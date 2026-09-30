@@ -540,6 +540,7 @@ def test_tier1_stock_option_illiquidity_rejection(auditor):
         strike=1100.0,
         option_type="CE",
         metrics={"oi": 500, "volume": 25},
+        created_at="2026-09-29 11:00:00 IST",
         is_live=True,
         environment="LIVE",
     )

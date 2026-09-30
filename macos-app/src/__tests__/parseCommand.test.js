@@ -1,6 +1,64 @@
 import { describe, it, expect } from 'vitest'
 import { getSymbolExchange } from '../renderer/src/data/universeData'
 
+function extractSymbolAndExchange(rawArgs, contextSymbol = null) {
+  if (!rawArgs || rawArgs.length === 0) {
+    if (!contextSymbol) return { symbol: null, exchange: null }
+    return { symbol: contextSymbol, exchange: getSymbolExchange(contextSymbol) }
+  }
+
+  const prepositions = new Set(['OF', 'ON', 'IN', 'AT', 'FOR'])
+  const tokens = rawArgs
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0 && !prepositions.has(t.toUpperCase()))
+
+  if (tokens.length === 0) {
+    return { symbol: contextSymbol, exchange: contextSymbol ? getSymbolExchange(contextSymbol) : null }
+  }
+
+  let sym = tokens[0]
+  let exch = null
+  const validExchs = ['BSE', 'NSE', 'MCX', 'CDS', 'CRYPTO', 'BINANCE']
+
+  if (sym.includes(':')) {
+    const [p, s] = sym.split(':')
+    const pU = p.toUpperCase()
+    const sU = s.toUpperCase()
+    if (validExchs.includes(pU)) {
+      exch = pU
+      sym = s
+    } else if (validExchs.includes(sU)) {
+      exch = sU
+      sym = p
+    }
+  }
+
+  const parenMatch = sym.match(/^([A-Za-z0-9_&-]+)\((BSE|NSE|MCX|CDS|CRYPTO)\)$/i)
+  if (parenMatch) {
+    sym = parenMatch[1]
+    exch = parenMatch[2].toUpperCase()
+  }
+
+  if (!exch && tokens.length > 1) {
+    const second = tokens[1].replace(/[()]/g, '').toUpperCase()
+    if (validExchs.includes(second)) {
+      exch = second
+    } else {
+      const first = tokens[0].replace(/[()]/g, '').toUpperCase()
+      if (validExchs.includes(first)) {
+        exch = first
+        sym = tokens[1]
+      }
+    }
+  }
+
+  sym = sym.toUpperCase().replace(/[()]/g, '')
+  if (!exch) {
+    exch = getSymbolExchange(sym)
+  }
+  return { symbol: sym, exchange: exch }
+}
+
 // Copied verbatim from src/renderer/src/components/Input/InputBar.jsx
 // so we can test it as a pure function without importing the React component.
 function parseCommand(input) {
@@ -9,23 +67,16 @@ function parseCommand(input) {
   const args  = parts.slice(1)
 
   switch (cmd) {
-    case 'quote': case 'q':
-      if (!args[0]) return { error: 'Usage: quote SYMBOL' }
-      return { endpoint: '/skills/quote', body: { symbol: args[0].toUpperCase() }, cardType: 'quote' }
+    case 'quote': case 'q': {
+      const { symbol: sym, exchange: exch } = extractSymbolAndExchange(args, null)
+      if (!sym) return { error: 'Usage: quote SYMBOL' }
+      const finalSym = exch && exch !== 'NSE' ? `${exch}:${sym}` : sym
+      return { endpoint: '/skills/quote', body: { symbol: finalSym }, cardType: 'quote' }
+    }
 
     case 'analyze': case 'analyse': case 'a': {
-      if (!args[0]) return { error: 'Usage: analyze SYMBOL' }
-      let sym = args[0].toUpperCase()
-      let exch = args[1]?.toUpperCase()
-      if (!exch) {
-        if (sym.includes(':')) {
-          const [prefix, s] = sym.split(':')
-          exch = prefix
-          sym = s
-        } else {
-          exch = getSymbolExchange(sym)
-        }
-      }
+      const { symbol: sym, exchange: exch } = extractSymbolAndExchange(args, null)
+      if (!sym) return { error: 'Usage: analyze SYMBOL' }
       return { stream: true, symbol: sym, exchange: exch }
     }
 
@@ -239,6 +290,32 @@ describe('parseCommand', () => {
     const result = parseCommand('analyze BANKNIFTY bse')
     expect(result.symbol).toBe('BANKNIFTY')
     expect(result.exchange).toBe('BSE')
+  })
+
+  it('analyze handles natural language exchange phrases (of BSE, on BSE, in BSE, parenthesized)', () => {
+    const ofBse = parseCommand('analyze SHREEREF of BSE')
+    expect(ofBse.symbol).toBe('SHREEREF')
+    expect(ofBse.exchange).toBe('BSE')
+
+    const onBse = parseCommand('analyze SHREEREF on BSE')
+    expect(onBse.symbol).toBe('SHREEREF')
+    expect(onBse.exchange).toBe('BSE')
+
+    const inBse = parseCommand('analyze SHREEREF in BSE')
+    expect(inBse.symbol).toBe('SHREEREF')
+    expect(inBse.exchange).toBe('BSE')
+
+    const parenBse = parseCommand('analyze SHREEREF(BSE)')
+    expect(parenBse.symbol).toBe('SHREEREF')
+    expect(parenBse.exchange).toBe('BSE')
+
+    const prefixBse = parseCommand('analyze BSE:SHREEREF')
+    expect(prefixBse.symbol).toBe('SHREEREF')
+    expect(prefixBse.exchange).toBe('BSE')
+
+    const suffixBse = parseCommand('analyze SHREEREF:BSE')
+    expect(suffixBse.symbol).toBe('SHREEREF')
+    expect(suffixBse.exchange).toBe('BSE')
   })
 
   it('analyze aliases: analyse and a', () => {

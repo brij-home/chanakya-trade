@@ -33,10 +33,9 @@ export function isTestOrSimAlert(item) {
   const summary = String(item.summary || '').toUpperCase()
   const env = String(item.environment || '').toUpperCase()
   const isTestFlag = item.is_test === true || item.isTest === true || item.metrics?.is_test === true
-  const isLiveFlag = item.is_live !== false && item.isLive !== false
 
-  // 1. Explicit test flags or non-live environment
-  if (isTestFlag || env === 'TEST' || env === 'SIMULATE' || env === 'DEMO' || !isLiveFlag) return true
+  // 1. Explicit test flags or non-live test environments
+  if (isTestFlag || env === 'TEST' || env === 'SIMULATE' || env === 'DEMO') return true
   if (id.startsWith('test-') || id.startsWith('sim-') || id.startsWith('mock-') || id.startsWith('synthetic-') || id.includes('-test-')) return true
 
   // 2. Headline / summary containing test indicators (including word boundaries)
@@ -412,11 +411,12 @@ export function classifyAlertSegment(alert) {
     alert.option_type || (alert.strike && Number(alert.strike) > 0) ||
     (alert.contract_symbol && alert.contract_symbol !== cleanSym && (alert.contract_symbol.includes('CE') || alert.contract_symbol.includes('PE')))
   )
-  const isDerivAlt = alert.alert_type === 'GAMMA_BLAST' || alert.alert_type === 'OPTIONS_MOMENTUM'
+  const isDerivAlt = alert.alert_type === 'GAMMA_BLAST' || alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE'
   const isStockDeriv = Boolean(
+    seg === 'FNO_STOCK' ||
+    (seg === 'FNO' && !isIndex) ||
     isFut || isOption || isDerivAlt ||
-    (exch === 'NFO' && (isFut || isOption || alert.contract_symbol)) ||
-    (seg === 'FNO_STOCK' && (isFut || isOption || isDerivAlt || alert.contract_symbol))
+    (exch === 'NFO' && (isFut || isOption || alert.contract_symbol))
   )
 
   if (isStockDeriv) {
@@ -478,22 +478,38 @@ export function formatExpiryDetails(alert) {
 
   // 4. If no explicit date string, parse contract symbol tokens
   if ((!d || isNaN(d.getTime())) && contractSym) {
-    // 4a. NSE Index Weekly contract format: e.g. NIFTY2692425000CE (26=2026, 9=Sep, 24=day 24)
-    // Month codes: 1-9 for Jan-Sep, O for Oct, N for Nov, D for Dec
-    const mWeekly = contractSym.match(/^([A-Z]+)(\d{2})([1-9OND])(\d{2})(\d+)(CE|PE)$/i)
-    if (mWeekly) {
-      const yr = 2000 + parseInt(mWeekly[2], 10)
-      const mCode = mWeekly[3].toUpperCase()
-      const mo = mCode === 'O' ? 9 : mCode === 'N' ? 10 : mCode === 'D' ? 11 : parseInt(mCode, 10) - 1
-      const day = parseInt(mWeekly[4], 10)
+    // 4a. Broker YYYYMMDD format (matched FIRST before weekly): e.g. UNITDSPR202609291380PE, POLICYBZR202610271100PE, HAL202609294800PE
+    const mIso = contractSym.match(/([A-Z0-9_&]+?)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(\d+)(CE|PE)$/i)
+    if (mIso) {
+      const yr = parseInt(mIso[2], 10)
+      const mo = parseInt(mIso[3], 10) - 1
+      const day = parseInt(mIso[4], 10)
       const parsed = new Date(yr, mo, day)
       if (!isNaN(parsed.getTime())) {
         d = parsed
-        inferredExpiryType = 'WEEKLY'
+        inferredExpiryType = isIndex ? 'WEEKLY' : 'MONTHLY'
       }
     }
 
-    // 4b. Monthly contract format: e.g. NIFTY26SEP25000CE or RELIANCE26SEP2900CE
+    // 4b. NSE Index Weekly contract format: e.g. NIFTY2692425000CE (26=2026, 9=Sep, 24=day 24)
+    // Month codes: 1-9 for Jan-Sep, O for Oct, N for Nov, D for Dec
+    // Strictly requires valid day (01-31) and applies only to index contracts
+    if ((!d || isNaN(d.getTime())) && isIndex) {
+      const mWeekly = contractSym.match(/^([A-Z]+)(\d{2})([1-9OND])(0[1-9]|[12]\d|3[01])(\d+)(CE|PE)$/i)
+      if (mWeekly) {
+        const yr = 2000 + parseInt(mWeekly[2], 10)
+        const mCode = mWeekly[3].toUpperCase()
+        const mo = mCode === 'O' ? 9 : mCode === 'N' ? 10 : mCode === 'D' ? 11 : parseInt(mCode, 10) - 1
+        const day = parseInt(mWeekly[4], 10)
+        const parsed = new Date(yr, mo, day)
+        if (!isNaN(parsed.getTime())) {
+          d = parsed
+          inferredExpiryType = 'WEEKLY'
+        }
+      }
+    }
+
+    // 4c. Monthly contract format: e.g. NIFTY26SEP25000CE or RELIANCE26SEP2900CE
     if (!d || isNaN(d.getTime())) {
       const mMonthly = contractSym.match(/(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)/i)
       if (mMonthly) {
@@ -555,21 +571,29 @@ export function formatExpiryDetails(alert) {
   let dateFormatted = null
 
   if (d && !isNaN(d.getTime())) {
-    monthName = `${months[d.getMonth()]} ${d.getFullYear()}`
-    weekday = days[d.getDay()]
-    const dayOfMonth = d.getDate().toString().padStart(2, '0')
-    dateFormatted = `${d.getDate()}-${months[d.getMonth()]}`
-
     const today = new Date()
     today.setHours(0, 0, 0, 0)
     const target = new Date(d)
     target.setHours(0, 0, 0, 0)
-    dte = Math.round((target - today) / (1000 * 60 * 60 * 24))
+    const calculatedDte = Math.round((target - today) / (1000 * 60 * 60 * 24))
 
-    if (isWeekly) {
-      formatted = `${dayOfMonth}-${months[d.getMonth()]}-${d.getFullYear()} (${weekday}) Weekly Expiry`
+    // Guard against deep historical years (e.g. year 2020 parsed from corrupted tokens)
+    if (calculatedDte < -365 || d.getFullYear() < 2024) {
+      d = null
+      dateFormatted = null
+      dte = null
     } else {
-      formatted = `${monthName} Monthly Expiry (${dayOfMonth}-${months[d.getMonth()]}-${d.getFullYear()})`
+      dte = calculatedDte
+      monthName = `${months[d.getMonth()]} ${d.getFullYear()}`
+      weekday = days[d.getDay()]
+      const dayOfMonth = d.getDate().toString().padStart(2, '0')
+      dateFormatted = `${d.getDate()}-${months[d.getMonth()]}`
+
+      if (isWeekly) {
+        formatted = `${dayOfMonth}-${months[d.getMonth()]}-${d.getFullYear()} (${weekday}) Weekly Expiry`
+      } else {
+        formatted = `${monthName} Monthly Expiry (${dayOfMonth}-${months[d.getMonth()]}-${d.getFullYear()})`
+      }
     }
   }
 
@@ -834,6 +858,53 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
 }
 
 /**
+ * Official NSE/BSE Exchange Trading Holidays (2025–2027)
+ * Synchronized with market/calendar.py SSOT.
+ */
+export const NSE_TRADING_HOLIDAYS = new Set([
+  // 2025
+  '2025-01-26', '2025-02-26', '2025-03-14', '2025-03-31', '2025-04-10', '2025-04-14',
+  '2025-04-18', '2025-05-01', '2025-06-07', '2025-07-06', '2025-08-15', '2025-08-27',
+  '2025-10-02', '2025-10-22', '2025-11-05', '2025-12-25',
+  // 2026
+  '2026-01-26', '2026-02-16', '2026-03-04', '2026-03-20', '2026-04-03', '2026-04-14',
+  '2026-04-21', '2026-05-01', '2026-05-27', '2026-06-26', '2026-08-15', '2026-09-14',
+  '2026-10-02', '2026-10-20', '2026-11-10', '2026-11-24', '2026-12-25',
+  // 2027
+  '2027-01-26', '2027-03-08', '2027-03-23', '2027-03-26', '2027-04-14', '2027-05-01',
+  '2027-08-15', '2027-09-04', '2027-10-02', '2027-10-09', '2027-10-29', '2027-11-14',
+  '2027-12-25'
+])
+
+/**
+ * Computes official market trading days between startDate and endDate (inclusive).
+ * Strictly excludes:
+ *   - Weekends (Saturday & Sunday)
+ *   - Official Indian market holidays (Ganesh Chaturthi, Diwali, Republic Day, etc.)
+ */
+export function getTradingDaysBetween(startDate, endDate = new Date()) {
+  if (!startDate || isNaN(startDate.getTime())) return 0
+  const cur = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate())
+  const end = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate())
+  if (cur > end) return 0
+  let count = 0
+  while (cur <= end) {
+    const day = cur.getDay() // 0 = Sun, 6 = Sat
+    if (day !== 0 && day !== 6) {
+      const y = cur.getFullYear()
+      const m = String(cur.getMonth() + 1).padStart(2, '0')
+      const d = String(cur.getDate()).padStart(2, '0')
+      const iso = `${y}-${m}-${d}`
+      if (!NSE_TRADING_HOLIDAYS.has(iso)) {
+        count++
+      }
+    }
+    cur.setDate(cur.getDate() + 1)
+  }
+  return count
+}
+
+/**
  * Institutional active validation check (SSOT):
  * True only if a trade setup is neither archived, invalidated, expired, nor exited (SL, Time Stop, Runner, Target).
  */
@@ -843,15 +914,16 @@ export function isAlertActive(a) {
   if (a.is_invalidated || a.isInvalidated || a.is_archived || a.isArchived) return false
   const stage = String(a.stage || '').toUpperCase()
   const targetStatus = String(a.target_status || a.targetStatus || '').toUpperCase()
+  const isTrailingRunner = Boolean(a.should_trail || a.shouldTrail)
   if (
     stage === 'INVALIDATED' ||
-    stage === 'TARGET_ACHIEVED' ||
+    (stage === 'TARGET_ACHIEVED' && !isTrailingRunner) ||
     stage === 'COMPLETED' ||
     stage === 'SL_HIT' ||
     stage === 'TIME_STOP_EXIT' ||
     stage === 'RUNNER_EXIT' ||
     stage === 'PROFIT_SECURED' ||
-    targetStatus === 'TARGET_ACHIEVED' ||
+    (targetStatus === 'TARGET_ACHIEVED' && !isTrailingRunner) ||
     targetStatus === 'RUNNER_CLOSED' ||
     targetStatus === 'SL_HIT' ||
     targetStatus === 'TIME_STOP_EXIT'
@@ -865,29 +937,49 @@ export function isAlertActive(a) {
     horizon.includes('POSITIONAL') ||
     horizon.includes('LONG') ||
     horizon.includes('MULTIBAGGER') ||
+    horizon === 'ROLLING_24H' ||
     (a.alert_type && (
       a.alert_type.toUpperCase().includes('SWING') ||
       a.alert_type.toUpperCase().includes('MULTIBAGGER') ||
       a.alert_type.toUpperCase().includes('STAGE_1_TO_2')
     ))
 
-  if (isExplicitIntraday && !isSwingOrPositional && (a.created_at || a.timestamp)) {
+  if (a.created_at || a.timestamp) {
     try {
       const exch = String(a.exchange || '').toUpperCase()
       const seg = String(a.segment || a.metrics?.segment || '').toUpperCase()
-      const isCrypto = exch === 'CRYPTO' || exch === 'BINANCE' || exch === 'DERIBIT' || seg === 'CRYPTO' || String(a.symbol || '').toUpperCase().endsWith('USDT')
+      const isCrypto = exch === 'CRYPTO' || exch === 'BINANCE' || exch === 'DERIBIT' || seg === 'CRYPTO' || String(a.symbol || '').toUpperCase().endsWith('USDT') || horizon === 'ROLLING_24H'
 
       const clean = String(a.created_at || a.timestamp).replace(' IST', '').trim()
       const createdDate = new Date(clean)
       const now = new Date()
       if (!isNaN(createdDate.getTime())) {
-        if (isCrypto) {
-          // 24x7 Crypto uses 24-hour rolling expiry window
+        if (isCrypto || horizon === 'ROLLING_24H') {
+          // 24x7 Continuous markets use 24-hour rolling expiry window
           if (now.getTime() - createdDate.getTime() >= 86_400_000) {
             return false
           }
-        } else if (createdDate.toDateString() !== now.toDateString()) {
+        } else if (isExplicitIntraday && !isSwingOrPositional) {
+          if (createdDate.toDateString() !== now.toDateString()) {
+            return false
+          }
+        } else if (a.alert_type === 'GAMMA_BLAST' && createdDate.toDateString() !== now.toDateString()) {
+          // Intraday Gamma Blasts expire at the close of trading session
           return false
+        } else {
+          // Multi-day horizon retention in TRADING DAYS (excluding weekends & holidays)
+          const tradingDays = getTradingDaysBetween(createdDate, now)
+          if (horizon === 'SWING_SHORT' && tradingDays > 7) {
+            return false
+          } else if (horizon === 'SWING_MID' && tradingDays > 25) {
+            return false
+          } else if ((horizon === 'LONG_TERM' || horizon === 'POSITIONAL') && tradingDays > 130) {
+            return false
+          } else if (horizon === 'MULTIBAGGER' && tradingDays > 520) {
+            return false
+          } else if (!isSwingOrPositional && tradingDays > 5) {
+            return false
+          }
         }
       }
     } catch (_) {}
@@ -926,49 +1018,6 @@ export function resolveHorizonAndETA(alert) {
   const rawHorizon = String(alert.time_horizon || alert.timeHorizon || '').toUpperCase()
   const rawType = String(alert.alert_type || alert.alertType || '').toUpperCase()
   const exch = String(alert.exchange || 'NSE').toUpperCase()
-
-  let key = 'INTRADAY'
-  if (
-    rawHorizon === 'MULTIBAGGER' ||
-    rawType.includes('MULTIBAGGER') ||
-    rawType.includes('STAGE_1_TO_2')
-  ) {
-    key = 'MULTIBAGGER'
-  } else if (
-    rawHorizon === 'LONG_TERM' ||
-    (rawHorizon === 'POSITIONAL' && !rawType.includes('SWING'))
-  ) {
-    key = 'LONG_TERM'
-  } else if (
-    rawHorizon === 'SWING_MID' ||
-    rawType.includes('SQUEEZE') ||
-    rawType.includes('RRG') ||
-    rawType.includes('PULLBACK')
-  ) {
-    key = 'SWING_MID'
-  } else if (
-    rawHorizon === 'SWING_SHORT' ||
-    rawHorizon === 'SWING' ||
-    rawType.includes('COILING') ||
-    rawType.includes('CIRCUIT') ||
-    rawType.includes('VCP')
-  ) {
-    key = 'SWING_SHORT'
-  } else if (
-    rawHorizon === 'INTRADAY' ||
-    rawType.includes('GAMMA') ||
-    rawType.includes('SPARK') ||
-    rawType.includes('ORB') ||
-    rawType.includes('CONTAGION')
-  ) {
-    key = 'INTRADAY'
-  } else if (rawHorizon) {
-    key = rawHorizon
-  }
-
-  // Derive ETA
-  let etaLabel = alert.eta_label || alert.etaLabel || null
-  let etaFull = null
   const isCrypto =
     exch === 'CRYPTO' ||
     exch === 'BINANCE' ||
@@ -977,6 +1026,38 @@ export function resolveHorizonAndETA(alert) {
     String(alert.symbol || '').toUpperCase().endsWith('USDT') ||
     String(alert.symbol || '').toUpperCase().endsWith('USDC') ||
     String(alert.symbol || '').toUpperCase().startsWith('CRYPTO:')
+
+  let key = 'INTRADAY'
+  if (rawHorizon === 'ROLLING_24H' || (isCrypto && (!rawHorizon || rawHorizon === 'INTRADAY'))) {
+    key = 'ROLLING_24H'
+  } else if (rawHorizon === 'MULTIBAGGER') {
+    key = 'MULTIBAGGER'
+  } else if (rawHorizon === 'LONG_TERM' || rawHorizon === 'POSITIONAL') {
+    key = 'LONG_TERM'
+  } else if (rawHorizon === 'SWING_MID') {
+    key = 'SWING_MID'
+  } else if (rawHorizon === 'SWING_SHORT' || rawHorizon === 'SWING') {
+    key = 'SWING_SHORT'
+  } else if (rawHorizon === 'INTRADAY') {
+    key = isCrypto ? 'ROLLING_24H' : 'INTRADAY'
+  } else if (rawType.includes('MULTIBAGGER')) {
+    key = 'MULTIBAGGER'
+  } else if (rawType.includes('STAGE_1_TO_2')) {
+    const text = String((alert.headline || '') + ' ' + (alert.summary || '') + ' ' + (alert.alert_id || '')).toUpperCase()
+    key = text.includes('MULTIBAGGER') ? 'MULTIBAGGER' : 'LONG_TERM'
+  } else if (rawType.includes('SQUEEZE') || rawType.includes('RRG') || rawType.includes('PULLBACK')) {
+    key = 'SWING_MID'
+  } else if (rawType.includes('COILING') || rawType.includes('CIRCUIT') || rawType.includes('VCP')) {
+    key = 'SWING_SHORT'
+  } else if (rawType.includes('GAMMA') || rawType.includes('SPARK') || rawType.includes('ORB') || rawType.includes('CONTAGION')) {
+    key = 'INTRADAY'
+  } else if (rawHorizon) {
+    key = rawHorizon
+  }
+
+  // Derive ETA
+  let etaLabel = alert.eta_label || alert.etaLabel || null
+  let etaFull = null
 
   if (isCrypto && (!etaLabel || etaLabel.includes('15:15') || etaLabel.includes('Today'))) {
     etaLabel = '24h'
@@ -1004,6 +1085,9 @@ export function resolveHorizonAndETA(alert) {
         etaLabel = '2–5d'
         etaFull = '2–5 Sessions'
       }
+    } else if (key === 'ROLLING_24H') {
+      etaLabel = '24h'
+      etaFull = '24h Rolling Window'
     } else {
       // INTRADAY
       etaLabel = isCrypto ? '24h' : (exch === 'MCX' ? '23:15' : '15:15')
@@ -1032,6 +1116,19 @@ export function resolveHorizonAndETA(alert) {
 
   // Token styles & metadata
   switch (key) {
+    case 'ROLLING_24H':
+      return {
+        key: 'ROLLING_24H',
+        label: '24H ROLLING',
+        shortLabel: '24H',
+        icon: '🪙',
+        etaLabel: etaLabel || '24h',
+        etaFull: etaFull || '24h Rolling Window',
+        compactBadge: `🪙 24H • ${etaLabel || '24h'}`,
+        badgeClasses: 'bg-teal-500/20 text-teal-300 border-teal-500/40',
+        etaClasses: 'bg-teal-500/10 text-teal-300 border-teal-500/30',
+        tooltip: '24/7 Continuous Market: Rolling 24-hour expiration window.',
+      }
     case 'MULTIBAGGER':
       return {
         key: 'MULTIBAGGER',
@@ -1165,11 +1262,29 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
 
   if (isTerminal) {
     if (isDerivative) {
-      const raw = alert.ltp != null ? alert.ltp : (alert.option_premium != null ? alert.option_premium : alert.trigger_level)
-      currentPrice = raw != null ? Number(String(raw).replace(/[^0-9.-]/g, '')) : null
-      premiumNum = currentPrice
       const rawS = alert.underlying_spot != null ? alert.underlying_spot : alert.metrics?.spot
       spotNum = rawS != null ? Number(String(rawS).replace(/[^0-9.-]/g, '')) : null
+
+      const isIndexOrStockSpot = (val) => {
+        if (val == null || isNaN(val) || val <= 0) return false
+        if (spotNum && Math.abs(val - spotNum) / spotNum < 0.05) return true
+        if ((cleanSym.includes('NIFTY') || cleanSym.includes('SENSEX')) && val > 3000 && (entryNum == null || entryNum < 1500)) return true
+        return false
+      }
+
+      let rawOpt = null
+      if (alert.option_premium != null && Number(alert.option_premium) > 0 && !isIndexOrStockSpot(Number(alert.option_premium))) {
+        rawOpt = alert.option_premium
+      } else if (alert.ltp != null && Number(alert.ltp) > 0 && !isIndexOrStockSpot(Number(alert.ltp))) {
+        rawOpt = alert.ltp
+      } else if (alert.trigger_level != null && !isIndexOrStockSpot(Number(alert.trigger_level))) {
+        rawOpt = alert.trigger_level
+      } else {
+        rawOpt = entryNum || alert.option_premium
+      }
+
+      currentPrice = rawOpt != null ? Number(String(rawOpt).replace(/[^0-9.-]/g, '')) : null
+      premiumNum = currentPrice
     } else {
       const raw = alert.ltp != null ? alert.ltp : (alert.underlying_spot != null ? alert.underlying_spot : alert.trigger_level)
       currentPrice = raw != null ? Number(String(raw).replace(/[^0-9.-]/g, '')) : null
@@ -1181,7 +1296,24 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     spotNum = rawSpot != null ? Number(String(rawSpot).replace(/[^0-9.-]/g, '')) : null
 
     if (isDerivative) {
-      const rawOpt = liveContract?.ltp ?? alert.ltp ?? alert.option_premium ?? alert.trigger_level
+      const isIndexOrStockSpot = (val) => {
+        if (val == null || isNaN(val) || val <= 0) return false
+        if (spotNum && Math.abs(val - spotNum) / spotNum < 0.05) return true
+        if ((cleanSym.includes('NIFTY') || cleanSym.includes('SENSEX')) && val > 3000 && (entryNum == null || entryNum < 1500)) return true
+        return false
+      }
+
+      let rawOpt = null
+      if (liveContract?.ltp != null && Number(liveContract.ltp) > 0) {
+        rawOpt = liveContract.ltp
+      } else if (alert.option_premium != null && Number(alert.option_premium) > 0 && !isIndexOrStockSpot(Number(alert.option_premium))) {
+        rawOpt = alert.option_premium
+      } else if (alert.ltp != null && Number(alert.ltp) > 0 && !isIndexOrStockSpot(Number(alert.ltp))) {
+        rawOpt = alert.ltp
+      } else {
+        rawOpt = alert.trigger_level != null && !isIndexOrStockSpot(Number(alert.trigger_level)) ? alert.trigger_level : entryNum
+      }
+
       premiumNum = rawOpt != null ? Number(String(rawOpt).replace(/[^0-9.-]/g, '')) : null
       currentPrice = premiumNum
     } else {

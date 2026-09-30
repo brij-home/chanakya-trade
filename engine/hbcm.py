@@ -30,14 +30,14 @@ HBCM_CONSTITUENTS: dict[str, list[dict[str, Any]]] = {
         {"symbol": "RELIANCE", "weight_pct": 9.8},
         {"symbol": "HDFCBANK", "weight_pct": 11.5},
         {"symbol": "ICICIBANK", "weight_pct": 7.8},
-        {"symbol": "INFOSYS", "weight_pct": 6.0},
+        {"symbol": "INFY", "weight_pct": 6.0},
         {"symbol": "TCS", "weight_pct": 4.2},
     ],
     "NIFTY 50": [
         {"symbol": "RELIANCE", "weight_pct": 9.8},
         {"symbol": "HDFCBANK", "weight_pct": 11.5},
         {"symbol": "ICICIBANK", "weight_pct": 7.8},
-        {"symbol": "INFOSYS", "weight_pct": 6.0},
+        {"symbol": "INFY", "weight_pct": 6.0},
         {"symbol": "TCS", "weight_pct": 4.2},
     ],
     "BANKNIFTY": [
@@ -65,7 +65,7 @@ HBCM_CONSTITUENTS: dict[str, list[dict[str, Any]]] = {
         {"symbol": "RELIANCE", "weight_pct": 11.2},
         {"symbol": "HDFCBANK", "weight_pct": 13.1},
         {"symbol": "ICICIBANK", "weight_pct": 8.9},
-        {"symbol": "INFOSYS", "weight_pct": 6.8},
+        {"symbol": "INFY", "weight_pct": 6.8},
         {"symbol": "TCS", "weight_pct": 4.8},
     ],
     "BANKEX": [
@@ -78,9 +78,11 @@ HBCM_CONSTITUENTS: dict[str, list[dict[str, Any]]] = {
 }
 
 MIN_CONFLUENCE_THRESHOLD = 4  # >= 4 of 5 must agree concurrently
+# Weighted fallback: 3/5 pass if their combined weight >= this % of the index
+MIN_WEIGHTED_CONFLUENCE_PCT = 55.0
 _HBCM_CACHE: dict[str, tuple[float, HBCMResult]] = {}
 _HBCM_LOCK = threading.Lock()
-_HBCM_TTL = 30.0  # 30s cache for high-frequency scan loop
+_HBCM_TTL = 15.0  # Reduced 30s→15s: halves stale-data window on fast moves
 
 
 @dataclass
@@ -131,6 +133,7 @@ def evaluate_hbcm(
     direction: str = "BULLISH",
     mock_quotes: Optional[dict[str, Any]] = None,
     mock_5m_candles: Optional[dict[str, Any]] = None,
+    allow_weighted_fallback: bool = False,
 ) -> HBCMResult:
     """
     Evaluates real-time 5-minute directional score for top 5 constituents of the given index.
@@ -138,6 +141,11 @@ def evaluate_hbcm(
     Requirements:
     - Direction BULLISH: >= 4 of 5 heavyweights must print 5m close >= VWAP.
     - Direction BEARISH: >= 4 of 5 heavyweights must print 5m close <= VWAP.
+
+    Args:
+        allow_weighted_fallback: When True (caller signals explosive momentum), a BEARISH
+            evaluation can pass with only 3/5 heavyweights if their combined weight >= 55%
+            of the total represented weight.  Keeps the 4/5 hard rule for standard setups.
     """
     clean_und = (
         underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
@@ -251,8 +259,8 @@ def evaluate_hbcm(
                 pass
 
         # Freshness & live trading verification:
-        # A constituent requires a valid live VWAP to establish institutional confluence.
-        if not is_testing and not mock_quotes and (vwap <= 0 or ltp <= 0):
+        # A constituent requires a valid live price to establish institutional confluence.
+        if ltp <= 0:
             posture = "NEUTRAL"
             neutral_symbols.append(sym)
             is_above_vwap = False
@@ -306,6 +314,24 @@ def evaluate_hbcm(
 
     if dir_norm == "BULLISH":
         confluence_pass = b_count >= MIN_CONFLUENCE_THRESHOLD
+
+        # ── Weighted Fallback (Momentum Bypass for early fast rallies) ─────────
+        # Symmetric to the BEARISH weighted fallback below.
+        # 3/5 bullish heavyweights that cover >= 55% of index weight = institutional rally.
+        _bullish_weighted_pass = False
+        if not confluence_pass and allow_weighted_fallback and b_count >= 3:
+            bull_weight = sum(weights_map.get(s, 0.0) for s in bullish_symbols)
+            bull_weight_pct = (bull_weight / max(1.0, tot_weight)) * 100.0
+            if bull_weight_pct >= MIN_WEIGHTED_CONFLUENCE_PCT:
+                _bullish_weighted_pass = True
+                logger.info(
+                    f"[HBCM] BULLISH weighted-fallback PASS for {clean_und}: "
+                    f"{b_count}/5 heavyweights ({', '.join(bullish_symbols)}) cover "
+                    f"{bull_weight_pct:.1f}% >= {MIN_WEIGHTED_CONFLUENCE_PCT}% weight threshold."
+                )
+        if _bullish_weighted_pass:
+            confluence_pass = True
+
         aligned = bullish_symbols
         unaligned = [s for s in symbols if s not in bullish_symbols]
         summary = (
@@ -320,8 +346,31 @@ def evaluate_hbcm(
             if confluence_pass
             else f"Heavyweight breadth unaligned: only {b_count}/{total_n} constituents ({', '.join(aligned) or 'None'}) bullish above VWAP (institutional breakout requires >= 4/5)."
         )
+
     else:
         confluence_pass = bear_count >= MIN_CONFLUENCE_THRESHOLD
+
+        # ── Weighted Fallback (Momentum Bypass for early fast dumps) ──────────
+        # When the caller signals explosive momentum AND we have exactly 3 of 5
+        # bearish heavyweights, check if their combined index weight covers >= 55%
+        # of the total represented weight.  This allows signals like:
+        #   HDFCBANK (27%) + ICICIBANK (23%) + SBIN (11%) = 61% → PASS
+        # while still rejecting weak 3/5 where only lightweight names align.
+        _weighted_fallback_pass = False
+        if not confluence_pass and allow_weighted_fallback and bear_count >= 3:
+            bear_weight = sum(weights_map.get(s, 0.0) for s in bearish_symbols)
+            bear_weight_pct = (bear_weight / max(1.0, tot_weight)) * 100.0
+            if bear_weight_pct >= MIN_WEIGHTED_CONFLUENCE_PCT:
+                _weighted_fallback_pass = True
+                logger.info(
+                    f"[HBCM] BEARISH weighted-fallback PASS for {clean_und}: "
+                    f"{bear_count}/5 heavyweights ({', '.join(bearish_symbols)}) cover "
+                    f"{bear_weight_pct:.1f}% >= {MIN_WEIGHTED_CONFLUENCE_PCT}% weight threshold."
+                )
+
+        if _weighted_fallback_pass:
+            confluence_pass = True
+
         aligned = bearish_symbols
         unaligned = [s for s in symbols if s not in bearish_symbols]
         summary = (

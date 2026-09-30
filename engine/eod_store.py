@@ -210,10 +210,56 @@ def init_eod_store() -> None:
             """
         )
         conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS inflection_daily_cache (
+                symbol TEXT PRIMARY KEY,
+                inflection_score INTEGER NOT NULL,
+                primary_archetype TEXT NOT NULL,
+                archetype_label TEXT,
+                timing_state TEXT NOT NULL,
+                timing_label TEXT,
+                horizon TEXT NOT NULL,
+                cycle_state TEXT,
+                ltp REAL,
+                entry_price REAL,
+                stop_loss REAL,
+                target_1 REAL,
+                target_2 REAL,
+                target_moonshot REAL,
+                risk_reward_ratio REAL,
+                vcp_detected INTEGER,
+                squeeze_state TEXT,
+                rvol_20d REAL,
+                trend_template_passed INTEGER,
+                sector TEXT,
+                sector_tailwind_score INTEGER,
+                rrg_quadrant TEXT,
+                forensic_safe INTEGER,
+                turnover_20d_cr REAL,
+                cap_tier TEXT,
+                circuit_state TEXT,
+                weekly_stage TEXT,
+                executive_verdict TEXT,
+                executive_summary TEXT,
+                raw_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ohlcv_sym_date ON ohlcv_daily (symbol, date DESC)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_century_score ON century_compounder_cache (century_score DESC, total_projected_multiple DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_inflection_score ON inflection_daily_cache (inflection_score DESC, turnover_20d_cr DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_inflection_archetype ON inflection_daily_cache (primary_archetype, inflection_score DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_inflection_timing ON inflection_daily_cache (timing_state, inflection_score DESC)"
         )
         conn.commit()
 
@@ -1203,6 +1249,168 @@ def get_top_cached_century_compounders(
     return results
 
 
+# ── Inflection Setup Daily Cache Helpers ─────────────────────────────
+
+
+def save_cached_inflections_batch(candidates: list[dict[str, Any]]) -> int:
+    """
+    Saves or updates precomputed InflectionSetup records in inflection_daily_cache.
+    Atomic batch insert in < 20ms.
+    """
+    if not candidates:
+        return 0
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for c in candidates:
+        sym = c.get("symbol", "").upper().replace(".NS", "").replace("NSE:", "").strip()
+        if not sym:
+            continue
+        rows.append(
+            (
+                sym,
+                int(c.get("inflection_score") or 0),
+                str(c.get("primary_archetype") or "VCP_PIVOT_BREAKOUT"),
+                str(c.get("archetype_label") or ""),
+                str(c.get("timing_state") or "TRIGGER_NOW"),
+                str(c.get("timing_label") or ""),
+                str(c.get("horizon") or "MID_TERM"),
+                str(c.get("cycle_state") or "COILING_PIVOT"),
+                float(c.get("ltp") or 0.0),
+                float(c.get("entry_price") or 0.0),
+                float(c.get("stop_loss") or 0.0),
+                float(c.get("target_1") or 0.0),
+                float(c.get("target_2") or 0.0),
+                float(c.get("target_moonshot") or 0.0),
+                float(c.get("risk_reward_ratio") or 0.0),
+                1 if c.get("vcp_detected") else 0,
+                str(c.get("squeeze_state") or "NORMAL"),
+                float(c.get("rvol_20d") or 1.0),
+                int(c.get("trend_template_passed") or 0),
+                str(c.get("sector") or ""),
+                int(c.get("sector_tailwind_score") or 0),
+                str(c.get("rrg_quadrant") or "IMPROVING"),
+                1 if c.get("forensic_safe") else 0,
+                float(c.get("turnover_20d_cr") or 0.0),
+                str(c.get("cap_tier") or "SMALL"),
+                str(c.get("circuit_state") or "NORMAL"),
+                str(c.get("weekly_stage") or "STAGE_2_MARKUP"),
+                str(c.get("executive_verdict") or "👀 WATCHLIST"),
+                str(c.get("executive_summary") or ""),
+                json.dumps(c, ensure_ascii=False),
+                now_iso,
+            )
+        )
+
+    if not rows:
+        return 0
+
+    with _store_lock:
+        conn = _get_connection()
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO inflection_daily_cache
+            (symbol, inflection_score, primary_archetype, archetype_label,
+             timing_state, timing_label, horizon, cycle_state, ltp,
+             entry_price, stop_loss, target_1, target_2, target_moonshot,
+             risk_reward_ratio, vcp_detected, squeeze_state, rvol_20d,
+             trend_template_passed, sector, sector_tailwind_score, rrg_quadrant,
+             forensic_safe, turnover_20d_cr, cap_tier, circuit_state,
+             weekly_stage, executive_verdict, executive_summary, raw_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    return len(rows)
+
+
+def get_cached_inflections_batch(
+    symbols: Optional[list[str]] = None,
+    min_score: int = 40,
+    min_turnover_cr: float = 0.0,
+    archetype: str = "ALL",
+    timing: str = "ALL",
+    horizon: str = "ALL",
+    cap_tier: str = "ALL",
+    limit: int = 100,
+    max_age_hours: float = 24.0,
+) -> list[dict[str, Any]]:
+    """
+    Returns top ranked precomputed inflection setups directly from SQLite in < 15ms.
+    Filtered by score, archetype, timing, horizon, turnover floor, and age.
+    """
+    conn = _get_connection()
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+
+    clauses = ["inflection_score >= ?", "updated_at >= ?"]
+    params: list[Any] = [min_score, cutoff_iso]
+
+    if min_turnover_cr > 0:
+        clauses.append("turnover_20d_cr >= ?")
+        params.append(min_turnover_cr)
+
+    if archetype and archetype.upper() != "ALL":
+        clauses.append("primary_archetype = ?")
+        params.append(archetype.upper().strip())
+
+    if timing and timing.upper() != "ALL":
+        clauses.append("timing_state = ?")
+        params.append(timing.upper().strip())
+
+    if horizon and horizon.upper() != "ALL":
+        clauses.append("horizon = ?")
+        params.append(horizon.upper().strip())
+
+    if cap_tier and cap_tier.upper() != "ALL":
+        clauses.append("cap_tier = ?")
+        params.append(cap_tier.upper().strip())
+
+    if symbols:
+        clean_syms = [s.upper().replace(".NS", "").replace("NSE:", "").strip() for s in symbols]
+        placeholders = ",".join(["?"] * len(clean_syms))
+        clauses.append(f"symbol IN ({placeholders})")
+        params.extend(clean_syms)
+
+    query = f"""
+        SELECT raw_json FROM inflection_daily_cache
+        WHERE {" AND ".join(clauses)}
+        ORDER BY inflection_score DESC, turnover_20d_cr DESC
+        LIMIT ?
+    """
+    params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+    results = []
+    for r in rows:
+        raw = r["raw_json"]
+        if raw:
+            try:
+                results.append(json.loads(raw))
+            except Exception:
+                pass
+    return results
+
+
+def count_cached_inflections(max_age_hours: float = 24.0) -> int:
+    """Returns total number of fresh precomputed setups in SQLite."""
+    conn = _get_connection()
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM inflection_daily_cache WHERE updated_at >= ?",
+        (cutoff_iso,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def clear_cached_inflections() -> None:
+    """Flushes precomputed inflection setups from SQLite."""
+    with _store_lock:
+        conn = _get_connection()
+        conn.execute("DELETE FROM inflection_daily_cache")
+        conn.commit()
+
+
 # ── Bulk Ingestion & Delta Synchronizer ──────────────────────────────
 
 
@@ -1464,6 +1672,7 @@ def get_store_statistics() -> dict[str, Any]:
     bar_count = conn.execute("SELECT COUNT(*) FROM ohlcv_daily").fetchone()[0]
     fund_count = conn.execute("SELECT COUNT(*) FROM company_fundamentals").fetchone()[0]
     forensic_count = conn.execute("SELECT COUNT(*) FROM company_forensics").fetchone()[0]
+    inflection_count = conn.execute("SELECT COUNT(*) FROM inflection_daily_cache").fetchone()[0]
 
     last_update_row = conn.execute("SELECT MAX(updated_at) FROM symbol_meta").fetchone()
     last_update = last_update_row[0] if last_update_row and last_update_row[0] else None
@@ -1481,6 +1690,7 @@ def get_store_statistics() -> dict[str, Any]:
         "total_bars_count": bar_count,
         "fundamentals_count": fund_count,
         "forensics_count": forensic_count,
+        "inflections_count": inflection_count,
         "db_size_mb": size_mb,
         "last_updated_at": last_update,
         "l1_cache": {

@@ -32,6 +32,7 @@ export default function PortfolioView() {
   const [greeks, setGreeks] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [lastUpdated, setLastUpdated] = useState(null)
 
   // Search & Sorting State
   const [searchQuery, setSearchQuery] = useState('')
@@ -59,6 +60,7 @@ export default function PortfolioView() {
       ])
       if (portRes.status === 'fulfilled') {
         setPortfolio(portRes.value)
+        setLastUpdated(new Date())
       } else {
         setPortfolio(null)
         setError(portRes.reason?.message || 'Portfolio unavailable')
@@ -76,14 +78,24 @@ export default function PortfolioView() {
     }
   }, [portfolioSource])
 
+  // Initial load
   useEffect(() => {
     loadPortfolio()
+  }, [loadPortfolio])
+
+  // Auto-refresh every 30 seconds to prevent stale positions/P&L
+  useEffect(() => {
+    const t = setInterval(() => {
+      loadPortfolio()
+    }, 30_000)
+    return () => clearInterval(t)
   }, [loadPortfolio])
 
   const handleSwitchSource = (newSource) => {
     setPortfolioSource(newSource)
     loadPortfolio(newSource)
   }
+
 
   const rawRows = useMemo(
     () => [...(portfolio?.holdings || []), ...(portfolio?.positions || [])],
@@ -278,9 +290,18 @@ export default function PortfolioView() {
           <button onClick={() => sendDraft('portfolio doctor')} disabled={!portfolio} className="btn btn-sm">
             🔬 Health Check
           </button>
-          <button onClick={() => loadPortfolio()} className="btn btn-sm btn-ghost">
-            ↻ Refresh
-          </button>
+          <div className="flex items-center gap-1.5">
+            {lastUpdated && !loading && (
+              <span className="text-[9px] font-mono tabular-nums" style={{ color: 'var(--color-muted)' }}
+                title={`Last updated: ${lastUpdated.toLocaleTimeString('en-IN')}`}
+              >
+                ⏱ {lastUpdated.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+              </span>
+            )}
+            <button onClick={() => loadPortfolio()} disabled={loading} className="btn btn-sm btn-ghost">
+              {loading ? '…' : '↻'} Refresh
+            </button>
+          </div>
         </div>
       </header>
 

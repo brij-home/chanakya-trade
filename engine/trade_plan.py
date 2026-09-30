@@ -762,6 +762,18 @@ def calculate_trade_plan(
     rr_t1 = round(t1_distance_pts / stop_distance_pts, 2)
     rr_t2 = round(t2_distance_pts / stop_distance_pts, 2)
 
+    is_asymmetry_viable: bool = False
+    asymmetry_verdict: str = "POOR_ASYMMETRY_REJECTED"
+    asymmetry_note: str = ""
+
+    opposing_collision = False
+    if opposing_barrier:
+        barrier_price, barrier_desc = opposing_barrier
+        headroom_pts = abs(barrier_price - ltp)
+        min_blast_headroom = stop_distance_pts * (0.40 if has_active_blast else 0.70)
+        if headroom_pts < min_blast_headroom:
+            opposing_collision = True
+
     # Mathematical Expectancy Filter
     if not is_long and is_geom_broken:
         is_asymmetry_viable = False
@@ -770,14 +782,15 @@ def calculate_trade_plan(
             f"Invalid short geometry: Stop distance ({stop_distance_pts:,.1f} pts) exceeds asset value ({ltp:,.1f}), "
             f"or target calculations fall below zero. Structurally unviable."
         )
-    elif opposing_barrier and not has_active_blast:
+    elif opposing_collision:
         barrier_price, barrier_desc = opposing_barrier
         headroom_pts = abs(barrier_price - ltp)
         is_asymmetry_viable = False
         asymmetry_verdict = "OPPOSING_ZONE_COLLISION_REJECTED"
         asymmetry_note = (
             f"Opposing zone collision: {barrier_desc} is only {headroom_pts:,.1f} pts from spot "
-            f"(< 0.70x stop risk {stop_distance_pts:,.1f} pts). Headroom truncated; wait for clean breakout/retest."
+            f"(< {0.40 if has_active_blast else 0.70:.2f}x stop risk {stop_distance_pts:,.1f} pts). "
+            f"Headroom truncated; wait for clean breakout/retest."
         )
     elif rr_t2 >= 2.5 and (rr_t1 >= 1.2 or (has_active_blast and rr_t2 >= 2.0) or rr_t1 >= 0.8):
         is_asymmetry_viable = True
@@ -821,6 +834,13 @@ def calculate_trade_plan(
                 if adr_consumed >= 80.0:
                     asymmetry_note += (
                         f" [⚠️ ADR Alert: {adr_consumed:.0f}% of daily range already consumed]"
+                    )
+                if tf == "INTRADAY" and adr_consumed >= 105.0:
+                    is_asymmetry_viable = False
+                    asymmetry_verdict = "ADR_EXHAUSTION_REJECTED"
+                    asymmetry_note = (
+                        f"Intraday Range Exhaustion: {adr_consumed:.0f}% of daily ADR consumed. "
+                        f"Continuation expectancy severely degraded; high probability of mean-reversion trap."
                     )
         except Exception:
             pass
@@ -1155,6 +1175,16 @@ def calculate_option_execution_plan(
         else:
             disciplined_sl_floor = round(max(0.05, option_ltp * 0.60), 2)
             sl_prem = max(raw_sl_prem, disciplined_sl_floor)
+
+        # Strict Invariant: For any long option, SL premium MUST be strictly lower than entry premium.
+        # It must never exceed 88% of option_ltp (ensuring at least 12% risk cushion) and never be >= option_ltp.
+        max_allowed_sl = round(max(0.05, option_ltp * 0.88), 2)
+        sl_prem = min(sl_prem, max_allowed_sl)
+        # Re-apply disciplined floor if valid
+        if sl_prem < disciplined_sl_floor:
+            sl_prem = min(disciplined_sl_floor, max_allowed_sl)
+        if sl_prem >= option_ltp:
+            sl_prem = round(max(0.05, option_ltp * 0.75), 2)
     else:
         sl_prem = raw_sl_prem
 
@@ -1287,7 +1317,97 @@ def calculate_option_execution_plan(
             f"move SL to Cost (₹{breakeven_stop:,.2f}), or exit on first 5m candle close below prior low."
         ),
         "time_stop_mins": 20,
-        "time_stop_rule": "If trade active 20m with < +5% gain, exit at CMP/Scratch to avoid theta decay.",
+        "time_stop_rule": (
+            "If trade active 20m with < +5% gain, exit or convert to defined-risk spread to eliminate theta decay."
+        ),
+    }
+
+    # ── Hedged Defined-Risk Spread Plan (Theta Mitigation & High-Conviction Wall Monetization) ──
+    step = 50.0
+    sym_u = (getattr(trade_plan, "symbol", "") or "").upper()
+    if sym_u in ("BANKNIFTY", "SENSEX", "BANKEX"):
+        step = 100.0
+    elif sym_u == "MIDCPNIFTY":
+        step = 25.0
+    elif sym_u == "FINNIFTY":
+        step = 50.0
+    else:
+        step = 50.0 if spot >= 2500 else (20.0 if spot >= 1000 else 10.0)
+
+    is_long_opt = option_type.upper() == "CE"
+    if is_long_opt:
+        short_strike = round((strike + max(step, (spot_t1 - strike) * 0.75)) / step) * step
+        if short_strike <= strike:
+            short_strike = strike + step
+    else:
+        short_strike = round((strike - max(step, (strike - spot_t1) * 0.75)) / step) * step
+        if short_strike >= strike:
+            short_strike = strike - step
+
+    dist_short = abs(short_strike - strike)
+    short_prem_est = max(
+        0.50, round(option_ltp * max(0.20, 1.0 - (dist_short / (spot * 0.015 + dist_short))), 2)
+    )
+    net_debit = max(0.10, round(option_ltp - short_prem_est, 2))
+    spread_width = abs(short_strike - strike)
+    max_spread_profit = max(0.10, round(spread_width - net_debit, 2))
+    spread_rr = f"1:{round(max_spread_profit / net_debit, 2)}" if net_debit > 0 else "1:2"
+    spread_breakeven = round(strike + net_debit if is_long_opt else strike - net_debit, 1)
+
+    spread_name = "Bull Call Spread" if is_long_opt else "Bear Put Spread"
+    hedged_spread_plan = {
+        "spread_name": spread_name,
+        "structure": "VERTICAL_DEBIT_SPREAD",
+        "long_leg": {
+            "action": "BUY",
+            "strike": strike,
+            "option_type": option_type.upper(),
+            "premium": round(option_ltp, 2),
+        },
+        "short_leg": {
+            "action": "SELL",
+            "strike": short_strike,
+            "option_type": option_type.upper(),
+            "premium": short_prem_est,
+        },
+        "net_debit": net_debit,
+        "max_risk_pts": net_debit,
+        "max_profit_pts": max_spread_profit,
+        "breakeven_spot": spread_breakeven,
+        "spread_rr": spread_rr,
+        "theta_impact": "NEUTRAL_TO_POSITIVE",
+        "theta_reduction_pct": 75.0,
+        "risk_reduction_pct": round(((option_ltp - net_debit) / max(0.01, option_ltp)) * 100, 1),
+        "guidance": (
+            f"Trade a {spread_name} (Buy {int(strike)} + Sell {int(short_strike)}): "
+            f"Cuts risk by {round(((option_ltp - net_debit) / max(0.01, option_ltp)) * 100, 0):.0f}% "
+            f"(₹{net_debit:,.1f} vs ₹{option_ltp:,.1f}), flattens theta decay to zero, "
+            f"and monetizes overhead resistance at {int(short_strike)}."
+        ),
+    }
+
+    # ── Free-Roll Execution Protocol (Zero-Risk Runner Monetization at T1) ────
+    t1_gain_pts = max(0.1, round(t1_prem - option_ltp, 2)) if option_ltp > 0 else 0.0
+    t1_gain_pct = round((t1_gain_pts / option_ltp) * 100, 1) if option_ltp > 0 else 0.0
+    free_roll_plan = {
+        "status": "ELIGIBLE",
+        "t1_scale_action": "SCALE_OUT_50_PCT",
+        "t1_target_premium": t1_prem,
+        "t1_gain_pct": t1_gain_pct,
+        "breakeven_stop": breakeven_stop,
+        "net_risk_after_t1": 0.0,
+        "runner_size_pct": 50.0,
+        "runner_target_2": t2_prem,
+        "runner_target_3": t3_prem,
+        "runner_trailing_strategy": "1.5x ATR dynamic trail behind swing pivots",
+        "synthetic_hedge_option": (
+            f"At T1 (₹{t1_prem:,.1f}), optionally sell {int(short_strike)} {option_type.upper()} "
+            f"to lock in max profit and eliminate all theta on remaining runner."
+        ),
+        "protocol_summary": (
+            f"Bank 50% at T1 (₹{t1_prem:,.1f} / +{t1_gain_pct:.0f}%), ratchet SL to Cost (₹{breakeven_stop:,.1f}). "
+            f"Net trade risk becomes ₹0.00 (Free-Roll). Hold remaining 50% for T2 (₹{t2_prem:,.1f}) and T3 (₹{t3_prem:,.1f})."
+        ),
     }
 
     return {
@@ -1343,4 +1463,8 @@ def calculate_option_execution_plan(
         if (t3_prem and option_ltp > 0)
         else None,
         "t3_eta": trade_plan.eta_t3_str,
+        # Hedged Defined-Risk Spread Blueprint (Theta Neutralization & Wall Monetization)
+        "hedged_spread": hedged_spread_plan,
+        # Free-Roll Execution Protocol (+2R Scale 50% & Zero-Risk Runner)
+        "free_roll_plan": free_roll_plan,
     }

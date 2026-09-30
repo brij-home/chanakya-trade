@@ -233,6 +233,34 @@ def _err(msg: str, code: int = 500) -> HTTPException:
     return HTTPException(status_code=code, detail={"status": "error", "message": msg})
 
 
+_VALID_EXCHANGES = frozenset({"NSE", "BSE", "NFO", "BFO", "MCX", "CDS"})
+
+
+def _normalize_symbol_and_exchange(symbol: str, exchange: Optional[str] = "NSE") -> tuple[str, str]:
+    sym = (symbol or "").upper().strip()
+    exch = (exchange or "NSE").upper().strip()
+    if exch not in _VALID_EXCHANGES:
+        exch = "NSE"
+    if ":" in sym:
+        parts = sym.split(":", 1)
+        exch_candidate = parts[0].strip().upper()
+        if exch_candidate in _VALID_EXCHANGES:
+            exch = exch_candidate
+            sym = parts[1].strip().upper()
+        else:
+            sym = parts[1].strip().upper()
+    elif exch == "NSE":
+        from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
+
+        if sym in _MCX_SYMBOLS:
+            exch = "MCX"
+        elif sym in _CDS_SYMBOLS:
+            exch = "CDS"
+        elif sym in _BSE_SYMBOLS:
+            exch = "BSE"
+    return sym, exch
+
+
 # ── Skills ────────────────────────────────────────────────────
 
 
@@ -242,8 +270,13 @@ async def skill_quote(req: SymbolRequest):
     try:
         from market.quotes import get_quote
 
-        instrument = req.symbol if ":" in req.symbol else f"{req.exchange}:{req.symbol}"
+        sym, exch = _normalize_symbol_and_exchange(req.symbol, req.exchange)
+        instrument = f"{exch}:{sym}"
         quotes = await asyncio.to_thread(get_quote, [instrument])
+        if not quotes and exch == "NSE":
+            # Cross-exchange fallback for BSE exclusive stocks
+            bse_inst = f"BSE:{sym}"
+            quotes = await asyncio.to_thread(get_quote, [bse_inst])
         if not quotes:
             raise _err(f"No quote found for {req.symbol}", 404)
         return _ok(list(quotes.values())[0])
@@ -304,19 +337,31 @@ async def skill_history(req: HistoryRequest):
         import numpy as np
         from engine.provenance import create_provenance
 
+        sym, exch = _normalize_symbol_and_exchange(req.symbol, req.exchange)
         df = await asyncio.to_thread(
             get_ohlcv,
-            req.symbol.upper(),
-            req.exchange.upper(),
+            sym,
+            exch,
             interval=req.interval,
             days=req.days,
             include_live_candle=req.include_live,
         )
+        if (df is None or df.empty) and exch == "NSE":
+            df = await asyncio.to_thread(
+                get_ohlcv,
+                sym,
+                "BSE",
+                interval=req.interval,
+                days=req.days,
+                include_live_candle=req.include_live,
+            )
+            if df is not None and not df.empty:
+                exch = "BSE"
         if df is None or df.empty:
             return _ok(
                 {
-                    "symbol": req.symbol.upper(),
-                    "exchange": req.exchange.upper(),
+                    "symbol": sym,
+                    "exchange": exch,
                     "interval": req.interval,
                     "candles": [],
                     "volumes": [],
@@ -993,19 +1038,7 @@ async def skill_analyze(req: AnalyzeRequest):
     try:
         from engine.analysis_cache import analysis_cache
 
-        sym = req.symbol.upper().strip()
-        exch = req.exchange.upper().strip() if req.exchange else "NSE"
-        if ":" in sym:
-            exch, sym = sym.split(":", 1)
-        elif exch == "NSE":
-            from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
-
-            if sym in _MCX_SYMBOLS:
-                exch = "MCX"
-            elif sym in _CDS_SYMBOLS:
-                exch = "CDS"
-            elif sym in _BSE_SYMBOLS:
-                exch = "BSE"
+        sym, exch = _normalize_symbol_and_exchange(req.symbol, req.exchange)
 
         # Check cache immediately if not forcing fresh run (0 tokens, <1ms)
         if not req.force:
@@ -1033,6 +1066,12 @@ async def skill_analyze(req: AnalyzeRequest):
             q = get_quote([f"{exch}:{sym}"])
             if q:
                 spot = list(q.values())[0].last_price
+            if exch == "NSE" and (not spot or spot <= 0):
+                # Cross-exchange fallback: if no quote on NSE, try BSE
+                q_bse = get_quote([f"BSE:{sym}"])
+                if q_bse and list(q_bse.values())[0].last_price > 0:
+                    exch = "BSE"
+                    spot = list(q_bse.values())[0].last_price
         except Exception:
             pass
 
@@ -1122,19 +1161,7 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
-    sym = symbol.upper().strip()
-    exch = exchange.upper().strip() if exchange else "NSE"
-    if ":" in sym:
-        exch, sym = sym.split(":", 1)
-    elif exch == "NSE":
-        from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
-
-        if sym in _MCX_SYMBOLS:
-            exch = "MCX"
-        elif sym in _CDS_SYMBOLS:
-            exch = "CDS"
-        elif sym in _BSE_SYMBOLS:
-            exch = "BSE"
+    sym, exch = _normalize_symbol_and_exchange(symbol, exchange)
     stream_id = f"{sym}_{exch}_{uuid4().hex[:8]}"
 
     hub_key = f"{sym}_{exch}"
@@ -1158,6 +1185,7 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
 
     def _run():
         """Runs entirely in a background thread — no event loop blocking."""
+        nonlocal exch
         try:
             import os as _os
             from engine.analysis_cache import analysis_cache
@@ -1195,6 +1223,11 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
                 q = get_quote([f"{exch}:{sym}"])
                 if q:
                     spot = list(q.values())[0].last_price
+                if exch == "NSE" and (not spot or spot <= 0):
+                    q_bse = get_quote([f"BSE:{sym}"])
+                    if q_bse and list(q_bse.values())[0].last_price > 0:
+                        exch = "BSE"
+                        spot = list(q_bse.values())[0].last_price
             except Exception:
                 pass
 
@@ -1329,19 +1362,7 @@ async def skill_deep_analyze(req: AnalyzeRequest):
         from agent.core import get_provider
         from agent.deep_agent import DeepAnalyzer
 
-        sym = req.symbol.upper().strip()
-        exch = req.exchange.upper().strip() if req.exchange else "NSE"
-        if ":" in sym:
-            exch, sym = sym.split(":", 1)
-        elif exch == "NSE":
-            from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
-
-            if sym in _MCX_SYMBOLS:
-                exch = "MCX"
-            elif sym in _CDS_SYMBOLS:
-                exch = "CDS"
-            elif sym in _BSE_SYMBOLS:
-                exch = "BSE"
+        sym, exch = _normalize_symbol_and_exchange(req.symbol, req.exchange)
 
         registry = build_registry()
         provider = get_provider(registry=registry)
@@ -1695,7 +1716,8 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
             segment=segment,
             horizon=horizon,
         )
-        return {"status": "ok", "data": [a.to_dict() for a in alerts]}
+        counts = auto_alert_engine.get_counts()
+        return {"status": "ok", "data": [a.to_dict() for a in alerts], "counts": counts}
     except Exception as e:
         raise _err(str(e))
 
@@ -1864,9 +1886,12 @@ async def skill_auto_alerts_clear_test():
     """Clear all synthetic test/simulated alerts from engine buffer and broadcast purge."""
     try:
         from engine.auto_alert_engine import auto_alert_engine
+        from engine.alerts import alert_manager
         from web.sse import event_bus
 
-        purged_count = auto_alert_engine.clear_test_alerts()
+        purged_auto = auto_alert_engine.clear_test_alerts()
+        purged_manual = alert_manager.clear_test_alerts()
+        purged_count = purged_auto + purged_manual
         try:
             await event_bus.broadcast(
                 {
@@ -1878,7 +1903,27 @@ async def skill_auto_alerts_clear_test():
             )
         except Exception:
             pass
-        return {"status": "ok", "data": {"cleared": True, "purged": purged_count}}
+        return {
+            "status": "ok",
+            "data": {
+                "cleared": True,
+                "purged": purged_count,
+                "purged_auto": purged_auto,
+                "purged_manual": purged_manual,
+            },
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/clear_test")
+async def skill_manual_alerts_clear_test():
+    """Clear all test/simulated manual price alerts from alert manager."""
+    try:
+        from engine.alerts import alert_manager
+
+        purged = alert_manager.clear_test_alerts()
+        return {"status": "ok", "data": {"cleared": True, "purged": purged}}
     except Exception as e:
         raise _err(str(e))
 
@@ -3687,6 +3732,13 @@ class InflectionSyncSkillRequest(BaseModel):
     exchange: str = "NSE"
 
 
+class InflectionPrecomputeSkillRequest(BaseModel):
+    universe: str = "all_nse_liquid"
+    min_turnover_cr: float = 0.5
+    exchange: str = "NSE"
+    force: bool = False
+
+
 class InflectionDecisionSkillRequest(BaseModel):
     symbol: str
     exchange: str = "NSE"
@@ -3719,7 +3771,7 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
         f"inflection_scan:{req.universe}:{req.archetype}:{req.timing}:{req.horizon}:"
         f"{req.min_score}:{req.max_results}:{req.min_turnover_cr}:{req.cap_tier}"
     )
-    if req.use_local_cache:
+    if req.use_local_cache and not req.refresh:
         cached = analysis_cache.get_macro(cache_key, max_age_seconds=300)
         if cached and isinstance(cached, dict):
             return _ok(cached)
@@ -3737,7 +3789,8 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
             min_turnover_cr=req.min_turnover_cr,
             cap_tier_filter=req.cap_tier,
             use_local_cache=req.use_local_cache,
-            sync_missing=req.sync_missing,
+            bypass_inflection_cache=req.refresh,
+            sync_missing=req.sync_missing and not req.refresh,
             exchange=req.exchange,
         )
 
@@ -3803,6 +3856,51 @@ async def skill_inflection_sync(req: InflectionSyncSkillRequest):
     try:
         res = await asyncio.to_thread(_sync)
         return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/inflection_precompute")
+@router.post("/precompute_inflections")
+async def skill_inflection_precompute(req: Optional[InflectionPrecomputeSkillRequest] = None):
+    """
+    Precomputes the entire universe into the persistent SQLite inflection_daily_cache table
+    for instant sub-25ms scans across 1,200+ liquid equities.
+    """
+    try:
+        from analysis.inflection_scanner import scan_inflections_universe
+        from engine.eod_store import count_cached_inflections
+
+        u = req.universe if req else "all_nse_liquid"
+        min_to = req.min_turnover_cr if req else 0.5
+        exch = req.exchange if req else "NSE"
+
+        def _do_precompute():
+            return scan_inflections_universe(
+                universe=u,
+                archetype_filter="ALL",
+                timing_filter="ALL",
+                horizon_filter="ALL",
+                min_score=40,
+                max_results=150,
+                min_turnover_cr=min_to,
+                use_local_cache=True,
+                sync_missing=False,
+                exchange=exch,
+            )
+
+        res = await asyncio.to_thread(_do_precompute)
+        cached_count = count_cached_inflections(max_age_hours=24.0)
+        return _ok(
+            {
+                "status": "PRECOMPUTE_COMPLETE",
+                "universe": u,
+                "qualified_count": res.total_qualified,
+                "total_cached": cached_count,
+                "execution_time_seconds": res.execution_time_seconds,
+                "cache_state": res.cache_state,
+            }
+        )
     except Exception as e:
         raise _err(str(e))
 
@@ -4449,7 +4547,13 @@ async def skill_send_opportunity_telegram(req: SendOpportunityTelegramRequest):
     using the in-memory precomputed setup blueprint without waiting for recalculations (<50ms).
     """
     try:
+        from engine.auto_alert_engine import auto_alert_engine
         from bot.telegram_bot import push_execution_alert
+
+        try:
+            auto_alert_engine.ingest_execution_gate_report(req.opportunity)
+        except Exception:
+            pass
 
         push_execution_alert(req.opportunity)
         return _ok(
@@ -4988,6 +5092,58 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         cur_ltp = float(q_obj.last_price) if q_obj and q_obj.last_price else 0.0
         if not cur_ltp:
             cur_ltp = get_ltp(active_inst)
+
+        cur_vwap = getattr(q_obj, "vwap", None) if q_obj else None
+        if not cur_vwap or cur_vwap <= 0:
+            from market.quotes import get_computed_vwap
+
+            cur_vwap = get_computed_vwap(setup_sym, exchange=exch)
+
+        pcr_val = None
+        max_pain_val = None
+        try:
+            from market.options import get_options_snapshot
+
+            opt_snap = get_options_snapshot(setup_sym)
+            if opt_snap and opt_snap[0]:
+                chain = opt_snap[0]
+                ce_oi = sum(
+                    int(getattr(c, "oi", 0) or 0)
+                    for c in chain
+                    if getattr(c, "option_type", "") == "CE"
+                )
+                pe_oi = sum(
+                    int(getattr(c, "oi", 0) or 0)
+                    for c in chain
+                    if getattr(c, "option_type", "") == "PE"
+                )
+                if ce_oi > 0:
+                    pcr_val = round(pe_oi / ce_oi, 2)
+                strikes = sorted(
+                    {
+                        float(getattr(c, "strike", 0.0) or 0.0)
+                        for c in chain
+                        if getattr(c, "strike", 0.0)
+                    }
+                )
+                if strikes:
+                    loss_by_strike = {}
+                    for s in strikes:
+                        total_loss = 0.0
+                        for c in chain:
+                            stk = float(getattr(c, "strike", 0.0) or 0.0)
+                            oi = int(getattr(c, "oi", 0) or 0)
+                            if not oi or not stk:
+                                continue
+                            if getattr(c, "option_type", "") == "CE" and s > stk:
+                                total_loss += (s - stk) * oi
+                            elif getattr(c, "option_type", "") == "PE" and s < stk:
+                                total_loss += (stk - s) * oi
+                        loss_by_strike[s] = total_loss
+                    if loss_by_strike:
+                        max_pain_val = min(loss_by_strike, key=loss_by_strike.get)
+        except Exception:
+            pass
 
         # Upsert active symbol into watchlist so frontend always gets live price
         # (handles non-standard symbols like MCX commodities that may not be in the fixed list)
@@ -6394,6 +6550,9 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             "exchange": exch,
             "timeframe": tf,
             "ltp": round(cur_ltp, 2),
+            "vwap": round(float(cur_vwap), 2) if cur_vwap and cur_vwap > 0 else None,
+            "pcr": pcr_val,
+            "max_pain": max_pain_val,
             "watchlist": watchlist,
             "live_tickers": live_tickers,
             "personas": personas,

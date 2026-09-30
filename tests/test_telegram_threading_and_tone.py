@@ -184,3 +184,182 @@ def test_multichannel_chat_scoped_and_alias_threading():
     )
     p_fno = format_telegram_push_payload(fno_update, chat_id=fno_chat, signal_id=fno_internal)
     assert p_fno["reply_to_message_id"] == 1185
+
+
+def test_spread_freeroll_threading_and_timestamp_fallback():
+    """
+    Verify:
+    1. Initial BANKNIFTY 54300 PE signal recorded with message ID 88001.
+    2. UPDATE #2 with SPREAD FREE-ROLL UNLOCKED links to message 88001 even if
+       the minute timestamp shifted (e.g. _1243 vs _1244) or lookup uses alert_id.
+    """
+    chat_fno = "-1004380788314"
+    orig_sig = "SIG_BANKNIFTY_54300PE_29SEP_1243"
+    alert_id = "aa-options_momentum-banknifty_54300pe-20260929"
+
+    # Record root message
+    record_signal_message_id(orig_sig, 88001, chat_id=chat_fno, alert_id=alert_id)
+
+    # 1. Exact lookup
+    assert get_signal_message_id(orig_sig, chat_id=chat_fno) == 88001
+
+    # 2. Lookup via alert_id
+    assert get_signal_message_id("", chat_id=chat_fno, alert_id=alert_id) == 88001
+
+    # 3. Lookup when timestamp shifted by 1 minute (_1244 instead of _1243)
+    shifted_sig = "SIG_BANKNIFTY_54300PE_29SEP_1244"
+    assert get_signal_message_id(shifted_sig, chat_id=chat_fno) == 88001
+
+    # 4. Message format with UPDATE and FREE-ROLL automatically finds root message
+    update_msg = (
+        "[REAL/LIVE] UPDATE #2 · SPREAD FREE-ROLL UNLOCKED\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🏆 🔴 BANKNIFTY 54300 PE — 100% RISK-FREE SPREAD\n"
+        "• Underlying: BANKNIFTY | Strike: 54300 PE\n"
+        "💰 Spread Net Value: ₹196.30 · 📈 Spread P&L: +₹62.89 (+64.4%)\n"
+        "⚡️ DECISIVE ACTION: SCALE 50% LONG LEG & MOVE SL TO BREAKEVEN (FREE-ROLL)\n"
+        "🏷️ Ref: #SIG_BANKNIFTY_54300PE_29SEP_1244"
+    )
+    payload = format_telegram_push_payload(update_msg, chat_id=chat_fno, alert_id=alert_id)
+    assert payload["reply_to_message_id"] == 88001
+    assert payload["reply_parameters"]["message_id"] == 88001
+
+
+def test_spread_freeroll_humanized_decisive_action_and_net_debit():
+    """
+    Verify:
+    1. Raw enum SCALE_50_PCT_LOCK_BREAKEVEN is humanized to crystal-clear trader directive.
+    2. Spread net debit is clearly distinguished from single leg entry in Original Plan line.
+    3. Zero raw enum strings leak to user-facing template.
+    """
+    from bot.alert_templates import humanize_decisive_action
+    from engine.alert_model import AutoAlert
+
+    # Verify action humanizer
+    assert (
+        humanize_decisive_action("SCALE_50_PCT_LOCK_BREAKEVEN")
+        == "SCALE 50% LONG LEG & MOVE SL TO BREAKEVEN (FREE-ROLL)"
+    )
+    assert (
+        humanize_decisive_action("BOOK_SPREAD_70_PCT")
+        == "CLOSE BOTH LEGS AT MARKET (LOCK 70% PROFIT)"
+    )
+    assert (
+        humanize_decisive_action("SCRATCH_SPREAD_AT_MARKET")
+        == "EXIT BOTH LEGS AT MARKET (CAPITAL DEFENSE)"
+    )
+
+    alert = AutoAlert(
+        alert_id="aa-options_momentum-banknifty_54300pe-20260929",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="SPREAD_FREE_ROLL",
+        symbol="BANKNIFTY",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="BANKNIFTY 54300 PE SPREAD FREE-ROLL UNLOCKED",
+        summary="Net spread value expanded by +64.4%. 100% capital risk-free.",
+        ltp=196.30,
+        trigger_level=192.40,
+        target_level=350.0,
+        stop_loss=153.90,
+        contract_symbol="BANKNIFTY 54300 PE",
+        target_status="SPREAD_FREE_ROLL",
+        option_premium=192.40,
+        lot_size=30,
+        pnl_pct=64.4,
+        trailing_decision="SCALE_50_PCT_LOCK_BREAKEVEN",
+        trailing_rationale="Net spread value expanded to ₹160.5 (Entry: ₹97.7, +64.4%). Trade is 100% capital risk-free.",
+        actionable_plan={
+            "hedge_plan": {
+                "net_debit_per_share": 97.70,
+                "buy_strike": 54300,
+                "sell_strike": 54000,
+            }
+        },
+        update_number=2,
+        signal_ref="#SIG_BANKNIFTY_54300PE_29SEP_1243",
+    )
+    alert.pnl_pts = 62.89
+
+    from bot.alert_templates import render_auto_alert
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    # Assert decisive action is humanized (no raw enum)
+    assert "SCALE_50_PCT_LOCK_BREAKEVEN" not in rendered
+    assert "SCALE 50% LONG LEG & MOVE SL TO BREAKEVEN (FREE-ROLL)" in rendered
+
+    # Assert spread debit is clearly displayed alongside long leg entry
+    assert "Spread Debit: ₹97.70 (Long Leg: ₹192.40)" in rendered
+    assert "UPDATE #2 · SPREAD FREE-ROLL UNLOCKED" in rendered
+
+
+def test_auto_alert_upgrade_preserves_telegram_root(tmp_path, monkeypatch):
+    """
+    Verify that when an EARLY_WARNING alert is upgraded to IGNITED,
+    any prior telegram_root_message_id is preserved so updates thread properly.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    early = AutoAlert(
+        alert_id="aa-optmom-ce-HDFCBANK-1700-coiling",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="EARLY_WARNING",
+        symbol="HDFCBANK",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="HDFCBANK Early Warning Setup",
+        summary="High conviction early warning options momentum",
+        ltp=24.70,
+        trigger_level=24.70,
+        target_level=35.0,
+        stop_loss=18.0,
+        strike=1700.0,
+        option_type="CE",
+        contract_symbol="HDFCBANK1700CE",
+        confidence=85,
+        created_at=now_str,
+        telegram_root_message_id=99001,
+        telegram_message_id=99001,
+        signal_ref="#SIG_HDFCBANK_1700CE_11SEP_1000",
+    )
+    engine.record_alert(early)
+
+    ignited = AutoAlert(
+        alert_id="aa-optmom-ce-HDFCBANK-1700-ignite",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="HDFCBANK",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="HDFCBANK Ignited Breakout",
+        summary="Breakout ignited on heavy volume",
+        ltp=22.10,
+        trigger_level=22.10,
+        target_level=33.2,
+        stop_loss=16.6,
+        strike=1700.0,
+        option_type="CE",
+        contract_symbol="HDFCBANK1700CE",
+        confidence=90,
+        created_at=now_str,
+    )
+
+    recorded = engine.record_alert(ignited)
+    assert recorded is True
+
+    upgraded = next(a for a in engine.get_alerts() if a.symbol == "HDFCBANK")
+    assert upgraded.stage == "IGNITED"
+    assert upgraded.telegram_root_message_id == 99001

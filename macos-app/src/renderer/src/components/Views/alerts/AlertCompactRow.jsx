@@ -1,12 +1,14 @@
 import React, { memo, useMemo } from 'react'
 import { useLiveSpot } from './LiveSpotsContext'
-import { AUTO_TYPE_STYLE, INDEX_LOT_SIZES, convictionEmoji, getStaleness, formatExpiryDetails, resolveAlertLifecycle } from './alertHelpers'
+import { AUTO_TYPE_STYLE, INDEX_LOT_SIZES, convictionEmoji, getStaleness, formatExpiryDetails, resolveAlertLifecycle, resolveAlertProvenance } from './alertHelpers'
 import { RRMiniBar, MilestoneDots } from './AlertWidgets'
 
 export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTelegram, onTrade, onExpand, isExpanded, onDismiss }) {
   const plan = alert.actionable_plan || {}
   const tradePlan = plan.trade_plan || {}
   const optPlan = plan.option_plan || null
+  const convictionTier = alert.metrics?.conviction_tier || plan.conviction_tier || null
+  const executionMandate = plan.execution_style_mandate || alert.metrics?.execution_style_mandate || null
 
   const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
   const rawContract = alert.contract_symbol || optPlan?.contract_symbol || plan.option_contract || ''
@@ -21,8 +23,9 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   const liveContract = liveContractByClean ?? liveContractByFull
 
   const style = AUTO_TYPE_STYLE[alert.alert_type] || AUTO_TYPE_STYLE.GAMMA_BLAST
-  const isTest = alert.environment === 'TEST' || alert.is_live === false
-  const isOffMarket = alert.environment === 'EOD_SCAN' || alert.environment === 'OFF-MARKET' || alert.market_status === 'SESSION_CLOSED'
+  const provenance = useMemo(() => resolveAlertProvenance(alert), [alert])
+  const isTest = provenance.isTest
+  const isOffMarket = provenance.isOffMarket
 
   // Canonical Single Source of Truth Lifecycle Evaluation
   const lifecycle = useMemo(
@@ -154,7 +157,11 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   }, [triggerTimeStr])
 
   const conviction = Number(alert.confidence || alert.metrics?.scrutiny?.score || 75)
-  const reasonShort = (alert.summary || alert.headline || '').slice(0, 40)
+  const reasonShort = alert.summary || alert.headline || ''
+  const confluenceAlignment = alert.confluence_alignment || alert.metadata?.confluence_alignment || null
+  const stagnationWarning = alert.stagnation_warning || alert.metadata?.stagnation_warning || null
+  const physicalRisk = alert.physical_delivery_risk || alert.metadata?.physical_delivery_risk || null
+  const gapRisk = alert.premarket_gap_risk || alert.metadata?.premarket_gap_risk || null
 
   const fmt = (n, dec = 0) => n != null && !isNaN(n) ? Number(n).toLocaleString(isCrypto ? 'en-US' : 'en-IN', { minimumFractionDigits: dec, maximumFractionDigits: dec }) : '—'
   const fmtP = (n) => n != null && !isNaN(n) ? Number(n).toLocaleString(isCrypto ? 'en-US' : 'en-IN', { minimumFractionDigits: Number(n) < 100 ? 1 : 0, maximumFractionDigits: isCrypto ? 2 : 1 }) : '—'
@@ -179,18 +186,18 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         </span>
 
         <span className="text-[11px] font-black text-text font-mono whitespace-nowrap">{cleanSym}</span>
-        {strikeNum && !isFuture && (
+        {isDerivative && strikeNum && !isFuture && (
           <span className="text-[10px] font-black text-gold font-mono whitespace-nowrap">
             {currSym}{Number(strikeNum).toLocaleString(isCrypto ? 'en-US' : 'en-IN')}
           </span>
         )}
-        {optType && !isFuture && (
+        {isDerivative && optType && !isFuture && (
           <span className={`text-[8px] px-1 py-px rounded font-black ${optType === 'CE' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
             {optType}
           </span>
         )}
-        {isFuture && <span className="text-[8px] px-1 py-px rounded font-black bg-blue-500/20 text-blue-300">FUT</span>}
-        {(expiryInfo?.fullDisplay || expiryShort) && (
+        {isDerivative && isFuture && <span className="text-[8px] px-1 py-px rounded font-black bg-blue-500/20 text-blue-300">FUT</span>}
+        {isDerivative && (expiryInfo?.fullDisplay || expiryShort) && (
           <span
             className={`text-[8px] font-mono px-1.5 py-px rounded font-bold whitespace-nowrap border ${
               expiryInfo?.isWeekly
@@ -261,6 +268,21 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           </span>
         ) : null}
 
+        {/* Telegram Delivery Status */}
+        {alert.telegram_dispatched ? (
+          <span className="text-[7px] px-1 py-px rounded font-black bg-sky-500/20 text-sky-300 border border-sky-500/35 whitespace-nowrap hidden sm:inline-flex items-center gap-0.5" title="Dispatched to Telegram channel">
+            <span>📱</span><span>TG SENT</span>
+          </span>
+        ) : alert.telegram_suppression_reason ? (
+          <span className="text-[7px] px-1 py-px rounded font-medium bg-amber-500/10 text-amber-300/90 border border-amber-500/25 whitespace-nowrap hidden sm:inline-flex items-center gap-0.5 cursor-help" title={`Telegram push held: ${alert.telegram_suppression_reason}`}>
+            <span>📱</span><span>TG HELD</span>
+          </span>
+        ) : isTest ? (
+          <span className="text-[7px] px-1 py-px rounded font-medium bg-panel text-muted border border-border/40 whitespace-nowrap hidden sm:inline" title="Terminal only (Simulation / Test mode)">
+            TERMINAL
+          </span>
+        ) : null}
+
         <span className={`text-[9px] font-black px-1.5 py-px rounded whitespace-nowrap ${
           isBull ? 'text-emerald-400 bg-emerald-500/10' :
           isNeutral ? 'text-purple-400 bg-purple-500/10' :
@@ -268,6 +290,98 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         }`}>
           {isBull ? '▲ BULL' : isNeutral ? '◆ NEUT' : '▼ BEAR'}
         </span>
+
+        {/* Conviction Tier Badge */}
+        {convictionTier === 'APEX_CONFLUENCE' && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-amber-500/25 text-amber-300 border border-amber-500/50 hidden sm:inline"
+            title="Tier 1 Institutional Apex Confluence (Conviction >= 90%)"
+          >
+            💎 APEX
+          </span>
+        )}
+        {convictionTier === 'HIGH_CONVICTION' && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hidden sm:inline"
+            title="Tier 2 High Conviction Setup (Conviction 80–89%)"
+          >
+            ⚡ HIGH
+          </span>
+        )}
+        {convictionTier === 'DEFINED_RISK_ONLY' && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 hidden sm:inline"
+            title="Tier 3 Defined-Risk Vertical Spread Mandate (Conviction 70–79%)"
+          >
+            🛡️ SPREAD
+          </span>
+        )}
+
+        {/* Hedged Spread Execution Mandate */}
+        {executionMandate === 'HEDGED_SPREAD_MANDATORY' && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/20 text-rose-300 border border-rose-500/40 hidden sm:inline"
+            title={plan.sector_concurrency_warning || plan.trap_warning || 'Defined-risk vertical spread mandated'}
+          >
+            🛡️ HEDGE MANDATE
+          </span>
+        )}
+
+        {/* Multi-Horizon Confluence Alignment */}
+        {confluenceAlignment === 'TRIPLE_HORIZON' && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-gradient-to-r from-amber-500/25 via-emerald-500/25 to-sky-500/25 text-amber-300 border border-amber-400/50 shadow-sm hidden sm:inline"
+            title="Institutional Triple-Horizon Confluence: Intraday + Swing + Multibagger all mutually aligned in trend and volume structure."
+          >
+            👑 TRIPLE CONFLUENCE
+          </span>
+        )}
+        {confluenceAlignment === 'DUAL_HORIZON' && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hidden sm:inline"
+            title="Dual-Horizon Alignment: Multi-timeframe trend and volume confirmation across time horizons."
+          >
+            ⚡ DUAL CONFLUENCE
+          </span>
+        )}
+
+        {/* Pre-Market Opening Gap Sentinel */}
+        {gapRisk === 'GAP_OVER_SL' && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-pulse hidden sm:inline"
+            title="Pre-market Sentinel: Opening price gapped beyond invalidation stop-loss."
+          >
+            🛑 GAP OVER SL
+          </span>
+        )}
+        {gapRisk === 'GAP_NO_CHASE' && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-amber-500/25 text-amber-300 border border-amber-500/50 hidden sm:inline"
+            title="Pre-market Sentinel: Opening price gapped beyond maximum entry boundary. Do not chase."
+          >
+            ⚠️ NO CHASE
+          </span>
+        )}
+
+        {/* Stagnation & Chop Defense Sentinel */}
+        {stagnationWarning && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-amber-500/15 text-amber-300 border border-amber-500/35 cursor-help hidden sm:inline"
+            title={typeof stagnationWarning === 'string' ? stagnationWarning : 'Consolidated in chop without reaching T1 (+2R). Trailing stop held at breakeven.'}
+          >
+            ⏳ STAGNANT
+          </span>
+        )}
+
+        {/* SEBI Physical Settlement Risk */}
+        {physicalRisk && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/20 text-rose-300 border border-rose-500/40 cursor-help hidden sm:inline"
+            title={typeof physicalRisk === 'object' && physicalRisk.advisory ? physicalRisk.advisory : (typeof physicalRisk === 'string' ? physicalRisk : 'SEBI Physical Settlement risk: Contract within 4 days of expiry. Margin escalation active. Square off or roll contract.')}
+          >
+            ⚠️ PHYSICAL RISK
+          </span>
+        )}
 
         <span
           className="text-[7px] font-black px-1 py-px rounded whitespace-nowrap hidden sm:inline"
@@ -486,7 +600,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
             }}
             className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-indigo-700 dark:text-indigo-300 hover:text-indigo-900 dark:hover:text-indigo-200 bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-400/40 dark:border-indigo-500/35 hover:border-indigo-500/60 transition-all"
             title={`Option Alternative: ${optPlan?.contract_symbol || plan.option_contract} @ ${currSym}${optPlan?.entry_premium || plan.option_entry?.replace(/^[₹$]/, '') || '—'} (Click to trade Option)`}
-          >⚡ Opt {optPlan?.contract_symbol ? optPlan.contract_symbol.slice(-6) : (plan.option_contract ? plan.option_contract.slice(-6) : '')}</button>
+          >⚡ Opt {optPlan?.strike ? `${optPlan.strike} ${optPlan.option_type || ''}` : (optPlan?.contract_symbol || plan.option_contract || '').replace(/^[A-Za-z]+/, '') || 'Proxy'}</button>
         )}
 
         {/* ── 1-Click Roll Strike Button ── */}

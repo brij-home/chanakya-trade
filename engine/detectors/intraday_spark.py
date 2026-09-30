@@ -324,12 +324,14 @@ def detect_intraday_mover_sparks(
             if seg != "INDEX":
                 try:
                     from engine.alert_expiry import (
-                        is_monthly_physical_expiry_week,
+                        check_monthly_physical_settlement_status,
                         get_next_monthly_expiry_date,
                     )
 
                     now_d = datetime.now(IST)
-                    is_exp_wk, dte = is_monthly_physical_expiry_week(now_d)
+                    is_exp_wk, dte = check_monthly_physical_settlement_status(
+                        symbol=sym, ref_dt=now_d
+                    )
                     if is_exp_wk:
                         next_dt = get_next_monthly_expiry_date(now_d)
                         next_str = next_dt.strftime("%d-%b-%Y")
@@ -449,12 +451,14 @@ def detect_intraday_mover_sparks(
             if seg != "INDEX":
                 try:
                     from engine.alert_expiry import (
-                        is_monthly_physical_expiry_week,
+                        check_monthly_physical_settlement_status,
                         get_next_monthly_expiry_date,
                     )
 
                     now_d = datetime.now(IST)
-                    is_exp_wk, dte = is_monthly_physical_expiry_week(now_d)
+                    is_exp_wk, dte = check_monthly_physical_settlement_status(
+                        symbol=sym, ref_dt=now_d
+                    )
                     if is_exp_wk:
                         next_dt = get_next_monthly_expiry_date(now_d)
                         next_str = next_dt.strftime("%d-%b-%Y")

@@ -267,19 +267,28 @@ session = get_current_ist_session()
 
 ---
 
-## 8. Multi-Channel Dispatch
+## 8. Multi-Channel Dispatch & Single-Authority Ingestion
 
 When an alert is approved and dispatched:
 
-1. **SSE Bus** (`web.sse.event_bus`): Pushes to all connected browser clients
+1. **SSE Bus** (`web.sse.event_bus`): Pushes to all connected browser / desktop clients in real time
    ```python
    from web.sse import event_bus
-   event_bus.push({"type": "alert", "data": alert.to_dict()})
+   event_bus.publish_sync("alert", alert.to_dict())
    ```
-2. **In-Memory Circular Buffer**: Appended to `_ALERT_BUFFER` (deque, maxlen=500)
-3. **Persistent Storage**: Written to `auto_alerts.json` via `engine/alerts.py`
-4. **Telegram** (if configured): `bot/telegram_bot.py` high-confidence alerts only (score >= 80)
-5. **Desktop Notification** (macOS): Electron IPC notification
+2. **In-Memory Circular Buffer**: Appended to `self._alerts` (deque, maxlen=500)
+3. **Persistent Storage**: Written atomically to `auto_alerts.json`
+4. **Telegram Gate**: Evaluated against institutional conviction, R:R >= 1.4, macro regime, sector daily caps, and Zero-Ghost lifecycle invariant
+5. **Desktop Notification** (macOS/Electron): Local system notification & chime
+
+### Single-Authority Ingestion Protocol (Zero Shadow Dispatches)
+- **Zero Shadow Alerts**: Modules outside the alert engine (`analysis/execution_gate.py`, etc.) MUST NEVER call `send_push()` or `push_execution_alert()` directly for new trade setups.
+- **Canonical Method**: Ingest via `auto_alert_engine.ingest_execution_gate_report(report)`.
+- **Guarantees**:
+  1. Generates deterministic alert ID via `generate_alert_id()`.
+  2. Persists record into `auto_alerts.json`.
+  3. Emits real-time SSE event to UI.
+  4. Applies centralized Telegram filters with explicit `TG SENT` vs `TG HELD` provenance logging.
 
 ---
 
@@ -300,6 +309,8 @@ All alerts in ChanakyaTrade must strictly follow centralized determinism rules:
    - `validate_alert_id(alert_id)` rejects IDs with banned minute timestamps (12+ digits) or random UUID hex suffixes.
 5. **Static Code Audits**:
    - Statically validated via `tests/test_alert_identity_invariants.py`, which parses all files in `engine/detectors/*.py` to ensure zero banned patterns exist.
+6. **Channel Parity & Query Transparency**:
+   - Telegram bot `/alerts` (`cmd_alerts`) must query both `auto_alert_engine.get_alerts(view_mode="ACTIVE")` and `alert_manager._alerts`, displaying live delivery status (`📱 TG SENT` vs `🔒 TG HELD`).
 
 ---
 

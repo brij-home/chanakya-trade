@@ -465,6 +465,13 @@ def calculate_position_size(
                 max_risk_pct * 0.70, 2
             )  # Scale down 30% during elevated volatility
             vix_note = f" [VIX={vix:.1f} ELEVATED: Risk scaled down 30% to {effective_risk_pct}%]"
+        elif vix < 12.0:
+            effective_risk_pct = round(
+                max_risk_pct * 0.75, 2
+            )  # Scale down 25% during low-volatility compression (diminished follow-through)
+            vix_note = (
+                f" [VIX={vix:.1f} COMPRESSION: Risk scaled down 25% to {effective_risk_pct}%]"
+            )
 
     # Market Regime Gate Sizing Coupling (Edgeless Chop / Locomotive Polarization)
     try:
@@ -589,6 +596,14 @@ _DETECTOR_LOT_MULTIPLIERS: dict[str, float] = {
 }
 
 
+_CONVICTION_TIER_LOT_MULTIPLIERS: dict[str, float] = {
+    "APEX_CONFLUENCE": 1.25,  # +25% sizing for institutional alpha setups (>=90% conviction)
+    "HIGH_CONVICTION": 1.0,  # Baseline institutional sizing (80-89% conviction)
+    "DEFINED_RISK_ONLY": 0.65,  # -35% risk compression for tier-3 defined-risk setups (70-79% conviction)
+    "LOW_CONVICTION": 0.50,  # Damped sizing for marginal setups (<70%)
+}
+
+
 def get_detector_lot_multiplier(alert_type: str) -> float:
     """
     Returns the detector-specific lot quantization multiplier for ``alert_type``.
@@ -599,6 +614,13 @@ def get_detector_lot_multiplier(alert_type: str) -> float:
     Unknown alert types → 1.0× (safe default)
     """
     return _DETECTOR_LOT_MULTIPLIERS.get(str(alert_type).upper(), 1.0)
+
+
+def get_conviction_tier_lot_multiplier(conviction_tier: Optional[str]) -> float:
+    """Returns lot sizing multiplier based on institutional conviction tier."""
+    if not conviction_tier:
+        return 1.0
+    return _CONVICTION_TIER_LOT_MULTIPLIERS.get(str(conviction_tier).upper(), 1.0)
 
 
 def calculate_position_size_for_alert(
@@ -616,29 +638,16 @@ def calculate_position_size_for_alert(
     profit_factor: float = 1.8,
     is_fno: bool = False,
     vix: Optional[float] = None,
+    conviction_tier: Optional[str] = None,
 ) -> PositionSizeResult:
     """
-    Detector-aware position sizing with empirically-calibrated lot multipliers.
+    Detector-aware and conviction-tier-calibrated position sizing.
 
-    Wraps ``calculate_position_size()`` with a detector-specific multiplier
-    applied to the resulting lot count.  Multipliers are defined in
-    ``_DETECTOR_LOT_MULTIPLIERS`` and derived from EOD session diagnostics:
-
-    - High-conviction setups (ORB_BREAKOUT, INDEX_CALL_SETUP, INDEX_PUT_SETUP):
-      lots × 1.25 — rewarding structurally proven edges with larger sizing.
-    - Counter-trend setups (COUNTER_TREND, REVERSAL_BEAR, REVERSAL_BULL):
-      lots × 0.5 — dampening risk on historically lower-conviction signals.
-    - Standard setups: lots × 1.0 (no change).
+    Combines detector-specific historical edge multipliers with conviction tier
+    allocations (APEX_CONFLUENCE: 1.25×, DEFINED_RISK_ONLY: 0.65×).
 
     Lot counts are always rounded down to maintain F&O contract integrity.
     The multiplier is logged in ``PositionSizeResult.notes`` for full traceability.
-
-    Args:
-        alert_type: The detector type string (e.g. ``"ORB_BREAKOUT"``).
-        All other args mirror ``calculate_position_size()``.
-
-    Returns:
-        PositionSizeResult with detector-adjusted lots, shares, capital, and risk fields.
     """
     # 1. Compute baseline position size using standard engine
     base = calculate_position_size(
@@ -657,15 +666,17 @@ def calculate_position_size_for_alert(
         vix=vix,
     )
 
-    # 2. Resolve detector multiplier
-    multiplier = get_detector_lot_multiplier(alert_type)
+    # 2. Resolve combined detector & conviction tier multiplier
+    detector_multiplier = get_detector_lot_multiplier(alert_type)
+    tier_multiplier = get_conviction_tier_lot_multiplier(conviction_tier)
+    combined_multiplier = round(detector_multiplier * tier_multiplier, 2)
 
     # 3. No adjustment needed for standard multiplier (1.0×)
-    if multiplier == 1.0 or base.lots <= 0:
+    if combined_multiplier == 1.0 or base.lots <= 0:
         return base
 
-    # 4. Apply multiplier to lots (always round down to whole contracts)
-    raw_lots = base.lots * multiplier
+    # 4. Apply combined multiplier to lots (always round down to whole contracts)
+    raw_lots = base.lots * combined_multiplier
     adjusted_lots = max(1, int(raw_lots))  # Never go below 1 lot
 
     # 5. Recompute derived fields from adjusted lots
@@ -677,12 +688,13 @@ def calculate_position_size_for_alert(
     adjusted_risk_pct = (adjusted_risk / capital) * 100.0 if capital > 0 else 0.0
 
     mult_label = (
-        f"+{int((multiplier - 1.0) * 100)}%"
-        if multiplier > 1.0
-        else f"-{int((1.0 - multiplier) * 100)}%"
+        f"+{int((combined_multiplier - 1.0) * 100)}%"
+        if combined_multiplier > 1.0
+        else f"-{int((1.0 - combined_multiplier) * 100)}%"
     )
+    tier_tag = f"Tier [{conviction_tier}] {tier_multiplier:.2f}x | " if conviction_tier else ""
     adjusted_notes = (
-        f"{base.notes} | Detector [{alert_type}] multiplier {multiplier:.2f}x ({mult_label}): "
+        f"{base.notes} | {tier_tag}Detector [{alert_type}] combined multiplier {combined_multiplier:.2f}x ({mult_label}): "
         f"{base.lots} → {adjusted_lots} lots."
     )
 
@@ -715,6 +727,7 @@ def generate_execution_ticket(
     alert_type: Optional[str] = None,
     is_fno: bool = False,
     order_type: str = "LIMIT",
+    conviction_tier: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Builds a capital-calibrated, ready-to-execute institutional order ticket.
@@ -733,6 +746,7 @@ def generate_execution_ticket(
             target_price=target_price,
             max_risk_pct=max_risk_pct,
             is_fno=is_fno,
+            conviction_tier=conviction_tier,
         )
     else:
         res = calculate_position_size(
@@ -777,4 +791,5 @@ def generate_execution_ticket(
         "auto_submit_ready": True,
         "smart_routing": sor_plan.to_dict(),
         "notes": res.notes,
+        "conviction_tier": conviction_tier,
     }

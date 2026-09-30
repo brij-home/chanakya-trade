@@ -48,10 +48,13 @@ from __future__ import annotations
 
 from typing import Any, Optional
 import json
+import logging
 import os
 import sys
 import threading
 from pathlib import Path
+
+logger = logging.getLogger("chanakya.web.api")
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
 if sys.platform == "win32":
@@ -2762,6 +2765,8 @@ async def api_risk_status(request: Request):
 
 
 def _compute_portfolio(source: str = "auto") -> Optional[dict]:
+    import concurrent.futures as _cf
+
     holdings: list[dict] = []
     positions: list[dict] = []
     total_cash = total_margin = total_balance = 0.0
@@ -2769,19 +2774,22 @@ def _compute_portfolio(source: str = "auto") -> Optional[dict]:
 
     src = (source or "auto").strip().lower()
 
+    # Hard per-broker wall-clock timeout (seconds).
+    # Prevents stale-token re-auth storms (up to 3 × 2 HTTP retries × 10s each)
+    # from blocking the entire portfolio response and causing browser timeouts.
+    _BROKER_TIMEOUT = 8.0
+
     def _try(name: str, factory):
         nonlocal total_cash, total_margin, total_balance
-        try:
+
+        def _fetch():
             b = factory()
             if not b.is_authenticated():
-                return
-            active_brokers.append(name)
+                return None
             f = b.get_funds()
-            total_cash += f.available_cash
-            total_margin += f.used_margin
-            total_balance += f.total_balance
+            h_list = []
             for h in b.get_holdings():
-                holdings.append(
+                h_list.append(
                     {
                         "broker": name,
                         "symbol": h.symbol,
@@ -2794,8 +2802,9 @@ def _compute_portfolio(source: str = "auto") -> Optional[dict]:
                         "current_value": round(h.last_price * h.quantity, 2),
                     }
                 )
+            p_list = []
             for p in b.get_positions():
-                positions.append(
+                p_list.append(
                     {
                         "broker": name,
                         "symbol": p.symbol,
@@ -2806,6 +2815,27 @@ def _compute_portfolio(source: str = "auto") -> Optional[dict]:
                         "pnl": p.pnl,
                     }
                 )
+            return (f, h_list, p_list)
+
+        try:
+            with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                future = _ex.submit(_fetch)
+                try:
+                    result = future.result(timeout=_BROKER_TIMEOUT)
+                except _cf.TimeoutError:
+                    # Broker hung (stale token re-auth storm or network hang).
+                    # Cancel and skip — fail-open for portfolio display.
+                    future.cancel()
+                    return
+            if result is None:
+                return
+            f, h_list, p_list = result
+            active_brokers.append(name)
+            total_cash += f.available_cash
+            total_margin += f.used_margin
+            total_balance += f.total_balance
+            holdings.extend(h_list)
+            positions.extend(p_list)
         except Exception:
             pass
 
@@ -3444,6 +3474,62 @@ async def trigger_multibagger_scan_api(top_n: int = 10, min_conviction: int = 65
     }
 
 
+@app.get("/api/alerts/auto/audit-trail", tags=["Alerts"])
+async def get_alerts_audit_trail_api(
+    alert_id: Optional[str] = None,
+    symbol: Optional[str] = None,
+    event_type: Optional[str] = None,
+    limit: int = 50,
+):
+    """
+    Query chronological audit trail events across one or all active/archived alerts.
+    Enables rapid operational troubleshooting and end-to-end delivery traceability.
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+
+    events = auto_alert_engine.get_audit_trail(
+        alert_id=alert_id,
+        symbol=symbol,
+        event_type=event_type,
+        limit=min(limit, 200),
+    )
+    return {"status": "ok", "count": len(events), "data": events}
+
+
+@app.get("/api/alerts/auto/{alert_id}/audit", tags=["Alerts"])
+async def get_alert_audit_detail_api(alert_id: str):
+    """
+    Get complete audit lifecycle trail and delivery diagnostics for a specific alert.
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+
+    alert = auto_alert_engine.get_alert_by_id(alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+
+    return {
+        "status": "ok",
+        "data": {
+            "alert_id": alert.alert_id,
+            "trace_id": alert.trace_id,
+            "symbol": alert.symbol,
+            "exchange": alert.exchange,
+            "stage": alert.stage,
+            "created_at": alert.created_at,
+            "current_status": {
+                "ltp": alert.ltp,
+                "is_active": alert.is_active,
+                "is_invalidated": alert.is_invalidated,
+                "is_archived": alert.is_archived,
+                "telegram_dispatched": alert.telegram_dispatched,
+                "telegram_suppression_reason": alert.telegram_suppression_reason,
+                "achieved_milestones": alert.achieved_milestones or [],
+            },
+            "audit_trail": getattr(alert, "audit_trail", []) or [],
+        },
+    }
+
+
 @app.get("/api/alerts/auto/telegram-destinations", tags=["Alerts"])
 async def get_telegram_destinations_api():
     """
@@ -3538,6 +3624,29 @@ async def send_alert_to_telegram(payload: dict):
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Telegram send failed: {e}")
+
+    # Mark alert as dispatched to Telegram and record audit trail to maintain Zero-Ghost lifecycle contract
+    try:
+        target.telegram_dispatched = True
+        target.telegram_suppression_reason = None
+        if not isinstance(getattr(target, "dispatched_channels", None), list):
+            target.dispatched_channels = []
+        if "telegram" not in target.dispatched_channels:
+            target.dispatched_channels.append("telegram")
+        if hasattr(target, "record_audit"):
+            target.record_audit(
+                "TELEGRAM_SENT",
+                f"Manually dispatched to Telegram channel via UI (confidence: {target.confidence}%)",
+                actor="MANUAL_UI",
+                details={
+                    "confidence": target.confidence,
+                    "stage": target.stage,
+                    "chat_id": chat_id or "DEFAULT_CHAT",
+                },
+            )
+        auto_alert_engine._save()
+    except Exception as e_audit:
+        logger.debug(f"[API] Failed to record manual Telegram dispatch state: {e_audit}")
 
     # Truncate preview for the response
     preview = rendered_msg[:800] if len(rendered_msg) > 800 else rendered_msg

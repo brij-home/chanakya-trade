@@ -203,16 +203,34 @@ def test_orb_breakout_rr_ratio_valid():
     df_5m = pd.DataFrame(records).set_index("datetime")
     ltp = 56430.0  # Broke above orb_high (56400.0), well within no_chase (56400 + 70 = 56470)
 
-    alert = detect_opening_range_breakout(
-        symbol="BANKNIFTY",
-        df=df_5m,
-        ltp=ltp,
-        vwap=56350.0,
-        exchange="NSE",
-        rvol=1.8,
-        ref_time=ref_time,
-        ignore_time_gate=True,
+    from engine.option_resolver import ResolvedOptionPlan
+
+    mock_opt = ResolvedOptionPlan(
+        contract_symbol="BANKNIFTY26OCT56500CE",
+        strike=56500.0,
+        option_type="CE",
+        expiry="2026-10-29",
+        entry_premium=150.0,
+        sl_premium=110.0,
+        t1_premium=210.0,
+        t2_premium=260.0,
+        lot_size=15,
+        underlying_spot=ltp,
+        underlying_sl=56300.0,
+        underlying_target=56600.0,
     )
+
+    with patch("engine.detectors.orb.resolve_option_contract", return_value=mock_opt):
+        alert = detect_opening_range_breakout(
+            symbol="BANKNIFTY",
+            df=df_5m,
+            ltp=ltp,
+            vwap=56350.0,
+            exchange="NSE",
+            rvol=1.8,
+            ref_time=ref_time,
+            ignore_time_gate=True,
+        )
     assert alert is not None
     assert alert.direction == "BULLISH"
     assert "ORB" in alert.headline

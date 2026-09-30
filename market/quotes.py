@@ -55,6 +55,79 @@ except Exception:
     pass
 
 
+# ── Computed VWAP cache ────────────────────────────────────────────────────────
+# mStock REST API does not return VWAP in its quote response (mode=FULL or OHLC).
+# We compute it locally from today's 5-minute OHLCV bars using the standard
+# intraday TWAP formula: sum(typical_price × volume) / sum(volume)
+# where typical_price = (High + Low + Close) / 3.
+# Cache TTL: 30s — balances freshness vs repeated history fetches.
+_vwap_cache_lock = threading.Lock()
+_VWAP_CACHE: dict[str, tuple[float, float]] = {}  # symbol → (computed_at, vwap)
+_VWAP_CACHE_TTL = 30.0
+
+
+def get_computed_vwap(symbol: str, exchange: str = "NSE") -> Optional[float]:
+    """
+    Compute session VWAP for a symbol from today's 5-minute bars.
+
+    Returns None if: no 5m data available, all bars have zero volume (indices),
+    or the formula produces a degenerate result.
+
+    Cached for 30s per symbol to avoid repeated history fetches on every quote call.
+    """
+    clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    now_ts = time.monotonic()
+    with _vwap_cache_lock:
+        cached = _VWAP_CACHE.get(clean)
+        if cached and (now_ts - cached[0]) < _VWAP_CACHE_TTL:
+            return cached[1] if cached[1] > 0 else None
+
+    try:
+        from market.history import get_ohlcv
+        from zoneinfo import ZoneInfo
+
+        IST = ZoneInfo("Asia/Kolkata")
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+
+        df = get_ohlcv(clean, exchange=exchange, interval="5minute", days=1)
+        if df is None or len(df) < 1:
+            return None
+
+        # Isolate today's bars only
+        if hasattr(df.index, "strftime"):
+            df = df[df.index.strftime("%Y-%m-%d") == today_str]
+        if len(df) < 1:
+            return None
+
+        col_h = "high" if "high" in df.columns else "High"
+        col_l = "low" if "low" in df.columns else "Low"
+        col_c = "close" if "close" in df.columns else "Close"
+        col_v = "volume" if "volume" in df.columns else "Volume"
+
+        h = df[col_h].astype(float)
+        lo = df[col_l].astype(float)
+        c = df[col_c].astype(float)
+        v = df[col_v].astype(float)
+
+        typical = (h + lo + c) / 3.0
+        total_vol = v.sum()
+
+        if total_vol <= 0:
+            # Indices have zero volume in the exchange feed — fall back to simple
+            # time-weighted average price (equal-weight TWAP) as best proxy.
+            vwap_val = float(typical.mean()) if len(typical) > 0 else 0.0
+        else:
+            vwap_val = float((typical * v).sum() / total_vol)
+
+        if vwap_val > 0:
+            with _vwap_cache_lock:
+                _VWAP_CACHE[clean] = (now_ts, vwap_val)
+            return vwap_val
+    except Exception:
+        pass
+    return None
+
+
 def _enrich_quote(
     quote: Quote,
     *,
@@ -75,10 +148,34 @@ def _enrich_quote(
     source_kind = (
         source if source in {"STREAM", "REST", "EOD_SNAPSHOT", "FALLBACK", "CACHE"} else "FALLBACK"
     )
+
+    vwap_val = getattr(quote, "vwap", None)
+    clean_sym = instrument.split(":")[-1].strip().upper()
+    if (vwap_val is None or vwap_val <= 0) and not _OPTION_PATTERN.match(clean_sym):
+        # 1. Fast cache check
+        with _vwap_cache_lock:
+            cached_vwap = _VWAP_CACHE.get(clean_sym)
+            if cached_vwap and (time.monotonic() - cached_vwap[0]) < _VWAP_CACHE_TTL:
+                vwap_val = cached_vwap[1] if cached_vwap[1] > 0 else None
+        # 2. If it's a primary benchmark index and still missing, compute on-demand
+        if (vwap_val is None or vwap_val <= 0) and clean_sym in {
+            "NIFTY",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "SENSEX",
+            "NIFTY 50",
+            "NIFTY BANK",
+        }:
+            vwap_val = get_computed_vwap(
+                clean_sym, exchange="BSE" if clean_sym == "SENSEX" else "NSE"
+            )
+
     return replace(
         quote,
         provider=provider,
         source=source_kind,
+        vwap=vwap_val or quote.vwap,
         data_state=classify_data_state(source=source_kind, provider=provider, price=price),
         canonical_instrument_id=canonical_id,
         provider_symbol=quote.provider_symbol or instrument,
@@ -110,6 +207,10 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                         if c_tick and getattr(c_tick, "ltp", 0.0) > 0:
                             tick = c_tick
                     if tick and getattr(tick, "ltp", 0.0) > 0:
+                        ws_vwap = (
+                            float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0)
+                            or None
+                        )
                         result[inst] = _enrich_quote(
                             Quote(
                                 symbol=clean,
@@ -121,6 +222,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                                 volume=int(getattr(tick, "volume", 0) or 0),
                                 change=float(getattr(tick, "change", 0.0) or 0.0),
                                 change_pct=float(getattr(tick, "change_pct", 0.0) or 0.0),
+                                vwap=ws_vwap,
                                 exchange_timestamp=(
                                     datetime.fromtimestamp(
                                         tick.timestamp, tz=timezone.utc
@@ -160,6 +262,10 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                         if c_tick and getattr(c_tick, "ltp", 0.0) > 0:
                             tick = c_tick
                     if tick and getattr(tick, "ltp", 0.0) > 0:
+                        ws_vwap = (
+                            float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0)
+                            or None
+                        )
                         result[inst] = _enrich_quote(
                             Quote(
                                 symbol=clean,
@@ -171,6 +277,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                                 volume=int(getattr(tick, "volume", 0) or 0),
                                 change=float(getattr(tick, "change", 0.0) or 0.0),
                                 change_pct=float(getattr(tick, "change_pct", 0.0) or 0.0),
+                                vwap=ws_vwap,
                                 exchange_timestamp=(
                                     datetime.fromtimestamp(
                                         tick.timestamp, tz=timezone.utc
@@ -207,6 +314,9 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
         for inst in instruments:
             tick = ws_manager.get_tick(inst)
             if tick and tick.ltp > 0:
+                ws_vwap = (
+                    float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0) or None
+                )
                 result[inst] = _enrich_quote(
                     Quote(
                         symbol=tick.symbol.split(":")[-1].split("-")[0]
@@ -220,6 +330,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                         volume=tick.volume,
                         change=tick.change,
                         change_pct=tick.change_pct,
+                        vwap=ws_vwap,
                         exchange_timestamp=(
                             datetime.fromtimestamp(tick.timestamp, tz=timezone.utc).isoformat()
                             if tick.timestamp and tick.timestamp > 0

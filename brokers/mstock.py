@@ -943,8 +943,10 @@ class MStockAPI(BrokerAPI):
                 dedup_payload = {
                     exch: list(dict.fromkeys(toks)) for exch, toks in exchange_tokens.items()
                 }
+                # mode=OHLC returns open/high/low/close/ltp.
+                # Note: mStock OpenAPI throws error IA400 if mode='FULL' is passed.
                 q_payload = {"mode": "OHLC", "exchangeTokens": dedup_payload}
-                resp = self._client.post(url, json=q_payload, headers=self._headers(), timeout=3.5)
+                resp = self._client.post(url, json=q_payload, headers=self._headers(), timeout=6.0)
                 if resp.status_code == 200:
                     data = resp.json()
                     raw_data = data.get("data") or data.get("result") or data
@@ -961,7 +963,16 @@ class MStockAPI(BrokerAPI):
                     else:
                         fetched = []
 
+                    _mstock_full_keys_logged = getattr(self, "_mstock_full_keys_logged", False)
                     for item in fetched:
+                        if not _mstock_full_keys_logged:
+                            import logging as _logging
+
+                            _logging.getLogger(__name__).debug(
+                                f"[mStock FULL] First item keys: {list(item.keys())} | sample: { {k: item[k] for k in list(item.keys())[:12]} }"
+                            )
+                            self._mstock_full_keys_logged = True
+                            _mstock_full_keys_logged = True
                         exch = item.get("exchange") or "NSE"
                         tok = str(item.get("symbolToken") or item.get("token") or "")
                         ltp = float(
@@ -981,6 +992,16 @@ class MStockAPI(BrokerAPI):
                             clean = inst_list[0].replace("NSE:", "").replace("BSE:", "").strip()
                             targets = [(inst_list[0], clean)]
                         for orig_inst, target_sym in targets:
+                            _vwap = (
+                                float(
+                                    item.get("vwap")
+                                    or item.get("averageTradePrice")
+                                    or item.get("avgTradePrice")
+                                    or item.get("averagePrice")
+                                    or 0.0
+                                )
+                                or None
+                            )
                             q_obj = Quote(
                                 symbol=target_sym,
                                 last_price=ltp,
@@ -991,6 +1012,7 @@ class MStockAPI(BrokerAPI):
                                 volume=int(item.get("volume") or 0),
                                 change=round(change, 2),
                                 change_pct=round(change_pct, 2),
+                                vwap=_vwap,
                             )
                             quotes[orig_inst] = q_obj
                             quotes[target_sym] = q_obj
@@ -1024,6 +1046,16 @@ class MStockAPI(BrokerAPI):
                         change = ltp - close
                         change_pct = (change / close * 100.0) if close else 0.0
                         if ltp > 0:
+                            _vwap_fb = (
+                                float(
+                                    res.get("vwap")
+                                    or res.get("averageTradePrice")
+                                    or res.get("avgTradePrice")
+                                    or res.get("averagePrice")
+                                    or 0.0
+                                )
+                                or None
+                            )
                             q_obj = Quote(
                                 symbol=clean_sym,
                                 last_price=ltp,
@@ -1034,6 +1066,7 @@ class MStockAPI(BrokerAPI):
                                 volume=int(res.get("volume") or 0),
                                 change=round(change, 2),
                                 change_pct=round(change_pct, 2),
+                                vwap=_vwap_fb,
                             )
                             quotes[inst] = q_obj
                             quotes[clean_sym] = q_obj

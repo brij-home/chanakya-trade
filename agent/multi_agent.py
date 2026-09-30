@@ -278,6 +278,20 @@ class TechnicalAnalyst(BaseAnalyst):
                     error=result["error"],
                 )
 
+            if result.get("verdict") == "INSUFFICIENT DATA" or not result.get("is_valid", True):
+                msg = (
+                    result.get("summary")
+                    or f"Insufficient historical bars for {exchange}:{symbol} (minimum 30 required) to compute technical indicators."
+                )
+                return AnalystReport(
+                    analyst=self.name,
+                    verdict="INSUFFICIENT DATA",
+                    confidence=0,
+                    score=0,
+                    key_points=[msg],
+                    data=result,
+                )
+
             score = result.get("score", 0)
             verdict = result.get("verdict", "NEUTRAL")
             confidence = min(abs(score), 100)

@@ -262,6 +262,7 @@ def build_defined_risk_hedge_plan(
     vel_score: float = 80.0,
     spread_width: Optional[float] = None,
     asymmetric_r_r: bool = False,
+    expiry_date: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """
     Constructs an institutional defined-risk hedge plan for any option signal.
@@ -634,6 +635,7 @@ def build_defined_risk_hedge_plan(
         "legs": legs,
         "ratio_spread_1x2": ratio_plan,
         "expiry_recommendation": expiry_rec,
+        "expiry_date": expiry_date,
     }
 
 

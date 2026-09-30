@@ -227,6 +227,9 @@ def test_format_contract_display_futures():
     assert format_contract_display("HAL26SEP4800PE") == "HAL 4800 PE"
     assert format_contract_display("NIFTY 24800 CE") == "NIFTY 24800 CE"
     assert format_contract_display("NIFTY2692524800CE") == "NIFTY 24800 CE"
+    assert format_contract_display("M&M202610272950PE") == "M&M 2950 PE"
+    assert format_contract_display("M&M26OCT2950PE") == "M&M 2950 PE"
+    assert format_contract_display("M&M2950PE") == "M&M 2950 PE"
 
 
 def test_asymmetric_setup_alert_readable_futures_and_no_spot_clash():
@@ -732,6 +735,27 @@ def test_resolve_expiry_cycle_all_scenarios():
     assert res_nm["cycle"] == "Next Monthly"
     assert res_nm["is_monthly"] is True
     assert "Next Monthly · 29-Oct-2026" in res_nm["badge"]
+
+    # 8. Broker YYYYMMDD same-day / 0DTE contract e.g. UNITDSPR202609291380PE
+    res_unitdspr = resolve_expiry_cycle(
+        contract="UNITDSPR202609291380PE",
+        underlying="UNITDSPR",
+        as_of=date(2026, 9, 29),
+    )
+    assert res_unitdspr["cycle"] == "0DTE / Today's Expiry"
+    assert res_unitdspr["dte"] == 0
+    assert "29-Sep-2026" in res_unitdspr["badge"]
+    assert "Next Monthly" not in res_unitdspr["badge"]
+
+    # 9. Broker YYYYMMDD next monthly contract e.g. POLICYBZR202610271100PE
+    res_policy = resolve_expiry_cycle(
+        contract="POLICYBZR202610271100PE",
+        underlying="POLICYBZR",
+        as_of=date(2026, 9, 29),
+    )
+    assert res_policy["cycle"] == "Next Monthly"
+    assert res_policy["dte"] == 28
+    assert "27-Oct-2026" in res_policy["badge"]
 
 
 def test_gamma_blast_alert_contract_and_rr_resolution():
@@ -2156,6 +2180,79 @@ def test_crisp_alert_formatting_and_sector_shortening():
     assert ":1 R:R" not in rendered
 
 
+def test_options_alert_headline_sector_shortening_and_deduplication():
+    """Verify that verbose sector names in alert headlines (e.g. [AUTOMOBILES & MOBILITY])
+
+    are shortened to [AUTO] and deduplicated when a leader trophy badge is present.
+    """
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+
+    # Scenario 1: Headline with both sector badge and trophy badge
+    alert_with_trophy = AutoAlert(
+        alert_id="aa-opt-mm-test-1",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="M&M",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="🔴 OPTIONS MOMENTUM [AUTOMOBILES & MOBILITY] (PUT SURGE): M&M202610272950PE @ ₹55.4 (Lot: 200) (Vol/OI 3.22x) [🏆 AUTOMOBILES & MOBILITY #1/5]",
+        summary="M&M breakdown confirmation with heavy put surge",
+        ltp=55.4,
+        trigger_level=55.4,
+        target_level=90.0,
+        stop_loss=38.0,
+        strike=2950.0,
+        option_type="PE",
+        contract_symbol="M&M202610272950PE",
+        lot_size=200,
+        actionable_plan={
+            "action": "BUY_PUT",
+            "contract": "M&M202610272950PE",
+            "recommended_entry": "₹55.40",
+            "stop_loss": "₹38.0",
+            "target": "₹90.0",
+        },
+    )
+    rendered_1 = render_auto_alert(alert_with_trophy, in_market=True)
+    # Long sector name should not appear anywhere in rendered message
+    assert "AUTOMOBILES & MOBILITY" not in rendered_1
+    # Contract is spaced and readable
+    assert "M&M 2950 PE" in rendered_1
+    # Redundant [AUTO] at the beginning is removed because [🏆 AUTO #1/5] is present
+    assert "[🏆 AUTO #1/5]" in rendered_1
+    assert "OPTIONS MOMENTUM (PUT SURGE):" in rendered_1
+
+    # Scenario 2: Headline without trophy badge has shortened sector [AUTO]
+    alert_no_trophy = AutoAlert(
+        alert_id="aa-opt-mm-test-2",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="M&M",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="🔴 OPTIONS MOMENTUM [AUTOMOBILES & MOBILITY] (PUT SURGE): M&M 2950 PE @ ₹55.4 (Lot: 200) (Vol/OI 3.22x)",
+        summary="M&M breakdown",
+        ltp=55.4,
+        trigger_level=55.4,
+        target_level=90.0,
+        stop_loss=38.0,
+        strike=2950.0,
+        option_type="PE",
+        contract_symbol="M&M 2950 PE",
+        lot_size=200,
+        actionable_plan={
+            "action": "BUY_PUT",
+            "recommended_entry": "₹55.40",
+            "stop_loss": "₹38.0",
+            "target": "₹90.0",
+        },
+    )
+    rendered_2 = render_auto_alert(alert_no_trophy, in_market=True)
+    assert "AUTOMOBILES & MOBILITY" not in rendered_2
+    assert "OPTIONS MOMENTUM [AUTO] (PUT SURGE):" in rendered_2
+
+
 def test_render_crypto_alert_holistic_sanitization():
     """Verify that crypto alerts render without duplicate CMP, without truncated ($ in signals,
 
@@ -2288,3 +2385,230 @@ def test_crypto_milestone_update_numbering_and_currency():
     assert "Trail Stop:</b> <code>$123.87</code>" in rendered
     assert "Entry: $124.12 | SL: $125.65 | T1: $120.07 | T2: $117.12" in rendered
     assert "T2: $117.12" in rendered
+
+
+def test_asymmetric_and_fno_alerts_display_all_expiry_contract_details():
+    """
+    Verify institutional expiry contract display invariants:
+    1. render_asymmetric_alert prominently renders ⏳ Expiry: badge with cycle, date, and DTE.
+    2. Hedged Spread (Preferred) line explicitly displays contract expiry date tag.
+    3. F&O Alternative line explicitly displays contract expiry date [Exp: ...].
+    4. render_fno_alert also renders expiry on Hedged Spread line.
+    """
+    # 1. Asymmetric Alert with Full F&O Derivative Execution Suite
+    asym_dict = {
+        "symbol": "NIFTY",
+        "segment": "FNO_INDEX",
+        "conviction_score": 92,
+        "verdict": "MAX_CONVICTION",
+        "ltp": 23128.1,
+        "entry_range": "₹23,012.5 – ₹23,313.1",
+        "stop_loss": 22711.79,
+        "target_1": 23983.32,
+        "target_2": 24732.68,
+        "target_moonshot": 25625.96,
+        "risk_reward": "1:3.9",
+        "direction": "BULLISH",
+        "expiry_date": "2026-10-29",
+        "actionable_plan": {
+            "hedge_plan": {
+                "strategy": "BULL_CALL_SPREAD",
+                "strategy_title": "Bull Call Spread",
+                "buy_leg": "BUY NIFTY 23100 CE @ ₹221.9",
+                "sell_leg": "SELL NIFTY 23600 CE @ ₹58.0",
+                "net_debit_per_share": 163.9,
+                "max_loss": 10653.5,
+                "max_profit": 28346.5,
+                "risk_reward": "1:2.7",
+                "expiry_date": "29-Oct-2026",
+            },
+            "futures_plan": {
+                "contract_symbol": "NIFTY26OCTFUT",
+                "entry_price": 23209.0,
+                "stop_loss": 22792.7,
+                "target_1": 24064.3,
+                "lot_size": 65,
+                "futures_hedge": {
+                    "strategy": "COLLARED_FUTURE",
+                    "description": "Long Future + Buy 22700 PE (Hard Floor at ₹22,700 · Eliminates Overnight Gap Risk)",
+                },
+            },
+            "option_plan": {
+                "contract_symbol": "NIFTY26OCT23100CE",
+                "expiry_date": "29-Oct-2026",
+                "entry_premium": 221.9,
+                "sl_premium": 155.4,
+                "t1_premium": 649.6,
+                "lot_size": 65,
+            },
+        },
+        "confluences": ["200-EMA Institutional Floor", "RSI Oversold Climax"],
+    }
+
+    rendered_asym = render_asymmetric_alert(asym_dict, in_market=True)
+
+    # Invariant 1: Prominent Expiry Badge line
+    assert "⏳ <b>Expiry:</b>" in rendered_asym
+    assert "29-Oct-2026" in rendered_asym
+
+    # Invariant 2: Hedged Spread displays expiry tag
+    assert (
+        "• <b>🛡️ Hedged Spread (Preferred):</b> <code>Bull Call Spread</code> [29-Oct-2026]"
+        in rendered_asym
+    )
+
+    # Invariant 3: F&O Alternative displays contract expiry
+    assert (
+        "• <b>F&O Alternative:</b> <code>NIFTY 23100 CE</code> (Lot: 65) @ ₹221.9 | SL: ₹155.4 | T1: ₹649.6 [Exp: 29-Oct-2026]"
+        in rendered_asym
+    )
+
+    # Invariant 4: Futures Preferred line
+    assert "Futures Preferred:</b> <code>NIFTY 26-OCT FUT</code>" in rendered_asym
+
+    # 2. F&O Gamma Blast Alert with Hedged Spread
+    fno_dict = {
+        "contract": "NIFTY26OCT23100CE",
+        "underlying": "NIFTY",
+        "option_type": "CE",
+        "strike": 23100,
+        "premium": 221.9,
+        "spot": 23128.1,
+        "stop_loss": 155.4,
+        "target_1": 400.0,
+        "target_2": 600.0,
+        "risk_reward": "1:2.8",
+        "entry_range": "₹215.0 – ₹225.0",
+        "lot_size": 65,
+        "trigger_reason": "Call Volume Surge 3.4x",
+        "vol_oi": 3.4,
+        "imbalance": 2.1,
+        "profit_rule": "Scale 50% at T1, SL to Breakeven",
+        "expiry_date": "29-Oct-2026",
+        "hedge_plan": {
+            "strategy": "BULL_CALL_SPREAD",
+            "strategy_title": "Bull Call Spread",
+            "buy_leg": "BUY NIFTY 23100 CE",
+            "sell_leg": "SELL NIFTY 23600 CE",
+            "net_debit_per_share": 163.9,
+            "max_loss": 10653.5,
+            "expiry_date": "29-Oct-2026",
+        },
+    }
+
+    rendered_fno = render_fno_alert(fno_dict, in_market=True)
+    assert "⏳ <b>Expiry:</b>" in rendered_fno
+    assert (
+        "• <b>🛡️ Hedged Spread (Preferred):</b> <code>Bull Call Spread</code> [29-Oct-2026]"
+        in rendered_fno
+    )
+
+
+def test_auto_alert_telegram_expiry_price_coherence():
+    """
+    RCA Regression Test: Verify that single-stock derivative alerts with 8-digit broker contract
+    symbols (e.g. UNITDSPR202609291380PE or UNITDSPR202610271380PE) never display contradictory
+    expiry badges (e.g. displaying Oct expiry while pricing Sep contracts).
+    """
+    from engine.alert_model import AutoAlert
+    from bot.alert_templates import format_auto_alert_telegram
+    from datetime import datetime
+    from config.constants import IST
+
+    # 1. 0DTE / Current-day September contract
+    today_dt = datetime.now(IST).strftime("%Y%m%d")
+    today_disp = datetime.now(IST).strftime("%d-%b-%Y")
+    contract_today = f"UNITDSPR{today_dt}1380PE"
+
+    sep_alert = AutoAlert(
+        alert_id=f"aa-opening-drive-ignition-unitdspr-bear-{today_dt}",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="IGNITED",
+        symbol="UNITDSPR",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="UNITDSPR Bearish Breakdown",
+        summary="Opening drive breakdown",
+        ltp=14.0,
+        trigger_level=14.0,
+        target_level=18.9,
+        stop_loss=10.9,
+        contract_symbol=contract_today,
+        strike=1380.0,
+        option_type="PE",
+        option_premium=14.0,
+        underlying_spot=1376.3,
+        lot_size=400,
+        segment="FNO_STOCK",
+        confidence=92,
+        actionable_plan={
+            "contract": contract_today,
+            "recommended_entry": "₹14.00",
+            "stop_loss": "₹10.9",
+            "target_1": "₹18.9",
+            "target_2": "₹23.8",
+            "option_plan": {
+                "contract_symbol": contract_today,
+                "strike": 1380.0,
+                "option_type": "PE",
+                "entry_premium": 14.0,
+                "sl_premium": 10.9,
+                "t1_premium": 18.9,
+                "t2_premium": 23.8,
+                "lot_size": 400,
+            },
+        },
+    )
+
+    msg_sep = format_auto_alert_telegram(sep_alert)
+    assert "₹14.00" in msg_sep
+    assert today_disp in msg_sep
+    assert "Next Monthly · 29-Oct-2026" not in msg_sep
+    assert "0DTE" in msg_sep or "Today's Expiry" in msg_sep
+
+    # 2. Next Month October contract
+    oct_alert = AutoAlert(
+        alert_id="aa-opening-drive-ignition-unitdspr-bear-20261027",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="IGNITED",
+        symbol="UNITDSPR",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="UNITDSPR Bearish Breakdown",
+        summary="Opening drive breakdown",
+        ltp=28.0,
+        trigger_level=28.0,
+        target_level=37.8,
+        stop_loss=21.8,
+        contract_symbol="UNITDSPR202610271380PE",
+        strike=1380.0,
+        option_type="PE",
+        option_premium=28.0,
+        underlying_spot=1376.3,
+        lot_size=400,
+        segment="FNO_STOCK",
+        confidence=92,
+        actionable_plan={
+            "contract": "UNITDSPR202610271380PE",
+            "recommended_entry": "₹28.00",
+            "stop_loss": "₹21.8",
+            "target_1": "₹37.8",
+            "target_2": "₹47.6",
+            "option_plan": {
+                "contract_symbol": "UNITDSPR202610271380PE",
+                "strike": 1380.0,
+                "option_type": "PE",
+                "entry_premium": 28.0,
+                "sl_premium": 21.8,
+                "t1_premium": 37.8,
+                "t2_premium": 47.6,
+                "lot_size": 400,
+            },
+        },
+    )
+
+    msg_oct = format_auto_alert_telegram(oct_alert)
+    assert "₹28.00" in msg_oct
+    assert "27-Oct-2026" in msg_oct
+    assert "Next Monthly" in msg_oct
+    assert "29-Sep-2026" not in msg_oct

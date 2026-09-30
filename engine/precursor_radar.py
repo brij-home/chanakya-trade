@@ -677,11 +677,12 @@ class PrecursorRadarScanner:
         stop_loss = round(ltp - max(min_risk, sl_distance), 2)
         if stop_loss >= entry_low:
             stop_loss = round(entry_low - min_risk, 2)
-        risk_pts = max(min_risk, round(ltp - stop_loss, 2))
+        base_trigger = max(ltp, pivot_high if (pivot_high and pivot_high > ltp) else ltp)
+        risk_pts = max(min_risk, round(base_trigger - stop_loss, 2))
 
-        target_1 = round(ltp + 2.0 * risk_pts, 2)
-        target_2 = round(ltp + 3.5 * risk_pts, 2)
-        rr_str = f"1:{((target_2 - ltp) / risk_pts):.1f}"
+        target_1 = round(base_trigger + 2.0 * risk_pts, 2)
+        target_2 = round(base_trigger + 3.5 * risk_pts, 2)
+        rr_str = f"1:{((target_2 - base_trigger) / risk_pts):.1f}"
 
         curr_sym = "$" if sym_seg == "CRYPTO" else "₹"
         entry_range = f"{curr_sym}{entry_low:,.1f} – {curr_sym}{entry_high:,.1f}"

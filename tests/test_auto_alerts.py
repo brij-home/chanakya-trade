@@ -1514,7 +1514,7 @@ def test_auto_alert_expiration_and_reaping(tmp_path, monkeypatch):
         target_level=950.0,
         stop_loss=1040.0,
         created_at="2026-09-09 13:25:48 IST",
-        expiry_date="2026-09-29",
+        expiry_date="2026-10-29",
         strike=1010.0,
         option_type="PE",
         contract_symbol="SBIN1010PE",
@@ -1538,6 +1538,48 @@ def test_auto_alert_expiration_and_reaping(tmp_path, monkeypatch):
     active_alerts = engine.get_alerts(view_mode="ACTIVE")
     assert len(active_alerts) == 1
     assert active_alerts[0].alert_id == "t-active-sbin"
+
+
+def test_reap_expired_winning_alert_marked_completed_not_invalidated(tmp_path, monkeypatch):
+    """
+    Institutional Invariant: Winning trades that hit targets/profit must NOT be marked
+    is_invalidated=True when reaped at intraday/contract cutoff; they must transition to COMPLETED.
+    """
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.AUTO_ALERTS_FILE", data_file)
+    engine = AutoAlertEngine()
+
+    winning_alert = AutoAlert(
+        alert_id="aa-opening-drive-ignition-atherenerg-bear-20260929",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="TARGET_ACHIEVED",
+        symbol="ATHERENERG",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="Ather Target Hit",
+        summary="",
+        ltp=12.65,
+        trigger_level=7.35,
+        target_level=12.49,
+        stop_loss=10.22,
+        created_at="2026-09-29 09:16:00 IST",
+        pnl_pct=72.11,
+        achieved_milestones=["DE_RISK_0_5R", "T0_5_ACHIEVED", "T1_ACHIEVED", "TARGET_ACHIEVED"],
+        time_horizon="INTRADAY",
+    )
+    monkeypatch.setattr(AutoAlert, "is_expired", property(lambda self: True))
+
+    with engine._lock:
+        engine._alerts = [winning_alert]
+        engine._save()
+
+    reaped_count = engine.reap_expired_alerts()
+    assert reaped_count == 1
+    assert winning_alert.is_archived is True
+    assert winning_alert.stage == "COMPLETED"
+    assert winning_alert.is_invalidated is False
+    assert winning_alert.invalidation_reason is None
+    assert "completed in profit" in winning_alert.archive_reason
 
 
 def test_three_day_alert_retention_across_all_groups(tmp_path, monkeypatch):
@@ -2226,9 +2268,15 @@ def test_auto_alert_directional_whiplash_guard():
     """
     from unittest.mock import patch
 
-    with patch(
-        "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
-        return_value=None,
+    with (
+        patch(
+            "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
+            return_value=None,
+        ),
+        patch(
+            "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+            return_value=(True, "", {}),
+        ),
     ):
         engine = AutoAlertEngine()
         engine._alerts = []
@@ -2846,6 +2894,80 @@ def test_symbol_consolidation_respects_session_date(tmp_path, monkeypatch):
     assert active_hdfc[0].contract_symbol == "HDFCBANK680CE"
 
 
+def test_offmarket_intraday_suppressed_while_swing_allowed(tmp_path, monkeypatch):
+    """Verify that domestic equity INTRADAY setups are rejected off-market, but SWING setups are allowed."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: False)
+    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
+    monkeypatch.delenv("DEPLOY_MODE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    from brokers.base import Quote
+
+    fake_quote = Quote(
+        symbol="NSE:TATASTEEL",
+        last_price=150.0,
+        data_state="REALTIME",
+        provider="NSE",
+        quality_flags=(),
+    )
+    monkeypatch.setattr(
+        "market.quotes.get_quote",
+        lambda sym: {sym: fake_quote, "TATASTEEL": fake_quote, "RELIANCE": fake_quote},
+    )
+
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    # 1. Domestic intraday setup off-market -> MUST BE REJECTED
+    intraday_alert = AutoAlert(
+        alert_id="aa-intraday-test-offmarket",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="RELIANCE",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="RELIANCE Intraday Off-market",
+        summary="Should be suppressed",
+        time_horizon="INTRADAY",
+        ltp=2500.0,
+        trigger_level=2500.0,
+        target_level=2550.0,
+        stop_loss=2480.0,
+        created_at=now_str,
+    )
+    rec_intraday = engine.record_alert(intraday_alert)
+    assert rec_intraday is False
+
+    # 2. Swing setup off-market -> MUST BE ACCEPTED
+    swing_alert = AutoAlert(
+        alert_id="aa-swing-test-offmarket",
+        alert_type="SQUEEZE_BREAKDOWN",
+        stage="IGNITED",
+        symbol="TATASTEEL",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="TATASTEEL Swing Breakdown",
+        summary="Should be accepted off-market",
+        time_horizon="SWING_MID",
+        ltp=150.0,
+        trigger_level=150.0,
+        target_level=140.0,
+        stop_loss=155.0,
+        created_at=now_str,
+    )
+    rec_swing = engine.record_alert(swing_alert)
+    assert rec_swing is True
+
+
 def test_underlying_directional_cooldown_suppresses_duplicate(tmp_path, monkeypatch):
     """Verify that an active trade on an underlying suppresses redundant same-direction alerts within cooldown window."""
     from datetime import datetime
@@ -3200,6 +3322,7 @@ def test_record_alert_adhoc_cli_suppresses_telegram(tmp_path, monkeypatch):
         confidence=90,
         is_live=True,
         environment="LIVE",
+        metrics={"rollover_series": "NEXT_MONTH", "is_next_month_routed": True},
     )
 
     # In market hours
@@ -4077,16 +4200,13 @@ def test_gamma_blast_0dte_afternoon_theta_guard_and_hero_bypass(monkeypatch):
 
 def test_gamma_blast_stock_sebi_physical_delivery_protection(monkeypatch):
     """Verifies that single-stock options during physical delivery expiry week
-
-    carry explicit margin warnings and intraday scalp mandates.
+    are strictly vetoed for near-month, and safely routed to next-month contract.
     """
+    from datetime import datetime, timezone, timedelta
     from engine.detectors.gamma_blast import detect_gamma_blast
     from types import SimpleNamespace
 
-    # Mock is_monthly_physical_expiry_week to return True
-    monkeypatch.setattr(
-        "engine.alert_expiry.is_monthly_physical_expiry_week", lambda *args, **kw: True
-    )
+    IST = timezone(timedelta(hours=5, minutes=30))
 
     class MockTP:
         is_asymmetry_viable = True
@@ -4100,7 +4220,8 @@ def test_gamma_blast_stock_sebi_physical_delivery_protection(monkeypatch):
     monkeypatch.setattr("engine.position_sizer.get_lot_size", lambda sym: 250)
 
     spot = 2800.0
-    c_stock = SimpleNamespace(
+    # Near-month contract expiring in physical settlement week (DTE <= 4)
+    c_near = SimpleNamespace(
         strike=2800.0,
         option_type="CE",
         oi=80000,
@@ -4113,15 +4234,34 @@ def test_gamma_blast_stock_sebi_physical_delivery_protection(monkeypatch):
         bid=34.8,
         ask=35.2,
     )
-    alerts = detect_gamma_blast("RELIANCE", spot, [c_stock], vwap=2795.0)
-    assert len(alerts) == 1
-    alert = alerts[0]
-    assert "[SEBI PHYSICAL SETTLEMENT WEEK]" in alert.headline
-    assert alert.metrics.get("physical_settlement_week") is True
-    assert "SEBI Physical Delivery Expiry Week" in alert.metrics.get(
-        "physical_settlement_warning", ""
+
+    # 1. Strictly vetoes near-month contract during physical delivery week
+    alerts_near = detect_gamma_blast(
+        "RELIANCE", spot, [c_near], vwap=2795.0, now_dt=datetime(2026, 9, 22, 10, 0, tzinfo=IST)
     )
-    assert "INTRADAY SCALP ONLY" in alert.actionable_plan.get("profit_rule", "")
+    assert len(alerts_near) == 0, (
+        "Near-month stock option in physical settlement week must be strictly vetoed"
+    )
+
+    # 2. Accepts safe next-month contract (October cycle)
+    c_next = SimpleNamespace(
+        strike=2800.0,
+        option_type="CE",
+        oi=80000,
+        oi_change=-20000,
+        volume=120000,
+        last_price=55.0,
+        symbol="RELIANCE26OCT2800CE",
+        expiry="2026-10-29",
+        pchange=16.0,
+        bid=54.8,
+        ask=55.2,
+    )
+    alerts_next = detect_gamma_blast(
+        "RELIANCE", spot, [c_next], vwap=2795.0, now_dt=datetime(2026, 9, 22, 10, 0, tzinfo=IST)
+    )
+    assert len(alerts_next) == 1, "Next-month stock option must be accepted"
+    assert alerts_next[0].symbol == "RELIANCE"
 
 
 def test_scan_opening_drives_anti_storm_pacing(tmp_path, monkeypatch):
@@ -4328,7 +4468,6 @@ def test_auto_alert_t0_5_milestone_latch_and_deduplication(monkeypatch):
     assert "YESBANK23PE:yb-live-1:T0_5" in engine._dispatched_milestones
 
 
-
 def test_dual_dispatch_dedup_terminal_exit_invariant(monkeypatch):
     """
     Regression guard: AGENTS.md Rule 16 — RCA-First.
@@ -4374,9 +4513,9 @@ def test_dual_dispatch_dedup_terminal_exit_invariant(monkeypatch):
     # --- Invariant 1: TERMINAL_EXIT dedup key structure ---
     # Simulate Path A (RUNNER_EXIT) registering its keys in _dispatched_milestones
     # (exactly as _dispatch() does after the dedup gate passes)
-    aid = alert.alert_id       # "bnb-trail-reg-1"
-    sym = alert.symbol         # "CRYPTO:BNBUSDT"
-    atype = alert.alert_type   # "CRYPTO_MOMENTUM"
+    aid = alert.alert_id  # "bnb-trail-reg-1"
+    sym = alert.symbol  # "CRYPTO:BNBUSDT"
+    atype = alert.alert_type  # "CRYPTO_MOMENTUM"
     c_tag = alert.contract_symbol or sym  # "CRYPTO:BNBUSDT"
 
     terminal_key = f"{aid}:TERMINAL_EXIT"
@@ -4444,7 +4583,6 @@ def test_dual_dispatch_dedup_terminal_exit_invariant(monkeypatch):
         target_status="RUNNER_CLOSED",
     )
     # Simulate the atomic increment as now implemented (under lock):
-    import threading
     with engine._lock:
         next_count = getattr(alert2, "telegram_update_count", 0) + 1
         alert2.telegram_update_count = next_count
@@ -4456,3 +4594,241 @@ def test_dual_dispatch_dedup_terminal_exit_invariant(monkeypatch):
     assert alert2.update_number == 1, (
         f"update_number must be 1 (UPDATE #1), got {alert2.update_number}"
     )
+
+
+def test_auto_alert_engine_get_counts():
+    """Verify get_counts returns thread-safe active, archived, and total breakdown."""
+    engine = AutoAlertEngine()
+    engine._alerts.clear()
+
+    # Add active alert
+    a1 = AutoAlert(
+        alert_id="active-1",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="RELIANCE",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Breakout",
+        summary="Test",
+        ltp=2500.0,
+        trigger_level=2500.0,
+        target_level=2600.0,
+        stop_loss=2450.0,
+        is_archived=False,
+    )
+    # Add archived alert
+    a2 = AutoAlert(
+        alert_id="archived-1",
+        alert_type="GAMMA_BLAST",
+        stage="EXPIRED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Expired",
+        summary="Test",
+        ltp=24000.0,
+        trigger_level=24000.0,
+        target_level=24200.0,
+        stop_loss=23900.0,
+        is_archived=True,
+    )
+    # Add invalidated alert (should be classified as archived/inactive)
+    a3 = AutoAlert(
+        alert_id="invalid-1",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="INVALIDATED",
+        symbol="BANKNIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="Invalidated",
+        summary="Test",
+        ltp=50000.0,
+        trigger_level=50000.0,
+        target_level=49500.0,
+        stop_loss=50200.0,
+        is_archived=False,
+        is_invalidated=True,
+    )
+
+    engine._alerts.extend([a1, a2, a3])
+    counts = engine.get_counts()
+    assert counts["total"] == 3
+    assert counts["active"] == 1
+    assert counts["archived"] == 2
+    assert "today" in counts
+    assert "today_closed" in counts
+
+
+def test_same_session_inactive_alert_retention_and_today_view(tmp_path, monkeypatch):
+    """Verify that same-day completed/invalidated alerts are NEVER pruned when new alerts arrive."""
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    from datetime import datetime
+    from config.constants import IST
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    engine = AutoAlertEngine()
+    engine._alerts.clear()
+
+    # 1. Morning Opening Drive alert that completed (T1 achieved)
+    morning_alert = AutoAlert(
+        alert_id=f"aa-opening-nifty-0923-{today_str.replace('-', '')}",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="RUNNER_EXIT",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="[OPENING DRIVE] NIFTY Bearish Breakdown",
+        summary="Opening drive breakdown",
+        ltp=63.8,
+        trigger_level=63.8,
+        target_level=86.1,
+        stop_loss=49.8,
+        confidence=92,
+        created_at=f"{today_str} 09:23:25 IST",
+        target_status="RUNNER_CLOSED",
+        is_invalidated=False,
+        is_archived=True,
+    )
+    # 2. Earlier invalidated alert from today
+    invalid_alert = AutoAlert(
+        alert_id=f"aa-condor-nifty-1012-{today_str.replace('-', '')}",
+        alert_type="ASYMMETRIC_OPPORTUNITY",
+        stage="INVALIDATED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="NEUTRAL",
+        headline="IRON CONDOR PINNING",
+        summary="Range pinning",
+        ltp=22855.55,
+        trigger_level=22855.55,
+        target_level=22950.0,
+        stop_loss=22750.0,
+        confidence=85,
+        created_at=f"{today_str} 10:12:00 IST",
+        is_invalidated=True,
+        invalidation_reason="Superseded by trend expansion",
+        is_archived=False,
+    )
+    # Insert existing alerts into engine
+    with engine._lock:
+        engine._alerts = [morning_alert, invalid_alert]
+        engine._save()
+
+    # 3. New midday alert for NIFTY arrives
+    midday_alert = AutoAlert(
+        alert_id=f"aa-contagion-nifty-1035-{today_str.replace('-', '')}",
+        alert_type="INDEX_CONTAGION",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="HEAVYWEIGHT BREAKDOWN",
+        summary="Constituent synchronization",
+        ltp=75.15,
+        trigger_level=75.15,
+        target_level=101.5,
+        stop_loss=54.1,
+        strike=22850,
+        option_type="PE",
+        option_premium=75.15,
+        contract_symbol="NIFTY2026092922850PE",
+        confidence=91,
+        created_at=f"{today_str} 10:35:25 IST",
+        actionable_plan={"action": "BUY_PE", "entry_range": "₹74 – ₹76"},
+        environment="SIMULATION",
+    )
+
+    # Record the midday alert
+    engine.record_alert(midday_alert)
+
+    # Invariant: Neither the morning alert nor the invalid alert must be purged!
+    alert_ids = [a.alert_id for a in engine._alerts]
+    assert morning_alert.alert_id in alert_ids, "Morning alert was incorrectly purged!"
+    assert invalid_alert.alert_id in alert_ids, "Invalidated same-day alert was incorrectly purged!"
+    assert midday_alert.alert_id in alert_ids, "Midday alert was not recorded!"
+
+    # Invariant: TODAY view mode returns all 3 alerts
+    today_alerts = engine.get_alerts(view_mode="TODAY")
+    assert len(today_alerts) == 3
+    today_ids = {a.alert_id for a in today_alerts}
+    assert morning_alert.alert_id in today_ids
+    assert invalid_alert.alert_id in today_ids
+    assert midday_alert.alert_id in today_ids
+
+    # Invariant: get_counts reports accurate today breakdown
+    counts = engine.get_counts()
+    assert counts["today"] == 3
+    assert counts["today_closed"] == 2  # morning (archived/closed) + invalid (not is_active)
+    assert counts["active"] == 1  # only midday_alert is active
+
+
+def test_telegram_suppression_reason_recording(tmp_path, monkeypatch):
+    """Verify that AutoAlertEngine records telegram_suppression_reason when dispatch is held."""
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+    from engine.alert_preferences import alert_preferences
+
+    engine = AutoAlertEngine()
+    engine._alerts.clear()
+
+    # Case A: Disabled in preferences
+    monkeypatch.setattr(
+        alert_preferences,
+        "is_alert_allowed",
+        lambda a, channel="telegram": False if channel == "telegram" else True,
+    )
+    low_conf_alert = AutoAlert(
+        alert_id="aa-suppress-conf-001",
+        alert_type="GENERAL",
+        stage="IGNITED",
+        symbol="TCS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Low Conf",
+        summary="Test",
+        ltp=3500.0,
+        trigger_level=3500.0,
+        target_level=3700.0,
+        stop_loss=3450.0,
+        confidence=70,
+        is_live=True,
+        environment="LIVE",
+    )
+    engine._dispatch(low_conf_alert)
+    assert low_conf_alert.telegram_dispatched is False
+    assert low_conf_alert.telegram_suppression_reason is not None
+    assert (
+        "Telegram notifications disabled in preferences"
+        in low_conf_alert.telegram_suppression_reason
+    )
+
+    # Case B: Telegram enabled, but confidence below bar (70 < 85%)
+    monkeypatch.setattr(alert_preferences, "is_alert_allowed", lambda a, channel="telegram": True)
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda exchange="NSE": True)
+    low_conf_alert2 = AutoAlert(
+        alert_id="aa-suppress-conf-002",
+        alert_type="GENERAL",
+        stage="IGNITED",
+        symbol="INFY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Low Conf 2",
+        summary="Test",
+        ltp=1850.0,
+        trigger_level=1850.0,
+        target_level=1950.0,
+        stop_loss=1800.0,
+        confidence=70,  # Below 85% Telegram bar
+        is_live=True,
+        environment="LIVE",
+    )
+    engine._dispatch(low_conf_alert2)
+    assert low_conf_alert2.telegram_dispatched is False
+    assert low_conf_alert2.telegram_suppression_reason is not None
+    assert "below Telegram bar" in low_conf_alert2.telegram_suppression_reason

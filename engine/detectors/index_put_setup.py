@@ -40,6 +40,9 @@ _INDEX_SYMBOLS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SEN
 # Setup type → headline icon map
 _SETUP_ICONS = {
     "PDH_SUPPLY_REJECTION": "🔴",
+    "DAY_HIGH_SUPPLY_REJECTION": "🔴",
+    "FAILED_DAY_HIGH_BREAKOUT": "⚡",
+    "INTRADAY_CAPITULATION_TOP": "⚡",
     "VWAP_REJECTION": "🔴",
     "SUPPLY_ZONE_SWEEP": "⚡",
     "BEARISH_OB_CONFLUENCE": "🎯",
@@ -90,29 +93,68 @@ def detect_index_put_setup(
 
     # ── Market Breadth Gate ─────────────────────────────────────────
     # Index put setups into broad market rallies have negative statistical expectancy.
+    # PRICE-ACTION ESCAPE: If spot is already -0.5% from session open, the index has
+    # voted with price — A/D breadth lags by 10-15 minutes. Skip breadth gate in that case.
     is_test_runner = (
         ("PYTEST_CURRENT_TEST" in os.environ)
         or (os.environ.get("CHANAKYA_TESTING") == "1")
         or (os.environ.get("DEPLOY_MODE") == "test")
     )
-    if not is_test_runner or os.environ.get("ENFORCE_TEST_BREADTH") == "1":
+    _day_open_price: Optional[float] = None
+    if ohlcv_5m is not None:
         try:
-            from market.sentiment import get_market_breadth
+            if hasattr(ohlcv_5m, "iloc") and len(ohlcv_5m) >= 1:
+                col_o = "open" if "open" in ohlcv_5m.columns else "Open"
+                _day_open_price = float(ohlcv_5m[col_o].iloc[0])
+        except Exception:
+            pass
+    _spot_below_open_escape = bool(
+        _day_open_price
+        and _day_open_price > 0
+        and spot < _day_open_price * 0.995  # spot already -0.5% from open: price action voted
+    )
+    _retreat_from_high_pct = (
+        ((day_high - spot) / max(1.0, day_high)) * 100.0 if (day_high and day_high > 0) else 0.0
+    )
+    _min_top_retreat = (
+        0.50 if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX") else 0.30
+    )
+    _eff_vwap = vwap if (vwap and vwap > 0) else spot
+    _is_v_top_escape = bool(
+        day_high
+        and day_high > 0
+        and _retreat_from_high_pct >= _min_top_retreat
+        and (_eff_vwap > 0 and (day_high - _eff_vwap) / _eff_vwap * 100.0 >= 0.20)
+    )
+    _breadth_bypassed = _spot_below_open_escape or _is_v_top_escape
 
-            mb = get_market_breadth()
-            if mb and mb.verdict != "UNAVAILABLE" and getattr(mb, "ad_ratio", 0.0) > 0:
-                if (
-                    mb.verdict == "BROAD_RALLY"
-                    or mb.ad_ratio > 1.80
-                    or (mb.advances >= 2.0 * max(1, mb.declines))
-                ):
-                    logger.info(
-                        f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Market Breadth Rally active "
-                        f"(Adv: {mb.advances} / Dec: {mb.declines}, A/D {mb.ad_ratio:.2f}). Disallow put setups in bullish tide."
-                    )
-                    return []
-        except Exception as e_mb:
-            logger.debug(f"[IndexPutSetup] Breadth check bypassed: {e_mb}")
+    if not is_test_runner or os.environ.get("ENFORCE_TEST_BREADTH") == "1":
+        if not _breadth_bypassed:
+            try:
+                from market.sentiment import get_market_breadth
+
+                mb = get_market_breadth()
+                if mb and mb.verdict != "UNAVAILABLE" and getattr(mb, "ad_ratio", 0.0) > 0:
+                    if (
+                        mb.verdict == "BROAD_RALLY"
+                        or mb.ad_ratio > 1.80
+                        or (mb.advances >= 2.0 * max(1, mb.declines))
+                    ):
+                        logger.info(
+                            f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Market Breadth Rally active "
+                            f"(Adv: {mb.advances} / Dec: {mb.declines}, A/D {mb.ad_ratio:.2f}). Disallow put setups in bullish tide."
+                        )
+                        return []
+            except Exception as e_mb:
+                logger.debug(f"[IndexPutSetup] Breadth check bypassed: {e_mb}")
+        else:
+            if _spot_below_open_escape:
+                escape_msg = f"spot ₹{spot:,.1f} already {((spot / _day_open_price - 1) * 100):.2f}% from open ₹{_day_open_price:,.1f}"
+            else:
+                escape_msg = f"V-Top / Climax exhaustion retreat (-{_retreat_from_high_pct:.2f}% from Day High ₹{day_high:,.1f}, VWAP overextension)"
+            logger.debug(
+                f"[IndexPutSetup] Breadth gate BYPASSED for {clean_sym}: {escape_msg} — price action overrides A/D lag."
+            )
 
     now_dt = ref_time or datetime.now(IST)
     if now_dt.tzinfo is None:
@@ -126,9 +168,19 @@ def detect_index_put_setup(
     # First 10 minutes (09:15 - 09:25 IST) are noisy opening auction price discovery.
     # Multi-candle structural setups (trend pullbacks, double tops, day-low breakdowns)
     # require at least 2 completed 5m bars and cannot form before 09:25 IST.
+    # EXCEPTION: Opening Range Displacement (ORD) — If spot has aggressively sliced
+    # through Previous Day Low (PDL) by >= 0.20% and is down >= 0.50% from open,
+    # institutional liquidation is already underway. Bypass opening buffer so early drops are caught.
+    _is_opening_displacement = bool(
+        prev_day_low
+        and prev_day_low > 0
+        and spot < prev_day_low * 0.998
+        and _spot_below_open_escape
+    )
     is_opening_buffer = (
         (curr_time < dtime(9, 25))
         and not ignore_time_gate
+        and not _is_opening_displacement
         and (not is_test_runner or ref_time is not None)
     )
     if is_opening_buffer:
@@ -214,12 +266,17 @@ def detect_index_put_setup(
     )
 
     # ── Optimization 1: Intraday Put-Call Ratio (PCR) Confluence Gate ───
-    # PCR > 1.45 indicates overwhelming Put Writing cushion providing a floor.
+    # PCR > 1.45 ONLY indicates a floor when PUT WRITERS ARE ADDING (pe_oi_change > 0).
+    # If PE OI is unwinding (pe_oi_change < 0) with high PCR, that is a breakdown signal
+    # — the floor is collapsing as writers cover. Do NOT veto in that case.
     ce_oi_total = sum(
         int(getattr(c, "oi", 0) or 0) for c in chain if getattr(c, "option_type", "") == "CE"
     )
     pe_oi_total = sum(
         int(getattr(c, "oi", 0) or 0) for c in chain if getattr(c, "option_type", "") == "PE"
+    )
+    pe_oi_change_sum = sum(
+        int(getattr(c, "oi_change", 0) or 0) for c in chain if getattr(c, "option_type", "") == "PE"
     )
     chain_pcr = (
         round(pe_oi_total / max(1, ce_oi_total), 2)
@@ -227,12 +284,25 @@ def detect_index_put_setup(
         else None
     )
 
-    if chain_pcr is not None and chain_pcr > 1.45 and not is_explosive_momentum:
+    # Veto only when: PCR > 1.45 AND writers are actively adding new puts (floor building)
+    # NOT when writers are unwinding (breakdown acceleration)
+    _pcr_writers_adding = pe_oi_change_sum > 0
+    if (
+        chain_pcr is not None
+        and chain_pcr > 1.45
+        and _pcr_writers_adding
+        and not is_explosive_momentum
+    ):
         logger.info(
-            f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Heavy Put Writing Cushion active "
-            f"(PCR: {chain_pcr:.2f} > 1.45, Put OI {pe_oi_total:,} vs Call OI {ce_oi_total:,})."
+            f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Active Put Writing Cushion "
+            f"(PCR: {chain_pcr:.2f} > 1.45, OI adding {pe_oi_change_sum:+,}). Floor-building writers resist breakdown."
         )
         return []
+    elif chain_pcr is not None and chain_pcr > 1.45 and not _pcr_writers_adding:
+        logger.debug(
+            f"[IndexPutSetup] PCR={chain_pcr:.2f} > 1.45 but pe_oi_change={pe_oi_change_sum:+,} (unwinding) "
+            f"→ NOT a floor, this is a breakdown signal. Allowing PE setup to proceed."
+        )
 
     # ── Optimization 2: Index Heavyweight Breadth Confluence Matrix (HBCM) ──
     hw_posture: dict[str, Any] = {}
@@ -242,10 +312,19 @@ def detect_index_put_setup(
         from market.indices import get_heavyweights_posture
 
         hw_posture = get_heavyweights_posture(clean_sym)
-        hbcm_res = evaluate_hbcm(clean_sym, "BEARISH")
+        # Pass allow_weighted_fallback when momentum is explosive so that 3/5 heavyweights
+        # with >= 55% combined weight can satisfy the confluence gate on fast dump days.
+        hbcm_res = evaluate_hbcm(
+            clean_sym,
+            "BEARISH",
+            allow_weighted_fallback=is_explosive_momentum,
+        )
         hbcm_dict = hbcm_res.to_dict()
 
-        if hbcm_res.total_heavyweights > 0:
+        has_hbcm_quotes = hbcm_res.total_heavyweights > 0 and not (
+            hbcm_res.summary or ""
+        ).startswith("HBCM_TEST_PASSTHROUGH")
+        if has_hbcm_quotes:
             if not hbcm_res.confluence_pass and not is_explosive_momentum:
                 logger.info(
                     f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: {hbcm_res.rejection_reason}"
@@ -320,12 +399,26 @@ def detect_index_put_setup(
             return []
 
     # ── VWAP Overextension & Capitulation Filter ─────────────────
-    # If spot has already dumped > 0.65% below VWAP, entering at market is a FOMO exhaustion trap
+    # Default: Extended > 0.65% below VWAP = FOMO exhaustion trap, skip.
+    # MOMENTUM ESCAPE: On genuine institutional flushes, spot can legitimately trade
+    # 1-2% below VWAP as sellers step through bids. Raise the cap dynamically:
+    #   vol_oi_ratio >= 2.0x or pe_pchange >= 15% → cap 1.2% below VWAP
+    #   vol_oi_ratio >= 3.0x or pe_pchange >= 25% → cap 2.0% (full flush)
     if effective_vwap > 0 and spot < effective_vwap:
         spot_vwap_ext = (effective_vwap - spot) / effective_vwap * 100.0
-        if spot_vwap_ext > 0.65:
+        _is_full_flush_ps = cand_pe_vol_oi >= 3.0 or (
+            cand_pe_pchange >= 25.0
+            and cand_pe_vol >= (15000 if clean_sym in ("NIFTY", "BANKNIFTY") else 3000)
+        )
+        _is_momentum_exp_ps = cand_pe_vol_oi >= 2.0 or (
+            cand_pe_pchange >= 15.0
+            and cand_pe_vol >= (8000 if clean_sym in ("NIFTY", "BANKNIFTY") else 1500)
+        )
+        _vwap_cap = 2.0 if _is_full_flush_ps else (1.2 if _is_momentum_exp_ps else 0.65)
+        if spot_vwap_ext > _vwap_cap:
             logger.debug(
-                f"[IndexPutSetup] Suppressed PE: Spot extended -{spot_vwap_ext:.2f}% below VWAP (>0.65% capitulation threshold)"
+                f"[IndexPutSetup] Suppressed PE: Spot extended -{spot_vwap_ext:.2f}% below VWAP "
+                f"(cap={_vwap_cap:.2f}% | flush={_is_full_flush_ps} | momentum={_is_momentum_exp_ps})"
             )
             return []
 
@@ -365,6 +458,18 @@ def detect_index_put_setup(
                 "retreat_pct": round(spot_retreat_from_high, 3),
             }
 
+    # 2b. Day High Supply Rejection (Intraday Bull Trap / Ceiling Rejection)
+    # Spot tested Day High and has now retreated >= 0.08% from the peak
+    if day_high and day_high > 0 and "PDH_SUPPLY_REJECTION" not in signals:
+        dh_retreat_pct = (day_high - spot) / max(1.0, day_high) * 100.0
+        if 0.08 <= dh_retreat_pct <= 0.50:
+            signals.append("DAY_HIGH_SUPPLY_REJECTION")
+            signal_tags["day_high_supply_rejection"] = {
+                "day_high": day_high,
+                "spot": spot,
+                "dh_retreat_pct": round(dh_retreat_pct, 3),
+            }
+
     # 3. VWAP Failure Retest
     # Spot tagged VWAP from below, failed to close above, now below VWAP
     if effective_vwap > 0 and spot < effective_vwap:
@@ -373,7 +478,12 @@ def detect_index_put_setup(
             ((day_high or spot) - effective_vwap) / effective_vwap * 100 if day_high else 0.0
         )
         # Day high must have been at or above VWAP (touched it) but spot now below (failed retest)
-        if day_high_vs_vwap >= -0.1 and vwap_fail_pct >= 0.05:
+        # PROXIMITY ENVELOPE: 0.03% <= rejection <= 0.18% (for Nifty: 7 to 40 pts below VWAP).
+        # Above 0.18%, price has already dumped far away from VWAP resistance and faces short-squeeze risk.
+        max_rejection_envelope = (
+            0.25 if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX") else 0.18
+        )
+        if day_high_vs_vwap >= -0.1 and (0.03 <= vwap_fail_pct <= max_rejection_envelope):
             signals.append("VWAP_REJECTION")
             signal_tags["vwap_rejection"] = {
                 "vwap": effective_vwap,
@@ -502,6 +612,96 @@ def detect_index_put_setup(
                                 }
                     except Exception as e_tpb:
                         logger.debug(f"[IndexPutSetup] Trend pullback check error: {e_tpb}")
+
+                # 6b. Intraday Capitulation Top (ICT) — Catches V-Top turning points & Bull Traps above VWAP
+                # Mirrors INTRADAY_CAPITULATION_REVERSAL in index_call_setup:
+                # Fires when:
+                # a. Day high was heavily overbought above session VWAP (>= 0.25% for Nifty, >= 0.40% for BankNifty)
+                # b. Spot has retreated >= 0.10% off the day high
+                # c. 5m structure shift confirmed (lower close or break of previous bar low / CHoCH)
+                if (
+                    len(active_ohlcv) >= 6
+                    and not is_opening_buffer
+                    and "INTRADAY_CAPITULATION_TOP" not in signals
+                ):
+                    try:
+                        min_overbought = (
+                            0.40
+                            if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX")
+                            else 0.25
+                        )
+                        day_high_ext = (
+                            (((day_high or spot) - effective_vwap) / effective_vwap * 100.0)
+                            if effective_vwap > 0
+                            else 0.0
+                        )
+                        spot_retreat = (
+                            (((day_high or spot) - spot) / max(1.0, spot) * 100.0)
+                            if day_high
+                            else 0.0
+                        )
+
+                        if day_high_ext >= min_overbought and spot_retreat >= 0.10:
+                            b_curr = active_ohlcv.iloc[-1]
+                            b_prev = active_ohlcv.iloc[-2]
+                            curr_c = float(b_curr[col_c])
+                            prev_l = float(b_prev[col_l])
+                            curr_h = float(b_curr[col_h])
+                            prev_h = float(b_prev[col_h])
+                            col_o_ict = "open" if "open" in active_ohlcv.columns else "Open"
+                            curr_o = float(b_curr[col_o_ict])
+
+                            is_choch = curr_c <= (prev_l * 1.0005)
+                            is_lower_high = (curr_h < prev_h) and (curr_c < curr_o)
+
+                            if is_choch or is_lower_high:
+                                signals.append("INTRADAY_CAPITULATION_TOP")
+                                signal_tags["capitulation_top"] = {
+                                    "day_high": round(day_high or spot, 2),
+                                    "vwap": round(effective_vwap, 2),
+                                    "overbought_pct": round(day_high_ext, 2),
+                                    "retreat_pct": round(spot_retreat, 2),
+                                    "choch_break": is_choch,
+                                    "lower_high": is_lower_high,
+                                }
+                    except Exception as e_ict:
+                        logger.debug(f"[IndexPutSetup] ICT check error: {e_ict}")
+
+                # 6c. Failed Day High Breakout (Bull Trap / Liquidity Sweep above Day High)
+                # Catches institutional stop hunts where price momentarily pierces Day High and snaps back below
+                if (
+                    len(active_ohlcv) >= 6
+                    and not is_opening_buffer
+                    and "FAILED_DAY_HIGH_BREAKOUT" not in signals
+                ):
+                    try:
+                        b_curr = active_ohlcv.iloc[-1]
+                        curr_h = float(b_curr[col_h])
+                        curr_c = float(b_curr[col_c])
+                        curr_l = float(b_curr[col_l])
+                        col_o_fdh = "open" if "open" in active_ohlcv.columns else "Open"
+                        curr_o = float(b_curr[col_o_fdh])
+                        c_rng = max(0.1, curr_h - curr_l)
+                        u_wick_pct = (curr_h - curr_c) / c_rng * 100.0
+
+                        prior_high = float(active_ohlcv[col_h].iloc[:-1].max())
+                        ref_high = day_high if (day_high and day_high < curr_h) else prior_high
+
+                        if ref_high and ref_high > 0 and curr_h > ref_high and curr_c <= ref_high:
+                            pierce_pct = (curr_h - ref_high) / ref_high * 100.0
+                            if 0.02 <= pierce_pct <= 0.60 and (
+                                u_wick_pct >= 35.0 or curr_c < curr_o
+                            ):
+                                signals.append("FAILED_DAY_HIGH_BREAKOUT")
+                                signal_tags["failed_day_high_breakout"] = {
+                                    "day_high": round(ref_high, 2),
+                                    "pierce_high": round(curr_h, 2),
+                                    "pierce_pct": round(pierce_pct, 3),
+                                    "upper_wick_pct": round(u_wick_pct, 1),
+                                    "close": round(curr_c, 2),
+                                }
+                    except Exception as e_fdh:
+                        logger.debug(f"[IndexPutSetup] FDH check error: {e_fdh}")
 
         except Exception as e_ohlcv:
             logger.debug(f"[IndexPutSetup] OHLCV analysis error for {underlying}: {e_ohlcv}")
@@ -652,6 +852,9 @@ def detect_index_put_setup(
     base_confidence = 68
     signal_bonuses = {
         "PDH_SUPPLY_REJECTION": 14,
+        "DAY_HIGH_SUPPLY_REJECTION": 14,
+        "FAILED_DAY_HIGH_BREAKOUT": 15,
+        "INTRADAY_CAPITULATION_TOP": 15,
         "VWAP_REJECTION": 10,
         "SUPPLY_ZONE_SWEEP": 8,
         "BEARISH_OB_CONFLUENCE": 10,
@@ -749,9 +952,36 @@ def detect_index_put_setup(
         ref_level = struct_detail.get("prev_day_high") or struct_detail.get("prev_week_high", 0.0)
         retreat_pct = struct_detail.get("retreat_pct", 0.0)
         summary = (
-            f"Spot swept {level_type} (₹{ref_level:,.1f}) and rejected with a {retreat_pct:.2f}% wick \u2014 "
+            f"Spot swept {level_type} (₹{ref_level:,.1f}) and rejected with a {retreat_pct:.2f}% wick — "
             f"institutional supply OB confirmed. Put volume surging ({volume:,} contracts, {vol_oi_ratio:.1f}x Vol/OI). "
             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "INTRADAY_CAPITULATION_TOP" in signals:
+        ict = signal_tags.get("capitulation_top", {})
+        headline = f"{vel_badge}⚡ INTRADAY CAPITULATION TOP: {clean_sym} {int(strike)} PE"
+        summary = (
+            f"Climax exhaustion & V-top reversal: Spot overbought +{ict.get('overbought_pct', 0):.2f}% above session VWAP (₹{effective_vwap:,.1f}) "
+            f"and rejected Day High (₹{ict.get('day_high', 0):,.1f}) with 5m CHoCH structure breakdown. "
+            f"High-probability mean-reversion retest back towards VWAP. "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "FAILED_DAY_HIGH_BREAKOUT" in signals:
+        fdh = signal_tags.get("failed_day_high_breakout", {})
+        headline = f"⚡ FAILED DAY HIGH BREAKOUT (BULL TRAP): {clean_sym} {int(strike)} PE"
+        summary = (
+            f"Bull Trap / Liquidity Sweep above Day High: Spot (₹{spot:,.1f}) pierced Session High (₹{fdh.get('day_high', 0):,.1f}) "
+            f"by {fdh.get('pierce_pct', 0):.2f}% to ₹{fdh.get('pierce_high', 0):,.1f}, then failed and closed back below with a "
+            f"{fdh.get('upper_wick_pct', 0):.0f}% supply rejection wick. Trapped buyers vulnerable to liquidation. "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "DAY_HIGH_SUPPLY_REJECTION" in signals:
+        dhsr = signal_tags.get("day_high_supply_rejection", {})
+        headline = f"{vel_badge}{icon} DAY HIGH SUPPLY REJECTION: {clean_sym} {int(strike)} PE"
+        summary = (
+            f"Spot rejected Day High (₹{dhsr.get('day_high', 0):,.1f}) and formed an upper-wick supply rejection "
+            f"(retreating -{dhsr.get('dh_retreat_pct', 0):.2f}% from peak) — institutional distribution/bull trap confirmed. "
+            f"Put volume active ({volume:,} contracts, {vol_oi_ratio:.1f}x Vol/OI). "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
         )
     elif "VWAP_REJECTION" in signals:
         vwap_fail = signal_tags.get("vwap_rejection", {})
@@ -865,6 +1095,10 @@ def detect_index_put_setup(
             1.0, round(min(opt_ltp * 0.55, max(1.0, opt_ltp - (actual_width * 0.35))), 2)
         )
 
+    is_spread_mandated = False
+    is_0dte_midday_trap = False
+    is_midday_chop_window = False
+
     if opt_ltp > 0 and sell_prem > 0 and sell_strike < strike:
         net_debit = round(max(1.0, min(actual_width * 0.75, opt_ltp - sell_prem)), 2)
         strike_width = round(strike - sell_strike, 2)
@@ -875,6 +1109,24 @@ def detect_index_put_setup(
 
         now_time = now_dt.time()
         is_midday_chop_window = (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 70)
+
+        # 0DTE Expiry Check:
+        is_0dte = False
+        try:
+            from engine.alert_expiry import get_expiry_metadata
+
+            exp_meta = get_expiry_metadata(exp_date, exp_type, clean_sym, contract_sym)
+            if exp_meta and exp_meta.get("dte") == 0:
+                is_0dte = True
+            elif exp_date and exp_date == now_dt.strftime("%Y-%m-%d"):
+                is_0dte = True
+        except Exception:
+            pass
+
+        # 0DTE Midday Theta Trap: On expiry day between 11:30 and 14:00, theta decay is at its weekly maximum.
+        # Naked option buying during this window suffers severe theta drag and mean-reversion whipsaws.
+        is_0dte_midday_trap = is_0dte and (dtime(11, 30) <= now_time <= dtime(14, 0))
+
         if is_low_vix_range:
             pref_veh = "SPREAD_ONLY"
             spread_guidance = (
@@ -886,6 +1138,12 @@ def detect_index_put_setup(
             spread_guidance = (
                 f"⚠️ HIGH-VIX REGIME (India VIX {vix_val:.1f} >= 18.0): High IV crush risk on naked options; "
                 "execute defined-risk Bear Put Spread or Deep ITM only."
+            )
+        elif is_0dte_midday_trap:
+            pref_veh = "SPREAD_ONLY"
+            spread_guidance = (
+                "⚠️ 0DTE MIDDAY THETA TRAP (11:30–14:00 IST): Naked option buying strictly prohibited on expiry day; "
+                "execute defined-risk Bear Put Spread only to eliminate theta bleed."
             )
         elif is_midday_chop_window:
             pref_veh = "HEDGED_SPREAD"
@@ -940,20 +1198,22 @@ def detect_index_put_setup(
                 },
             ],
         }
+        is_spread_mandated = bool(
+            (is_low_vix_range or is_high_iv_risk or is_midday_chop_window or is_0dte_midday_trap)
+            and hedge_plan is not None
+        )
 
     # ── Optimal Trade Entry (OTE) & No-Chase Guard ───────────────
-    if is_low_vix_range and not hedge_plan:
+    if (is_low_vix_range or is_0dte_midday_trap) and not hedge_plan:
         logger.info(
-            f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Low-VIX range-bound regime without viable hedged spread."
+            f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: {'0DTE Midday Theta Trap' if is_0dte_midday_trap else 'Low-VIX range-bound regime'} without viable hedged spread."
         )
         return []
 
-    act_verb = (
-        "BEAR PUT SPREAD" if ((is_low_vix_range or is_high_iv_risk) and hedge_plan) else "BUY PE"
-    )
+    act_verb = "BEAR PUT SPREAD" if is_spread_mandated else "BUY PE"
     target_inst = (
         f"{clean_sym} {int(strike)}/{int(hedge_plan['sell_strike'])} Bear Put Spread"
-        if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
+        if is_spread_mandated
         else contract_sym
     )
 
@@ -964,14 +1224,12 @@ def detect_index_put_setup(
 
     alert = AutoAlert(
         alert_id=generate_alert_id(clean_sym, "INDEX_PUT_SETUP", variant=f"pe-{int(strike)}"),
-        alert_type="GAMMA_BLAST",
+        alert_type="INDEX_PUT_SETUP",
         stage=stage,
         symbol=clean_sym,
         exchange=opt_exchange,
         direction="BEARISH",
-        headline=f"🛡️ [HEDGED SPREAD MANDATE] {headline}"
-        if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
-        else headline,
+        headline=f"🛡️ [HEDGED SPREAD MANDATE] {headline}" if is_spread_mandated else headline,
         summary=f"{summary} | OTE Entry: {entry_range_str} | No Chase > ₹{no_chase_lvl}",
         ltp=opt_ltp or spot,
         trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
@@ -1037,11 +1295,9 @@ def detect_index_put_setup(
             "action": act_verb,
             "contract": target_inst,
             "instrument": target_inst,
-            "instrument_type": "SPREAD"
-            if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
-            else "OPTION",
+            "instrument_type": "OPTION_SPREAD" if is_spread_mandated else "OPTION",
             "preferred_vehicle": hedge_plan.get(
-                "preferred_vehicle", "DEEP_ITM_OR_SPREAD" if is_high_iv_risk else "NAKED_OPTION"
+                "preferred_vehicle", "SPREAD_ONLY" if is_spread_mandated else "NAKED_OPTION"
             )
             if hedge_plan
             else ("DEEP_ITM_OR_SPREAD" if is_high_iv_risk else "NAKED_OPTION"),

@@ -536,3 +536,93 @@ def test_render_asymmetric_alert_displays_futures_and_rollover_badge():
 
     assert "NEXT-MONTH ROLLOVER" in rendered
     assert "SEBI Physical Margin Safe" in rendered
+
+
+def test_resolve_recommended_option_contract_generates_hedged_spread_and_futures_collar():
+    """Verify resolve_recommended_option_contract generates defined-risk hedge_plan and futures_hedge."""
+    from engine.asymmetric_radar import resolve_recommended_option_contract
+
+    res = resolve_recommended_option_contract(
+        symbol="NIFTY",
+        direction="BULLISH",
+        spot=23128.0,
+        stop_loss=22711.0,
+        target_1=23983.0,
+        target_2=24732.0,
+        setup_type="RUBBER_BAND_200EMA",
+        is_positional=True,
+    )
+
+    assert "hedge_plan" in res
+    assert res["hedge_plan"] is not None
+    assert res["hedge_plan"]["strategy"] in ("BULL_CALL_SPREAD", "BULL_PUT_CREDIT_SPREAD")
+    assert res["hedge_plan"]["net_debit_per_share"] > 0
+    assert res["hedge_plan"]["max_loss"] > 0
+
+    assert "futures_hedge" in res
+    assert res["futures_hedge"] is not None
+    assert "protective_strike" in res["futures_hedge"]
+    assert "Overnight Gap Risk" in res["futures_hedge"]["description"]
+
+
+def test_render_asymmetric_alert_displays_hedged_spread_and_futures_collar():
+    """Verify render_asymmetric_alert prominently renders Hedged Spread and Futures Collar note."""
+    from bot.alert_templates import render_asymmetric_alert
+
+    hedge_plan = {
+        "strategy": "BULL_CALL_SPREAD",
+        "strategy_title": "Bull Call Spread",
+        "buy_leg": "BUY NIFTY 23100 CE @ ₹221.9",
+        "sell_leg": "SELL NIFTY 23600 CE @ ₹58.0",
+        "net_debit_per_share": 163.9,
+        "max_loss": 10653.5,
+        "max_profit": 28346.5,
+        "risk_reward": "1:2.7",
+    }
+    futures_hedge = {
+        "strategy": "COLLARED_FUTURE",
+        "description": "Long Future + Buy 22700 PE (Hard Floor at ₹22,700 · Eliminates Overnight Gap Risk)",
+    }
+
+    alert_dict = {
+        "symbol": "NIFTY",
+        "segment": "FNO_INDEX",
+        "conviction_score": 91,
+        "verdict": "MAX_CONVICTION",
+        "ltp": 23128.1,
+        "entry_range": "₹23,012.5 – ₹23,313.1",
+        "stop_loss": 22711.79,
+        "target_1": 23983.32,
+        "target_2": 24732.68,
+        "target_moonshot": 25625.96,
+        "risk_reward": "1:3.9",
+        "direction": "BULLISH",
+        "actionable_plan": {
+            "hedge_plan": hedge_plan,
+            "futures_plan": {
+                "contract_symbol": "NIFTY26OCTFUT",
+                "entry_price": 23209.0,
+                "stop_loss": 22792.7,
+                "target_1": 24064.3,
+                "lot_size": 65,
+                "futures_hedge": futures_hedge,
+            },
+            "option_plan": {
+                "contract_symbol": "NIFTY23100CE",
+                "entry_premium": 221.9,
+                "sl_premium": 155.4,
+                "t1_premium": 649.6,
+                "lot_size": 65,
+            },
+        },
+        "confluences": ["200-EMA Institutional Floor", "14-Day RSI Oversold Climax"],
+    }
+
+    rendered = render_asymmetric_alert(alert_dict, in_market=True)
+    assert "🛡️ Hedged Spread (Preferred):" in rendered
+    assert "Bull Call Spread" in rendered
+    assert "Net Debit:" in rendered
+    assert "70% Margin Relief · Zero Theta Bleed" in rendered
+    assert "Overnight Gap Risk:" in rendered
+    assert "Futures Preferred:" in rendered
+    assert "F&O Alternative:" in rendered

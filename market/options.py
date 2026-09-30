@@ -12,16 +12,19 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import logging
+import threading
+import time
+
 import pandas as pd
 
 from brokers.base import OptionsContract
 from brokers.session import get_data_broker
+from engine import alert_expiry
 from market.nse_scraper import nse_get_options_chain
 from market.source_tracker import record_source, warn_fallback
 
-
-import threading
-import time
+logger = logging.getLogger("chanakya.market.options")
 
 _CHAIN_CACHE: dict[str, tuple[float, list[OptionsContract]]] = {}
 _CHAIN_CACHE_TTL_DEFAULT = 180.0  # Off-market hours fallback
@@ -171,6 +174,33 @@ def get_options_chain(
         .strip()
     )
     is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
+    is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+
+    # Institutional Single-Stock Physical Expiry Rollover:
+    # Under SEBI regulations, single-stock options are physically settled. In the final 4 trading
+    # days before the last Thursday, near-month stock options are subject to 100% physical delivery
+    # margin surges and severe gamma/theta collapse.
+    # Therefore, when expiry is not specified for an F&O stock during monthly expiry week,
+    # always select the next-month monthly expiry contract and its live data.
+    if not is_commodity and not is_index and expiry is None:
+        try:
+            avail_exps = get_expiries(clean_sym)
+            if alert_expiry.is_monthly_physical_expiry_week(
+                symbol=clean_sym, available_expiries=avail_exps
+            ):
+                exp_res = alert_expiry.resolve_recommended_derivative_expiry(
+                    symbol=clean_sym,
+                    instrument_type="OPTION",
+                    available_expiries=avail_exps,
+                )
+                if exp_res.get("is_next_month_routed"):
+                    expiry = exp_res.get("recommended_expiry")
+                    logger.info(
+                        f"[Options] Single-stock {clean_sym} in physical expiry week: "
+                        f"routed to next-month contract {expiry} and its live data."
+                    )
+        except Exception as e_exp:
+            logger.debug(f"[Options] Physical expiry check error for {clean_sym}: {e_exp}")
 
     cache_key = f"{clean_sym}:{expiry or 'nearest'}"
     now = time.time()

@@ -238,6 +238,18 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     expect(screen.getAllByText(/₹(3,040|3,015)/).length).toBeGreaterThanOrEqual(1)
   })
 
+  it('switches to Today\'s Session mode to view all session setups including completed and invalidated', async () => {
+    render(<AlertsView />)
+
+    await waitFor(() => {
+      expect(screen.getByText(/Today's Session/i)).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByText(/Today's Session/i))
+
+    expect(screen.getByText('NIFTY')).toBeTruthy()
+  })
+
   it('switches to Archived & History mode to view archived and completed setups', async () => {
     render(<AlertsView />)
 
@@ -492,11 +504,30 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     expect(midSwing.icon).toBe('📈')
     expect(midSwing.etaFull).toBe('1–4 Weeks')
 
-    // 4. Long Positional
+    // 4. Long Positional (including STAGE_1_TO_2_EXPANSION compounders)
     const longPos = resolveHorizonAndETA({ time_horizon: 'LONG_TERM' })
     expect(longPos.key).toBe('LONG_TERM')
     expect(longPos.icon).toBe('🏛️')
     expect(longPos.etaFull).toBe('1–6 Months')
+
+    const longPosStage2 = resolveHorizonAndETA({ time_horizon: 'LONG_TERM', alert_type: 'STAGE_1_TO_2_EXPANSION' })
+    expect(longPosStage2.key).toBe('LONG_TERM')
+    expect(longPosStage2.label).toBe('LONG POSITIONAL')
+    expect(longPosStage2.icon).toBe('🏛️')
+    expect(longPosStage2.etaFull).toBe('1–6 Months')
+    expect(longPosStage2.etaLabel).toBe('1–6m')
+
+    const positionalStage2 = resolveHorizonAndETA({ time_horizon: 'POSITIONAL', alert_type: 'STAGE_1_TO_2_EXPANSION' })
+    expect(positionalStage2.key).toBe('LONG_TERM')
+    expect(positionalStage2.icon).toBe('🏛️')
+
+    const swingMidStage2 = resolveHorizonAndETA({ time_horizon: 'SWING_MID', alert_type: 'STAGE_1_TO_2_EXPANSION' })
+    expect(swingMidStage2.key).toBe('SWING_MID')
+    expect(swingMidStage2.icon).toBe('📈')
+
+    const intraSqueeze = resolveHorizonAndETA({ time_horizon: 'INTRADAY', alert_type: 'SQUEEZE_BREAKDOWN' })
+    expect(intraSqueeze.key).toBe('INTRADAY')
+    expect(intraSqueeze.icon).toBe('⏱️')
 
     // 5. Multibagger
     const multi = resolveHorizonAndETA({ time_horizon: 'MULTIBAGGER' })

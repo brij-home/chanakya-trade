@@ -1243,6 +1243,79 @@ def build_registry() -> ToolRegistry:
         fn=_get_shareholding,
     )
 
+    reg.register(
+        name="get_institutional_catalysts",
+        description=(
+            "Get institutional catalysts, credit rating upgrades (CRISIL, ICRA, CARE), "
+            "FII/DII QoQ stake changes, promoter de-pledging, and MF mandate eligibility for an NSE/BSE stock."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Stock symbol (e.g., TRENT, CGPOWER, RELIANCE)",
+                },
+            },
+            "required": ["symbol"],
+        },
+        fn=lambda symbol: (
+            __import__("analysis.institutional_catalysts", fromlist=["get_institutional_catalysts"])
+            .get_institutional_catalysts(symbol)
+            .to_dict()
+        ),
+    )
+
+    reg.register(
+        name="get_delivery_accumulation",
+        description=(
+            "Compute the Cumulative Free-Float Absorption Index (CFAI), stealth cash delivery accumulation percentage, "
+            "and floating supply exhaustion for an equity stock."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Stock symbol (e.g., MAZDOCK, TRENT, HAL)",
+                },
+            },
+            "required": ["symbol"],
+        },
+        fn=lambda symbol: (
+            __import__("analysis.delivery_accumulation", fromlist=["compute_cfai"])
+            .compute_cfai(symbol)
+            .to_dict()
+        ),
+    )
+
+    reg.register(
+        name="get_incubation_radar",
+        description=(
+            "Query the institutional incubation radar to inspect retained candidates categorized by their "
+            "market cycle state (STAGE_1_ACCUMULATION, COILING_PIVOT, TRIGGER_READY, PULLBACK_RETEST) and breakout ETA."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "horizon": {
+                    "type": "string",
+                    "description": "Optional horizon filter: 'SHORT_TERM', 'MID_TERM', 'LONG_TERM'",
+                },
+                "cycle_state": {
+                    "type": "string",
+                    "description": "Optional cycle state filter: 'STAGE_1_ACCUMULATION', 'COILING_PIVOT', 'TRIGGER_READY', 'PULLBACK_RETEST'",
+                },
+            },
+        },
+        fn=lambda horizon=None, cycle_state=None: [
+            c.to_dict()
+            for c in __import__(
+                "engine.incubation_radar", fromlist=["get_incubated_candidates"]
+            ).get_incubated_candidates(horizon=horizon, cycle_state=cycle_state)
+        ],
+    )
+
     def _get_most_active(by: str = "volume") -> list:
         from market.active_stocks import get_most_active
 

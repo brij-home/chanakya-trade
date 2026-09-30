@@ -285,3 +285,129 @@ def test_bot_template_time_stop_exit_rendering():
     assert "VELOCITY TIME-STOP EXIT" in msg
     assert "STAGNATION TIME-STOP" in msg
     assert "EXIT AT CMP / SCRATCH POSITION" in msg
+
+
+def test_defined_risk_spread_exempt_from_velocity_time_stop():
+    """Defined-risk spreads have theta hedged by short leg and must be exempt from Rule 4D velocity time-stops."""
+    now_ist = datetime.now(IST)
+    created_time = (now_ist - timedelta(minutes=25)).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    spread_alert = AutoAlert(
+        alert_id="test-spread-exemption",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Bull Call Spread Ignited",
+        summary="Spread trade",
+        ltp=110.0,
+        trigger_level=105.0,
+        target_level=160.0,
+        stop_loss=80.0,
+        option_premium=105.0,
+        contract_symbol="NIFTY26OCT23000CE",
+        created_at=created_time,
+        triggered_at=created_time,
+        actionable_plan={
+            "action": "BULL_CALL_SPREAD",
+            "instrument_type": "OPTION_SPREAD",
+            "hedged_spread": {"buy_strike": 23000, "sell_strike": 23150},
+        },
+    )
+
+    res = evaluate_alert_targets_and_trailing(spread_alert, current_ltp=107.0)
+    assert res is not None
+    # Must NOT trigger premature TIME_STOP_SCRATCH
+    assert res.new_milestone != "TIME_STOP_SCRATCH"
+    assert res.target_status != "TIME_STOP_EXIT"
+
+
+def test_structure_holding_above_vwap_compresses_risk_instead_of_scratch():
+    """At 22m, if spot is holding above VWAP, compress risk and extend runway rather than scratching."""
+    now_ist = datetime.now(IST)
+    created_time = (now_ist - timedelta(minutes=22)).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    alert = AutoAlert(
+        alert_id="test-coiling-compress",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="RELIANCE",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Call Ignited",
+        summary="Call setup",
+        ltp=52.0,
+        trigger_level=50.0,
+        target_level=80.0,
+        stop_loss=40.0,
+        initial_stop_loss=40.0,
+        option_premium=50.0,
+        contract_symbol="RELIANCE26OCT3100CE",
+        strike=3100,
+        option_type="CE",
+        underlying_spot=3055.0,
+        created_at=created_time,
+        triggered_at=created_time,
+        metrics={"vwap": 3048.0},  # Spot 3055 is safely holding above VWAP 3048
+        actionable_plan={
+            "action": "BUY CE",
+            "recommended_entry": "₹50.0",
+            "stop_loss": "₹40.0",
+        },
+    )
+
+    res = evaluate_alert_targets_and_trailing(alert, current_ltp=51.0)
+    assert res is not None
+    # Must trigger Tier-1 COMPRESS_STALL_RISK with tightened stop, NOT TIME_STOP_SCRATCH
+    assert res.new_milestone == "COMPRESS_STALL_RISK"
+    assert res.recommended_stop > 40.0  # Stop loss tightened
+    assert "CONSOLIDATION COIL" in res.trailing_rationale
+    assert "HEDGE OPTION" in res.trailing_rationale
+
+
+def test_profitable_time_stop_marked_completed_not_invalidated():
+    """A trade in positive PnL reaching time limit is marked COMPLETED with is_invalidated=False."""
+    engine = AutoAlertEngine()
+    now_ist = datetime.now(IST)
+    created_time = (now_ist - timedelta(minutes=50)).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    winning_alert = AutoAlert(
+        alert_id="test-winning-timestop",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Nifty Call",
+        summary="Nifty CE",
+        ltp=100.0,
+        trigger_level=100.0,
+        target_level=160.0,
+        stop_loss=80.0,
+        option_premium=100.0,
+        contract_symbol="NIFTY26OCT23200CE",
+        is_live=True,
+        environment="LIVE",
+        created_at=created_time,
+        triggered_at=created_time,
+        actionable_plan={"action": "BUY CE"},
+    )
+
+    with engine._lock:
+        engine._alerts = [winning_alert]
+
+    # Quote is 103.5 (+3.5% PnL)
+    with mock.patch.object(
+        engine, "_batch_refresh_quotes", return_value={"NIFTY26OCT23200CE": 103.5}
+    ):
+        with mock.patch.object(engine, "_dispatch"):
+            with mock.patch.object(engine, "check_and_ignite_early_warnings"):
+                with mock.patch.object(engine, "resolve_session_end_alerts"):
+                    updated = engine.check_and_alert_targets_and_trailing()
+
+    assert len(updated) == 1
+    u = updated[0]
+    assert u.stage == "COMPLETED"
+    assert u.is_invalidated is False
+    assert "TIME-STOP PROFIT SECURED" in u.headline

@@ -84,6 +84,7 @@ def _format_squeeze_alert(
     action: str,
     entry_rg: str,
     trigger_lvl: float,
+    time_horizon: str = "SWING_SHORT",
 ) -> AutoAlert:
     clean_sym = canonical_alert_symbol(symbol)
     is_idx = is_index_symbol(clean_sym)
@@ -148,6 +149,7 @@ def _format_squeeze_alert(
             segment="FNO_INDEX",
             confidence=conf,
             created_at=now_iso,
+            time_horizon=time_horizon,
             metrics=metrics,
             actionable_plan=act_plan,
         )
@@ -170,6 +172,7 @@ def _format_squeeze_alert(
         trigger_level=trigger_lvl,
         target_level=target,
         stop_loss=sl,
+        time_horizon=time_horizon,
         metrics=metrics,
         actionable_plan={
             "action": action,
@@ -406,6 +409,7 @@ def detect_squeeze_breakout(
                 action="BUY_ON_PIVOT",
                 entry_rg=entry_rg,
                 trigger_lvl=pivot_high,
+                time_horizon=trade_tf,
             )
 
         # ── EARLY WARNING (BEARISH): Coiled in squeeze, close above pivot low support ───
@@ -535,6 +539,7 @@ def detect_squeeze_breakout(
                 action="SELL_ON_BREAKDOWN",
                 entry_rg=entry_rg,
                 trigger_lvl=pivot_low,
+                time_horizon=trade_tf,
             )
 
         # ── IGNITED (BULLISH): Squeeze Fired + Fresh Breakout above pivot ───
@@ -637,6 +642,7 @@ def detect_squeeze_breakout(
                 action="BUY_EXPANSION",
                 entry_rg=entry_rg,
                 trigger_lvl=pivot_high,
+                time_horizon=trade_tf,
             )
 
         # ── IGNITED (BEARISH): Squeeze Fired + Fresh Breakdown below pivot low ───
@@ -764,6 +770,7 @@ def detect_squeeze_breakout(
                 action="SELL_EXPANSION",
                 entry_rg=entry_rg,
                 trigger_lvl=pivot_low,
+                time_horizon=trade_tf,
             )
 
     except Exception as e:

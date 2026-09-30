@@ -7,7 +7,7 @@
 
 <!-- TOC -->
 - [1. Project Overview & Component Map](#1-project-overview--component-map)
-- [2. Safety & Trading Guardrails (18 Core Invariants)](#2-safety--trading-guardrails-18-core-invariants)
+- [2. Safety & Trading Guardrails (20 Core Invariants)](#2-safety--trading-guardrails-20-core-invariants)
 - [3. LLM Model Hierarchy & Multi-Key Resilience](#3-llm-model-hierarchy--multi-key-resilience)
 - [4. Environment & Common Commands](#4-environment--common-commands)
 - [5. On-Demand Skills Directory](#5-on-demand-skills-directory)
@@ -35,7 +35,7 @@
 
 ---
 
-## 2. Safety & Trading Guardrails (18 Core Invariants)
+## 2. Safety & Trading Guardrails (20 Core Invariants)
 
 > **⚠️ Never commit `.env` — see [`config/credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) for secure token management.**
 
@@ -106,6 +106,20 @@
 18. **Zero In-Line Startup Migrations**:
    - Startup, file-loading, and critical loops (`_load()`) must remain idempotent, deterministic, and free of historical mutation or regex rehabilitation loops.
    - Historical database repairs, one-off schema transformations, and legacy error reconciliations belong strictly in offline administrative scripts (`scripts/remediate_corrupted_alerts.py`) or dedicated explicit methods, never executed on hot startup paths.
+19. **Single-Authority Alert Ingestion & Zero Shadow Dispatch Invariant**:
+   - All trade setups, scanner signals, execution readiness alerts, and automated push notifications MUST enter the system through the centralized alert pipeline (`auto_alert_engine` or `alert_manager`), ensuring deterministic ID generation (`generate_alert_id()`), storage persistence in `auto_alerts.json`/`alerts.json`, real-time SSE broadcast to UI, and audit-logged multi-channel dispatch.
+   - Direct unrecorded calls to `bot.telegram_bot.send_push()` for new trade setups (shadow alerts) are strictly prohibited.
+   - Channel Parity & Transparent Governance: Every trade setup must be discoverable across both the desktop UI and Telegram query interfaces (`cmd_alerts`), with explicit delivery provenance tags (`TG SENT` vs `TG HELD` with documented suppression reason).
+20. **Institutional Single Source of Truth (SSOT) & End-to-End Audit Traceability**:
+   - **The 5 Authoritative SSOT Domains**:
+     1. *Alerts & Setups*: [`AutoAlertEngine`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/auto_alert_engine.py) (`auto_alerts.json`) is the sole write authority. Downstream sinks (Telegram, Desktop UI, SSE) are read-only projections.
+     2. *Orders & Positions*: Real broker execution pipeline ([`engine/order_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/order_lifecycle.py)) and persisted SQLite audit ledger ([`engine/security_audit.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/security_audit.py)).
+     3. *Market Quotes*: [`market.quotes`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/quotes.py) is the sole quote gateway with bounded caching and SLA tracking via [`engine.observability`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/observability.py).
+     4. *Instruments & Lot Sizes*: Canonical exchange masters ([`market/instruments.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/instruments.py)). Lot sizes, tick sizes, and tokens must never be guessed or hardcoded.
+     5. *Operational Mode*: Sole source is `GET /api/mode` (`OBSERVE`, `SIMULATE`, `EXECUTE`).
+   - **The Single-Writer Rule**: Exactly ONE domain engine owns state mutation per domain. Modules outside that domain must NEVER write to storage files or push to output sinks directly.
+   - **Auditability Mandate**: Every lifecycle event (creation, scrutiny, SSE broadcast, Telegram gate decision, milestone progress, invalidation) MUST append an immutable record to `alert.audit_trail` via `alert.record_audit()`.
+   - **Fast Troubleshooting**: Query any alert's full chronological journey in <60 seconds via `GET /api/alerts/auto/{alert_id}/audit` or the global timeline via `GET /api/alerts/auto/audit-trail`.
 
 ---
 

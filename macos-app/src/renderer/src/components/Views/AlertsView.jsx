@@ -305,18 +305,18 @@ const AutoAlertCard = memo(function AutoAlertCard({
               <span className={`text-[8px] px-1.5 py-px rounded font-black tracking-wider uppercase border ${provenance.cls}`}>
                 {provenance.label}
               </span>
-              {strikeNum && !isFuture && (
+              {isDerivative && strikeNum && !isFuture && (
                 <span className="text-[9px] font-black text-gold font-mono leading-none">₹{Number(strikeNum).toLocaleString('en-IN')}</span>
               )}
-              {optType && !isFuture && (
+              {isDerivative && optType && !isFuture && (
                 <span className={`text-[8px] px-1 py-px rounded font-black uppercase ${
                   optType === 'CE' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
                 }`}>{optType}</span>
               )}
-              {isFuture && (
+              {isDerivative && isFuture && (
                 <span className="text-[8px] px-1 py-px rounded font-black uppercase bg-blue-500/20 text-blue-300">FUT</span>
               )}
-              {moneyness && !isFuture && (
+              {isDerivative && moneyness && !isFuture && (
                 <span className={`text-[8px] px-1 py-px rounded font-black ${
                   moneyness === 'ITM' ? 'text-emerald-300 bg-emerald-500/15' : moneyness === 'ATM' ? 'text-gold bg-gold/15' : 'text-zinc-400 bg-zinc-500/15'
                 }`}>{moneyness}</span>
@@ -327,7 +327,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
               <span className={`text-[8px] font-bold ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {isBull ? '▲' : '▼'} {alert.direction}
               </span>
-              {(isDerivative || Boolean(optPlan || optType || strikeNum || alert.expiry_date)) && expiryInfo?.fullDisplay && (
+              {isDerivative && expiryInfo?.fullDisplay && (
                 <span
                   className={`text-[8px] font-mono px-1.5 py-px rounded font-bold whitespace-nowrap border ${
                     expiryInfo.isWeekly
@@ -370,6 +370,21 @@ const AutoAlertCard = memo(function AutoAlertCard({
               ) : (alert.order_flow_signals?.live_broker_connected || alert.order_flow_signals?.broker_depth_status === 'LIVE_L2') ? (
                 <span className="text-[7px] px-1 py-px rounded font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 whitespace-nowrap" title="Live Broker Level 2 depth active">
                   🟢 LIVE L2
+                </span>
+              ) : null}
+
+              {/* Telegram Delivery Status */}
+              {alert.telegram_dispatched ? (
+                <span className="text-[7px] px-1 py-px rounded font-black bg-sky-500/20 text-sky-300 border border-sky-500/35 whitespace-nowrap flex items-center gap-0.5" title="Dispatched to Telegram channel">
+                  <span>📱</span><span>TG SENT</span>
+                </span>
+              ) : alert.telegram_suppression_reason ? (
+                <span className="text-[7px] px-1 py-px rounded font-medium bg-amber-500/10 text-amber-300/90 border border-amber-500/25 whitespace-nowrap flex items-center gap-0.5 cursor-help" title={`Telegram push held: ${alert.telegram_suppression_reason}`}>
+                  <span>📱</span><span>TG HELD</span>
+                </span>
+              ) : isTest ? (
+                <span className="text-[7px] px-1 py-px rounded font-medium bg-panel text-muted border border-border/40 whitespace-nowrap" title="Terminal only (Simulation / Test mode)">
+                  TERMINAL
                 </span>
               ) : null}
             </div>
@@ -1374,6 +1389,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const [cleanupNotice, setCleanupNotice] = useState(null)
   const [archiving, setArchiving] = useState(null)
   const [autoAlerts, setAutoAlerts] = useState([])
+  const [serverCounts, setServerCounts] = useState(null)
   const [autoLoading, setAutoLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -1675,7 +1691,11 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const loadAutoAlerts = useCallback(async (isInitial = false) => {
     if (isInitial) setAutoLoading(true)
     try {
-      const res = await callRef.current('/skills/alerts/auto/list', { view_mode: autoViewMode, limit: 300 })
+      const mode = isInitial ? 'ALL' : autoViewMode
+      const res = await callRef.current('/skills/alerts/auto/list', { view_mode: mode, limit: 300 })
+      if (res?.counts) {
+        setServerCounts(res.counts)
+      }
       const fresh = res?.data ?? res ?? []
 
       // Institutional chime check on live ignited alerts
@@ -1719,22 +1739,13 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const storeNotifications = useNotificationStore((s) => s.notifications)
   useEffect(() => {
     if (!storeNotifications || storeNotifications.length === 0) return
-    // Only merge AUTO-type alerts matching the current view_mode so historical archived
-    // items from notifications do not leak into the active radar table
     const autoFromStore = storeNotifications.filter(
       (n) => n.alert_type && !['PRICE', 'TECHNICAL', 'CONDITIONAL'].includes(n.alert_type) && !isTestOrSimAlert(n)
     )
     if (autoFromStore.length > 0) {
-      const modeFiltered = autoFromStore.filter((n) => {
-        if (autoViewMode === 'ACTIVE') return isAlertActive(n)
-        if (autoViewMode === 'ARCHIVED') return !isAlertActive(n)
-        return true
-      })
-      if (modeFiltered.length > 0) {
-        setAutoAlerts((prev) => mergeAlertsInPlace(prev, modeFiltered))
-      }
+      setAutoAlerts((prev) => mergeAlertsInPlace(prev, autoFromStore))
     }
-  }, [storeNotifications, autoViewMode])
+  }, [storeNotifications])
 
   useEffect(() => {
     loadAlerts(true)
@@ -2351,10 +2362,6 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   // Active validation check delegates to top-level institutional isAlertActive
   const checkIsAlertActive = isAlertActive
 
-  const activeCount = autoAlerts.filter(isAlertActive).length
-  const archivedCount = autoAlerts.length - activeCount
-  const expiredCount = autoAlerts.filter((a) => a.is_expired || a.stage === 'EXPIRED').length
-
   // Safe helper to parse alert timestamp to epoch ms (handles ISO, IST strings, and nulls)
   const parseAlertTimestamp = (raw) => {
     if (!raw) return null
@@ -2366,6 +2373,35 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       return null
     }
   }
+
+  // Helper to determine if an alert was triggered in today's Indian Market calendar session
+  const isTodayAlert = useCallback((a) => {
+    try {
+      const raw = a.created_at || a.timestamp || a.invalidated_at || ''
+      const todayIST = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date())
+      if (raw && raw.includes(todayIST)) return true
+      const id = a.alert_id || a.id || ''
+      const ymd = todayIST.replace(/-/g, '')
+      if (id.includes(ymd)) return true
+      const ts = parseAlertTimestamp(raw)
+      if (ts) {
+        const d = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(ts))
+        if (d === todayIST) return true
+      }
+      return false
+    } catch (_) {
+      return true
+    }
+  }, [])
+
+  const activeCount = serverCounts?.active ?? autoAlerts.filter(isAlertActive).length
+  const todayCount = serverCounts?.today ?? autoAlerts.filter(isTodayAlert).length
+  const todayClosedCount = serverCounts?.today_closed ?? autoAlerts.filter((a) => isTodayAlert(a) && !isAlertActive(a)).length
+  const archivedCount = serverCounts?.archived ?? autoAlerts.filter((a) => !isAlertActive(a)).length
+  const totalAlertsCount = serverCounts?.total ?? (activeCount + archivedCount)
+  const expiredCount = autoAlerts.filter((a) => a.is_expired || a.stage === 'EXPIRED').length
+  const tgSentCount = useMemo(() => autoAlerts.filter((a) => a.telegram_dispatched).length, [autoAlerts])
+  const tgHeldCount = useMemo(() => autoAlerts.filter((a) => a.telegram_suppression_reason && !a.telegram_dispatched).length, [autoAlerts])
 
   // Invalidation count for banner:
   // 1. Must not already be archived (archived setups belong in history tab, not active radar)
@@ -2413,6 +2449,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
       // 1. Primary Filter: View Mode
       if (autoViewMode === 'ACTIVE' && !isAlertActive(a)) return false
+      if (autoViewMode === 'TODAY' && !isTodayAlert(a)) return false
       if (autoViewMode === 'ARCHIVED' && isAlertActive(a)) return false
 
       // 2. Search Query Filter (Symbol, Contract, Headline, Summary)
@@ -2436,8 +2473,12 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         }
       }
 
-      // 5. Category / Alert-Type Filter
-      if (selectedFilter === 'INVALIDATED') {
+      // 5. Category / Alert-Type / Channel Delivery Filter
+      if (selectedFilter === 'TG_SENT') {
+        if (!a.telegram_dispatched) return false
+      } else if (selectedFilter === 'TG_HELD') {
+        if (!a.telegram_suppression_reason || a.telegram_dispatched) return false
+      } else if (selectedFilter === 'INVALIDATED') {
         if (!a.is_invalidated && a.stage !== 'INVALIDATED') return false
       } else if (selectedFilter === 'TARGET_HIT') {
         if (
@@ -2488,6 +2529,8 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
           if (hzInfo.key !== 'SWING_SHORT') return false
         } else if (selectedHorizon === 'INTRADAY') {
           if (hzInfo.key !== 'INTRADAY') return false
+        } else if (selectedHorizon === 'ROLLING_24H') {
+          if (hzInfo.key !== 'ROLLING_24H') return false
         } else if (hzInfo.key !== selectedHorizon && (a.time_horizon || 'INTRADAY') !== selectedHorizon) {
           return false
         }
@@ -2926,6 +2969,21 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 </button>
 
                 <button
+                  onClick={() => setAutoViewMode('TODAY')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                    autoViewMode === 'TODAY'
+                      ? 'bg-sky-500/15 dark:bg-sky-500/25 text-sky-800 dark:text-sky-300 border border-sky-400/50 dark:border-sky-500/40 shadow-sm'
+                      : 'text-muted hover:text-text'
+                  }`}
+                  title="View all trades triggered in today's market session (active + completed + invalidated)"
+                >
+                  <span>☀️ Today's Session</span>
+                  <span className="text-[10px] px-1.5 py-px rounded-full font-mono bg-sky-500/20 dark:bg-sky-500/30 text-sky-800 dark:text-sky-200">
+                    {todayCount}
+                  </span>
+                </button>
+
+                <button
                   onClick={() => setAutoViewMode('ARCHIVED')}
                   className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
                     autoViewMode === 'ARCHIVED'
@@ -2949,7 +3007,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   }`}
                   title="Show all records"
                 >
-                  All ({autoAlerts.length})
+                  All ({totalAlertsCount})
                 </button>
               </div>
 
@@ -3118,6 +3176,25 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
               </div>
             </div>
 
+            {/* Session Inactive Alerts Indicator Banner */}
+            {autoViewMode === 'ACTIVE' && todayClosedCount > 0 && (
+              <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-sky-500/10 border border-sky-500/25 text-sky-800 dark:text-sky-200 text-xs animate-slide-up-fade">
+                <div className="flex items-center gap-2">
+                  <span>☀️</span>
+                  <span>
+                    <b>{todayClosedCount} earlier setup{todayClosedCount > 1 ? 's' : ''}</b> completed or closed in today's session.
+                  </span>
+                </div>
+                <button
+                  onClick={() => setAutoViewMode('TODAY')}
+                  className="font-bold text-sky-700 dark:text-sky-300 hover:text-sky-900 dark:hover:text-sky-100 flex items-center gap-1 cursor-pointer underline text-[11px]"
+                >
+                  <span>View Full Session ({todayCount})</span>
+                  <span>→</span>
+                </button>
+              </div>
+            )}
+
             {/* ROW 2: Multi-Select Segment Rail & Delivery Routing */}
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-1 p-0.5 rounded-xl bg-surface/90 border border-border/60 w-fit flex-wrap">
@@ -3225,6 +3302,8 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   title="Filter by setup / strategy category"
                 >
                   <option value="ALL">All Categories / Setups</option>
+                  <option value="TG_SENT">📱 Dispatched to Telegram ({tgSentCount})</option>
+                  <option value="TG_HELD">🔒 Terminal Only / TG Held ({tgHeldCount})</option>
                   <option value="TARGET_HIT">🎯 Targets Hit</option>
                   <option value="HIGH_CONVICTION">⭐ Conviction 85%+</option>
                   <option value="MULTI_FLOW">🌊 Multi-Strike Flow</option>
@@ -3264,6 +3343,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 >
                   <option value="ALL">All Horizons</option>
                   <option value="INTRADAY">⏱️ Intraday (Today)</option>
+                  <option value="ROLLING_24H">🪙 24H Rolling (Crypto)</option>
                   <option value="SWING_SHORT">⚡ 2–5D Short Swing</option>
                   <option value="SWING_MID">📈 1–4W Mid Swing</option>
                   <option value="POSITIONAL">🏛️ 1–6M Long Positional</option>

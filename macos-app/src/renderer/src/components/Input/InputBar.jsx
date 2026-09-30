@@ -4,6 +4,69 @@ import { useAPI } from '../../hooks/useAPI'
 import SmartTypeahead from '../Common/SmartTypeahead'
 import { fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
+// Helper to robustly extract symbol and exchange from user input tokens,
+// supporting natural phrases ('SHREEREF of BSE', 'SHREEREF on BSE', 'SHREEREF BSE', 'BSE:SHREEREF', 'SHREEREF(BSE)').
+export function extractSymbolAndExchange(rawArgs, contextSymbol = null) {
+  if (!rawArgs || rawArgs.length === 0) {
+    if (!contextSymbol) return { symbol: null, exchange: null }
+    return { symbol: contextSymbol, exchange: getSymbolExchange(contextSymbol) }
+  }
+
+  const prepositions = new Set(['OF', 'ON', 'IN', 'AT', 'FOR'])
+  const tokens = rawArgs
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0 && !prepositions.has(t.toUpperCase()))
+
+  if (tokens.length === 0) {
+    return { symbol: contextSymbol, exchange: contextSymbol ? getSymbolExchange(contextSymbol) : null }
+  }
+
+  let sym = tokens[0]
+  let exch = null
+  const validExchs = ['BSE', 'NSE', 'MCX', 'CDS', 'CRYPTO', 'BINANCE']
+
+  // 1. Colon prefix or suffix (e.g. 'BSE:SHREEREF' or 'SHREEREF:BSE')
+  if (sym.includes(':')) {
+    const [p, s] = sym.split(':')
+    const pU = p.toUpperCase()
+    const sU = s.toUpperCase()
+    if (validExchs.includes(pU)) {
+      exch = pU
+      sym = s
+    } else if (validExchs.includes(sU)) {
+      exch = sU
+      sym = p
+    }
+  }
+
+  // 2. Parenthesized exchange (e.g. 'SHREEREF(BSE)')
+  const parenMatch = sym.match(/^([A-Za-z0-9_&-]+)\((BSE|NSE|MCX|CDS|CRYPTO)\)$/i)
+  if (parenMatch) {
+    sym = parenMatch[1]
+    exch = parenMatch[2].toUpperCase()
+  }
+
+  // 3. Multi-token exchange (e.g. ['SHREEREF', 'BSE'] or ['BSE', 'SHREEREF'])
+  if (!exch && tokens.length > 1) {
+    const second = tokens[1].replace(/[()]/g, '').toUpperCase()
+    if (validExchs.includes(second)) {
+      exch = second
+    } else {
+      const first = tokens[0].replace(/[()]/g, '').toUpperCase()
+      if (validExchs.includes(first)) {
+        exch = first
+        sym = tokens[1]
+      }
+    }
+  }
+
+  sym = sym.toUpperCase().replace(/[()]/g, '')
+  if (!exch) {
+    exch = getSymbolExchange(sym)
+  }
+  return { symbol: sym, exchange: exch }
+}
+
 // Maps typed commands → API endpoint + card type
 function parseCommand(input, contextSymbol = null) {
   const parts = input.trim().split(/\s+/)
@@ -12,24 +75,15 @@ function parseCommand(input, contextSymbol = null) {
 
   switch (cmd) {
     case 'quote': case 'q': {
-      const sym = args[0]?.toUpperCase() || contextSymbol
+      const { symbol: sym, exchange: exch } = extractSymbolAndExchange(args, contextSymbol)
       if (!sym) return { error: 'Please specify a stock symbol (e.g. quote INFY)' }
-      return { endpoint: '/skills/quote', body: { symbol: sym }, cardType: 'quote' }
+      const finalSym = exch && exch !== 'NSE' ? `${exch}:${sym}` : sym
+      return { endpoint: '/skills/quote', body: { symbol: finalSym }, cardType: 'quote' }
     }
 
     case 'analyze': case 'analyse': case 'debate': case 'a': {
-      let sym = args[0]?.toUpperCase() || contextSymbol
+      const { symbol: sym, exchange: exch } = extractSymbolAndExchange(args, contextSymbol)
       if (!sym) return { error: 'Please specify a stock symbol to analyze (e.g. analyze INFY)' }
-      let exch = args[1]?.toUpperCase()
-      if (!exch) {
-        if (sym.includes(':')) {
-          const [prefix, s] = sym.split(':')
-          exch = prefix
-          sym = s
-        } else {
-          exch = getSymbolExchange(sym)
-        }
-      }
       return { stream: true, symbol: sym, exchange: exch }
     }
 
@@ -308,27 +362,17 @@ function parseCommand(input, contextSymbol = null) {
     }
 
     default: {
-      // Check if the user typed a single symbol name like 'Bajaj-Auto', 'BAJAJ_AUTO', 'RELIANCE', 'MCX:CRUDEOIL', 'CRUDEOIL'
-      let rawSym = input.trim().toUpperCase()
-      let exch = 'NSE'
-      if (rawSym.startsWith('MCX:')) {
-        exch = 'MCX'
-        rawSym = rawSym.slice(4)
-      } else if (rawSym.startsWith('CDS:') || rawSym.startsWith('FX:') || rawSym.startsWith('FOREX:')) {
-        exch = 'CDS'
-        rawSym = rawSym.split(':')[1]
-      } else if (rawSym.startsWith('BSE:')) {
-        exch = 'BSE'
-        rawSym = rawSym.slice(4)
-      } else if (rawSym.startsWith('NSE:')) {
-        exch = 'NSE'
-        rawSym = rawSym.slice(4)
-      } else {
-        exch = getSymbolExchange(rawSym)
-      }
-      const cleanSingle = rawSym.replace(/_/g, '-')
-      if (/^[A-Z0-9&-]{2,15}$/.test(cleanSingle) && !['HELLO', 'HI', 'HELP', 'CLEAR', 'RESET', 'YES', 'NO', 'CANCEL'].includes(cleanSingle)) {
-        return { stream: true, symbol: cleanSingle, exchange: exch }
+      // Check if user entered a symbol or symbol with exchange e.g. 'SHREEREF', 'SHREEREF of BSE', 'SHREEREF BSE', 'BSE:SHREEREF'
+      const rawParts = input.trim().split(/\s+/)
+      const { symbol: sym, exchange: exch } = extractSymbolAndExchange(rawParts, null)
+      if (sym) {
+        const cleanSingle = sym.replace(/_/g, '-')
+        if (
+          /^[A-Z0-9&-]{2,15}$/.test(cleanSingle) &&
+          !['HELLO', 'HI', 'HELP', 'CLEAR', 'RESET', 'YES', 'NO', 'CANCEL'].includes(cleanSingle)
+        ) {
+          return { stream: true, symbol: cleanSingle, exchange: exch }
+        }
       }
       // Fall through to AI chat — session_id injected in submit()
       return { endpoint: '/skills/chat', body: { message: input }, cardType: 'markdown' }

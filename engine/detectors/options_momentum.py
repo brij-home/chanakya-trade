@@ -475,6 +475,12 @@ def detect_options_momentum_breakouts(
                     except Exception:
                         pass
 
+                if is_physical_expiry_week and not is_next_month_routed:
+                    logger.debug(
+                        f"[OptionsBreakout] Strictly vetoed {contract_sym}: Near-month stock option in SEBI physical delivery expiry week"
+                    )
+                    continue
+
                 pchange = getattr(c, "pchange", None)
                 min_pchange = 8.0 if is_opening_drive else 6.0
                 if opt_type == "CE":
@@ -1085,7 +1091,12 @@ def detect_options_momentum_breakouts(
                 )
 
                 lot_tag = f" (Lot: {lot_sz})" if (lot_sz and lot_sz > 1) else ""
-                sec_badge = f" [{sec_name.upper()}]" if (sec_name and not is_idx) else ""
+                sec_badge = ""
+                if sec_name and not is_idx:
+                    from bot.alert_templates import shorten_sector_name
+
+                    short_sec = shorten_sector_name(sec_name).upper() or sec_name.upper()
+                    sec_badge = f" [{short_sec}]"
                 cat_badge = (
                     " ⚡ DECOUPLER"
                     if (not is_idx and is_extreme_catalyst and not sector_tailwind_bonus)

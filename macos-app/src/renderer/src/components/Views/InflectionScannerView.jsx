@@ -169,8 +169,9 @@ export default function InflectionScannerView({
           max_results: 100,
           min_turnover_cr: overrideTurnover,
           cap_tier: overrideCap,
-          use_local_cache: !force,
+          use_local_cache: true,
           sync_missing: false,
+          refresh: force,
         },
         { timeoutMs: 120000, signal: abortCtrl.signal }
       )
@@ -207,8 +208,11 @@ export default function InflectionScannerView({
         setSyncStatusMsg(
           `✓ Synced ${data.synced_count || 0} stocks (${data.failed_count || 0} failed) in ${data.duration_sec || 0}s`
         )
-        // Auto re-scan using the newly cached EOD store
-        await executeScan(universe, minTurnoverCr, capTierFilter, true)
+        // Auto precompute inflection setups and instant load
+        try {
+          await call('/skills/inflection_precompute', { universe: universe, min_turnover_cr: minTurnoverCr })
+        } catch {}
+        await executeScan(universe, minTurnoverCr, capTierFilter, false)
       }
       loadStoreStats()
     } catch (err) {
@@ -1451,18 +1455,32 @@ export default function InflectionScannerView({
           {/* Scan / Rescan Button */}
           <button
             type="button"
-            onClick={() => executeScan(universe, minTurnoverCr, capTierFilter, true)}
+            onClick={(e) => executeScan(universe, minTurnoverCr, capTierFilter, Boolean(e.shiftKey))}
             disabled={isScanning}
             className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1 rounded-lg border transition-all cursor-pointer shadow-xs ${
               !scanResult
                 ? 'border-gold bg-gold/25 text-amber-700 dark:text-amber-300 hover:bg-gold/35 ring-1 ring-gold/50 animate-pulse font-bold'
                 : 'border-gold/40 bg-gold/15 text-amber-600 dark:text-amber-400 hover:bg-gold/25'
             }`}
-            title={scanResult ? 'Re-run inflection scan across target universe' : 'Run inflection scan on target universe'}
+            title={scanResult ? 'Click for instant cache (<25ms) or Shift+Click for full recalculation' : 'Run instant inflection scan on target universe'}
           >
-            <span className={isScanning ? 'animate-spin' : ''}>🔄</span>
-            <span>{isScanning ? 'Scanning...' : scanResult ? 'Rescan' : 'Scan Market'}</span>
+            <span className={isScanning ? 'animate-spin' : ''}>{isScanning ? '🔄' : '⚡'}</span>
+            <span>{isScanning ? 'Scanning...' : 'Scan Market'}</span>
           </button>
+
+          {/* Recalculate Button (when result exists) */}
+          {scanResult && (
+            <button
+              type="button"
+              onClick={() => executeScan(universe, minTurnoverCr, capTierFilter, true)}
+              disabled={isScanning}
+              className="flex items-center gap-1 text-xs px-2 py-1 rounded-lg border border-border bg-elevated text-muted hover:text-text cursor-pointer transition-all"
+              title="Recalculate entire universe from raw quantitative engine (~4s)"
+            >
+              <span className={isScanning ? 'animate-spin' : ''}>🔄</span>
+              <span>Recalculate</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -1680,7 +1698,7 @@ export default function InflectionScannerView({
             </p>
             <button
               type="button"
-              onClick={() => executeScan(universe, minTurnoverCr, capTierFilter, true)}
+              onClick={() => executeScan(universe, minTurnoverCr, capTierFilter, false)}
               className="mt-4 flex items-center gap-2 text-xs font-bold px-5 py-2.5 rounded-xl border border-gold/40 bg-gold/15 text-amber-600 dark:text-amber-400 hover:bg-gold/25 shadow-md hover:shadow-gold/10 transition-all cursor-pointer font-mono"
             >
               <span>⚡</span>

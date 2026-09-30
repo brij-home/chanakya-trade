@@ -1,6 +1,6 @@
 import React, { memo, useMemo } from 'react'
 import { useLiveSpot } from './LiveSpotsContext'
-import { AUTO_TYPE_STYLE, formatExpiryDetails, resolveAlertLifecycle } from './alertHelpers'
+import { AUTO_TYPE_STYLE, formatExpiryDetails, resolveAlertLifecycle, isTestOrSimAlert } from './alertHelpers'
 
 export const AlertTriageCard = memo(function AlertTriageCard({
   alert,
@@ -75,6 +75,12 @@ export const AlertTriageCard = memo(function AlertTriageCard({
   const expiryInfo = useMemo(() => formatExpiryDetails(alert), [alert])
   const fmtP = (v) => v !== null && v !== undefined && !isNaN(v) ? (Number(v) >= 500 ? Number(v).toFixed(1) : Number(v).toFixed(2)) : '—'
   const conviction = alert.confidence || 85
+  const convictionTier = alert.metrics?.conviction_tier || plan.conviction_tier || null
+  const executionMandate = plan.execution_style_mandate || alert.metrics?.execution_style_mandate || null
+  const confluenceAlignment = alert.confluence_alignment || alert.metadata?.confluence_alignment || null
+  const stagnationWarning = alert.stagnation_warning || alert.metadata?.stagnation_warning || null
+  const physicalRisk = alert.physical_delivery_risk || alert.metadata?.physical_delivery_risk || null
+  const gapRisk = alert.premarket_gap_risk || alert.metadata?.premarket_gap_risk || null
 
   return (
     <article
@@ -136,6 +142,42 @@ export const AlertTriageCard = memo(function AlertTriageCard({
             </span>
           )}
 
+          {/* Conviction Tier Badge */}
+          {convictionTier === 'APEX_CONFLUENCE' && (
+            <span
+              className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-amber-500/25 text-amber-300 border border-amber-500/50 shadow-sm"
+              title="Tier 1 Institutional Apex Confluence: Full position & Free-roll eligible (Conviction >= 90%)"
+            >
+              💎 APEX
+            </span>
+          )}
+          {convictionTier === 'HIGH_CONVICTION' && (
+            <span
+              className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+              title="Tier 2 High Conviction Setup (Conviction 80–89%)"
+            >
+              ⚡ HIGH
+            </span>
+          )}
+          {convictionTier === 'DEFINED_RISK_ONLY' && (
+            <span
+              className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-indigo-500/20 text-indigo-300 border border-indigo-500/40"
+              title="Tier 3 Defined-Risk Vertical Spread Mandate (Conviction 70–79%)"
+            >
+              🛡️ SPREAD
+            </span>
+          )}
+
+          {/* Hedged Spread Execution Mandate */}
+          {executionMandate === 'HEDGED_SPREAD_MANDATORY' && (
+            <span
+              className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/20 text-rose-300 border border-rose-500/40"
+              title={plan.sector_concurrency_warning || plan.trap_warning || 'Defined-risk vertical spread mandated to neutralize theta decay & cap risk'}
+            >
+              🛡️ HEDGE MANDATE
+            </span>
+          )}
+
           {/* Time Horizon & ETA Badges */}
           {horizonInfo && (
             <div className="flex items-center gap-1">
@@ -154,6 +196,62 @@ export const AlertTriageCard = memo(function AlertTriageCard({
             </div>
           )}
 
+          {/* Multi-Horizon Confluence Alignment */}
+          {confluenceAlignment === 'TRIPLE_HORIZON' && (
+            <span
+              className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-gradient-to-r from-amber-500/25 via-emerald-500/25 to-sky-500/25 text-amber-300 border border-amber-400/50 shadow-sm"
+              title="Institutional Triple-Horizon Confluence: Intraday + Swing + Multibagger all mutually aligned in trend and volume structure."
+            >
+              👑 TRIPLE CONFLUENCE
+            </span>
+          )}
+          {confluenceAlignment === 'DUAL_HORIZON' && (
+            <span
+              className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+              title="Dual-Horizon Alignment: Multi-timeframe trend and volume confirmation across time horizons."
+            >
+              ⚡ DUAL CONFLUENCE
+            </span>
+          )}
+
+          {/* Pre-Market Opening Gap Sentinel */}
+          {gapRisk === 'GAP_OVER_SL' && (
+            <span
+              className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-pulse"
+              title="Pre-market Sentinel: Opening price gapped beyond invalidation stop-loss."
+            >
+              🛑 GAP OVER SL
+            </span>
+          )}
+          {gapRisk === 'GAP_NO_CHASE' && (
+            <span
+              className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-amber-500/25 text-amber-300 border border-amber-500/50"
+              title="Pre-market Sentinel: Opening price gapped beyond maximum entry boundary. Do not chase."
+            >
+              ⚠️ NO CHASE
+            </span>
+          )}
+
+          {/* Stagnation & Chop Defense Sentinel */}
+          {stagnationWarning && (
+            <span
+              className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-amber-500/15 text-amber-300 border border-amber-500/35 cursor-help"
+              title={typeof stagnationWarning === 'string' ? stagnationWarning : 'Consolidated in chop without reaching T1 (+2R). Trailing stop held at breakeven.'}
+            >
+              ⏳ STAGNANT
+            </span>
+          )}
+
+          {/* SEBI Physical Settlement Risk */}
+          {physicalRisk && (
+            <span
+              className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/20 text-rose-300 border border-rose-500/40 cursor-help"
+              title={typeof physicalRisk === 'object' && physicalRisk.advisory ? physicalRisk.advisory : (typeof physicalRisk === 'string' ? physicalRisk : 'SEBI Physical Settlement risk: Contract within 4 days of expiry. Margin escalation active. Square off or roll contract.')}
+            >
+              ⚠️ PHYSICAL RISK
+            </span>
+          )}
+
           {/* Broker Depth Feed Status */}
           {alert.order_flow_signals?.live_broker_connected === false || alert.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' || alert.order_flow_signals?.provenance === 'SYNTHETIC_L1_DISCONNECTED' ? (
             <span className="text-[7px] px-1 py-px rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap" title="No active broker WebSocket connection. Using tick-level fallback.">
@@ -162,6 +260,21 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           ) : (alert.order_flow_signals?.live_broker_connected || alert.order_flow_signals?.broker_depth_status === 'LIVE_L2') ? (
             <span className="text-[7px] px-1 py-px rounded font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 whitespace-nowrap" title="Live Broker Level 2 depth active">
               🟢 LIVE L2
+            </span>
+          ) : null}
+
+          {/* Telegram Delivery Status */}
+          {alert.telegram_dispatched ? (
+            <span className="text-[7px] px-1 py-px rounded font-black bg-sky-500/20 text-sky-300 border border-sky-500/35 whitespace-nowrap flex items-center gap-0.5" title="Dispatched to Telegram channel">
+              <span>📱</span><span>TG SENT</span>
+            </span>
+          ) : alert.telegram_suppression_reason ? (
+            <span className="text-[7px] px-1 py-px rounded font-medium bg-amber-500/10 text-amber-300/90 border border-amber-500/25 whitespace-nowrap flex items-center gap-0.5 cursor-help" title={`Telegram push held: ${alert.telegram_suppression_reason}`}>
+              <span>📱</span><span>TG HELD</span>
+            </span>
+          ) : isTestOrSimAlert(alert) ? (
+            <span className="text-[7px] px-1 py-px rounded font-medium bg-panel text-muted border border-border/40 whitespace-nowrap" title="Terminal only (Simulation / Test mode)">
+              TERMINAL
             </span>
           ) : null}
 

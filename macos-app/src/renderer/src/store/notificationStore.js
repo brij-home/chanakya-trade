@@ -23,17 +23,20 @@ function loadStoredNotifications() {
     const now = new Date()
     return sanitized.map((item) => {
       const isIntraday = item.time_horizon === 'INTRADAY' || item.timeHorizon === 'INTRADAY'
-      const isSwingOrPositional = ['SWING_SHORT', 'SWING_MID', 'POSITIONAL'].includes(item.time_horizon || item.timeHorizon)
+      const isSwingOrPositional = ['SWING_SHORT', 'SWING_MID', 'POSITIONAL', 'LONG_TERM', 'MULTIBAGGER'].includes(item.time_horizon || item.timeHorizon)
+      const isGammaOrZeroDte = (item.alert_type || '').includes('GAMMA') || (item.alert_type || '').includes('0DTE')
       const exch = String(item.exchange || '').toUpperCase()
       const seg = String(item.segment || item.metrics?.segment || '').toUpperCase()
       const isCrypto = exch === 'CRYPTO' || exch === 'BINANCE' || exch === 'DERIBIT' || seg === 'CRYPTO' || String(item.symbol || '').toUpperCase().endsWith('USDT')
       const timeStr = item.created_at || item.timestamp
-      if (isIntraday && !isSwingOrPositional && timeStr) {
+
+      if (timeStr) {
         try {
           const d = new Date(String(timeStr).replace(' IST', '').trim())
           if (!isNaN(d.getTime())) {
+            const ageDays = (now.getTime() - d.getTime()) / 86_400_000
             if (isCrypto) {
-              if (now.getTime() - d.getTime() >= 86_400_000) {
+              if (ageDays >= 1) {
                 return {
                   ...item,
                   is_invalidated: true,
@@ -43,19 +46,49 @@ function loadStoredNotifications() {
                   invalidation_reason: item.invalidation_reason || '24x7 Crypto session expired (24h rolling limit reached). Trade closed.'
                 }
               }
-            } else if (d.toDateString() !== now.toDateString()) {
+            } else if ((isIntraday || isGammaOrZeroDte) && d.toDateString() !== now.toDateString()) {
               return {
                 ...item,
                 is_invalidated: true,
                 isInvalidated: true,
                 is_active: false,
                 stage: 'EXPIRED',
-                invalidation_reason: item.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
+                invalidation_reason: item.invalidation_reason || 'Session expired (market cutoff reached). Trade closed.'
+              }
+            } else if (ageDays > 5) {
+              return {
+                ...item,
+                is_invalidated: true,
+                isInvalidated: true,
+                is_active: false,
+                stage: 'EXPIRED',
+                invalidation_reason: item.invalidation_reason || 'Signal window exceeded (5-day limit). Trade closed.'
               }
             }
           }
         } catch (_) {}
       }
+
+      if (item.expiry_date) {
+        try {
+          const exp = new Date(item.expiry_date)
+          if (!isNaN(exp.getTime())) {
+            const today = new Date()
+            today.setHours(0, 0, 0, 0)
+            if (exp < today) {
+              return {
+                ...item,
+                is_invalidated: true,
+                isInvalidated: true,
+                is_active: false,
+                stage: 'EXPIRED',
+                invalidation_reason: item.invalidation_reason || `Contract expired (${item.expiry_date}).`
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
       return item
     })
   } catch (_) {
@@ -91,8 +124,11 @@ export function normalizeNotification(payload) {
   const optType = payload.option_type || (payload.contract_symbol?.endsWith('PE') ? 'PE' : payload.contract_symbol?.endsWith('CE') ? 'CE' : null)
   const strikeNum = payload.strike ? Number(String(payload.strike).replace(/[^0-9.-]/g, '')) : null
   const spotNum = payload.underlying_spot ? Number(payload.underlying_spot) : null
-  const premiumNum = payload.option_premium ? Number(payload.option_premium) : (payload.ltp ? Number(payload.ltp) : null)
-  const ltpNum = payload.ltp ? Number(String(payload.ltp).replace(/[^0-9.-]/g, '')) : null
+  const isOption = Boolean(optType || payload.contract_symbol?.endsWith('PE') || payload.contract_symbol?.endsWith('CE') || payload.derivative_type === 'OPTIONS')
+  const rawLtp = payload.ltp ? Number(String(payload.ltp).replace(/[^0-9.-]/g, '')) : null
+  const isSpotLeak = isOption && rawLtp != null && (rawLtp > 5000 || (spotNum && Math.abs(rawLtp - spotNum) < 10))
+  const premiumNum = payload.option_premium ? Number(payload.option_premium) : (isSpotLeak ? null : rawLtp)
+  const ltpNum = isSpotLeak ? null : rawLtp
 
   const slNum = optPlan?.sl_premium ? Number(optPlan.sl_premium) : (tradePlan.invalidation_stop ? Number(tradePlan.invalidation_stop) : (payload.stop_loss ? Number(payload.stop_loss) : (payload.sl ? Number(payload.sl) : null)))
   const entryNum = optPlan?.entry_premium ? Number(optPlan.entry_premium) : (tradePlan.entry_price ? Number(tradePlan.entry_price) : (payload.trigger_level ? Number(payload.trigger_level) : (payload.entry ? Number(payload.entry) : (premiumNum || ltpNum))))
@@ -101,7 +137,18 @@ export function normalizeNotification(payload) {
   const t3Num = optPlan?.t3_premium ? Number(optPlan.t3_premium) : (tradePlan.target_3 ? Number(tradePlan.target_3) : (payload.t3 ? Number(payload.t3) : null))
 
   const rawTime = payload.created_at || payload.timestamp || payload.triggered_at || now.toISOString()
-  const timeHorizon = payload.time_horizon || payload.timeHorizon || (tradePlan?.timeframe?.toUpperCase().includes('SWING') ? 'SWING_MID' : 'SWING_MID')
+  const isIntradayType = Boolean(
+    payload.alert_type &&
+    (payload.alert_type.toUpperCase().includes('INTRADAY') ||
+     payload.alert_type.toUpperCase().includes('GAMMA') ||
+     payload.alert_type.toUpperCase().includes('OPTIONS_MOMENTUM') ||
+     payload.alert_type.toUpperCase().includes('SCALP') ||
+     payload.alert_type.toUpperCase().includes('ORB'))
+  )
+  const timeHorizon =
+    payload.time_horizon ||
+    payload.timeHorizon ||
+    (isIntradayType ? 'INTRADAY' : (tradePlan?.timeframe?.toUpperCase().includes('SWING') ? 'SWING_MID' : 'INTRADAY'))
 
   return {
     id,

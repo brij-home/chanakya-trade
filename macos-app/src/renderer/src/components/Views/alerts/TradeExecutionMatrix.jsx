@@ -14,7 +14,10 @@ export function TradeExecutionMatrix({
   expiryInfo,
   densityMode = 'compact',
 }) {
-  const tp = tradePlan || {}
+  const tp = tradePlan || alert?.actionable_plan?.trade_plan || {}
+  const optPlan = alert?.actionable_plan?.option_plan || {}
+  const hedgedSpread = alert?.hedged_spread || alert?.actionable_plan?.hedged_spread || optPlan?.hedged_spread || tp?.hedged_spread || null
+  const freeRollPlan = alert?.free_roll_plan || alert?.actionable_plan?.free_roll_plan || optPlan?.free_roll_plan || tp?.free_roll_plan || null
   const mktSt = marketStatus || 'SESSION_CLOSED'
 
   // Single Source of Truth Lifecycle evaluated against the exact current price
@@ -380,6 +383,50 @@ export function TradeExecutionMatrix({
           />
         ) : null}
       </div>
+
+      {/* ── Institutional Defined-Risk Vertical Spread Blueprint ── */}
+      {hedgedSpread && (
+        <div className="p-2 rounded-lg bg-sky-950/40 border border-sky-500/30 flex flex-col gap-1.5 text-[9.5px]">
+          <div className="flex items-center justify-between">
+            <span className="font-black text-sky-300 flex items-center gap-1 uppercase tracking-wide">
+              <span>🛡️</span> DEFINED-RISK VERTICAL SPREAD (Theta-Neutral)
+            </span>
+            <span className="font-mono font-bold text-sky-200 bg-sky-500/20 px-1.5 py-0.5 rounded border border-sky-500/30">
+              R:R {hedgedSpread.spread_rr || '1:2.5'} · Max Profit: ₹{hedgedSpread.max_profit_pts ? formatNum(hedgedSpread.max_profit_pts) : '—'}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 text-[9px] font-mono">
+            <div className="bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-1 rounded text-emerald-300 truncate" title={hedgedSpread.long_leg}>
+              🟢 <span className="font-bold">BUY:</span> {hedgedSpread.long_leg}
+            </div>
+            <div className="bg-rose-500/10 border border-rose-500/20 px-1.5 py-1 rounded text-rose-300 truncate" title={hedgedSpread.short_leg}>
+              🔴 <span className="font-bold">SELL:</span> {hedgedSpread.short_leg}
+            </div>
+            <div className="bg-amber-500/10 border border-amber-500/20 px-1.5 py-1 rounded text-amber-300 truncate">
+              ⚡ <span className="font-bold">Net Debit:</span> ₹{formatNum(hedgedSpread.net_debit)}
+            </div>
+          </div>
+          <div className="text-[8.5px] text-sky-200/80 flex items-center gap-1 font-sans">
+            <span>🛡️</span>
+            <span>{hedgedSpread.guidance || `${hedgedSpread.theta_reduction_pct || 75}% Theta decay offset via short leg.`}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ── Free-Roll Execution Protocol (+2R Scale 50% & Zero-Risk Runner) ── */}
+      {freeRollPlan && (
+        <div className="p-2 rounded-lg bg-emerald-950/40 border border-emerald-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-1.5 text-[9.5px]">
+          <div className="flex items-center gap-1.5 font-bold text-emerald-300">
+            <span className="text-xs">💎</span>
+            <span>
+              FREE-ROLL PROTOCOL: Bank {freeRollPlan.scale_pct || '50%'} at T1 (₹{formatNum(freeRollPlan.t1_target_premium || levels.t1)}) & ratchet SL to Cost (Risk = ₹0.00).
+            </span>
+          </div>
+          <div className="text-[8.5px] font-mono text-cyan-300 bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/20 whitespace-nowrap">
+            🏃 Runner: {freeRollPlan.runner_trailing_strategy || '1.5x ATR dynamic trail'}
+          </div>
+        </div>
+      )}
 
       {/* Dynamic Institutional Guidance: Extended / Pullback / Pyramiding */}
       {isExtended && (

@@ -437,6 +437,21 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
             day_low = round(day_low * fx, 2) if day_low else 0.0
         # ─────────────────────────────────────────────────────────────────
 
+        # Fallback to BSE if not found or no price on NSE (.NS)
+        if (
+            (not last_price or last_price <= 0)
+            and exchange.upper() == "NSE"
+            and ticker.endswith(".NS")
+        ):
+            try:
+                bse_q = yf_get_quote(symbol, exchange="BSE")
+                if bse_q and bse_q.last_price > 0:
+                    with _quote_cache_lock:
+                        _quote_cache[cache_key] = (now, bse_q)
+                    return bse_q
+            except Exception:
+                pass
+
         change = round(last_price - prev_close, 2) if prev_close else 0
         change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
 
@@ -464,6 +479,15 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
             or "delisted" in err_str
             or isinstance(e, (KeyError, IndexError))
         ):
+            if exchange.upper() == "NSE" and ticker.endswith(".NS"):
+                try:
+                    bse_q = yf_get_quote(symbol, exchange="BSE")
+                    if bse_q and bse_q.last_price > 0:
+                        with _quote_cache_lock:
+                            _quote_cache[cache_key] = (now, bse_q)
+                        return bse_q
+                except Exception:
+                    pass
             with _dead_ticker_lock:
                 if ticker not in _DEAD_TICKER_CACHE:  # first detection — log it
                     logger.warning(
@@ -653,6 +677,20 @@ def yf_get_ohlcv(
             hist = t.history(period=p, interval=yf_interval)
 
         if hist.empty:
+            if exchange.upper() == "NSE" and ticker.endswith(".NS"):
+                try:
+                    bse_rows = yf_get_ohlcv(
+                        symbol=symbol,
+                        exchange="BSE",
+                        interval=interval,
+                        from_date=from_date,
+                        to_date=to_date,
+                        period=period,
+                    )
+                    if bse_rows:
+                        return bse_rows
+                except Exception:
+                    pass
             return []
 
         # ── MCX Commodity USD → INR conversion for OHLCV ────────────────
@@ -697,7 +735,21 @@ def yf_get_ohlcv(
     except Exception as e:
         err_str = str(e).lower()
         if "404" in err_str or "not found" in err_str or "delisted" in err_str:
-            with _quote_cache_lock:
+            if exchange.upper() == "NSE" and ticker.endswith(".NS"):
+                try:
+                    bse_rows = yf_get_ohlcv(
+                        symbol=symbol,
+                        exchange="BSE",
+                        interval=interval,
+                        from_date=from_date,
+                        to_date=to_date,
+                        period=period,
+                    )
+                    if bse_rows:
+                        return bse_rows
+                except Exception:
+                    pass
+            with _dead_ticker_lock:
                 _DEAD_TICKER_CACHE[ticker] = time.time()
         elif (
             "429" in err_str

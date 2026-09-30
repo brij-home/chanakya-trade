@@ -121,6 +121,7 @@ def detect_gamma_blast(
     day_low: Optional[float] = None,
     prev_day_high: Optional[float] = None,
     prev_day_low: Optional[float] = None,
+    now_dt: Optional[datetime] = None,
 ) -> list[AutoAlert]:
     """
     Evaluates options chain for explosive Gamma Blast early-warning and ignite triggers.
@@ -143,7 +144,7 @@ def detect_gamma_blast(
         return []
 
     alerts: list[AutoAlert] = []
-    now_dt = datetime.now(IST)
+    now_dt = now_dt or datetime.now(IST)
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     is_opening_drive = now_dt.hour == 9 and now_dt.minute <= 45
     clean_sym = canonical_alert_symbol(underlying)
@@ -356,6 +357,21 @@ def detect_gamma_blast(
                 min_exp_oi_chg = 8000
                 min_turnover_vol = 12000
 
+        # Momentum volume relaxation (Fix E CE): During the first 30 minutes post-opening
+        # (09:25–09:45), CE volumes haven't ramped to full institutional levels yet.
+        # Lower the floor to 5000 when pchange >= 10% and oi_change signals real activity.
+        pchange_ce_pre = float(getattr(c, "pchange", 0.0) or 0.0)
+        oi_change_ce_pre = int(getattr(c, "oi_change", 0) or 0)
+        _is_early_momentum_ce = (
+            is_index
+            and not is_opening_drive
+            and now_dt.minute <= 45  # Before 09:45 IST
+            and pchange_ce_pre >= 10.0
+            and (oi_change_ce_pre != 0)
+        )
+        if _is_early_momentum_ce and min_volume > 5000:
+            min_volume = 5000
+
         if c_oi < min_strike_oi or c_vol < min_volume:
             continue
 
@@ -412,13 +428,13 @@ def detect_gamma_blast(
                     is_phys_week = False
 
         if is_phys_week and not is_index:
-            # During physical expiry week, near-month single stock options have huge margin spikes (25%->100%).
-            # Suppress sluggish early warnings: require vol_oi_ratio >= 1.4 or ignited momentum to prevent capital traps.
-            if vol_oi_ratio < 1.4 and (volume < 300 * lot_sz) and pchange < 10.0:
-                logger.debug(
-                    f"[GammaBlast CE] Suppressed {contract_sym}: Low turnover during SEBI physical delivery week"
-                )
-                continue
+            # Under SEBI regulations, single-stock derivatives are physically settled. In the final
+            # 4 trading days before the last Thursday, near-month stock options face 100% full-value
+            # margin surges and severe gamma/theta collapse. Strictly veto all near-month stock options.
+            logger.debug(
+                f"[GammaBlast CE] Strictly vetoed {contract_sym}: Near-month stock option in SEBI physical delivery expiry week"
+            )
+            continue
 
         now_ts = time.time()
         c_key = f"{underlying}_{int(strike)}_CE"
@@ -482,8 +498,27 @@ def detect_gamma_blast(
             )
 
         # Opposing Day High collision & VWAP overextension filter for CE:
-        if effective_vwap > 0 and (spot - effective_vwap) / effective_vwap * 100 > 0.65:
-            continue  # Extended > 0.65% above VWAP: Climax exhaustion risk
+        # Default: Extended > 0.65% above VWAP = climax exhaustion, skip.
+        # EXCEPTION: On genuine institutional breakouts, spot legitimately surges 1-2% above VWAP
+        # before consolidating. Raise the cap dynamically:
+        #   vol_oi >= 2.0x or pchange >= 15% → cap rises to 1.2% above VWAP
+        #   vol_oi >= 3.0x or pchange >= 25% → cap rises to 2.0% (full breakout flush)
+        _ce_vwap_ext_pct = (
+            (spot - effective_vwap) / effective_vwap * 100 if effective_vwap > 0 else 0.0
+        )
+        _is_ce_full_flush = vol_oi_ratio >= 3.0 or (
+            pchange >= 25.0 and volume >= (15000 if is_index else 400)
+        )
+        _is_ce_momentum = vol_oi_ratio >= 2.0 or (
+            pchange >= 15.0 and volume >= (8000 if is_index else 200)
+        )
+        _ce_vwap_ext_cap = 2.0 if _is_ce_full_flush else (1.2 if _is_ce_momentum else 0.65)
+        if _ce_vwap_ext_pct > _ce_vwap_ext_cap:
+            logger.debug(
+                f"[GammaBlast CE] Rejected {contract_sym}: Extended {_ce_vwap_ext_pct:.2f}% above VWAP "
+                f"(cap={_ce_vwap_ext_cap:.2f}% | flush={_is_ce_full_flush} | momentum={_is_ce_momentum})"
+            )
+            continue  # True climax exhaustion or thin momentum
 
         # PDH Proximity Suppression for CE:
         # If spot is within 0.25% of PDH and no confirmed PDH sweep, CE is colliding into
@@ -576,13 +611,18 @@ def detect_gamma_blast(
                 )
 
                 # Fix 2: SMC Structural Bypass for is_asymmetry_viable (CE side)
-                _ce_smc_bypass = _pdl_sweep_active and is_index and vol_oi_ratio >= 1.5
+                _ce_smc_bypass = is_index and (
+                    (vol_oi_ratio >= 1.5) or is_oi_shedding or _pdl_sweep_active
+                )
                 if tp and not tp.is_asymmetry_viable and not _ce_smc_bypass:
                     logger.debug(
                         f"[GammaBlast] Rejected {contract_sym}: Poor structural asymmetry ({tp.asymmetry_verdict})"
                     )
                     continue
                 elif tp and not tp.is_asymmetry_viable and _ce_smc_bypass:
+                    tp.is_asymmetry_viable = True
+                    tp.asymmetry_verdict = "SMC_MOMENTUM_OVERRIDE"
+                    tp.asymmetry_note = "SMC Gamma Bypass: Momentum expansion override"
                     logger.debug(
                         f"[GammaBlast CE] SMC PDL-sweep bypass: overriding asymmetry rejection for {contract_sym} "
                         f"(spot={spot:.1f} near day_low={day_low})"
@@ -666,6 +706,9 @@ def detect_gamma_blast(
                 sl_premium = round(max(0.05, opt_ltp * 0.72), 1) if opt_ltp > 0 else 1.0
                 rr_str = "1:1.7"
                 t1_pct_str = "+25%"
+                confidence = (
+                    confidence if ("confidence" in locals() and confidence is not None) else 70
+                )
 
             headline = (
                 f"⚡ CALL GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} CE"
@@ -909,6 +952,21 @@ def detect_gamma_blast(
                 min_exp_oi_chg = 8000
                 min_turnover_vol = 12000
 
+        # Momentum volume relaxation (Fix E): During the first 30 minutes post-opening
+        # (09:25–09:45), PE volumes haven't ramped to full institutional levels yet.
+        # Lower the floor to 5000 when pchange >= 10% and oi_change signals real activity.
+        pchange_pre = float(getattr(c, "pchange", 0.0) or 0.0)
+        oi_change_pre = int(getattr(c, "oi_change", 0) or 0)
+        _is_early_momentum_pe = (
+            is_index
+            and not is_opening_drive
+            and now_dt.minute <= 45  # Before 09:45 IST
+            and pchange_pre >= 10.0
+            and (oi_change_pre != 0)
+        )
+        if _is_early_momentum_pe and min_volume > 5000:
+            min_volume = 5000
+
         if c_oi < min_strike_oi or c_vol < min_volume:
             continue
 
@@ -965,13 +1023,13 @@ def detect_gamma_blast(
                     is_phys_week = False
 
         if is_phys_week and not is_index:
-            # During physical expiry week, near-month single stock options have huge margin spikes (25%->100%).
-            # Suppress sluggish early warnings: require vol_oi_ratio >= 1.4 or ignited momentum to prevent capital traps.
-            if vol_oi_ratio < 1.4 and (volume < 300 * lot_sz) and pchange < 10.0:
-                logger.debug(
-                    f"[GammaBlast PE] Suppressed {contract_sym}: Low turnover during SEBI physical delivery week"
-                )
-                continue
+            # Under SEBI regulations, single-stock derivatives are physically settled. In the final
+            # 4 trading days before the last Thursday, near-month stock options face 100% full-value
+            # margin surges and severe gamma/theta collapse. Strictly veto all near-month stock options.
+            logger.debug(
+                f"[GammaBlast PE] Strictly vetoed {contract_sym}: Near-month stock option in SEBI physical delivery expiry week"
+            )
+            continue
 
         now_ts = time.time()
         c_key = f"{underlying}_{int(strike)}_PE"
@@ -1036,8 +1094,27 @@ def detect_gamma_blast(
             )
 
         # Opposing Day Low collision & VWAP overextension filter for PE:
-        if effective_vwap > 0 and (effective_vwap - spot) / effective_vwap * 100 > 0.65:
-            continue  # Extended > 0.65% below VWAP: Capitulation exhaustion risk
+        # Default: Extended > 0.65% below VWAP = capitulation exhaustion, skip.
+        # EXCEPTION: When momentum is high (institutional flush), raise the cap:
+        #   vol_oi >= 2.0x or pchange >= 15% → cap rises to 1.2% below VWAP
+        #   vol_oi >= 3.0x or pchange >= 25% → cap rises to 2.0% below VWAP (full flush)
+        # This prevents missing the biggest PE moves of the day.
+        _pe_vwap_ext_pct = (
+            (effective_vwap - spot) / effective_vwap * 100 if effective_vwap > 0 else 0.0
+        )
+        _is_full_flush = vol_oi_ratio >= 3.0 or (
+            pchange >= 25.0 and volume >= (15000 if is_index else 400)
+        )
+        _is_momentum_expansion = vol_oi_ratio >= 2.0 or (
+            pchange >= 15.0 and volume >= (8000 if is_index else 200)
+        )
+        _pe_vwap_ext_cap = 2.0 if _is_full_flush else (1.2 if _is_momentum_expansion else 0.65)
+        if _pe_vwap_ext_pct > _pe_vwap_ext_cap:
+            logger.debug(
+                f"[GammaBlast PE] Rejected {contract_sym}: Extended {_pe_vwap_ext_pct:.2f}% below VWAP "
+                f"(cap={_pe_vwap_ext_cap:.2f}% | flush={_is_full_flush} | momentum={_is_momentum_expansion})"
+            )
+            continue  # True capitulation exhaustion or thin momentum
 
         # PDL Proximity Suppression for PE:
         # If spot is within 0.25% above PDL and no confirmed PDL bounce, PE is colliding into
@@ -1130,13 +1207,18 @@ def detect_gamma_blast(
                 )
 
                 # Fix 2: SMC Structural Bypass for is_asymmetry_viable (PE side)
-                _pe_smc_bypass = is_index and ((vol_oi_ratio >= 2.0) or _pdh_sweep_active)
+                _pe_smc_bypass = is_index and (
+                    (vol_oi_ratio >= 1.5) or is_oi_shedding or _pdh_sweep_active
+                )
                 if tp and not tp.is_asymmetry_viable and not _pe_smc_bypass:
                     logger.debug(
                         f"[GammaBlast] Rejected {contract_sym}: Poor structural asymmetry ({tp.asymmetry_verdict})"
                     )
                     continue
                 elif tp and not tp.is_asymmetry_viable and _pe_smc_bypass:
+                    tp.is_asymmetry_viable = True
+                    tp.asymmetry_verdict = "SMC_MOMENTUM_OVERRIDE"
+                    tp.asymmetry_note = "SMC Gamma Bypass: Momentum expansion override"
                     logger.debug(
                         f"[GammaBlast PE] SMC bypass: overriding asymmetry rejection for {contract_sym} "
                         f"(vol_oi={vol_oi_ratio:.2f}, pdh_sweep={_pdh_sweep_active})"
@@ -1220,6 +1302,9 @@ def detect_gamma_blast(
                 sl_premium = round(max(0.05, opt_ltp * 0.72), 1) if opt_ltp > 0 else 1.0
                 rr_str = "1:1.7"
                 t1_pct_str = "+25%"
+                confidence = (
+                    confidence if ("confidence" in locals() and confidence is not None) else 70
+                )
 
             headline = (
                 f"⚡ PUT GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} PE"

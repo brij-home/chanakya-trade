@@ -33,7 +33,7 @@ def test_put_option_ignition_requires_premium_breakout(monkeypatch):
         alert_type="OPTIONS_MOMENTUM",
         stage="EARLY_WARNING",
         symbol="NIFTY",
-        contract_symbol="NFO:NIFTY26SEP23000PE",
+        contract_symbol="NFO:NIFTY26OCT23000PE",
         exchange="NFO",
         direction="BEARISH",
         headline="PE Coiling",
@@ -51,7 +51,7 @@ def test_put_option_ignition_requires_premium_breakout(monkeypatch):
 
     # 1. Price drops to 65.6 (below trigger 69.4) -> MUST NOT IGNITE
     monkeypatch.setattr(
-        engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26SEP23000PE": 65.6}
+        engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26OCT23000PE": 65.6}
     )
     ignited = engine.check_and_ignite_early_warnings()
     assert len(ignited) == 0
@@ -59,7 +59,7 @@ def test_put_option_ignition_requires_premium_breakout(monkeypatch):
 
     # 2. Price surges to 71.0 (above trigger 69.4) -> MUST IGNITE AS PUT BREAKDOWN
     monkeypatch.setattr(
-        engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26SEP23000PE": 71.0}
+        engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26OCT23000PE": 71.0}
     )
     ignited = engine.check_and_ignite_early_warnings()
     assert len(ignited) == 1
@@ -84,7 +84,7 @@ def test_opposing_trade_mutex_suppresses_conflicting_ignition(monkeypatch):
         alert_type="GAMMA_BLAST",
         stage="IGNITED",
         symbol="NIFTY",
-        contract_symbol="NFO:NIFTY26SEP23050CE",
+        contract_symbol="NFO:NIFTY26OCT23050CE",
         exchange="NFO",
         direction="BULLISH",
         headline="CE Ignited",
@@ -104,7 +104,7 @@ def test_opposing_trade_mutex_suppresses_conflicting_ignition(monkeypatch):
         alert_type="OPTIONS_MOMENTUM",
         stage="EARLY_WARNING",
         symbol="NIFTY",
-        contract_symbol="NFO:NIFTY26SEP23000PE",
+        contract_symbol="NFO:NIFTY26OCT23000PE",
         exchange="NFO",
         direction="BEARISH",
         headline="PE Coiling",
@@ -122,7 +122,7 @@ def test_opposing_trade_mutex_suppresses_conflicting_ignition(monkeypatch):
 
     # PE crosses trigger, but no CHoCH/reversal metric -> MUST BE SUPPRESSED
     monkeypatch.setattr(
-        engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26SEP23000PE": 72.0}
+        engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26OCT23000PE": 72.0}
     )
     ignited = engine.check_and_ignite_early_warnings()
     assert len(ignited) == 0
@@ -153,7 +153,7 @@ def test_pdl_bear_trap_suppression():
     mock_pe.volume = 5000
     mock_pe.oi = 10000  # Vol/OI = 0.5 (low)
     mock_pe.option_type = "PE"
-    mock_pe.symbol = "NIFTY26SEP23000PE"
+    mock_pe.symbol = "NIFTY26OCT23000PE"
     mock_pe.expiry = "2026-09-25"
 
     chain = [mock_pe]
@@ -187,7 +187,7 @@ def test_gamma_blast_sweep_requires_actual_bounce():
     mock_ce.oi = 50000
     mock_ce.oi_change = -5000
     mock_ce.option_type = "CE"
-    mock_ce.symbol = "NIFTY26SEP23050CE"
+    mock_ce.symbol = "NIFTY26OCT23050CE"
     mock_ce.expiry = "2026-09-25"
 
     chain = [mock_ce]
@@ -221,7 +221,7 @@ def test_index_macro_confluence_vetoes_secondary_index_put_when_nifty_is_green()
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="MIDCPNIFTY",
-        contract_symbol="NFO:MIDCPNIFTY26SEP12500PE",
+        contract_symbol="NFO:MIDCPNIFTY26OCT12500PE",
         exchange="NFO",
         direction="BEARISH",
         headline="Midcap Put Breakdown",
@@ -281,7 +281,7 @@ def test_banknifty_locomotive_tug_of_war_vetoes_naked_options(monkeypatch):
         alert_type="INDEX_CALL_SETUP",
         stage="IGNITED",
         symbol="BANKNIFTY",
-        contract_symbol="NFO:BANKNIFTY26SEP55500CE",
+        contract_symbol="NFO:BANKNIFTY26OCT55500CE",
         exchange="NFO",
         direction="BULLISH",
         headline="Bank Nifty Call Breakout",
@@ -317,7 +317,7 @@ def test_in_flight_directional_lockout_blocks_opposing_alert():
         alert_type="OPTIONS_MOMENTUM",
         stage="IGNITED",
         symbol="MIDCPNIFTY",
-        contract_symbol="NFO:MIDCPNIFTY26SEP12500CE",
+        contract_symbol="NFO:MIDCPNIFTY26OCT12500CE",
         exchange="NFO",
         direction="BULLISH",
         headline="Midcap CE In-Flight",
@@ -343,7 +343,7 @@ def test_in_flight_directional_lockout_blocks_opposing_alert():
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="MIDCPNIFTY",
-        contract_symbol="NFO:MIDCPNIFTY26SEP12450PE",
+        contract_symbol="NFO:MIDCPNIFTY26OCT12450PE",
         exchange="NFO",
         direction="BEARISH",
         headline="Midcap PE Breakdown",
@@ -385,7 +385,7 @@ def test_directional_quarantine_blocks_rapid_flip_flop(monkeypatch):
         alert_type="OPTIONS_MOMENTUM",
         stage="IGNITED",
         symbol="NIFTY",
-        contract_symbol="NFO:NIFTY26SEP25000CE",
+        contract_symbol="NFO:NIFTY26OCT25000CE",
         exchange="NFO",
         direction="BULLISH",
         headline="Nifty Bullish",
@@ -416,7 +416,7 @@ def test_directional_quarantine_blocks_rapid_flip_flop(monkeypatch):
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="NIFTY",
-        contract_symbol="NFO:NIFTY26SEP24800PE",
+        contract_symbol="NFO:NIFTY26OCT24800PE",
         exchange="NFO",
         direction="BEARISH",
         headline="Nifty Bear Breakdown",
@@ -463,7 +463,7 @@ def test_tier1_sanity_at_step_00e_protects_existing_trades():
         alert_type="OPTIONS_MOMENTUM",
         stage="EARLY_WARNING",
         symbol="FINNIFTY",
-        contract_symbol="NFO:FINNIFTY26SEP24000CE",
+        contract_symbol="NFO:FINNIFTY26OCT24000CE",
         exchange="NFO",
         direction="BULLISH",
         headline="Finnifty CE Radar",
@@ -489,7 +489,7 @@ def test_tier1_sanity_at_step_00e_protects_existing_trades():
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="FINNIFTY",
-        contract_symbol="NFO:FINNIFTY26SEP23800PE",
+        contract_symbol="NFO:FINNIFTY26OCT23800PE",
         exchange="NFO",
         direction="BEARISH",
         headline="Finnifty PE Counter-Trend",

@@ -262,7 +262,7 @@ def test_gamma_blast_strictly_rejects_unviable_asymmetry():
             option_type="PE",
             last_price=100.0,
             oi=50000,
-            oi_change=-5000,
+            oi_change=5000,
             volume=60000,
             exchange="NFO",
         )
@@ -311,3 +311,26 @@ def test_scrutiny_auditor_vetoes_unviable_trade_plan():
     assert "Sanity Veto" in reason
     assert "poor asymmetry" in reason
     assert flags["rr_valid"] is False
+
+
+def test_get_trading_days_elapsed():
+    """Verify that get_trading_days_elapsed accurately counts trading sessions excluding weekends and holidays."""
+    from market.calendar import get_trading_days_elapsed
+
+    # Friday 2026-09-11 to Tuesday 2026-09-15:
+    # Fri (11): Trading day -> 1
+    # Sat (12): Weekend -> 0
+    # Sun (13): Weekend -> 0
+    # Mon (14): Ganesh Chaturthi holiday -> 0
+    # Tue (15): Trading day -> 2
+    assert get_trading_days_elapsed(date(2026, 9, 11), date(2026, 9, 11)) == 1
+    assert get_trading_days_elapsed(date(2026, 9, 11), date(2026, 9, 13)) == 1
+    assert (
+        get_trading_days_elapsed(date(2026, 9, 11), date(2026, 9, 14)) == 1
+    )  # 14 is Ganesh Chaturthi!
+    assert (
+        get_trading_days_elapsed(date(2026, 9, 11), date(2026, 9, 15)) == 2
+    )  # 11 + 15 = 2 trading days
+    assert (
+        get_trading_days_elapsed(date(2026, 9, 15), date(2026, 9, 11)) == 0
+    )  # start > target -> 0

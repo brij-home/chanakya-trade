@@ -381,10 +381,12 @@ def resolve_recommended_option_contract(
 
     opt_t1 = round(max(0.05, opt_ltp + opt_gain_t1), 2)
     opt_t2 = round(max(0.05, opt_ltp + opt_gain_t2), 2)
-    opt_sl = round(max(0.05, opt_ltp + opt_loss_sl), 2)
-    # Institutional Risk Control: Cap max option loss at -30% of entry premium
-    if opt_ltp > 0:
-        opt_sl = max(opt_sl, round(max(0.05, opt_ltp * 0.70), 2))
+    if opt_ltp > 0.10:
+        opt_sl = round(max(0.05, min(opt_ltp - 0.05, opt_ltp + opt_loss_sl)), 2)
+        opt_sl = max(opt_sl, round(opt_ltp * 0.70, 2))
+    else:
+        # Micro-premium floor: strictly guarantee stop loss is below premium
+        opt_sl = round(max(0.01, opt_ltp * 0.50), 2)
 
     # ── Futures Contract Specification ────────────────────────────
     # Formulate canonical monthly futures contract: {SYMBOL}{YY}{MMM}FUT
@@ -406,6 +408,58 @@ def resolve_recommended_option_contract(
     fut_t1 = round(target_1 + fut_basis, 2) if target_1 > 0 else 0.0
     fut_t2 = round(target_2 + fut_basis, 2) if target_2 > 0 else 0.0
     fut_sl = round(stop_loss + fut_basis, 2) if stop_loss > 0 else 0.0
+
+    if not expiry_date and fut_exp_date:
+        expiry_date = fut_exp_date.strftime("%Y-%m-%d")
+
+    # ── Institutional Defined-Risk Hedged Spread ─────────────────
+    hedge_plan = None
+    try:
+        from engine.options_hedging import build_defined_risk_hedge_plan
+
+        hedge_plan = build_defined_risk_hedge_plan(
+            symbol=clean_sym,
+            direction=direction,
+            spot=spot,
+            strike=strike,
+            opt_type=opt_type,
+            opt_ltp=opt_ltp,
+            chain=chain,
+            lot_size=lot_sz,
+            now_dt=now_dt,
+            asymmetric_r_r=True,
+            expiry_date=expiry_date,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to build defined-risk hedge plan for {clean_sym}: {e}")
+
+    # ── Futures Overnight Risk Mitigation (Protective Collar) ─────
+    futures_hedge = None
+    if fut_contract_sym and spot > 0:
+        step = 100.0 if "BANK" in clean_sym else (50.0 if "NIFTY" in clean_sym else 20.0)
+        is_bullish = direction.upper() in ("BULLISH", "BUY", "LONG")
+        if is_bullish:
+            put_strike = float(round((stop_loss if stop_loss > 0 else spot * 0.98) / step) * step)
+            call_strike = float(round((target_1 if target_1 > 0 else spot * 1.03) / step) * step)
+            futures_hedge = {
+                "strategy": "COLLARED_FUTURE",
+                "protective_strike": put_strike,
+                "protective_symbol": f"{clean_sym} {int(put_strike)} PE",
+                "ceiling_strike": call_strike,
+                "ceiling_symbol": f"{clean_sym} {int(call_strike)} CE",
+                "description": f"Long Future + Buy {int(put_strike)} PE (Hard Floor at ₹{put_strike:,.0f} · Eliminates Overnight Gap Risk)",
+            }
+        else:
+            call_strike = float(round((stop_loss if stop_loss > 0 else spot * 1.02) / step) * step)
+            put_strike = float(round((target_1 if target_1 > 0 else spot * 0.97) / step) * step)
+            futures_hedge = {
+                "strategy": "COLLARED_FUTURE",
+                "protective_strike": call_strike,
+                "protective_symbol": f"{clean_sym} {int(call_strike)} CE",
+                "ceiling_strike": put_strike,
+                "ceiling_symbol": f"{clean_sym} {int(put_strike)} PE",
+                "description": f"Short Future + Buy {int(call_strike)} CE (Hard Ceiling at ₹{call_strike:,.0f} · Eliminates Overnight Gap Risk)",
+            }
 
     return {
         "strike": strike,
@@ -431,6 +485,8 @@ def resolve_recommended_option_contract(
         "futures_recommendation": (
             "Delta 1.0 zero-decay vehicle for positional swing" if is_positional else None
         ),
+        "hedge_plan": hedge_plan,
+        "futures_hedge": futures_hedge,
     }
 
 
@@ -488,6 +544,8 @@ class AsymmetricOpportunity:
     futures_stop_loss: Optional[float] = None
     is_next_month_routed: bool = False
     derivative_safeguard: Optional[str] = None
+    hedge_plan: Optional[dict[str, Any]] = None
+    futures_hedge: Optional[dict[str, Any]] = None
 
     # Compatibility Aliases
     moonshot_target: float = 0.0
@@ -788,6 +846,8 @@ class AsymmetricOpportunityRadar:
             futures_stop_loss=opt_info.get("futures_stop_loss") if opt_info else None,
             is_next_month_routed=opt_info.get("is_next_month_routed", False) if opt_info else False,
             derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
+            hedge_plan=opt_info.get("hedge_plan") if opt_info else None,
+            futures_hedge=opt_info.get("futures_hedge") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -952,6 +1012,8 @@ class AsymmetricOpportunityRadar:
             futures_stop_loss=opt_info.get("futures_stop_loss") if opt_info else None,
             is_next_month_routed=opt_info.get("is_next_month_routed", False) if opt_info else False,
             derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
+            hedge_plan=opt_info.get("hedge_plan") if opt_info else None,
+            futures_hedge=opt_info.get("futures_hedge") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -1142,6 +1204,8 @@ class AsymmetricOpportunityRadar:
             futures_stop_loss=opt_info.get("futures_stop_loss") if opt_info else None,
             is_next_month_routed=opt_info.get("is_next_month_routed", False) if opt_info else False,
             derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
+            hedge_plan=opt_info.get("hedge_plan") if opt_info else None,
+            futures_hedge=opt_info.get("futures_hedge") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -1553,6 +1617,12 @@ class AsymmetricOpportunityRadar:
                 "lot_size": lot_sz,
             },
             lot_size=lot_sz,
+            futures_hedge={
+                "strategy": "PROTECTIVE_FLOOR",
+                "protective_strike": round(sl_price / (10.0 if "CRUDE" in clean_sym else 1.0))
+                * (10.0 if "CRUDE" in clean_sym else 1.0),
+                "description": f"Hedged Commodity Contract: Hard Floor at ₹{round(sl_price / (10.0 if 'CRUDE' in clean_sym else 1.0)) * (10.0 if 'CRUDE' in clean_sym else 1.0):,.1f} to eliminate overnight gap risk into US session",
+            },
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -1733,6 +1803,8 @@ class AsymmetricOpportunityRadar:
             futures_stop_loss=opt_info.get("futures_stop_loss") if opt_info else None,
             is_next_month_routed=opt_info.get("is_next_month_routed", False) if opt_info else False,
             derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
+            hedge_plan=opt_info.get("hedge_plan") if opt_info else None,
+            futures_hedge=opt_info.get("futures_hedge") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 

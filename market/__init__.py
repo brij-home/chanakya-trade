@@ -10,6 +10,7 @@ from market.calendar import (
     get_current_ist_session,
     get_trading_minutes_elapsed,
     get_adjusted_expiry_date,
+    get_trading_days_elapsed,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "get_current_ist_session",
     "get_trading_minutes_elapsed",
     "get_adjusted_expiry_date",
+    "get_trading_days_elapsed",
 ]

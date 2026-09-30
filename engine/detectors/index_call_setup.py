@@ -40,12 +40,15 @@ _INDEX_SYMBOLS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SEN
 # Setup type → headline icon map
 _SETUP_ICONS = {
     "PDL_DEMAND_REJECTION": "🟢",
+    "DAY_LOW_DEMAND_BOUNCE": "🟢",
+    "FAILED_DAY_LOW_BREAKDOWN": "⚡",
     "VWAP_RECLAIM": "🟢",
     "DEMAND_ZONE_SWEEP": "⚡",
     "BEARISH_EXHAUSTION_CE": "🎯",
     "DOUBLE_BOTTOM_BREAKOUT": "🟢",
     "VCP_COILING": "🔴",  # Red dot = early warning, coiling before explosive move
     "DAY_HIGH_BREAKOUT": "🚀",
+    "INTRADAY_CAPITULATION_REVERSAL": "🔥",
 }
 
 
@@ -91,29 +94,77 @@ def detect_index_call_setup(
 
     # ── Market Breadth Gate ─────────────────────────────────────────
     # Index call setups into severe broad market liquidation have negative statistical expectancy.
+    # PRICE-ACTION ESCAPE: If spot is already +0.5% from session open, price has voted bullish
+    # — A/D breadth lags by 10-15 minutes. Skip breadth gate when price action confirms the move.
     is_test_runner = (
         ("PYTEST_CURRENT_TEST" in os.environ)
         or (os.environ.get("CHANAKYA_TESTING") == "1")
         or (os.environ.get("DEPLOY_MODE") == "test")
     )
-    if not is_test_runner or os.environ.get("ENFORCE_TEST_BREADTH") == "1":
+    _day_open_price_ce: Optional[float] = None
+    if ohlcv_5m is not None:
         try:
-            from market.sentiment import get_market_breadth
+            if hasattr(ohlcv_5m, "iloc") and len(ohlcv_5m) >= 1:
+                col_o = "open" if "open" in ohlcv_5m.columns else "Open"
+                _day_open_price_ce = float(ohlcv_5m[col_o].iloc[0])
+        except Exception:
+            pass
+    _spot_above_open_escape = bool(
+        _day_open_price_ce
+        and _day_open_price_ce > 0
+        and spot
+        > _day_open_price_ce * 1.005  # spot already +0.5% from open: price action voted bullish
+    )
 
-            mb = get_market_breadth()
-            if mb and mb.verdict != "UNAVAILABLE" and getattr(mb, "ad_ratio", 0.0) > 0:
-                if (
-                    mb.verdict == "BROAD_DECLINE"
-                    or mb.ad_ratio < 0.60
-                    or (mb.declines >= 2.0 * max(1, mb.advances))
-                ):
-                    logger.info(
-                        f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Market Breadth Liquidation active "
-                        f"(Adv: {mb.advances} / Dec: {mb.declines}, A/D {mb.ad_ratio:.2f}). Disallow call setups in negative tide."
-                    )
-                    return []
-        except Exception as e_mb:
-            logger.debug(f"[IndexCallSetup] Breadth check bypassed: {e_mb}")
+    # ── Dynamic V-Reversal / Capitulation Breadth Escape ──────────────
+    # A V-bottom forms BELOW the day's open. Demanding spot > day_open * 1.005 on a V-reversal
+    # is mathematically unreachable. When spot has surged significantly off the session low
+    # (>= +0.30% for Nifty/Sensex, >= +0.45% for BankNifty/FinNifty/Midcap) AND reclaimed
+    # or arrived within 0.15% of session VWAP, the price action has decisively bottomed.
+    # Lagging market-wide A/D breadth (which takes hours to recover) must not block index call setups.
+    _bounce_from_low_pct = (
+        ((spot - day_low) / max(1.0, day_low) * 100.0)
+        if (day_low and day_low > 0 and spot > day_low)
+        else 0.0
+    )
+    _min_reversal_bounce = (
+        0.45 if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX") else 0.30
+    )
+    _is_v_reversal_escape = bool(
+        day_low
+        and day_low > 0
+        and _bounce_from_low_pct >= _min_reversal_bounce
+        and (vwap is None or vwap <= 0 or spot >= vwap * 0.9985)
+    )
+    _breadth_bypassed = _spot_above_open_escape or _is_v_reversal_escape
+
+    if not is_test_runner or os.environ.get("ENFORCE_TEST_BREADTH") == "1":
+        if not _breadth_bypassed:
+            try:
+                from market.sentiment import get_market_breadth
+
+                mb = get_market_breadth()
+                if mb and mb.verdict != "UNAVAILABLE" and getattr(mb, "ad_ratio", 0.0) > 0:
+                    if (
+                        mb.verdict == "BROAD_DECLINE"
+                        or mb.ad_ratio < 0.60
+                        or (mb.declines >= 2.0 * max(1, mb.advances))
+                    ):
+                        logger.info(
+                            f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Market Breadth Liquidation active "
+                            f"(Adv: {mb.advances} / Dec: {mb.declines}, A/D {mb.ad_ratio:.2f}). Disallow call setups in negative tide."
+                        )
+                        return []
+            except Exception as e_mb:
+                logger.debug(f"[IndexCallSetup] Breadth check bypassed: {e_mb}")
+        else:
+            if _spot_above_open_escape:
+                escape_reason = f"spot ₹{spot:,.1f} is +{((spot / _day_open_price_ce - 1) * 100):.2f}% from open ₹{_day_open_price_ce:,.1f}"
+            else:
+                escape_reason = f"V-Reversal expansion (+{_bounce_from_low_pct:.2f}% from low ₹{day_low:,.1f}, VWAP reclaimed)"
+            logger.debug(
+                f"[IndexCallSetup] Breadth gate BYPASSED for {clean_sym}: {escape_reason} — price action overrides lagging A/D breadth."
+            )
 
     now_dt = ref_time or datetime.now(IST)
     if now_dt.tzinfo is None:
@@ -215,12 +266,17 @@ def detect_index_call_setup(
     )
 
     # ── Optimization 1: Intraday Put-Call Ratio (PCR) Confluence Gate ───
-    # PCR < 0.65 indicates overwhelming Call Writing overhead capping the ceiling.
+    # PCR < 0.65 ONLY indicates a supply ceiling when CALL WRITERS ARE ADDING (ce_oi_change > 0).
+    # If CE OI is unwinding (ce_oi_change < 0) with low PCR, writers are COVERING (short squeeze
+    # signal). Do NOT veto — that is the highest-conviction CE entry condition.
     ce_oi_total = sum(
         int(getattr(c, "oi", 0) or 0) for c in chain if getattr(c, "option_type", "") == "CE"
     )
     pe_oi_total = sum(
         int(getattr(c, "oi", 0) or 0) for c in chain if getattr(c, "option_type", "") == "PE"
+    )
+    ce_oi_change_sum = sum(
+        int(getattr(c, "oi_change", 0) or 0) for c in chain if getattr(c, "option_type", "") == "CE"
     )
     chain_pcr = (
         round(pe_oi_total / max(1, ce_oi_total), 2)
@@ -228,12 +284,25 @@ def detect_index_call_setup(
         else None
     )
 
-    if chain_pcr is not None and chain_pcr < 0.65 and not is_explosive_momentum:
+    # Veto only when: PCR < 0.65 AND writers are actively adding new calls (ceiling building)
+    # NOT when writers are unwinding (short squeeze = CE rally signal)
+    _pcr_writers_adding_ce = ce_oi_change_sum > 0
+    if (
+        chain_pcr is not None
+        and chain_pcr < 0.65
+        and _pcr_writers_adding_ce
+        and not is_explosive_momentum
+    ):
         logger.info(
-            f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Heavy Call Writing Wall active "
-            f"(PCR: {chain_pcr:.2f} < 0.65, Call OI {ce_oi_total:,} vs Put OI {pe_oi_total:,})."
+            f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Active Call Writing Wall "
+            f"(PCR: {chain_pcr:.2f} < 0.65, CE OI adding {ce_oi_change_sum:+,}). Ceiling-building writers resist breakout."
         )
         return []
+    elif chain_pcr is not None and chain_pcr < 0.65 and not _pcr_writers_adding_ce:
+        logger.debug(
+            f"[IndexCallSetup] PCR={chain_pcr:.2f} < 0.65 but ce_oi_change={ce_oi_change_sum:+,} (unwinding) "
+            f"→ NOT a ceiling, this is a short-squeeze signal. Allowing CE setup to proceed."
+        )
 
     # ── Optimization 2: Index Heavyweight Breadth Confluence Matrix (HBCM) ──
     hw_posture: dict[str, Any] = {}
@@ -243,10 +312,19 @@ def detect_index_call_setup(
         from market.indices import get_heavyweights_posture
 
         hw_posture = get_heavyweights_posture(clean_sym)
-        hbcm_res = evaluate_hbcm(clean_sym, "BULLISH")
+        # Pass allow_weighted_fallback when momentum is explosive so that 3/5 heavyweights
+        # with >= 55% combined weight can satisfy the confluence gate on fast rally days.
+        hbcm_res = evaluate_hbcm(
+            clean_sym,
+            "BULLISH",
+            allow_weighted_fallback=is_explosive_momentum,
+        )
         hbcm_dict = hbcm_res.to_dict()
 
-        if hbcm_res.total_heavyweights > 0:
+        has_hbcm_quotes = hbcm_res.total_heavyweights > 0 and not (
+            hbcm_res.summary or ""
+        ).startswith("HBCM_TEST_PASSTHROUGH")
+        if has_hbcm_quotes:
             if not hbcm_res.confluence_pass and not is_explosive_momentum:
                 logger.info(
                     f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: {hbcm_res.rejection_reason}"
@@ -326,14 +404,26 @@ def detect_index_call_setup(
             return []
 
     # ── VWAP Overextension & Climax Filter ───────────────────────
-    # If spot has surged > 1.20% above VWAP it's a climax extension — no fresh CE entry.
-    # Note: index legs routinely extend 0.8–1.0% above VWAP during genuine momentum moves;
-    # the old 0.65% threshold was killing valid continuation setups.
+    # Default: Extended > 0.65% above VWAP = climax exhaustion, skip.
+    # MOMENTUM ESCAPE: On genuine institutional breakouts, spot can legitimately trade
+    # 1-2% above VWAP as buyers step through offers. Raise the cap dynamically:
+    #   vol_oi_ratio >= 2.0x or ce_pchange >= 15% → cap 1.2% above VWAP
+    #   vol_oi_ratio >= 3.0x or ce_pchange >= 25% → cap 2.0% (full expansion)
     if effective_vwap > 0 and spot > effective_vwap:
         spot_vwap_ext = (spot - effective_vwap) / effective_vwap * 100.0
-        if spot_vwap_ext > 1.20:
+        _is_full_flush_cs = cand_ce_vol_oi >= 3.0 or (
+            cand_ce_pchange >= 25.0
+            and cand_ce_vol >= (15000 if clean_sym in ("NIFTY", "BANKNIFTY") else 3000)
+        )
+        _is_momentum_exp_cs = cand_ce_vol_oi >= 2.0 or (
+            cand_ce_pchange >= 15.0
+            and cand_ce_vol >= (8000 if clean_sym in ("NIFTY", "BANKNIFTY") else 1500)
+        )
+        _vwap_cap = 2.0 if _is_full_flush_cs else (1.2 if _is_momentum_exp_cs else 0.65)
+        if spot_vwap_ext > _vwap_cap:
             logger.debug(
-                f"[IndexCallSetup] Suppressed CE: Spot extended +{spot_vwap_ext:.2f}% above VWAP (>0.65% climax threshold)"
+                f"[IndexCallSetup] Suppressed CE: Spot extended +{spot_vwap_ext:.2f}% above VWAP "
+                f"(cap={_vwap_cap:.2f}% | flush={_is_full_flush_cs} | momentum={_is_momentum_exp_cs})"
             )
             return []
 
@@ -369,6 +459,18 @@ def detect_index_call_setup(
                 "bounce_pct": round(spot_bounce_from_low, 3),
             }
 
+    # 2b. Day Low Demand Bounce (Current Session Day Low Demand Support)
+    # Spot tested Day Low and has now bounced >= 0.08% from the low
+    if day_low and day_low > 0 and "PDL_DEMAND_REJECTION" not in signals:
+        dl_bounce_pct = (spot - day_low) / max(1.0, day_low) * 100.0
+        if 0.08 <= dl_bounce_pct <= 0.50:
+            signals.append("DAY_LOW_DEMAND_BOUNCE")
+            signal_tags["day_low_demand_bounce"] = {
+                "day_low": day_low,
+                "spot": spot,
+                "dl_bounce_pct": round(dl_bounce_pct, 3),
+            }
+
     # 3. VWAP Reclaim (symmetric to VWAP Rejection in put detector)
     # Spot was below VWAP, tagged it from below, and is now holding above
     if effective_vwap > 0 and spot > effective_vwap:
@@ -377,7 +479,12 @@ def detect_index_call_setup(
             (effective_vwap - (day_low or spot)) / effective_vwap * 100 if day_low else 0.0
         )
         # Day low must have been at or below VWAP (was below it) but spot now above (reclaimed)
-        if day_low_vs_vwap >= -0.1 and vwap_reclaim_pct >= 0.05:
+        # PROXIMITY ENVELOPE: 0.03% <= reclaim <= 0.18% (for Nifty: 7 to 40 pts above VWAP).
+        # Above 0.18%, price has already overextended away from the reclaim support and faces mean-reversion pullback risk.
+        max_reclaim_envelope = (
+            0.25 if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX") else 0.18
+        )
+        if day_low_vs_vwap >= -0.1 and (0.03 <= vwap_reclaim_pct <= max_reclaim_envelope):
             signals.append("VWAP_RECLAIM")
             signal_tags["vwap_reclaim"] = {
                 "vwap": effective_vwap,
@@ -505,6 +612,95 @@ def detect_index_call_setup(
                             }
                     except Exception as e_vcp:
                         logger.debug(f"[IndexCallSetup] VCP coiling check error: {e_vcp}")
+
+                # 8. Intraday Capitulation Reversal (ICR) — Catches V-Bottom turning points BEFORE full VWAP reclaim
+                # Fires when:
+                # a. Day low was heavily oversold below session VWAP (>= 0.35% for Nifty, >= 0.55% for BankNifty)
+                # b. Spot has surged >= 0.25% off the day low
+                # c. 5m structure shift confirmed (higher close or reclaim of previous bar high / CHoCH)
+                if (
+                    len(active_ohlcv) >= 6
+                    and not is_opening_buffer
+                    and "INTRADAY_CAPITULATION_REVERSAL" not in signals
+                ):
+                    try:
+                        min_oversold = (
+                            0.55
+                            if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX")
+                            else 0.35
+                        )
+                        day_low_ext = (
+                            ((effective_vwap - (day_low or spot)) / effective_vwap * 100.0)
+                            if effective_vwap > 0
+                            else 0.0
+                        )
+                        spot_bounce = (
+                            ((spot - (day_low or spot)) / max(1.0, spot) * 100.0)
+                            if day_low
+                            else 0.0
+                        )
+
+                        if day_low_ext >= min_oversold and spot_bounce >= 0.25:
+                            b_curr = active_ohlcv.iloc[-1]
+                            b_prev = active_ohlcv.iloc[-2]
+                            curr_c = float(b_curr[col_c])
+                            prev_h = float(b_prev[col_h])
+                            curr_l = float(b_curr[col_l])
+                            prev_l = float(b_prev[col_l])
+                            col_o_icr = "open" if "open" in active_ohlcv.columns else "Open"
+                            curr_o = float(b_curr[col_o_icr])
+
+                            is_choch = curr_c >= (prev_h * 0.9995)
+                            is_higher_low = (curr_l > prev_l) and (curr_c > curr_o)
+
+                            if is_choch or is_higher_low:
+                                signals.append("INTRADAY_CAPITULATION_REVERSAL")
+                                signal_tags["capitulation_reversal"] = {
+                                    "day_low": round(day_low or spot, 2),
+                                    "vwap": round(effective_vwap, 2),
+                                    "oversold_pct": round(day_low_ext, 2),
+                                    "bounce_pct": round(spot_bounce, 2),
+                                    "choch_reclaim": is_choch,
+                                    "higher_low": is_higher_low,
+                                }
+                    except Exception as e_icr:
+                        logger.debug(f"[IndexCallSetup] ICR check error: {e_icr}")
+
+                # 8b. Failed Day Low Breakdown (Bear Trap / Liquidity Sweep below Day Low)
+                # Catches sharp institutional stop hunts where price momentarily pierces Day Low and snaps back above
+                if (
+                    len(active_ohlcv) >= 6
+                    and not is_opening_buffer
+                    and "FAILED_DAY_LOW_BREAKDOWN" not in signals
+                ):
+                    try:
+                        b_curr = active_ohlcv.iloc[-1]
+                        curr_l = float(b_curr[col_l])
+                        curr_c = float(b_curr[col_c])
+                        curr_h = float(b_curr[col_h])
+                        col_o_fdl = "open" if "open" in active_ohlcv.columns else "Open"
+                        curr_o = float(b_curr[col_o_fdl])
+                        c_rng = max(0.1, curr_h - curr_l)
+                        l_wick_pct = (curr_c - curr_l) / c_rng * 100.0
+
+                        prior_low = float(active_ohlcv[col_l].iloc[:-1].min())
+                        ref_low = day_low if (day_low and day_low > curr_l) else prior_low
+
+                        if ref_low and ref_low > 0 and curr_l < ref_low and curr_c >= ref_low:
+                            sweep_pct = (ref_low - curr_l) / ref_low * 100.0
+                            if 0.02 <= sweep_pct <= 0.60 and (
+                                l_wick_pct >= 35.0 or curr_c > curr_o
+                            ):
+                                signals.append("FAILED_DAY_LOW_BREAKDOWN")
+                                signal_tags["failed_day_low_breakdown"] = {
+                                    "day_low": round(ref_low, 2),
+                                    "breach_low": round(curr_l, 2),
+                                    "sweep_pct": round(sweep_pct, 3),
+                                    "lower_wick_pct": round(l_wick_pct, 1),
+                                    "close": round(curr_c, 2),
+                                }
+                    except Exception as e_fdl:
+                        logger.debug(f"[IndexCallSetup] FDL check error: {e_fdl}")
 
                 # 8. Trend Continuation Pullback (EMA 9/20 & VWAP Support Reclaim)
                 # Catches sustained morning trends where price pulls back into EMA/VWAP support and resumes up
@@ -711,6 +907,9 @@ def detect_index_call_setup(
     base_confidence = 68
     signal_bonuses = {
         "PDL_DEMAND_REJECTION": 14,
+        "DAY_LOW_DEMAND_BOUNCE": 14,
+        "FAILED_DAY_LOW_BREAKDOWN": 15,
+        "INTRADAY_CAPITULATION_REVERSAL": 15,
         "VWAP_RECLAIM": 10,
         "DEMAND_ZONE_SWEEP": 8,
         "BEARISH_EXHAUSTION_CE": 10,
@@ -818,6 +1017,33 @@ def detect_index_call_setup(
             f"Spot reclaimed VWAP (₹{effective_vwap:,.1f}) — now acting as support (bullish flip). "
             f"Spot {vr.get('vwap_reclaim_pct', 0):.2f}% above VWAP post-reclaim. "
             f"Call volume active ({volume:,} contracts, {vol_oi_ratio:.1f}x). "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "INTRADAY_CAPITULATION_REVERSAL" in signals:
+        icr = signal_tags.get("capitulation_reversal", {})
+        headline = f"{vel_badge}⚡ INTRADAY CAPITULATION REVERSAL: {clean_sym} {int(strike)} CE"
+        summary = (
+            f"V-Bottom Capitulation Reversal: Spot (₹{spot:,.1f}) surged +{icr.get('bounce_pct', 0.25):.2f}% off session low ₹{icr.get('day_low', 0):,.1f} "
+            f"after reaching -{icr.get('oversold_pct', 0.5):.2f}% oversold extension below VWAP (₹{icr.get('vwap', 0):,.1f}). "
+            f"Bullish 5m structure shift confirmed (CHoCH / higher-low). "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "FAILED_DAY_LOW_BREAKDOWN" in signals:
+        fdl = signal_tags.get("failed_day_low_breakdown", {})
+        headline = f"⚡ FAILED DAY LOW BREAKDOWN (BEAR TRAP): {clean_sym} {int(strike)} CE"
+        summary = (
+            f"Bear Trap / Liquidity Sweep below Day Low: Spot (₹{spot:,.1f}) swept below Session Low (₹{fdl.get('day_low', 0):,.1f}) "
+            f"by {fdl.get('sweep_pct', 0):.2f}% to ₹{fdl.get('breach_low', 0):,.1f}, then sharply reclaimed back above with a "
+            f"{fdl.get('lower_wick_pct', 0):.0f}% demand absorption wick. Trapped shorters vulnerable to short-squeeze. "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "DAY_LOW_DEMAND_BOUNCE" in signals:
+        dld = signal_tags.get("day_low_demand_bounce", {})
+        headline = f"🟢 DAY LOW DEMAND BOUNCE: {clean_sym} {int(strike)} CE"
+        summary = (
+            f"Spot tested Session Day Low (₹{dld.get('day_low', 0):,.1f}) and held key support, bouncing "
+            f"+{dld.get('dl_bounce_pct', 0):.2f}% with bullish demand response. "
+            f"Call volume active ({volume:,} contracts, {vol_oi_ratio:.1f}x Vol/OI). "
             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
         )
     elif "DEMAND_ZONE_SWEEP" in signals:
@@ -941,6 +1167,10 @@ def detect_index_call_setup(
             1.0, round(min(opt_ltp * 0.55, max(1.0, opt_ltp - (actual_width * 0.35))), 2)
         )
 
+    is_spread_mandated = False
+    is_0dte_midday_trap = False
+    is_midday_chop_window = False
+
     if opt_ltp > 0 and sell_prem > 0 and sell_strike > strike:
         net_debit = round(max(1.0, min(actual_width * 0.75, opt_ltp - sell_prem)), 2)
         strike_width = round(sell_strike - strike, 2)
@@ -951,6 +1181,24 @@ def detect_index_call_setup(
 
         now_time = now_dt.time()
         is_midday_chop_window = (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 70)
+
+        # 0DTE Expiry Check:
+        is_0dte = False
+        try:
+            from engine.alert_expiry import get_expiry_metadata
+
+            exp_meta = get_expiry_metadata(exp_date, exp_type, clean_sym, contract_sym)
+            if exp_meta and exp_meta.get("dte") == 0:
+                is_0dte = True
+            elif exp_date and exp_date == now_dt.strftime("%Y-%m-%d"):
+                is_0dte = True
+        except Exception:
+            pass
+
+        # 0DTE Midday Theta Trap: On expiry day between 11:30 and 14:00, theta decay is at its weekly maximum.
+        # Naked option buying during this window suffers severe theta drag and mean-reversion whipsaws.
+        is_0dte_midday_trap = is_0dte and (dtime(11, 30) <= now_time <= dtime(14, 0))
+
         if is_low_vix_range:
             pref_veh = "SPREAD_ONLY"
             spread_guidance = (
@@ -962,6 +1210,12 @@ def detect_index_call_setup(
             spread_guidance = (
                 f"⚠️ HIGH-VIX REGIME (India VIX {vix_val:.1f} >= 18.0): High IV crush risk on naked options; "
                 "execute defined-risk Bull Call Spread or Deep ITM only."
+            )
+        elif is_0dte_midday_trap:
+            pref_veh = "SPREAD_ONLY"
+            spread_guidance = (
+                "⚠️ 0DTE MIDDAY THETA TRAP (11:30–14:00 IST): Naked option buying strictly prohibited on expiry day; "
+                "execute defined-risk Bull Call Spread only to eliminate theta bleed."
             )
         elif is_midday_chop_window:
             pref_veh = "HEDGED_SPREAD"
@@ -1016,20 +1270,22 @@ def detect_index_call_setup(
                 },
             ],
         }
+        is_spread_mandated = bool(
+            (is_low_vix_range or is_high_iv_risk or is_midday_chop_window or is_0dte_midday_trap)
+            and hedge_plan is not None
+        )
 
     # ── Optimal Trade Entry (OTE) & No-Chase Guard ───────────────
-    if is_low_vix_range and not hedge_plan:
+    if (is_low_vix_range or is_0dte_midday_trap) and not hedge_plan:
         logger.info(
-            f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Low-VIX range-bound regime without viable hedged spread."
+            f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: {'0DTE Midday Theta Trap' if is_0dte_midday_trap else 'Low-VIX range-bound regime'} without viable hedged spread."
         )
         return []
 
-    act_verb = (
-        "BULL CALL SPREAD" if ((is_low_vix_range or is_high_iv_risk) and hedge_plan) else "BUY CE"
-    )
+    act_verb = "BULL CALL SPREAD" if is_spread_mandated else "BUY CE"
     target_inst = (
         f"{clean_sym} {int(strike)}/{int(hedge_plan['sell_strike'])} Bull Call Spread"
-        if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
+        if is_spread_mandated
         else contract_sym
     )
 
@@ -1040,14 +1296,12 @@ def detect_index_call_setup(
 
     alert = AutoAlert(
         alert_id=generate_alert_id(clean_sym, "INDEX_CALL_SETUP", variant=f"ce-{int(strike)}"),
-        alert_type="GAMMA_BLAST",
+        alert_type="INDEX_CALL_SETUP",
         stage=stage,
         symbol=clean_sym,
         exchange=opt_exchange,
         direction="BULLISH",
-        headline=f"🛡️ [HEDGED SPREAD MANDATE] {headline}"
-        if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
-        else headline,
+        headline=f"🛡️ [HEDGED SPREAD MANDATE] {headline}" if is_spread_mandated else headline,
         summary=f"{summary} | OTE Entry: {entry_range_str} | No Chase > ₹{no_chase_lvl}",
         ltp=opt_ltp or spot,
         trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
@@ -1113,11 +1367,9 @@ def detect_index_call_setup(
             "action": act_verb,
             "contract": contract_sym,
             "instrument": target_inst,
-            "instrument_type": "OPTION_SPREAD"
-            if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
-            else "OPTION",
+            "instrument_type": "OPTION_SPREAD" if is_spread_mandated else "OPTION",
             "preferred_vehicle": hedge_plan.get(
-                "preferred_vehicle", "DEEP_ITM_OR_SPREAD" if is_high_iv_risk else "NAKED_OPTION"
+                "preferred_vehicle", "SPREAD_ONLY" if is_spread_mandated else "NAKED_OPTION"
             )
             if hedge_plan
             else ("DEEP_ITM_OR_SPREAD" if is_high_iv_risk else "NAKED_OPTION"),

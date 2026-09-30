@@ -246,6 +246,7 @@ def detect_opening_drive(
                 opt_contract_sym = chosen.symbol
                 opt_ltp = float(chosen.last_price)
                 opt_strike = float(chosen.strike)
+                opt_expiry = getattr(chosen, "expiry", None)
                 opt_sl = round(max(0.1, opt_ltp * 0.78), 2)
                 opt_t1 = round(opt_ltp * 1.35, 2)
                 opt_t2 = round(opt_ltp * 1.70, 2)
@@ -313,10 +314,13 @@ def detect_opening_drive(
             "t1_premium": opt_t1,
             "t2_premium": opt_t2,
             "lot_size": lot_sz,
+            "expiry": opt_expiry if "opt_expiry" in locals() else None,
+            "expiry_date": opt_expiry if "opt_expiry" in locals() else None,
         }
 
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     alert_seg = "FNO_INDEX" if is_index else ("FNO_STOCK" if lot_sz else "EQUITY")
+    resolved_exp = opt_expiry if (has_opt and "opt_expiry" in locals()) else None
 
     return AutoAlert(
         alert_id=generate_alert_id(
@@ -336,6 +340,8 @@ def detect_opening_drive(
         strike=opt_strike if has_opt else None,
         option_type=opt_type if has_opt else None,
         contract_symbol=opt_contract_sym if has_opt else None,
+        expiry_date=resolved_exp,
+        expiry_type=("WEEKLY" if is_index else "MONTHLY") if resolved_exp else None,
         option_premium=opt_ltp if has_opt else None,
         underlying_spot=ltp,
         lot_size=lot_sz,

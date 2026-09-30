@@ -265,7 +265,7 @@ def detect_multibagger_breakouts(
                 no_chase_boundary=no_chase_val,
                 setup_style="MULTIBAGGER_MOMENTUM" if is_stage_2 else "COMPOUNDER_GROWTH",
                 created_at=now_iso,
-                is_live=not is_test and mkt_open,
+                is_live=not is_test,
                 environment=provenance_env,
                 market_status=mkt_status,
                 metrics={

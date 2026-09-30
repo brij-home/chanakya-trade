@@ -167,6 +167,7 @@ class PatternLearningEngine:
         self._outcomes: list[PatternTradeOutcome] = []
         self._post_mortems: list[InvalidationPostMortem] = []
         self._symbol_lockouts: dict[str, dict[str, Any]] = {}
+        self._session_trap_pivots: dict[str, list[dict[str, Any]]] = {}
         self._invalidation_counts: dict[str, int] = {}  # symbol:direction -> count today
         self._lock = threading.Lock()
         self._factor_weights: dict[str, int] = {
@@ -664,6 +665,94 @@ class PatternLearningEngine:
             self._symbol_lockouts.pop(sym, None)
         return active
 
+    # ── Session Breakout Trap Memory ────────────────────────
+
+    def record_session_trap_pivot(
+        self,
+        symbol: str,
+        pivot_price: float,
+        direction: str = "BULLISH",
+        trap_type: str = "BREAKOUT_TRAP",
+        note: str = "",
+    ) -> dict[str, Any]:
+        """
+        Records an intraday breakout failure / trap level for a symbol.
+        Enforces memory across the session to prevent repeating duplicate entries
+        into confirmed fakeout/distribution price zones.
+        """
+        if not symbol or pivot_price <= 0:
+            return {}
+        clean_sym = (
+            symbol.upper()
+            .replace(".NS", "")
+            .replace(".BO", "")
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("MCX:", "")
+            .replace("NFO:", "")
+            .strip()
+        )
+        now_dt = datetime.now(IST)
+        today_str = now_dt.strftime("%Y-%m-%d")
+        record = {
+            "symbol": clean_sym,
+            "pivot_price": round(float(pivot_price), 2),
+            "direction": direction.upper(),
+            "trap_type": trap_type.upper(),
+            "recorded_at": now_dt.strftime("%Y-%m-%d %H:%M:%S IST"),
+            "session_date": today_str,
+            "note": note or f"Failed {direction} breakout pivot at ₹{pivot_price:,.1f}",
+        }
+        with self._lock:
+            if clean_sym not in self._session_trap_pivots:
+                self._session_trap_pivots[clean_sym] = []
+            # Keep only today's session traps
+            self._session_trap_pivots[clean_sym] = [
+                p
+                for p in self._session_trap_pivots[clean_sym]
+                if p.get("session_date") == today_str
+            ]
+            self._session_trap_pivots[clean_sym].append(record)
+            logger.info(
+                f"[PatternLearningEngine] 🛑 Session Trap Pivot recorded: {clean_sym} at ₹{pivot_price:,.2f} ({trap_type})"
+            )
+        return record
+
+    def is_near_session_trap_pivot(
+        self,
+        symbol: str,
+        current_price: float,
+        threshold_pct: float = 0.6,
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        """
+        Checks if current_price is within threshold_pct of any recorded failed breakout pivot today.
+        Returns (is_near, trap_record).
+        """
+        if not symbol or current_price <= 0:
+            return False, None
+        clean_sym = (
+            symbol.upper()
+            .replace(".NS", "")
+            .replace(".BO", "")
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("MCX:", "")
+            .replace("NFO:", "")
+            .strip()
+        )
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        with self._lock:
+            traps = self._session_trap_pivots.get(clean_sym, [])
+            for trap in traps:
+                if trap.get("session_date") != today_str:
+                    continue
+                p_level = trap.get("pivot_price", 0.0)
+                if p_level > 0:
+                    diff_pct = abs(current_price - p_level) / p_level * 100.0
+                    if diff_pct <= threshold_pct:
+                        return True, trap
+        return False, None
+
     def conduct_invalidation_post_mortem(
         self,
         alert: Any,
@@ -1019,6 +1108,17 @@ class PatternLearningEngine:
             reason=f"{primary_reason.replace('_', ' ').title()}",
             reclaim_level=reclaim_level,
         )
+
+        # Record session trap pivot level to prevent repeat fakeout entries today
+        trap_pivot = entry_price if entry_price > 0 else (alert_trig if not is_opt else 0.0)
+        if trap_pivot > 0:
+            self.record_session_trap_pivot(
+                symbol=clean_sym,
+                pivot_price=trap_pivot,
+                direction=direction,
+                trap_type="BULL_TRAP" if direction == "BULLISH" else "BEAR_TRAP",
+                note=f"Invalidated {alert_type}: {primary_reason}",
+            )
 
         # Record outcome into learning memory with -1.0R payoff
         self.record_trade_outcome(
@@ -1521,6 +1621,17 @@ class PatternLearningEngine:
     def get_learned_archetypes(self) -> list[dict[str, Any]]:
         return [f.to_dict() for f in self._fingerprints]
 
+    def get_active_session_traps(self) -> list[dict[str, Any]]:
+        """Returns all breakout trap pivot levels recorded during today's session."""
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        all_traps = []
+        with self._lock:
+            for sym, traps in self._session_trap_pivots.items():
+                for t in traps:
+                    if t.get("session_date") == today_str:
+                        all_traps.append(dict(t))
+        return all_traps
+
     def get_learning_analytics(self) -> dict[str, Any]:
         """Returns comprehensive self-learning intelligence and factor attribution."""
         total_archetypes = len(self._fingerprints)
@@ -1546,6 +1657,7 @@ class PatternLearningEngine:
             "average_realized_rr": avg_rr,
             "active_factor_weights": self._factor_weights,
             "active_lockouts": self.get_locked_out_symbols(),
+            "active_session_traps": self.get_active_session_traps(),
             "archetypes": [f.to_dict() for f in self._fingerprints[:5]],
             "recent_outcomes": [o.to_dict() for o in self._outcomes[-10:]],
             "recent_post_mortems": [pm.to_dict() for pm in self._post_mortems[:10]],

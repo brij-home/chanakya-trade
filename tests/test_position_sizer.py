@@ -109,3 +109,21 @@ class TestPositionSizer:
         assert res.lots == 1
         assert "HIGH_TICKET_RISK" in res.notes
         assert "exceeds max risk tolerance" in res.notes
+
+    def test_vix_sub_12_compression_scaling(self):
+        # When India VIX < 12.0, risk is scaled down 25% due to low-volatility compression
+        res = calculate_position_size(
+            symbol="RELIANCE",
+            entry_price=2500.0,
+            stop_loss=2450.0,
+            capital=1000000.0,
+            max_risk_pct=2.0,
+            max_capital_pct=100.0,
+            sizing_model="fixed_fractional",
+            vix=11.2,
+        )
+        assert "COMPRESSION" in res.notes
+        assert "Risk scaled down 25%" in res.notes
+        # 2.0% * 0.75 = 1.5% effective risk -> risk budget = 15,000 / 50 pts = 300 shares
+        assert res.shares == 300
+        assert res.risk_pct <= 1.55

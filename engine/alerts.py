@@ -26,7 +26,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from rich.console import Console
@@ -366,6 +366,35 @@ class AlertManager:
                 else:
                     surviving.append(a)
             if purged > 0:
+                self._alerts = surviving
+                self._save()
+        return purged
+
+    def clear_test_alerts(self) -> int:
+        """Purges all test/simulated alerts from memory and disk storage."""
+        purged = 0
+        with self._lock:
+            surviving = []
+            for a in self._alerts:
+                aid = str(getattr(a, "id", "") or "").lower()
+                env = str(getattr(a, "environment", "") or "").upper()
+                is_test = bool(getattr(a, "is_test", False))
+                msg = str(getattr(a, "message", "") or "").upper()
+                desc = str(a.describe() if hasattr(a, "describe") else "").upper()
+                if (
+                    is_test
+                    or env in ("TEST", "SIMULATE", "DEMO")
+                    or aid.startswith("test-")
+                    or aid.startswith("sim-")
+                    or aid.startswith("mock-")
+                    or "[TEST]" in msg
+                    or "[TEST]" in desc
+                    or "🧪" in msg
+                ):
+                    purged += 1
+                else:
+                    surviving.append(a)
+            if purged > 0 or len(surviving) != len(self._alerts):
                 self._alerts = surviving
                 self._save()
         return purged
@@ -1023,6 +1052,8 @@ def _telegram_notify(
     disable_notification: Optional[bool] = None,
     signal_id: Optional[str] = None,
     message_thread_id: Optional[int] = None,
+    on_success: Optional[Any] = None,
+    alert_id: Optional[str] = None,
 ) -> None:
     """
     Send a Telegram push notification.
@@ -1054,6 +1085,8 @@ def _telegram_notify(
             disable_notification=disable_notification,
             signal_id=signal_id,
             message_thread_id=message_thread_id,
+            on_success=on_success,
+            alert_id=alert_id,
         )
     except Exception:
         pass
