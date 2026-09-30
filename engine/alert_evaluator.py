@@ -184,8 +184,11 @@ def evaluate_alert_invalidation(
                         "TARGET_ACHIEVED",
                     )
                     or getattr(alert, "should_trail", False)
-                    or getattr(alert, "trailing_stop", None) is not None
-                    or getattr(alert, "initial_stop_loss", None) is not None
+                    or (
+                        getattr(alert, "initial_stop_loss", None) is not None
+                        and alert.stop_loss
+                        and alert.stop_loss > alert.initial_stop_loss + 0.05
+                    )
                 )
                 if (
                     not has_ratcheted_sl

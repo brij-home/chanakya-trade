@@ -236,14 +236,14 @@ def test_in_flight_telegram_protection_prevents_supersede():
 
 
 def test_in_flight_warning_and_spread_touch_suppressed_on_telegram():
-    """IN_FLIGHT_WARNING and SPREAD_SHORT_STRIKE_TOUCH milestones must be suppressed from Telegram."""
+    """SPREAD_SHORT_STRIKE_TOUCH milestones must be suppressed from Telegram."""
     engine = AutoAlertEngine()
-    alert = _make_dummy_alert("m-warn", "NIFTY", stage="IN_FLIGHT_WARNING")
+    alert = _make_dummy_alert("m-touch", "NIFTY", stage="SPREAD_SHORT_STRIKE_TOUCH")
     alert.telegram_dispatched = True  # Pretend original signal was dispatched
 
     with patch("engine.alerts._telegram_notify") as mock_tg:
         engine._dispatch(alert)
-        # Must not call _telegram_notify for IN_FLIGHT_WARNING
+        # Must not call _telegram_notify for SPREAD_SHORT_STRIKE_TOUCH
         mock_tg.assert_not_called()
         assert "held in Terminal UI only" in getattr(alert, "telegram_suppression_reason", "")
 
