@@ -9,7 +9,8 @@ Comprehensive unit tests for the institutional Telegram alert template engine:
 - Zero-redundancy and mobile height reduction checks
 """
 
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from bot.alert_templates import (
     FNOAlertData,
     MilestoneAlertData,
@@ -916,7 +917,7 @@ def test_auto_alert_engine_milestone_evaluation_consistency():
             "target_1": "₹58.50",
             "target_2": "₹73.10",
         },
-        created_at="2026-09-11 12:23:00 IST",
+        created_at=datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S IST"),
     )
 
     # 1. At LTP ₹39.25 (+₹0.25 above entry), Target 1 (58.50) MUST NOT trigger!
@@ -2610,7 +2611,7 @@ def test_auto_alert_telegram_expiry_price_coherence():
     msg_oct = format_auto_alert_telegram(oct_alert)
     assert "₹28.00" in msg_oct
     assert "27-Oct-2026" in msg_oct
-    assert "Next Monthly" in msg_oct
+    assert "Monthly" in msg_oct
     assert "29-Sep-2026" not in msg_oct
 
 

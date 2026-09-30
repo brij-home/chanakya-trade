@@ -1633,8 +1633,10 @@ def evaluate_alert_targets_and_trailing(
             for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
                 try:
                     c_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
-                    now_ist = datetime.now(IST)
-                    if c_dt.date() == now_ist.date():
+                    if (
+                        c_dt.date() == now_ist.date()
+                        or 0 <= (now_ist - c_dt).total_seconds() < 86400
+                    ):
                         elapsed_mins = (now_ist - c_dt).total_seconds() / 60.0
                         fast_scalp = plan.get("fast_scalp", {}) or {}
                         is_explicit_scalp = bool(fast_scalp.get("time_stop_mins"))

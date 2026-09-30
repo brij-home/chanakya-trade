@@ -11,7 +11,7 @@ Unit tests for the Institutional Telegram Apex Gate:
 """
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -43,6 +43,11 @@ def _make_dummy_alert(
 ) -> AutoAlert:
     if strike is None:
         strike = spot
+    exp_date_str = (
+        datetime.now(IST).strftime("%Y-%m-%d")
+        if is_0dte
+        else (datetime.now(IST) + timedelta(days=7)).strftime("%Y-%m-%d")
+    )
     return AutoAlert(
         alert_id=alert_id,
         alert_type=alert_type,
@@ -59,7 +64,7 @@ def _make_dummy_alert(
         strike=strike,
         option_type=opt_type,
         contract_symbol=f"{symbol}{int(strike)}{opt_type}",
-        expiry_date="2026-10-01",
+        expiry_date=exp_date_str,
         underlying_spot=spot,
         option_premium=ltp,
         is_live=True,
