@@ -1602,8 +1602,25 @@ class AutoAlertEngine:
                             "INTRADAY_BREAKDOWN_SPARK",
                             "VOLUME_EXPANSION",
                         }
+                        # Multi-Horizon Independence:
+                        # If the active alert and incoming alert operate on distinct time horizon tiers
+                        # (e.g. MULTIBAGGER / SWING_MID vs INTRADAY), do not collapse or suppress them.
+                        _a_th = (getattr(active_diff_detector, "time_horizon", "") or "").upper()
+                        _inc_th = (getattr(alert, "time_horizon", "") or "").upper()
+                        _is_multi_horizon = bool(
+                            _a_th
+                            and _inc_th
+                            and _a_th != _inc_th
+                            and (
+                                _a_th in ("MULTIBAGGER", "SWING_MID", "LONG_TERM", "POSITIONAL")
+                                or _inc_th
+                                in ("MULTIBAGGER", "SWING_MID", "LONG_TERM", "POSITIONAL")
+                            )
+                        )
+
                         is_orthogonal_confluence = (
-                            active_diff_detector.alert_type in CONFLUENCE_RADARS
+                            not _is_multi_horizon
+                            and active_diff_detector.alert_type in CONFLUENCE_RADARS
                             and alert.alert_type in CONFLUENCE_RADARS
                         )
 
@@ -1691,6 +1708,9 @@ class AutoAlertEngine:
                                 )
                             if not to_dispatch:
                                 return False
+                        elif _is_multi_horizon:
+                            # Multi-horizon setup: Allow both to coexist for multi-horizon confluence detection
+                            pass
                         else:
                             # Cross-Detector Active Trade Mutex: Suppress duplicate execution triggers
                             logger.info(
