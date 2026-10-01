@@ -300,5 +300,8 @@ def test_stock_options_gamma_blast_smc_momentum_override_on_opposing_zone_collis
     assert len(alerts) >= 1
     alert = alerts[0]
     assert alert.symbol == "SONACOMS"
-    assert alert.actionable_plan.get("trade_plan", {}).get("asymmetry_verdict") == "SMC_MOMENTUM_OVERRIDE"
+    assert (
+        alert.actionable_plan.get("trade_plan", {}).get("asymmetry_verdict")
+        == "SMC_MOMENTUM_OVERRIDE"
+    )
     assert alert.actionable_plan.get("trade_plan", {}).get("is_asymmetry_viable") is True
