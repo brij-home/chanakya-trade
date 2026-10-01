@@ -227,3 +227,78 @@ def test_auto_alert_engine_prioritizes_active_intraday_movers():
         with _quote_cache_lock:
             for k in ("MCX", "SONACOMS", "RELIANCE", "TCS", "INFY"):
                 _QUOTE_CACHE.pop(k, None)
+
+
+def test_stock_options_gamma_blast_smc_momentum_override_on_opposing_zone_collision():
+    """Verifies that single-stock options with heavy call writer unwinding (oi_change < 0,
+    is_oi_shedding or vol_oi_ratio >= 1.5) are NOT killed by trade plan opposing zone collision.
+    The SMC momentum expansion override must apply to both single-stock options and indices.
+    """
+    from engine.trade_plan import TradePlan
+
+    spot = 835.0
+    now_dt = datetime.now(IST)
+    exp_dt = (now_dt + timedelta(days=14)).strftime("%Y-%m-%d")
+    contracts = [
+        OptionsContract(
+            symbol="SONACOMS26SEP840CE",
+            underlying="SONACOMS",
+            strike=840.0,
+            option_type="CE",
+            expiry=exp_dt,
+            last_price=7.80,
+            volume=1040000,
+            oi=830000,
+            oi_change=-45000,  # Heavy unwinding
+            pchange=28.5,
+            bid=7.70,
+            ask=7.90,
+        ),
+    ]
+
+    mock_tp = TradePlan(
+        symbol="SONACOMS",
+        direction="BUY",
+        timeframe="INTRADAY",
+        entry_price=835.0,
+        invalidation_stop=827.0,
+        stop_distance_pts=8.0,
+        stop_distance_pct=0.96,
+        sl_rationale="Dynamic ATR stop",
+        target_1=842.0,
+        t1_distance_pts=7.0,
+        t1_distance_pct=0.84,
+        rr_t1=0.88,
+        t1_rationale="Supply barrier",
+        target_2=850.0,
+        t2_distance_pts=15.0,
+        t2_distance_pct=1.80,
+        rr_t2=1.88,
+        t2_rationale="Expansion target",
+        is_asymmetry_viable=False,
+        asymmetry_verdict="OPPOSING_ZONE_COLLISION_REJECTED",
+        asymmetry_note="Supply OB collision test",
+        atr_points=10.0,
+        velocity_pts_per_bar=2.0,
+        expected_bars_t1=3,
+        expected_bars_t2=6,
+        eta_t1_minutes=15,
+        eta_t2_minutes=30,
+        eta_t1_str="~15 mins",
+        eta_t2_str="~30 mins",
+        session_overrun_risk=False,
+        session_clock_note="Normal",
+        options_recommended_structure="NAKED_OPTION",
+        estimated_theta_drag_pts=0.2,
+        theta_drag_pct_of_gain=2.5,
+        structure_advice="Direct call purchase",
+    )
+
+    with patch("engine.trade_plan.calculate_trade_plan", return_value=mock_tp):
+        alerts = detect_gamma_blast("SONACOMS", spot, contracts, now_dt=now_dt)
+
+    assert len(alerts) >= 1
+    alert = alerts[0]
+    assert alert.symbol == "SONACOMS"
+    assert alert.actionable_plan.get("trade_plan", {}).get("asymmetry_verdict") == "SMC_MOMENTUM_OVERRIDE"
+    assert alert.actionable_plan.get("trade_plan", {}).get("is_asymmetry_viable") is True

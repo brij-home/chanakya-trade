@@ -613,7 +613,9 @@ def detect_gamma_blast(
                 )
 
                 # Fix 2: SMC Structural Bypass for is_asymmetry_viable (CE side)
-                _ce_smc_bypass = is_index and (
+                # Applies to both liquid single-stock options and indices when institutional
+                # writer panic unwinding (vol_oi >= 1.5 / negative dOI) or PDL sweeps are confirmed.
+                _ce_smc_bypass = (
                     (vol_oi_ratio >= 1.5) or is_oi_shedding or _pdl_sweep_active
                 )
                 if tp and not tp.is_asymmetry_viable and not _ce_smc_bypass:
@@ -1209,7 +1211,9 @@ def detect_gamma_blast(
                 )
 
                 # Fix 2: SMC Structural Bypass for is_asymmetry_viable (PE side)
-                _pe_smc_bypass = is_index and (
+                # Applies to both liquid single-stock options and indices when institutional
+                # writer panic unwinding (vol_oi >= 1.5 / negative dOI) or PDH sweeps are confirmed.
+                _pe_smc_bypass = (
                     (vol_oi_ratio >= 1.5) or is_oi_shedding or _pdh_sweep_active
                 )
                 if tp and not tp.is_asymmetry_viable and not _pe_smc_bypass:
