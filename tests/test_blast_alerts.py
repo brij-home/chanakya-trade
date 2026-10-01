@@ -29,8 +29,8 @@ def test_format_blast_alert_call():
     assert "NIFTY 23550 CE" in html
     assert "Entry Zone:" in html
     assert "₹85.50 – ₹92.70" in html
-    assert "Invalidation SL:" in html
-    assert "Target 1 (1.5R):" in html
+    assert "SL:" in html
+    assert "T1 (1.5R):" in html
     assert "Playbook:" in html
     assert "GAMMA BLAST SURGE" in html
     assert "Chanakya" not in html
@@ -59,9 +59,9 @@ def test_format_blast_alert_put():
     }
     html = format_blast_alert(blast_data, underlying="NIFTY", spot=23420.0)
     assert "NIFTY 23400 PE" in html
-    assert "Target 1 (1.5R):" in html
+    assert "T1 (1.5R):" in html
     assert "BUY NIFTY 23400 PE" in html
-    assert "Invalidation SL:" in html
+    assert "SL:" in html
 
 
 def test_send_blast_push_mocked():

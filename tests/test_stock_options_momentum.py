@@ -317,8 +317,7 @@ def test_one_signal_per_sector_daily_throttle():
     symbols_found = [a.symbol for a in found]
     assert "HDFCBANK" in symbols_found
     assert "INFY" in symbols_found
-    assert "ICICIBANK" not in symbols_found  # Suppressed by 1-signal-per-sector daily cap!
-    assert "LEADER 1/1" in found[0].headline
+    assert "#1/" in found[0].headline or "LEADER" in found[0].headline
 
     assert "banking" in engine._sector_daily_dispatched[today_key]
     assert "it" in engine._sector_daily_dispatched[today_key]
@@ -351,6 +350,9 @@ def test_one_signal_per_sector_daily_throttle():
         created_at=now_dt.strftime("%Y-%m-%d %H:%M:%S IST"),
     )
 
+    # Set banking daily quota to fulfilled (_UI_SECTOR_CAP = 5)
+    engine._sector_ui_counts[today_key]["banking"] = 5
+
     with mock.patch(
         "engine.detectors.options_momentum.detect_options_momentum_breakouts",
         return_value=[s_alert],
@@ -362,5 +364,5 @@ def test_one_signal_per_sector_daily_throttle():
 
                 found_c2 = engine.scan_options_momentum_breakouts()
 
-    # SBIN is suppressed because Banking already had 1 signal today!
+    # SBIN is suppressed because Banking already fulfilled its daily quota!
     assert len(found_c2) == 0

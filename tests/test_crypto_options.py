@@ -324,7 +324,8 @@ def test_render_crypto_auto_alert():
     )
 
     rendered = render_auto_alert(alert, in_market=False)
-    assert "[CRYPTO 24x7] ALPHA VORTEX" in rendered
+    assert "[CRYPTO 24x7]" in rendered
+    assert "ALPHA VORTEX" in rendered
     assert "$81,100.00" in rendered
     assert "$80,200.00" in rendered
     assert "$84,500.00" in rendered

@@ -105,26 +105,32 @@ def test_pilot_profile_fails_closed_until_deliberately_enabled(monkeypatch):
 
 
 def test_derivative_requires_verified_contract(tmp_path, monkeypatch):
+    from market.instrument_master import close_db
+
+    close_db()
     monkeypatch.setenv("TRADING_PLATFORM_HOME", str(tmp_path))
     from engine.order_lifecycle import _resolve_order_instrument
     from market.instrument_master import upsert_verified_contract
 
-    with pytest.raises(ValueError, match="provider-verified"):
-        _resolve_order_instrument("NFO:NIFTY26SEP25000CE", "NRML")
+    try:
+        with pytest.raises(ValueError, match="provider-verified"):
+            _resolve_order_instrument("NFO:NIFTY26SEP25000CE", "NRML")
 
-    upsert_verified_contract(
-        lookup_symbol="NFO:NIFTY26SEP25000CE",
-        provider="shoonya",
-        provider_symbol="NIFTY26SEP25000CE",
-        provider_token="12345",
-        exchange="NFO",
-        segment="FNO",
-        lot_size=75,
-        tick_size=0.05,
-    )
-    _, exchange, segment = _resolve_order_instrument("NFO:NIFTY26SEP25000CE", "NRML")
-    assert exchange == "NFO"
-    assert segment == "OPTIONS"
+        upsert_verified_contract(
+            lookup_symbol="NFO:NIFTY26SEP25000CE",
+            provider="shoonya",
+            provider_symbol="NIFTY26SEP25000CE",
+            provider_token="12345",
+            exchange="NFO",
+            segment="FNO",
+            lot_size=75,
+            tick_size=0.05,
+        )
+        _, exchange, segment = _resolve_order_instrument("NFO:NIFTY26SEP25000CE", "NRML")
+        assert exchange == "NFO"
+        assert segment == "OPTIONS"
+    finally:
+        close_db()
 
 
 def test_cash_equity_suffix_is_not_misclassified_as_option():

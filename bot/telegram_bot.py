@@ -34,11 +34,13 @@ Install: pip install python-telegram-bot
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
+import re
 import threading
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from dotenv import load_dotenv
 
@@ -790,19 +792,69 @@ async def cmd_alert(update, context) -> None:
 
 
 async def cmd_alerts(update, context) -> None:
-    """Handle /alerts — list active alerts."""
+    """Handle /alerts — list active alerts across both Autonomous Radar and Manual triggers."""
     try:
         from engine.alerts import alert_manager
+        from engine.auto_alert_engine import auto_alert_engine
 
-        active = [a for a in alert_manager._alerts if not a.triggered]
-        if not active:
-            await update.message.reply_text("No active alerts.")
+        # 1. Fetch active autonomous radar alerts
+        auto_active = auto_alert_engine.get_alerts(view_mode="ACTIVE", limit=20)
+
+        # 2. Fetch active manual price/technical alerts
+        manual_active = [
+            a
+            for a in alert_manager._alerts
+            if not a.triggered and not getattr(a, "is_invalidated", False)
+        ]
+
+        if not auto_active and not manual_active:
+            await update.message.reply_text(
+                "🔔 <b>No active alerts</b> on Radar or Manual triggers.",
+                parse_mode="HTML",
+            )
             return
-        lines = ["🔔 Active Alerts\n"]
-        for a in active:
-            lines.append(f"  [{a.id}] {a.describe()}")
-        await update.message.reply_text("\n".join(lines))
+
+        lines = ["🔔 <b>Active Alerts Dashboard</b>\n"]
+
+        if auto_active:
+            lines.append(f"⚡ <b>Autonomous Radar ({len(auto_active)})</b>")
+            for a in auto_active[:12]:
+                sym = a.symbol
+                atype = (a.alert_type or "SETUP").replace("_", " ")
+                conf = getattr(a, "confidence", 0)
+                stage = getattr(a, "stage", "ACTIVE")
+                dir_icon = "🟢" if a.direction in ("BULLISH", "LONG", "BUY") else "🔴"
+                tg_tag = "📱" if getattr(a, "telegram_dispatched", False) else "🔒"
+                entry = (
+                    f"₹{a.trigger_level:,.1f}"
+                    if a.trigger_level > 0
+                    else (f"₹{a.entry_price:,.1f}" if a.entry_price > 0 else f"₹{a.ltp:,.1f}")
+                )
+                t1 = (
+                    f"₹{a.target_level:,.1f}"
+                    if a.target_level > 0
+                    else (f"₹{a.target_1:,.1f}" if getattr(a, "target_1", 0) > 0 else "-")
+                )
+                sl = f"₹{a.stop_loss:,.1f}" if a.stop_loss > 0 else "-"
+
+                lines.append(
+                    f"• {tg_tag} {dir_icon} <b>{sym}</b> [{atype}] · {conf}%\n"
+                    f"  Entry: <code>{entry}</code> | SL: <code>{sl}</code> | T1: <code>{t1}</code> ({stage})"
+                )
+            if len(auto_active) > 12:
+                lines.append(f"  <i>...and {len(auto_active) - 12} more on Terminal UI</i>")
+            lines.append("")
+
+        if manual_active:
+            lines.append(f"📌 <b>Manual Price Alerts ({len(manual_active)})</b>")
+            for m in manual_active:
+                lines.append(f"• <code>[{m.id}]</code> {m.describe()}")
+            lines.append("")
+
+        lines.append("<i>Legend: 📱 Telegram Dispatched | 🔒 Terminal UI Only</i>")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
     except Exception as e:
+        logger.error(f"[TelegramBot] cmd_alerts failed: {e}", exc_info=True)
         await update.message.reply_text(f"Alerts failed: {e}")
 
 
@@ -1266,12 +1318,15 @@ async def cmd_precursors(update, context) -> None:
             f"<i>Candidates exhibiting pre-move DNA before explosive breakouts:</i>\n",
         ]
 
+        from bot.alert_templates import shorten_sector_name
+
         for c in candidates:
             icon = "🔥" if c.conviction_score >= 85 else "✅"
             factors_brief = "\n  • ".join(c.matched_factors[:2])
+            sec_disp = shorten_sector_name(c.sector_name) or c.sector_name
             lines.append(
                 f"{icon} <b>{c.symbol} [{c.segment}]</b> — 🧠 <b>Score: {c.conviction_score}/100</b> ({c.verdict})\n"
-                f"  💰 <b>LTP:</b> ₹{c.ltp:,.2f} | <b>Sector:</b> {c.sector_name} ({c.rrg_quadrant})\n"
+                f"  💰 <b>LTP:</b> ₹{c.ltp:,.2f} | <b>Sector:</b> {sec_disp} ({c.rrg_quadrant})\n"
                 f"  🎯 <b>Entry Zone:</b> <code>{c.entry_range}</code>\n"
                 f"  🛑 <b>SL:</b> <code>₹{c.stop_loss:,.2f}</code> | 🎯 <b>T1:</b> <code>₹{c.target_1:,.2f}</code> ({c.risk_reward} R:R)\n"
                 f"  📊 <b>Pre-Move Precursors:</b>\n  • {factors_brief}\n"
@@ -1712,17 +1767,275 @@ def get_telegram_destinations() -> dict[str, Any]:
     }
 
 
+_THREADS_FILE = Path(__file__).parent.parent / "data" / "telegram_threads.json"
+_signal_message_map: dict[str, int] = {}
+_signal_map_lock = threading.Lock()
+_MAX_SIGNAL_MAP_SIZE = 1000
+_threads_loaded = False
+
+
+def _load_threads_if_needed() -> None:
+    global _threads_loaded
+    if _threads_loaded:
+        return
+    with _signal_map_lock:
+        if _threads_loaded:
+            return
+        if _THREADS_FILE.exists():
+            try:
+                with open(_THREADS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        _signal_message_map.update(
+                            {str(k): int(v) for k, v in data.items() if str(v).isdigit()}
+                        )
+            except Exception:
+                pass
+        _threads_loaded = True
+
+
+def _save_threads() -> None:
+    try:
+        _THREADS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with _signal_map_lock:
+            data = dict(_signal_message_map)
+        with open(_THREADS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def get_signal_message_id(
+    signal_id: str,
+    chat_id: Optional[str] = None,
+    alert_id: Optional[str] = None,
+) -> Optional[int]:
+    """Retrieve original Telegram message_id for a given signal_id to thread replies."""
+    if not signal_id and not alert_id:
+        return None
+    _load_threads_if_needed()
+    sig = signal_id.lstrip("#").strip() if signal_id else ""
+    candidates: list[str] = []
+    if sig:
+        candidates.append(sig)
+    if alert_id:
+        aid = alert_id.strip()
+        if aid and aid not in candidates:
+            candidates.append(aid)
+    if sig:
+        base_sig = re.sub(r"_\d{4}$", "", sig)
+        if base_sig not in candidates:
+            candidates.append(base_sig)
+        contract_sig = re.sub(r"_\d{1,2}[A-Z]{3}(?:_\d{4})?$", "", sig)
+        if contract_sig not in candidates:
+            candidates.append(contract_sig)
+
+    with _signal_map_lock:
+        if chat_id:
+            clean_chat = str(chat_id).strip()
+            if ":" in clean_chat:
+                clean_chat = clean_chat.split(":", 1)[0].strip()
+            if clean_chat:
+                for c in candidates:
+                    val = _signal_message_map.get(f"{clean_chat}:{c}")
+                    if val is not None:
+                        return int(val)
+        for c in candidates:
+            val = _signal_message_map.get(c)
+            if val is not None:
+                return int(val)
+    return None
+
+
+def record_signal_message_id(
+    signal_id: str,
+    message_id: int,
+    chat_id: Optional[str] = None,
+    alert_id: Optional[str] = None,
+) -> None:
+    """Record Telegram message_id for a signal to thread future milestone/trailing updates."""
+    if not (signal_id or alert_id) or not message_id:
+        return
+    _load_threads_if_needed()
+    sig = signal_id.lstrip("#").strip() if signal_id else ""
+    keys_to_index: list[str] = []
+    if sig:
+        keys_to_index.append(sig)
+        base_sig = re.sub(r"_\d{4}$", "", sig)
+        if base_sig not in keys_to_index:
+            keys_to_index.append(base_sig)
+        contract_sig = re.sub(r"_\d{1,2}[A-Z]{3}(?:_\d{4})?$", "", sig)
+        if contract_sig not in keys_to_index:
+            keys_to_index.append(contract_sig)
+    if alert_id:
+        aid = alert_id.strip()
+        if aid and aid not in keys_to_index:
+            keys_to_index.append(aid)
+
+    clean_chat = ""
+    if chat_id:
+        clean_chat = str(chat_id).strip()
+        if ":" in clean_chat:
+            clean_chat = clean_chat.split(":", 1)[0].strip()
+
+    with _signal_map_lock:
+        if len(_signal_message_map) >= _MAX_SIGNAL_MAP_SIZE:
+            for k in list(_signal_message_map.keys())[:200]:
+                _signal_message_map.pop(k, None)
+        for k in keys_to_index:
+            _signal_message_map[k] = int(message_id)
+            if clean_chat:
+                _signal_message_map[f"{clean_chat}:{k}"] = int(message_id)
+    try:
+        _save_threads()
+    except Exception:
+        pass
+
+
+def clear_signal_message_ids() -> None:
+    """Clear in-memory and persisted signal-to-message mapping (useful for testing/cleanup)."""
+    with _signal_map_lock:
+        _signal_message_map.clear()
+    try:
+        if _THREADS_FILE.exists():
+            _THREADS_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def format_telegram_push_payload(
+    message: str,
+    chat_id: Optional[str] = None,
+    reply_to_message_id: Optional[int] = None,
+    disable_notification: Optional[bool] = None,
+    signal_id: Optional[str] = None,
+    message_thread_id: Optional[int] = None,
+    parse_mode: str = "HTML",
+    alert_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Construct the canonical Telegram sendMessage payload.
+    Handles:
+      1. Topic/Thread Partitioning: extracts topic ID from 'chat_id:topic_id' or TELEGRAM_TOPIC_ID.
+      2. Thread Partitioning via reply_to_message_id: links updates/milestones back to the original call.
+      3. Audio / Tone Differentiator: sets disable_notification=True for minor trailing ratchets or silent alerts.
+    """
+    target_chat_id = (chat_id or "").strip() or _load_chat_id()
+
+    # Topic/thread parsing: support "chat_id:thread_id" syntax
+    if target_chat_id and ":" in str(target_chat_id):
+        parts = str(target_chat_id).split(":", 1)
+        if parts[1].strip().isdigit():
+            target_chat_id = parts[0].strip()
+            if message_thread_id is None:
+                message_thread_id = int(parts[1].strip())
+
+    if message_thread_id is None:
+        env_tid = os.environ.get("TELEGRAM_TOPIC_ID") or os.environ.get(
+            "TELEGRAM_MESSAGE_THREAD_ID"
+        )
+        if env_tid and env_tid.strip().isdigit():
+            message_thread_id = int(env_tid.strip())
+
+    # Guard: FNO_INDEX channel (-1004380788314) strictly restricted to Nifty, Banknifty, Midcp, and Sensex
+    fno_idx_env_id = os.environ.get("TELEGRAM_FNO_INDEX_CHAT_ID", "-1004380788314").strip()
+    if target_chat_id and str(target_chat_id) == fno_idx_env_id:
+        m_blocked = re.search(
+            r"\b(FINNIFTY|BANKEX|NIFTYNXT50|CNXIT|NIFTYIT|NIFTYAUTO|NIFTYPHARMA|NIFTYMETAL|NIFTYENERGY)\b",
+            message,
+            re.IGNORECASE,
+        )
+        if m_blocked:
+            return {}
+
+    payload: dict[str, Any] = {"chat_id": target_chat_id, "text": message}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if message_thread_id:
+        payload["message_thread_id"] = message_thread_id
+
+    # Extract signal_id if not explicitly provided
+    resolved_sig = (signal_id or "").lstrip("#").strip()
+    if not resolved_sig:
+        m = re.search(r"#(SIG_[a-zA-Z0-9_]+)", message)
+        if m:
+            resolved_sig = m.group(1).lstrip("#").strip()
+
+    # Thread Partitioning via reply_to_message_id:
+    # If not explicitly specified, auto-lookup root message ID for updates/milestones
+    if reply_to_message_id is None and (
+        resolved_sig or alert_id or re.search(r"#(SIG_[a-zA-Z0-9_]+)", message)
+    ):
+        is_update = bool(
+            re.search(r"\bUPDATE\s*#?\d*\b", message, re.IGNORECASE)
+            or re.search(
+                r"\b(?:TARGET|TRAIL|STOP|INVALIDAT|EXIT|SCALE|WARNING|HIT|BREACH|FREE-ROLL|RATCHET|PROFIT|COMPRESS|STAGNATION)\b",
+                message,
+                re.IGNORECASE,
+            )
+        )
+        if is_update:
+            if resolved_sig or alert_id:
+                reply_to_message_id = get_signal_message_id(
+                    resolved_sig, chat_id=target_chat_id, alert_id=alert_id
+                )
+            if not reply_to_message_id:
+                m_tag = re.search(r"#(SIG_[a-zA-Z0-9_]+)", message)
+                if m_tag:
+                    reply_to_message_id = get_signal_message_id(
+                        m_tag.group(1), chat_id=target_chat_id, alert_id=alert_id
+                    )
+
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = int(reply_to_message_id)
+        payload["allow_sending_without_reply"] = True
+        payload["reply_parameters"] = {
+            "message_id": int(reply_to_message_id),
+            "allow_sending_without_reply": True,
+        }
+
+    # Audio / Tone Differentiator:
+    # Silent (disable_notification=True): TRAIL RATCHET, PRECURSOR RADAR, EOD, morning brief
+    # Audible (disable_notification=False): NEW CALL, TARGET 1/2/FINAL, STOP LOSS EXIT, INVALIDATED
+    if disable_notification is None:
+        msg_upper = message.upper()
+        if (
+            "TRAIL_RATCHET" in msg_upper
+            or "TRAILING STOP RATCHET" in msg_upper
+            or "PRECURSOR RADAR" in msg_upper
+            or "MORNING BRIEF" in msg_upper
+            or "EOD REPORT" in msg_upper
+            or "[SILENT]" in msg_upper
+        ):
+            disable_notification = True
+        else:
+            disable_notification = False
+
+    if disable_notification:
+        payload["disable_notification"] = True
+
+    return payload
+
+
 def send_push(
     message: str,
     parse_mode: str = "HTML",
     bypass_dedup: bool = False,
     chat_id: Optional[str] = None,
+    reply_to_message_id: Optional[int] = None,
+    disable_notification: Optional[bool] = None,
+    signal_id: Optional[str] = None,
+    message_thread_id: Optional[int] = None,
+    on_success: Optional[Callable[[int], None]] = None,
+    alert_id: Optional[str] = None,
 ) -> None:
     """
     Send a push notification to the configured Telegram chat, group, or channel.
     Called from alerts, morning brief scheduler, execution gate, etc.
     Non-blocking — runs in a background thread.
     Includes a 5-minute anti-flood message deduplication guard.
+    Supports in-thread replies (reply_to_message_id), topic routing (message_thread_id),
+    audible vs silent notification delivery (disable_notification), and on_success callbacks.
     """
     import hashlib
     import time
@@ -1759,6 +2072,24 @@ def send_push(
 
             _recent_push_digests[digest] = now
 
+    payload = format_telegram_push_payload(
+        message=message,
+        chat_id=target_chat_id,
+        reply_to_message_id=reply_to_message_id,
+        disable_notification=disable_notification,
+        signal_id=signal_id,
+        message_thread_id=message_thread_id,
+        parse_mode=parse_mode,
+        alert_id=alert_id,
+    )
+    if not payload or not payload.get("text"):
+        return
+
+    resolved_sig = (signal_id or "").lstrip("#").strip()
+    tags = [t.lstrip("#").strip() for t in re.findall(r"#(SIG_[a-zA-Z0-9_]+)", message)]
+    if not resolved_sig and tags:
+        resolved_sig = tags[0]
+
     def _send():
         if os.environ.get("CHANAKYA_TESTING") == "1":
             logger.debug(
@@ -1767,18 +2098,58 @@ def send_push(
             return
         try:
             import httpx
-            import re
 
             url = f"https://api.telegram.org/bot{token}/sendMessage"
-            payload = {"chat_id": target_chat_id, "text": message}
-            if parse_mode:
-                payload["parse_mode"] = parse_mode
-
             resp = httpx.post(url, json=payload, timeout=10)
-            # If HTML parsing fails due to any unescaped tags/characters, retry as plain text so the alert is never lost
-            if not resp.is_success and parse_mode == "HTML":
+            if resp.is_success:
+                try:
+                    data = resp.json()
+                    msg_id = data.get("result", {}).get("message_id")
+                    if msg_id:
+                        keys_to_record = set()
+                        if resolved_sig:
+                            keys_to_record.add(resolved_sig)
+                        for t in tags:
+                            keys_to_record.add(t)
+                        for k in keys_to_record:
+                            record_signal_message_id(
+                                k, msg_id, chat_id=target_chat_id, alert_id=alert_id
+                            )
+                        if on_success and callable(on_success):
+                            try:
+                                on_success(int(msg_id))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            elif parse_mode == "HTML":
+                # If HTML parsing fails due to any unescaped tags/characters, retry as plain text so the alert is never lost
                 clean_text = re.sub(r"<[^>]+>", "", message)
-                httpx.post(url, json={"chat_id": target_chat_id, "text": clean_text}, timeout=10)
+                fallback_payload = dict(payload)
+                fallback_payload.pop("parse_mode", None)
+                fallback_payload["text"] = clean_text
+                resp2 = httpx.post(url, json=fallback_payload, timeout=10)
+                if resp2.is_success:
+                    try:
+                        data = resp2.json()
+                        msg_id = data.get("result", {}).get("message_id")
+                        if msg_id:
+                            keys_to_record = set()
+                            if resolved_sig:
+                                keys_to_record.add(resolved_sig)
+                            for t in tags:
+                                keys_to_record.add(t)
+                            for k in keys_to_record:
+                                record_signal_message_id(
+                                    k, msg_id, chat_id=target_chat_id, alert_id=alert_id
+                                )
+                            if on_success and callable(on_success):
+                                try:
+                                    on_success(int(msg_id))
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
         except Exception:
             pass
 

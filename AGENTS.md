@@ -7,7 +7,7 @@
 
 <!-- TOC -->
 - [1. Project Overview & Component Map](#1-project-overview--component-map)
-- [2. Safety & Trading Guardrails (15 Core Invariants)](#2-safety--trading-guardrails-15-core-invariants)
+- [2. Safety & Trading Guardrails (20 Core Invariants)](#2-safety--trading-guardrails-20-core-invariants)
 - [3. LLM Model Hierarchy & Multi-Key Resilience](#3-llm-model-hierarchy--multi-key-resilience)
 - [4. Environment & Common Commands](#4-environment--common-commands)
 - [5. On-Demand Skills Directory](#5-on-demand-skills-directory)
@@ -24,7 +24,7 @@
 | **`agent/`** | Multi-agent reasoning, smart funnel, screening & debates | [`smart_funnel.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/smart_funnel.py), [`multi_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/multi_agent.py), [`dag_orchestrator.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/dag_orchestrator.py), [`personas.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/personas.py), [`tools.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/tools.py) |
 | **`analysis/`** | Quantitative sector rotation, forensic accounting, DCF, SMC & Multibagger | [`sector_rotation.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/sector_rotation.py), [`market_structure.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/market_structure.py), [`volume_profile.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/volume_profile.py), [`multibagger.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/multibagger.py), [`forensic.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/forensic.py), [`dcf.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/dcf.py) |
 | **`brokers/`** | Broker unified abstraction (data vs execution) | [`session.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/session.py), [`fyers.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/fyers.py), [`shoonya.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/shoonya.py), [`zerodha.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/zerodha.py), [`angelone.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/angelone.py), [`mstock.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/mstock.py), [`mock.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/mock.py) |
-| **`engine/`** | Backtesting, risk gate, execution, sizing, lifecycle & cache | [`backtest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest.py), [`trade_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trade_lifecycle.py), [`position_sizer.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/position_sizer.py), [`risk_gate.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/risk_gate.py), [`auto_alert_engine.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/auto_alert_engine.py), [`alert_postmortem_runner.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/alert_postmortem_runner.py), [`paper.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/paper.py) |
+| **`engine/`** | Backtesting, risk gate, execution, sizing, lifecycle & cache | [`alert_identity.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/alert_identity.py), [`backtest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest.py), [`trade_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trade_lifecycle.py), [`position_sizer.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/position_sizer.py), [`risk_gate.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/risk_gate.py), [`auto_alert_engine.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/auto_alert_engine.py), [`alert_postmortem_runner.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/alert_postmortem_runner.py), [`paper.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/paper.py) |
 | **`market/`** | Market feeds, options chain, quotes, sentiment & global macro | [`quotes.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/quotes.py), [`global_macro.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/global_macro.py), [`gift_nifty.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/gift_nifty.py), [`options.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/options.py), [`indices.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/indices.py), [`mstock_websocket.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/mstock_websocket.py) |
 | **`web/`** | FastAPI sidecar API (port `8765`), OAuth & SSE | [`api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py), [`auth.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/auth.py), [`sse.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/sse.py), [`openclaw.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/openclaw.py), [`skills.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/skills.py) |
 | **`app/`** | Interactive REPL, CLI commands & launcher | [`main.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/main.py), [`repl.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/repl.py), [`commands/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/commands) |
@@ -35,7 +35,7 @@
 
 ---
 
-## 2. Safety & Trading Guardrails (15 Core Invariants)
+## 2. Safety & Trading Guardrails (20 Core Invariants)
 
 > **⚠️ Never commit `.env` — see [`config/credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) for secure token management.**
 
@@ -93,6 +93,33 @@
    - **Strict Need-Basis AI Invocation**: AI models must NEVER be invoked unconditionally on raw market ticks or unfiltered scanner loops.
    - **4-Stage Zero-Token Pre-LLM Filter**: Lockout Gate → In-Memory TTL Dedup Cache → Deterministic Quantitative Conviction Gate → Local Pool Circuit Breaker.
    - **Zero Truncation Guarantee**: Maintain bounded token allocations with a 1.5× to 2.5× safety buffer. Enforce defensive JSON parsing with deterministic quantitative zero-blackout fallback.
+16. **Institutional RCA-First Engineering Protocol**:
+   - Whenever an issue, anomaly, or surge occurs (e.g. repetitive popups, duplicate dispatches, or unexpected state transitions), ALWAYS inspect the entire data pipeline (backend logs, engine events, SSE broadcast, identity generation) to isolate the true Root Cause Analysis (RCA) BEFORE proposing code changes.
+   - NEVER apply cosmetic UI patches (such as client-side debouncing, hiding, or artificial rate-limiting) to mask underlying engine or backend architecture bugs. Fix the failure mode strategically at its source (schema, factory, state machine, deduplication).
+   - Defensive verification: For any bug fix, write a deterministic regression test or static invariant test that prevents recurrence permanently.
+17. **Centralized Alert Identity & Symbol Canonicalization Invariant**:
+   - All detectors and alert creators MUST generate alert IDs exclusively via [`engine.alert_identity.generate_alert_id()`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/alert_identity.py).
+   - Alert IDs are strictly deterministic per calendar session date (`%Y%m%d`), canonical symbol, and variant slug: `aa-{alert_type_slug}-{canonical_symbol}[-{variant}]-{YYYYMMDD}`.
+   - NEVER incorporate minute/second timestamps (`%H%M`, `%S`) or random UUIDs (`uuid.uuid4()`) in alert IDs — volatile IDs bypass in-session deduplication and trigger alert storms.
+   - Symbol normalization MUST use `canonical_alert_symbol()`, uniformly stripping exchange prefixes across NSE, BSE, NFO, BFO, MCX, CDS, and Crypto.
+   - Enforce static and runtime invariants via [`tests/test_alert_identity_invariants.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_alert_identity_invariants.py).
+18. **Zero In-Line Startup Migrations**:
+   - Startup, file-loading, and critical loops (`_load()`) must remain idempotent, deterministic, and free of historical mutation or regex rehabilitation loops.
+   - Historical database repairs, one-off schema transformations, and legacy error reconciliations belong strictly in offline administrative scripts (`scripts/remediate_corrupted_alerts.py`) or dedicated explicit methods, never executed on hot startup paths.
+19. **Single-Authority Alert Ingestion & Zero Shadow Dispatch Invariant**:
+   - All trade setups, scanner signals, execution readiness alerts, and automated push notifications MUST enter the system through the centralized alert pipeline (`auto_alert_engine` or `alert_manager`), ensuring deterministic ID generation (`generate_alert_id()`), storage persistence in `auto_alerts.json`/`alerts.json`, real-time SSE broadcast to UI, and audit-logged multi-channel dispatch.
+   - Direct unrecorded calls to `bot.telegram_bot.send_push()` for new trade setups (shadow alerts) are strictly prohibited.
+   - Channel Parity & Transparent Governance: Every trade setup must be discoverable across both the desktop UI and Telegram query interfaces (`cmd_alerts`), with explicit delivery provenance tags (`TG SENT` vs `TG HELD` with documented suppression reason).
+20. **Institutional Single Source of Truth (SSOT) & End-to-End Audit Traceability**:
+   - **The 5 Authoritative SSOT Domains**:
+     1. *Alerts & Setups*: [`AutoAlertEngine`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/auto_alert_engine.py) (`auto_alerts.json`) is the sole write authority. Downstream sinks (Telegram, Desktop UI, SSE) are read-only projections.
+     2. *Orders & Positions*: Real broker execution pipeline ([`engine/order_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/order_lifecycle.py)) and persisted SQLite audit ledger ([`engine/security_audit.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/security_audit.py)).
+     3. *Market Quotes*: [`market.quotes`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/quotes.py) is the sole quote gateway with bounded caching and SLA tracking via [`engine.observability`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/observability.py).
+     4. *Instruments & Lot Sizes*: Canonical exchange masters ([`market/instruments.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/instruments.py)). Lot sizes, tick sizes, and tokens must never be guessed or hardcoded.
+     5. *Operational Mode*: Sole source is `GET /api/mode` (`OBSERVE`, `SIMULATE`, `EXECUTE`).
+   - **The Single-Writer Rule**: Exactly ONE domain engine owns state mutation per domain. Modules outside that domain must NEVER write to storage files or push to output sinks directly.
+   - **Auditability Mandate**: Every lifecycle event (creation, scrutiny, SSE broadcast, Telegram gate decision, milestone progress, invalidation) MUST append an immutable record to `alert.audit_trail` via `alert.record_audit()`.
+   - **Fast Troubleshooting**: Query any alert's full chronological journey in <60 seconds via `GET /api/alerts/auto/{alert_id}/audit` or the global timeline via `GET /api/alerts/auto/audit-trail`.
 
 ---
 
@@ -137,20 +164,29 @@
 
 ## 4. Environment & Common Commands
 
+### ⚡ Rapid Iteration Protocol (Zero Wait-Time Invariant)
+- **During Active Iteration & Debugging**:
+  - **DO NOT** run `scripts/validate_all.py` (which spins up 21 Vitest workers, Ruff, and full multi-worker Pytest smoke matrix, adding 1+ minute overhead per turn).
+  - **ONLY** run targeted pytest for the modified module/test:
+    `& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_specific.py -k "test_name" -q` (execution: 1–2s).
+  - Apply the targeted fix, run the specific test, restart the service with `scripts\service.ps1`, and respond immediately.
+- **Pre-Push / Release Gate Only**:
+  - Reserve `validate_all.py --fast` or `--full` exclusively for when the user explicitly requests full pre-commit validation or when preparing a final release push.
+
 ```powershell
 # Services & Lifecycle (Detached background daemon — 0 agent tasks, no prompt lock)
 powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action restart
 powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action status
 powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action stop
 
-# Fast Pre-Commit Gate (< 8s)
+# Targeted Test Execution (< 2s) — MANDATORY FOR RAPID ITERATION
+& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_auto_alerts.py -k "test_name" -q
+
+# Fast Pre-Commit Gate (~60s) — USE ONLY ON EXPLICIT USER REQUEST OR FINAL PRE-PUSH
 python scripts/validate_all.py --fast
 
-# Full CI/CD Pre-Push Gate (< 30s)
+# Full CI/CD Pre-Push Gate (~90s)
 python scripts/validate_all.py --full
-
-# Targeted Test Execution
-& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_skills.py -v
 ```
 
 ---

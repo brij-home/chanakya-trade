@@ -126,7 +126,7 @@ _KNOWN_NSE_TOKENS = {
     "MARUTI": "10999",
     "TATAMOTORS": "3456",
     "WIPRO": "3787",
-    "COFORGE": "11540",
+    "COFORGE": "11543",
     "TRENT": "1964",
     "HCLTECH": "7229",
     "DIVISLAB": "10940",
@@ -139,9 +139,9 @@ _KNOWN_NSE_TOKENS = {
     "PATANJALI": "17029",
     "OBEROIRLTY": "20242",
     "KPITTECH": "9683",
-    "TATAELXSI": "3506",
+    "TATAELXSI": "3411",
     "MPHASIS": "4503",
-    "MANKIND": "5926",
+    "MANKIND": "15380",
     "BSE": "19585",
     "MCX": "31181",
     "GOLD": "GOLD",
@@ -187,37 +187,120 @@ class MStockAPI(BrokerAPI):
 
         # Restore saved token session if valid
         self._load_token()
+        try:
+            self._ensure_scrip_cache()
+        except Exception:
+            pass
 
     # ── Token Resolution Helper ──────────────────────────────
+
+    @staticmethod
+    def _resolve_derivative_candidates(clean_sym: str) -> list[str]:
+        """Convert ISO YYYYMMDD derivative format to NSE YYMMM / weekly YYMDD formats."""
+        m = re.match(
+            r"^([A-Za-z0-9_& -]+?)(20\d{2})(\d{2})(\d{2})(\d+(?:\.\d+)?)(CE|PE)$",
+            clean_sym,
+            re.IGNORECASE,
+        )
+        if not m:
+            return [clean_sym]
+        und, yyyy, mm, dd, strike, opt_type = m.groups()
+        yy = yyyy[2:]
+        m_int = int(mm)
+        s_int = str(int(float(strike)))
+        opt_t = opt_type.upper()
+        cands = [clean_sym]
+        m_map_3 = {
+            1: "JAN",
+            2: "FEB",
+            3: "MAR",
+            4: "APR",
+            5: "MAY",
+            6: "JUN",
+            7: "JUL",
+            8: "AUG",
+            9: "SEP",
+            10: "OCT",
+            11: "NOV",
+            12: "DEC",
+        }
+        m_map_1 = {
+            1: "1",
+            2: "2",
+            3: "3",
+            4: "4",
+            5: "5",
+            6: "6",
+            7: "7",
+            8: "8",
+            9: "9",
+            10: "O",
+            11: "N",
+            12: "D",
+        }
+        # 1. Weekly specific-day formats MUST take precedence over monthly formats
+        # NSE weekly contracts use single-character month (1-9, O, N, D) + two-digit day (dd)
+        if m_int in m_map_1:
+            cands.append(f"{und}{yy}{m_map_1[m_int]}{dd}{s_int}{opt_t}")
+            if dd.startswith("0"):
+                cands.append(f"{und}{yy}{m_map_1[m_int]}{dd[1:]}{s_int}{opt_t}")
+        # 2. Two-digit numeric month + day format
+        cands.append(f"{und}{yy}{mm}{dd}{s_int}{opt_t}")
+        # 3. Monthly format (YYMMM) only as fallback when day is not a separate weekly expiry
+        if m_int in m_map_3:
+            cands.append(f"{und}{yy}{m_map_3[m_int]}{s_int}{opt_t}")
+        return cands
 
     def get_symbol_token(self, symbol: str, exchange: str = "NSE") -> str:
         """Resolve security token for symbol via known tokens or cached scrip master."""
         clean_sym = (
-            symbol.replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").strip().upper()
+            symbol.replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("BFO:", "")
+            .replace("NFO:", "")
+            .replace("-EQ", "")
+            .strip()
+            .upper()
         )
+        if clean_sym == "SENSEX":
+            return "51" if str(exchange).upper() in ("BFO", "5") else "1"
+        if clean_sym == "BANKEX":
+            return "69" if str(exchange).upper() in ("BFO", "5") else "12"
+
+        # 1. Canonical Scrip Master Cache takes PRECEDENCE (Rule 11: Exchange Authority)
+        try:
+            self._ensure_scrip_cache()
+            cache_key = f"{exchange}:{clean_sym}"
+            eq_cache_key = f"{exchange}:{clean_sym}-EQ"
+            if cache_key in self._scrip_token_cache:
+                return self._scrip_token_cache[cache_key]
+            if eq_cache_key in self._scrip_token_cache:
+                return self._scrip_token_cache[eq_cache_key]
+
+            # Check candidate derivative symbol variations (e.g. ISO YYYYMMDD -> NSE YYMMM)
+            for cand in self._resolve_derivative_candidates(clean_sym):
+                cand_key = f"{exchange}:{cand}"
+                if cand_key in self._scrip_token_cache:
+                    tok = self._scrip_token_cache[cand_key]
+                    self._scrip_token_cache[cache_key] = tok
+                    return tok
+        except Exception:
+            pass
+
+        # 2. Hardcoded fallback (only if scrip master cache miss)
         if clean_sym in _KNOWN_NSE_TOKENS:
             return _KNOWN_NSE_TOKENS[clean_sym]
 
-        cache_key = f"{exchange}:{clean_sym}"
-        if cache_key in self._scrip_token_cache:
-            return self._scrip_token_cache[cache_key]
-
-        try:
-            self._ensure_scrip_cache()
-            if cache_key in self._scrip_token_cache:
-                return self._scrip_token_cache[cache_key]
-        except Exception:
-            pass
         return clean_sym
 
     def _ensure_scrip_cache(self) -> None:
         """Parse instruments from Scrip Master if not yet loaded."""
-        if self._scrip_token_cache or not self._token:
+        if self._scrip_token_cache:
             return
 
         cache_disk_file = app_data_path("mstock_scrip_cache.json")
         now_ts = time.time()
-        # 1. Try local disk cache if fresher than 24 hours
+        # 1. Try local disk cache if fresher than 24 hours (does not require active broker token)
         if cache_disk_file.exists():
             try:
                 disk_data = json.loads(cache_disk_file.read_text(encoding="utf-8"))
@@ -226,6 +309,9 @@ class MStockAPI(BrokerAPI):
                     return
             except Exception:
                 pass
+
+        if not self._token:
+            return
 
         scrip_txt = self.download_scrip_master()
         if not scrip_txt:
@@ -840,7 +926,11 @@ class MStockAPI(BrokerAPI):
                 or clean_sym.endswith("-FUT")
                 or clean_sym.endswith("FUT")
             ):
-                exchange = "NFO"
+                exchange = (
+                    "BFO" if any(clean_sym.startswith(x) for x in ("SENSEX", "BANKEX")) else "NFO"
+                )
+            elif clean_sym in ("SENSEX", "BANKEX"):
+                exchange = "BSE"
             else:
                 exchange = "NSE"
 
@@ -859,8 +949,10 @@ class MStockAPI(BrokerAPI):
                 dedup_payload = {
                     exch: list(dict.fromkeys(toks)) for exch, toks in exchange_tokens.items()
                 }
+                # mode=OHLC returns open/high/low/close/ltp.
+                # Note: mStock OpenAPI throws error IA400 if mode='FULL' is passed.
                 q_payload = {"mode": "OHLC", "exchangeTokens": dedup_payload}
-                resp = self._client.post(url, json=q_payload, headers=self._headers(), timeout=3.5)
+                resp = self._client.post(url, json=q_payload, headers=self._headers(), timeout=6.0)
                 if resp.status_code == 200:
                     data = resp.json()
                     raw_data = data.get("data") or data.get("result") or data
@@ -877,7 +969,16 @@ class MStockAPI(BrokerAPI):
                     else:
                         fetched = []
 
+                    _mstock_full_keys_logged = getattr(self, "_mstock_full_keys_logged", False)
                     for item in fetched:
+                        if not _mstock_full_keys_logged:
+                            import logging as _logging
+
+                            _logging.getLogger(__name__).debug(
+                                f"[mStock FULL] First item keys: {list(item.keys())} | sample: { {k: item[k] for k in list(item.keys())[:12]} }"
+                            )
+                            self._mstock_full_keys_logged = True
+                            _mstock_full_keys_logged = True
                         exch = item.get("exchange") or "NSE"
                         tok = str(item.get("symbolToken") or item.get("token") or "")
                         ltp = float(
@@ -897,6 +998,16 @@ class MStockAPI(BrokerAPI):
                             clean = inst_list[0].replace("NSE:", "").replace("BSE:", "").strip()
                             targets = [(inst_list[0], clean)]
                         for orig_inst, target_sym in targets:
+                            _vwap = (
+                                float(
+                                    item.get("vwap")
+                                    or item.get("averageTradePrice")
+                                    or item.get("avgTradePrice")
+                                    or item.get("averagePrice")
+                                    or 0.0
+                                )
+                                or None
+                            )
                             q_obj = Quote(
                                 symbol=target_sym,
                                 last_price=ltp,
@@ -907,6 +1018,7 @@ class MStockAPI(BrokerAPI):
                                 volume=int(item.get("volume") or 0),
                                 change=round(change, 2),
                                 change_pct=round(change_pct, 2),
+                                vwap=_vwap,
                             )
                             quotes[orig_inst] = q_obj
                             quotes[target_sym] = q_obj
@@ -940,6 +1052,16 @@ class MStockAPI(BrokerAPI):
                         change = ltp - close
                         change_pct = (change / close * 100.0) if close else 0.0
                         if ltp > 0:
+                            _vwap_fb = (
+                                float(
+                                    res.get("vwap")
+                                    or res.get("averageTradePrice")
+                                    or res.get("avgTradePrice")
+                                    or res.get("averagePrice")
+                                    or 0.0
+                                )
+                                or None
+                            )
                             q_obj = Quote(
                                 symbol=clean_sym,
                                 last_price=ltp,
@@ -950,6 +1072,7 @@ class MStockAPI(BrokerAPI):
                                 volume=int(res.get("volume") or 0),
                                 change=round(change, 2),
                                 change_pct=round(change_pct, 2),
+                                vwap=_vwap_fb,
                             )
                             quotes[inst] = q_obj
                             quotes[clean_sym] = q_obj
@@ -1001,11 +1124,24 @@ class MStockAPI(BrokerAPI):
         Return all available sorted expiry dates (YYYY-MM-DD) for an underlying
         directly from m.Stock Option Chain Master.
         """
-        clean_sym = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()
+        clean_sym = (
+            underlying.replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("BFO:", "")
+            .replace("NFO:", "")
+            .upper()
+            .strip()
+        )
+        is_bse = (
+            clean_sym in ("SENSEX", "BANKEX")
+            or underlying.upper().startswith("BSE:")
+            or underlying.upper().startswith("BFO:")
+        )
+        exchange = 5 if is_bse else 2
         if not self._token:
             self.authenticate()
         try:
-            master = self.get_option_chain_master(exchange=2)
+            master = self.get_option_chain_master(exchange=exchange)
             dct_exp = master.get("dctExp", {})
             opt_idx = master.get("OPTIDX", [])
             of_stk = master.get("OFSTK", [])
@@ -1056,7 +1192,27 @@ class MStockAPI(BrokerAPI):
         Falls back seamlessly to the market engine (NSE scraper) if session is unauthenticated
         or if m.Stock API encounters an error.
         """
-        clean_sym = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()
+        clean_sym = (
+            underlying.replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("BFO:", "")
+            .replace("NFO:", "")
+            .upper()
+            .strip()
+        )
+        is_bse = (
+            clean_sym in ("SENSEX", "BANKEX")
+            or underlying.upper().startswith("BSE:")
+            or underlying.upper().startswith("BFO:")
+        )
+        exchange = 5 if is_bse else 2
+        opt_exch = "BFO" if is_bse else "NFO"
+
+        from engine.position_sizer import get_lot_size
+
+        lot_sz = get_lot_size(clean_sym) or (
+            20 if clean_sym == "SENSEX" else (30 if clean_sym == "BANKEX" else 1)
+        )
 
         # Attempt native m.Stock Option Chain if token available
         if not self._token:
@@ -1064,7 +1220,7 @@ class MStockAPI(BrokerAPI):
 
         if self._token:
             try:
-                master = self.get_option_chain_master(exchange=2)
+                master = self.get_option_chain_master(exchange=exchange)
                 dct_exp = master.get("dctExp", {})
                 opt_idx = master.get("OPTIDX", [])
                 of_stk = master.get("OFSTK", [])
@@ -1130,7 +1286,7 @@ class MStockAPI(BrokerAPI):
                         resolved_expiry_str = candidates[0][1]
 
                     if chosen_epoch:
-                        url = f"{MSTOCK_BASE_URL}/openapi/typeb/GetOptionChain/2/{chosen_epoch}/{token}"
+                        url = f"{MSTOCK_BASE_URL}/openapi/typeb/GetOptionChain/{exchange}/{chosen_epoch}/{token}"
                         resp = self._fetch_authed("GET", url)
                         if resp.status_code == 200:
                             data = resp.json()
@@ -1169,7 +1325,8 @@ class MStockAPI(BrokerAPI):
                                         oi=oi,
                                         oi_change=0,
                                         volume=vol,
-                                        exchange="NFO",
+                                        lot_size=lot_sz,
+                                        exchange=opt_exch,
                                     )
                                     contracts.append(c_obj)
                                     token_map[c_token] = c_obj
@@ -1192,7 +1349,8 @@ class MStockAPI(BrokerAPI):
                                         oi=oi,
                                         oi_change=0,
                                         volume=vol,
-                                        exchange="NFO",
+                                        lot_size=lot_sz,
+                                        exchange=opt_exch,
                                     )
                                     contracts.append(p_obj)
                                     token_map[p_token] = p_obj
@@ -1238,7 +1396,7 @@ class MStockAPI(BrokerAPI):
                                             q_url,
                                             json={
                                                 "mode": "OHLC",
-                                                "exchangeTokens": {"NFO": atm_tokens},
+                                                "exchangeTokens": {opt_exch: atm_tokens},
                                             },
                                             timeout=4.0,
                                         )
@@ -1283,6 +1441,9 @@ class MStockAPI(BrokerAPI):
             except Exception:
                 pass
 
+        if is_bse:
+            return []
+
         # Defensive fallback to institutional NSE scraper engine
         from market.nse_scraper import nse_get_options_chain
 
@@ -1304,7 +1465,7 @@ class MStockAPI(BrokerAPI):
 
         clean_sym = symbol.replace("NSE:", "").replace("BSE:", "")
         exchange = "BSE" if symbol.startswith("BSE:") else "NSE"
-        token = _KNOWN_NSE_TOKENS.get(clean_sym, "")
+        token = self.get_symbol_token(clean_sym, exchange)
 
         interval_map = {
             "D": "ONE_DAY",
@@ -1901,7 +2062,7 @@ class MStockAPI(BrokerAPI):
 
         clean_sym = symbol.replace("NSE:", "").replace("BSE:", "")
         exchange_id = "4" if symbol.startswith("BSE:") else "1"
-        token = _KNOWN_NSE_TOKENS.get(clean_sym, "")
+        token = self.get_symbol_token(clean_sym, "BSE" if exchange_id == "4" else "NSE")
 
         if self._token and token:
             try:

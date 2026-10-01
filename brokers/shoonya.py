@@ -502,6 +502,8 @@ class ShoonyaAPI(BrokerAPI):
             .replace("CDS:", "")
             .replace("NFO:", "")
             .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("BFO:", "")
             .strip()
         )
         is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
@@ -511,9 +513,14 @@ class ShoonyaAPI(BrokerAPI):
             "GBPINR",
             "JPYINR",
         ) or underlying.upper().startswith("CDS:")
+        is_bse = (
+            clean_sym in ("SENSEX", "BANKEX")
+            or underlying.upper().startswith("BSE:")
+            or underlying.upper().startswith("BFO:")
+        )
 
-        exch = "MCX" if is_commodity else ("CDS" if is_currency else "NFO")
-        prefix = f"{exch}:" if is_commodity or is_currency else "NSE:"
+        exch = "MCX" if is_commodity else ("CDS" if is_currency else ("BFO" if is_bse else "NFO"))
+        prefix = f"{exch}:" if is_commodity or is_currency else ("BSE:" if is_bse else "NSE:")
         resolved = self._resolve_instrument(f"{prefix}{clean_sym}")
         payload: dict[str, Any] = {
             "exch": exch,

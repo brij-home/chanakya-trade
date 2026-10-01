@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useChatStore, getBaseUrl } from '../../store/chatStore'
+import { resolveHorizonAndETA } from '../Views/alerts/alertHelpers'
 
 export default function AlertsCard({ data }) {
   const port    = useChatStore((s) => s.port)
@@ -73,11 +74,17 @@ export default function AlertsCard({ data }) {
                   <span className={`text-[9px] px-1.5 py-0.2 rounded font-black uppercase tracking-wider ${isTest ? 'bg-purple-500/20 text-purple-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
                     {isTest ? '🧪 TEST' : '🟢 LIVE'}
                   </span>
-                  {a.time_horizon && (
-                    <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-sky-500/15 text-sky-300 border border-sky-500/30">
-                      {a.time_horizon === 'INTRADAY' ? '⏱️ INTRADAY' : a.time_horizon === 'SWING_SHORT' ? '⚡ 2-5D' : a.time_horizon === 'SWING_MID' ? '📈 1-4W' : '🏛️ POS'}
-                    </span>
-                  )}
+                  {(() => {
+                    const hz = resolveHorizonAndETA(a)
+                    return (
+                      <span
+                        title={hz.tooltip}
+                        className={`text-[8px] px-1 py-0.2 rounded font-mono font-bold border ${hz.badgeClasses}`}
+                      >
+                        {hz.compactBadge}
+                      </span>
+                    )
+                  })()}
                   {a.order_flow_signals?.live_broker_connected === false || a.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' ? (
                     <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40" title="No active broker WebSocket depth connection. Using tick-level fallback.">
                       ⚠️ SYNTHETIC L1

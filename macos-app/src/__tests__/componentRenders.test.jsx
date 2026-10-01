@@ -283,6 +283,35 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       expect(screen.getByText(/Paper OMS · 0 Real Broker Risk/i)).toBeTruthy()
       expect(screen.queryByText(/⚠️ LIVE OMS · Real Capital at Risk/i)).toBeNull()
     })
+
+    it('renders Smart Order Router (SOR) strategy badge when smart_routing is present', () => {
+      render(
+        <OrderTicketModal
+          isOpen={true}
+          onClose={vi.fn()}
+          appMode="PAPER"
+          initialData={{
+            symbol: 'RELIANCE',
+            price: 2800,
+            stopLoss: 2740,
+            target: 2920,
+            action: 'BUY',
+            smart_routing: {
+              routing_mode: 'ICEBERG',
+              num_tranches: 3,
+              tranche_size: 100,
+              delay_seconds: 5,
+              estimated_spread_savings_inr: 450,
+              notes: 'Iceberg slicing 3 tranches to minimize impact cost',
+            },
+          }}
+        />
+      )
+
+      expect(screen.getByText(/Smart Router: ICEBERG/i)).toBeTruthy()
+      expect(screen.getByText(/SOR Active/i)).toBeTruthy()
+      expect(screen.getByText(/3 Tranches × 100 Qty/i)).toBeTruthy()
+    })
   })
 
   describe('HighConvictionCard', () => {

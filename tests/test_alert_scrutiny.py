@@ -284,22 +284,22 @@ def test_auto_alert_engine_gated_approval_attaches_scrutiny():
 
 
 def test_auto_alert_engine_urgent_signal_enrichment():
-    """Urgent signal (Gamma Blast) records immediately with QUANT_VERIFIED and runs async enrichment."""
+    """Urgent signal (Circuit Warning) records immediately with QUANT_VERIFIED and runs async enrichment."""
     engine = AutoAlertEngine()
     engine._alerts = []
     urgent_alert = AutoAlert(
-        alert_id="urgent-gamma-1",
-        alert_type="GAMMA_BLAST",
+        alert_id="urgent-circuit-1",
+        alert_type="CIRCUIT_WARNING",
         stage="IGNITED",
-        symbol="NSE:NIFTY",
+        symbol="NSE:RELIANCE",
         exchange="NSE",
         direction="BULLISH",
-        headline="Nifty Gamma Blast",
-        summary="OI unwinding surge",
-        ltp=25000.0,
-        trigger_level=25000.0,
-        stop_loss=24900.0,
-        target_level=25300.0,
+        headline="Reliance Circuit Warning",
+        summary="Upper circuit headroom approaching",
+        ltp=2500.0,
+        trigger_level=2500.0,
+        stop_loss=2450.0,
+        target_level=2600.0,
         confidence=82,
         is_live=True,
         environment="LIVE",
@@ -408,7 +408,7 @@ def test_tier2_quant_fallback_long_put_guidance(auditor):
     result = auditor._generate_quantitative_fallback(alert, {"level_coherence": True})
     assert result.status == "APPROVED"
     assert "Buy PE" in result.actionable_guidance
-    assert "Rs.36.0" in result.actionable_guidance
+    assert "Rs.36.0" in result.actionable_guidance or "₹36.0" in result.actionable_guidance
     assert "Short near" not in result.actionable_guidance
     assert "Put momentum" in result.logic_confirmation
 
@@ -540,6 +540,7 @@ def test_tier1_stock_option_illiquidity_rejection(auditor):
         strike=1100.0,
         option_type="CE",
         metrics={"oi": 500, "volume": 25},
+        created_at="2026-09-29 11:00:00 IST",
         is_live=True,
         environment="LIVE",
     )

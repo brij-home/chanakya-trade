@@ -679,19 +679,57 @@ class SmartFunnel:
 
         # ── Fundamental Rules (Bypassed for Crypto) ──
         if exchange.upper() != "CRYPTO":
-            if roe >= 15.0:
+            # Detect sector classification for financial/capital-intensive calibration
+            sec_id = "broad_market"
+            try:
+                from analysis.universe import get_stock_sector
+
+                sec_id, _ = get_stock_sector(symbol)
+            except Exception:
+                pass
+            is_financial = sec_id in ("banking", "finance", "financials")
+            is_capital_intensive = sec_id in ("energy", "infra", "metals", "realty", "telecom")
+
+            # Check for Emerging Turnaround Inflection
+            eps_q1 = float(fund.get("eps_q1_growth") or 0.0)
+            eps_acc = float(fund.get("eps_acceleration") or 0.0)
+            is_turnaround = eps_q1 >= 30.0 or eps_acc >= 25.0
+
+            if is_turnaround:
+                score += 15.0
+                positive_flags.append(
+                    f"⚡ Turnaround Inflection (Quarterly EPS +{eps_q1:.0f}% YoY)"
+                )
+            elif roe >= 15.0:
                 score += 10.0
                 positive_flags.append(f"High ROE ({roe:.1f}%)")
-            elif roe < 5.0 and roe != 0.0:
+            elif roe < 5.0 and roe != 0.0 and not is_turnaround:
                 score -= 15.0
                 rejection_flags.append(f"Weak capital efficiency (ROE {roe:.1f}% < 5%)")
 
-            if 0.0 < de <= 0.6:
-                score += 10.0
-                positive_flags.append(f"Clean debt-light balance sheet (D/E {de:.2f}x)")
-            elif de > 2.2:
-                score -= 20.0
-                rejection_flags.append(f"High financial leverage (D/E {de:.2f}x > 2.2x)")
+            # Calibrated Leverage (D/E) rules:
+            # - Financials/Banks operate on leverage (deposits/borrowings = loan inventory)
+            # - Capital-intensive sectors (Infra, Power, Realty) require long-term project debt
+            if is_financial:
+                if roe >= 14.0:
+                    score += 5.0
+                    positive_flags.append(f"Financials ROE expansion ({roe:.1f}%)")
+            elif is_capital_intensive:
+                if 0.0 < de <= 1.2:
+                    score += 10.0
+                    positive_flags.append(
+                        f"Prudent capital-intensive balance sheet (D/E {de:.2f}x)"
+                    )
+                elif de > 3.8:
+                    score -= 20.0
+                    rejection_flags.append(f"High project debt leverage (D/E {de:.2f}x > 3.8x)")
+            else:
+                if 0.0 < de <= 0.6:
+                    score += 10.0
+                    positive_flags.append(f"Clean debt-light balance sheet (D/E {de:.2f}x)")
+                elif de > 2.2:
+                    score -= 20.0
+                    rejection_flags.append(f"High financial leverage (D/E {de:.2f}x > 2.2x)")
 
             if pe > 95.0:
                 score -= 15.0
@@ -703,7 +741,9 @@ class SmartFunnel:
                     f"Minervini SEPA qualified (Q1 EPS {fund.get('eps_q1_growth', 0):.0f}% YoY accelerating)"
                 )
             elif (
-                fund.get("eps_acceleration") is not None and fund.get("eps_acceleration", 0) < -15.0
+                fund.get("eps_acceleration") is not None
+                and fund.get("eps_acceleration", 0) < -15.0
+                and not is_turnaround
             ):
                 score -= 10.0
                 rejection_flags.append(

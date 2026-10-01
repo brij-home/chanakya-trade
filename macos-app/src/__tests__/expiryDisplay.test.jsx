@@ -81,6 +81,32 @@ describe('Options Expiry Clarity & Badging (Weekly ⚡W vs Monthly 📅M)', () =
       expect(details.fullDisplay).toContain('⚡W')
       expect(details.fullDisplay).toContain('17-Sep')
     })
+
+    it('correctly resolves 8-digit broker ISO format (UNITDSPR202609291380PE) without 31-Mar or negative DTE distortion', () => {
+      const sepAlert = {
+        symbol: 'UNITDSPR',
+        contract_symbol: 'UNITDSPR202609291380PE',
+      }
+      const sepDetails = formatExpiryDetails(sepAlert)
+      expect(sepDetails).not.toBeNull()
+      expect(sepDetails.isMonthly).toBe(true)
+      expect(sepDetails.dateFormatted).toBe('29-Sep')
+      expect(sepDetails.fullDisplay).not.toContain('31-Mar')
+      expect(sepDetails.fullDisplay).not.toContain('-2373d')
+      expect(sepDetails.fullDisplay).toContain('29-Sep')
+
+      const octAlert = {
+        symbol: 'POLICYBZR',
+        contract_symbol: 'POLICYBZR202610271100PE',
+      }
+      const octDetails = formatExpiryDetails(octAlert)
+      expect(octDetails).not.toBeNull()
+      expect(octDetails.isMonthly).toBe(true)
+      expect(octDetails.dateFormatted).toBe('27-Oct')
+      expect(octDetails.fullDisplay).toContain('27-Oct')
+      expect(octDetails.fullDisplay).not.toContain('(-')
+      expect(octDetails.dte).toBeGreaterThanOrEqual(0)
+    })
   })
 
   describe('AlertCompactRow Component', () => {

@@ -15,12 +15,12 @@ early-warning alert for the parent index 60-120 seconds *before* the index spot 
 from __future__ import annotations
 
 import logging
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+from engine.alert_identity import generate_alert_id
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("engine.index_contagion")
@@ -278,13 +278,19 @@ class IndexContagionEngine:
         except Exception as e_tp:
             logger.debug(f"[IndexContagion] Trade plan failed: {e_tp}")
 
-        if tp and tp.is_asymmetry_viable:
+        is_viable = True
+        asym_verdict = "ACCEPTABLE"
+        asym_note = ""
+        if tp:
             sl = tp.invalidation_stop
             t1 = tp.target_1
             t2 = tp.target_2
             t3 = tp.target_3
             rr_str = f"1:{tp.rr_t1}"
             tp_dict = tp.as_dict()
+            is_viable = tp.is_asymmetry_viable
+            asym_verdict = tp.asymmetry_verdict
+            asym_note = tp.asymmetry_note
         else:
             # High-precision ATR anchor for indices (BankNifty ~140 pts, Nifty ~60 pts)
             risk_pts = 140.0 if "BANK" in index_name else 60.0
@@ -302,7 +308,9 @@ class IndexContagionEngine:
             tp_dict = None
 
         leaders_str = ", ".join(leading[:3]) if leading else "Core heavyweights"
-        tag = "🚀 HEAVYWEIGHT CONTAGION" if is_bull else "🔻 HEAVYWEIGHT BREAKDOWN"
+        tag = ("🚀 HEAVYWEIGHT CONTAGION" if is_bull else "🔻 HEAVYWEIGHT BREAKDOWN") + (
+            f" [WAIT CONFIRMATION: {asym_verdict}]" if not is_viable else ""
+        )
 
         # Resolve live ATM Option Contract for the index
         opt_type = "CE" if is_bull else "PE"
@@ -455,7 +463,7 @@ class IndexContagionEngine:
         final_conf = min(95, max(65, int(conf_score)))
 
         return AutoAlert(
-            alert_id=f"aa-contagion-{index_name.lower()}-{uuid.uuid4().hex[:6]}",
+            alert_id=generate_alert_id(index_name, "INDEX_CONTAGION", variant=direction.lower()),
             alert_type="INDEX_CONTAGION",
             stage="EARLY_WARNING",
             symbol=index_name,
@@ -484,7 +492,9 @@ class IndexContagionEngine:
                 "option_premium": opt_ltp,
             },
             actionable_plan={
-                "action": f"BUY {opt_type}",
+                "action": f"WAIT_CONFIRMATION ({asym_verdict})"
+                if not is_viable
+                else f"BUY {opt_type}",
                 "instrument": opt_contract_sym,
                 "instrument_type": "OPTION",
                 "segment": "FNO_INDEX",
@@ -504,10 +514,21 @@ class IndexContagionEngine:
                 "underlying_target_2": f"₹{t2:,.1f}" if t2 else None,
                 "underlying_target_3": f"₹{t3:,.1f}" if t3 else None,
                 "risk_reward": rr_str,
+                "is_asymmetry_viable": is_viable,
+                "asymmetry_verdict": asym_verdict,
+                "asymmetry_note": asym_note,
                 "trade_plan": tp_dict,
                 "option_plan": opt_plan,
-                "when_to_buy": when_to_buy_str,
-                "when_to_wait": "Do not chase if spot extends > 0.6% from VWAP without retest",
+                "when_to_buy": (
+                    f"DO NOT ENTER NAKED {opt_type} ({asym_verdict}). Wait for confirmed 5m breakdown close below support."
+                    if not is_viable
+                    else when_to_buy_str
+                ),
+                "when_to_wait": (
+                    f"⛔ ASYMMETRY GUARD: {asym_note}. Do not chase into support."
+                    if not is_viable
+                    else "Do not chase if spot extends > 0.6% from VWAP without retest"
+                ),
                 "profit_rule": "Scale 50% at T1, move SL to breakeven, trail runner on 5m 20-EMA.",
             },
             confidence=final_conf,

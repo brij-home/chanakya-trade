@@ -87,6 +87,46 @@ def bs_premium(
         return intrinsic + time_value
 
 
+def bs_delta(
+    spot: float,
+    strike: float,
+    dte: int,
+    iv: float,
+    option_type: str,
+    rate: float = RISK_FREE_RATE,
+) -> float:
+    """
+    Compute Black-Scholes option delta.
+
+    Returns:
+        float: Delta from 0.0 to 1.0 for CE, -1.0 to 0.0 for PE.
+    """
+    if iv <= 0 or spot <= 0 or strike <= 0:
+        return 0.5 if option_type.upper() == "CE" else -0.5
+
+    # For expired past test mock dates (dte < 0), default to a 5-day weekly baseline.
+    # For 0DTE session trading (dte == 0), use 0.5-day intraday time.
+    if dte < 0:
+        effective_dte = 5.0
+    elif dte == 0:
+        effective_dte = 0.5
+    else:
+        effective_dte = float(dte)
+    try:
+        from scipy.stats import norm
+
+        T = max(1e-4, effective_dte / 365.0)
+        d1 = (math.log(spot / strike) + (rate + 0.5 * iv**2) * T) / (iv * math.sqrt(T))
+        if option_type.upper() == "CE":
+            return round(float(norm.cdf(d1)), 4)
+        else:
+            return round(float(norm.cdf(d1) - 1.0), 4)
+    except Exception:
+        moneyness = (spot - strike) / max(1.0, (spot * iv * math.sqrt(effective_dte / 365.0)))
+        approx = 1.0 / (1.0 + math.exp(-1.7 * moneyness))
+        return round(approx if option_type.upper() == "CE" else approx - 1.0, 4)
+
+
 # ── Data Models ──────────────────────────────────────────────
 
 

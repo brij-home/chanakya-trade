@@ -354,7 +354,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
             <span className="text-gold font-bold">🧠 Confidence: {conviction}%</span>
           </div>
           <div className="text-text font-bold">
-            {alert.is_live === false ? '🧪 [TEST]' : `${dirBadge} [REAL/LIVE]`} {alert.alert_type?.replace(/_/g, ' ')}
+            {alert.is_live === false ? '🧪 [TEST] NEW CALL ·' : `${dirBadge} [REAL/LIVE] NEW CALL ·`} {alert.alert_type?.replace(/_/g, ' ')}
           </div>
           <div className="text-zinc-300">
             • <b>Action:</b> {alert.actionable_plan?.trade_plan?.action || alert.actionable_plan?.action || (alert.direction === 'BEARISH' ? 'BUY PUT' : 'BUY CALL')} <b>{contractLabel}</b>
@@ -362,17 +362,12 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
           </div>
           {alert.stop_loss && (
             <div className="text-rose-400">
-              • <b>Invalidation SL:</b> ₹{Number(alert.stop_loss).toFixed(1)}
+              • <b>SL:</b> ₹{Number(alert.stop_loss).toFixed(1)}
             </div>
           )}
           {alert.target_level && (
             <div className="text-emerald-400">
-              • <b>Target:</b> ₹{Number(alert.target_level).toFixed(1)}
-            </div>
-          )}
-          {(alert.actionable_plan?.runner_strike || alert.actionable_plan?.runner_alternative) && (
-            <div className="text-purple-300">
-              • 🚀 <b>Runner Alternative:</b> {alert.actionable_plan.runner_strike?.symbol || alert.actionable_plan.runner_alternative}
+              • <b>T1:</b> ₹{Number(alert.target_level).toFixed(1)}
             </div>
           )}
         </div>

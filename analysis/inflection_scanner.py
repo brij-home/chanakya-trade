@@ -58,6 +58,9 @@ from analysis.multibagger import (
     detect_vcp,
     evaluate_trend_template,
 )
+from analysis.institutional_catalysts import (
+    get_institutional_catalysts,
+)
 from analysis.sector_rotation import get_stock_tailwind
 from analysis.universe import (
     THEMATIC_PRESETS,
@@ -65,7 +68,6 @@ from analysis.universe import (
     get_stock_sector,
     resolve_dynamic_universe,
 )
-from analysis.volume_profile import analyze_volume_profile
 
 
 @dataclass
@@ -121,6 +123,14 @@ class InflectionSetup:
     executive_summary: str = ""
     data_quality_label: str = "💾 0ms Local Cache"
 
+    # Multi-Horizon & Cycle ETA Retention
+    horizon: str = "MID_TERM"  # "SHORT_TERM" | "MID_TERM" | "LONG_TERM"
+    cycle_state: str = "COILING_PIVOT"  # "TRIGGER_READY" | "COILING_PIVOT" | "STAGE_1_ACCUMULATION" | "PULLBACK_RETEST" | "STAGE_2_MARKUP"
+    eta_days: int = 3
+    eta_label: str = "2–5 Sessions"
+    catalyst_badges: list[str] = field(default_factory=list)
+    institutional_catalysts: dict[str, Any] = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -131,11 +141,13 @@ class InflectionScanResult:
     universe_name: str
     archetype_filter: str
     timing_filter: str
-    total_scanned: int
-    total_qualified: int
+    horizon_filter: str = "ALL"
+    total_scanned: int = 0
+    total_qualified: int = 0
     candidates: list[InflectionSetup] = field(default_factory=list)
     archetype_counts: dict[str, int] = field(default_factory=dict)
     timing_counts: dict[str, int] = field(default_factory=dict)
+    horizon_counts: dict[str, int] = field(default_factory=dict)
     top_sectors: list[dict[str, Any]] = field(default_factory=list)
     scan_timestamp: str = ""
     execution_time_seconds: float = 0.0
@@ -148,11 +160,13 @@ class InflectionScanResult:
             "universe_name": self.universe_name,
             "archetype_filter": self.archetype_filter,
             "timing_filter": self.timing_filter,
+            "horizon_filter": self.horizon_filter,
             "total_scanned": self.total_scanned,
             "total_qualified": self.total_qualified,
             "candidates": [c.to_dict() for c in self.candidates],
             "archetype_counts": self.archetype_counts,
             "timing_counts": self.timing_counts,
+            "horizon_counts": self.horizon_counts,
             "top_sectors": self.top_sectors,
             "scan_timestamp": self.scan_timestamp,
             "execution_time_seconds": self.execution_time_seconds,
@@ -285,27 +299,7 @@ def evaluate_single_stock_inflection(
     if not has_catalyst:
         return None
 
-    # 4. Smart Money Concepts (SMC) Structure (computed only for qualified contenders)
-    smc_rep = None
-    try:
-        smc_rep = analyze_market_structure(clean_sym, df=df)
-    except Exception:
-        pass
-
-    smc_regime = smc_rep.regime if smc_rep else "CONSOLIDATION"
-    smc_setup = smc_rep.setup_type if smc_rep else "RANGE_BOUND"
-    has_choch = bool(smc_rep and smc_rep.choch_detected)
-    has_spring = bool(smc_rep and "SPRING" in str(smc_setup).upper())
-
-    # 5. Volume Profile & RVOL 20D (computed only for qualified contenders)
-    rvol_20d = fast_rvol
-    try:
-        vpa_rep = analyze_volume_profile(clean_sym, df=df)
-        rvol_20d = round(float(vpa_rep.rvol_20d), 2)
-    except Exception:
-        pass
-
-    # 6. Sector RRG Tailwind & Governance Forensics
+    # 4. Sector RRG Tailwind & Governance Forensics (Fast in-memory matrix lookup)
     sec_info = get_stock_sector(clean_sym)
     sec_desc = sec_info[1] if isinstance(sec_info, tuple) else str(sec_info)
     sector_name = sector_override or sec_desc
@@ -342,65 +336,109 @@ def evaluate_single_stock_inflection(
             forensic_safe = True
             pass
 
+    # 5. Fast Tentative Archetype Pre-Scoring (Zero-Cost Funnel Gate)
+    prelim_vcp = 0
+    if is_vcp and vcp_pivot > 0:
+        prelim_vcp = 60
+        if vcp_tightness > 0 and vcp_tightness <= 4.0:
+            prelim_vcp += 20
+        elif vcp_tightness <= 7.0:
+            prelim_vcp += 10
+        pivot_dist_pct = abs(ltp - vcp_pivot) / vcp_pivot * 100.0
+        if pivot_dist_pct <= 3.0:
+            prelim_vcp += 15
+
+    prelim_sq = 0
+    if squeeze.is_squeeze_on or squeeze_status == "FIRED":
+        prelim_sq = 55
+        if squeeze.is_squeeze_on:
+            prelim_sq += 15
+            if squeeze.momentum_value > 0:
+                prelim_sq += 10
+        elif squeeze_status == "FIRED" and squeeze.momentum_value > 0:
+            prelim_sq += 25
+
+    prelim_stage = 0
+    if weinstein_stage == "STAGE_2_MARKUP":
+        prelim_stage = 60 + int(trend_passed * 3.5)
+        if trend_passed >= 6:
+            prelim_stage += 10
+    elif weinstein_stage == "STAGE_1_BASE" and trend_passed >= 4:
+        prelim_stage = 50 + int(trend_passed * 3)
+
+    prelim_rrg = 0
+    if rrg_quadrant in ("LEADING", "IMPROVING"):
+        prelim_rrg = 45 + int(sector_tailwind * 0.4)
+        if rrg_quadrant == "LEADING":
+            prelim_rrg += 10
+        else:
+            prelim_rrg += 5
+
+    # SMC Spring / Sweep candidate potential check
+    candle_span = max(0.01, highs[-1] - lows[-1])
+    is_rejection_candle = (closes[-1] - lows[-1]) / candle_span >= 0.55
+    potential_smc = fast_rvol >= 1.5 or is_rejection_candle or day_change_pct >= 2.0
+
+    max_prelim_score = max(
+        prelim_vcp, prelim_sq, prelim_stage, prelim_rrg, 50 if potential_smc else 0
+    )
+    # If the stock mathematically cannot achieve score >= 40 across any archetype, skip heavy SMC & VPA
+    if max_prelim_score < 40:
+        return None
+
+    # 6. Deep SMC & Volume Profile (Computed ONLY for qualified contenders)
+    smc_rep = None
+    try:
+        smc_rep = analyze_market_structure(clean_sym, df=df)
+    except Exception:
+        pass
+
+    smc_regime = smc_rep.regime if smc_rep else "CONSOLIDATION"
+    smc_setup = smc_rep.setup_type if smc_rep else "RANGE_BOUND"
+    has_choch = bool(smc_rep and smc_rep.choch_detected)
+    has_spring = bool(smc_rep and "SPRING" in str(smc_setup).upper())
+
+    rvol_20d = fast_rvol
+
     # ─────────────────────────────────────────────────────────────────
     # 7. ARCHETYPE IDENTIFICATION & SCORING
     # ─────────────────────────────────────────────────────────────────
     confluence_factors: list[str] = []
     archetype_scores: dict[str, int] = {
-        "VCP_PIVOT_BREAKOUT": 0,
-        "TTM_SQUEEZE_EXPLOSION": 0,
-        "STAGE_1_TO_2_EXPANSION": 0,
+        "VCP_PIVOT_BREAKOUT": prelim_vcp,
+        "TTM_SQUEEZE_EXPLOSION": prelim_sq,
+        "STAGE_1_TO_2_EXPANSION": prelim_stage,
         "SMC_SPRING_SWEEP": 0,
-        "RRG_SECTOR_ROTATION": 0,
+        "RRG_SECTOR_ROTATION": prelim_rrg,
     }
 
-    # Archetype 1: VCP Pivot Breakout
+    # Archetype 1 Confluence factors
     if is_vcp and vcp_pivot > 0:
-        base_vcp = 60
         if vcp_tightness > 0 and vcp_tightness <= 4.0:
-            base_vcp += 20
             confluence_factors.append(f"VCP Tight Contraction ({vcp_tightness}% pivot risk)")
         elif vcp_tightness <= 7.0:
-            base_vcp += 10
             confluence_factors.append(f"VCP Contraction ({vcp_tightness}%)")
-
         pivot_dist_pct = abs(ltp - vcp_pivot) / vcp_pivot * 100.0
         if pivot_dist_pct <= 3.0:
-            base_vcp += 15
             confluence_factors.append(
                 f"At VCP Pivot ₹{vcp_pivot:.1f} (within {pivot_dist_pct:.1f}%)"
             )
 
-        archetype_scores["VCP_PIVOT_BREAKOUT"] = base_vcp
+    # Archetype 2 Confluence factors
+    if squeeze.is_squeeze_on:
+        confluence_factors.append(f"TTM Squeeze Coiling ({squeeze.squeeze_duration_bars} bars)")
+        if squeeze.momentum_value > 0:
+            confluence_factors.append("Squeeze Momentum Rising (+)")
+    elif squeeze_status == "FIRED" and squeeze.momentum_value > 0:
+        confluence_factors.append("TTM Squeeze Volatility Explosion FIRED")
 
-    # Archetype 2: TTM Squeeze Explosion
-    if squeeze.is_squeeze_on or squeeze_status == "FIRED":
-        base_sq = 55
-        if squeeze.is_squeeze_on:
-            base_sq += 15
-            confluence_factors.append(f"TTM Squeeze Coiling ({squeeze.squeeze_duration_bars} bars)")
-            if squeeze.momentum_value > 0:
-                base_sq += 10
-                confluence_factors.append("Squeeze Momentum Rising (+)")
-        elif squeeze_status == "FIRED" and squeeze.momentum_value > 0:
-            base_sq += 25
-            confluence_factors.append("TTM Squeeze Volatility Explosion FIRED")
-
-        archetype_scores["TTM_SQUEEZE_EXPLOSION"] = base_sq
-
-    # Archetype 3: Stage 1 to 2 Expansion
+    # Archetype 3 Confluence factors
     if weinstein_stage == "STAGE_2_MARKUP":
-        base_s2 = 60 + int(trend_passed * 3.5)
         confluence_factors.append(f"Weinstein Stage 2 Markup ({trend_passed}/8 Minervini)")
-        if trend_passed >= 6:
-            base_s2 += 10
-        archetype_scores["STAGE_1_TO_2_EXPANSION"] = base_s2
     elif weinstein_stage == "STAGE_1_BASE" and trend_passed >= 4:
-        base_s1 = 50 + int(trend_passed * 3)
         confluence_factors.append(f"Stage 1 Accumulation Base Transition ({trend_passed}/8)")
-        archetype_scores["STAGE_1_TO_2_EXPANSION"] = base_s1
 
-    # Archetype 4: SMC Spring & Liquidity Sweep
+    # Archetype 4: SMC Spring & Liquidity Sweep (Enriched)
     if has_choch or has_spring or smc_regime == "BULLISH":
         base_smc = 50
         if has_spring:
@@ -414,18 +452,11 @@ def evaluate_single_stock_inflection(
             confluence_factors.append("Demand Order Block OTE 50% discount retest")
         archetype_scores["SMC_SPRING_SWEEP"] = base_smc
 
-    # Archetype 5: RRG Sector Momentum Rotation
-    if rrg_quadrant in ("LEADING", "IMPROVING"):
-        base_rrg = 45 + int(sector_tailwind * 0.4)
-        if rrg_quadrant == "LEADING":
-            base_rrg += 10
-            confluence_factors.append(
-                f"Sector {sector_name} LEADING Benchmark ({sector_tailwind}/100)"
-            )
-        else:
-            base_rrg += 5
-            confluence_factors.append(f"Sector {sector_name} IMPROVING into Leading")
-        archetype_scores["RRG_SECTOR_ROTATION"] = base_rrg
+    # Archetype 5 Confluence factors
+    if rrg_quadrant == "LEADING":
+        confluence_factors.append(f"Sector {sector_name} LEADING Benchmark ({sector_tailwind}/100)")
+    elif rrg_quadrant == "IMPROVING":
+        confluence_factors.append(f"Sector {sector_name} IMPROVING into Leading")
 
     # Volume confluence
     if rvol_20d >= 1.8:
@@ -436,6 +467,13 @@ def evaluate_single_stock_inflection(
     # Forensic check
     if not forensic_safe:
         confluence_factors.append("⚠️ Forensic Caution: Elevated governance / audit flags")
+
+    # Institutional Catalysts & Credit Ratings Check
+    inst_report = get_institutional_catalysts(clean_sym)
+    catalyst_badges = list(inst_report.catalyst_badges)
+    for b in catalyst_badges[:2]:
+        if b not in confluence_factors:
+            confluence_factors.append(b)
 
     # Circuit Lock Detection
     is_uc_locked = False
@@ -463,6 +501,14 @@ def evaluate_single_stock_inflection(
     low_52w = float(np.min(lows[-lookback_52w:]))
     dist_52w_high = round(((high_52w - ltp) / max(0.01, high_52w)) * 100.0, 1)
     dist_52w_low = round(((ltp - low_52w) / max(0.01, low_52w)) * 100.0, 1)
+
+    # Determine Best Primary Archetype (Early Gate)
+    primary_archetype = max(archetype_scores, key=archetype_scores.get)
+    max_archetype_score = archetype_scores[primary_archetype]
+
+    # If no criteria hit at all, score is low — skip weekly resampling and exit immediately
+    if max_archetype_score < 40:
+        return None
 
     # Multi-Timeframe Weekly Alignment — Real Weinstein Stage on weekly bars
     # Fetches actual weekly OHLCV and classifies Weinstein Stage for high-timeframe context.
@@ -539,14 +585,6 @@ def evaluate_single_stock_inflection(
                 )
     except Exception:
         pass
-
-    # Determine Best Primary Archetype
-    primary_archetype = max(archetype_scores, key=archetype_scores.get)
-    max_archetype_score = archetype_scores[primary_archetype]
-
-    # If no criteria hit at all, score is low
-    if max_archetype_score < 40:
-        return None
 
     # ─────────────────────────────────────────────────────────────────
     # 8. TIMING STATE CLASSIFICATION
@@ -700,6 +738,55 @@ def evaluate_single_stock_inflection(
     )
     confluence_total = int(min(99, tech_score + sec_score + qual_score))
 
+    # Multi-Horizon Classification
+    # 1. LONG_TERM (Multibagger Compounder 1-3Y):
+    #    Qualified institutional catalysts (CRISIL upgrade / FII-DII influx / zero pledge),
+    #    clean forensics, high moonshot asymmetry (+6R+), or established Stage 2 compounder.
+    if (
+        inst_report.is_multibagger_catalyst_qualified
+        or (
+            forensic_safe
+            and (target_moonshot / max(0.1, entry_price)) >= 1.5
+            and primary_archetype in ("STAGE_1_TO_2_EXPANSION", "RRG_SECTOR_ROTATION")
+        )
+        or (score >= 70 and dist_52w_high <= 20.0 and trend_passed >= 6 and qual_score >= 18)
+    ):
+        horizon = "LONG_TERM"
+    elif (
+        primary_archetype in ("TTM_SQUEEZE_EXPLOSION", "SMC_SPRING_SWEEP")
+        or timing_state == "TRIGGER_NOW"
+        or rvol_20d >= 1.8
+    ):
+        horizon = "SHORT_TERM"
+    else:
+        horizon = "MID_TERM"
+
+    # Cycle State & Precise ETA Window
+    if timing_state == "TRIGGER_NOW":
+        cycle_state = "TRIGGER_READY"
+        eta_days = 0
+        eta_label = "🔥 TODAY (Trigger Ready)"
+    elif timing_state == "COILING_IMMINENT":
+        cycle_state = "COILING_PIVOT"
+        eta_days = 3
+        eta_label = "⏳ 2–5 Sessions (Coiling)"
+    elif timing_state == "PULLBACK_RETEST":
+        cycle_state = "PULLBACK_RETEST"
+        eta_days = 2
+        eta_label = "🎯 1–3 Sessions (Retest Zone)"
+    elif primary_archetype == "STAGE_1_TO_2_EXPANSION" and trend_passed < 6:
+        cycle_state = "STAGE_1_ACCUMULATION"
+        eta_days = 20
+        eta_label = "📐 2–4 Weeks (Accumulation)"
+    elif weekly_stage == "WEEKLY_STAGE_2":
+        cycle_state = "STAGE_2_MARKUP"
+        eta_days = 0
+        eta_label = "🚀 Active Markup (Stage 2)"
+    else:
+        cycle_state = "COILING_PIVOT"
+        eta_days = 5
+        eta_label = "⏳ Stalking Pivot"
+
     # Executive Action Verdict
     if is_uc_locked:
         exec_verdict = "🔒 CIRCUIT LOCKED"
@@ -770,6 +857,12 @@ def evaluate_single_stock_inflection(
         executive_verdict=exec_verdict,
         executive_summary=exec_summary,
         data_quality_label="💾 0ms Local Cache",
+        horizon=horizon,
+        cycle_state=cycle_state,
+        eta_days=eta_days,
+        eta_label=eta_label,
+        catalyst_badges=catalyst_badges,
+        institutional_catalysts=inst_report.to_dict(),
     )
 
 
@@ -780,11 +873,13 @@ def scan_inflections_universe(
     universe: str = "multibagger_hunters",
     archetype_filter: str = "ALL",
     timing_filter: str = "ALL",
+    horizon_filter: str = "ALL",
     min_score: int = 45,
     max_results: int = 40,
     min_turnover_cr: float = 0.0,
     cap_tier_filter: str = "ALL",
     use_local_cache: bool = True,
+    bypass_inflection_cache: bool = False,
     sync_missing: bool = True,
     exchange: str = "NSE",
     parallel_workers: int = 24,
@@ -811,6 +906,104 @@ def scan_inflections_universe(
             )
         u_name = THEMATIC_PRESETS.get(universe.lower(), {}).get("name", universe_desc)
 
+    norm_archetype = archetype_filter.upper().strip()
+    norm_timing = timing_filter.upper().strip()
+    norm_horizon = horizon_filter.upper().strip()
+    norm_cap_tier = cap_tier_filter.upper().strip()
+
+    # 0. Check SQLite Daily Precomputed Inflection Cache (< 20ms response)
+    if use_local_cache and df_cache is None and not bypass_inflection_cache:
+        try:
+            from engine.eod_store import count_cached_inflections, get_cached_inflections_batch
+
+            is_broad = universe.lower() in ("all_nse_liquid", "nifty_total_market", "nifty500")
+            if count_cached_inflections(max_age_hours=24.0) >= 20:
+                cached_data = get_cached_inflections_batch(
+                    symbols=None if is_broad else symbols,
+                    min_score=min_score,
+                    min_turnover_cr=min_turnover_cr,
+                    archetype=norm_archetype,
+                    timing=norm_timing,
+                    horizon=norm_horizon,
+                    cap_tier=norm_cap_tier,
+                    limit=max_results,
+                    max_age_hours=24.0,
+                )
+                if cached_data:
+                    reconstructed = []
+                    arch_cnts = {}
+                    tim_cnts = {}
+                    hor_cnts = {}
+                    for d in cached_data:
+                        arch = d.get("primary_archetype", "VCP_PIVOT_BREAKOUT")
+                        tim = d.get("timing_state", "TRIGGER_NOW")
+                        hor = d.get("horizon", "MID_TERM")
+                        arch_cnts[arch] = arch_cnts.get(arch, 0) + 1
+                        tim_cnts[tim] = tim_cnts.get(tim, 0) + 1
+                        hor_cnts[hor] = hor_cnts.get(hor, 0) + 1
+                        valid_fields = {
+                            k: v for k, v in d.items() if k in InflectionSetup.__dataclass_fields__
+                        }
+                        reconstructed.append(InflectionSetup(**valid_fields))
+
+                    t1 = time.perf_counter()
+                    sector_counts = {}
+                    for c in reconstructed:
+                        sector_counts[c.sector] = sector_counts.get(c.sector, 0) + 1
+                    top_sectors = [
+                        {"sector": sec, "count": count, "icon": _get_sector_icon(sec)}
+                        for sec, count in sorted(
+                            sector_counts.items(), key=lambda x: x[1], reverse=True
+                        )[:5]
+                    ]
+                    return InflectionScanResult(
+                        universe_id=universe,
+                        universe_name=u_name,
+                        archetype_filter=norm_archetype,
+                        timing_filter=norm_timing,
+                        horizon_filter=norm_horizon,
+                        total_scanned=len(symbols),
+                        total_qualified=len(reconstructed),
+                        candidates=reconstructed[:max_results],
+                        archetype_counts=arch_cnts,
+                        timing_counts=tim_cnts,
+                        horizon_counts=hor_cnts,
+                        top_sectors=top_sectors,
+                        scan_timestamp=timestamp_str,
+                        execution_time_seconds=round(t1 - t0, 3),
+                        cache_state="SQLITE_DAILY_PRECOMPUTED (<20ms)",
+                        filtered_out_liquidity_count=0,
+                    )
+        except Exception:
+            pass
+
+    # Fast Liquidity & Minimum Bar Pre-Filter via SQLite Metadata (3ms)
+    filtered_out_liquidity_count = 0
+    if df_cache is None and use_local_cache and len(symbols) > 80:
+        try:
+            from engine.eod_store import get_symbol_meta_batch
+
+            meta_map = get_symbol_meta_batch(symbols)
+            if meta_map:
+                active_symbols = []
+                for s in symbols:
+                    clean_s = s.upper().replace(".NS", "").replace("NSE:", "").strip()
+                    m = meta_map.get(clean_s)
+                    if m:
+                        if m.get("bar_count", 0) < 25:
+                            filtered_out_liquidity_count += 1
+                            continue
+                        if (
+                            min_turnover_cr > 0
+                            and (m.get("median_turnover_20d") or 0.0) < min_turnover_cr
+                        ):
+                            filtered_out_liquidity_count += 1
+                            continue
+                    active_symbols.append(s)
+                symbols = active_symbols
+        except Exception:
+            pass
+
     cache_state = "REST_DIRECT"
     if df_cache is None and use_local_cache:
         try:
@@ -831,10 +1024,6 @@ def scan_inflections_universe(
                     df_cache.update(newly_cached)
         except Exception:
             pass
-
-    norm_archetype = archetype_filter.upper().strip()
-    norm_timing = timing_filter.upper().strip()
-    norm_cap_tier = cap_tier_filter.upper().strip()
 
     # Pre-fetch sector RRG matrix once to avoid hundreds of repetitive SQLite queries
     rrg_matrix: Optional[dict[str, Any]] = None
@@ -883,15 +1072,26 @@ def scan_inflections_universe(
             if setup and setup.inflection_score >= min_score:
                 candidates.append(setup)
 
+    # Auto-save qualified setups into SQLite Daily Cache for instant < 20ms future hits
+    if candidates and use_local_cache:
+        try:
+            from engine.eod_store import save_cached_inflections_batch
+
+            save_cached_inflections_batch([c.to_dict() for c in candidates])
+        except Exception:
+            pass
+
     # 3. Apply Filters
     filtered: list[InflectionSetup] = []
     archetype_counts: dict[str, int] = {}
     timing_counts: dict[str, int] = {}
+    horizon_counts: dict[str, int] = {}
 
     for c in candidates:
         # Tally counts
         archetype_counts[c.primary_archetype] = archetype_counts.get(c.primary_archetype, 0) + 1
         timing_counts[c.timing_state] = timing_counts.get(c.timing_state, 0) + 1
+        horizon_counts[c.horizon] = horizon_counts.get(c.horizon, 0) + 1
 
         # Check archetype filter
         if norm_archetype != "ALL" and c.primary_archetype != norm_archetype:
@@ -899,6 +1099,10 @@ def scan_inflections_universe(
 
         # Check timing filter
         if norm_timing != "ALL" and c.timing_state != norm_timing:
+            continue
+
+        # Check horizon filter
+        if norm_horizon != "ALL" and c.horizon != norm_horizon:
             continue
 
         # Check market cap tier filter
@@ -928,11 +1132,13 @@ def scan_inflections_universe(
         universe_name=u_name,
         archetype_filter=norm_archetype,
         timing_filter=norm_timing,
+        horizon_filter=norm_horizon,
         total_scanned=len(symbols),
         total_qualified=len(final_candidates),
         candidates=final_candidates,
         archetype_counts=archetype_counts,
         timing_counts=timing_counts,
+        horizon_counts=horizon_counts,
         top_sectors=top_sectors,
         scan_timestamp=timestamp_str,
         execution_time_seconds=round(t1 - t0, 3),

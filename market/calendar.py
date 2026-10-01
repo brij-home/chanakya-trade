@@ -505,3 +505,35 @@ def get_adjusted_expiry_date(
     while cur.weekday() >= 5 or is_trading_holiday(cur, exchange):
         cur -= timedelta(days=1)
     return cur
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Trading Session Counting (Swing / Positional Shelf-Life)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def get_trading_days_elapsed(
+    start_date: date,
+    end_date: Optional[date] = None,
+    exchange: str = "NSE",
+) -> int:
+    """
+    Computes count of official market trading days that have elapsed between
+    start_date and end_date (inclusive).
+    Excludes all:
+      - Weekends (Saturday & Sunday)
+      - Exchange trading holidays (Ganesh Chaturthi, Republic Day, Diwali, etc.)
+    If start_date > end_date, returns 0.
+    """
+    target = end_date or datetime.now(IST).date()
+    if start_date > target:
+        return 0
+
+    cur = start_date
+    trading_days = 0
+    while cur <= target:
+        if cur.weekday() < 5 and not is_trading_holiday(cur, exchange):
+            trading_days += 1
+        cur += timedelta(days=1)
+
+    return trading_days

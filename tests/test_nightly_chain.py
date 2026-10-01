@@ -35,6 +35,11 @@ def test_alert_postmortem_runner_execution():
     from unittest.mock import MagicMock
     from engine.alert_model import AutoAlert
 
+    from datetime import datetime, timezone, timedelta
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+
     mock_engine = MagicMock()
     mock_alert = AutoAlert(
         alert_id="test-alert-1",
@@ -49,7 +54,7 @@ def test_alert_postmortem_runner_execution():
         trigger_level=2800.0,
         stop_loss=2750.0,
         target_level=2900.0,
-        created_at="2026-09-23 10:00:00",
+        created_at=f"{today_str} 10:00:00",
         is_invalidated=True,
         r_multiple=-1.0,
     )

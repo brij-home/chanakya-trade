@@ -29,7 +29,6 @@ Operational Invariants:
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime, timezone, timedelta, time as dtime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -38,6 +37,7 @@ import numpy as np
 import pandas as pd
 
 from engine.alert_model import AutoAlert
+from engine.alert_identity import canonical_alert_symbol
 from engine.option_resolver import resolve_option_contract, is_index_symbol
 
 logger = logging.getLogger("chanakya.detectors.orb")
@@ -270,7 +270,9 @@ def detect_opening_range_breakout(
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     direction = "BULLISH" if is_bullish else "BEARISH"
     alert_type = "ORB_BREAKOUT" if is_bullish else "ORB_BREAKDOWN"
-    alert_id = f"orb-{direction.lower()[:4]}-{symbol.lower()}-{uuid.uuid4().hex[:6]}"
+    from engine.alert_identity import generate_alert_id
+
+    alert_id = generate_alert_id(symbol, alert_type, variant=direction.lower()[:4])
 
     if is_bullish:
         trigger_level = orb_high
@@ -328,7 +330,7 @@ def detect_opening_range_breakout(
         confidence += 4
     confidence = min(96, confidence)
 
-    clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    clean_sym = canonical_alert_symbol(symbol)
     is_idx = is_index_symbol(clean_sym)
     opt_plan = (
         resolve_option_contract(

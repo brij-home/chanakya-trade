@@ -13,6 +13,7 @@ Main entry point: analyse(symbol) → TechnicalSnapshot
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -37,20 +38,20 @@ class TechnicalSnapshot:
     ltp: float
 
     # Indicators
-    rsi: float = 0.0
-    macd: float = 0.0
-    macd_sig: float = 0.0
-    macd_hist: float = 0.0
+    rsi: Optional[float] = None
+    macd: Optional[float] = None
+    macd_sig: Optional[float] = None
+    macd_hist: Optional[float] = None
     macd_signal: str = "NEUTRAL"  # BULLISH | BEARISH | NEUTRAL
     macd_detail: str = ""  # e.g. "Bullish crossover", "Above signal line"
-    ema20: float = 0.0
-    ema50: float = 0.0
-    sma200: float = 0.0
-    bb_upper: float = 0.0
-    bb_lower: float = 0.0
-    bb_mid: float = 0.0
-    atr: float = 0.0
-    volume_ratio: float = 0.0  # today's vol / 20-day avg vol
+    ema20: Optional[float] = None
+    ema50: Optional[float] = None
+    sma200: Optional[float] = None
+    bb_upper: Optional[float] = None
+    bb_lower: Optional[float] = None
+    bb_mid: Optional[float] = None
+    atr: Optional[float] = None
+    volume_ratio: Optional[float] = None  # today's vol / 20-day avg vol
 
     # Timeframe & Provenance
     timeframe: str = "1D (Daily)"
@@ -196,8 +197,28 @@ def analyse(
     except Exception:
         df = pd.DataFrame()
 
+    if (df.empty or len(df) < 30) and exchange.upper() == "NSE":
+        # Cross-exchange fallback: if symbol is listed exclusively on BSE
+        try:
+            bse_df = get_ohlcv(symbol=symbol, exchange="BSE", days=days)
+            if not bse_df.empty and len(bse_df) >= 30:
+                df = bse_df
+                exchange = "BSE"
+        except Exception:
+            pass
+
     if df.empty or len(df) < 30:
-        return TechnicalSnapshot(symbol=symbol, ltp=0.0, verdict="INSUFFICIENT DATA")
+        return TechnicalSnapshot(
+            symbol=symbol,
+            ltp=0.0,
+            rsi=None,
+            macd=None,
+            macd_sig=None,
+            macd_hist=None,
+            verdict="INSUFFICIENT DATA",
+            summary=f"Insufficient historical bars for {exchange}:{symbol} (minimum 30 required).",
+            is_valid=False,
+        )
 
     close = df["close"]
     ltp = float(close.iloc[-1])

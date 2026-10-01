@@ -22,7 +22,7 @@ from engine.observability import get_registry, new_correlation_id
 from market.data_events import classify_data_state, utc_now_iso
 
 _OPTION_PATTERN = re.compile(
-    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z0-9_& -]+?)(?:20\d{6}|\d{2}[A-Z]{3}|\d{5}(?=\d{3,}))?\s*(\d{1,6}(?:\.\d+)?)\s*(CE|PE)$",
+    r"^(?:NFO:|BFO:|NSE:|BSE:)?(?P<underlying>[A-Za-z0-9_& -]+?)(?:(?P<exp_iso>20\d{6})|(?P<exp_nfo>\d{2}[A-Z]{3})|(?P<exp_weekly>\d{2}[OND]\d{2})|(?P<exp_num>\d{5}(?=\d{3,})))?\s*(?P<strike>\d{1,6}(?:\.\d+)?)\s*(?P<opt_type>CE|PE)$",
     re.IGNORECASE,
 )
 
@@ -55,6 +55,79 @@ except Exception:
     pass
 
 
+# ── Computed VWAP cache ────────────────────────────────────────────────────────
+# mStock REST API does not return VWAP in its quote response (mode=FULL or OHLC).
+# We compute it locally from today's 5-minute OHLCV bars using the standard
+# intraday TWAP formula: sum(typical_price × volume) / sum(volume)
+# where typical_price = (High + Low + Close) / 3.
+# Cache TTL: 30s — balances freshness vs repeated history fetches.
+_vwap_cache_lock = threading.Lock()
+_VWAP_CACHE: dict[str, tuple[float, float]] = {}  # symbol → (computed_at, vwap)
+_VWAP_CACHE_TTL = 30.0
+
+
+def get_computed_vwap(symbol: str, exchange: str = "NSE") -> Optional[float]:
+    """
+    Compute session VWAP for a symbol from today's 5-minute bars.
+
+    Returns None if: no 5m data available, all bars have zero volume (indices),
+    or the formula produces a degenerate result.
+
+    Cached for 30s per symbol to avoid repeated history fetches on every quote call.
+    """
+    clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    now_ts = time.monotonic()
+    with _vwap_cache_lock:
+        cached = _VWAP_CACHE.get(clean)
+        if cached and (now_ts - cached[0]) < _VWAP_CACHE_TTL:
+            return cached[1] if cached[1] > 0 else None
+
+    try:
+        from market.history import get_ohlcv
+        from zoneinfo import ZoneInfo
+
+        IST = ZoneInfo("Asia/Kolkata")
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+
+        df = get_ohlcv(clean, exchange=exchange, interval="5minute", days=1)
+        if df is None or len(df) < 1:
+            return None
+
+        # Isolate today's bars only
+        if hasattr(df.index, "strftime"):
+            df = df[df.index.strftime("%Y-%m-%d") == today_str]
+        if len(df) < 1:
+            return None
+
+        col_h = "high" if "high" in df.columns else "High"
+        col_l = "low" if "low" in df.columns else "Low"
+        col_c = "close" if "close" in df.columns else "Close"
+        col_v = "volume" if "volume" in df.columns else "Volume"
+
+        h = df[col_h].astype(float)
+        lo = df[col_l].astype(float)
+        c = df[col_c].astype(float)
+        v = df[col_v].astype(float)
+
+        typical = (h + lo + c) / 3.0
+        total_vol = v.sum()
+
+        if total_vol <= 0:
+            # Indices have zero volume in the exchange feed — fall back to simple
+            # time-weighted average price (equal-weight TWAP) as best proxy.
+            vwap_val = float(typical.mean()) if len(typical) > 0 else 0.0
+        else:
+            vwap_val = float((typical * v).sum() / total_vol)
+
+        if vwap_val > 0:
+            with _vwap_cache_lock:
+                _VWAP_CACHE[clean] = (now_ts, vwap_val)
+            return vwap_val
+    except Exception:
+        pass
+    return None
+
+
 def _enrich_quote(
     quote: Quote,
     *,
@@ -75,10 +148,34 @@ def _enrich_quote(
     source_kind = (
         source if source in {"STREAM", "REST", "EOD_SNAPSHOT", "FALLBACK", "CACHE"} else "FALLBACK"
     )
+
+    vwap_val = getattr(quote, "vwap", None)
+    clean_sym = instrument.split(":")[-1].strip().upper()
+    if (vwap_val is None or vwap_val <= 0) and not _OPTION_PATTERN.match(clean_sym):
+        # 1. Fast cache check
+        with _vwap_cache_lock:
+            cached_vwap = _VWAP_CACHE.get(clean_sym)
+            if cached_vwap and (time.monotonic() - cached_vwap[0]) < _VWAP_CACHE_TTL:
+                vwap_val = cached_vwap[1] if cached_vwap[1] > 0 else None
+        # 2. If it's a primary benchmark index and still missing, compute on-demand
+        if (vwap_val is None or vwap_val <= 0) and clean_sym in {
+            "NIFTY",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "SENSEX",
+            "NIFTY 50",
+            "NIFTY BANK",
+        }:
+            vwap_val = get_computed_vwap(
+                clean_sym, exchange="BSE" if clean_sym == "SENSEX" else "NSE"
+            )
+
     return replace(
         quote,
         provider=provider,
         source=source_kind,
+        vwap=vwap_val or quote.vwap,
         data_state=classify_data_state(source=source_kind, provider=provider, price=price),
         canonical_instrument_id=canonical_id,
         provider_symbol=quote.provider_symbol or instrument,
@@ -110,6 +207,10 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                         if c_tick and getattr(c_tick, "ltp", 0.0) > 0:
                             tick = c_tick
                     if tick and getattr(tick, "ltp", 0.0) > 0:
+                        ws_vwap = (
+                            float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0)
+                            or None
+                        )
                         result[inst] = _enrich_quote(
                             Quote(
                                 symbol=clean,
@@ -121,6 +222,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                                 volume=int(getattr(tick, "volume", 0) or 0),
                                 change=float(getattr(tick, "change", 0.0) or 0.0),
                                 change_pct=float(getattr(tick, "change_pct", 0.0) or 0.0),
+                                vwap=ws_vwap,
                                 exchange_timestamp=(
                                     datetime.fromtimestamp(
                                         tick.timestamp, tz=timezone.utc
@@ -145,7 +247,61 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
             except Exception:
                 return {}
 
-        # 2. Fyers WebSocket
+        # 2. Kotak Neo WebSocket
+        if broker_key == "kotak":
+            try:
+                from market.kotak_websocket import kotak_ws
+                from market.websocket import ws_manager
+
+                missing = []
+                for inst in instruments:
+                    clean = inst.split(":")[-1].strip().upper()
+                    tick = kotak_ws.get_tick(inst) or kotak_ws.get_tick(clean)
+                    if not tick or getattr(tick, "ltp", 0.0) <= 0:
+                        c_tick = ws_manager.get_tick(inst) or ws_manager.get_tick(clean)
+                        if c_tick and getattr(c_tick, "ltp", 0.0) > 0:
+                            tick = c_tick
+                    if tick and getattr(tick, "ltp", 0.0) > 0:
+                        ws_vwap = (
+                            float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0)
+                            or None
+                        )
+                        result[inst] = _enrich_quote(
+                            Quote(
+                                symbol=clean,
+                                last_price=float(tick.ltp),
+                                open=getattr(tick, "open", None),
+                                high=getattr(tick, "high", None),
+                                low=getattr(tick, "low", None),
+                                close=getattr(tick, "close", None),
+                                volume=int(getattr(tick, "volume", 0) or 0),
+                                change=float(getattr(tick, "change", 0.0) or 0.0),
+                                change_pct=float(getattr(tick, "change_pct", 0.0) or 0.0),
+                                vwap=ws_vwap,
+                                exchange_timestamp=(
+                                    datetime.fromtimestamp(
+                                        tick.timestamp, tz=timezone.utc
+                                    ).isoformat()
+                                    if getattr(tick, "timestamp", 0) and tick.timestamp > 0
+                                    else None
+                                ),
+                            ),
+                            instrument=inst,
+                            provider="kotak",
+                            source="STREAM",
+                            correlation_id=correlation_id,
+                        )
+                    else:
+                        missing.append(inst)
+
+                if missing and getattr(kotak_ws, "is_connected", lambda: False)():
+                    kotak_ws.subscribe(missing)
+
+                return result
+            except Exception:
+                return {}
+
+        # 3. Fyers WebSocket
         if broker_key != "fyers":
             return {}
 
@@ -158,6 +314,9 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
         for inst in instruments:
             tick = ws_manager.get_tick(inst)
             if tick and tick.ltp > 0:
+                ws_vwap = (
+                    float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0) or None
+                )
                 result[inst] = _enrich_quote(
                     Quote(
                         symbol=tick.symbol.split(":")[-1].split("-")[0]
@@ -171,6 +330,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                         volume=tick.volume,
                         change=tick.change,
                         change_pct=tick.change_pct,
+                        vwap=ws_vwap,
                         exchange_timestamp=(
                             datetime.fromtimestamp(tick.timestamp, tz=timezone.utc).isoformat()
                             if tick.timestamp and tick.timestamp > 0
@@ -200,23 +360,64 @@ def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
         from market.options import get_options_snapshot
 
         res: dict[str, Quote] = {}
-        by_und: dict[str, list[tuple[str, str, float, str]]] = {}
+        by_und_exp: dict[
+            tuple[str, Optional[str]], list[tuple[str, str, float, str, Optional[str]]]
+        ] = {}
         for inst in instruments:
             clean = inst.split(":")[-1].strip().upper()
             m = _OPTION_PATTERN.match(clean)
             if not m:
                 continue
-            und, strike_str, opt_type = m.groups()
-            by_und.setdefault(und.upper(), []).append(
-                (inst, clean, float(strike_str), opt_type.upper())
+            und = m.group("underlying")
+            exp_iso = m.group("exp_iso")
+            exp_weekly = m.group("exp_weekly")
+            exp_num = m.group("exp_num")
+            strike_str = m.group("strike")
+            opt_type = m.group("opt_type")
+            exp_date_str = None
+            if exp_iso:
+                # 20261027 -> 2026-10-27
+                exp_date_str = f"{exp_iso[:4]}-{exp_iso[4:6]}-{exp_iso[6:8]}"
+            elif exp_weekly:
+                # 26O06 -> 2026-10-06
+                yy = exp_weekly[:2]
+                m_char = exp_weekly[2].upper()
+                dd = exp_weekly[3:5]
+                m_map_rev = {
+                    "1": "01",
+                    "2": "02",
+                    "3": "03",
+                    "4": "04",
+                    "5": "05",
+                    "6": "06",
+                    "7": "07",
+                    "8": "08",
+                    "9": "09",
+                    "O": "10",
+                    "N": "11",
+                    "D": "12",
+                }
+                mm = m_map_rev.get(m_char, "10")
+                exp_date_str = f"20{yy}-{mm}-{dd}"
+            elif exp_num and len(exp_num) == 5:
+                # 26911 -> 2026-09-11
+                yy = exp_num[:2]
+                m_char = exp_num[2]
+                dd = exp_num[3:5]
+                mm = f"0{m_char}" if m_char.isdigit() else "10"
+                exp_date_str = f"20{yy}-{mm}-{dd}"
+            by_und_exp.setdefault((und.upper(), exp_date_str), []).append(
+                (inst, clean, float(strike_str), opt_type.upper(), exp_date_str)
             )
 
-        for und, items in by_und.items():
+        for (und, exp_date_str), items in by_und_exp.items():
             try:
-                contracts, spot, expiries, src_info = get_options_snapshot(und)
-                for inst, clean, strike, opt_type in items:
+                contracts, spot, expiries, src_info = get_options_snapshot(und, expiry=exp_date_str)
+                for inst, clean, strike, opt_type, target_exp in items:
                     for c in contracts:
                         if c.option_type == opt_type and abs(c.strike - strike) < 0.01:
+                            if target_exp and getattr(c, "expiry", None) and c.expiry != target_exp:
+                                continue
                             chg_pct = (
                                 getattr(c, "pchange", 0.0) or getattr(c, "change_pct", 0.0) or 0.0
                             )
@@ -289,12 +490,23 @@ def _futures_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
     return res
 
 
+from config.market_universes import (
+    BSE_EQUITY_SYMBOLS as _BSE_SYMBOLS,
+    CDS_CURRENCY_SYMBOLS as _CDS_SYMBOLS,
+    CRYPTO_SYMBOLS as _CRYPTO_SYMBOLS,
+    MCX_COMMODITY_SYMBOLS as _MCX_SYMBOLS,
+)
+
+
 def _yf_fallback_quotes(
     instruments: list[str], *, correlation_id: Optional[str] = None
 ) -> dict[str, Quote]:
     """Try yfinance when broker is unavailable (skips Indian options & futures which yfinance does not host)."""
     try:
-        from market.yfinance_provider import yf_get_quotes, yf_available
+        from market.yfinance_provider import yf_get_quotes, yf_available, is_yf_rate_limited
+
+        if not yf_available() or is_yf_rate_limited():
+            return {}
 
         yf_eligible = [
             i
@@ -302,6 +514,9 @@ def _yf_fallback_quotes(
             if not (
                 i.startswith("NFO:")
                 or i.startswith("BFO:")
+                or i.startswith("CRYPTO:")
+                or i.startswith("BINANCE:")
+                or i.split(":")[-1].upper() in _CRYPTO_SYMBOLS
                 or _OPTION_PATTERN.match(i.split(":")[-1])
                 or _OPTION_PATTERN.match(
                     i.split(":")[-1].replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
@@ -313,79 +528,22 @@ def _yf_fallback_quotes(
         if not yf_eligible:
             return {}
 
-        if yf_available():
-            raw = yf_get_quotes(yf_eligible)
-            cid = correlation_id or new_correlation_id("quote")
-            return {
-                instrument: _enrich_quote(
-                    quote,
-                    instrument=instrument,
-                    provider="yfinance",
-                    source="FALLBACK",
-                    correlation_id=cid,
-                    quality_flags=("DELAYED_SOURCE",),
-                )
-                for instrument, quote in raw.items()
-            }
+        raw = yf_get_quotes(yf_eligible)
+        cid = correlation_id or new_correlation_id("quote")
+        return {
+            instrument: _enrich_quote(
+                quote,
+                instrument=instrument,
+                provider="yfinance",
+                source="FALLBACK",
+                correlation_id=cid,
+                quality_flags=("DELAYED_SOURCE",),
+            )
+            for instrument, quote in raw.items()
+        }
     except Exception:
         pass
     return {}
-
-
-_MCX_SYMBOLS = {
-    "GOLD",
-    "GOLDM",
-    "GOLDPETAL",
-    "SILVER",
-    "SILVERM",
-    "SILVERMIC",
-    "CRUDEOIL",
-    "CRUDEOILM",
-    "CRUDE",
-    "BRENT",
-    "NATURALGAS",
-    "NATGASMINI",
-    "NATGAS",
-    "COPPER",
-    "ZINC",
-    "ALUMINIUM",
-    "ALUMINUM",
-    "LEAD",
-    "COTTON",
-}
-_CDS_SYMBOLS = {
-    "USDINR",
-    "USD/INR",
-    "EURINR",
-    "EUR/INR",
-    "GBPINR",
-    "GBP/INR",
-    "JPYINR",
-    "JPY/INR",
-}
-_BSE_SYMBOLS = {"SENSEX", "BANKEX", "BSE SENSEX", "BSE BANKEX"}
-_CRYPTO_SYMBOLS = {
-    "BTC",
-    "BITCOIN",
-    "BTCUSD",
-    "BTC-USD",
-    "BTCUSDT",
-    "BTCINR",
-    "ETH",
-    "ETHEREUM",
-    "ETHUSD",
-    "ETH-USD",
-    "ETHUSDT",
-    "SOL",
-    "SOLANA",
-    "SOLUSD",
-    "SOL-USD",
-    "SOLUSDT",
-    "BNB",
-    "BNBUSD",
-    "BNB-USD",
-    "BNBUSDT",
-}
 
 
 def normalize_instrument(inst: str) -> str:
@@ -409,6 +567,8 @@ def normalize_instrument(inst: str) -> str:
         or _OPTION_PATTERN.match(clean_deriv)
         or _FUT_PATTERN.match(upper)
     ):
+        if any(upper.startswith(x) for x in ("SENSEX", "BANKEX")):
+            return f"BFO:{upper}"
         return f"NFO:{upper}"
     return f"NSE:{upper}"
 

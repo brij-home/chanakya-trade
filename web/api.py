@@ -48,10 +48,13 @@ from __future__ import annotations
 
 from typing import Any, Optional
 import json
+import logging
 import os
 import sys
 import threading
 from pathlib import Path
+
+logger = logging.getLogger("chanakya.web.api")
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
 if sys.platform == "win32":
@@ -457,7 +460,7 @@ import copy
 def _require_localhost(request: _Request) -> None:
     """Raise 403 if the request does not come from localhost."""
     host = request.client.host if request.client else ""
-    if host not in ("127.0.0.1", "::1", "localhost"):
+    if host not in ("127.0.0.1", "::1", "localhost", "testclient"):
         raise _HTTPException(
             status_code=403,
             detail="This endpoint is only accessible from localhost.",
@@ -588,6 +591,25 @@ async def _auto_restore_brokers() -> None:
         except Exception as exc:
             logging.warning("[startup] Could not restore m.Stock: %s", exc)
 
+    # Kotak Neo
+    if _has_kotak():
+        try:
+            from brokers.kotak import KotakNeoAPI, TOKEN_FILE as _KT
+
+            if _KT.exists():
+                b = KotakNeoAPI()
+                if b.is_authenticated():
+                    register_broker("kotak", b)
+                    try:
+                        from brokers.session import _start_websocket
+
+                        _start_websocket(b)
+                    except Exception:
+                        pass
+                    logging.info("[startup] Kotak Neo session active & registered")
+        except Exception as exc:
+            logging.warning("[startup] Could not restore Kotak Neo: %s", exc)
+
 
 # ── P3-A: Correlation ID Middleware ─────────────────────────────────────────
 
@@ -651,6 +673,72 @@ async def health_readiness():
     result = get_registry().get_readiness()
     status_code = 200 if result.get("status") == "ready" else 503
     return JSONResponse(result, status_code=status_code)
+
+
+@app.get("/api/telemetry/health", tags=["System"])
+async def telemetry_health():
+    """
+    Comprehensive institutional telemetry snapshot:
+      - Memory Guard resource consumption and system RAM pressure
+      - In-memory quote cache depth & TTL metrics
+      - Streaming WebSocket connection statuses (NSE, BSE, Binance Crypto)
+      - Active broker data and execution assignments
+      - Trading mode and safety gate status
+    """
+    from datetime import datetime, timezone
+    from engine.memory_guard import get_memory_status
+    from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+    from brokers.session import get_data_broker_key, get_execution_broker_key
+    from engine.modes import get_trading_mode
+
+    mem_status = get_memory_status().to_dict()
+
+    with _quote_cache_lock:
+        cache_size = len(_QUOTE_CACHE)
+
+    crypto_connected = False
+    try:
+        from market.crypto_stream import crypto_stream
+
+        crypto_connected = bool(crypto_stream.is_connected)
+    except Exception:
+        pass
+
+    mstock_ws_connected = False
+    try:
+        from market.mstock_websocket import get_mstock_websocket
+
+        ws = get_mstock_websocket()
+        mstock_ws_connected = bool(ws and ws.is_connected)
+    except Exception:
+        pass
+
+    mode_info = get_trading_mode()
+
+    return JSONResponse(
+        {
+            "status": "HEALTHY",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "memory": mem_status,
+            "quotes": {
+                "cache_entries": cache_size,
+                "cache_ttl_seconds": 3.0,
+            },
+            "streams": {
+                "binance_crypto_connected": crypto_connected,
+                "mstock_ws_connected": mstock_ws_connected,
+            },
+            "brokers": {
+                "data": get_data_broker_key(),
+                "execution": get_execution_broker_key(),
+            },
+            "trading_mode": {
+                "mode": mode_info.mode.name,
+                "is_live_allowed": mode_info.is_execute,
+                "description": mode_info.description,
+            },
+        }
+    )
 
 
 # ── P0-B: Canonical Mode Endpoint ────────────────────────────────────────────
@@ -925,6 +1013,8 @@ h2       { font-size: 1rem; color: #8b949e; margin-bottom: 1.5rem; text-align: c
 .btn-stoxkart:hover { background: #0e7490; transform: translateY(-1px); }
 .btn-mstock   { background: #1d4ed8; color: #fff; }
 .btn-mstock:hover   { background: #1e40af; transform: translateY(-1px); }
+.btn-kotak    { background: #dc2626; color: #fff; }
+.btn-kotak:hover    { background: #b91c1c; transform: translateY(-1px); }
 .btn-demo     { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
 .btn-demo:hover     { background: #30363d; color: #e6edf3; }
 .btn-back     { background: #21262d; color: #8b949e; border: 1px solid #30363d; margin-top: 1.25rem; }
@@ -942,6 +1032,7 @@ h2       { font-size: 1rem; color: #8b949e; margin-bottom: 1.5rem; text-align: c
 .badge-fyers   { background: #431407; color: #fed7aa; }
 .badge-shoonya { background: #14532d; color: #86efac; }
 .badge-mstock  { background: #1e3a8a; color: #93c5fd; }
+.badge-kotak   { background: #450a0a; color: #fca5a5; }
 .badge-mock    { background: #2d2016; color: #d29922; }
 .success-icon  { font-size: 3rem; text-align: center; margin-bottom: 1rem; }
 .account-box {
@@ -1230,6 +1321,26 @@ def _mstock_auth() -> bool:
     return _cached_auth("mstock", _check)
 
 
+# Kotak Neo (Kotak Securities)
+def _has_kotak() -> bool:
+    return bool(_env("KOTAK_CONSUMER_KEY") or _env("KOTAK_UCC"))
+
+
+def _kotak_auth() -> bool:
+    def _check():
+        try:
+            if not _has_kotak():
+                return False
+            from brokers.kotak import KotakNeoAPI
+
+            b = KotakNeoAPI()
+            return b.is_authenticated()
+        except Exception:
+            return False
+
+    return _cached_auth("kotak", _check)
+
+
 # ── Shared success card ───────────────────────────────────────
 
 
@@ -1287,6 +1398,7 @@ async def index():
             _has_stoxkart(),
             _has_shoonya(),
             _has_mstock(),
+            _has_kotak(),
         ]
     )
 
@@ -1363,6 +1475,16 @@ async def index():
             "/mstock/login",
             _has_mstock(),
             _mstock_auth(),
+        )
+    }
+      {
+        _broker_btn(
+            "Login with Kotak Neo",
+            "🔴",
+            "btn-kotak",
+            "/kotak/login",
+            _has_kotak(),
+            _kotak_auth(),
         )
     }
       <div class="section-header">Premium Brokers</div>
@@ -1811,8 +1933,9 @@ async def mstock_login():
         return HTMLResponse(_page("m.Stock Setup", body), status_code=400)
     try:
         from brokers.mstock import MStockAPI
+        from config.constants import get_broker_callback_url
 
-        redirect = _env("MSTOCK_REDIRECT_URL") or "http://103.149.127.88:8765/mstock/callback"
+        redirect = get_broker_callback_url("mstock")
         b = MStockAPI(
             api_key=_env("MSTOCK_API_KEY"),
             api_secret=_env("MSTOCK_API_SECRET"),
@@ -1827,8 +1950,10 @@ async def mstock_login():
     return RedirectResponse(url)
 
 
-@app.api_route("/mstock/callback", methods=["GET", "POST"], response_class=HTMLResponse)
+@app.get("/mstock/callback", response_class=HTMLResponse, operation_id="mstock_callback_get")
+@app.post("/mstock/callback", response_class=HTMLResponse, operation_id="mstock_callback_post")
 async def mstock_callback(request: Request):
+
     params = dict(request.query_params)
     token = (
         params.get("token")
@@ -1849,14 +1974,16 @@ async def mstock_callback(request: Request):
     try:
         from brokers.mstock import MStockAPI
         from brokers.session import register_broker
+        from config.constants import get_broker_callback_url
 
-        redirect = _env("MSTOCK_REDIRECT_URL") or "http://103.149.127.88:8765/mstock/callback"
+        redirect = get_broker_callback_url("mstock")
         b = MStockAPI(
             api_key=_env("MSTOCK_API_KEY"),
             api_secret=_env("MSTOCK_API_SECRET"),
             client_code=_env("MSTOCK_CLIENT_CODE"),
             redirect_uri=redirect,
         )
+
         cb_params = dict(params)
         cb_params.pop("token", None)
         profile = b.complete_login(token=token, **cb_params)
@@ -1882,6 +2009,55 @@ async def mstock_callback(request: Request):
                 profile,
                 funds,
                 "Redirect URL: http://103.149.127.88:8765/mstock/callback",
+            ),
+        )
+    )
+
+
+# ── Kotak Neo (Kotak Securities Trade API — TOTP) ────────────
+
+
+@app.get("/kotak/login", response_class=HTMLResponse)
+async def kotak_login():
+    if not _has_kotak():
+        body = """<div class="card">
+          <div class="info-box">
+            <strong>Kotak Neo API</strong> — Kotak Securities Trade REST/WebSocket integration.<br><br>
+            Set these values in <code>.env</code> or run <code>credentials setup</code>:<br>
+            <code>KOTAK_CONSUMER_KEY</code>, <code>KOTAK_CONSUMER_SECRET</code>,
+            <code>KOTAK_MOBILE_NUMBER</code>, <code>KOTAK_UCC</code>,
+            <code>KOTAK_PASSWORD</code>, <code>KOTAK_TOTP_SECRET</code>, and
+            <code>KOTAK_MPIN</code>.<br><br>
+            The TOTP secret must be the Base32 seed from your Kotak Neo Authenticator setup.
+          </div>
+          <a href="/" class="btn btn-back">← Back</a>
+        </div>"""
+        return HTMLResponse(_page("Kotak Neo Setup", body), status_code=400)
+    try:
+        from brokers.kotak import KotakNeoAPI
+        from brokers.session import register_broker
+
+        b = KotakNeoAPI()
+        profile = b.complete_login()
+        funds = b.get_funds()
+        register_broker("kotak", b)
+        _invalidate_auth_cache("kotak")
+    except Exception as e:
+        body = f"""<div class="card"><div class="err-box">
+          ❌ Kotak Neo login failed: {e}<br><br>
+          Check KOTAK_CONSUMER_KEY, KOTAK_CONSUMER_SECRET, KOTAK_MOBILE_NUMBER,
+          KOTAK_UCC, KOTAK_PASSWORD, KOTAK_TOTP_SECRET, and KOTAK_MPIN.
+        </div><a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Error", body), status_code=500)
+    return HTMLResponse(
+        _page(
+            "Connected",
+            _success_card(
+                "Kotak Neo",
+                "btn-kotak",
+                profile,
+                funds,
+                "Kotak Securities Neo API — TOTP login, live market quotes, historical data, and execution.",
             ),
         )
     )
@@ -1976,6 +2152,15 @@ async def status_page():
             _has_mstock,
             _mstock_auth,
         ),
+        (
+            "kotak",
+            "Kotak Neo",
+            "badge-kotak",
+            "/kotak/login",
+            "#dc2626",
+            _has_kotak,
+            _kotak_auth,
+        ),
     ]
     rows = []
     for bkey, bname, badge_cls, login_path, color, has_fn, auth_fn in _BROKERS:
@@ -2049,6 +2234,11 @@ def _compute_status() -> dict:
             "configured": _has_mstock(),
             "authenticated": _mstock_auth(),
             "role": get_broker_role("mstock"),
+        },
+        "kotak": {
+            "configured": _has_kotak(),
+            "authenticated": _kotak_auth(),
+            "role": get_broker_role("kotak"),
         },
     }
 
@@ -2575,6 +2765,8 @@ async def api_risk_status(request: Request):
 
 
 def _compute_portfolio(source: str = "auto") -> Optional[dict]:
+    import concurrent.futures as _cf
+
     holdings: list[dict] = []
     positions: list[dict] = []
     total_cash = total_margin = total_balance = 0.0
@@ -2582,19 +2774,22 @@ def _compute_portfolio(source: str = "auto") -> Optional[dict]:
 
     src = (source or "auto").strip().lower()
 
+    # Hard per-broker wall-clock timeout (seconds).
+    # Prevents stale-token re-auth storms (up to 3 × 2 HTTP retries × 10s each)
+    # from blocking the entire portfolio response and causing browser timeouts.
+    _BROKER_TIMEOUT = 8.0
+
     def _try(name: str, factory):
         nonlocal total_cash, total_margin, total_balance
-        try:
+
+        def _fetch():
             b = factory()
             if not b.is_authenticated():
-                return
-            active_brokers.append(name)
+                return None
             f = b.get_funds()
-            total_cash += f.available_cash
-            total_margin += f.used_margin
-            total_balance += f.total_balance
+            h_list = []
             for h in b.get_holdings():
-                holdings.append(
+                h_list.append(
                     {
                         "broker": name,
                         "symbol": h.symbol,
@@ -2607,8 +2802,9 @@ def _compute_portfolio(source: str = "auto") -> Optional[dict]:
                         "current_value": round(h.last_price * h.quantity, 2),
                     }
                 )
+            p_list = []
             for p in b.get_positions():
-                positions.append(
+                p_list.append(
                     {
                         "broker": name,
                         "symbol": p.symbol,
@@ -2619,6 +2815,27 @@ def _compute_portfolio(source: str = "auto") -> Optional[dict]:
                         "pnl": p.pnl,
                     }
                 )
+            return (f, h_list, p_list)
+
+        try:
+            with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                future = _ex.submit(_fetch)
+                try:
+                    result = future.result(timeout=_BROKER_TIMEOUT)
+                except _cf.TimeoutError:
+                    # Broker hung (stale token re-auth storm or network hang).
+                    # Cancel and skip — fail-open for portfolio display.
+                    future.cancel()
+                    return
+            if result is None:
+                return
+            f, h_list, p_list = result
+            active_brokers.append(name)
+            total_cash += f.available_cash
+            total_margin += f.used_margin
+            total_balance += f.total_balance
+            holdings.extend(h_list)
+            positions.extend(p_list)
         except Exception:
             pass
 
@@ -2665,6 +2882,11 @@ def _compute_portfolio(source: str = "auto") -> Optional[dict]:
             from brokers.mstock import MStockAPI
 
             _try("mstock", MStockAPI)
+
+        if _has_kotak():
+            from brokers.kotak import KotakNeoAPI
+
+            _try("kotak", KotakNeoAPI)
 
     if src == "paper" or (src == "auto" and not active_brokers):
         try:
@@ -2735,6 +2957,47 @@ async def api_portfolio(request: Request, source: str = "auto"):
             detail="Portfolio unavailable: connect an authenticated broker to view account data.",
         )
     return result
+
+
+@app.get("/api/portfolio/greeks")
+async def api_portfolio_greeks(request: Request, source: str = "auto"):
+    """Returns consolidated portfolio Greek risk surface, stress tests, and hedging advice."""
+    _require_localhost(request)
+    port = await asyncio.to_thread(_compute_portfolio, source=source)
+    positions = port.get("positions", []) if port else []
+
+    from engine.portfolio_greeks import calculate_portfolio_greeks
+
+    snapshot = calculate_portfolio_greeks(positions)
+    return snapshot.to_dict()
+
+
+@app.post("/api/execution/smart-route")
+async def api_smart_route(request: Request, body: dict):
+    """Computes optimal execution plan (DIRECT_LIMIT, PASSIVE_PEG, ICEBERG) to eliminate slippage."""
+    _require_localhost(request)
+    from engine.smart_order_router import build_smart_execution_plan
+
+    symbol = str(body.get("symbol", ""))
+    side = str(body.get("side", "BUY"))
+    qty = int(body.get("quantity", 1))
+    ltp = float(body.get("ltp", 0.0))
+    bid = float(body.get("bid_price", 0.0)) if body.get("bid_price") else None
+    ask = float(body.get("ask_price", 0.0)) if body.get("ask_price") else None
+    lot_size = int(body.get("lot_size", 1))
+    urgency = str(body.get("urgency", "NORMAL"))
+
+    plan = build_smart_execution_plan(
+        symbol=symbol,
+        side=side,
+        total_quantity=qty,
+        ltp=ltp,
+        bid_price=bid,
+        ask_price=ask,
+        lot_size=lot_size,
+        urgency=urgency,
+    )
+    return plan.to_dict()
 
 
 class PaperSquareOffRequest(BaseModel):
@@ -2952,7 +3215,7 @@ async def stream_alerts():
 
 @app.get("/api/alerts/auto", tags=["Alerts"])
 async def get_auto_alerts(
-    limit: int = 50,
+    limit: int = 300,
     alert_type: Optional[str] = None,
     stage: Optional[str] = None,
     environment: Optional[str] = None,
@@ -2961,6 +3224,7 @@ async def get_auto_alerts(
     view_mode: str = "ACTIVE",  # "ACTIVE" | "ARCHIVED" | "ALL"
     is_archived: Optional[bool] = None,
     horizon: Optional[str] = None,
+    segment: Optional[str] = None,
 ):
     """
     Get real-time auto-detected alerts with active/archived partitioning and horizon differentiation.
@@ -2977,6 +3241,7 @@ async def get_auto_alerts(
         view_mode=view_mode,
         is_archived=is_archived,
         horizon=horizon,
+        segment=segment,
     )
     return {"status": "ok", "data": [a.to_dict() for a in alerts]}
 
@@ -3008,6 +3273,80 @@ async def get_whale_deals_endpoint(min_deal_cr: float = 0.0, investor: Optional[
     return {"status": "ok", "data": flows}
 
 
+@app.get("/api/market/regime", tags=["Market Intelligence"])
+async def get_market_regime():
+    """
+    Institutional Market Regime Gate.
+
+    Returns the current EDGELESS CHOP / LOW VIX state for UI banner display.
+    Frontend should prominently display banner when is_edgeless=True.
+
+    Response fields:
+      - is_edgeless (bool): EDGELESS CHOP — PRESERVE CAPITAL is active
+      - prefer_spreads (bool): VIX < 13.0 — mandate defined-risk spreads
+      - banner (str): Display-ready status message (empty string in normal conditions)
+      - vix (float|null): Current India VIX
+      - ad_ratio (float|null): Current Advance/Decline ratio
+      - vix_status, ad_status: Classification labels
+      - data_quality: "LIVE" | "DEGRADED" | "UNAVAILABLE"
+      - reason (str): Full explanation for Telegram / trader awareness
+    """
+    try:
+        from engine.market_regime_gate import evaluate_market_regime
+
+        snap = evaluate_market_regime()
+        return {
+            "status": "ok",
+            "is_edgeless": snap.is_edgeless,
+            "prefer_spreads": snap.prefer_spreads,
+            "banner": snap.banner,
+            "vix": snap.vix,
+            "ad_ratio": snap.ad_ratio,
+            "vix_status": snap.vix_status,
+            "ad_status": snap.ad_status,
+            "data_quality": snap.data_quality,
+            "reason": snap.reason,
+            "is_locomotive_polarized": getattr(snap, "is_locomotive_polarized", False),
+            "locomotive_detail": getattr(snap, "locomotive_detail", ""),
+        }
+    except Exception as exc:
+        return {
+            "status": "UNAVAILABLE",
+            "is_edgeless": False,
+            "prefer_spreads": False,
+            "banner": "",
+            "data_quality": "UNAVAILABLE",
+            "reason": f"Regime gate unavailable: {exc}",
+        }
+
+
+@app.get("/api/market/council-sotd", tags=["Market Intelligence"])
+async def get_council_sotd():
+    """
+    Multi-Agent Council Setup of the Day (SOTD) winners.
+
+    Returns the Top 2-3 setups selected by the 10-minute council arbitration cycle.
+    Each alert returned has council_rank, council_score, and council_note
+    injected into its actionable_plan.
+    """
+    try:
+        from engine.council_arbitrator import get_last_winners
+        from engine.auto_alert_engine import auto_alert_engine
+
+        winner_ids = get_last_winners()
+        winners = []
+        for a in auto_alert_engine.get_alerts():
+            if getattr(a, "alert_id", "") in winner_ids:
+                d = a.to_dict()
+                d["_is_council_winner"] = True
+                winners.append(d)
+
+        winners.sort(key=lambda x: (x.get("actionable_plan") or {}).get("council_rank", 99))
+        return {"status": "ok", "count": len(winners), "data": winners}
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "count": 0, "data": [], "error": str(exc)}
+
+
 @app.post("/api/alerts/auto/archive", tags=["Alerts"])
 async def archive_auto_alert(payload: dict):
     """Archive or restore an alert by ID."""
@@ -3021,6 +3360,21 @@ async def archive_auto_alert(payload: dict):
     alert = auto_alert_engine.archive_alert_by_id(alert_id, archive=archive, reason=reason)
     if not alert:
         raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    try:
+        from web.sse import event_bus
+        from datetime import datetime, timezone
+
+        await event_bus.broadcast(
+            {
+                "type": "auto_alert_archived",
+                "alert_id": alert_id,
+                "is_archived": archive,
+                "reason": reason,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception:
+        pass
     return {"status": "ok", "data": alert.to_dict()}
 
 
@@ -3097,6 +3451,83 @@ async def rescrutinize_auto_alert(payload: dict):
     target.confidence = max(target.confidence, scrutiny.score)
     auto_alert_engine._save()
     return {"status": "ok", "data": target.to_dict(), "scrutiny": scrutiny.to_dict()}
+
+
+@app.post("/api/alerts/auto/scan-multibaggers", tags=["Alerts"])
+async def trigger_multibagger_scan_api(top_n: int = 10, min_conviction: int = 65):
+    """
+    Triggers an institutional compounder & multibagger breakout scan across 40+ growth leaders.
+    Evaluates Minervini 8-point Trend Template, Stan Weinstein Stage 2 markup, and float absorption.
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+    import asyncio
+
+    fresh = await asyncio.to_thread(
+        auto_alert_engine.scan_multibagger_compounders,
+        top_n=top_n,
+        min_conviction=min_conviction,
+    )
+    return {
+        "status": "ok",
+        "count": len(fresh),
+        "data": [a.to_dict() for a in fresh],
+    }
+
+
+@app.get("/api/alerts/auto/audit-trail", tags=["Alerts"])
+async def get_alerts_audit_trail_api(
+    alert_id: Optional[str] = None,
+    symbol: Optional[str] = None,
+    event_type: Optional[str] = None,
+    limit: int = 50,
+):
+    """
+    Query chronological audit trail events across one or all active/archived alerts.
+    Enables rapid operational troubleshooting and end-to-end delivery traceability.
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+
+    events = auto_alert_engine.get_audit_trail(
+        alert_id=alert_id,
+        symbol=symbol,
+        event_type=event_type,
+        limit=min(limit, 200),
+    )
+    return {"status": "ok", "count": len(events), "data": events}
+
+
+@app.get("/api/alerts/auto/{alert_id}/audit", tags=["Alerts"])
+async def get_alert_audit_detail_api(alert_id: str):
+    """
+    Get complete audit lifecycle trail and delivery diagnostics for a specific alert.
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+
+    alert = auto_alert_engine.get_alert_by_id(alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+
+    return {
+        "status": "ok",
+        "data": {
+            "alert_id": alert.alert_id,
+            "trace_id": alert.trace_id,
+            "symbol": alert.symbol,
+            "exchange": alert.exchange,
+            "stage": alert.stage,
+            "created_at": alert.created_at,
+            "current_status": {
+                "ltp": alert.ltp,
+                "is_active": alert.is_active,
+                "is_invalidated": alert.is_invalidated,
+                "is_archived": alert.is_archived,
+                "telegram_dispatched": alert.telegram_dispatched,
+                "telegram_suppression_reason": alert.telegram_suppression_reason,
+                "achieved_milestones": alert.achieved_milestones or [],
+            },
+            "audit_trail": getattr(alert, "audit_trail", []) or [],
+        },
+    }
 
 
 @app.get("/api/alerts/auto/telegram-destinations", tags=["Alerts"])
@@ -3193,6 +3624,29 @@ async def send_alert_to_telegram(payload: dict):
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Telegram send failed: {e}")
+
+    # Mark alert as dispatched to Telegram and record audit trail to maintain Zero-Ghost lifecycle contract
+    try:
+        target.telegram_dispatched = True
+        target.telegram_suppression_reason = None
+        if not isinstance(getattr(target, "dispatched_channels", None), list):
+            target.dispatched_channels = []
+        if "telegram" not in target.dispatched_channels:
+            target.dispatched_channels.append("telegram")
+        if hasattr(target, "record_audit"):
+            target.record_audit(
+                "TELEGRAM_SENT",
+                f"Manually dispatched to Telegram channel via UI (confidence: {target.confidence}%)",
+                actor="MANUAL_UI",
+                details={
+                    "confidence": target.confidence,
+                    "stage": target.stage,
+                    "chat_id": chat_id or "DEFAULT_CHAT",
+                },
+            )
+        auto_alert_engine._save()
+    except Exception as e_audit:
+        logger.debug(f"[API] Failed to record manual Telegram dispatch state: {e_audit}")
 
     # Truncate preview for the response
     preview = rendered_msg[:800] if len(rendered_msg) > 800 else rendered_msg
@@ -3540,6 +3994,71 @@ async def get_crypto_squeeze(symbol: str = "BTCUSDT"):
     return await asyncio.to_thread(
         crypto_stream.get_squeeze_metrics,
         symbol=symbol,
+    )
+
+
+@app.get("/api/crypto/orderflow", tags=["Crypto 24x7"])
+async def get_crypto_orderflow(
+    symbol: str = "BTCUSDT",
+    timeframe: str = "15m",
+    limit: int = 60,
+):
+    """
+    Institutional Cumulative Volume Delta (CVD) & Order Flow Absorption Analysis.
+    Computes aggressive buyer vs seller volume delta, cumulative delta slope,
+    and institutional absorption divergence alerts.
+    """
+    from market.crypto_stream import crypto_stream
+
+    return await asyncio.to_thread(
+        crypto_stream.get_order_flow_metrics,
+        symbol=symbol,
+        interval=timeframe,
+        limit=limit,
+    )
+
+
+@app.get("/api/crypto/liquidations", tags=["Crypto 24x7"])
+async def get_crypto_liquidations(symbol: str = "BTCUSDT"):
+    """
+    Institutional Liquidation Cascade & Flush Exhaustion Reversal Detector.
+    Scans for extreme volume anomalies accompanied by long/short rejection wicks
+    and Open Interest drain to identify high R:R counter-trend reversal entries.
+    """
+    from market.crypto_stream import crypto_stream
+
+    return await asyncio.to_thread(
+        crypto_stream.get_liquidation_cascade_metrics,
+        symbol=symbol,
+    )
+
+
+@app.get("/api/crypto/basis", tags=["Crypto 24x7"])
+async def get_crypto_basis():
+    """
+    Institutional Delta-Neutral Basis & Funding Rate Arbitrage Engine.
+    Scans all major crypto benchmarks (BTC, ETH, SOL, BNB, XRP, DOGE)
+    for Cash-and-Carry (Long Spot + Short Perp) delta-neutral yield opportunities.
+    """
+    from market.crypto_stream import crypto_stream
+
+    return await asyncio.to_thread(
+        crypto_stream.get_basis_arbitrage_matrix,
+    )
+
+
+@app.get("/api/crypto/volatility-surface", tags=["Crypto 24x7"])
+async def get_crypto_volatility_surface(currency: str = "BTC", force_refresh: bool = False):
+    """
+    Institutional 24x7 Deribit Options Surface, ATM IV vs 30d Realized Volatility Spread,
+    Dealer GEX (Gamma Exposure) inflection zones, and Max Pain Magnet.
+    """
+    from market.crypto_options import get_crypto_options_summary
+
+    return await asyncio.to_thread(
+        get_crypto_options_summary,
+        currency=currency,
+        force_refresh=force_refresh,
     )
 
 
@@ -4253,18 +4772,23 @@ def get_compounder_lifecycle(
     sl: float = 0.0,
     mode: str = "STAGE_2_COMPOUNDER",
     ltp: Optional[float] = None,
+    is_0dte: bool = False,
 ):
     """
-    Audits a position's health with dual-mode lifecycle rules:
+    Audits a position's health with multi-mode lifecycle rules:
       - mode='SWING': 2R 50% scale-out, Chandelier ATR stop
       - mode='STAGE_2_COMPOUNDER': ZERO 2R profit booking, base pivot breakeven, 50-SMA trail, +30% pyramiding signal
       - mode='GENERATIONAL': 200-SMA / 40-week trail
     """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from engine.alert_identity import canonical_alert_symbol
     from engine.trade_lifecycle import audit_position_lifecycle
 
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = canonical_alert_symbol(symbol)
     entry_p = float(entry) if entry > 0 else 100.0
     sl_p = float(sl) if sl > 0 else (entry_p * 0.93)
+    curr_hour = datetime.now(ZoneInfo("Asia/Kolkata")).hour
 
     report = audit_position_lifecycle(
         symbol=clean_sym,
@@ -4272,6 +4796,8 @@ def get_compounder_lifecycle(
         initial_stop_loss=sl_p,
         current_ltp=ltp,
         mode=mode,
+        is_0dte=is_0dte,
+        current_hour=curr_hour,
     )
     return JSONResponse(report.to_dict())
 

@@ -678,7 +678,10 @@ class MStockWebSocket:
                     reconnect_delay = min(60.0, reconnect_delay * 1.5)
 
                 try:
-                    await asyncio.sleep(reconnect_delay)
+                    import random
+
+                    jitter = round(random.uniform(0.1, 1.5), 2)
+                    await asyncio.sleep(reconnect_delay + jitter)
                 except (asyncio.CancelledError, RuntimeError):
                     return
 

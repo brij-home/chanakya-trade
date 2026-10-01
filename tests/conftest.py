@@ -113,6 +113,19 @@ def isolate_alert_preferences(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         yield
 
 
+@pytest.fixture(autouse=True)
+def isolate_learning_engine(monkeypatch: pytest.MonkeyPatch):
+    """Ensure learning engine symbol lockouts and temporary states do not leak between tests."""
+    try:
+        from engine.learning_engine import pattern_learning_engine
+
+        pattern_learning_engine.clear_symbol_lockout()
+        yield
+        pattern_learning_engine.clear_symbol_lockout()
+    except Exception:
+        yield
+
+
 @pytest.fixture
 def ohlcv_df() -> pd.DataFrame:
     """200-row OHLCV DataFrame with deterministic prices.

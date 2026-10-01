@@ -510,14 +510,35 @@ def evaluate_long_term_horizon(
     elif roce < 8.0:
         score -= 12
 
-    # 2. Debt to Equity
+    # 2. Debt to Equity (Sector-Calibrated)
     de = details["debt_equity"]
-    if de <= 0.5:
-        score += 15
-    elif de <= 1.0:
-        score += 5
-    elif de > 2.0:
-        score -= 20
+    sec_id = "broad_market"
+    try:
+        from analysis.universe import get_stock_sector
+
+        sec_id, _ = get_stock_sector(symbol)
+    except Exception:
+        pass
+    is_financial = sec_id in ("banking", "finance", "financials")
+    is_capital_intensive = sec_id in ("energy", "infra", "metals", "realty", "telecom")
+
+    if is_financial:
+        # Financials/NBFCs borrow to lend; leverage is operational inventory
+        score += 10
+    elif is_capital_intensive:
+        if de <= 1.2:
+            score += 15
+        elif de <= 2.5:
+            score += 5
+        elif de > 3.8:
+            score -= 20
+    else:
+        if de <= 0.5:
+            score += 15
+        elif de <= 1.0:
+            score += 5
+        elif de > 2.0:
+            score -= 20
 
     # 3. Forensic Governance
     if forensic_safe:

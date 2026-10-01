@@ -9,7 +9,8 @@ Comprehensive unit tests for the institutional Telegram alert template engine:
 - Zero-redundancy and mobile height reduction checks
 """
 
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from bot.alert_templates import (
     FNOAlertData,
     MilestoneAlertData,
@@ -25,6 +26,7 @@ from bot.alert_templates import (
     format_price,
     normalize_env_tag,
     build_signal_ref,
+    format_contract_display,
     _format_call_time_and_elapsed,
 )
 from engine.auto_alert_engine import AutoAlert
@@ -83,12 +85,12 @@ def test_render_fno_alert_dataclass():
     assert "NIFTY 24500 CE" in msg
     assert "Spot: <b>₹24,480.00</b>" in msg
     assert "Expiry:</b>" in msg
-    assert "Weekly" in msg or "Monthly" in msg
+    assert "Weekly" in msg or "Monthly" in msg or "0DTE" in msg
     assert "Action:</b> <b>BUY NIFTY 24500 CE</b>" in msg
     assert "Entry Zone:</b> <code>₹85.00 – ₹92.00</code>" in msg
-    assert "Invalidation SL:</b> <code>₹66.00</code> (-25.0%)" in msg
-    assert "Target 1 (1.5R):</b> <code>₹118.00</code> (+34.0%)" in msg
-    assert "Target 2 (2.5R):</b> <code>₹145.00</code> (+65.0%)" in msg
+    assert "SL:</b> <code>₹66.00</code> (-25.0%)" in msg
+    assert "T1 (1.5R):</b> <code>₹118.00</code> (+34.0%)" in msg
+    assert "T2 (2.5R):</b> <code>₹145.00</code> (+65.0%)" in msg
     assert "DO NOT CHASE:</b> Above <code>₹105.00</code>" in msg
     assert "Conviction:</b> <b>92/100</b> (MAX_CONVICTION) · ⚡ 2X Size" in msg
     assert "Playbook:</b> <i>Book 50% at T1, SL to Cost</i>" in msg
@@ -159,8 +161,8 @@ def test_render_equity_alert_dataclass_and_dict():
     assert "Strategic: <b>94/100</b>" in msg
     assert "Live Tactical: <b>90/100</b>" in msg
     assert "RVOL: <b>2.1x</b>" in msg
-    assert "Target 1 (2R):</b> <code>₹7,520.00</code>" in msg
-    assert "Target 2 (3.5R):</b> <code>₹7,890.00</code>" in msg
+    assert "T1 (2R):</b> <code>₹7,520.00</code>" in msg
+    assert "T2 (3.5R):</b> <code>₹7,890.00</code>" in msg
     assert "DO NOT CHASE:</b> Above <code>₹7,220.00</code>" in msg
     assert "/size TRENT 7100.00 6880.00" in msg
     assert "🏷️ <b>Ref:</b> <code>#SIG_TRENT" in msg
@@ -213,6 +215,86 @@ def test_render_precursor_and_asymmetric_alerts():
     assert "POLYCAB" in a_msg
     assert "Moonshot (+6R+):</b> <code>₹7,400.00</code>" in a_msg
     assert "1:3.5 R:R" in a_msg
+
+
+def test_format_contract_display_futures():
+    """Verify raw futures contracts are formatted into human-readable symbols preserving expiry and vehicle."""
+    assert format_contract_display("NIFTY26OCTFUT") == "NIFTY 26-OCT FUT"
+    assert format_contract_display("HAL26SEPFUT") == "HAL 26-SEP FUT"
+    assert format_contract_display("GOLD26OCTFUT") == "GOLD 26-OCT FUT"
+    assert format_contract_display("NIFTY 26-OCT FUT") == "NIFTY 26-OCT FUT"
+    assert format_contract_display("NIFTY26OCT24FUT") == "NIFTY 24-OCT FUT"
+    # Ensure options formatting is unaffected
+    assert format_contract_display("HAL26SEP4800PE") == "HAL 4800 PE"
+    assert format_contract_display("NIFTY 24800 CE") == "NIFTY 24800 CE"
+    assert format_contract_display("NIFTY2692524800CE") == "NIFTY 24800 CE"
+    assert format_contract_display("M&M202610272950PE") == "M&M 2950 PE"
+    assert format_contract_display("M&M26OCT2950PE") == "M&M 2950 PE"
+    assert format_contract_display("M&M2950PE") == "M&M 2950 PE"
+
+
+def test_asymmetric_setup_alert_readable_futures_and_no_spot_clash():
+    """
+    Verify that in asymmetric setups:
+    1. Spot entry range is preserved for Action line (no clash with option premium).
+    2. Futures preferred line displays clean contract symbol, lot size, and execution levels (entry, SL, T1).
+    3. F&O alternative option displays clean contract symbol, lot size, and execution levels.
+    """
+    asym_dict = {
+        "symbol": "NIFTY",
+        "score": 94,
+        "verdict": "MAX_CONVICTION",
+        "ltp": 23077.0,
+        "stop_loss": 22661.61,
+        "target_1": 24057.49,
+        "target_2": 24805.19,
+        "moonshot_target": 25635.97,
+        "risk_reward_ratio": 4.2,
+        "lot_size": 65,
+        "direction": "BULLISH",
+        "actionable_plan": {
+            "entry_range": "₹23,000 – ₹23,100",
+            "spot_entry_range": "₹23,000 – ₹23,100",
+            "stop_loss": 22661.61,
+            "target_1": 24057.49,
+            "lot_size": 65,
+            "futures_plan": {
+                "contract_symbol": "NIFTY26OCTFUT",
+                "entry_price": 23157.8,
+                "stop_loss": 22661.61,
+                "target_1": 24057.49,
+                "lot_size": 65,
+            },
+            "option_plan": {
+                "contract_symbol": "NIFTY 23100 CE",
+                "entry_premium": 210.3,
+                "sl_premium": 147.2,
+                "t1_premium": 700.5,
+                "lot_size": 65,
+            },
+        },
+        "confluences": ["200-EMA Institutional Floor", "RSI Oversold Climax"],
+    }
+    msg = render_asymmetric_alert(asym_dict)
+
+    # 1. Spot Action line must use spot range, not option premium range
+    assert (
+        "Action: BUY</b> @ <code>₹23,000 – ₹23,100</code> (Lot: 65) (Spot CMP: ₹23,077.00)" in msg
+    )
+    assert "SL:</b> <code>₹22,661.61</code>" in msg
+    assert "T1 (+2R):</b> <code>₹24,057.49</code>" in msg
+
+    # 2. Futures Preferred line must show clean symbol with expiry, lot size, and execution levels
+    assert (
+        "Futures Preferred:</b> <code>NIFTY 26-OCT FUT</code> (Lot: 65) @ ₹23,157.8 | SL: ₹22,661.6 | T1: ₹24,057.5 [Delta 1.0 · Zero Theta Decay]"
+        in msg
+    )
+
+    # 3. F&O Alternative option line must show clean option, lot size, and execution levels
+    assert (
+        "F&O Alternative:</b> <code>NIFTY 23100 CE</code> (Lot: 65) @ ₹210.3 | SL: ₹147.2 | T1: ₹700.5"
+        in msg
+    )
 
 
 def test_render_milestone_alerts():
@@ -329,12 +411,12 @@ def test_render_milestone_alert_full_traceability():
     assert "T2: ₹180.83" in rendered
 
     # 4. Current Opt CMP & P&L Attribution
-    assert "Opt CMP:</b> ₹118.10 | <b>Target 1:</b> ₹118.00" in rendered
+    assert "Opt CMP:</b> ₹118.10 | <b>T1:</b> ₹118.00" in rendered
     assert "Move:</b> <b>+₹13.10 (+12.5% | +1.0R)</b>" in rendered
 
     # 5. Trailing Stop & Decisive Action
     assert "Trail Stop:</b> <code>₹96.54</code> (+0.2% Breakeven Lock) (100% risk-free)" in rendered
-    assert "BOOK 50% PROFIT NOW & HOLD RUNNER (Target 2: ₹180.83)" in rendered
+    assert "BOOK 50% PROFIT NOW & HOLD RUNNER (T2: ₹180.83)" in rendered
 
 
 def test_render_auto_alert_target_1_traceability():
@@ -378,7 +460,7 @@ def test_render_auto_alert_target_1_traceability():
     assert "#SIG_HAL_4500CE_11SEP_0942" in rendered
     assert "Original Plan:" in rendered
     assert "Entry: ₹105.00" in rendered
-    assert "Target 1:</b> ₹118.00" in rendered
+    assert "T1:</b> ₹118.00" in rendered
     assert "BOOK 50% PROFIT NOW & HOLD RUNNER" in rendered
 
 
@@ -519,7 +601,7 @@ def test_render_auto_alert_integration():
     assert "NIFTY 24500 CE" in msg3
     assert "Expiry:</b>" in msg3
     assert "Action:</b> BUY <b>NIFTY 24500 CE</b>" in msg3
-    assert "Invalidation SL:</b> <code>₹66.0</code>" in msg3
+    assert "SL:</b> <code>₹66.0</code>" in msg3
 
 
 def test_minimalist_alert_hierarchy_and_deduplication():
@@ -564,7 +646,7 @@ def test_minimalist_alert_hierarchy_and_deduplication():
     # 2. Hierarchy: Action & Levels appear BEFORE Reason
     idx_action = rendered.find("Action:")
     assert idx_action != -1
-    idx_sl = rendered.find("Invalidation SL:")
+    idx_sl = rendered.find("SL:")
     assert idx_sl != -1
     idx_reason = rendered.find("Reason:")
     assert idx_reason != -1
@@ -655,6 +737,27 @@ def test_resolve_expiry_cycle_all_scenarios():
     assert res_nm["is_monthly"] is True
     assert "Next Monthly · 29-Oct-2026" in res_nm["badge"]
 
+    # 8. Broker YYYYMMDD same-day / 0DTE contract e.g. UNITDSPR202609291380PE
+    res_unitdspr = resolve_expiry_cycle(
+        contract="UNITDSPR202609291380PE",
+        underlying="UNITDSPR",
+        as_of=date(2026, 9, 29),
+    )
+    assert res_unitdspr["cycle"] == "0DTE / Today's Expiry"
+    assert res_unitdspr["dte"] == 0
+    assert "29-Sep-2026" in res_unitdspr["badge"]
+    assert "Next Monthly" not in res_unitdspr["badge"]
+
+    # 9. Broker YYYYMMDD next monthly contract e.g. POLICYBZR202610271100PE
+    res_policy = resolve_expiry_cycle(
+        contract="POLICYBZR202610271100PE",
+        underlying="POLICYBZR",
+        as_of=date(2026, 9, 29),
+    )
+    assert res_policy["cycle"] == "Next Monthly"
+    assert res_policy["dte"] == 28
+    assert "27-Oct-2026" in res_policy["badge"]
+
 
 def test_gamma_blast_alert_contract_and_rr_resolution():
     """Verify that Gamma Blast alerts resolve specific strike/type, avoid TYOPTION, and meet institutional R:R."""
@@ -686,8 +789,8 @@ def test_gamma_blast_alert_contract_and_rr_resolution():
 
     # 4. Institutional R:R >= 1:3.0
     assert "1:3.2 R:R" in rendered
-    assert "Target 1 (1.8R):" in rendered
-    assert "Target 2 (3.2R):" in rendered
+    assert "T1 (1.8R):" in rendered
+    assert "T2 (3.2R):" in rendered
 
 
 def test_fno_and_equity_price_showcase_and_provenance():
@@ -814,7 +917,7 @@ def test_auto_alert_engine_milestone_evaluation_consistency():
             "target_1": "₹58.50",
             "target_2": "₹73.10",
         },
-        created_at="2026-09-11 12:23:00 IST",
+        created_at=datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S IST"),
     )
 
     # 1. At LTP ₹39.25 (+₹0.25 above entry), Target 1 (58.50) MUST NOT trigger!
@@ -1160,8 +1263,8 @@ def test_gamma_blast_milestone_no_spot_target_corruption():
 
     assert "TARGET 1 HIT" in msg_t1
     assert "410.00" not in msg_t1
-    assert "Target 1:</b> ₹5.43" in msg_t1
-    assert "Target 2: ₹11.27" in msg_t1
+    assert "T1:</b> ₹5.43" in msg_t1
+    assert "T2: ₹11.27" in msg_t1
 
 
 def test_no_chase_direction_and_comparator_sanctity():
@@ -1303,7 +1406,7 @@ def test_render_auto_alert_t2_achieved_milestone():
     assert "TARGET 2 HIT" in rendered
     assert "TARGET 2 ACHIEVED" in rendered
     assert "MIDCPNIFTY" in rendered
-    assert "Target 2:</b> ₹293.94" in rendered
+    assert "T2:</b> ₹293.94" in rendered
     assert "Trail Stop:</b> <code>₹254.55</code>" in rendered
     assert "TRAIL STOP-LOSS TO T1 (₹254.55)" in rendered
     # Invariant: Must NOT fall through to initial breakout BUY card!
@@ -1391,9 +1494,9 @@ def test_render_asymmetric_alert_bearish_and_neutral():
     assert "TURTLE SOUP SHORT" in bear_msg
     assert "🔻" in bear_msg or "🔴" in bear_msg
     assert "Action: SHORT (SELL)" in bear_msg
-    assert "Invalidation SL (Above High):</b> <code>₹52,620.00</code>" in bear_msg
-    assert "Target 1 (Downside):</b> <code>₹51,950.00</code>" in bear_msg
-    assert "Target 2 (Downside):</b> <code>₹51,600.00</code>" in bear_msg
+    assert "SL (Above High):</b> <code>₹52,620.00</code>" in bear_msg
+    assert "T1 (Downside):</b> <code>₹51,950.00</code>" in bear_msg
+    assert "T2 (Downside):</b> <code>₹51,600.00</code>" in bear_msg
     assert "1:3.6 R:R" in bear_msg
 
     # 2. Delta-Neutral Expiry Iron Condor Pinning Setup
@@ -1472,7 +1575,7 @@ def test_render_auto_alert_target_0_5_milestone_not_initial_breakout():
     rendered = render_auto_alert(alert, in_market=True)
 
     # Invariant 1: Milestone header and title
-    assert "TARGET 0.5 ACHIEVED (SCALE 1)" in rendered
+    assert "TARGET 0.5 HIT (SCALE 1)" in rendered or "TARGET 0.5 ACHIEVED (SCALE 1)" in rendered
     assert "DE-RISK SCALE HIT" in rendered
     assert "BSE 3200 PE" in rendered
 
@@ -1663,11 +1766,8 @@ def test_first_time_message_prominently_shows_runner_and_confidence():
     assert "• <b>Horizon:</b>" in rendered
     assert "⏱️ INTRADAY" in rendered
 
-    # 2. Runner Alternative
-    assert (
-        "• 🚀 <b>Runner Alternative (High Beta):</b> <code>BSE 3150 PE</code> (Opt CMP: ₹42.50)"
-        in rendered
-    )
+    # 2. Runner Alternative excluded to eliminate trader confusion
+    assert "Runner Alternative" not in rendered
 
 
 def test_format_signal_badge_and_lot_concor_and_scenarios():
@@ -1737,7 +1837,7 @@ def test_fno_and_auto_alerts_color_coding_and_lot_size():
         "lot_size": 1250,
     }
     rendered_fno_pe = render_fno_alert(pe_alert)
-    assert "🔴 <b>[REAL/LIVE] GAMMA BLAST SURGE</b>" in rendered_fno_pe
+    assert "🔴 <b>[REAL/LIVE] NEW CALL · GAMMA BLAST SURGE</b>" in rendered_fno_pe
     assert "🔴 <b>CONCOR 485 PE</b> @ <code>₹7.20</code> (Lot: 1250)" in rendered_fno_pe
     assert "• <b>Entry Zone:</b> <code>₹7.00 – ₹7.40</code> (Lot: 1250)" in rendered_fno_pe
 
@@ -1755,7 +1855,7 @@ def test_fno_and_auto_alerts_color_coding_and_lot_size():
         "lot_size": 1250,
     }
     rendered_fno_ce = render_fno_alert(ce_alert)
-    assert "🟢 <b>[REAL/LIVE] GAMMA BLAST SURGE</b>" in rendered_fno_ce
+    assert "🟢 <b>[REAL/LIVE] NEW CALL · GAMMA BLAST SURGE</b>" in rendered_fno_ce
     assert "🟢 <b>CONCOR 485 CE</b> @ <code>₹8.50</code> (Lot: 1250)" in rendered_fno_ce
 
     # 3. render_auto_alert with Options Momentum Put Alert
@@ -1786,7 +1886,7 @@ def test_fno_and_auto_alerts_color_coding_and_lot_size():
         confidence=91,
     )
     rendered_auto_pe = render_auto_alert(auto_pe, in_market=True)
-    assert "🔴 <b>[REAL/LIVE] OPTIONS PUT SURGE</b>" in rendered_auto_pe
+    assert "🔴 <b>[REAL/LIVE] NEW CALL · OPTIONS PUT SURGE</b>" in rendered_auto_pe
     assert "🔴 OPTIONS MOMENTUM (PUT SURGE): CONCOR 485 PE @ ₹7.2 (Lot: 1250)" in rendered_auto_pe
     assert (
         "• <b>Action:</b> BUY <b>CONCOR 485 PE</b> @ <code>₹7.2</code> (Lot: 1250)"
@@ -1931,3 +2031,695 @@ def test_mcx_provenance_badge_reflects_delayed_feed_when_broker_is_mstock():
         # MUST NOT claim LIVE BROKER FEED for MCX when broker is mstock
         assert "LIVE BROKER FEED" not in rendered
         assert "DELAYED FEED (yfinance)" in rendered
+
+
+def test_runner_extension_strike_roll_and_original_sl_sanity():
+    """
+    Verifies that:
+    1. Trailing SL above entry on a long option does NOT overwrite the SL in Original Plan.
+    2. Strike roll recommendation is rendered for deep ITM option runners.
+    """
+    from bot.alert_templates import MilestoneAlertData, render_milestone_alert
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-midcp-runner-01",
+        alert_type="GAMMA_BLAST",
+        stage="TARGET_ACHIEVED",
+        symbol="MIDCPNIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="🏆 🔴 MIDCPNIFTY 14475 PE (GAMMA BLAST)",
+        summary="Explosive Put expansion",
+        ltp=235.95,
+        trigger_level=139.50,
+        stop_loss=194.10,  # Trailed stop!
+        initial_stop_loss=95.00,  # Real original initial SL
+        target_level=216.20,
+        strike=14475.0,
+        option_type="PE",
+        contract_symbol="MIDCPNIFTY 14475 PE",
+        underlying_spot=14220.0,
+        lot_size=120,
+        actionable_plan={
+            "action": "BUY_PE",
+            "recommended_entry": 139.50,
+            "invalidation_stop": 194.10,  # Trailed stop
+            "initial_invalidation_stop": 95.00,
+            "target_1": 185.0,
+            "target_2": 216.20,
+            "option_plan": {
+                "contract": "MIDCPNIFTY 14475 PE",
+                "entry_premium": 139.50,
+                "sl_premium": 194.10,
+                "initial_sl_premium": 95.00,
+                "t1_premium": 185.0,
+                "t2_premium": 216.20,
+            },
+        },
+        trailing_stop=194.10,
+        should_trail=True,
+        locked_profit_pct=39.1,
+        pnl_pct=69.1,
+        r_multiple=1.77,
+        strike_roll_recommendation={
+            "action": "ROLL_DOWN",
+            "current_strike": 14475.0,
+            "recommended_strike": 14225.0,
+            "recommended_contract": "MIDCPNIFTY 14225 PE",
+            "pnl_pct": 69.1,
+            "reason": "Lock +69% ITM gains. Roll down to liquid ATM 14225 PE.",
+        },
+    )
+
+    ms_data = MilestoneAlertData.from_alert(alert, "FINAL_TARGET")
+    rendered = render_milestone_alert(ms_data)
+
+    # 1. Runner Extension & Trailed SL header
+    assert "RUNNER EXTENSION" in rendered
+    assert "Chandelier Trail SL:</b> <code>₹194.10</code>" in rendered
+
+    # 2. Strike Roll recommendation rendered
+    assert "STRIKE ROLL:" in rendered
+    assert "Book <code>14475</code> &amp; Roll Down to <code>MIDCPNIFTY 14225 PE</code>" in rendered
+    assert "Lock +69% ITM Gains" in rendered
+
+    # 3. Original Plan MUST display real initial SL (₹95.00), NEVER the trailed SL (₹194.10)!
+    assert "Entry: ₹139.50 (Lot: 120)" in rendered
+    assert "SL: ₹95.00" in rendered
+    assert "SL: ₹194.10" not in rendered
+
+
+def test_crisp_alert_formatting_and_sector_shortening():
+    """
+    Verifies that:
+    1. Sector name is shortened (e.g. 'Automobiles & Mobility' -> 'Auto').
+    2. Fallback developer scrutiny text ('Tier-1 math & level sanity passed...') is suppressed from Signals.
+    3. Repetitive detector prefixes ('T-0 Explosive Downside Mover:') are stripped from Reason.
+    4. R:R is rendered cleanly as e.g. '1.4R'.
+    """
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-sonacoms-crisp",
+        alert_type="INTRADAY_BREAKDOWN",
+        stage="IGNITED",
+        symbol="SONACOMS",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="🔴 INTRADAY BREAKDOWN: SONACOMS Dump -0.8% (RVOL 1.8x) @ ₹826.0",
+        summary="T-0 Explosive Downside Mover: SONACOMS falling -0.8% with 1.8x Time-of-Day Relative Volume. Trapped below VWAP ₹826.0",
+        ltp=826.0,
+        trigger_level=826.0,
+        stop_loss=833.1,
+        target_level=815.7,
+        lot_size=1225,
+        metrics={
+            "sector_name": "Automobiles & Mobility",
+            "rvol": 1.8,
+            "scrutiny": {
+                "logic_confirmation": "Tier-1 math & level sanity passed for INTRADAY_BREAKDOWN"
+            },
+        },
+        actionable_plan={
+            "action": "SELL",
+            "trade_plan": {
+                "symbol": "SONACOMS",
+                "direction": "SHORT",
+                "entry_price": 826.0,
+                "invalidation_stop": 833.1,
+                "target_1": 815.7,
+                "target_2": 808.6,
+                "stop_distance_pts": 7.1,
+                "t1_distance_pts": 10.3,
+                "t2_distance_pts": 17.4,
+                "rr_t1": 1.45,
+                "rr_t2": 2.45,
+                "is_asymmetry_viable": True,
+                "asymmetry_verdict": "ACCEPTABLE",
+            },
+        },
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    # 1. Sector shortened to Auto
+    assert "Sec: <b>Auto</b>" in rendered
+    assert "Automobiles & Mobility" not in rendered
+
+    # 2. Debugging scrutiny suppressed
+    assert "sanity passed" not in rendered
+    assert "Tier-1" not in rendered
+
+    # 3. Detector boilerplate stripped and verbose terms converted to TOD RVOL
+    assert "T-0 Explosive Downside Mover:" not in rendered
+    assert "TOD RVOL" in rendered
+
+    # 4. R:R rendered as 1.5R or 1.4R
+    assert "1.5R" in rendered or "1.4R" in rendered
+    assert ":1 R:R" not in rendered
+
+
+def test_options_alert_headline_sector_shortening_and_deduplication():
+    """Verify that verbose sector names in alert headlines (e.g. [AUTOMOBILES & MOBILITY])
+
+    are shortened to [AUTO] and deduplicated when a leader trophy badge is present.
+    """
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+
+    # Scenario 1: Headline with both sector badge and trophy badge
+    alert_with_trophy = AutoAlert(
+        alert_id="aa-opt-mm-test-1",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="M&M",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="🔴 OPTIONS MOMENTUM [AUTOMOBILES & MOBILITY] (PUT SURGE): M&M202610272950PE @ ₹55.4 (Lot: 200) (Vol/OI 3.22x) [🏆 AUTOMOBILES & MOBILITY #1/5]",
+        summary="M&M breakdown confirmation with heavy put surge",
+        ltp=55.4,
+        trigger_level=55.4,
+        target_level=90.0,
+        stop_loss=38.0,
+        strike=2950.0,
+        option_type="PE",
+        contract_symbol="M&M202610272950PE",
+        lot_size=200,
+        actionable_plan={
+            "action": "BUY_PUT",
+            "contract": "M&M202610272950PE",
+            "recommended_entry": "₹55.40",
+            "stop_loss": "₹38.0",
+            "target": "₹90.0",
+        },
+    )
+    rendered_1 = render_auto_alert(alert_with_trophy, in_market=True)
+    # Long sector name should not appear anywhere in rendered message
+    assert "AUTOMOBILES & MOBILITY" not in rendered_1
+    # Contract is spaced and readable
+    assert "M&M 2950 PE" in rendered_1
+    # Redundant [AUTO] at the beginning is removed because [🏆 AUTO #1/5] is present
+    assert "[🏆 AUTO #1/5]" in rendered_1
+    assert "OPTIONS MOMENTUM (PUT SURGE):" in rendered_1
+
+    # Scenario 2: Headline without trophy badge has shortened sector [AUTO]
+    alert_no_trophy = AutoAlert(
+        alert_id="aa-opt-mm-test-2",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="M&M",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="🔴 OPTIONS MOMENTUM [AUTOMOBILES & MOBILITY] (PUT SURGE): M&M 2950 PE @ ₹55.4 (Lot: 200) (Vol/OI 3.22x)",
+        summary="M&M breakdown",
+        ltp=55.4,
+        trigger_level=55.4,
+        target_level=90.0,
+        stop_loss=38.0,
+        strike=2950.0,
+        option_type="PE",
+        contract_symbol="M&M 2950 PE",
+        lot_size=200,
+        actionable_plan={
+            "action": "BUY_PUT",
+            "recommended_entry": "₹55.40",
+            "stop_loss": "₹38.0",
+            "target": "₹90.0",
+        },
+    )
+    rendered_2 = render_auto_alert(alert_no_trophy, in_market=True)
+    assert "AUTOMOBILES & MOBILITY" not in rendered_2
+    assert "OPTIONS MOMENTUM [AUTO] (PUT SURGE):" in rendered_2
+
+
+def test_render_crypto_alert_holistic_sanitization():
+    """Verify that crypto alerts render without duplicate CMP, without truncated ($ in signals,
+
+    with 24h rolling ETA, and with Runner (T3) support.
+    """
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+    from engine.alert_scrutiny import alert_scrutiny_auditor
+
+    alert = AutoAlert(
+        alert_id="aa-crypto-momentum-btcusdt-demand-20260927",
+        alert_type="CRYPTO_MOMENTUM",
+        stage="IGNITED",
+        symbol="BTCUSDT",
+        exchange="CRYPTO",
+        segment="CRYPTO",
+        direction="BULLISH",
+        headline="⚡ CRYPTO SMC ALPHA: BTCUSDT Demand Order Block Reclaim @ $84,893.89",
+        summary="Smart Money structural reclaim at 15m Demand OB ($83,886.03 - $84,573.03). Bullish structure confirmed.",
+        ltp=84893.89,
+        trigger_level=84573.03,
+        target_level=88923.37,
+        stop_loss=83214.94,
+        confidence=91,
+        time_horizon="INTRADAY",
+        eta_label="Today 15:15 IST",  # Simulating an alert corrupted with 15:15 IST
+        metrics={
+            "setup_confluence": "15m Bullish Regime + Unmitigated Demand OB ($83,886.0 - $84,573.0)",
+        },
+        actionable_plan={
+            "action": "BUY_SPOT / LONG",
+            "segment": "CRYPTO",
+            "contract": "CRYPTO:BTCUSDT",
+            "entry_range": "$83,886.03 – $84,995.90",
+            "stop_loss": "$83,214.94",
+            "target": "$88,923.37",
+            "target_2": "$91,945.48",
+            "target_3": "$94,967.59",
+            "runner": "$94,967.59",
+            "risk_reward": "1:2.4 (T1) | 1:4.2 (T2)",
+            "setup_confluence": "15m Bullish Regime + Unmitigated Demand OB ($83,886.0 - $84,573.0)",
+            "profit_rule": "Scale 50% at T1, trail remaining to breakeven.",
+            "no_chase_boundary": 85587.91,
+        },
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    # 1. Zero duplicate price in headline
+    assert rendered.count("$84,893.89") == 1
+    assert "Spot CMP: <b>$84,893.89</b>" not in rendered
+
+    # 2. No truncated "($ " or duplicated confluence in Signals
+    assert "($\n" not in rendered
+    assert "($," not in rendered
+    assert "• Signals: 15m Bullish Regime" not in rendered
+    assert (
+        "• <b>Structure:</b> <i>15m Bullish Regime + Unmitigated Demand OB ($83,886.0 - $84,573.0)</i>"
+        in rendered
+    )
+
+    # 3. ETA corrected to 24h Rolling (never 15:15 IST for crypto)
+    assert "Today 15:15 IST" not in rendered
+    assert "24h Rolling" in rendered
+
+    # 4. Runner (T3) rendered in trade plan
+    assert "Runner:" in rendered
+    assert "$94,967.59" in rendered
+
+    # 5. Crypto Quant Scrutiny fallback formats in USD ($) and zero Rs.
+    scrutiny = alert_scrutiny_auditor._generate_quantitative_fallback(alert, {})
+    assert "Rs." not in scrutiny.logic_confirmation
+    assert "Rs." not in scrutiny.trap_risk_warning
+    assert "Rs." not in scrutiny.actionable_guidance
+    assert "$" in scrutiny.logic_confirmation
+
+
+def test_crypto_milestone_update_numbering_and_currency():
+    """Verify crypto milestone updates start at UPDATE #1 (not skipping to #4) and format in USD ($)."""
+    alert = AutoAlert(
+        alert_id="aa-crypto-solusdt-short-test",
+        alert_type="CRYPTO_MOMENTUM",
+        stage="T1_ACHIEVED",
+        symbol="SOLUSDT",
+        exchange="CRYPTO",
+        direction="BEARISH",
+        headline="🏆 🔴 CRYPTO:SOLUSDT (CRYPTO MOMENTUM) — TARGET 1 ACHIEVED",
+        summary="Target 1 hit at $120.07",
+        ltp=123.86,
+        trigger_level=124.12,
+        target_level=120.07,
+        stop_loss=125.65,
+        created_at="2026-09-27 16:30:00 IST",
+        actionable_plan={
+            "action": "SELL / SHORT",
+            "contract": "CRYPTO:SOLUSDT",
+            "recommended_entry": "$124.12",
+            "entry_price": 124.12,
+            "stop_loss": "$125.65",
+            "target": "$120.07",
+            "target_1": "$120.07",
+            "target_2": "$117.12",
+            "runner": "$115.00",
+        },
+        trailing_stop=123.87,
+        locked_profit_pct=0.2,
+        achieved_milestones=["T1_ACHIEVED"],
+        is_live=True,
+        environment="LIVE",
+        telegram_update_count=0,
+        update_number=1,
+    )
+
+    # 1. Update number and milestone data extraction
+    ms_data = MilestoneAlertData.from_alert(alert, "TARGET_1")
+    assert ms_data.update_number == 1
+    assert ms_data.exchange == "CRYPTO"
+    assert ms_data.currency == "$"
+
+    rendered = render_milestone_alert(ms_data)
+
+    # 2. Header must be UPDATE #1, never UPDATE #4 or UPDATE #2
+    assert "UPDATE #1 · TARGET 1 HIT" in rendered
+    assert "UPDATE #4" not in rendered
+
+    # 3. Currency symbol must be $ throughout, zero ₹
+    assert "₹" not in rendered
+    assert "$123.86" in rendered
+    assert "T1:</b> $120.07" in rendered
+    assert "Trail Stop:</b> <code>$123.87</code>" in rendered
+    assert "Entry: $124.12 | SL: $125.65 | T1: $120.07 | T2: $117.12" in rendered
+    assert "T2: $117.12" in rendered
+
+
+def test_asymmetric_and_fno_alerts_display_all_expiry_contract_details():
+    """
+    Verify institutional expiry contract display invariants:
+    1. render_asymmetric_alert prominently renders ⏳ Expiry: badge with cycle, date, and DTE.
+    2. Hedged Spread (Preferred) line explicitly displays contract expiry date tag.
+    3. F&O Alternative line explicitly displays contract expiry date [Exp: ...].
+    4. render_fno_alert also renders expiry on Hedged Spread line.
+    """
+    # 1. Asymmetric Alert with Full F&O Derivative Execution Suite
+    asym_dict = {
+        "symbol": "NIFTY",
+        "segment": "FNO_INDEX",
+        "conviction_score": 92,
+        "verdict": "MAX_CONVICTION",
+        "ltp": 23128.1,
+        "entry_range": "₹23,012.5 – ₹23,313.1",
+        "stop_loss": 22711.79,
+        "target_1": 23983.32,
+        "target_2": 24732.68,
+        "target_moonshot": 25625.96,
+        "risk_reward": "1:3.9",
+        "direction": "BULLISH",
+        "expiry_date": "2026-10-29",
+        "actionable_plan": {
+            "hedge_plan": {
+                "strategy": "BULL_CALL_SPREAD",
+                "strategy_title": "Bull Call Spread",
+                "buy_leg": "BUY NIFTY 23100 CE @ ₹221.9",
+                "sell_leg": "SELL NIFTY 23600 CE @ ₹58.0",
+                "net_debit_per_share": 163.9,
+                "max_loss": 10653.5,
+                "max_profit": 28346.5,
+                "risk_reward": "1:2.7",
+                "expiry_date": "29-Oct-2026",
+            },
+            "futures_plan": {
+                "contract_symbol": "NIFTY26OCTFUT",
+                "entry_price": 23209.0,
+                "stop_loss": 22792.7,
+                "target_1": 24064.3,
+                "lot_size": 65,
+                "futures_hedge": {
+                    "strategy": "COLLARED_FUTURE",
+                    "description": "Long Future + Buy 22700 PE (Hard Floor at ₹22,700 · Eliminates Overnight Gap Risk)",
+                },
+            },
+            "option_plan": {
+                "contract_symbol": "NIFTY26OCT23100CE",
+                "expiry_date": "29-Oct-2026",
+                "entry_premium": 221.9,
+                "sl_premium": 155.4,
+                "t1_premium": 649.6,
+                "lot_size": 65,
+            },
+        },
+        "confluences": ["200-EMA Institutional Floor", "RSI Oversold Climax"],
+    }
+
+    rendered_asym = render_asymmetric_alert(asym_dict, in_market=True)
+
+    # Invariant 1: Prominent Expiry Badge line
+    assert "⏳ <b>Expiry:</b>" in rendered_asym
+    assert "29-Oct-2026" in rendered_asym
+
+    # Invariant 2: Hedged Spread displays expiry tag
+    assert (
+        "• <b>🛡️ Hedged Spread (Preferred):</b> <code>Bull Call Spread</code> [29-Oct-2026]"
+        in rendered_asym
+    )
+
+    # Invariant 3: F&O Alternative displays contract expiry
+    assert (
+        "• <b>F&O Alternative:</b> <code>NIFTY 23100 CE</code> (Lot: 65) @ ₹221.9 | SL: ₹155.4 | T1: ₹649.6 [Exp: 29-Oct-2026]"
+        in rendered_asym
+    )
+
+    # Invariant 4: Futures Preferred line
+    assert "Futures Preferred:</b> <code>NIFTY 26-OCT FUT</code>" in rendered_asym
+
+    # 2. F&O Gamma Blast Alert with Hedged Spread
+    fno_dict = {
+        "contract": "NIFTY26OCT23100CE",
+        "underlying": "NIFTY",
+        "option_type": "CE",
+        "strike": 23100,
+        "premium": 221.9,
+        "spot": 23128.1,
+        "stop_loss": 155.4,
+        "target_1": 400.0,
+        "target_2": 600.0,
+        "risk_reward": "1:2.8",
+        "entry_range": "₹215.0 – ₹225.0",
+        "lot_size": 65,
+        "trigger_reason": "Call Volume Surge 3.4x",
+        "vol_oi": 3.4,
+        "imbalance": 2.1,
+        "profit_rule": "Scale 50% at T1, SL to Breakeven",
+        "expiry_date": "29-Oct-2026",
+        "hedge_plan": {
+            "strategy": "BULL_CALL_SPREAD",
+            "strategy_title": "Bull Call Spread",
+            "buy_leg": "BUY NIFTY 23100 CE",
+            "sell_leg": "SELL NIFTY 23600 CE",
+            "net_debit_per_share": 163.9,
+            "max_loss": 10653.5,
+            "expiry_date": "29-Oct-2026",
+        },
+    }
+
+    rendered_fno = render_fno_alert(fno_dict, in_market=True)
+    assert "⏳ <b>Expiry:</b>" in rendered_fno
+    assert (
+        "• <b>🛡️ Hedged Spread (Preferred):</b> <code>Bull Call Spread</code> [29-Oct-2026]"
+        in rendered_fno
+    )
+
+
+def test_auto_alert_telegram_expiry_price_coherence():
+    """
+    RCA Regression Test: Verify that single-stock derivative alerts with 8-digit broker contract
+    symbols (e.g. UNITDSPR202609291380PE or UNITDSPR202610271380PE) never display contradictory
+    expiry badges (e.g. displaying Oct expiry while pricing Sep contracts).
+    """
+    from engine.alert_model import AutoAlert
+    from bot.alert_templates import format_auto_alert_telegram
+    from datetime import datetime
+    from config.constants import IST
+
+    # 1. 0DTE / Current-day September contract
+    today_dt = datetime.now(IST).strftime("%Y%m%d")
+    today_disp = datetime.now(IST).strftime("%d-%b-%Y")
+    contract_today = f"UNITDSPR{today_dt}1380PE"
+
+    sep_alert = AutoAlert(
+        alert_id=f"aa-opening-drive-ignition-unitdspr-bear-{today_dt}",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="IGNITED",
+        symbol="UNITDSPR",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="UNITDSPR Bearish Breakdown",
+        summary="Opening drive breakdown",
+        ltp=14.0,
+        trigger_level=14.0,
+        target_level=18.9,
+        stop_loss=10.9,
+        contract_symbol=contract_today,
+        strike=1380.0,
+        option_type="PE",
+        option_premium=14.0,
+        underlying_spot=1376.3,
+        lot_size=400,
+        segment="FNO_STOCK",
+        confidence=92,
+        actionable_plan={
+            "contract": contract_today,
+            "recommended_entry": "₹14.00",
+            "stop_loss": "₹10.9",
+            "target_1": "₹18.9",
+            "target_2": "₹23.8",
+            "option_plan": {
+                "contract_symbol": contract_today,
+                "strike": 1380.0,
+                "option_type": "PE",
+                "entry_premium": 14.0,
+                "sl_premium": 10.9,
+                "t1_premium": 18.9,
+                "t2_premium": 23.8,
+                "lot_size": 400,
+            },
+        },
+    )
+
+    msg_sep = format_auto_alert_telegram(sep_alert)
+    assert "₹14.00" in msg_sep
+    assert today_disp in msg_sep
+    assert "Next Monthly · 29-Oct-2026" not in msg_sep
+    assert "0DTE" in msg_sep or "Today's Expiry" in msg_sep
+
+    # 2. Next Month October contract
+    oct_alert = AutoAlert(
+        alert_id="aa-opening-drive-ignition-unitdspr-bear-20261027",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="IGNITED",
+        symbol="UNITDSPR",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="UNITDSPR Bearish Breakdown",
+        summary="Opening drive breakdown",
+        ltp=28.0,
+        trigger_level=28.0,
+        target_level=37.8,
+        stop_loss=21.8,
+        contract_symbol="UNITDSPR202610271380PE",
+        strike=1380.0,
+        option_type="PE",
+        option_premium=28.0,
+        underlying_spot=1376.3,
+        lot_size=400,
+        segment="FNO_STOCK",
+        confidence=92,
+        actionable_plan={
+            "contract": "UNITDSPR202610271380PE",
+            "recommended_entry": "₹28.00",
+            "stop_loss": "₹21.8",
+            "target_1": "₹37.8",
+            "target_2": "₹47.6",
+            "option_plan": {
+                "contract_symbol": "UNITDSPR202610271380PE",
+                "strike": 1380.0,
+                "option_type": "PE",
+                "entry_premium": 28.0,
+                "sl_premium": 21.8,
+                "t1_premium": 37.8,
+                "t2_premium": 47.6,
+                "lot_size": 400,
+            },
+        },
+    )
+
+    msg_oct = format_auto_alert_telegram(oct_alert)
+    assert "₹28.00" in msg_oct
+    assert "27-Oct-2026" in msg_oct
+    assert "Monthly" in msg_oct
+    assert "29-Sep-2026" not in msg_oct
+
+
+def test_opening_drive_call_option_header_not_put_surge():
+    """Verify that a Call option with 'OPENING' or 'Open==Low' in headline is NEVER rendered as PUT SURGE."""
+    from bot.alert_templates import format_auto_alert_telegram
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-opening-drive-ignition-solarinds-bull-20260930",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="IGNITED",
+        symbol="SOLARINDS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="[OPENING DR] SOLARINDS Bullish Ignition (Open==Low @ ₹19,200.0 (Lot: 50))",
+        summary="SOLARINDS explosive Opening Drive confirmed: Open==Low at ₹19,200.0 with immediate expansion",
+        ltp=700.0,
+        trigger_level=700.0,
+        target_level=945.0,
+        stop_loss=546.0,
+        strike=19750.0,
+        option_type="CE",
+        contract_symbol="SOLARINDS2026102719750CE",
+        confidence=92,
+        actionable_plan={
+            "action": "BUY SOLARINDS 19750 CE",
+            "contract": "SOLARINDS 19750 CE",
+            "recommended_entry": "₹700.00",
+            "stop_loss": "₹546.0",
+            "target_1": "₹945.0",
+            "target_2": "₹1,190.0",
+            "lot_size": 50,
+        },
+    )
+
+    rendered = format_auto_alert_telegram(alert)
+    # Must NOT have PUT SURGE or red icon in header
+    assert "OPTIONS PUT SURGE" not in rendered
+    assert "🔴 <b>[REAL/LIVE] NEW CALL · OPTIONS PUT SURGE</b>" not in rendered
+    # Must have green icon and appropriate breakout/ignition header
+    assert "🟢" in rendered
+    assert "OPENING DRIVE IGNITION" in rendered
+    assert "BUY" in rendered
+    assert "SOLARINDS 19750 CE" in rendered
+
+
+def test_option_alert_action_line_clarity_with_hedged_spread():
+    """Verify that when an option alert has actionable_plan['action'] == 'BULL CALL SPREAD',
+    the top Action line renders BUY <contract> @ <LTP> with Hedged Spread Preferred signpost,
+    preventing confusion between single option levels and spread levels."""
+    from bot.alert_templates import format_auto_alert_telegram
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-nifty-vwap-reclaim-ce-22750-20260930",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="[HEDGED SPR] VWAP RECLAIM CALL SETUP: NIFTY 22750 CE",
+        summary="Spot reclaimed VWAP now acting as support",
+        ltp=141.05,
+        trigger_level=141.05,
+        target_level=183.40,
+        stop_loss=112.80,
+        strike=22750.0,
+        option_type="CE",
+        contract_symbol="NIFTY2026100622750CE",
+        confidence=96,
+        actionable_plan={
+            "action": "BULL CALL SPREAD",
+            "contract": "NIFTY2026100622750CE",
+            "recommended_entry": "₹141.05",
+            "stop_loss": "₹112.80",
+            "target_1": "₹183.40",
+            "target_2": "₹218.60",
+            "lot_size": 65,
+            "hedge_plan": {
+                "strategy": "BULL_CALL_SPREAD",
+                "sentiment": "BULLISH",
+                "preferred_vehicle": "HEDGED_SPREAD",
+                "buy_leg": "BUY NIFTY 22750 CE @ ₹141.1",
+                "sell_leg": "SELL NIFTY 22800 CE @ ₹117.3",
+                "buy_strike": 22750.0,
+                "sell_strike": 22800.0,
+                "strike_width": 50.0,
+                "net_debit_per_share": 23.8,
+                "max_loss": 1547.0,
+                "max_profit": 1703.0,
+                "risk_reward": "1:1.1",
+                "booking_target_70": 42.1,
+                "spread_stop_loss": 11.9,
+                "legs": [
+                    {"strike": 22750, "side": "BUY"},
+                    {"strike": 22800, "side": "SELL"},
+                ],
+            },
+        },
+    )
+
+    rendered = format_auto_alert_telegram(alert)
+    # The Action line must NOT start with 'BULL CALL SPREAD NIFTY 22750 CE @ ₹141.05'
+    assert "• <b>Action:</b> BULL CALL SPREAD" not in rendered
+    # It must render BUY NIFTY 22750 CE @ ₹141.05 with the signpost
+    assert "• <b>Action:</b> BUY <b>NIFTY 22750 CE</b> @ <code>₹141.05</code>" in rendered
+    assert "(Hedged Spread Preferred 👇)" in rendered
+    # The shield box must still be rendered below
+    assert "🛡️ <b>DEFINED-RISK HEDGE SPREAD" in rendered
+    assert "Net Debit / Max Loss:</b> <code>₹23.8/sh (₹1,547 total)</code>" in rendered

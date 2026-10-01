@@ -12,21 +12,26 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import logging
+import threading
+import time
+
 import pandas as pd
 
 from brokers.base import OptionsContract
 from brokers.session import get_data_broker
+from engine import alert_expiry
 from market.nse_scraper import nse_get_options_chain
 from market.source_tracker import record_source, warn_fallback
 
-
-import threading
-import time
+logger = logging.getLogger("chanakya.market.options")
 
 _CHAIN_CACHE: dict[str, tuple[float, list[OptionsContract]]] = {}
 _CHAIN_CACHE_TTL_DEFAULT = 180.0  # Off-market hours fallback
 _CHAIN_CACHE_TTL_LIVE = 15.0  # 15s during live market hours for real-time gamma/OI shifts
 _CHAIN_CACHE_TTL_SCRAPER = 30.0  # 30s for scraper fallback
+_EXPIRIES_CACHE: dict[str, tuple[float, list[str]]] = {}
+_EXPIRIES_CACHE_TTL = 300.0  # 5 minutes cache for expiry dates
 
 
 def get_chain_cache_ttl(is_broker: bool = True) -> float:
@@ -165,11 +170,39 @@ def get_options_chain(
         .replace("CDS:", "")
         .replace("NFO:", "")
         .replace("NSE:", "")
+        .replace("BSE:", "")
         .strip()
     )
     is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
+    is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
 
-    cache_key = f"{underlying.upper()}:{expiry or 'nearest'}"
+    # Institutional Single-Stock Physical Expiry Rollover:
+    # Under SEBI regulations, single-stock options are physically settled. In the final 4 trading
+    # days before the last Thursday, near-month stock options are subject to 100% physical delivery
+    # margin surges and severe gamma/theta collapse.
+    # Therefore, when expiry is not specified for an F&O stock during monthly expiry week,
+    # always select the next-month monthly expiry contract and its live data.
+    if not is_commodity and not is_index and expiry is None:
+        try:
+            avail_exps = get_expiries(clean_sym)
+            if alert_expiry.is_monthly_physical_expiry_week(
+                symbol=clean_sym, available_expiries=avail_exps
+            ):
+                exp_res = alert_expiry.resolve_recommended_derivative_expiry(
+                    symbol=clean_sym,
+                    instrument_type="OPTION",
+                    available_expiries=avail_exps,
+                )
+                if exp_res.get("is_next_month_routed"):
+                    expiry = exp_res.get("recommended_expiry")
+                    logger.info(
+                        f"[Options] Single-stock {clean_sym} in physical expiry week: "
+                        f"routed to next-month contract {expiry} and its live data."
+                    )
+        except Exception as e_exp:
+            logger.debug(f"[Options] Physical expiry check error for {clean_sym}: {e_exp}")
+
+    cache_key = f"{clean_sym}:{expiry or 'nearest'}"
     now = time.time()
     if cache_key in _CHAIN_CACHE:
         cached_at, cached_chain = _CHAIN_CACHE[cache_key]
@@ -217,27 +250,40 @@ def get_options_chain(
         _CHAIN_CACHE[cache_key] = (now, chain)
         return chain
 
-    # Tier 4: High-fidelity synthetic chain for major indices (SENSEX/BANKEX on BSE, or when external feeds are unavailable)
-    if clean_sym in ("SENSEX", "BANKEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
-        try:
-            from market.quotes import get_ltp
+    # Tier 4: Synthetic chain ONLY in explicit Mock/Demo mode (never during LIVE/PAPER trading with real brokers)
+    import os
 
-            idx_spot = get_ltp(
-                f"BSE:{clean_sym}" if clean_sym in ("SENSEX", "BANKEX") else f"NSE:{clean_sym}"
-            ) or get_ltp(clean_sym)
-            if idx_spot and idx_spot > 0:
-                chain = build_index_synthetic_option_chain(clean_sym, spot=idx_spot, expiry=expiry)
-                if chain:
-                    record_source(
-                        "options",
-                        "index_synthetic_bfo"
-                        if clean_sym in ("SENSEX", "BANKEX")
-                        else "index_synthetic_nfo",
+    try:
+        from brokers.session import get_data_broker_key
+
+        broker_key = get_data_broker_key()
+    except Exception:
+        broker_key = ""
+
+    trading_mode = os.environ.get("TRADING_MODE", "").upper()
+    if broker_key == "mock" or trading_mode == "DEMO":
+        if clean_sym in ("SENSEX", "BANKEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
+            try:
+                from market.quotes import get_ltp
+
+                idx_spot = get_ltp(
+                    f"BSE:{clean_sym}" if clean_sym in ("SENSEX", "BANKEX") else f"NSE:{clean_sym}"
+                ) or get_ltp(clean_sym)
+                if idx_spot and idx_spot > 0:
+                    chain = build_index_synthetic_option_chain(
+                        clean_sym, spot=idx_spot, expiry=expiry
                     )
-                    _CHAIN_CACHE[cache_key] = (now, chain)
-                    return chain
-        except Exception:
-            pass
+                    if chain:
+                        record_source(
+                            "options",
+                            "index_synthetic_bfo"
+                            if clean_sym in ("SENSEX", "BANKEX")
+                            else "index_synthetic_nfo",
+                        )
+                        _CHAIN_CACHE[cache_key] = (now, chain)
+                        return chain
+            except Exception:
+                pass
 
     record_source("options", "none")
     _CHAIN_CACHE[cache_key] = (now, [])
@@ -348,11 +394,27 @@ def get_expiries(underlying: str) -> list[str]:
     All available expiry dates for an underlying (sorted ascending).
     Returns dates as "YYYY-MM-DD" strings.
     """
+    clean_u = (
+        underlying.replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("NFO:", "")
+        .replace("MCX:", "")
+        .upper()
+        .strip()
+    )
+    now = time.time()
+    if clean_u in _EXPIRIES_CACHE:
+        cached_at, cached_exp = _EXPIRIES_CACHE[clean_u]
+        ttl = _EXPIRIES_CACHE_TTL if cached_exp else 15.0
+        if (now - cached_at) < ttl:
+            return list(cached_exp)
+
     try:
         broker = get_data_broker()
         if hasattr(broker, "get_expiries"):
             exp = broker.get_expiries(underlying)
             if exp:
+                _EXPIRIES_CACHE[clean_u] = (now, exp)
                 return exp
     except Exception:
         pass
@@ -362,12 +424,14 @@ def get_expiries(underlying: str) -> list[str]:
 
         exp = nse_get_expiries(underlying)
         if exp:
+            _EXPIRIES_CACHE[clean_u] = (now, exp)
             return exp
     except Exception:
         pass
 
     chain = get_options_chain(underlying)
     dates = sorted({c.expiry for c in chain if c.expiry})
+    _EXPIRIES_CACHE[clean_u] = (now, dates)
     return dates
 
 

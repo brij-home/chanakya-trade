@@ -524,6 +524,14 @@ class FyersAPI(BrokerAPI):
                 fyers_sym = "NSE:NIFTY50-INDEX"
             elif clean_und in ("BANKNIFTY", "NIFTY BANK"):
                 fyers_sym = "NSE:NIFTYBANK-INDEX"
+            elif clean_und in ("FINNIFTY", "NIFTY FIN SERVICE"):
+                fyers_sym = "NSE:FINNIFTY-INDEX"
+            elif clean_und in ("MIDCPNIFTY", "NIFTY MID SELECT"):
+                fyers_sym = "NSE:MIDCPNIFTY-INDEX"
+            elif clean_und == "SENSEX":
+                fyers_sym = "BSE:SENSEX-INDEX"
+            elif clean_und == "BANKEX":
+                fyers_sym = "BSE:BANKEX-INDEX"
             elif clean_und in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:"):
                 fyers_sym = f"MCX:{clean_und}"
             elif clean_und in (

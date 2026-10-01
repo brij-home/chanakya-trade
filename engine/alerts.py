@@ -26,7 +26,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from rich.console import Console
@@ -366,6 +366,35 @@ class AlertManager:
                 else:
                     surviving.append(a)
             if purged > 0:
+                self._alerts = surviving
+                self._save()
+        return purged
+
+    def clear_test_alerts(self) -> int:
+        """Purges all test/simulated alerts from memory and disk storage."""
+        purged = 0
+        with self._lock:
+            surviving = []
+            for a in self._alerts:
+                aid = str(getattr(a, "id", "") or "").lower()
+                env = str(getattr(a, "environment", "") or "").upper()
+                is_test = bool(getattr(a, "is_test", False))
+                msg = str(getattr(a, "message", "") or "").upper()
+                desc = str(a.describe() if hasattr(a, "describe") else "").upper()
+                if (
+                    is_test
+                    or env in ("TEST", "SIMULATE", "DEMO")
+                    or aid.startswith("test-")
+                    or aid.startswith("sim-")
+                    or aid.startswith("mock-")
+                    or "[TEST]" in msg
+                    or "[TEST]" in desc
+                    or "🧪" in msg
+                ):
+                    purged += 1
+                else:
+                    surviving.append(a)
+            if purged > 0 or len(surviving) != len(self._alerts):
                 self._alerts = surviving
                 self._save()
         return purged
@@ -763,16 +792,29 @@ class AlertManager:
             message=desktop_msg,
         )
 
-        # 3. Telegram push
+        from bot.alert_templates import build_signal_ref
+
+        sig_ref = (
+            getattr(alert, "signal_ref", None)
+            or getattr(alert, "signal_id", None)
+            or build_signal_ref(alert.symbol, alert_id=alert.id, created_at=alert.created_at)
+        )
+
         tg_chat_id = None
         try:
             from engine.alert_preferences import alert_preferences, classify_alert_segment
 
             target_seg = getattr(alert, "segment", None) or classify_alert_segment(alert)
             tg_chat_id = alert_preferences.get_telegram_chat_id(target_seg)
+            fno_index_chat = alert_preferences.get_telegram_chat_id("FNO_INDEX")
+            if tg_chat_id and fno_index_chat and str(tg_chat_id) == str(fno_index_chat):
+                if not alert_preferences.is_fno_index_symbol_allowed(alert.symbol):
+                    tg_chat_id = None
         except Exception:
             tg_chat_id = None
-        _telegram_notify(tg_msg, chat_id=tg_chat_id)
+
+        if tg_chat_id:
+            _telegram_notify(tg_msg, chat_id=tg_chat_id, signal_id=sig_ref)
 
         # 4. Webhook (OpenClaw / external agents)
         if alert.webhook_url:
@@ -1003,11 +1045,21 @@ def _desktop_notify(title: str, message: str) -> None:
     threading.Thread(target=_send, daemon=True).start()
 
 
-def _telegram_notify(message: str, chat_id: Optional[str] = None) -> None:
+def _telegram_notify(
+    message: str,
+    chat_id: Optional[str] = None,
+    reply_to_message_id: Optional[int] = None,
+    disable_notification: Optional[bool] = None,
+    signal_id: Optional[str] = None,
+    message_thread_id: Optional[int] = None,
+    on_success: Optional[Any] = None,
+    alert_id: Optional[str] = None,
+) -> None:
     """
     Send a Telegram push notification.
     Non-blocking — runs in background thread.
     Never dispatches during test execution or test deployment modes.
+    Supports in-thread replies, topic routing, and audible vs silent delivery.
     """
     import os
     import sys
@@ -1026,7 +1078,16 @@ def _telegram_notify(message: str, chat_id: Optional[str] = None) -> None:
     try:
         from bot.telegram_bot import send_push
 
-        send_push(message, chat_id=chat_id)
+        send_push(
+            message,
+            chat_id=chat_id,
+            reply_to_message_id=reply_to_message_id,
+            disable_notification=disable_notification,
+            signal_id=signal_id,
+            message_thread_id=message_thread_id,
+            on_success=on_success,
+            alert_id=alert_id,
+        )
     except Exception:
         pass
 

@@ -229,3 +229,96 @@ def test_crypto_api_endpoints():
         assert "active_demand_zones" in smc_data
         assert "active_supply_zones" in smc_data
         assert "target_1" in smc_data
+
+
+def test_crypto_order_flow_cvd_metrics():
+    """Verify Cumulative Volume Delta (CVD) calculation and absorption signal logic."""
+    manager = CryptoStreamManager(symbols=["BTCUSDT"])
+    sample_bars = []
+    for i in range(30):
+        tot_v = 100.0 + i * 2.0
+        # Create aggressive buy delta
+        buy_v = tot_v * 0.70
+        sell_v = tot_v * 0.30
+        sample_bars.append(
+            {
+                "date": pd.to_datetime(1789900000000 + i * 900000, unit="ms"),
+                "open": 80000.0 + i * 15,
+                "high": 80100.0 + i * 15,
+                "low": 79950.0 + i * 15,
+                "close": 80080.0 + i * 15,
+                "volume": tot_v,
+                "buy_volume": buy_v,
+                "sell_volume": sell_v,
+                "delta": buy_v - sell_v,
+            }
+        )
+    df = pd.DataFrame(sample_bars).set_index("date")
+    df["date"] = df.index
+
+    with patch.object(manager, "get_klines", return_value=df):
+        res = manager.get_order_flow_metrics("BTCUSDT", interval="15m", limit=30)
+        assert res["status"] == "ONLINE"
+        assert res["symbol"] == "BTCUSDT"
+        assert res["current_delta"] > 0
+        assert res["delta_bias"] == "BULLISH_AGGRESSIVE"
+        assert res["cumulative_volume_delta"] > 0
+        assert res["cvd_trend"] == "RISING"
+        assert len(res["bars"]) > 0
+
+
+def test_crypto_basis_arbitrage_matrix():
+    """Verify Delta-Neutral Cash & Carry basis and funding arbitrage engine."""
+    manager = CryptoStreamManager(symbols=["BTCUSDT", "ETHUSDT"])
+    mock_quote = Quote(
+        symbol="CRYPTO:BTCUSDT",
+        last_price=80000.0,
+        open=79000.0,
+        high=80500.0,
+        low=78500.0,
+        close=79500.0,
+        volume=1000,
+        provider="binance",
+        source="TEST",
+        data_state="LIVE",
+        received_at="2026-09-27T12:00:00Z",
+    )
+    mock_fut = {
+        "symbol": "BTCUSDT",
+        "mark_price": 80080.0,
+        "funding_rate_8h": 0.0003,  # ~32.8% APY
+        "open_interest_usd": 500000000.0,
+        "next_funding_time": 1789950000000,
+    }
+
+    with (
+        patch.object(manager, "get_quote", return_value=mock_quote),
+        patch.object(manager, "fetch_futures_metrics", return_value=mock_fut),
+    ):
+        res = manager.get_basis_arbitrage_matrix()
+        assert res["status"] == "ONLINE"
+        assert len(res["matrix"]) > 0
+        opp = res["matrix"][0]
+        assert opp["annualized_funding_yield_pct"] > 18.0
+        assert opp["strategy"] == "CASH_AND_CARRY_PRIME"
+        assert opp["action"] == "BUY_SPOT_AND_SHORT_PERP"
+        assert opp["daily_usd_per_10k"] > 0
+
+
+def test_new_crypto_fastapi_endpoints():
+    """Verify new /api/crypto/orderflow, /liquidations, /basis, and /volatility-surface endpoints."""
+    client = TestClient(app)
+
+    # 1. Basis endpoint
+    resp_basis = client.get("/api/crypto/basis")
+    assert resp_basis.status_code == 200
+    b_data = resp_basis.json()
+    assert "status" in b_data
+    assert "matrix" in b_data
+
+    # 2. Volatility surface endpoint
+    resp_vol = client.get("/api/crypto/volatility-surface?currency=BTC")
+    assert resp_vol.status_code == 200
+    v_data = resp_vol.json()
+    assert "currency" in v_data
+    assert v_data["currency"] == "BTC"

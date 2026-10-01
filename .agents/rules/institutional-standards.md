@@ -86,3 +86,13 @@
 
 - **Unique Watchlist Presets**: Watchlist preset dictionaries (`WATCHLIST_PRESETS` in `agent/smart_funnel.py`) must have unique keys mapping to unique symbol lists. Duplicate aliases (e.g., both `"nifty_50"` and `"nifty50"` mapping to identical 50-stock lists) are prohibited — keep one canonical key.
 - **Cache Integrity**: Never cache empty collections (`opportunities: []`, `alerts: []`). Treat empty results as cache misses. Only persist verified, non-empty data. Empty caches poison downstream queries that rely on fresh data.
+
+---
+
+## 9. Rapid Iteration & Fast Validation Protocol
+
+- **Skip Full Pre-Commit Gates During Development**:
+  - Never execute `scripts/validate_all.py` (which runs 21 Vitest frontend workers, linters, and full multi-worker pytest matrices) during rapid interactive development or single-bug fixes. It wastes minutes and locks the terminal.
+  - **Always execute targeted pytest only**: `python -m pytest tests/<relevant_test>.py -k "<test_filter>" -q`.
+  - Apply the fix, run the targeted test (must take $<3$s), restart the background daemon via `scripts\service.ps1 -Action restart`, and confirm resolution directly.
+  - Reserve `validate_all.py` exclusively for when the user explicitly asks for full pre-commit/pre-push validation or before production tagging.

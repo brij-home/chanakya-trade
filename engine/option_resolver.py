@@ -38,12 +38,15 @@ class ResolvedOptionPlan:
     underlying_sl: float
     underlying_target: float
     is_estimated: bool = False
+    expiry: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "contract_symbol": self.contract_symbol,
             "strike": self.strike,
             "option_type": self.option_type,
+            "expiry": self.expiry,
+            "expiry_date": self.expiry,
             "entry_premium": self.entry_premium,
             "sl_premium": self.sl_premium,
             "t1_premium": self.t1_premium,
@@ -173,6 +176,8 @@ def resolve_option_contract(
             opt_t1 = round(opt_ltp + estimated_prem_gain, 2)
             opt_t2 = round(opt_ltp + 1.8 * estimated_prem_gain, 2)
 
+    opt_exp = getattr(chosen_contract, "expiry", None) if chosen_contract else None
+
     return ResolvedOptionPlan(
         contract_symbol=opt_sym,
         strike=opt_strike,
@@ -188,4 +193,5 @@ def resolve_option_contract(
         underlying_target=underlying_target
         or (round(spot * 1.02, 1) if is_bull else round(spot * 0.98, 1)),
         is_estimated=is_est,
+        expiry=opt_exp,
     )

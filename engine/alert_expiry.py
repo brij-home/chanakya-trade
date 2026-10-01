@@ -75,25 +75,77 @@ def get_expiry_metadata(
             .strip()
         )
 
-        # 1. Weekly NSE Index Option: e.g. NIFTY2692425000CE
-        m_weekly = re.search(r"^([A-Z]+)(\d{2})([1-9OND])(\d{2})", csym)
-        if m_weekly:
-            yr = 2000 + int(m_weekly.group(2))
-            m_code = m_weekly.group(3)
-            m_idx = (
-                10
-                if m_code == "O"
-                else (11 if m_code == "N" else (12 if m_code == "D" else int(m_code)))
-            )
-            day = int(m_weekly.group(4))
+        # 1. Broker YYYYMMDD format: e.g. HAL202609294800PE, UNITDSPR202609291380PE, M&M202610272950PE
+        m_yyyymmdd = re.search(
+            r"([A-Za-z0-9_&]+?)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d*(?:CE|PE)", csym
+        )
+        if m_yyyymmdd:
+            _, yyyy_str, mm_str, dd_str = m_yyyymmdd.groups()
             try:
-                dt = date(yr, m_idx, day)
+                dt = date(int(yyyy_str), int(mm_str), int(dd_str))
                 if not expiry_type:
-                    expiry_type = "WEEKLY"
+                    clean_und = (
+                        (symbol or "")
+                        .upper()
+                        .replace("MCX:", "")
+                        .replace("NFO:", "")
+                        .replace("NSE:", "")
+                        .strip()
+                    )
+                    is_idx = clean_und in (
+                        "NIFTY",
+                        "BANKNIFTY",
+                        "FINNIFTY",
+                        "MIDCPNIFTY",
+                        "SENSEX",
+                        "BANKEX",
+                    )
+                    if is_idx:
+                        expiry_type = (
+                            "MONTHLY" if (dt + timedelta(days=7)).month != dt.month else "WEEKLY"
+                        )
+                    else:
+                        expiry_type = "MONTHLY"
             except ValueError:
-                pass
+                dt = None
 
-        # 2. Monthly Contract: e.g. NIFTY26SEP25000CE, RELIANCE26SEPFUT, GOLD26SEP154000CE
+        # 2. Weekly NSE Index Option: e.g. NIFTY2692425000CE
+        if not dt:
+            clean_und = (
+                (symbol or "")
+                .upper()
+                .replace("MCX:", "")
+                .replace("NFO:", "")
+                .replace("NSE:", "")
+                .strip()
+            )
+            is_idx = clean_und in (
+                "NIFTY",
+                "BANKNIFTY",
+                "FINNIFTY",
+                "MIDCPNIFTY",
+                "SENSEX",
+                "BANKEX",
+            )
+            if is_idx:
+                m_weekly = re.search(r"^([A-Z]+)(\d{2})([1-9OND])(0[1-9]|[12]\d|3[01])", csym)
+                if m_weekly:
+                    yr = 2000 + int(m_weekly.group(2))
+                    m_code = m_weekly.group(3)
+                    m_idx = (
+                        10
+                        if m_code == "O"
+                        else (11 if m_code == "N" else (12 if m_code == "D" else int(m_code)))
+                    )
+                    day = int(m_weekly.group(4))
+                    try:
+                        dt = date(yr, m_idx, day)
+                        if not expiry_type:
+                            expiry_type = "WEEKLY"
+                    except ValueError:
+                        pass
+
+        # 3. Monthly Contract: e.g. NIFTY26SEP25000CE, RELIANCE26SEPFUT, GOLD26SEP154000CE
         if not dt:
             m_monthly = re.search(r"(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)", csym)
             if m_monthly:
@@ -232,18 +284,28 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     Returns True for pure option strategies (OPTIONS_MOMENTUM, OPTION_WRITE, GAMMA_BLAST with option_type)
     or when alert.contract_symbol represents an active option contract.
     Returns False for underlying stock/index setups even if an option recommendation is attached.
+    Safely handles both object/dataclass instances and dictionaries.
     """
-    atype = str(getattr(alert, "alert_type", "") or "")
+
+    def _g(key: str, default: Any = None) -> Any:
+        if isinstance(alert, dict):
+            return alert.get(key, default)
+        return getattr(alert, key, default)
+
+    atype = str(_g("alert_type", "") or "")
     if atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE"):
         return True
-    if atype == "GAMMA_BLAST" and getattr(alert, "option_type", None):
+    if atype == "GAMMA_BLAST" and _g("option_type", None):
         return True
 
-    # Underlying stock/index setups are always anchored to spot
+    # Underlying stock/index setups are anchored to spot even if an option recommendation is attached
     if atype in (
         "ASYMMETRIC_OPPORTUNITY",
         "SQUEEZE_BREAKOUT",
         "SQUEEZE_BREAKDOWN",
+        "INTRADAY_BREAKOUT_SPARK",
+        "INTRADAY_BREAKDOWN_SPARK",
+        "INTRADAY_SPARK",
         "POCKET_PIVOT",
         "PRECURSOR_RADAR",
         "SMC_SWEEP",
@@ -252,15 +314,21 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     ):
         return False
 
-    csym = str(getattr(alert, "contract_symbol", "") or "").upper()
-    opt_t = str(getattr(alert, "option_type", "") or "").upper()
+    csym = str(_g("contract_symbol", "") or "").upper()
+    opt_t = str(_g("option_type", "") or "").upper()
+
+    # If an option contract is explicitly attached with strike/premium, levels are option premiums
+    if (csym.endswith("CE") or csym.endswith("PE") or opt_t in ("CE", "PE")) and (
+        _g("option_premium") is not None or _g("strike") is not None
+    ):
+        return True
 
     if atype == "GAMMA_BLAST" and (
         opt_t in ("CE", "PE") or csym.endswith("CE") or csym.endswith("PE")
     ):
         return True
 
-    has_opt_marker = bool(csym or opt_t in ("CE", "PE") or getattr(alert, "strike", None))
+    has_opt_marker = bool(csym or opt_t in ("CE", "PE") or _g("strike", None))
     if not has_opt_marker:
         return False
 
@@ -268,12 +336,12 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     if csym and (csym.endswith("CE") or csym.endswith("PE")):
         return True
 
-    if opt_t in ("CE", "PE") and getattr(alert, "strike", None):
+    if opt_t in ("CE", "PE") and _g("strike", None):
         return True
 
     # Check if ltp is close to option_premium (within 25% tolerance) for other derivatives
-    ltp = float(getattr(alert, "ltp", 0.0) or 0.0)
-    opt_prem = getattr(alert, "option_premium", None)
+    ltp = float(_g("ltp", 0.0) or 0.0)
+    opt_prem = _g("option_premium", None)
     if opt_prem is not None and float(opt_prem) > 0 and ltp > 0:
         prem = float(opt_prem)
         return abs(ltp - prem) <= max(2.0, prem * 0.25)
@@ -283,10 +351,16 @@ def is_alert_option_premium_level(alert: Any) -> bool:
 
 def _parse_expiry_date(expiry_str: Optional[str]) -> Optional[datetime.date]:
     """Internal helper to parse varied Indian exchange expiry string formats."""
+    if hasattr(expiry_str, "date"):
+        return expiry_str.date()
+    from datetime import date as ddate
+
+    if isinstance(expiry_str, ddate):
+        return expiry_str
     if not expiry_str:
         return None
-    clean = str(expiry_str).split("T")[0].strip()
-    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
+    clean = str(expiry_str).split("T")[0].split(" ")[0].strip()
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y", "%Y%m%d", "%d%b%Y", "%d%b%y", "%d-%B-%Y"):
         try:
             return datetime.strptime(clean, fmt).date()
         except ValueError:
@@ -317,23 +391,33 @@ def is_0dte_afternoon(expiry_str: Optional[str], ref_dt: Optional[datetime] = No
 
 
 def is_monthly_physical_expiry_week(
-    expiry_str: Optional[str],
+    expiry_str: Optional[Any] = None,
     symbol: Optional[str] = None,
     ref_dt: Optional[datetime] = None,
+    available_expiries: Optional[list[str]] = None,
 ) -> bool:
     """
-    Returns True if a single-stock option is in the final 4 trading days of its monthly physical
-    settlement expiry week, where SEBI margin requirements surge 300%-500% and liquidity dries up.
+    Returns True if a single-stock derivative is in the final 4 trading days of its monthly physical
+    settlement expiry week (Monday through Thursday before the last Thursday of the month),
+    where SEBI margin requirements surge 300%-500% (100% full stock lot value) and liquidity collapses.
+
+    - Indices (NIFTY, BANKNIFTY, etc.) are cash settled by SEBI and are strictly exempt.
+    - Single-stock options & futures:
+      - If expiry_str is provided: returns True if DTE <= 4 to that expiry.
+      - If available_expiries is provided: finds nearest expiry >= today; returns True if DTE <= 4.
+      - If symbol is provided: checks available expiries from broker; returns True if DTE <= 4.
+      - Calendar fallback: returns True if current date is within 4 days of month-end or last Thursday.
     """
-    exp_d = _parse_expiry_date(expiry_str)
-    if not exp_d:
-        return False
-    now_d = (ref_dt or datetime.now(IST)).date()
-    dte = (exp_d - now_d).days
-    if dte < 0:
-        return False
-    # If symbol is index, physical delivery does not apply (indices are cash settled in India)
-    is_idx = (symbol or "").upper() in (
+    clean_sym = (
+        (symbol or "")
+        .upper()
+        .replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("BFO:", "")
+        .strip()
+    )
+    is_idx = clean_sym in (
         "NIFTY",
         "BANKNIFTY",
         "FINNIFTY",
@@ -343,8 +427,110 @@ def is_monthly_physical_expiry_week(
     )
     if is_idx:
         return False
-    # Single-stock derivatives only: within 4 calendar days (Mon-Thu of expiry week)
-    return dte <= 4
+
+    now_d = (ref_dt or datetime.now(IST)).date()
+
+    if expiry_str:
+        exp_d = _parse_expiry_date(expiry_str)
+        if not exp_d:
+            return False
+        dte = (exp_d - now_d).days
+        if dte < 0:
+            return False
+        return dte <= 4
+
+    # 1. Calendar settlement status: check if now_d is within monthly physical settlement window
+    is_settle, dte_settle = check_monthly_physical_settlement_status(
+        clean_sym, ref_dt=ref_dt or datetime.now(IST)
+    )
+    if is_settle:
+        return True
+
+    # 2. If available_expiries passed, check expiries in the current calendar month
+    if available_expiries:
+        month_avail = [
+            p
+            for exp in available_expiries
+            if (p := _parse_expiry_date(exp)) is not None
+            and p.year == now_d.year
+            and p.month == now_d.month
+        ]
+        if month_avail:
+            for p in month_avail:
+                if p >= now_d:
+                    dte = (p - now_d).days
+                    return 0 <= dte <= 4
+            return False
+
+    # 3. Check dynamic expiries for single-stock derivatives if available
+    if clean_sym:
+        try:
+            from market.options import get_expiries
+
+            exps = get_expiries(clean_sym)
+            if exps:
+                # Find expiries in the same month/year as now_d
+                month_exps = [
+                    p
+                    for exp in exps
+                    if (p := _parse_expiry_date(exp)) is not None
+                    and p.year == now_d.year
+                    and p.month == now_d.month
+                ]
+                if month_exps:
+                    for p in month_exps:
+                        if p >= now_d:
+                            dte = (p - now_d).days
+                            return 0 <= dte <= 4
+                    return False
+        except Exception:
+            pass
+
+    # 4. Calendar fallback to monthly last Thursday
+    this_month_last_thu = get_last_thursday_of_month(now_d.year, now_d.month)
+    if now_d > this_month_last_thu:
+        # Check if we are still within the same calendar month
+        import calendar
+
+        _, last_day_num = calendar.monthrange(now_d.year, now_d.month)
+        days_left_in_month = last_day_num - now_d.day
+        if days_left_in_month <= 4:
+            return True
+        return False
+    dte = (this_month_last_thu - now_d).days
+    return 0 <= dte <= 4
+
+
+def check_monthly_physical_settlement_status(
+    symbol: Optional[str] = None,
+    ref_dt: Optional[datetime] = None,
+) -> tuple[bool, int]:
+    """
+    Convenience helper returning (is_settlement_week, dte_days).
+    dte_days is the days remaining until the active month's last Thursday.
+    """
+    now_d = (ref_dt or datetime.now(IST)).date()
+    clean_sym = (
+        (symbol or "")
+        .upper()
+        .replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("BFO:", "")
+        .strip()
+    )
+    if clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
+        return (False, 999)
+
+    this_month_last_thu = get_last_thursday_of_month(now_d.year, now_d.month)
+    if now_d > this_month_last_thu:
+        next_thu = get_next_monthly_expiry_date(ref_dt)
+        dte = (next_thu - now_d).days
+        return (False, dte)
+
+    dte = (this_month_last_thu - now_d).days
+    is_exp_wk = 0 <= dte <= 4
+    return (is_exp_wk, dte)
 
 
 def get_last_thursday_of_month(year: int, month: int) -> "date":

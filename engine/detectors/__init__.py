@@ -12,14 +12,33 @@ from engine.detectors.gamma_blast import detect_gamma_blast
 from engine.detectors.index_call_setup import detect_index_call_setup
 from engine.detectors.index_put_setup import detect_index_put_setup
 from engine.detectors.intraday_spark import detect_intraday_mover_sparks
+from engine.detectors.multibagger import detect_multibagger_breakouts, get_multibagger_universe
 from engine.detectors.opening_drive import detect_opening_drive
 from engine.detectors.options_momentum import detect_options_momentum_breakouts
 from engine.detectors.orb import detect_opening_range_breakout
+from engine.detectors.order_flow import detect_order_flow_divergence, OrderFlowDivergenceDetector
 from engine.detectors.pattern_coiling import detect_learned_pattern_coiling
+from engine.detectors.pre_inflection_dryup import detect_pre_inflection_dryup
 from engine.detectors.preopen_bias import detect_preopen_bias
 from engine.detectors.squeeze_breakout import detect_squeeze_breakout
+from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
+
+from engine.detection_context import (
+    BaseDetector,
+    DetectionContext,
+    DetectorRegistry,
+    FunctionalDetectorAdapter,
+    build_detection_context,
+    detector_registry,
+)
 
 __all__ = [
+    "BaseDetector",
+    "DetectionContext",
+    "DetectorRegistry",
+    "FunctionalDetectorAdapter",
+    "build_detection_context",
+    "detector_registry",
     "detect_gamma_blast",
     "detect_index_call_setup",
     "detect_index_put_setup",
@@ -28,6 +47,7 @@ __all__ = [
     "detect_squeeze_breakout",
     "detect_circuit_proximity",
     "detect_learned_pattern_coiling",
+    "detect_pre_inflection_dryup",
     "detect_opening_range_breakout",
     "detect_options_momentum_breakouts",
     "detect_commodity_breakouts",
@@ -35,4 +55,9 @@ __all__ = [
     "detect_crypto_signals",
     "detect_single_crypto_symbol",
     "detect_intraday_mover_sparks",
+    "detect_multibagger_breakouts",
+    "get_multibagger_universe",
+    "detect_order_flow_divergence",
+    "OrderFlowDivergenceDetector",
+    "detect_smc_orderblock_retest",
 ]

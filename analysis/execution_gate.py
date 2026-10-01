@@ -162,6 +162,39 @@ def evaluate_execution_gate(
         isinstance(sec_align, dict) and sec_align.get("quadrant") == "LEADING"
     ) or sec_align == "STRONG_LEADING":
         strat_score += 10
+
+    # Factor E: Smart Money Stealth Accumulation & Free-Float Absorption
+    try:
+        from analysis.delivery_accumulation import compute_cfai
+
+        cfai = compute_cfai(symbol, df=df, ltp=ltp)
+        if getattr(cfai, "float_exhaustion_detected", False):
+            strat_score += 10
+        elif getattr(cfai, "verdict", "") == "HIGH_STEALTH_ACCUMULATION":
+            strat_score += 5
+    except Exception:
+        cfai = None
+
+    # Factor F: Institutional Catalysts & Shareholding Footprint
+    try:
+        from analysis.institutional_catalysts import get_institutional_catalysts
+
+        inst = get_institutional_catalysts(symbol)
+        if getattr(inst, "institutional_footprint", "") in (
+            "SMART_MONEY_ACCELERATION",
+            "FII_EXPANSION",
+            "DII_BACKING",
+        ):
+            strat_score += 5
+        if getattr(inst, "credit_rating", None) and getattr(
+            inst.credit_rating, "is_upgrade", False
+        ):
+            strat_score += 5
+        if getattr(inst, "pledged_pct", 0.0) > 25.0:
+            strat_score -= 15
+    except Exception:
+        inst = None
+
     strat_score = int(min(98, max(20, strat_score)))
 
     # 2. Tier 2: Tactical Microstructure Analysis (Live Real-Time Tick & Order Flow)
@@ -171,6 +204,31 @@ def evaluate_execution_gate(
 
     tact_score = 40
     catalysts: list[str] = []
+
+    # Record institutional catalysts if present
+    if cfai and getattr(cfai, "float_exhaustion_detected", False):
+        catalysts.append(f"Institutional Float Exhaustion (CFAI {cfai.cfai_pct:.1f}%)")
+    elif cfai and getattr(cfai, "verdict", "") == "HIGH_STEALTH_ACCUMULATION":
+        catalysts.append(f"Stealth Delivery Accumulation (CFAI {cfai.cfai_pct:.1f}%)")
+
+    if inst and getattr(inst, "institutional_footprint", "") in (
+        "SMART_MONEY_ACCELERATION",
+        "FII_EXPANSION",
+        "DII_BACKING",
+    ):
+        catalysts.append(
+            f"Institutional Backing ({inst.institutional_footprint.replace('_', ' ').title()})"
+        )
+    if (
+        inst
+        and getattr(inst, "credit_rating", None)
+        and getattr(inst.credit_rating, "is_upgrade", False)
+    ):
+        catalysts.append(
+            f"Credit Rating Upgrade ({inst.credit_rating.agency} {inst.credit_rating.current_rating})"
+        )
+    if inst and getattr(inst, "pledged_pct", 0.0) > 25.0:
+        catalysts.append(f"⚠️ High Promoter Pledge ({inst.pledged_pct:.1f}%)")
 
     # Factor A: RVOL Surge
     rvol_val = vp.rvol_20d
@@ -203,6 +261,22 @@ def evaluate_execution_gate(
     if ms.choch_detected:
         tact_score += 15
         catalysts.append(f"⚠️ Bullish Change of Character ({ms.choch_type})")
+
+    # Factor E: SMC Discount Dealing Range & Demand Order Block Test
+    if getattr(ms, "in_discount_zone", False):
+        tact_score += 5
+        catalysts.append("SMC Discount Dealing Range (<50% Equilibrium)")
+    if getattr(ms, "active_demand_zones", None):
+        for ob in ms.active_demand_zones[:2]:
+            if ob.bottom * 0.995 <= ltp <= ob.top * 1.005:
+                tact_score += 10
+                catalysts.append(f"Demand Order Block Retest (OTE ₹{ob.ote_price:.2f})")
+                break
+
+    # Factor F: Order Flow CVD Absorption Divergence
+    if getattr(vp, "cvd_divergence", None) == "BULLISH_ABSORPTION":
+        tact_score += 10
+        catalysts.append("CVD Bullish Absorption (Smart Money absorbing supply)")
 
     tact_score = int(min(98, max(15, tact_score)))
 
@@ -288,8 +362,15 @@ def evaluate_execution_gate(
         telegram_sent=False,
     )
 
-    # 4. Dispatch Telegram & Desktop Notification if eligible
+    # 4. Canonical Alert Pipeline Dispatch (Guarantees UI SSE + Storage + Telegram Parity)
     if notify_telegram and execution_status in ("READY", "STALK"):
+        try:
+            from engine.auto_alert_engine import auto_alert_engine
+
+            auto_alert_engine.ingest_execution_gate_report(report)
+        except Exception:
+            pass
+
         try:
             from bot.telegram_bot import push_execution_alert
 

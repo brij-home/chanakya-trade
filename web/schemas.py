@@ -119,6 +119,7 @@ class AutoAlertsListRequest(BaseModel):
     view_mode: Optional[str] = None  # "ACTIVE" | "ARCHIVED" | "ALL"
     is_archived: Optional[bool] = None
     segment: Optional[Any] = None  # str or list[str]
+    horizon: Optional[str] = None
 
 
 class AlertPreferencesUpdateRequest(BaseModel):

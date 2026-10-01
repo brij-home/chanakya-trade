@@ -34,8 +34,8 @@ def test_cross_radar_confluence_aggregation():
         target_level=7800.0,
         stop_loss=7320.0,
         confidence=88,
-        is_live=True,
-        environment="LIVE",
+        is_live=False,
+        environment="TEST",
     )
 
     res1 = engine.record_alert(alert1)
@@ -59,8 +59,8 @@ def test_cross_radar_confluence_aggregation():
         target_level=7850.0,
         stop_loss=7320.0,
         confidence=90,
-        is_live=True,
-        environment="LIVE",
+        is_live=False,
+        environment="TEST",
     )
 
     # Calling record_alert with the second detector
@@ -157,7 +157,7 @@ def test_deterministic_asymmetric_alert_id(monkeypatch):
     found1 = engine.scan_asymmetric_opportunities()
     assert len(found1) == 1
     first_id = found1[0].alert_id
-    assert first_id.startswith("asym-coforge-pocket-pivot-")
+    assert first_id.startswith("aa-asym-pocket-pivot-coforge-")
     assert len(engine._alerts) == 1
 
     # Cycle 2 (next 45s tick) - should be completely deduplicated, NOT inserted again!

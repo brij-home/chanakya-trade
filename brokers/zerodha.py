@@ -215,6 +215,8 @@ class ZerodhaAPI(BrokerAPI):
             .replace("CDS:", "")
             .replace("NFO:", "")
             .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("BFO:", "")
             .strip()
         )
         is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
@@ -224,8 +226,13 @@ class ZerodhaAPI(BrokerAPI):
             "GBPINR",
             "JPYINR",
         ) or underlying.upper().startswith("CDS:")
+        is_bse = (
+            clean_sym in ("SENSEX", "BANKEX")
+            or underlying.upper().startswith("BSE:")
+            or underlying.upper().startswith("BFO:")
+        )
 
-        exch = "MCX" if is_commodity else ("CDS" if is_currency else "NFO")
+        exch = "MCX" if is_commodity else ("CDS" if is_currency else ("BFO" if is_bse else "NFO"))
         all_instruments = self._get_instruments(exch)
 
         # Filter by underlying and option type

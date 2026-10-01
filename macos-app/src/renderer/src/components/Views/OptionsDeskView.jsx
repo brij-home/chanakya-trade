@@ -233,6 +233,7 @@ export default function OptionsDeskView({
   const [selectedExpiry, setSelectedExpiry] = useState('')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState(null)
   const [isLiveActive, setIsLiveActive] = useState(true)
   const [lastUpdated, setLastUpdated] = useState(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -293,6 +294,7 @@ export default function OptionsDeskView({
       const snapshot = res?.data ?? res
       if (snapshot) {
         setData(snapshot)
+        setFetchError(null)
         setLastUpdated(new Date())
         if (!selectedExpiry && snapshot.expiry) {
           setSelectedExpiry(snapshot.expiry)
@@ -300,6 +302,7 @@ export default function OptionsDeskView({
       }
     } catch (err) {
       console.error('Failed to load GEX snapshot:', err)
+      setFetchError(err?.message || 'Failed to connect to options chain feed')
     } finally {
       inFlightRef.current = false
       setLoading(false)
@@ -1843,25 +1846,45 @@ export default function OptionsDeskView({
             {paginatedChain.length === 0 ? (
               <div className="p-8 text-center bg-surface/60 rounded-xl border border-dashed border-border/80 space-y-3">
                 <div className="w-12 h-12 rounded-full bg-amber/10 border border-amber/30 text-amber flex items-center justify-center text-xl mx-auto">
-                  {dataState === 'BROKER_REQUIRED' ? '🔒' : '⏳'}
+                  {fetchError ? '⚠️' : dataState === 'BROKER_REQUIRED' ? '🔒' : '⏳'}
                 </div>
                 <div className="max-w-md mx-auto space-y-1">
                   <h3 className="text-sm font-bold font-mono text-text">
-                    {dataState === 'BROKER_REQUIRED'
+                    {fetchError
+                      ? 'Options Feed Reconnecting...'
+                      : dataState === 'BROKER_REQUIRED'
                       ? 'BSE SENSEX Spot Streaming • Broker Required for BFO Chain'
                       : loading
                       ? 'Streaming Real-Time Option Chain & Greeks...'
                       : 'No Active Contracts Found'}
                   </h3>
                   <p className="text-xs text-muted font-ui">
-                    {dataState === 'BROKER_REQUIRED'
+                    {fetchError
+                      ? `Unable to connect to live chain feed for ${underlying} (${fetchError}). Click Retry below to re-establish connection.`
+                      : dataState === 'BROKER_REQUIRED'
                       ? brokerNote || 'Live SENSEX index spot price is streaming real-time from BSE. Connect your broker (Zerodha Kite, Dhan, Shoonya, or Fyers) to stream real-time BFO options depth, Greeks, and execute orders.'
                       : loading
                       ? 'Connecting to exchange live feed and deriving volatility surface...'
                       : 'No option contracts found for the selected expiry. Try selecting another expiry or instrument.'}
                   </p>
                 </div>
-                {dataState === 'BROKER_REQUIRED' && (
+                {fetchError && (
+                  <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+                    <button
+                      onClick={() => fetchGex(false)}
+                      className="px-3 py-1.5 rounded-lg bg-amber text-black font-bold font-mono text-xs hover:brightness-110 cursor-pointer shadow-xs"
+                    >
+                      🔄 Retry Connection
+                    </button>
+                    <button
+                      onClick={() => handleSelectSymbol('NIFTY')}
+                      className="px-3 py-1.5 rounded-lg bg-surface border border-border/80 text-text font-bold font-mono text-xs hover:text-amber cursor-pointer"
+                    >
+                      Switch to NIFTY
+                    </button>
+                  </div>
+                )}
+                {dataState === 'BROKER_REQUIRED' && !fetchError && (
                   <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
                     <button
                       onClick={() => handleSelectSymbol('NIFTY')}

@@ -193,6 +193,34 @@ def calculate_deribit_gex(
     }
 
 
+def compute_crypto_realized_volatility(symbol: str = "BTCUSDT") -> tuple[float, float]:
+    """
+    Computes annualized 30-day and 7-day Realized Volatility (RV) from daily log returns.
+    Formula: RV = std(ln(P_t / P_{t-1})) * sqrt(365) * 100%
+    """
+    import math
+    import numpy as np
+
+    try:
+        from market.crypto_stream import crypto_stream, normalize_crypto_symbol
+
+        canon = normalize_crypto_symbol(symbol)
+        df = crypto_stream.get_klines(canon, interval="1d", limit=35)
+        if df.empty or len(df) < 8:
+            return 50.0, 50.0
+        closes = df["close"].values
+        log_rets = np.diff(np.log(closes))
+        if len(log_rets) < 7:
+            return 50.0, 50.0
+
+        rv_7d = float(np.std(log_rets[-7:], ddof=1) * math.sqrt(365) * 100.0)
+        rv_30d = float(np.std(log_rets, ddof=1) * math.sqrt(365) * 100.0)
+        return round(rv_30d, 2), round(rv_7d, 2)
+    except Exception as e:
+        logger.debug(f"Failed to compute realized volatility for {symbol}: {e}")
+        return 50.0, 50.0
+
+
 def get_crypto_options_summary(
     currency: str = "BTC", force_refresh: bool = False
 ) -> dict[str, Any]:
@@ -317,6 +345,28 @@ def get_crypto_options_summary(
     # 4. Dealer Gamma Exposure (GEX)
     gex = calculate_deribit_gex(contracts, underlying_spot)
 
+    # 5. Realized Volatility vs Implied Volatility (IV - RV Spread)
+    rv_30d, rv_7d = compute_crypto_realized_volatility(f"{curr}USDT")
+    vol_spread = round(atm_iv - rv_30d, 2)
+    if vol_spread >= 12.0:
+        vol_mispricing = "VOLATILITY_OVERPRICED_IV_RICH"
+        vol_strategy = "SELL_VOLATILITY / CREDIT_SPREADS / THETA_HARVEST"
+        vol_note = (
+            f"ATM IV ({atm_iv:.1f}%) is +{vol_spread:.1f}% higher than 30d Realized Vol ({rv_30d:.1f}%). "
+            "High statistical edge for selling volatility."
+        )
+    elif vol_spread <= -8.0:
+        vol_mispricing = "VOLATILITY_UNDERPRICED_IV_CHEAP"
+        vol_strategy = "BUY_VOLATILITY / STRADDLES / GAMMA_BREAKOUT"
+        vol_note = (
+            f"ATM IV ({atm_iv:.1f}%) is {vol_spread:.1f}% below 30d Realized Vol ({rv_30d:.1f}%). "
+            "Options are underpriced relative to actual price volatility."
+        )
+    else:
+        vol_mispricing = "VOLATILITY_FAIR_VALUE"
+        vol_strategy = "DIRECTIONAL_OR_EQUILIBRIUM"
+        vol_note = f"ATM IV ({atm_iv:.1f}%) roughly in line with 30d Realized Vol ({rv_30d:.1f}%)."
+
     result = {
         "status": "ONLINE",
         "currency": curr,
@@ -332,6 +382,12 @@ def get_crypto_options_summary(
         "pcr_sentiment": pcr_sentiment,
         "pcr_note": pcr_note,
         "atm_implied_volatility_pct": atm_iv,
+        "realized_volatility_30d_pct": rv_30d,
+        "realized_volatility_7d_pct": rv_7d,
+        "iv_rv_spread_pct": vol_spread,
+        "volatility_regime": vol_mispricing,
+        "volatility_strategy_recommendation": vol_strategy,
+        "volatility_analysis_note": vol_note,
         "total_call_oi": round(call_oi, 2),
         "total_put_oi": round(put_oi, 2),
         "net_gex_usd": gex["net_gex_usd"],

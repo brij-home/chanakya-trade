@@ -135,7 +135,8 @@ def get_ohlcv(
             # 1a. Check exact cache key
             if cache_key in _df_memory_cache:
                 stored_ts, cached_df = _df_memory_cache[cache_key]
-                if now_ts - stored_ts < ttl_limit and not cached_df.empty:
+                eff_ttl = 60.0 if cached_df.empty else ttl_limit
+                if now_ts - stored_ts < eff_ttl:
                     _df_memory_cache.move_to_end(cache_key)
                     return cached_df.copy()
             # 1b. Check normalized intraday cache key (shares 5d slice across Squeeze, ORB, Options Momentum)
@@ -345,7 +346,12 @@ def get_ohlcv(
             pass
 
     if not raw:
-        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+        empty_df = pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+        with _df_memory_cache_lock:
+            while len(_df_memory_cache) >= MAX_MEMORY_DFS:
+                _df_memory_cache.popitem(last=False)
+            _df_memory_cache[cache_key] = (now_ts, empty_df)
+        return empty_df
 
     df = pd.DataFrame(raw)
     df.rename(columns={"date": "date"}, inplace=True)
@@ -575,6 +581,8 @@ def load_ohlcv_cache(key: str) -> tuple[list, None]:
 
 
 _YF_BACKOFF: dict[str, float] = {}  # ticker -> backoff_until_timestamp
+_YF_GLOBAL_BACKOFF: float = 0.0
+_YF_CONSECUTIVE_FAILURES: int = 0
 _YF_BACKOFF_LOCK = threading.Lock()
 
 
@@ -586,9 +594,12 @@ def _yfinance_fallback(
     to_date: datetime,
 ) -> list[dict]:
     """Try yfinance for real market data when broker API is unavailable, with 429 rate-limit backoff."""
+    global _YF_CONSECUTIVE_FAILURES, _YF_GLOBAL_BACKOFF
     sym_key = f"{exchange}:{symbol}:{interval}".upper()
     now = time.time()
     with _YF_BACKOFF_LOCK:
+        if _YF_GLOBAL_BACKOFF > now:
+            return []
         if _YF_BACKOFF.get(sym_key, 0.0) > now:
             return []
 
@@ -604,16 +615,22 @@ def _yfinance_fallback(
             from_date=from_date,
             to_date=to_date,
         )
-        if not res:
-            with _YF_BACKOFF_LOCK:
+        with _YF_BACKOFF_LOCK:
+            if not res:
                 _YF_BACKOFF[sym_key] = now + 30.0  # 30s cooldown on empty/rate-limited response
-        else:
-            with _YF_BACKOFF_LOCK:
+                _YF_CONSECUTIVE_FAILURES += 1
+                if _YF_CONSECUTIVE_FAILURES >= 3:
+                    _YF_GLOBAL_BACKOFF = now + 60.0
+            else:
+                _YF_CONSECUTIVE_FAILURES = 0
                 _YF_BACKOFF.pop(sym_key, None)
         return res
     except Exception:
         with _YF_BACKOFF_LOCK:
             _YF_BACKOFF[sym_key] = now + 45.0
+            _YF_CONSECUTIVE_FAILURES += 1
+            if _YF_CONSECUTIVE_FAILURES >= 3:
+                _YF_GLOBAL_BACKOFF = now + 60.0
         return []
 
 

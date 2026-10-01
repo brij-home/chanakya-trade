@@ -51,10 +51,12 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const [preflightInfo, setPreflightInfo] = useState(null)
   const [previewOrder, setPreviewOrder] = useState(null)
   const [isValidatingRisk, setIsValidatingRisk] = useState(false)
+  const [smartRouting, setSmartRouting] = useState(null)
 
   // Sync state whenever modal opens or initialData changes
   useEffect(() => {
     if (isOpen) {
+      setSmartRouting(initialData.smart_routing || initialData.smartRouting || null)
       const sym = (initialData.symbol || '').toUpperCase()
       setSymbol(sym)
       const ex = initialData.exchange || 'NSE'
@@ -583,6 +585,29 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                 </div>
               </div>
 
+              {/* Smart Order Router (SOR) Execution Strategy */}
+              {smartRouting && (
+                <div className="bg-sky-500/10 border border-sky-500/30 rounded-xl p-2.5 flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm">
+                      {smartRouting.routing_mode === 'ICEBERG' ? '🧊' : smartRouting.routing_mode === 'PASSIVE_PEG' ? '🎯' : '⚡'}
+                    </span>
+                    <div>
+                      <div className="font-bold text-sky-300">
+                        Smart Router: {smartRouting.routing_mode}
+                        {smartRouting.routing_mode === 'ICEBERG' && ` (${smartRouting.num_tranches} Tranches × ${smartRouting.tranche_size} Qty)`}
+                      </div>
+                      <div className="text-[10px] text-sky-200/80 font-mono">
+                        {smartRouting.notes || `Estimated spread savings: ₹${smartRouting.estimated_spread_savings_inr || 0}`}
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-[9px] uppercase px-1.5 py-0.5 rounded font-black font-mono bg-sky-500/20 text-sky-300 border border-sky-500/40">
+                    SOR Active
+                  </span>
+                </div>
+              )}
+
               {/* Risk Sizing Card */}
               <div className="bg-panel/60 border border-border/50 rounded-xl p-3 space-y-2">
                 <div className="flex justify-between items-center text-[11px] font-ui">
@@ -695,6 +720,12 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                     <div className="flex justify-between text-[10px]">
                       <span className="text-muted">{isLiveMode ? 'Live Intent ID:' : 'Paper Intent ID:'}</span>
                       <span className="text-violet-400 font-bold">{previewOrder.order_id}</span>
+                    </div>
+                  )}
+                  {smartRouting && (
+                    <div className="flex justify-between text-[10px] text-sky-400">
+                      <span>Smart Execution Route:</span>
+                      <span className="font-semibold">{smartRouting.routing_mode} {smartRouting.num_tranches ? `(${smartRouting.num_tranches} Tranches)` : ''}</span>
                     </div>
                   )}
                   {totalCharges > 0 && (

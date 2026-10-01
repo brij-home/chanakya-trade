@@ -18,6 +18,7 @@ from typing import Any, Optional
 import numpy as np
 
 from engine.alert_model import AutoAlert
+from engine.alert_identity import canonical_alert_symbol
 
 logger = logging.getLogger("chanakya.detectors.intraday_spark")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -60,7 +61,11 @@ def compute_time_of_day_rvol(
         now_ist = now_ist.astimezone(IST)
 
     mins_from_open = (now_ist.hour * 60 + now_ist.minute) - (9 * 60 + 15)
-    fraction = expected_volume_fraction(float(mins_from_open))
+    # Outside active market session, compare full day volume (fraction = 1.0)
+    if mins_from_open < 0 or mins_from_open >= 375:
+        fraction = 1.0
+    else:
+        fraction = expected_volume_fraction(float(mins_from_open))
     expected_vol = max(1.0, avg_daily_vol * fraction)
     return round(float(current_vol) / expected_vol, 2)
 
@@ -109,7 +114,7 @@ def detect_intraday_mover_sparks(
     is_nifty_markup = (nifty_chg >= 0.40) and ((nifty_ltp > nifty_vwap) if nifty_vwap > 0 else True)
 
     for sym in scan_universe:
-        clean_sym = sym.upper().replace("NSE:", "").replace(".NS", "").strip()
+        clean_sym = canonical_alert_symbol(sym)
         q = quotes_map.get(f"NSE:{clean_sym}") or quotes_map.get(clean_sym)
         if not q:
             continue
@@ -127,6 +132,11 @@ def detect_intraday_mover_sparks(
         # Check turnover gate for equities (₹5 Cr min, or active volume)
         turnover_cr = round((ltp * vol) / 1e7, 2)
         if seg != "INDEX" and turnover_cr < 5.0 and vol < 50000:
+            continue
+
+        # Fast pre-filter: Stock must meet minimal price movement threshold before computing historical RVOL
+        min_move = 0.20 if seg == "INDEX" else 0.80
+        if abs(chg) < min_move:
             continue
 
         # Calculate TOD-RVOL
@@ -314,12 +324,14 @@ def detect_intraday_mover_sparks(
             if seg != "INDEX":
                 try:
                     from engine.alert_expiry import (
-                        is_monthly_physical_expiry_week,
+                        check_monthly_physical_settlement_status,
                         get_next_monthly_expiry_date,
                     )
 
                     now_d = datetime.now(IST)
-                    is_exp_wk, dte = is_monthly_physical_expiry_week(now_d)
+                    is_exp_wk, dte = check_monthly_physical_settlement_status(
+                        symbol=sym, ref_dt=now_d
+                    )
                     if is_exp_wk:
                         next_dt = get_next_monthly_expiry_date(now_d)
                         next_str = next_dt.strftime("%d-%b-%Y")
@@ -439,12 +451,14 @@ def detect_intraday_mover_sparks(
             if seg != "INDEX":
                 try:
                     from engine.alert_expiry import (
-                        is_monthly_physical_expiry_week,
+                        check_monthly_physical_settlement_status,
                         get_next_monthly_expiry_date,
                     )
 
                     now_d = datetime.now(IST)
-                    is_exp_wk, dte = is_monthly_physical_expiry_week(now_d)
+                    is_exp_wk, dte = check_monthly_physical_settlement_status(
+                        symbol=sym, ref_dt=now_d
+                    )
                     if is_exp_wk:
                         next_dt = get_next_monthly_expiry_date(now_d)
                         next_str = next_dt.strftime("%d-%b-%Y")
@@ -493,7 +507,9 @@ def detect_intraday_mover_sparks(
             df_5m = get_ohlcv(clean_sym, exchange="NSE", interval="5minute", days=3)
             df_15m = get_ohlcv(clean_sym, exchange="NSE", interval="15minute", days=5)
             if df_5m is not None and df_15m is not None:
-                mtf_res = compute_mtf_alignment(df_5m=df_5m, df_15m=df_15m, df_daily=df)
+                mtf_res = compute_mtf_alignment(
+                    df_5m=df_5m, df_15m=df_15m, df_daily=df, direction=direction
+                )
                 alignment_count = int(mtf_res.get("alignment_count", 0))
                 opp_trend = mtf_res.get("opposing_trend")
                 if opp_trend:
@@ -551,7 +567,9 @@ def detect_intraday_mover_sparks(
             except Exception as e_smc:
                 logger.debug(f"[IntradaySpark] Spark candle/divergence check error: {e_smc}")
 
-        alert_id = f"spark-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
+        from engine.alert_identity import generate_alert_id
+
+        alert_id = generate_alert_id(clean_sym, alert_type)
         alert = AutoAlert(
             alert_id=alert_id,
             alert_type=alert_type,
