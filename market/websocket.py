@@ -89,7 +89,13 @@ _INDEX_KEYWORDS = {
 
 
 def _to_ws_symbol(instrument: str) -> str:
-    """Convert our instrument format to Fyers WebSocket format."""
+    """Convert any instrument format (Equity, Index, MCX, Currency, Options) to Fyers WebSocket format."""
+    try:
+        from brokers.fyers import _to_fyers_symbol
+        return _to_fyers_symbol(instrument)
+    except Exception:
+        pass
+
     # Direct map lookup
     if instrument in _SYMBOL_MAP:
         return _SYMBOL_MAP[instrument]
@@ -136,6 +142,7 @@ class Tick:
     timestamp: float = 0.0  # epoch
     bid: float = 0.0
     ask: float = 0.0
+    atp: float = 0.0
 
 
 class WebSocketManager:
@@ -188,15 +195,45 @@ class WebSocketManager:
         else:
             logger.warning("WebSocket connection timed out — will use REST fallback")
 
-    def stop(self, timeout: float = 2.0) -> None:
-        """Disconnect the WebSocket and join background thread."""
-        if self._ws:
-            try:
-                self._ws.close_connection()
-            except Exception:
-                pass
+    def stop(self, timeout: float = 1.0) -> None:
+        """Disconnect the WebSocket and gracefully shut down without blocking."""
+        ws_to_close = self._ws
         self._connected = False
         self._ws = None
+
+        if ws_to_close:
+            def _close():
+                try:
+                    setattr(ws_to_close, "restart_flag", False)
+                    # Unblock message processing loop
+                    stop_ev = getattr(ws_to_close, "message_thread_stop_event", None)
+                    if stop_ev:
+                        stop_ev.set()
+                    cond = getattr(ws_to_close, "message_condition", None)
+                    if cond:
+                        try:
+                            lock = getattr(ws_to_close, "message_lock", None)
+                            if lock:
+                                with lock:
+                                    cond.notify_all()
+                        except Exception:
+                            pass
+                    # Close underlying websocket
+                    ws_obj = getattr(ws_to_close, "_FyersDataSocket__ws_object", None)
+                    if ws_obj and hasattr(ws_obj, "close"):
+                        try:
+                            ws_obj.close()
+                        except Exception:
+                            pass
+                    # Clear reference so ping thread exits its while loop
+                    setattr(ws_to_close, "_FyersDataSocket__ws_object", None)
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=_close, daemon=True)
+            t.start()
+            t.join(timeout=timeout)
+
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=timeout)
         self._thread = None
@@ -265,7 +302,7 @@ class WebSocketManager:
                 access_token=f"{self._app_id}:{self._access_token}",
                 log_path="",
                 litemode=False,
-                write_to_file=False,
+                write_to_file=True,
                 reconnect=True,
                 on_connect=self._on_connect,
                 on_close=self._on_close,
@@ -325,10 +362,17 @@ class WebSocketManager:
                     timestamp=float(data.get("exch_feed_time", time.time())),
                     bid=float(data.get("bid", 0)),
                     ask=float(data.get("ask", 0)),
+                    atp=float(data.get("atp", data.get("avg_traded_price", 0.0)) or 0.0),
                 )
 
                 with self._lock:
                     self._ticks[symbol] = tick
+                    # Index under clean aliases so caller queries hit cache without format transformation
+                    if ":" in symbol:
+                        clean = symbol.split(":", 1)[1]
+                        self._ticks[clean] = tick
+                        if "-" in clean:
+                            self._ticks[clean.split("-")[0]] = tick
 
                 # Fire callbacks
                 for cb in self._callbacks:

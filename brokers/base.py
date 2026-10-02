@@ -132,6 +132,10 @@ class OptionsContract:
     oi_change: int  # OI change vs prev day
     volume: int
     iv: Optional[float] = None  # Implied Volatility (%)
+    delta: Optional[float] = None  # Option Delta
+    gamma: Optional[float] = None  # Option Gamma
+    theta: Optional[float] = None  # Option Theta
+    vega: Optional[float] = None  # Option Vega
     bid: Optional[float] = None
     ask: Optional[float] = None
     bid_qty: int = 0
@@ -146,6 +150,7 @@ class OptionsContract:
     high: Optional[float] = None
     low: Optional[float] = None
     close: Optional[float] = None
+
 
 
 @dataclass

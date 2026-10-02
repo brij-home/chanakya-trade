@@ -529,10 +529,22 @@ async def _auto_restore_brokers() -> None:
             from brokers.fyers import FyersAPI, TOKEN_FILE as _FT
 
             if _FT.exists():
-                b = FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY"))
+                b = FyersAPI(
+                    _env("FYERS_APP_ID"),
+                    _env("FYERS_SECRET_KEY"),
+                    fy_id=_env("FYERS_FY_ID"),
+                    totp_secret=_env("FYERS_TOTP_SECRET"),
+                    pin=_env("FYERS_PIN"),
+                )
                 if b.is_authenticated():
-                    register_broker("fyers", b)
-                    logging.info("[startup] Fyers session restored")
+                    register_broker("fyers", b, primary=True, role="both")
+                    try:
+                        from brokers.session import _start_websocket
+
+                        _start_websocket(b)
+                    except Exception:
+                        pass
+                    logging.info("[startup] Fyers session restored as primary (role: both) & WebSocket started")
         except Exception as exc:
             logging.warning("[startup] Could not restore Fyers: %s", exc)
 
@@ -748,6 +760,14 @@ async def telemetry_health():
     except Exception:
         pass
 
+    fyers_ws_connected = False
+    try:
+        from market.websocket import ws_manager
+
+        fyers_ws_connected = bool(ws_manager.connected)
+    except Exception:
+        pass
+
     mode_info = get_trading_mode()
 
     return JSONResponse(
@@ -762,6 +782,7 @@ async def telemetry_health():
             "streams": {
                 "binance_crypto_connected": crypto_connected,
                 "mstock_ws_connected": mstock_ws_connected,
+                "fyers_ws_connected": fyers_ws_connected,
             },
             "brokers": {
                 "data": get_data_broker_key(),
@@ -1827,7 +1848,13 @@ async def fyers_callback(auth_code: str = "", state: str = "", s: str = ""):
         )
         profile = b.complete_login(auth_code=code)
         funds = b.get_funds()
-        register_broker("fyers", b)
+        register_broker("fyers", b, primary=True, role="both")
+        try:
+            from brokers.session import _start_websocket
+
+            _start_websocket(b)
+        except Exception:
+            pass
         _invalidate_auth_cache("fyers")
     except Exception as e:
         body = f"""<div class="card"><div class="err-box">❌ {e}</div>

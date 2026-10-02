@@ -384,13 +384,19 @@ export default function OptionsDeskView({
   const spotChangePct = data?.spot_change_pct || '0.00%'
   const spotIsPositive = data?.spot_is_positive ?? (!String(spotChange).startsWith('-'))
   const dataState = data?.data_state || (data ? (isMarketOpen ? 'LIVE' : 'OFF_MARKET') : 'LOADING')
+  const isBrokerFeed = Boolean(
+    data?.is_broker ||
+    ['fyers', 'zerodha', 'angelone', 'shoonya', 'mstock', 'mock'].includes(String(data?.data_source || '').toLowerCase()) ||
+    data?.source === 'BROKER_REST'
+  )
   const isRealtime = Boolean(data?.is_realtime && dataState === 'LIVE' && isMarketOpen)
-  const dataSource = data?.data_source || (isRealtime ? 'broker' : 'fallback')
+  const isScraperFeed = !isBrokerFeed && (dataState === 'DELAYED' || String(data?.data_source || '').toLowerCase().includes('scraper'))
+  const dataSource = data?.data_source || (isBrokerFeed ? 'fyers' : (isRealtime ? 'broker' : 'fallback'))
   const sourceLabel = data?.source_label || (
     isRealtime
       ? `${dataSource.toUpperCase()} Direct Feed`
       : !isMarketOpen
-      ? 'Previous Session EOD (Market Closed)'
+      ? `${dataSource.toUpperCase()} Settled EOD (Market Closed)`
       : 'Exchange Scraper (~15m Delayed)'
   )
 
@@ -912,11 +918,19 @@ export default function OptionsDeskView({
               <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold border ${
                 isRealtime
                   ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                  : !isMarketOpen
+                  ? 'bg-sky-500/15 border-sky-500/30 text-sky-400'
                   : dataState === 'BROKER_REQUIRED'
                   ? 'bg-blue-500/15 border-blue-500/30 text-blue-400'
                   : 'bg-amber-500/15 border-amber-500/30 text-amber'
               }`}>
-                {isRealtime ? `⚡ REALTIME` : dataState === 'BROKER_REQUIRED' ? '🔒 SPOT ONLY' : `⏱️ DELAYED`}
+                {isRealtime
+                  ? `⚡ REALTIME`
+                  : !isMarketOpen
+                  ? (isBrokerFeed ? `🌙 ${dataSource.toUpperCase()} EOD` : `🌙 EOD SETTLED`)
+                  : dataState === 'BROKER_REQUIRED'
+                  ? '🔒 SPOT ONLY'
+                  : `⏱️ DELAYED`}
               </span>
             </div>
           </div>
@@ -942,11 +956,19 @@ export default function OptionsDeskView({
           </div>
         </div>
 
-        {/* Fallback notice banner if delayed */}
-        {(!isRealtime && dataState !== 'BROKER_REQUIRED' && dataState !== 'LOADING') && (
+        {/* Scraper notice banner ONLY when actually on delayed scraper fallback */}
+        {isScraperFeed && dataState !== 'BROKER_REQUIRED' && dataState !== 'LOADING' && (
           <div className="bg-amber-500/10 border-l-2 border-amber px-2 py-1 rounded text-[10.5px] font-mono flex items-center justify-between text-amber">
             <span>⚠️ Scraper feed (~15m delayed). Connect broker for sub-second live streaming.</span>
             <span className="font-bold text-[9px] uppercase">NON-REALTIME</span>
+          </div>
+        )}
+
+        {/* Off-market informational notice when market is closed */}
+        {!isMarketOpen && dataState !== 'LOADING' && isBrokerFeed && (
+          <div className="bg-sky-500/10 border-l-2 border-sky-500 px-2 py-1 rounded text-[10.5px] font-mono flex items-center justify-between text-sky-400">
+            <span>🌙 Market is Closed (Trading hours: 09:15 - 15:30 IST) • Displaying official {dataSource.toUpperCase()} settled previous session EOD chain.</span>
+            <span className="font-bold text-[9px] uppercase">EOD SETTLED</span>
           </div>
         )}
 

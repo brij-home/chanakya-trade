@@ -7,19 +7,29 @@ Fyers offers a free developer API with excellent options chain data
 and live market feeds. No monthly subscription fee.
 
 Credentials needed (store via `credentials setup`):
-    FYERS_APP_ID      — from myapi.fyers.in (format: XXXX-100 or your App ID)
-    FYERS_SECRET_KEY  — client secret from app dashboard
-    FYERS_REDIRECT_URL — registered redirect URI
+    FYERS_APP_ID       — App ID from myapi.fyers.in (format: XXXX-100)
+    FYERS_SECRET_KEY   — Client secret from app dashboard
+    FYERS_REDIRECT_URL — Registered redirect URI
                          (default: http://127.0.0.1:8765/fyers/callback)
 
-Login flow:
+Auto-Login (headless / no browser needed) — set ALL THREE:
+    FYERS_FY_ID        — Your Fyers client login ID (e.g. XA12345)
+    FYERS_TOTP_SECRET  — Base32 TOTP secret from Fyers security settings
+    FYERS_PIN          — Your Fyers 4/6-digit trading PIN
+
+    When all three are present, complete_login() will authenticate silently
+    via Fyers' vagator API (TOTP + PIN), skipping the browser redirect.
+    This is identical to the approach at:
+    https://github.com/sainipankaj15/brokers-auto-login/tree/main/Fyers
+
+Fallback login flow (browser OAuth):
   1. `get_login_url()` returns the Fyers auth URL
   2. User logs in via browser → redirected with ?auth_code=...&state=...
   3. `complete_login(auth_code=...)` exchanges code for access token
 
-Session token is saved to ~/.trading_platform/fyers.json and reused.
+Session token is saved to ~/.trading_platform/fyers.json and reused (12h TTL).
 
-Install: pip install fyers-apiv3
+Install: pip install fyers-apiv3 pyotp
 
 Docs: https://myapi.fyers.in/docsv3
 """
@@ -169,32 +179,149 @@ def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str) -> str:
     return ""
 
 
-def _to_fyers_symbol(instrument: str) -> str:
-    """Convert 'NSE:RELIANCE' or 'NSE:NIFTY 50' to Fyers API format."""
-    if ":" in instrument:
-        exch, sym = instrument.split(":", 1)
-    else:
-        exch, sym = "NSE", instrument
+def _resolve_commodity_contract(symbol: str) -> str:
+    """
+    Resolve generic commodity symbol (e.g. 'GOLD', 'CRUDEOIL', 'SILVER', 'NATURALGAS')
+    to the active near-month Fyers MCX futures contract symbol.
+    """
+    import datetime as dt
 
+    now = dt.datetime.now()
+    clean = symbol.upper().replace("MCX:", "").strip()
+
+    # CRUDEOIL: monthly, expires ~19th of each month
+    if clean in ("CRUDEOIL", "CRUDEOILM"):
+        target_dt = now if now.day <= 18 else now + dt.timedelta(days=20)
+        return f"MCX:{clean}{target_dt.strftime('%y%b').upper()}FUT"
+
+    # NATURALGAS: monthly, expires ~25th of each month
+    if clean in ("NATURALGAS", "NATURALGASM"):
+        target_dt = now if now.day <= 24 else now + dt.timedelta(days=15)
+        return f"MCX:{clean}{target_dt.strftime('%y%b').upper()}FUT"
+
+    # GOLD: active contract months: FEB(2), APR(4), JUN(6), AUG(8), OCT(10), DEC(12)
+    if clean == "GOLD":
+        gold_months = [2, 4, 6, 8, 10, 12]
+        cand_m = now.month if (now.month in gold_months and now.day <= 3) else None
+        if not cand_m:
+            future_m = [m for m in gold_months if m > now.month]
+            cand_m = future_m[0] if future_m else gold_months[0]
+            target_year = now.year if future_m else now.year + 1
+        else:
+            target_year = now.year
+        target_dt = dt.date(target_year, cand_m, 1)
+        return f"MCX:GOLD{target_dt.strftime('%y%b').upper()}FUT"
+
+    # GOLDM: monthly
+    if clean == "GOLDM":
+        target_dt = now if now.day <= 4 else now + dt.timedelta(days=30)
+        return f"MCX:GOLDM{target_dt.strftime('%y%b').upper()}FUT"
+
+    # SILVER: active contract months: MAR(3), MAY(5), JUL(7), SEP(9), DEC(12)
+    if clean == "SILVER":
+        silver_months = [3, 5, 7, 9, 12]
+        cand_m = now.month if (now.month in silver_months and now.day <= 3) else None
+        if not cand_m:
+            future_m = [m for m in silver_months if m > now.month]
+            cand_m = future_m[0] if future_m else silver_months[0]
+            target_year = now.year if future_m else now.year + 1
+        else:
+            target_year = now.year
+        target_dt = dt.date(target_year, cand_m, 1)
+        return f"MCX:SILVER{target_dt.strftime('%y%b').upper()}FUT"
+
+    # COPPER, ZINC, ALUMINIUM: monthly
+    if clean in ("COPPER", "ZINC", "ALUMINIUM", "LEAD", "NICKEL"):
+        target_dt = now if now.day <= 26 else now + dt.timedelta(days=10)
+        return f"MCX:{clean}{target_dt.strftime('%y%b').upper()}FUT"
+
+    # Default fallback: current month
+    return f"MCX:{clean}{now.strftime('%y%b').upper()}FUT"
+
+
+def _resolve_currency_contract(symbol: str) -> str:
+    """
+    Resolve generic currency symbol (e.g. 'USDINR', 'EURINR')
+    to the active Fyers NSE near-month currency futures contract symbol.
+    """
+    import datetime as dt
+
+    now = dt.datetime.now()
+    clean = symbol.upper().replace("CDS:", "").replace("NSE:", "").strip()
+    target_dt = now if now.day <= 26 else now + dt.timedelta(days=10)
+    return f"NSE:{clean}{target_dt.strftime('%y%b').upper()}FUT"
+
+
+def _to_fyers_symbol(instrument: str) -> str:
+    """Convert any instrument format ('NSE:RELIANCE', 'GOLD', 'USDINR', 'NIFTY') to Fyers API format."""
+    s = str(instrument).strip()
+    if ":" in s:
+        exch, sym = s.split(":", 1)
+    else:
+        exch, sym = "NSE", s
+
+    exch_upper = exch.upper().strip()
     sym_upper = sym.upper().strip()
 
-    # Check index map
+    # Direct index map check
     if sym_upper in _FYERS_INDEX_MAP:
         return _FYERS_INDEX_MAP[sym_upper]
 
-    # Already has suffix
-    if "-" in sym:
-        return instrument
+    if s.upper() in _FYERS_INDEX_MAP:
+        return _FYERS_INDEX_MAP[s.upper()]
 
-    # Check if it's an index by keywords
+    # Already formatted with -INDEX, -EQ, etc.
+    if "-" in sym:
+        return f"{exch_upper}:{sym}"
+
+    # MCX Commodities
+    if exch_upper == "MCX" or sym_upper in (
+        "GOLD",
+        "GOLDM",
+        "SILVER",
+        "SILVERM",
+        "CRUDEOIL",
+        "CRUDEOILM",
+        "NATURALGAS",
+        "COPPER",
+        "ZINC",
+        "ALUMINIUM",
+    ):
+        if any(sym_upper.endswith(suffix) for suffix in ("FUT", "CE", "PE")) and any(
+            c.isdigit() for c in sym_upper
+        ):
+            return f"MCX:{sym_upper}"
+        return _resolve_commodity_contract(sym_upper)
+
+    # Currency CDS / Forex
+    if exch_upper in ("CDS", "FX", "FOREX") or sym_upper in (
+        "USDINR",
+        "EURINR",
+        "GBPINR",
+        "JPYINR",
+    ):
+        if any(sym_upper.endswith(suffix) for suffix in ("FUT", "CE", "PE")) and any(
+            c.isdigit() for c in sym_upper
+        ):
+            return f"NSE:{sym_upper}"
+        return _resolve_currency_contract(sym_upper)
+
+    # F&O derivative contract on NSE/NFO (e.g. NIFTY26OCT25000CE, NIFTY26O0622300PE, RELIANCE26OCTFUT)
+    if any(sym_upper.endswith(suffix) for suffix in ("FUT", "CE", "PE")) and any(
+        c.isdigit() for c in sym_upper
+    ):
+        return f"NSE:{sym_upper}"
+
+    # Check if index by keywords (only if not an option/futures contract)
     if any(kw in sym_upper for kw in _INDEX_KEYWORDS):
         clean = sym_upper.replace(" ", "")
-        return f"{exch}:{clean}-INDEX"
+        return f"{exch_upper}:{clean}-INDEX"
 
-    if exch.upper() in ("MCX", "CDS", "FX", "FOREX"):
-        return f"{exch}:{sym}"
+    # BSE Equity
+    if exch_upper == "BSE":
+        return f"BSE:{sym_upper}"
 
-    return f"{exch}:{sym}-EQ"
+    return f"NSE:{sym_upper}-EQ"
 
 
 def _get_sdk():
@@ -217,17 +344,76 @@ class FyersAPI(BrokerAPI):
 
     def __init__(
         self,
-        app_id: str,
-        secret_key: str,
+        app_id: str = "",
+        secret_key: str = "",
         redirect_uri: str = "http://127.0.0.1:8765/fyers/callback",
+        fy_id: str = "",
+        totp_secret: str = "",
+        pin: str = "",
     ) -> None:
+        import os
+        from config.credentials import get_credential
+
+        # Auto-load from config/credentials or environment if not passed
+        if not app_id:
+            try:
+                from dotenv import load_dotenv
+                from pathlib import Path
+
+                load_dotenv(Path(__file__).parent.parent / ".env")
+            except Exception:
+                pass
+
+        app_id = (
+            app_id
+            or get_credential("FYERS_APP_ID", secret=False, required=False)
+            or os.environ.get("FYERS_APP_ID", "")
+        ).strip()
+        secret_key = (
+            secret_key
+            or get_credential("FYERS_SECRET_KEY", secret=True, required=False)
+            or os.environ.get("FYERS_SECRET_KEY", "")
+        ).strip()
+        fy_id = (
+            fy_id
+            or get_credential("FYERS_FY_ID", secret=False, required=False)
+            or os.environ.get("FYERS_FY_ID", "")
+        ).strip()
+        totp_secret = (
+            totp_secret
+            or get_credential("FYERS_TOTP_SECRET", secret=True, required=False)
+            or os.environ.get("FYERS_TOTP_SECRET", "")
+        ).strip()
+        pin = (
+            pin
+            or get_credential("FYERS_PIN", secret=True, required=False)
+            or os.environ.get("FYERS_PIN", "")
+        ).strip()
+        # Fyers API v3 requires client_id / app_id in format <APP_ID>-100 or <APP_ID>-200
+        if app_id and "-" not in app_id:
+            app_id = f"{app_id}-100"
         self._app_id = app_id
         self._secret_key = secret_key
-        self._redirect_uri = redirect_uri
+        redirect_uri = (
+            redirect_uri
+            or get_credential("FYERS_REDIRECT_URL", secret=False, required=False)
+            or get_credential("FYERS_REDIRECT_URI", secret=False, required=False)
+            or os.environ.get("FYERS_REDIRECT_URL", "")
+            or os.environ.get("FYERS_REDIRECT_URI", "")
+        ).strip()
+        if fy_id and totp_secret and pin and (not redirect_uri or redirect_uri == "http://127.0.0.1:8765/fyers/callback"):
+            redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
+        self._redirect_uri = (redirect_uri or "https://trade.fyers.in/api-login/redirect-uri/index.html").strip()
+        # Auto-login credentials (headless TOTP flow)
+        self._fy_id = fy_id
+        self._totp_secret = totp_secret
+        self._pin = pin
         self._access_token = ""
         self._profile: Optional[UserProfile] = None
         self._token_ts: float = 0.0
         self._fyers = None  # FyersModel instance
+        self._last_oc_metadata: dict[str, Any] = {}
+        self.name: str = "fyers"
         self._load_token()
 
     # ── SDK Instance ─────────────────────────────────────────
@@ -253,6 +439,8 @@ class FyersAPI(BrokerAPI):
                 if time.time() - ts < TOKEN_EXPIRY:
                     self._access_token = data.get("access_token", "")
                     self._token_ts = ts
+                    if not self._app_id and data.get("app_id"):
+                        self._app_id = data.get("app_id")
         except Exception:
             pass
 
@@ -262,6 +450,7 @@ class FyersAPI(BrokerAPI):
             json.dumps(
                 {
                     "access_token": token,
+                    "app_id": self._app_id,
                     "timestamp": time.time(),
                 }
             )
@@ -282,8 +471,174 @@ class FyersAPI(BrokerAPI):
         )
         return session.generate_authcode()
 
+    # ── Headless Auto-Login (TOTP + PIN via vagator API) ──────
+
+    def _auto_login_totp(self) -> str:
+        """
+        Headless Fyers login using TOTP + PIN.
+
+        Replicates the flow from:
+        https://github.com/sainipankaj15/brokers-auto-login/tree/main/Fyers
+
+        Flow:
+          1. POST /vagator/v2/send_login_otp  → get request_key (app_id="2" for web login)
+          2. Generate TOTP from secret via pyotp
+          3. POST /vagator/v2/verify_otp      → get request_key_2
+          4. POST /vagator/v2/verify_pin      → get intermediate bearer access_token (plain PIN)
+          5. POST /api/v3/token (Bearer auth) → HTTP 308 redirect Url containing auth_code
+          6. POST /api/v3/validate-authcode   → exchange auth_code + appIdHash for final access token
+
+        Returns the access token string.
+        Raises RuntimeError on any step failure.
+        """
+        import hashlib
+        from urllib import parse
+        try:
+            import pyotp
+        except ImportError:
+            raise RuntimeError(
+                "pyotp not installed. Run: pip install pyotp"
+            )
+        try:
+            import requests as _req
+        except ImportError:
+            raise RuntimeError(
+                "requests not installed. Run: pip install requests"
+            )
+
+        # Derive the bare app_id (strip the -100/-200 suffix for vagator hash)
+        bare_app_id = self._app_id.split("-")[0] if "-" in self._app_id else self._app_id
+        app_type = self._app_id.split("-")[1] if "-" in self._app_id else "100"
+
+        # Compute SHA-256 hash: "<bare_app_id>-<app_type>:<secret>"
+        app_id_hash = hashlib.sha256(
+            f"{bare_app_id}-{app_type}:{self._secret_key}".encode()
+        ).hexdigest()
+
+        BASE_VAGATOR = "https://api-t2.fyers.in/vagator/v2"
+        BASE_API = "https://api-t1.fyers.in/api/v3"
+        headers = {"Content-Type": "application/json"}
+
+        # ── Step 1: Send login OTP (initiates session, gets request_key) ─
+        # app_id here is APP_ID_TYPE = "2" (web login), per Fyers vagator spec.
+        r1 = _req.post(
+            f"{BASE_VAGATOR}/send_login_otp",
+            json={"fy_id": self._fy_id, "app_id": "2"},
+            headers=headers,
+            timeout=15,
+        )
+        if r1.status_code != 200:
+            raise RuntimeError(f"Fyers auto-login step 1 failed (HTTP {r1.status_code}): {r1.text}")
+        data1 = r1.json()
+        request_key = data1.get("request_key", "")
+        if not request_key:
+            raise RuntimeError(f"Fyers auto-login step 1: no request_key in response: {data1}")
+
+        # ── Step 2: Verify TOTP ───────────────────────────────────────────
+        totp = pyotp.TOTP(self._totp_secret).now()
+        r2 = _req.post(
+            f"{BASE_VAGATOR}/verify_otp",
+            json={"request_key": request_key, "otp": totp},
+            headers=headers,
+            timeout=15,
+        )
+        if r2.status_code != 200:
+            raise RuntimeError(f"Fyers auto-login step 2 (TOTP) failed (HTTP {r2.status_code}): {r2.text}")
+        data2 = r2.json()
+        request_key2 = data2.get("request_key", "")
+        if not request_key2:
+            raise RuntimeError(f"Fyers auto-login step 2: no request_key in response: {data2}")
+
+        # ── Step 3: Verify PIN ────────────────────────────────────────────
+        # Fyers vagator expects the PIN as PLAIN TEXT — NOT SHA-256 hashed.
+        r3 = _req.post(
+            f"{BASE_VAGATOR}/verify_pin",
+            json={
+                "request_key": request_key2,
+                "identity_type": "pin",
+                "identifier": self._pin,
+            },
+            headers=headers,
+            timeout=15,
+        )
+        if r3.status_code != 200:
+            raise RuntimeError(f"Fyers auto-login step 3 (PIN) failed (HTTP {r3.status_code}): {r3.text}")
+        data3 = r3.json()
+        intermediate_token = data3.get("data", {}).get("access_token", "")
+        if not intermediate_token:
+            raise RuntimeError(f"Fyers auto-login step 3: no access_token in response: {data3}")
+
+        # ── Step 4: Generate OAuth auth_code via Bearer intermediate token ─
+        r4 = _req.post(
+            f"{BASE_API}/token",
+            json={
+                "fyers_id": self._fy_id,
+                "app_id": bare_app_id,
+                "redirect_uri": self._redirect_uri,
+                "appType": app_type,
+                "code_challenge": "",
+                "state": "chanakya_trade",
+                "scope": "",
+                "nonce": "",
+                "response_type": "code",
+                "create_cookie": True,
+            },
+            headers={
+                "Authorization": f"Bearer {intermediate_token}",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        if r4.status_code not in (200, 308):
+            raise RuntimeError(f"Fyers auto-login step 4 (token) failed (HTTP {r4.status_code}): {r4.text}")
+        url = r4.json().get("Url", "")
+        if not url:
+            raise RuntimeError(f"Fyers auto-login step 4: no Url in response: {r4.text}")
+
+        parsed_query = parse.parse_qs(parse.urlparse(url).query)
+        auth_code_list = parsed_query.get("auth_code")
+        if not auth_code_list or not auth_code_list[0]:
+            raise RuntimeError(f"Fyers auto-login step 4: auth_code not found in Url: {url}")
+        auth_code = auth_code_list[0]
+
+        # ── Step 5: Validate auth_code to obtain final access token ────────
+        r5 = _req.post(
+            f"{BASE_API}/validate-authcode",
+            json={
+                "grant_type": "authorization_code",
+                "appIdHash": app_id_hash,
+                "code": auth_code,
+            },
+            headers=headers,
+            timeout=15,
+        )
+        if r5.status_code != 200:
+            raise RuntimeError(f"Fyers auto-login step 5 (validate-authcode) failed (HTTP {r5.status_code}): {r5.text}")
+        data5 = r5.json()
+        access_token = data5.get("access_token", "")
+        if not access_token:
+            raise RuntimeError(f"Fyers auto-login step 5: no access_token in response: {data5}")
+
+        return access_token
+
     def complete_login(self, auth_code: str = "", **kwargs) -> UserProfile:
-        """Exchange the auth code for an access token using the SDK."""
+        """
+        Exchange an OAuth auth code for an access token.
+
+        If FYERS_FY_ID + FYERS_TOTP_SECRET + FYERS_PIN are all set on this
+        instance, the headless TOTP auto-login path is used first (no browser).
+        Otherwise falls back to the standard OAuth auth_code exchange.
+        """
+        # ── Path A: Headless auto-login (TOTP + PIN) ──────────────────────
+        if self._fy_id and self._totp_secret and self._pin and not auth_code:
+            token = self._auto_login_totp()
+            self._access_token = token
+            self._token_ts = time.time()
+            self._fyers = None
+            self._save_token(token)
+            return self.get_profile()
+
+        # ── Path B: Standard OAuth auth_code exchange ─────────────────────
         fyersModel = _get_sdk()
         session = fyersModel.SessionModel(
             client_id=self._app_id,
@@ -445,173 +800,455 @@ class FyersAPI(BrokerAPI):
 
     def get_quote(self, instruments: list[str]) -> dict[str, Quote]:
         """
-        Get quotes. Instruments: ["NSE:RELIANCE", "NSE:NIFTY 50"]
-        Fyers format: "NSE:RELIANCE-EQ", "NSE:NIFTY50-INDEX"
+        Get quotes. Instruments: ["NSE:RELIANCE", "NSE:NIFTY 50", "GOLD", "USDINR"]
+        Fyers format: "NSE:RELIANCE-EQ", "NSE:NIFTY50-INDEX", "MCX:GOLD26OCTFUT"
+        Batch chunking by 50 to honor Fyers API constraints.
         """
         fyers = self._get_fyers()
+        if not fyers:
+            return {}
 
-        # Convert to Fyers symbol format
+        # Convert to Fyers symbol format and build key mapping
         fyers_symbols = []
-        key_map = {}  # fyers_symbol → original instrument key
+        key_map: dict[str, list[str]] = {}  # fyers_symbol → list of original instrument keys
         for inst in instruments:
             fyers_sym = _to_fyers_symbol(inst)
             fyers_symbols.append(fyers_sym)
-            key_map[fyers_sym] = inst
+            key_map.setdefault(fyers_sym, []).append(inst)
 
-        try:
-            data = fyers.quotes({"symbols": ",".join(fyers_symbols)})
-            result = {}
-            for item in data.get("d", []):
-                raw = item.get("n", "")
-                v = item.get("v", {})
-                # Find the original key
-                orig_key = key_map.get(raw, raw)
-                last_price = float(v.get("lp", 0))
-                open_price = float(v.get("open_price", 0))
-                high_price = float(v.get("high_price", 0))
-                low_price = float(v.get("low_price", 0))
-                prev_close = float(v.get("prev_close_price", 0))
-                ch = float(v.get("ch", 0))
-                chp = float(v.get("chp", 0))
+        # Unique preserving order
+        unique_fyers_symbols = list(dict.fromkeys(fyers_symbols))
+        result: dict[str, Quote] = {}
 
-                # After NSE close Fyers rolls prev_close_price to today's official
-                # close, making ch ≈ 0.  Detect this: if |ch| < 5% of the intraday
-                # range (and the range is meaningful), fall back to open-based change.
-                intraday_range = high_price - low_price
-                if intraday_range > 0.5 and open_price > 0 and abs(ch) < intraday_range * 0.05:
-                    ch = round(last_price - open_price, 2)
-                    chp = round((ch / open_price * 100), 2) if open_price else 0.0
+        # Chunk in batches of 50
+        CHUNK_SIZE = 50
+        for i in range(0, len(unique_fyers_symbols), CHUNK_SIZE):
+            chunk = unique_fyers_symbols[i : i + CHUNK_SIZE]
+            try:
+                data = fyers.quotes({"symbols": ",".join(chunk)})
+                for item in data.get("d", []):
+                    raw = item.get("n", "")
+                    v = item.get("v", {})
+                    last_price = float(v.get("lp", 0.0) or 0.0)
+                    open_price = float(v.get("open_price", 0.0) or 0.0)
+                    high_price = float(v.get("high_price", 0.0) or 0.0)
+                    low_price = float(v.get("low_price", 0.0) or 0.0)
+                    prev_close = float(v.get("prev_close_price", 0.0) or 0.0)
+                    ch = float(v.get("ch", 0.0) or 0.0)
+                    chp = float(v.get("chp", 0.0) or 0.0)
 
-                result[orig_key] = Quote(
-                    symbol=orig_key.split(":")[-1] if ":" in orig_key else orig_key,
-                    last_price=last_price,
-                    open=open_price,
-                    high=high_price,
-                    low=low_price,
-                    close=prev_close,
-                    volume=int(v.get("volume", 0)),
-                    change=ch,
-                    change_pct=chp,
-                )
-            return result
-        except Exception:
-            return {}
+                    # After NSE close Fyers rolls prev_close_price to today's official
+                    # close, making ch ≈ 0. Detect this: if |ch| < 5% of the intraday
+                    # range (and the range is meaningful), fall back to open-based change.
+                    intraday_range = high_price - low_price
+                    if intraday_range > 0.5 and open_price > 0 and abs(ch) < intraday_range * 0.05:
+                        ch = round(last_price - open_price, 2)
+                        chp = round((ch / open_price * 100), 2) if open_price else 0.0
+
+                    orig_keys = key_map.get(raw, [raw])
+                    for k in orig_keys:
+                        k_sym = k.split(":")[-1] if ":" in k else k
+                        result[k] = Quote(
+                            symbol=k_sym,
+                            last_price=last_price,
+                            open=open_price,
+                            high=high_price,
+                            low=low_price,
+                            close=prev_close,
+                            volume=int(v.get("volume", 0) or 0),
+                            change=ch,
+                            change_pct=chp,
+                            vwap=float(v.get("atp", 0.0) or 0.0) or None,
+                            upper_circuit=float(v.get("upper_ckt", 0.0) or 0.0) or None,
+                            lower_circuit=float(v.get("lower_ckt", 0.0) or 0.0) or None,
+                        )
+                    if raw not in result:
+                        raw_sym = raw.split(":")[-1] if ":" in raw else raw
+                        result[raw] = Quote(
+                            symbol=raw_sym,
+                            last_price=last_price,
+                            open=open_price,
+                            high=high_price,
+                            low=low_price,
+                            close=prev_close,
+                            volume=int(v.get("volume", 0) or 0),
+                            change=ch,
+                            change_pct=chp,
+                            vwap=float(v.get("atp", 0.0) or 0.0) or None,
+                            upper_circuit=float(v.get("upper_ckt", 0.0) or 0.0) or None,
+                            lower_circuit=float(v.get("lower_ckt", 0.0) or 0.0) or None,
+                        )
+            except Exception:
+                continue
+
+        return result
 
     def get_ltp(self, instrument: str) -> float:
         quotes = self.get_quote([instrument])
         q = quotes.get(instrument)
         return q.last_price if q else 0.0
 
+    def get_market_depth(self, symbol: str) -> dict[str, Any]:
+        """
+        Level 2 Market Depth (5-level Order Book) + Circuit Limits + Official Exchange ATP (VWAP).
+        """
+        fyers = self._get_fyers()
+        if not fyers:
+            return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
+        fyers_sym = _to_fyers_symbol(symbol)
+        try:
+            data = fyers.depth({"symbol": fyers_sym, "ohlcv_flag": 1})
+            if data.get("s") != "ok":
+                return {
+                    "status": "UNAVAILABLE",
+                    "message": data.get("message", "Error fetching market depth"),
+                }
+            d = data.get("d", {}).get(fyers_sym, {})
+            bids = d.get("bids", d.get("bid", []))
+            asks = d.get("asks", d.get("ask", []))
+            total_buy = int(d.get("totalbuyqty", 0) or 0)
+            total_sell = int(d.get("totalsellqty", 0) or 0)
+            ratio = round(total_buy / max(total_sell, 1), 3) if total_sell > 0 else 1.0
+            return {
+                "status": "ok",
+                "market_data_state": "LIVE",
+                "symbol": symbol,
+                "fyers_symbol": fyers_sym,
+                "bids": bids,
+                "asks": asks,
+                "total_buy_qty": total_buy,
+                "total_sell_qty": total_sell,
+                "bid_ask_ratio": ratio,
+                "order_book_imbalance_ratio": ratio,
+                "atp": float(d.get("atp", 0.0) or 0.0),  # Official exchange VWAP
+                "upper_circuit": float(d.get("upper_ckt", 0.0) or 0.0),
+                "lower_circuit": float(d.get("lower_ckt", 0.0) or 0.0),
+                "ltp": float(d.get("ltp", 0.0) or 0.0),
+                "open": float(d.get("o", 0.0) or 0.0),
+                "high": float(d.get("h", 0.0) or 0.0),
+                "low": float(d.get("l", 0.0) or 0.0),
+                "close": float(d.get("c", 0.0) or 0.0),
+                "volume": int(d.get("v", 0) or 0),
+                "oi": int(d.get("oi", 0) or 0),
+                "pdoi": int(d.get("pdoi", 0) or 0),
+                "oi_pct_change": float(d.get("oipercent", 0.0) or 0.0),
+            }
+        except Exception as e:
+            return {"status": "UNAVAILABLE", "error": str(e)}
+
+    def get_market_status(self) -> dict[str, Any]:
+        """Real-time market status for Indian exchanges (NSE, BSE, MCX, CDS)."""
+        fyers = self._get_fyers()
+        if not fyers:
+            return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
+        try:
+            res = fyers.market_status()
+            if isinstance(res, dict) and res.get("s") == "ok":
+                return {
+                    "status": "ok",
+                    "marketStatus": res.get("marketStatus", []),
+                }
+            return {"status": "error", "raw": res}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     def get_options_chain(
         self,
         underlying: str,
         expiry: Optional[str] = None,
     ) -> list[OptionsContract]:
-        """Fyers options chain via SDK."""
+        """Fyers options chain with live Greeks, ΔOI, and institutional PCR via SDK."""
         fyers = self._get_fyers()
+        if not fyers:
+            return []
         try:
-            from market.instruments import COMMODITY_SYMBOLS
+            fyers_sym = _to_fyers_symbol(underlying)
+            if (
+                "-INDEX" not in fyers_sym
+                and "-EQ" not in fyers_sym
+                and not fyers_sym.startswith("MCX:")
+            ):
+                fyers_sym = f"NSE:{fyers_sym.split(':')[-1]}-EQ"
 
-            clean_und = (
-                underlying.upper()
-                .replace("MCX:", "")
-                .replace("CDS:", "")
-                .replace("NFO:", "")
-                .replace("NSE:", "")
-                .strip()
-            )
-            if clean_und in ("NIFTY", "NIFTY50", "NIFTY 50"):
-                fyers_sym = "NSE:NIFTY50-INDEX"
-            elif clean_und in ("BANKNIFTY", "NIFTY BANK"):
-                fyers_sym = "NSE:NIFTYBANK-INDEX"
-            elif clean_und in ("FINNIFTY", "NIFTY FIN SERVICE"):
-                fyers_sym = "NSE:FINNIFTY-INDEX"
-            elif clean_und in ("MIDCPNIFTY", "NIFTY MID SELECT"):
-                fyers_sym = "NSE:MIDCPNIFTY-INDEX"
-            elif clean_und == "SENSEX":
-                fyers_sym = "BSE:SENSEX-INDEX"
-            elif clean_und == "BANKEX":
-                fyers_sym = "BSE:BANKEX-INDEX"
-            elif clean_und in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:"):
-                fyers_sym = f"MCX:{clean_und}"
-            elif clean_und in (
-                "USDINR",
-                "EURINR",
-                "GBPINR",
-                "JPYINR",
-            ) or underlying.upper().startswith("CDS:"):
-                fyers_sym = f"CDS:{clean_und}"
-            else:
-                fyers_sym = f"NSE:{clean_und}-EQ"
+            params: dict[str, Any] = {"symbol": fyers_sym, "strikecount": 20, "greeks": "1"}
 
-            params = {"symbol": fyers_sym, "strikecount": 20}
+            # If specific expiry requested, map YYYY-MM-DD to Fyers expiry timestamp
             if expiry:
-                params["timestamp"] = expiry
+                if str(expiry).isdigit():
+                    params["timestamp"] = str(expiry)
+                else:
+                    exp_ts = self._resolve_expiry_timestamp(fyers_sym, expiry)
+                    if exp_ts:
+                        params["timestamp"] = str(exp_ts)
 
             data = fyers.optionchain(params)
-            chain = []
-            for item in data.get("data", {}).get("optionsChain", []):
-                for opt_type in ["CE", "PE"]:
-                    opt = (
-                        item.get(opt_type, item)
-                        if opt_type in str(item.get("option_type", ""))
-                        else None
-                    )
-                    if not opt and item.get("option_type") == opt_type:
-                        opt = item
-                    if not opt:
-                        continue
+            payload = data.get("data", {})
+            chain: list[OptionsContract] = []
 
-                    # Parse expiry from symbol if not provided by API.
-                    # Fyers symbol format: NIFTY26407STRIKECE → YY=26, MMM-day=407 (Apr 7)
-                    raw_expiry = opt.get("expiry", expiry or "")
-                    if not raw_expiry:
-                        sym_str = opt.get("symbol", "")
-                        raw_expiry = _parse_expiry_from_fyers_symbol(sym_str, opt_type) or ""
+            # Store root metadata for snapshot inspection
+            self._last_oc_metadata = {
+                "underlying": underlying,
+                "call_oi": payload.get("callOi", 0),
+                "put_oi": payload.get("putOi", 0),
+                "pcr": round(
+                    float(payload.get("putOi", 0) or 0) / max(float(payload.get("callOi", 1) or 1), 1),
+                    4,
+                ),
+                "expiry_data": payload.get("expiryData", []),
+                "indiavix": payload.get("indiavixData", {}).get("ltp"),
+            }
 
-                    chain.append(
-                        OptionsContract(
-                            symbol=opt.get("symbol", ""),
-                            underlying=underlying,
-                            expiry=raw_expiry,
-                            strike=float(opt.get("strike_price", item.get("strikePrice", 0))),
-                            option_type=opt_type,
-                            last_price=float(opt.get("ltp", 0)),
-                            oi=int(opt.get("oi", 0)),
-                            oi_change=int(opt.get("oiChange", 0)),
-                            volume=int(opt.get("volume", 0)),
-                            iv=float(opt.get("iv", 0)) or None,
-                            lot_size=int(opt.get("lotSize", 50)),
-                            exchange="NFO",
-                        )
+            for item in payload.get("optionsChain", []):
+                stk = item.get("strike_price")
+                if stk is None or stk == -1:
+                    continue  # Spot underlying header row
+
+                opt_type = str(item.get("option_type", "")).upper()
+                if opt_type not in ("CE", "PE"):
+                    continue
+
+                greeks = item.get("greeks") or {}
+                raw_expiry = item.get("expiry", expiry or "")
+                if not raw_expiry:
+                    sym_str = item.get("symbol", "")
+                    raw_expiry = _parse_expiry_from_fyers_symbol(sym_str, opt_type) or ""
+
+                chain.append(
+                    OptionsContract(
+                        symbol=item.get("symbol", ""),
+                        underlying=underlying,
+                        expiry=raw_expiry,
+                        strike=float(stk),
+                        option_type=opt_type,
+                        last_price=float(item.get("ltp", 0.0) or 0.0),
+                        oi=int(item.get("oi", 0) or 0),
+                        oi_change=int(item.get("doi", item.get("oich", item.get("oiChange", 0))) or 0),
+                        pchange_oi=float(item.get("pdoi", item.get("oichp", 0.0)) or 0.0) or None,
+                        volume=int(item.get("volume", 0) or 0),
+                        iv=float(greeks.get("iv", 0.0) or 0.0) or None,
+                        delta=float(greeks.get("delta", 0.0) or 0.0) or None,
+                        gamma=float(greeks.get("gamma", 0.0) or 0.0) or None,
+                        theta=float(greeks.get("theta", 0.0) or 0.0) or None,
+                        vega=float(greeks.get("vega", 0.0) or 0.0) or None,
+                        bid=float(item.get("bid", 0.0) or 0.0) or None,
+                        ask=float(item.get("ask", 0.0) or 0.0) or None,
+                        lot_size=int(item.get("lotSize", 50) or 50),
+                        exchange="NFO",
                     )
+                )
             return chain
         except Exception:
             return []
 
+    def get_expiries(self, underlying: str) -> list[str]:
+        """Extract all official available expiry dates from Fyers formatted as YYYY-MM-DD."""
+        fyers = self._get_fyers()
+        if not fyers:
+            return []
+        try:
+            fyers_sym = _to_fyers_symbol(underlying)
+            data = fyers.optionchain({"symbol": fyers_sym, "strikecount": 1})
+            expiry_data = data.get("data", {}).get("expiryData", [])
+            dates = []
+            for item in expiry_data:
+                d_str = item.get("date", "")
+                if "-" in d_str:
+                    parts = d_str.split("-")
+                    if len(parts) == 3:
+                        dates.append(f"{parts[2]}-{parts[1]}-{parts[0]}")
+            return sorted(set(dates))
+        except Exception:
+            return []
+
+    def _resolve_expiry_timestamp(
+        self, fyers_symbol: str, target_expiry_iso: str
+    ) -> Optional[str]:
+        """Convert YYYY-MM-DD to Fyers epoch timestamp."""
+        fyers = self._get_fyers()
+        if not fyers:
+            return None
+        try:
+            data = fyers.optionchain({"symbol": fyers_symbol, "strikecount": 1})
+            expiry_data = data.get("data", {}).get("expiryData", [])
+            parts = target_expiry_iso.split("-")
+            fyers_date_format = (
+                f"{parts[2]}-{parts[1]}-{parts[0]}" if len(parts) == 3 else target_expiry_iso
+            )
+            for item in expiry_data:
+                if item.get("date") == fyers_date_format:
+                    return str(item.get("expiry"))
+        except Exception:
+            pass
+        return None
+
+    def get_options_snapshot(
+        self,
+        underlying: str,
+        expiry: Optional[str] = None,
+    ) -> tuple[list[OptionsContract], Optional[float], list[str], dict[str, Any]]:
+        """
+        Unified options snapshot returning (contracts, live_spot_price, available_expiries, source_info).
+        Carries Greeks, PCR, India VIX, and official expiry dates.
+        """
+        from datetime import timezone
+
+        chain = self.get_options_chain(underlying, expiry)
+        meta = getattr(self, "_last_oc_metadata", {})
+        spot = self.get_ltp(underlying)
+        expiries = self.get_expiries(underlying)
+        if not expiries and chain:
+            expiries = sorted({c.expiry for c in chain if c.expiry})
+
+        source_info = {
+            "provider": "fyers",
+            "source": "BROKER_REST",
+            "data_state": "LIVE",
+            "is_realtime": True,
+            "pcr": meta.get("pcr"),
+            "call_oi": meta.get("call_oi"),
+            "put_oi": meta.get("put_oi"),
+            "indiavix": meta.get("indiavix"),
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+        return chain, spot, expiries, source_info
+
     # ── Orders ────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_fyers_order_type(order_type: str) -> int:
+        """Map order type to Fyers API v3 numeric code.
+        1: LIMIT, 2: MARKET, 3: STOP (SL-M), 4: STOP_LIMIT (SL-L).
+        """
+        ot = str(order_type or "").upper().strip()
+        if ot in ("MARKET", "MKT"):
+            return 2
+        if ot in ("SL", "STOP", "SL-M", "STOP_MARKET"):
+            return 3
+        if ot in ("SL-L", "STOP_LIMIT", "STOPLIMIT"):
+            return 4
+        return 1  # LIMIT default
 
     def place_order(self, req: OrderRequest) -> OrderResponse:
         fyers = self._get_fyers()
-        product_map = {"CNC": "CNC", "MIS": "INTRADAY", "NRML": "MARGIN"}
+        product_map = {
+            "CNC": "CNC",
+            "MIS": "INTRADAY",
+            "INTRADAY": "INTRADAY",
+            "NRML": "MARGIN",
+            "MARGIN": "MARGIN",
+            "CO": "CO",
+            "BO": "BO",
+        }
+        fyers_sym = _to_fyers_symbol(f"{req.exchange}:{req.symbol}" if req.exchange else req.symbol)
+        eff_type = self._to_fyers_order_type(req.order_type)
         payload = {
-            "symbol": f"NSE:{req.symbol}-EQ",
+            "symbol": fyers_sym,
             "qty": req.quantity,
-            "type": 1 if req.order_type == "MARKET" else 2,
+            "type": eff_type,
             "side": 1 if req.transaction_type == "BUY" else -1,
             "productType": product_map.get(req.product, "CNC"),
-            "limitPrice": req.price if req.order_type == "LIMIT" else 0,
-            "stopPrice": req.trigger_price if req.trigger_price else 0,
-            "validity": "DAY",
+            "limitPrice": float(req.price) if eff_type in (1, 4) else 0.0,
+            "stopPrice": float(req.trigger_price) if req.trigger_price else 0.0,
+            "validity": req.validity or "DAY",
             "disclosedQty": 0,
             "offlineOrder": False,
         }
         data = fyers.place_order(payload)
         return OrderResponse(
             order_id=str(data.get("id", "")),
-            status="OPEN",
+            status="OPEN" if data.get("s") == "ok" else "REJECTED",
             message=data.get("message", "Order placed"),
         )
+
+    def place_basket_orders(self, orders: list[OrderRequest]) -> list[OrderResponse]:
+        """Place multiple orders atomically in a single batch network call."""
+        fyers = self._get_fyers()
+        product_map = {
+            "CNC": "CNC",
+            "MIS": "INTRADAY",
+            "INTRADAY": "INTRADAY",
+            "NRML": "MARGIN",
+            "MARGIN": "MARGIN",
+            "CO": "CO",
+            "BO": "BO",
+        }
+        payload_orders = []
+        for req in orders:
+            fyers_sym = _to_fyers_symbol(
+                f"{req.exchange}:{req.symbol}" if req.exchange else req.symbol
+            )
+            eff_type = self._to_fyers_order_type(req.order_type)
+            payload_orders.append(
+                {
+                    "symbol": fyers_sym,
+                    "qty": req.quantity,
+                    "type": eff_type,
+                    "side": 1 if req.transaction_type == "BUY" else -1,
+                    "productType": product_map.get(req.product, "CNC"),
+                    "limitPrice": float(req.price) if eff_type in (1, 4) else 0.0,
+                    "stopPrice": float(req.trigger_price) if req.trigger_price else 0.0,
+                    "validity": req.validity or "DAY",
+                    "disclosedQty": 0,
+                    "offlineOrder": False,
+                }
+            )
+        data = fyers.place_basket_orders(payload_orders)
+        responses = []
+        for item in data.get("data", []):
+            responses.append(
+                OrderResponse(
+                    order_id=str(item.get("id", "")),
+                    status=str(item.get("status", "SUBMITTED")),
+                    message=item.get("message", "Basket order placed"),
+                )
+            )
+        return responses
+
+    def place_multileg_order(
+        self,
+        legs: list[dict],
+        order_type: Optional[str] = None,
+        product_type: str = "MARGIN",
+    ) -> OrderResponse:
+        """Place multi-leg options strategy order (e.g. Bull Call Spread, Straddle, Iron Condor)."""
+        fyers = self._get_fyers()
+        num_legs = len(legs)
+        eff_order_type = order_type or f"{num_legs}L"
+        payload_legs = {}
+        for idx, leg in enumerate(legs, start=1):
+            raw_side = str(leg.get("side", "BUY")).upper()
+            side_code = 1 if raw_side in ("1", "BUY") else -1
+            raw_type = str(leg.get("type", "LIMIT")).upper()
+            type_code = 1 if raw_type in ("1", "LIMIT") else 2
+            payload_legs[f"leg{idx}"] = {
+                "symbol": _to_fyers_symbol(leg["symbol"]),
+                "qty": int(leg["qty"]),
+                "side": side_code,
+                "type": type_code,
+                "limitPrice": float(leg.get("limitPrice", leg.get("limit_price", 0.0))),
+            }
+        payload = {
+            "productType": product_type,
+            "offlineOrder": False,
+            "orderType": eff_order_type,
+            "validity": "IOC",
+            "legs": payload_legs,
+        }
+        data = fyers.place_multileg_order(payload)
+        return OrderResponse(
+            order_id=str(data.get("id", "")),
+            status="SUBMITTED" if data.get("s") == "ok" else "REJECTED",
+            message=data.get("message", "Multi-leg order placed"),
+        )
+
+    def exit_positions(self, position_id: Optional[str] = None) -> bool:
+        """1-click square off specific position or panic square off all positions."""
+        fyers = self._get_fyers()
+        try:
+            data = fyers.exit_positions(id=position_id) if position_id else fyers.exit_positions()
+            return data.get("s") == "ok"
+        except Exception:
+            return False
 
     def get_orders(self) -> list[Order]:
         fyers = self._get_fyers()
@@ -645,6 +1282,35 @@ class FyersAPI(BrokerAPI):
         except Exception:
             return False
 
+    def modify_order(
+        self,
+        order_id: str,
+        price: Optional[float] = None,
+        qty: Optional[int] = None,
+        trigger_price: Optional[float] = None,
+        order_type: Optional[str] = None,
+    ) -> OrderResponse:
+        """Modify an active pending order on Fyers."""
+        fyers = self._get_fyers()
+        payload: dict[str, Any] = {"id": str(order_id)}
+        if price is not None:
+            payload["limitPrice"] = float(price)
+        if trigger_price is not None:
+            payload["stopPrice"] = float(trigger_price)
+        if qty is not None:
+            payload["qty"] = int(qty)
+        if order_type is not None:
+            payload["type"] = self._to_fyers_order_type(order_type)
+        try:
+            data = fyers.modify_order(payload)
+            return OrderResponse(
+                order_id=str(data.get("id", order_id)),
+                status="OPEN" if data.get("s") == "ok" else "REJECTED",
+                message=data.get("message", "Order modified"),
+            )
+        except Exception as e:
+            return OrderResponse(order_id=str(order_id), status="REJECTED", message=str(e))
+
     # ── Historical Data ──────────────────────────────────────
 
     def get_historical_data(
@@ -655,47 +1321,494 @@ class FyersAPI(BrokerAPI):
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
     ) -> list[dict]:
-        fyers = self._get_fyers()
-        resolution_map = {
-            "day": "D",
-            "minute": "1",
-            "5minute": "5",
-            "15minute": "15",
-            "30minute": "30",
-            "60minute": "60",
-        }
-        resolution = resolution_map.get(interval, "D")
-        to_date = to_date or datetime.now()
-        from_date = from_date or datetime(to_date.year - 1, to_date.month, to_date.day)
+        """
+        Fetch institutional OHLCV candles using Fyers official history API.
 
-        fyers_symbol = _to_fyers_symbol(f"{exchange}:{symbol}")
+        Maps intervals ('day', '60minute', '15minute', '5minute', '1minute', etc.)
+        to Fyers resolutions ('D', '60', '15', '5', '1').
+        """
+        from datetime import timedelta
+
+        fyers = self._get_fyers()
+        if not fyers:
+            raise RuntimeError("Fyers broker not initialized or logged in")
+
+        fyers_sym = _to_fyers_symbol(symbol)
+        if exchange and not fyers_sym.startswith(f"{exchange}:") and ":" not in fyers_sym:
+            fyers_sym = f"{exchange.upper()}:{fyers_sym}"
+
+        res_map = {
+            "day": "D",
+            "1d": "D",
+            "d": "D",
+            "60minute": "60",
+            "60m": "60",
+            "1h": "60",
+            "30minute": "30",
+            "30m": "30",
+            "20minute": "20",
+            "20m": "20",
+            "15minute": "15",
+            "15m": "15",
+            "10minute": "10",
+            "10m": "10",
+            "5minute": "5",
+            "5m": "5",
+            "3minute": "3",
+            "3m": "3",
+            "2minute": "2",
+            "2m": "2",
+            "minute": "1",
+            "1m": "1",
+            "1minute": "1",
+        }
+        res_str = res_map.get(str(interval).lower(), "D")
+
+        now = datetime.now()
+        eff_to = to_date or now
+        if not from_date:
+            if res_str in ("1", "2", "3", "5"):
+                eff_from = eff_to - timedelta(days=5)
+            elif res_str in ("10", "15", "20", "30", "60"):
+                eff_from = eff_to - timedelta(days=45)
+            else:
+                eff_from = eff_to - timedelta(days=365)
+        else:
+            eff_from = from_date
+
+        payload = {
+            "symbol": fyers_sym,
+            "resolution": res_str,
+            "date_format": "1",
+            "range_from": eff_from.strftime("%Y-%m-%d"),
+            "range_to": eff_to.strftime("%Y-%m-%d"),
+            "cont_flag": "1",
+        }
 
         try:
-            data = fyers.history(
-                {
-                    "symbol": fyers_symbol,
-                    "resolution": resolution,
-                    "date_format": "1",
-                    "range_from": str(int(from_date.timestamp())),
-                    "range_to": str(int(to_date.timestamp())),
-                    "cont_flag": "1",
-                }
-            )
-
+            data = fyers.history(payload)
+            if not isinstance(data, dict) or data.get("s") != "ok":
+                return []
             candles = data.get("candles", [])
-            return [
-                {
-                    "date": datetime.fromtimestamp(c[0]),
-                    "open": c[1],
-                    "high": c[2],
-                    "low": c[3],
-                    "close": c[4],
-                    "volume": c[5],
+            rows = []
+            for c in candles:
+                if len(c) >= 6:
+                    epoch = c[0]
+                    dt = datetime.fromtimestamp(epoch)
+                    rows.append(
+                        {
+                            "date": dt,
+                            "open": float(c[1]),
+                            "high": float(c[2]),
+                            "low": float(c[3]),
+                            "close": float(c[4]),
+                            "volume": float(c[5]),
+                        }
+                    )
+            return rows
+        except Exception:
+            return []
+
+    # ── Advanced Institutional Orders & Screeners ─────────────
+
+    def place_gtt_order(
+        self,
+        symbol: str,
+        qty: int,
+        side: int,  # 1 for BUY, -1 for SELL
+        trigger_price: float,
+        limit_price: Optional[float] = None,
+        product: str = "CNC",
+    ) -> dict[str, Any]:
+        """Place a Good-Till-Triggered (GTT) order held server-side by Fyers for up to 1 year."""
+        fyers = self._get_fyers()
+        fyers_sym = _to_fyers_symbol(symbol)
+        payload = {
+            "side": side,
+            "symbol": fyers_sym,
+            "productType": product,
+            "orderInfo": {
+                "leg1": {
+                    "price": float(limit_price or trigger_price),
+                    "triggerPrice": float(trigger_price),
+                    "qty": int(qty),
                 }
-                for c in candles
-            ]
+            },
+        }
+        return fyers.place_gtt_order(payload)
+
+    def get_gtt_orders(self) -> list[dict]:
+        """Fetch active server-side GTT orders."""
+        fyers = self._get_fyers()
+        try:
+            data = fyers.gtt_orderbook()
+            return data.get("orderBook", []) if isinstance(data, dict) else []
+        except Exception:
+            return []
+
+    def cancel_gtt_order(self, order_id: str) -> bool:
+        """Cancel an active GTT order."""
+        fyers = self._get_fyers()
+        try:
+            data = fyers.cancel_gtt_order({"id": str(order_id)})
+            return data.get("s") == "ok"
+        except Exception:
+            return False
+
+    def create_smart_trailing_order(
+        self,
+        symbol: str,
+        qty: int,
+        side: int,  # 1 for BUY, -1 for SELL
+        stop_price: float,
+        trail_amount: float,
+        limit_price: Optional[float] = None,
+        product: str = "INTRADAY",
+    ) -> dict[str, Any]:
+        """Place an exchange-managed Smart Trailing Stop Loss order."""
+        fyers = self._get_fyers()
+        fyers_sym = _to_fyers_symbol(symbol)
+        payload = {
+            "symbol": fyers_sym,
+            "side": side,
+            "qty": int(qty),
+            "productType": product,
+            "orderType": 1 if limit_price else 2,
+            "stopPrice": float(stop_price),
+            "jump_diff": float(trail_amount),
+            "limitPrice": float(limit_price) if limit_price else 0,
+        }
+        return fyers.create_smart_order_trail(payload)
+
+    def exit_all_positions(self, segment: Optional[str] = None) -> dict[str, Any]:
+        """1-Click Emergency Square-Off across all open positions or by segment."""
+        fyers = self._get_fyers()
+        payload = {"segment": segment} if segment else {"exit_all": 1}
+        return fyers.exit_positions(payload)
+
+    def get_screener_technical(self, screener: str = "cs004") -> dict[str, Any]:
+        """Query native Fyers server-side technical screeners."""
+        fyers = self._get_fyers()
+        try:
+            return fyers.screeners_technical({"screener": screener})
         except Exception as e:
-            raise RuntimeError(
-                f"Fyers historical data error: {e}\n"
-                "Check that the symbol and date range are valid. If your session expired, try: logout → login"
-            ) from e
+            return {"status": "error", "error": str(e), "s": "error"}
+
+    def get_screener_candlestick(self, pattern: str = "hammer") -> dict[str, Any]:
+        """Query native Fyers server-side candlestick pattern recognizer."""
+        fyers = self._get_fyers()
+        try:
+            if hasattr(fyers, "screeners_candlestick"):
+                return fyers.screeners_candlestick({"pattern": pattern})
+            elif hasattr(fyers, "screeners"):
+                return fyers.screeners({"pattern": pattern, "type": "candlestick"})
+            return {"s": "ok", "pattern": pattern, "data": []}
+        except Exception as e:
+            return {"status": "error", "error": str(e), "s": "error"}
+
+    def get_trade_history(self) -> list[dict]:
+        """Retrieve execution trade history for institutional audit."""
+        fyers = self._get_fyers()
+        try:
+            data = fyers.tradebook()
+            return data.get("tradeBook", []) if isinstance(data, dict) else []
+        except Exception:
+            return []
+
+    # ── 24x7 Server-Side Price & Volatility Triggers ─────────
+
+    def create_server_alert(
+        self,
+        symbol: str,
+        name: str,
+        target_price: float,
+        condition: str = "GT",  # "GT" (greater) or "LT" (lesser)
+        comparison_type: str = "LTP",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        """Create a 24x7 price alert monitored directly on Fyers exchange infrastructure."""
+        fyers = self._get_fyers()
+        fyers_sym = _to_fyers_symbol(symbol)
+        payload = {
+            "alert-type": 1,
+            "name": name,
+            "symbol": fyers_sym,
+            "comparisonType": comparison_type.upper(),
+            "condition": condition.upper(),
+            "value": float(target_price),
+            "notes": notes or f"ChanakyaTrade Alert on {symbol}",
+        }
+        return fyers.create_alert(payload)
+
+    def get_server_alerts(self, archive: int = 0) -> list[dict]:
+        """Retrieve all active or archived server-side price alerts."""
+        fyers = self._get_fyers()
+        try:
+            res = fyers.get_alert({"archive": archive})
+            return (
+                res.get("data", [])
+                if isinstance(res, dict) and isinstance(res.get("data"), list)
+                else []
+            )
+        except Exception:
+            return []
+
+    def delete_server_alert(self, alert_id: str) -> bool:
+        """Delete an active server-side price alert."""
+        fyers = self._get_fyers()
+        try:
+            res = fyers.delete_alert({"id": alert_id})
+            return res.get("s") == "ok"
+        except Exception:
+            return False
+
+    # ── Server-Side Candlestick Recognizers ──────────────────
+
+    def get_screener_candlestick(self, pattern: str = "hammer") -> dict[str, Any]:
+        """Query native Fyers server-side candlestick pattern recognizer."""
+        fyers = self._get_fyers()
+        try:
+            return fyers.screeners_candlestick({"screener": pattern})
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    # ── Real-Time Sector Breadth & Heatmap ───────────────────
+
+    def get_sector_heatmap(self) -> dict[str, Any]:
+        """
+        Generate real-time Sector Heatmap & Relative Strength Breadth Matrix.
+        Queries all major official NSE sectoral indices concurrently.
+        """
+        sector_symbols = [
+            ("Bank", "NSE:NIFTYBANK-INDEX"),
+            ("IT", "NSE:NIFTYIT-INDEX"),
+            ("Auto", "NSE:NIFTYAUTO-INDEX"),
+            ("Metal", "NSE:NIFTYMETAL-INDEX"),
+            ("Pharma", "NSE:NIFTYPHARMA-INDEX"),
+            ("FMCG", "NSE:NIFTYFMCG-INDEX"),
+            ("Energy", "NSE:NIFTYENERGY-INDEX"),
+            ("Infra", "NSE:NIFTYINFRA-INDEX"),
+            ("Realty", "NSE:NIFTYREALTY-INDEX"),
+            ("Fin Services", "NSE:NIFTYFINSERVICE-INDEX"),
+            ("Media", "NSE:NIFTYMEDIA-INDEX"),
+            ("PSE", "NSE:NIFTYPSE-INDEX"),
+        ]
+        sym_list = [sym for _, sym in sector_symbols]
+        quotes = self.get_quote(sym_list)
+
+        items = []
+        advances = 0
+        declines = 0
+
+        for name, sym in sector_symbols:
+            q = quotes.get(sym)
+            if q:
+                chg_pct = round(float(q.change_pct), 2)
+                ltp = round(float(q.last_price), 2)
+                chg = round(float(q.change), 2)
+                if chg_pct > 0:
+                    advances += 1
+                elif chg_pct < 0:
+                    declines += 1
+                items.append(
+                    {
+                        "name": name,
+                        "symbol": sym,
+                        "ltp": ltp,
+                        "change": chg,
+                        "change_pct": chg_pct,
+                        "status": "BULLISH" if chg_pct > 0 else "BEARISH",
+                    }
+                )
+
+        items.sort(key=lambda x: x["change_pct"], reverse=True)
+        leading = items[0]["name"] if items else "None"
+        lagging = items[-1]["name"] if items else "None"
+        breadth_ratio = round(advances / max(advances + declines, 1), 2)
+
+        return {
+            "status": "ok",
+            "timestamp": datetime.now().isoformat(),
+            "leading_sector": leading,
+            "lagging_sector": lagging,
+            "advances": advances,
+            "declines": declines,
+            "breadth_ratio": breadth_ratio,
+            "sectors": items,
+        }
+
+    def check_order_margin(
+        self,
+        orders: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """
+        Pre-flight margin calculation using official Fyers v3 Multi-Order Margin API.
+        Combines exchange margin requirements with SEBI statutory transaction costs
+        (Brokerage, STT, Exchange Fees, GST, Stamp Duty).
+        """
+        import requests
+        from decimal import Decimal
+        from engine.charges import calculate_transaction_charges
+
+        if not self._access_token:
+            return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
+
+        fyers_orders = []
+        parsed_orders = []
+
+        for o in orders:
+            raw_sym = str(o.get("symbol", "")).strip()
+            fyers_sym = _to_fyers_symbol(raw_sym)
+            qty = int(o.get("qty", o.get("quantity", 1)))
+            raw_side = str(o.get("side", "BUY")).upper()
+            side_code = 1 if raw_side in ("BUY", "1") else -1
+            pt = str(o.get("product_type", o.get("productType", "INTRADAY"))).upper()
+            if pt in ("MIS", "DAY", "INTRA"):
+                pt = "INTRADAY"
+            elif pt in ("NRML", "NORMAL", "CARRY"):
+                pt = "MARGIN"
+            elif pt in ("DELIVERY", "CASH"):
+                pt = "CNC"
+
+            limit_p = float(o.get("limit_price", o.get("price", 0.0)) or 0.0)
+            stop_p = float(o.get("stop_price", 0.0) or 0.0)
+            order_type = 1 if limit_p > 0 else 2
+
+            fyers_payload = {
+                "symbol": fyers_sym,
+                "qty": qty,
+                "side": side_code,
+                "type": order_type,
+                "productType": pt,
+            }
+            if limit_p > 0:
+                fyers_payload["limitPrice"] = limit_p
+            if stop_p > 0:
+                fyers_payload["stopPrice"] = stop_p
+
+            fyers_orders.append(fyers_payload)
+            parsed_orders.append({
+                "raw_symbol": raw_sym,
+                "fyers_symbol": fyers_sym,
+                "qty": qty,
+                "side": "BUY" if side_code == 1 else "SELL",
+                "product_type": pt,
+                "price": limit_p,
+            })
+
+        # 1. Query Fyers official multiorder margin endpoint
+        margin_url = "https://api-t1.fyers.in/api/v3/multiorder/margin"
+        headers = {
+            "Authorization": f"{self._app_id}:{self._access_token}",
+            "Content-Type": "application/json",
+        }
+
+        margin_total = 0.0
+        margin_avail = 0.0
+        fyers_err = None
+
+        try:
+            resp = requests.post(margin_url, headers=headers, json={"data": fyers_orders}, timeout=5.0)
+            if resp.status_code == 200:
+                res_data = resp.json()
+                if res_data.get("s") == "ok" and "data" in res_data:
+                    d = res_data["data"]
+                    margin_total = float(d.get("margin_total", 0.0) or 0.0)
+                    margin_avail = float(d.get("margin_avail", 0.0) or 0.0)
+                else:
+                    fyers_err = res_data.get("message", "Fyers margin calculation failed")
+            else:
+                fyers_err = f"HTTP {resp.status_code}: {resp.text}"
+        except Exception as e:
+            fyers_err = str(e)
+
+        # 2. If margin_avail is 0 or unpopulated, resolve from live funds endpoint
+        if margin_avail <= 0:
+            try:
+                funds = self.get_funds()
+                margin_avail = float(funds.available_margin or funds.equity_margin or funds.total_balance or 0.0)
+            except Exception:
+                pass
+
+        # 3. Calculate statutory transaction charges across all orders
+        total_brokerage = Decimal("0.00")
+        total_stt = Decimal("0.00")
+        total_exc = Decimal("0.00")
+        total_gst = Decimal("0.00")
+        total_stamp = Decimal("0.00")
+        total_sebi = Decimal("0.00")
+        total_charges = Decimal("0.00")
+
+        order_details = []
+        for p in parsed_orders:
+            sym = p["raw_symbol"]
+            sym_upper = sym.upper()
+            is_opt = any(x in sym_upper for x in ("CE", "PE"))
+            is_fut = "FUT" in sym_upper
+            is_delivery = p["product_type"] == "CNC"
+
+            if is_opt:
+                seg = "OPTIONS"
+            elif is_fut:
+                seg = "FUTURES"
+            elif is_delivery:
+                seg = "EQUITY_DELIVERY"
+            else:
+                seg = "EQUITY_INTRADAY"
+
+            exec_price = p["price"]
+            if exec_price <= 0:
+                exec_price = self.get_ltp(sym) or 100.0
+
+            costs = calculate_transaction_charges(
+                price=Decimal(str(round(exec_price, 2))),
+                quantity=p["qty"],
+                segment=seg,
+                side=p["side"],
+            )
+            total_brokerage += costs.brokerage
+            total_stt += costs.stt
+            total_exc += costs.exchange_charges
+            total_gst += costs.gst
+            total_stamp += costs.stamp_duty
+            total_sebi += costs.sebi_charges
+            total_charges += costs.total_charges
+
+            order_details.append({
+                "symbol": sym,
+                "fyers_symbol": p["fyers_symbol"],
+                "side": p["side"],
+                "qty": p["qty"],
+                "estimated_price": round(exec_price, 2),
+                "segment": seg,
+                "notional_turnover": float(costs.notional_turnover),
+                "charges": costs.to_dict(),
+            })
+
+        net_charges_float = float(total_charges)
+        total_cash_required = round(margin_total + (net_charges_float if any(p["side"] == "BUY" for p in parsed_orders) else 0.0), 2)
+        is_sufficient = (margin_avail >= total_cash_required) if margin_avail > 0 else True
+        shortfall = max(0.0, round(total_cash_required - margin_avail, 2)) if margin_avail > 0 and not is_sufficient else 0.0
+
+        return {
+            "status": "ok" if not fyers_err else "DEGRADED",
+            "fyers_error": fyers_err,
+            "preflight_verdict": "CLEARED" if is_sufficient else "INSUFFICIENT_MARGIN",
+            "required_margin": round(margin_total, 2),
+            "available_margin": round(margin_avail, 2),
+            "is_sufficient": is_sufficient,
+            "shortfall": shortfall,
+            "net_cash_required": total_cash_required,
+            "total_transaction_charges": round(net_charges_float, 2),
+            "charges_breakdown": {
+                "brokerage": float(total_brokerage),
+                "stt": float(total_stt),
+                "exchange_charges": float(total_exc),
+                "gst": float(total_gst),
+                "stamp_duty": float(total_stamp),
+                "sebi_charges": float(total_sebi),
+                "total_charges": net_charges_float,
+            },
+            "orders": order_details,
+        }
+

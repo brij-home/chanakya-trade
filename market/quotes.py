@@ -82,6 +82,10 @@ def get_computed_vwap(symbol: str, exchange: str = "NSE") -> Optional[float]:
         if cached and (now_ts - cached[0]) < _VWAP_CACHE_TTL:
             return cached[1] if cached[1] > 0 else None
 
+    # Defensive default: mark 0.0 so concurrent or rapid repeat calls don't hang
+    with _vwap_cache_lock:
+        _VWAP_CACHE[clean] = (now_ts, 0.0)
+
     try:
         from market.history import get_ohlcv
         from zoneinfo import ZoneInfo

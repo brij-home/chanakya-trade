@@ -5384,6 +5384,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             except Exception:
                 pass
 
+        effective_atr = atr_val if (atr_val is not None and atr_val > 0) else max(cur_ltp * 0.015, 1.0)
+
         # 2. Rich AI Personas with dynamically calculated quant metrics for setup_sym
         rvol_val = vp_report.rvol_20d if vp_report else 1.0
         structure_dir = ms_report.regime if ms_report else "NEUTRAL"
@@ -5469,8 +5471,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             kedia_metric = "SMILE: N/A"
 
         # 3. Taleb: Antifragile Convexity & Spreads
-        if atr_val is not None and cur_ltp > 0:
-            vol_pct = (atr_val / cur_ltp) * 100
+        vol_pct = (atr_val / cur_ltp) * 100 if (atr_val is not None and cur_ltp > 0) else None
+        if vol_pct is not None:
             taleb_conf = max(40, min(95, int(88 - (vol_pct * 8))))
             taleb_verdict = (
                 "POSITIVE CONVEXITY" if vol_pct <= 2.8 else "HIGH VOLATILITY (SPREADS ONLY)"
@@ -5800,13 +5802,13 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "confidence": taleb_conf,
                 "accent": "cyan",
                 "checklist": [
-                    f"Realized ATR Volatility: {vol_pct:.2f}%",
+                    f"Realized ATR Volatility: {f'{vol_pct:.2f}%' if vol_pct is not None else 'Pending'}",
                     "Defined-Risk Options Spread Mandate",
                     "Zero Unhedged Short Gamma Exposure",
                     "Positive Convexity Tail Skew Capture",
                 ],
                 "metrics": {
-                    "ATR Vol": f"{vol_pct:.2f}%",
+                    "ATR Vol": f"{vol_pct:.2f}%" if vol_pct is not None else "Pending",
                     "Max Loss": "Strictly Capped",
                     "Payoff": "Defined-Risk",
                     "Tail Hedge": "Active",
@@ -5882,13 +5884,13 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "accent": "purple",
                 "checklist": [
                     simons_metric,
-                    f"Realized ATR: Rs. {atr_val:.2f}",
+                    f"Realized ATR: {f'Rs. {atr_val:.2f}' if atr_val is not None else 'Pending'}",
                     f"Regime Direction: {structure_dir}",
                     "Kelly Risk-Parity Lot Quantization",
                 ],
                 "metrics": {
                     "Metric": simons_metric.split("|")[0].strip(),
-                    "ATR": f"Rs. {atr_val:.2f}",
+                    "ATR": f"Rs. {atr_val:.2f}" if atr_val is not None else "Pending",
                     "Regime": structure_dir,
                     "Edge": "Quantitative",
                 },
@@ -6263,10 +6265,10 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                     supports += [
                         float(l) for l in df["low"].tail(10).tolist() if float(l) < cur_ltp
                     ]
-                nearest_sup = max(supports) if supports else (cur_ltp - 1.5 * atr_val)
+                nearest_sup = max(supports) if supports else (cur_ltp - 1.5 * effective_atr)
 
-                min_risk = max(cur_ltp * 0.0035, atr_val * 0.8)
-                max_risk = max(cur_ltp * 0.025, atr_val * 2.5)
+                min_risk = max(cur_ltp * 0.0035, effective_atr * 0.8)
+                max_risk = max(cur_ltp * 0.025, effective_atr * 2.5)
                 raw_risk = max(cur_ltp - nearest_sup * 0.998, min_risk)
                 risk_unit = min(raw_risk, max_risk)
 
@@ -6299,10 +6301,10 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                     resistances += [
                         float(h) for h in df["high"].tail(10).tolist() if float(h) > cur_ltp
                     ]
-                nearest_res = min(resistances) if resistances else (cur_ltp + 1.5 * atr_val)
+                nearest_res = min(resistances) if resistances else (cur_ltp + 1.5 * effective_atr)
 
-                min_risk = max(cur_ltp * 0.0035, atr_val * 0.8)
-                max_risk = max(cur_ltp * 0.025, atr_val * 2.5)
+                min_risk = max(cur_ltp * 0.0035, effective_atr * 0.8)
+                max_risk = max(cur_ltp * 0.025, effective_atr * 2.5)
                 raw_risk = max(nearest_res * 1.002 - cur_ltp, min_risk)
                 risk_unit = min(raw_risk, max_risk)
 
@@ -8049,6 +8051,11 @@ async def skill_gex_snapshot(
                 "as_of_display": now_time,
                 "data_state": source_info.get("data_state", "UNVERIFIED"),
                 "data_source": source_info.get("provider", "unknown"),
+                "source": source_info.get("source", ""),
+                "is_broker": bool(
+                    source_info.get("source") == "BROKER_REST"
+                    or source_info.get("provider") in ("fyers", "zerodha", "angelone", "shoonya", "mstock")
+                ),
                 "source_label": source_info.get("source_label", "Unverified Feed"),
                 "is_realtime": source_info.get("is_realtime", False),
                 "is_market_open": source_info.get("is_market_open", False),

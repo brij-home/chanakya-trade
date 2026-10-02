@@ -319,6 +319,130 @@ def calculate_position_size(
     )
 
 
+def calculate_volatility_risk_parity_size(
+    symbol: str,
+    entry_price: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+    capital: Optional[float] = None,
+    target_risk_pct: float = 1.0,
+    max_margin_pct: float = 25.0,
+    atr: Optional[float] = None,
+    is_fno: Optional[bool] = None,
+    alert_type: Optional[str] = None,
+) -> PositionSizeResult:
+    """
+    Automated Volatility Risk-Parity Position Sizing Engine.
+
+    Calculates lot sizing such that rupee risk contribution is equalized across all assets
+    regardless of whether the instrument is a volatile midcap or a low-beta heavyweight.
+    Automatically fetches 14-period daily ATR, live LTP, and available margin if omitted.
+    """
+    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+
+    # 1. Resolve Capital from Broker Funds if omitted
+    if capital is None or capital <= 0:
+        try:
+            from brokers.session import get_execution_broker
+
+            exec_broker = get_execution_broker()
+            if exec_broker:
+                funds = exec_broker.get_funds()
+                avail = float(
+                    getattr(funds, "available_cash", 0.0)
+                    or getattr(funds, "available_margin", 0.0)
+                    or getattr(funds, "total_balance", 0.0)
+                    or 0.0
+                )
+                if avail > 0:
+                    capital = avail
+        except Exception:
+            pass
+        if capital is None or capital <= 0:
+            capital = 100000.0
+
+    # 2. Resolve live entry price if omitted
+    if entry_price is None or entry_price <= 0:
+        try:
+            from market.quotes import get_ltp
+
+            entry_price = float(get_ltp(f"NSE:{clean_sym}") or get_ltp(clean_sym) or 0.0)
+        except Exception:
+            pass
+        if entry_price is None or entry_price <= 0:
+            entry_price = 100.0
+
+    # 3. Resolve 14-period ATR if omitted
+    if atr is None or atr <= 0:
+        try:
+            from market.history import get_historical_data
+            from analysis.technical import atr as calc_atr
+
+            df = get_historical_data(clean_sym, interval="1d", days=60)
+            if df is not None and len(df) >= 14:
+                atr_series = calc_atr(df, period=14).dropna()
+                if not atr_series.empty:
+                    val = float(atr_series.iloc[-1])
+                    if val > 0:
+                        atr = val
+        except Exception:
+            pass
+        if atr is None or atr <= 0:
+            atr = max(round(entry_price * 0.015, 2), 1.0)
+
+    # 4. Resolve stop-loss if omitted (1.5 x ATR structural trailing floor)
+    if stop_loss is None or stop_loss <= 0 or stop_loss >= entry_price:
+        stop_loss = round(max(0.05, entry_price - (atr * 1.5)), 2)
+
+    # 5. Auto-detect F&O eligibility (derivatives / indices default to lots, stocks default to cash equity)
+    if is_fno is None:
+        import re
+        is_derivative_contract = bool(re.search(r"(?:FUT|\d+(?:CE|PE))$", clean_sym))
+        is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+        is_fno = is_derivative_contract or is_index
+
+    # 6. Execute core ATR volatility parity calculation
+    result = calculate_position_size(
+        symbol=clean_sym,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        capital=capital,
+        max_risk_pct=target_risk_pct,
+        max_capital_pct=max_margin_pct,
+        atr=atr,
+        sizing_model="atr_volatility",
+        is_fno=is_fno,
+    )
+
+    # 7. Apply detector-specific conviction lot scaling if provided
+    if alert_type and result.lot_size > 1 and result.lots >= 1:
+        mult = get_detector_lot_multiplier(alert_type)
+        if mult != 1.0:
+            adj_lots = max(1, int(round(result.lots * mult)))
+            adj_shares = adj_lots * result.lot_size
+            adj_capital = adj_shares * result.entry_price
+            adj_risk = adj_shares * abs(result.entry_price - result.stop_loss)
+            result = PositionSizeResult(
+                symbol=result.symbol,
+                shares=adj_shares,
+                lots=adj_lots,
+                lot_size=result.lot_size,
+                capital_allocated=adj_capital,
+                capital_pct=(adj_capital / capital) * 100.0 if capital > 0 else 0.0,
+                risk_amount=adj_risk,
+                risk_pct=(adj_risk / capital) * 100.0 if capital > 0 else 0.0,
+                entry_price=result.entry_price,
+                stop_loss=result.stop_loss,
+                target_price=result.target_price,
+                r_multiple=result.r_multiple,
+                sizing_model="atr_volatility",
+                notes=f"{result.notes} [Detector '{alert_type}' {mult:.2f}x sizing applied: {adj_lots} lots]",
+            )
+
+    vol_pct = (atr / entry_price) * 100.0
+    result.notes = f"Volatility Risk-Parity (14-ATR: ₹{atr:.2f} [{vol_pct:.2f}%]) | Margin Cap: {max_margin_pct}% | {result.notes}"
+    return result
+
+
 # ── Detector-Specific Lot Quantization ───────────────────────────────────────
 # Derived from EOD session diagnostics (2026-09-24): empirically-proven high-conviction
 # detectors receive a 1.25x lot premium; low-conviction counter-trend detectors are

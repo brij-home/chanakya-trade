@@ -265,3 +265,571 @@ async def get_ticker_snapshot():
         ticker_stream._cached_ribbon_tickers = tickers
         snap["tickers"] = tickers
     return snap
+
+
+@router.get("/api/market/depth/{symbol}", tags=["Market Data"])
+async def get_market_depth_endpoint(symbol: str):
+    """
+    Returns real-time Level 2 Market Depth (5 bids / 5 asks), ATP (VWAP),
+    circuit limits, and Order Book Imbalance (OBI).
+    """
+    from brokers.session import get_data_broker, get_execution_broker
+
+    clean = symbol.strip()
+    brk = None
+    try:
+        brk = get_data_broker()
+    except Exception:
+        pass
+    if not brk:
+        try:
+            brk = get_execution_broker()
+        except Exception:
+            pass
+
+    if brk and hasattr(brk, "get_market_depth"):
+        depth = await asyncio.to_thread(brk.get_market_depth, clean)
+        if depth and depth.get("status") == "ok":
+            return depth
+
+    # Fallback to order book analytics
+    from market.order_book import analyze_symbol_order_book
+
+    snap = await asyncio.to_thread(analyze_symbol_order_book, clean)
+    return {"status": "ok", "data": snap.to_dict()}
+
+
+@router.get("/api/market/exchange-status", tags=["Market Data"])
+async def get_exchange_market_status_endpoint():
+    """
+    Returns live exchange market status across Equity, F&O, Commodity, and Currency.
+    """
+    from brokers.session import get_data_broker
+
+    try:
+        brk = get_data_broker()
+        if brk and hasattr(brk, "get_market_status"):
+            res = await asyncio.to_thread(brk.get_market_status)
+            return {"status": "ok", "data": res}
+    except Exception as e:
+        logger.debug("Failed fetching market status from broker: %s", e)
+
+    from market.calendar import is_market_open
+
+    return {
+        "status": "ok",
+        "data": {
+            "NSE_EQUITY": "OPEN" if is_market_open("NSE") else "CLOSED",
+            "NSE_FNO": "OPEN" if is_market_open("NFO") else "CLOSED",
+            "BSE_EQUITY": "OPEN" if is_market_open("BSE") else "CLOSED",
+            "MCX_COMMODITY": "OPEN" if is_market_open("MCX") else "CLOSED",
+        },
+    }
+
+
+@router.get("/api/market/fyers/status", tags=["Broker Diagnostics"])
+async def get_fyers_status_endpoint():
+    """
+    Returns Fyers API v3 institutional integration status:
+    authentication, profile, funds, websocket connectivity, and role assignment.
+    """
+    from brokers.session import get_all_brokers, get_data_broker_key, get_execution_broker_key
+    from market.websocket import ws_manager
+
+    all_brokers = get_all_brokers()
+    fyers = all_brokers.get("fyers")
+    if not fyers:
+        return {
+            "connected": False,
+            "error": "Fyers broker not registered or session not active",
+        }
+
+    is_auth = False
+    profile = {}
+    funds = {}
+    try:
+        is_auth = fyers.is_authenticated()
+        if is_auth:
+            profile = await asyncio.to_thread(fyers.get_profile)
+            funds = await asyncio.to_thread(fyers.get_funds)
+    except Exception as e:
+        logger.debug("Fyers diagnostics error: %s", e)
+
+    return {
+        "connected": True,
+        "authenticated": is_auth,
+        "roles": {
+            "is_data_primary": get_data_broker_key() == "fyers",
+            "is_execution_primary": get_execution_broker_key() == "fyers",
+        },
+        "websocket": {
+            "connected": bool(ws_manager.connected),
+            "cached_ticks_count": len(ws_manager.get_all_ticks()),
+        },
+        "profile": {
+            "name": profile.get("name", ""),
+            "fy_id": profile.get("fy_id", ""),
+            "email": profile.get("email", ""),
+        },
+        "funds": funds,
+    }
+
+
+@router.get("/api/fyers/gtt", tags=["Fyers Advanced"])
+async def get_fyers_gtt_orders_endpoint():
+    """Retrieve active Good-Till-Triggered (GTT) orders held on Fyers servers."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if brk and hasattr(brk, "get_gtt_orders"):
+        orders = await asyncio.to_thread(brk.get_gtt_orders)
+        return {"status": "ok", "orders": orders}
+    return {"status": "error", "error": "Execution broker does not support GTT orders"}
+
+
+@router.post("/api/fyers/gtt", tags=["Fyers Advanced"])
+async def place_fyers_gtt_order_endpoint(req: dict):
+    """Place a 1-year valid GTT trigger order on Fyers servers."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "place_gtt_order"):
+        return {"status": "error", "error": "Execution broker does not support GTT orders"}
+
+    symbol = req.get("symbol", "")
+    qty = int(req.get("qty", req.get("quantity", 1)))
+    raw_side = str(req.get("side", 1)).upper()
+    side = 1 if raw_side in ("1", "BUY") else -1
+    trigger_price = float(req.get("trigger_price", req.get("triggerPrice", 0.0)))
+    limit_price = float(req.get("limit_price", req.get("limitPrice", trigger_price)))
+    product = req.get("product", req.get("productType", "CNC"))
+
+    res = await asyncio.to_thread(
+        brk.place_gtt_order,
+        symbol=symbol,
+        qty=qty,
+        side=side,
+        trigger_price=trigger_price,
+        limit_price=limit_price,
+        product=product,
+    )
+    return res
+
+
+@router.delete("/api/fyers/gtt/{order_id}", tags=["Fyers Advanced"])
+async def cancel_fyers_gtt_order_endpoint(order_id: str):
+    """Cancel a server-held GTT order."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if brk and hasattr(brk, "cancel_gtt_order"):
+        ok = await asyncio.to_thread(brk.cancel_gtt_order, order_id)
+        return {"status": "ok" if ok else "error", "cancelled": ok}
+    return {"status": "error", "error": "Execution broker does not support GTT orders"}
+
+
+@router.post("/api/fyers/smart-trail", tags=["Fyers Advanced"])
+async def place_fyers_smart_trail_endpoint(req: dict):
+    """Place an exchange-managed Smart Trailing Stop Loss order."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "create_smart_trailing_order"):
+        return {"status": "error", "error": "Execution broker does not support smart trailing orders"}
+
+    symbol = req.get("symbol", "")
+    qty = int(req.get("qty", 1))
+    raw_side = str(req.get("side", -1)).upper()
+    side = 1 if raw_side in ("1", "BUY") else -1
+    stop_price = float(req.get("stop_price", 0.0))
+    trail_amount = float(req.get("trail_amount", 1.0))
+    limit_price = float(req.get("limit_price")) if req.get("limit_price") else None
+    product = req.get("product", "INTRADAY")
+
+    res = await asyncio.to_thread(
+        brk.create_smart_trailing_order,
+        symbol=symbol,
+        qty=qty,
+        side=side,
+        stop_price=stop_price,
+        trail_amount=trail_amount,
+        limit_price=limit_price,
+        product=product,
+    )
+    return res
+
+
+@router.post("/api/fyers/exit-all", tags=["Fyers Advanced"])
+@router.post("/api/fyers/panic-exit", tags=["Fyers Advanced"])
+async def fyers_panic_exit_endpoint(req: Optional[dict] = None):
+    """1-Click Emergency Position Square-Off across all segments or specific segment."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "exit_all_positions"):
+        return {"status": "error", "error": "Execution broker does not support bulk emergency exit"}
+
+    segment = req.get("segment") if req else None
+    res = await asyncio.to_thread(brk.exit_all_positions, segment=segment)
+    return res
+
+
+@router.patch("/api/fyers/orders/{order_id}", tags=["Fyers Advanced"])
+async def patch_fyers_order_endpoint(order_id: str, req: dict):
+    """Modify an active pending order without losing queue priority."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "modify_order"):
+        return {"status": "error", "error": "Broker does not support order modification"}
+
+    price = float(req["price"]) if "price" in req and req["price"] is not None else None
+    qty = int(req["qty"]) if "qty" in req and req["qty"] is not None else None
+    trigger_price = float(req["trigger_price"]) if "trigger_price" in req and req["trigger_price"] is not None else None
+    order_type = req.get("order_type")
+
+    res = await asyncio.to_thread(
+        brk.modify_order,
+        order_id=order_id,
+        price=price,
+        qty=qty,
+        trigger_price=trigger_price,
+        order_type=order_type,
+    )
+    return {
+        "status": "ok" if res.status == "OPEN" else "error",
+        "order_id": res.order_id,
+        "broker_status": res.status,
+        "message": res.message,
+    }
+
+
+@router.get("/api/fyers/trades", tags=["Fyers Advanced"])
+async def get_fyers_trades_endpoint():
+    """Retrieve execution tradebook history for institutional audit."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if brk and hasattr(brk, "get_trade_history"):
+        trades = await asyncio.to_thread(brk.get_trade_history)
+        return {"status": "ok", "trades": trades}
+    return {"status": "error", "error": "Execution broker does not support trade history"}
+
+
+@router.get("/api/fyers/screener/{screener_id}", tags=["Fyers Advanced"])
+@router.get("/api/fyers/screeners/technical", tags=["Fyers Advanced"])
+async def get_fyers_screener_endpoint(screener_id: Optional[str] = None, screener: Optional[str] = None):
+    """Query Fyers native server-side screener (e.g. cs004 for F&O stocks)."""
+    from brokers.session import get_data_broker
+
+    brk = get_data_broker()
+    eff_screener = screener or screener_id or "cs004"
+    if brk and hasattr(brk, "get_screener_technical"):
+        data = await asyncio.to_thread(brk.get_screener_technical, eff_screener)
+        return {"status": "ok", "data": data, "s": "ok"}
+    return {"status": "error", "error": "Data broker does not support Fyers screeners"}
+
+
+@router.post("/api/fyers/multileg", tags=["Fyers Advanced"])
+async def place_fyers_multileg_endpoint(req: dict):
+    """Place atomic multi-leg option strategy (2L or 3L) with zero legging risk."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "place_multileg_order"):
+        return {"status": "error", "error": "Execution broker does not support multileg orders"}
+
+    order_type = req.get("order_type", "2L")
+    legs = req.get("legs", [])
+    product = req.get("product", "INTRADAY")
+
+    if not legs or len(legs) < 2:
+        return {"status": "error", "error": "At least 2 legs required for multileg order"}
+
+    res = await asyncio.to_thread(
+        brk.place_multileg_order,
+        order_type=order_type,
+        legs=legs,
+        product=product,
+    )
+    return {"status": "ok", "response": res}
+
+
+@router.get("/api/fyers/alerts", tags=["Fyers Advanced"])
+async def get_fyers_alerts_endpoint(archive: int = 0):
+    """Retrieve 24x7 server-side exchange price alerts."""
+    from brokers.session import get_data_broker
+
+    brk = get_data_broker()
+    if brk and hasattr(brk, "get_server_alerts"):
+        alerts = await asyncio.to_thread(brk.get_server_alerts, archive=archive)
+        return {"status": "ok", "alerts": alerts}
+    return {"status": "error", "error": "Broker does not support server alerts"}
+
+
+@router.post("/api/fyers/alerts", tags=["Fyers Advanced"])
+async def create_fyers_alert_endpoint(req: dict):
+    """Deploy a 24x7 price trigger directly on Fyers exchange infrastructure."""
+    from brokers.session import get_data_broker
+
+    brk = get_data_broker()
+    if not brk or not hasattr(brk, "create_server_alert"):
+        return {"status": "error", "error": "Broker does not support server alerts"}
+
+    symbol = req.get("symbol", "")
+    name = req.get("name", f"Alert-{symbol}")
+    target_price = float(req.get("target_price", 0.0))
+    condition = req.get("condition", "GT")
+    comparison_type = req.get("comparison_type", "LTP")
+    notes = req.get("notes", "")
+
+    res = await asyncio.to_thread(
+        brk.create_server_alert,
+        symbol=symbol,
+        name=name,
+        target_price=target_price,
+        condition=condition,
+        comparison_type=comparison_type,
+        notes=notes,
+    )
+    return {"status": "ok", "response": res}
+
+
+@router.delete("/api/fyers/alerts/{alert_id}", tags=["Fyers Advanced"])
+async def delete_fyers_alert_endpoint(alert_id: str):
+    """Delete a server-side price trigger."""
+    from brokers.session import get_data_broker
+
+    brk = get_data_broker()
+    if brk and hasattr(brk, "delete_server_alert"):
+        ok = await asyncio.to_thread(brk.delete_server_alert, alert_id)
+        return {"status": "ok" if ok else "error", "deleted": ok}
+    return {"status": "error", "error": "Broker does not support server alerts"}
+
+
+@router.get("/api/fyers/screener/candlestick/{pattern}", tags=["Fyers Advanced"])
+@router.get("/api/fyers/screeners/candlestick", tags=["Fyers Advanced"])
+async def get_fyers_candlestick_screener_endpoint(pattern: Optional[str] = "hammer"):
+    """Query native Fyers server-side candlestick pattern recognizer."""
+    from brokers.session import get_data_broker
+
+    brk = get_data_broker()
+    eff_pattern = pattern or "hammer"
+    if brk and hasattr(brk, "get_screener_candlestick"):
+        data = await asyncio.to_thread(brk.get_screener_candlestick, eff_pattern)
+        if isinstance(data, dict):
+            return {**data, "status": "ok", "s": data.get("s", "ok")}
+        return {"status": "ok", "data": data, "s": "ok"}
+    return {"status": "error", "error": "Data broker does not support candlestick screeners"}
+
+
+@router.get("/api/fyers/sector-heatmap", tags=["Fyers Advanced"])
+async def get_fyers_sector_heatmap_endpoint():
+    """Retrieve real-time Sector Heatmap & Relative Strength Breadth Matrix."""
+    from brokers.session import get_data_broker
+
+    brk = get_data_broker()
+    if brk and hasattr(brk, "get_sector_heatmap"):
+        heatmap = await asyncio.to_thread(brk.get_sector_heatmap)
+        return heatmap
+    return {"status": "error", "error": "Data broker does not support sector heatmap"}
+
+
+# ── 1. Options Gamma Exposure (GEX) & Dealer Zero-Gamma Levels ─────────────
+@router.get("/api/options/gex/{symbol}", tags=["Options & Derivatives"])
+async def get_options_gex_endpoint(symbol: str, expiry: Optional[str] = None):
+    """
+    Returns total Net Market Gamma, Dealer Zero-Gamma Level, Call Wall,
+    Put Wall, and Volatility Breakout Zones across the strike strip.
+    """
+    from analysis.gex import get_gex_analysis
+    res = await asyncio.to_thread(get_gex_analysis, symbol, expiry)
+    return res
+
+
+@router.post("/api/options/gex", tags=["Options & Derivatives"])
+async def post_options_gex_endpoint(req: dict[str, Any]):
+    """Compute GEX analysis from POST payload with symbol and optional expiry."""
+    from analysis.gex import get_gex_analysis
+    symbol = req.get("symbol", "NIFTY")
+    expiry = req.get("expiry")
+    res = await asyncio.to_thread(get_gex_analysis, symbol, expiry)
+    return res
+
+
+# ── 2. Order Flow & Cumulative Volume Delta (CVD) Divergence ───────────────
+@router.get("/api/order-flow/cvd/{symbol}", tags=["Order Flow & Depth"])
+async def get_order_flow_cvd_endpoint(symbol: str, timeframe: str = "5m"):
+    """
+    Computes Level 2 Bid/Ask order book delta imbalances and multi-bar
+    Cumulative Volume Delta (CVD) to identify institutional absorption and exhaustion tops/bottoms.
+    """
+    from analysis.order_flow import analyze_order_flow
+    snap = await asyncio.to_thread(analyze_order_flow, symbol, timeframe)
+    return {"status": "ok", "data": snap.to_dict()}
+
+
+@router.post("/api/order-flow/analyze", tags=["Order Flow & Depth"])
+async def post_order_flow_analyze_endpoint(req: dict[str, Any]):
+    """Analyze order flow and CVD from POST payload."""
+    from analysis.order_flow import analyze_order_flow
+    symbol = req.get("symbol", "NIFTY")
+    timeframe = req.get("timeframe", "5m")
+    snap = await asyncio.to_thread(analyze_order_flow, symbol, timeframe)
+    return {"status": "ok", "data": snap.to_dict()}
+
+
+# ── 3. Automated Volatility Risk-Parity Position Sizing ──────────────────────
+@router.get("/api/risk/size/{symbol}", tags=["Risk & Sizing"])
+async def get_volatility_risk_parity_size_endpoint(
+    symbol: str,
+    capital: Optional[float] = None,
+    risk_pct: float = 1.0,
+    max_margin_pct: float = 25.0,
+    entry_price: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+    is_fno: Optional[bool] = None,
+    alert_type: Optional[str] = None,
+):
+    """
+    Automated Volatility Risk-Parity sizing engine. Equalizes rupee risk contribution
+    using 14-period ATR and margin utilization limits.
+    """
+    from engine.position_sizer import calculate_volatility_risk_parity_size
+    res = await asyncio.to_thread(
+        calculate_volatility_risk_parity_size,
+        symbol=symbol,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        capital=capital,
+        target_risk_pct=risk_pct,
+        max_margin_pct=max_margin_pct,
+        is_fno=is_fno,
+        alert_type=alert_type,
+    )
+    return {"status": "ok", "data": res.as_dict()}
+
+
+@router.post("/api/risk/size", tags=["Risk & Sizing"])
+async def post_volatility_risk_parity_size_endpoint(req: dict[str, Any]):
+    """Automated Volatility Risk-Parity sizing engine via POST."""
+    from engine.position_sizer import calculate_volatility_risk_parity_size
+    symbol = req.get("symbol", "NIFTY")
+    capital = float(req["capital"]) if "capital" in req and req["capital"] else None
+    risk_pct = float(req.get("risk_pct", 1.0))
+    max_margin_pct = float(req.get("max_margin_pct", 25.0))
+    entry_price = float(req["entry_price"]) if "entry_price" in req and req["entry_price"] else None
+    stop_loss = float(req["stop_loss"]) if "stop_loss" in req and req["stop_loss"] else None
+    is_fno = bool(req["is_fno"]) if "is_fno" in req else None
+    alert_type = req.get("alert_type")
+
+    res = await asyncio.to_thread(
+        calculate_volatility_risk_parity_size,
+        symbol=symbol,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        capital=capital,
+        target_risk_pct=risk_pct,
+        max_margin_pct=max_margin_pct,
+        is_fno=is_fno,
+        alert_type=alert_type,
+    )
+    return {"status": "ok", "data": res.as_dict()}
+
+
+# ── 4. Broker Margin Pre-Flight Estimator ────────────────────────────────────
+@router.get("/api/fyers/margin-check", tags=["Fyers Advanced", "Risk & Sizing"])
+async def get_fyers_margin_check_endpoint(
+    symbol: str,
+    qty: int = 1,
+    side: str = "BUY",
+    product_type: str = "INTRADAY",
+    price: Optional[float] = None,
+):
+    """
+    Pre-flight margin calculation and net transaction charges estimation.
+    Queries official Fyers Multi-Order Margin API and SEBI statutory rates.
+    """
+    from brokers.session import get_execution_broker
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "check_order_margin"):
+        return {"status": "error", "error": "Execution broker does not support pre-flight margin checks"}
+
+    order_payload = [{
+        "symbol": symbol,
+        "qty": qty,
+        "side": side,
+        "product_type": product_type,
+        "price": price or 0.0,
+    }]
+    res = await asyncio.to_thread(brk.check_order_margin, order_payload)
+    return res
+
+
+@router.post("/api/fyers/margin-check", tags=["Fyers Advanced", "Risk & Sizing"])
+async def post_fyers_margin_check_endpoint(req: dict[str, Any]):
+    """
+    Pre-flight multi-order margin calculation and net transaction charges estimation.
+    """
+    from brokers.session import get_execution_broker
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "check_order_margin"):
+        return {"status": "error", "error": "Execution broker does not support pre-flight margin checks"}
+
+    orders = req.get("orders", [])
+    if not orders and "symbol" in req:
+        orders = [req]
+
+    res = await asyncio.to_thread(brk.check_order_margin, orders)
+    return res
+
+
+# ── Fyers Institutional 50-Level Depth (TBT) Endpoints ───────────
+
+@router.get("/api/fyers/tbt-depth/{symbol}", tags=["Fyers 50-Depth TBT"])
+async def get_fyers_50_depth_endpoint(symbol: str):
+    """
+    Retrieve real-time 50-level Depth of Market (DOM) from Fyers TBT feed.
+    Includes OBI-50, resting iceberg walls, and density score.
+    """
+    from market.fyers_tbt_manager import fyers_tbt_manager
+
+    # Auto-subscribe so subsequent queries stay warm
+    fyers_tbt_manager.subscribe([symbol])
+    data = await asyncio.to_thread(fyers_tbt_manager.get_50_depth, symbol)
+    return {"status": "ok", "data": data}
+
+
+@router.post("/api/fyers/tbt-audit", tags=["Fyers 50-Depth TBT"])
+async def post_fyers_tbt_audit_endpoint(req: dict[str, Any]):
+    """
+    Tier 2 Institutional Gatekeeper:
+    Audits candidate setup order book conviction, resting walls, and slippage.
+    """
+    from market.fyers_tbt_manager import fyers_tbt_manager
+
+    symbol = req.get("symbol", "")
+    if not symbol:
+        return {"status": "error", "error": "Symbol is required"}
+    side = req.get("side", "BUY")
+    lot_size = int(req.get("lot_size", 65))
+
+    audit = await asyncio.to_thread(
+        fyers_tbt_manager.audit_candidate_depth, symbol, side=side, lot_size=lot_size
+    )
+    return {"status": "ok", "audit": audit}
+
+
+@router.post("/api/fyers/tbt-subscribe", tags=["Fyers 50-Depth TBT"])
+async def post_fyers_tbt_subscribe_endpoint(req: dict[str, Any]):
+    """Dynamically register active symbol for 50-depth streaming."""
+    from market.fyers_tbt_manager import fyers_tbt_manager
+
+    symbols = req.get("symbols", [])
+    if isinstance(symbols, str):
+        symbols = [symbols]
+    if "symbol" in req and req["symbol"] not in symbols:
+        symbols.append(req["symbol"])
+
+    fyers_tbt_manager.subscribe(symbols)
+    return {"status": "ok", "subscribed": symbols}

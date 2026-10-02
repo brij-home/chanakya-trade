@@ -209,9 +209,34 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
     """
     clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip().upper()
     try:
-        from brokers.session import get_execution_broker
+        from brokers.session import get_data_broker, get_execution_broker
 
-        brk = get_execution_broker()
+        brk = None
+        try:
+            brk = get_data_broker()
+        except Exception:
+            pass
+        if not brk:
+            try:
+                brk = get_execution_broker()
+            except Exception:
+                pass
+
+        if brk and hasattr(brk, "get_market_depth"):
+            depth_dict = brk.get_market_depth(clean_sym)
+            if depth_dict and (depth_dict.get("bids") or depth_dict.get("buy")):
+                raw_depth = {
+                    "buy": depth_dict.get("bids") or depth_dict.get("buy", []),
+                    "sell": depth_dict.get("asks") or depth_dict.get("sell", []),
+                }
+                return compute_order_book_metrics(
+                    clean_sym,
+                    raw_depth,
+                    depth_dict.get("ltp", 0.0),
+                    live_broker_connected=True,
+                    provenance=f"LIVE_{brk.name.upper()}_L2" if hasattr(brk, "name") else "LIVE_BROKER_L2",
+                )
+
         if brk and hasattr(brk, "get_quote"):
             q = brk.get_quote(clean_sym)
             if q and hasattr(q, "depth") and q.depth:
