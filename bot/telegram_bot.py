@@ -1826,9 +1826,6 @@ def get_signal_message_id(
         base_sig = re.sub(r"_\d{4}$", "", sig)
         if base_sig not in candidates:
             candidates.append(base_sig)
-        contract_sig = re.sub(r"_\d{1,2}[A-Z]{3}(?:_\d{4})?$", "", sig)
-        if contract_sig not in candidates:
-            candidates.append(contract_sig)
 
     with _signal_map_lock:
         if chat_id:
@@ -1864,9 +1861,6 @@ def record_signal_message_id(
         base_sig = re.sub(r"_\d{4}$", "", sig)
         if base_sig not in keys_to_index:
             keys_to_index.append(base_sig)
-        contract_sig = re.sub(r"_\d{1,2}[A-Z]{3}(?:_\d{4})?$", "", sig)
-        if contract_sig not in keys_to_index:
-            keys_to_index.append(contract_sig)
     if alert_id:
         aid = alert_id.strip()
         if aid and aid not in keys_to_index:
@@ -1912,6 +1906,7 @@ def format_telegram_push_payload(
     message_thread_id: Optional[int] = None,
     parse_mode: str = "HTML",
     alert_id: Optional[str] = None,
+    is_update: Optional[bool] = None,
 ) -> dict[str, Any]:
     """
     Construct the canonical Telegram sendMessage payload.
@@ -1919,6 +1914,7 @@ def format_telegram_push_payload(
       1. Topic/Thread Partitioning: extracts topic ID from 'chat_id:topic_id' or TELEGRAM_TOPIC_ID.
       2. Thread Partitioning via reply_to_message_id: links updates/milestones back to the original call.
       3. Audio / Tone Differentiator: sets disable_notification=True for minor trailing ratchets or silent alerts.
+      4. Explicit Lifecycle State: enforces top-level delivery when is_update is False.
     """
     target_chat_id = (chat_id or "").strip() or _load_chat_id()
 
@@ -1962,18 +1958,34 @@ def format_telegram_push_payload(
             resolved_sig = m.group(1).lstrip("#").strip()
 
     # Thread Partitioning via reply_to_message_id:
-    # If not explicitly specified, auto-lookup root message ID for updates/milestones
-    if reply_to_message_id is None and (
+    # 1. Explicit False: Initial trade calls NEVER thread under prior messages
+    if is_update is False:
+        reply_to_message_id = None
+    elif reply_to_message_id is None and (
         resolved_sig or alert_id or re.search(r"#(SIG_[a-zA-Z0-9_]+)", message)
     ):
-        is_update = bool(
-            re.search(r"\bUPDATE\s*#?\d*\b", message, re.IGNORECASE)
-            or re.search(
-                r"\b(?:TARGET|TRAIL|STOP|INVALIDAT|EXIT|SCALE|WARNING|HIT|BREACH|FREE-ROLL|RATCHET|PROFIT|COMPRESS|STAGNATION)\b",
-                message,
-                re.IGNORECASE,
+        # 2. Defensive heuristic when caller did not pass is_update explicitly
+        if is_update is None:
+            is_new_call = bool(
+                re.search(
+                    r"\b(?:NEW\s+CALL|NEW\s+TRADE\s+SETUP|NEW\s+RADAR|PRECURSOR\s+RADAR|EOD\s+WATCHLIST|WATCHLIST|ALPHA\s+VORTEX)\b",
+                    message,
+                    re.IGNORECASE,
+                )
             )
-        )
+            if is_new_call:
+                is_update = False
+            else:
+                # Genuine update must carry an explicit UPDATE marker or milestone event header
+                is_update = bool(
+                    re.search(r"\bUPDATE\s*(?:#?\d+|·|:|-)\b", message, re.IGNORECASE)
+                    or re.search(
+                        r"\b(?:TARGET\s+\d+|FINAL\s+TARGET|TRAILING\s+STOP|VIEW\s+INVALIDATED|STOP\s+LOSS\s+HIT|RUNNER\s+EXIT|PROFIT\s+SECURED|BREAKEVEN\s+LOCKED|SPREAD\s+FREE-ROLL\s+UNLOCKED)\b",
+                        message,
+                        re.IGNORECASE,
+                    )
+                )
+
         if is_update:
             if resolved_sig or alert_id:
                 reply_to_message_id = get_signal_message_id(
@@ -1989,6 +2001,10 @@ def format_telegram_push_payload(
     if reply_to_message_id:
         payload["reply_to_message_id"] = int(reply_to_message_id)
         payload["allow_sending_without_reply"] = True
+        payload["reply_parameters"] = {
+            "message_id": int(reply_to_message_id),
+            "allow_sending_without_reply": True,
+        }
         payload["reply_parameters"] = {
             "message_id": int(reply_to_message_id),
             "allow_sending_without_reply": True,
@@ -2028,6 +2044,7 @@ def send_push(
     message_thread_id: Optional[int] = None,
     on_success: Optional[Callable[[int], None]] = None,
     alert_id: Optional[str] = None,
+    is_update: Optional[bool] = None,
 ) -> None:
     """
     Send a push notification to the configured Telegram chat, group, or channel.
@@ -2035,7 +2052,8 @@ def send_push(
     Non-blocking — runs in a background thread.
     Includes a 5-minute anti-flood message deduplication guard.
     Supports in-thread replies (reply_to_message_id), topic routing (message_thread_id),
-    audible vs silent notification delivery (disable_notification), and on_success callbacks.
+    audible vs silent notification delivery (disable_notification), explicit lifecycle typing (is_update),
+    and on_success callbacks.
     """
     import hashlib
     import time
@@ -2081,6 +2099,7 @@ def send_push(
         message_thread_id=message_thread_id,
         parse_mode=parse_mode,
         alert_id=alert_id,
+        is_update=is_update,
     )
     if not payload or not payload.get("text"):
         return

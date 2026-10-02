@@ -108,10 +108,10 @@ def _find_next_structural_target(
             t1 = round(best.midpoint, 2)
             t1_rationale = f"Nearest Supply OB midpoint ₹{t1:,.2f} (formed {best.formed_date})"
         else:
-            t1 = round(entry + 2.0 * risk, 2)
-            t1_rationale = "2.0R structural expansion (no opposing OB within range)"
-        t2 = round(entry + 4.0 * risk, 2)
-        runner = round(entry + 6.0 * risk, 2)
+            t1 = round(entry + 2.5 * risk, 2)
+            t1_rationale = "2.5R structural expansion (no opposing OB within range)"
+        t2 = round(entry + 4.5 * risk, 2)
+        runner = round(entry + 7.0 * risk, 2)
     else:
         # Avoid immediate floor: filter demand OBs that are far enough to allow at least 1.5R
         candidates = [
@@ -126,10 +126,10 @@ def _find_next_structural_target(
             t1 = round(best.midpoint, 2)
             t1_rationale = f"Nearest Demand OB midpoint ₹{t1:,.2f} (formed {best.formed_date})"
         else:
-            t1 = round(entry - 2.0 * risk, 2)
-            t1_rationale = "2.0R structural expansion (no opposing OB within range)"
-        t2 = round(entry - 4.0 * risk, 2)
-        runner = round(entry - 6.0 * risk, 2)
+            t1 = round(entry - 2.5 * risk, 2)
+            t1_rationale = "2.5R structural expansion (no opposing OB within range)"
+        t2 = round(entry - 4.5 * risk, 2)
+        runner = round(entry - 7.0 * risk, 2)
 
     return t1, t2, runner, t1_rationale
 
@@ -330,6 +330,7 @@ def detect_smc_orderblock_retest(
             trigger_level=entry_price,
             stop_loss=stop_loss,
             target_level=t1,
+            no_chase_boundary=round(ob.top, 2),
             confidence=conviction,
             created_at=now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
             is_live=not is_test,
@@ -351,18 +352,20 @@ def detect_smc_orderblock_retest(
                 "rr_t1": rr_t1,
                 "rr_t2": rr_t2,
                 "rvol": rvol,
+                "no_chase_boundary": round(ob.top, 2),
                 "confluence_types": confluence_factors,
                 "confluence_factors": confluence_factors,
             },
             actionable_plan={
                 "action": "BUY",
                 "instrument_type": "EQUITY",
-                "entry_range": f"₹{ob.bottom:,.2f} – ₹{ob.top:,.2f}",
+                "entry_range": f"₹{ob.bottom:,.2f} – ₹{round(ob.bottom + 0.85 * (ob.top - ob.bottom), 2):,.2f}",
                 "stop_loss": f"₹{stop_loss:,.2f}",
                 "target": f"₹{t1:,.2f}",
                 "target_1": f"₹{t1:,.2f}",
                 "target_2": f"₹{t2:,.2f}",
                 "runner_target": f"₹{runner:,.2f}",
+                "no_chase_boundary": f"₹{ob.top:,.2f}",
                 "risk_reward": f"1:{rr_t2}",
                 "no_chase_rule": (
                     f"DO NOT ENTER above ₹{ob.top:,.2f} — "
@@ -374,6 +377,7 @@ def detect_smc_orderblock_retest(
                     "target_1": t1,
                     "target_2": t2,
                     "runner_target": runner,
+                    "no_chase_boundary": round(ob.top, 2),
                     "rr_t1": rr_t1,
                     "rr_t2": rr_t2,
                 },
@@ -478,6 +482,7 @@ def detect_smc_orderblock_retest(
             trigger_level=entry_price,
             stop_loss=stop_loss,
             target_level=t1,
+            no_chase_boundary=round(ob.bottom, 2),
             confidence=conviction,
             created_at=now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
             is_live=not is_test,
@@ -499,18 +504,20 @@ def detect_smc_orderblock_retest(
                 "rr_t1": rr_t1,
                 "rr_t2": rr_t2,
                 "rvol": rvol,
+                "no_chase_boundary": round(ob.bottom, 2),
                 "confluence_types": confluence_factors,
                 "confluence_factors": confluence_factors,
             },
             actionable_plan={
                 "action": "SELL_SHORT",
                 "instrument_type": "EQUITY",
-                "entry_range": f"₹{ob.bottom:,.2f} – ₹{ob.top:,.2f}",
+                "entry_range": f"₹{round(ob.top - 0.85 * (ob.top - ob.bottom), 2):,.2f} – ₹{ob.top:,.2f}",
                 "stop_loss": f"₹{stop_loss:,.2f}",
                 "target": f"₹{t1:,.2f}",
                 "target_1": f"₹{t1:,.2f}",
                 "target_2": f"₹{t2:,.2f}",
                 "runner_target": f"₹{runner:,.2f}",
+                "no_chase_boundary": f"₹{ob.bottom:,.2f}",
                 "risk_reward": f"1:{rr_t2}",
                 "no_chase_rule": (
                     f"DO NOT ENTER below ₹{ob.bottom:,.2f} — "
@@ -522,6 +529,7 @@ def detect_smc_orderblock_retest(
                     "target_1": t1,
                     "target_2": t2,
                     "runner_target": runner,
+                    "no_chase_boundary": round(ob.bottom, 2),
                     "rr_t1": rr_t1,
                     "rr_t2": rr_t2,
                 },

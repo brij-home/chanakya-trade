@@ -543,16 +543,10 @@ def _round_strike(spot: float, step: float = 50.0) -> float:
 
 # ── Options Backtester ───────────────────────────────────────
 
-# Default lot sizes for popular Indian underlyings
-LOT_SIZES = {
-    "NIFTY": 65,
-    "NIFTY50": 65,
-    "NIFTY 50": 65,
-    "BANKNIFTY": 30,
-    "NIFTY BANK": 30,
-    "FINNIFTY": 60,
-    "MIDCPNIFTY": 120,
-}
+# Default lot sizes for popular Indian underlyings (SSOT from market.instruments)
+from market.instruments import STANDARD_LOT_SIZES
+
+LOT_SIZES = STANDARD_LOT_SIZES
 
 STRIKE_STEPS = {
     "NIFTY": 50,
@@ -583,7 +577,7 @@ class OptionsBacktester:
         self.underlying = underlying.upper()
         self.period = period
         self.initial_capital = capital
-        self.lot_size = lot_size or LOT_SIZES.get(self.underlying, 25)
+        self.lot_size = lot_size or LOT_SIZES.get(self.underlying, 1)
         self.strike_step = strike_step or STRIKE_STEPS.get(self.underlying, 50)
         self._spot_data: Optional[pd.DataFrame] = None
         self._vix_data: Optional[pd.DataFrame] = None

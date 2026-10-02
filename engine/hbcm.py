@@ -125,7 +125,18 @@ class HBCMResult:
 def get_hbcm_constituents(underlying: str) -> list[dict[str, Any]]:
     """Return top 5 constituents configuration for the given index."""
     clean = underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
-    return HBCM_CONSTITUENTS.get(clean, HBCM_CONSTITUENTS.get("NIFTY", []))
+    clean_key = clean.replace("_", "").replace(" ", "")
+    if clean_key in ("NIFTY", "NIFTY50"):
+        return HBCM_CONSTITUENTS["NIFTY"]
+    elif clean_key in ("BANKNIFTY", "NIFTYBANK"):
+        return HBCM_CONSTITUENTS["BANKNIFTY"]
+    elif clean_key in ("FINNIFTY", "NIFTYFINSERVICE"):
+        return HBCM_CONSTITUENTS["FINNIFTY"]
+    elif clean_key in ("SENSEX", "BSESENSEX"):
+        return HBCM_CONSTITUENTS["SENSEX"]
+    elif clean_key in ("BANKEX", "BSEBANKEX"):
+        return HBCM_CONSTITUENTS["BANKEX"]
+    return HBCM_CONSTITUENTS.get(clean, [])
 
 
 def evaluate_hbcm(

@@ -172,8 +172,13 @@ def evaluate_alert_invalidation(
                         "RUNNER_CLOSED",
                         "FINAL_TARGET",
                         "TARGET_ACHIEVED",
+                        "DE_RISK_0_5R",
+                        "BREAKEVEN_LOCKED",
                     )
-                    or "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", None) or [])
+                    or any(
+                        m in (getattr(alert, "achieved_milestones", None) or [])
+                        for m in ("T1_ACHIEVED", "DE_RISK_0_5R", "BREAKEVEN_LOCKED")
+                    )
                     or getattr(alert, "stage", "")
                     in (
                         "TARGET_1",
@@ -182,6 +187,8 @@ def evaluate_alert_invalidation(
                         "RUNNER_EXIT",
                         "FINAL_TARGET",
                         "TARGET_ACHIEVED",
+                        "DE_RISK_0_5R",
+                        "BREAKEVEN_LOCKED",
                     )
                     or getattr(alert, "should_trail", False)
                     or (

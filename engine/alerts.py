@@ -814,7 +814,13 @@ class AlertManager:
             tg_chat_id = None
 
         if tg_chat_id:
-            _telegram_notify(tg_msg, chat_id=tg_chat_id, signal_id=sig_ref)
+            _telegram_notify(
+                tg_msg,
+                chat_id=tg_chat_id,
+                signal_id=sig_ref,
+                alert_id=getattr(alert, "id", None),
+                is_update=getattr(alert, "is_milestone", False),
+            )
 
         # 4. Webhook (OpenClaw / external agents)
         if alert.webhook_url:
@@ -1054,12 +1060,13 @@ def _telegram_notify(
     message_thread_id: Optional[int] = None,
     on_success: Optional[Any] = None,
     alert_id: Optional[str] = None,
+    is_update: Optional[bool] = None,
 ) -> None:
     """
     Send a Telegram push notification.
     Non-blocking — runs in background thread.
     Never dispatches during test execution or test deployment modes.
-    Supports in-thread replies, topic routing, and audible vs silent delivery.
+    Supports in-thread replies, topic routing, explicit lifecycle typing, and audible vs silent delivery.
     """
     import os
     import sys
@@ -1087,6 +1094,7 @@ def _telegram_notify(
             message_thread_id=message_thread_id,
             on_success=on_success,
             alert_id=alert_id,
+            is_update=is_update,
         )
     except Exception:
         pass

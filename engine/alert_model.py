@@ -608,16 +608,55 @@ class AutoAlert:
                 except (ValueError, TypeError):
                     pass
 
-        if is_long:
-            if sl >= ltp:
-                return False, f"Inverted Stop-Loss: SL (₹{sl:,.2f}) >= LTP (₹{ltp:,.2f})"
-            if t1 <= ltp:
-                return False, f"Inverted Target: Target (₹{t1:,.2f}) <= LTP (₹{ltp:,.2f})"
-        elif is_short:
-            if sl <= ltp:
-                return False, f"Inverted Bearish Stop-Loss: SL (₹{sl:,.2f}) <= LTP (₹{ltp:,.2f})"
-            if t1 >= ltp:
-                return False, f"Inverted Bearish Target: Target (₹{t1:,.2f}) >= LTP (₹{ltp:,.2f})"
+        has_trailing_ratchet = bool(
+            getattr(self, "should_trail", False)
+            or (getattr(self, "achieved_milestones", None))
+            or (
+                self.stage
+                in (
+                    "RUNNER_EXIT",
+                    "COMPLETED",
+                    "INVALIDATED",
+                    "TARGET_ACHIEVED",
+                    "TRAILING_UPDATE",
+                    "T1_ACHIEVED",
+                    "T2_ACHIEVED",
+                    "DE_RISK_0_5R",
+                    "BREAKEVEN_LOCKED",
+                )
+            )
+            or (
+                getattr(self, "target_status", "")
+                in ("RUNNER_CLOSED", "T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED")
+            )
+        )
+
+        if not has_trailing_ratchet:
+            if is_long:
+                if sl >= ltp:
+                    return False, f"Inverted Stop-Loss: SL (₹{sl:,.2f}) >= LTP (₹{ltp:,.2f})"
+                if t1 <= ltp:
+                    return False, f"Inverted Target: Target (₹{t1:,.2f}) <= LTP (₹{ltp:,.2f})"
+            elif is_short:
+                if sl <= ltp:
+                    return False, f"Inverted Bearish Stop-Loss: SL (₹{sl:,.2f}) <= LTP (₹{ltp:,.2f})"
+                if t1 >= ltp:
+                    return False, f"Inverted Bearish Target: Target (₹{t1:,.2f}) >= LTP (₹{ltp:,.2f})"
+        else:
+            # For trailing stops, validate that initial stop was geometrically sound
+            init_sl = float(getattr(self, "initial_stop_loss", 0.0) or 0.0)
+            entry_p = float(self.trigger_level or getattr(self, "entry_price", 0.0) or 0.0)
+            if init_sl > 0 and entry_p > 0:
+                if is_long and init_sl >= entry_p:
+                    return (
+                        False,
+                        f"Inverted Initial Stop-Loss: Initial SL (₹{init_sl:,.2f}) >= Entry (₹{entry_p:,.2f})",
+                    )
+                elif is_short and init_sl <= entry_p:
+                    return (
+                        False,
+                        f"Inverted Initial Bearish Stop-Loss: Initial SL (₹{init_sl:,.2f}) <= Entry (₹{entry_p:,.2f})",
+                    )
 
         # Contract vs Expiry Date Coherence
         if self.contract_symbol and self.expiry_date:

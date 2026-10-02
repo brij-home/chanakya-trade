@@ -182,28 +182,30 @@ def detect_opening_drive(
     if is_bull_drive:
         sl_price = round(bar_low * 0.998, 2)
         risk_pts = max(0.5, ltp - sl_price)
-        t1_price = round(ltp + 1.8 * risk_pts, 2)
-        t2_price = round(ltp + 3.2 * risk_pts, 2)
-        t3_price = round(ltp + 5.0 * risk_pts, 2)
+        t1_price = round(ltp + 2.5 * risk_pts, 2)
+        t2_price = round(ltp + 4.5 * risk_pts, 2)
+        t3_price = round(ltp + 7.0 * risk_pts, 2)
+        no_chase_lvl = round(min(ltp + 0.35 * risk_pts, bar_open + 1.25 * (ltp - bar_open)), 2)
         headline = f"🚀 [OPENING DRIVE] {clean_sym} Bullish Ignition (Open==Low @ ₹{bar_open:,.1f})"
         summary = (
             f"{clean_sym} explosive Opening Drive confirmed: Open==Low at ₹{bar_open:,.1f} "
             f"with immediate expansion (+{range_pct:.1f}% range, {vol_desc}). "
-            f"Holding strictly above VWAP."
+            f"Holding strictly above VWAP. NO CHASE above ₹{no_chase_lvl:,.1f}."
         )
     else:
         sl_price = round(bar_high * 1.002, 2)
         risk_pts = max(0.5, sl_price - ltp)
-        t1_price = round(ltp - 1.8 * risk_pts, 2)
-        t2_price = round(ltp - 3.2 * risk_pts, 2)
-        t3_price = round(ltp - 5.0 * risk_pts, 2)
+        t1_price = round(ltp - 2.5 * risk_pts, 2)
+        t2_price = round(ltp - 4.5 * risk_pts, 2)
+        t3_price = round(ltp - 7.0 * risk_pts, 2)
+        no_chase_lvl = round(max(ltp - 0.35 * risk_pts, bar_open - 1.25 * (bar_open - ltp)), 2)
         headline = (
             f"🚨 [OPENING DRIVE] {clean_sym} Bearish Breakdown (Open==High @ ₹{bar_open:,.1f})"
         )
         summary = (
             f"{clean_sym} institutional Opening Drive breakdown: Open==High at ₹{bar_open:,.1f} "
             f"with heavy downside liquidation (-{range_pct:.1f}% range, {vol_desc}). "
-            f"Aggressive short / put momentum."
+            f"Aggressive short / put momentum. NO CHASE below ₹{no_chase_lvl:,.1f}."
         )
 
     rr_ratio = round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)
@@ -215,6 +217,8 @@ def detect_opening_drive(
     opt_sl = None
     opt_t1 = None
     opt_t2 = None
+    opt_runner = None
+    opt_no_chase = None
     opt_strike = None
     opt_type = "CE" if is_bull_drive else "PE"
     lot_sz = None
@@ -248,8 +252,10 @@ def detect_opening_drive(
                 opt_strike = float(chosen.strike)
                 opt_expiry = getattr(chosen, "expiry", None)
                 opt_sl = round(max(0.1, opt_ltp * 0.78), 2)
-                opt_t1 = round(opt_ltp * 1.35, 2)
-                opt_t2 = round(opt_ltp * 1.70, 2)
+                opt_t1 = round(opt_ltp * 1.50, 2)
+                opt_t2 = round(opt_ltp * 2.00, 2)
+                opt_runner = round(opt_ltp * 2.60, 2)
+                opt_no_chase = round(opt_ltp * 1.08, 2)
     except Exception as e:
         logger.debug(f"[OpeningDrive] Option lookup failed for {clean_sym}: {e}")
 
@@ -260,10 +266,13 @@ def detect_opening_drive(
         opt_contract_sym = f"{clean_sym} {int(opt_strike)} {opt_type}"
         opt_ltp = round(max(25.0, ltp * 0.007), 1)
         opt_sl = round(opt_ltp * 0.78, 1)
-        opt_t1 = round(opt_ltp * 1.35, 1)
-        opt_t2 = round(opt_ltp * 1.70, 1)
+        opt_t1 = round(opt_ltp * 1.50, 1)
+        opt_t2 = round(opt_ltp * 2.00, 1)
+        opt_runner = round(opt_ltp * 2.60, 1)
+        opt_no_chase = round(opt_ltp * 1.08, 1)
 
     has_opt = bool(opt_contract_sym and opt_ltp and (is_index or opt_ltp > 0))
+    resolved_no_chase = round(opt_no_chase if has_opt else no_chase_lvl, 2)
 
     action_str = f"BUY {opt_type}" if has_opt else ("BUY" if is_bull_drive else "SELL_SHORT")
     rec_entry = f"₹{opt_ltp:,.2f}" if has_opt else f"₹{ltp:,.1f}"
@@ -280,7 +289,9 @@ def detect_opening_drive(
         "target": rec_t1,
         "target_1": rec_t1,
         "target_2": f"₹{opt_t2:,.1f}" if (has_opt and opt_t2) else f"₹{t2_price:,.1f}",
-        "target_3": f"₹{t3_price:,.1f}",
+        "target_3": f"₹{opt_runner:,.1f}" if (has_opt and opt_runner) else f"₹{t3_price:,.1f}",
+        "runner_target": f"₹{opt_runner:,.1f}" if (has_opt and opt_runner) else f"₹{t3_price:,.1f}",
+        "no_chase_boundary": f"₹{resolved_no_chase:,.1f}",
         "risk_reward": rr_str,
         "underlying_spot": f"₹{ltp:,.1f}",
         "underlying_sl": f"₹{sl_price:,.1f}",
@@ -298,7 +309,7 @@ def detect_opening_drive(
             if has_opt
             else f"Enter {'LONG' if is_bull_drive else 'SHORT'} on ask while holding {'above' if is_bull_drive else 'below'} ₹{bar_open:,.1f}."
         ),
-        "when_to_wait": f"DISQUALIFIED if price crosses back through opening extreme ₹{bar_open:,.1f}.",
+        "when_to_wait": f"DISQUALIFIED if price crosses back through opening extreme ₹{bar_open:,.1f} or moves beyond no-chase boundary ₹{resolved_no_chase:,.1f}.",
         "profit_rule": "Scale 50% at T1, move SL to Cost/Breakeven, trail runner on 5m 20-EMA.",
     }
 
@@ -313,6 +324,8 @@ def detect_opening_drive(
             "sl_premium": opt_sl,
             "t1_premium": opt_t1,
             "t2_premium": opt_t2,
+            "t3_premium": opt_runner,
+            "no_chase_boundary": opt_no_chase,
             "lot_size": lot_sz,
             "expiry": opt_expiry if "opt_expiry" in locals() else None,
             "expiry_date": opt_expiry if "opt_expiry" in locals() else None,
@@ -337,6 +350,7 @@ def detect_opening_drive(
         trigger_level=opt_ltp if has_opt else ltp,
         target_level=opt_t1 if has_opt else t1_price,
         stop_loss=opt_sl if has_opt else sl_price,
+        no_chase_boundary=resolved_no_chase,
         strike=opt_strike if has_opt else None,
         option_type=opt_type if has_opt else None,
         contract_symbol=opt_contract_sym if has_opt else None,
@@ -359,6 +373,10 @@ def detect_opening_drive(
             "bar_high": bar_high,
             "bar_low": bar_low,
             "bar_close": bar_close,
+            "no_chase_boundary": resolved_no_chase,
+            "target_1": opt_t1 if has_opt else t1_price,
+            "target_2": opt_t2 if has_opt else t2_price,
+            "target_3": opt_runner if has_opt else t3_price,
         },
         actionable_plan=act_plan,
     )

@@ -38,6 +38,48 @@ DEFAULT_COMMODITIES = [
 LIQUID_COMMODITY_OPTIONS = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI", "GOLD", "GOLDM"}
 
 
+def compute_commodity_rsi(df_5m: Optional[pd.DataFrame], period: int = 14) -> Optional[float]:
+    """Calculates 14-period Wilder RSI from 5m OHLCV bars for momentum corridor gating."""
+    if df_5m is None or len(df_5m) < period + 1:
+        return None
+    try:
+        close_s = df_5m["close"] if "close" in df_5m.columns else df_5m.get("Close")
+        if close_s is None or len(close_s) < period + 1:
+            return None
+        delta = close_s.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(window=period, min_periods=period).mean()
+        avg_loss = loss.rolling(window=period, min_periods=period).mean()
+        last_gain = float(avg_gain.iloc[-1])
+        last_loss = float(avg_loss.iloc[-1])
+        if last_loss == 0:
+            return 100.0 if last_gain > 0 else 50.0
+        rs = last_gain / last_loss
+        return round(100.0 - (100.0 / (1.0 + rs)), 2)
+    except Exception:
+        return None
+
+
+def get_commodity_max_chase(clean_sym: str, risk_pts: float) -> float:
+    """
+    Returns asset-tailored maximum chase points for MCX commodities.
+    Ensures chase never exceeds 30% of structural risk or volatility budget (1 solution doesn't fit all).
+    """
+    sym = clean_sym.upper()
+    if sym in ("CRUDEOIL", "CRUDEOILM"):
+        return round(max(5.0, min(risk_pts * 0.30, 20.0)), 1)
+    elif sym in ("NATURALGAS", "NATGASMINI"):
+        return round(max(0.40, min(risk_pts * 0.28, 1.20)), 2)
+    elif sym in ("GOLD", "GOLDM", "GOLDGUINEA", "GOLDPETAL"):
+        return round(max(30.0, min(risk_pts * 0.30, 100.0)), 1)
+    elif sym in ("SILVER", "SILVERM", "SILMIC"):
+        return round(max(60.0, min(risk_pts * 0.30, 250.0)), 1)
+    elif sym in ("COPPER", "ZINC", "ALUMINIUM", "LEAD"):
+        return round(max(0.40, min(risk_pts * 0.28, 1.50)), 2)
+    return round(max(1.0, risk_pts * 0.30), 2)
+
+
 def detect_commodity_breakouts(
     universe: Optional[list[str]] = None,
     quotes_map: Optional[dict[str, Any]] = None,
@@ -153,6 +195,8 @@ def detect_commodity_breakouts(
             df_5m = get_ohlcv(clean_sym, exchange="MCX", interval="5minute", days=2)
         except Exception as e:
             logger.debug(f"[CommodityDetector] Error fetching 5m OHLCV for MCX:{clean_sym}: {e}")
+
+        rsi_5m = compute_commodity_rsi(df_5m)
 
         # US Open Transition Gate (18:15 to 19:15 IST):
         is_us_open_transition = (now_ist.hour == 18 and now_ist.minute >= 15) or (
@@ -279,6 +323,19 @@ def detect_commodity_breakouts(
 
         if not (is_bullish or is_bearish):
             continue
+
+        # Eagle RSI Momentum Corridor Gate (Live market only: reject overbought tops & oversold washouts)
+        if is_authentic_live and rsi_5m is not None:
+            if is_bullish and rsi_5m > 74.0:
+                logger.debug(
+                    f"[CommodityDetector] Suppressed bullish {clean_sym}: Overbought RSI ({rsi_5m:.1f} > 74.0) exhaustion risk"
+                )
+                continue
+            elif is_bearish and rsi_5m < 26.0:
+                logger.debug(
+                    f"[CommodityDetector] Suppressed bearish {clean_sym}: Oversold RSI ({rsi_5m:.1f} < 26.0) washout risk"
+                )
+                continue
 
         # Global Macro Pre-Filter (Live market only: DXY for Bullion, Brent for Crude Oil)
         if is_authentic_live:
@@ -479,6 +536,9 @@ def detect_commodity_breakouts(
         if not (is_bullish or is_bearish):
             continue
 
+        if rsi_5m is not None:
+            smc_tags.append(f"RSI {rsi_5m:.1f}")
+
         if rvol >= 1.5:
             smc_tags.append(f"Institutional Surge (RVOL {rvol:.1f}x)")
         elif rvol >= 1.2:
@@ -502,11 +562,19 @@ def detect_commodity_breakouts(
 
         lot_sz = get_lot_size(clean_sym) or 1
         has_real_vwap = abs(ltp - vwap) >= 2.0 and vwap != ltp
+        chase_pts = get_commodity_max_chase(clean_sym, risk_pts)
 
         if is_bullish:
             sl_price = round(ltp - risk_pts, 2)
-            t1_price = round(ltp + 2.0 * risk_pts, 2)
-            t2_price = round(ltp + 3.5 * risk_pts, 2)
+            t1_price = round(ltp + 2.8 * risk_pts, 2)
+            t2_price = round(ltp + 5.0 * risk_pts, 2)
+            t3_price = round(ltp + 7.5 * risk_pts, 2)
+            no_chase = round(ltp + chase_pts, 2)
+            e_low = round(max(sl_price + 0.5, ltp - 0.20 * risk_pts), 1)
+            e_high = round(min(no_chase - 0.1, ltp + 0.15 * risk_pts), 1)
+            if e_high <= e_low:
+                e_high = round(no_chase - 0.05, 1)
+                e_low = round(max(sl_price + 0.5, ltp - 0.10 * risk_pts), 1)
             if is_donchian_breakout:
                 headline = (
                     f"🛢️ MCX BREAKOUT: {clean_sym} +{chg:.1f}% Breaking 20-bar High (₹{ltp:,.1f})"
@@ -521,8 +589,15 @@ def detect_commodity_breakouts(
             action = "BUY_FUTURES"
         else:
             sl_price = round(ltp + risk_pts, 2)
-            t1_price = round(ltp - 2.0 * risk_pts, 2)
-            t2_price = round(ltp - 3.5 * risk_pts, 2)
+            t1_price = round(ltp - 2.8 * risk_pts, 2)
+            t2_price = round(ltp - 5.0 * risk_pts, 2)
+            t3_price = round(ltp - 7.5 * risk_pts, 2)
+            no_chase = round(ltp - chase_pts, 2)
+            e_high = round(min(sl_price - 0.5, ltp + 0.20 * risk_pts), 1)
+            e_low = round(max(no_chase + 0.1, ltp - 0.15 * risk_pts), 1)
+            if e_low >= e_high:
+                e_low = round(no_chase + 0.05, 1)
+                e_high = round(min(sl_price - 0.5, ltp + 0.10 * risk_pts), 1)
             if is_donchian_breakout:
                 headline = (
                     f"🛢️ MCX BREAKDOWN: {clean_sym} {chg:.1f}% Breaking 20-bar Low (₹{ltp:,.1f})"
@@ -624,8 +699,10 @@ def detect_commodity_breakouts(
                     opt_prem = float(getattr(closest_opt, "last_price", 0.0))
                     opt_risk = round(max(1.0, min(opt_prem * 0.35, risk_pts * 0.52)), 1)
                     opt_sl = round(max(0.05, opt_prem - opt_risk), 1)
-                    opt_t1 = round(opt_prem + 2.0 * opt_risk, 1)
-                    opt_t2 = round(opt_prem + 3.5 * opt_risk, 1)
+                    opt_t1 = round(opt_prem + 2.8 * opt_risk, 1)
+                    opt_t2 = round(opt_prem + 5.0 * opt_risk, 1)
+                    opt_runner = round(opt_prem + 7.5 * opt_risk, 1)
+                    opt_no_chase = round(opt_prem + 0.15 * opt_risk, 1)
 
                     opt_rr_calc = round(
                         abs(opt_t1 - opt_prem) / max(0.01, abs(opt_prem - opt_sl)), 1
@@ -647,6 +724,9 @@ def detect_commodity_breakouts(
                         "stop_loss": opt_sl,
                         "target_1": opt_t1,
                         "target_2": opt_t2,
+                        "target_3": opt_runner,
+                        "runner_target": opt_runner,
+                        "no_chase_boundary": opt_no_chase,
                         "risk_reward": opt_rr_str,
                         "max_loss_capped": round(opt_prem * lot_sz, 0),
                         "delta_tier": delta_tier,
@@ -656,13 +736,6 @@ def detect_commodity_breakouts(
             except Exception as e:
                 logger.debug(f"[CommodityDetector] Options chain resolution error: {e}")
                 opt_recommendation = None
-
-        if is_bullish:
-            e_low = round(max(sl_price + 0.5, ltp - 0.25 * risk_pts), 1)
-            e_high = round(min(t1_price - 0.25 * risk_pts, ltp + 0.25 * risk_pts), 1)
-        else:
-            e_high = round(min(sl_price - 0.5, ltp + 0.25 * risk_pts), 1)
-            e_low = round(max(t1_price + 0.25 * risk_pts, ltp - 0.25 * risk_pts), 1)
 
         confluence_str = (
             " + ".join(smc_tags) if smc_tags else "Donchian Breakout + VWAP Confirmation"
@@ -680,8 +753,12 @@ def detect_commodity_breakouts(
             opt_sl = opt_recommendation["stop_loss"]
             opt_t1 = opt_recommendation["target_1"]
             opt_t2 = opt_recommendation["target_2"]
+            opt_runner = opt_recommendation.get("target_3", round(opt_recommendation["ltp"] + 7.5 * opt_risk, 1))
+            opt_no_chase = opt_recommendation.get("no_chase_boundary", round(opt_recommendation["ltp"] + 0.15 * opt_risk, 1))
             opt_entry_low = round(max(0.5, opt_recommendation["ltp"] - 0.15 * opt_risk), 1)
-            opt_entry_high = round(opt_recommendation["ltp"] + 0.15 * opt_risk, 1)
+            opt_entry_high = round(min(opt_no_chase - 0.1, opt_recommendation["ltp"] + 0.10 * opt_risk), 1)
+            if opt_entry_high <= opt_entry_low:
+                opt_entry_high = round(opt_no_chase - 0.05, 1)
 
             _delta_tier = opt_recommendation.get("delta_tier", "ATM (Δ≈0.50)")
             _dte_warn = opt_recommendation.get("dte_warning") or ""
@@ -696,7 +773,11 @@ def detect_commodity_breakouts(
                 "entry_range": f"₹{opt_entry_low:,.1f} – ₹{opt_entry_high:,.1f}",
                 "stop_loss": f"₹{opt_sl:,.1f}",
                 "target": f"₹{opt_t1:,.1f}",
+                "target_1": f"₹{opt_t1:,.1f}",
                 "target_2": f"₹{opt_t2:,.1f}",
+                "target_3": f"₹{opt_runner:,.1f}",
+                "runner_target": f"₹{opt_runner:,.1f}",
+                "no_chase_boundary": f"₹{opt_no_chase:,.1f}",
                 "risk_reward": opt_recommendation["risk_reward"],
                 "lot_size": lot_sz,
                 "preferred_vehicle": "DEFINED_RISK_OPTION",
@@ -707,9 +788,9 @@ def detect_commodity_breakouts(
                     f"Enter {_delta_tier} {opt_contract_name} on 5m candle closing in breakout direction above/below VWAP ₹{vwap:,.1f}."
                     + (f" {_dte_warn}" if _dte_warn else "")
                 ),
-                "when_to_wait": f"Do not chase if option premium moves >15% beyond ₹{opt_recommendation['ltp']:,.1f} (Spot above ₹{e_high:,.1f}).",
+                "when_to_wait": f"Do not chase if option premium moves beyond ₹{opt_no_chase:,.1f} (Spot above/below ₹{no_chase:,.1f}).",
                 "profit_rule": (
-                    f"Book 50% at T1 (₹{opt_t1:,.1f}), trail stop to cost, hold runner for T2 (₹{opt_t2:,.1f}). "
+                    f"Book 50% at T1 (₹{opt_t1:,.1f}), trail stop to cost, hold 25% for T2 (₹{opt_t2:,.1f}), runner for T3 (₹{opt_runner:,.1f}). "
                     f"SL Risk: ₹{opt_sl_risk:,.0f} per lot (Max capital at risk: ₹{opt_max_outlay:,.0f})."
                 ),
                 "vehicle_rationale": (
@@ -724,6 +805,9 @@ def detect_commodity_breakouts(
                     "invalidation_stop": opt_sl,
                     "target_1": opt_t1,
                     "target_2": opt_t2,
+                    "target_3": opt_runner,
+                    "runner_target": opt_runner,
+                    "no_chase_boundary": opt_no_chase,
                     "risk_reward": opt_recommendation["risk_reward"],
                 },
                 "futures_reference": {
@@ -732,6 +816,9 @@ def detect_commodity_breakouts(
                     "stop_loss": sl_price,
                     "target_1": t1_price,
                     "target_2": t2_price,
+                    "target_3": t3_price,
+                    "runner_target": t3_price,
+                    "no_chase_boundary": no_chase,
                     "risk_reward": rr_str,
                 },
                 "option_alternative": opt_recommendation,
@@ -752,14 +839,18 @@ def detect_commodity_breakouts(
                 "entry_range": f"₹{e_low:,.1f} – ₹{e_high:,.1f}",
                 "stop_loss": f"₹{sl_price:,.1f}",
                 "target": f"₹{t1_price:,.1f}",
+                "target_1": f"₹{t1_price:,.1f}",
                 "target_2": f"₹{t2_price:,.1f}",
+                "target_3": f"₹{t3_price:,.1f}",
+                "runner_target": f"₹{t3_price:,.1f}",
+                "no_chase_boundary": f"₹{no_chase:,.1f}",
                 "risk_reward": rr_str,
                 "lot_size": lot_sz,
                 "preferred_vehicle": "FUTURES",
                 "setup_confluence": confluence_str,
                 "when_to_buy": f"Enter on 5m candle closing in direction above/below VWAP ₹{vwap:,.1f}.",
-                "when_to_wait": f"Do not chase if move exceeds {round(abs(chg) + 1.0, 1)}% or price moves beyond ₹{e_high:,.1f}.",
-                "profit_rule": f"Book 50% at T1 (+2.0R), trail stop to breakeven, hold runner for T2 (+3.5R). Capped risk ₹{fut_risk:,.0f} per lot.",
+                "when_to_wait": f"Do not chase if move exceeds {round(abs(chg) + 1.0, 1)}% or price moves beyond ₹{e_high if is_bullish else e_low:,.1f}.",
+                "profit_rule": f"Book 50% at T1 (+2.8R), trail stop to breakeven, hold 25% for T2 (+5.0R), runner for T3 (+7.5R). Capped risk ₹{fut_risk:,.0f} per lot.",
                 "trade_plan": {
                     "symbol": clean_sym,
                     "direction": "LONG" if is_bullish else "SHORT",
@@ -768,6 +859,9 @@ def detect_commodity_breakouts(
                     "invalidation_stop": sl_price,
                     "target_1": t1_price,
                     "target_2": t2_price,
+                    "target_3": t3_price,
+                    "runner_target": t3_price,
+                    "no_chase_boundary": no_chase,
                     "risk_reward": rr_str,
                 },
             }
@@ -789,6 +883,8 @@ def detect_commodity_breakouts(
                 conf_boost = min(15, conf_boost + 5)
         final_conf = min(92, base_conf + conf_boost)
 
+        chosen_no_chase = opt_no_chase if (should_use_option_primary and opt_recommendation) else no_chase
+
         alert = AutoAlert(
             alert_id=alert_id,
             alert_type=alert_type,
@@ -802,6 +898,7 @@ def detect_commodity_breakouts(
             trigger_level=ltp,
             target_level=t1_price,
             stop_loss=sl_price,
+            no_chase_boundary=round(chosen_no_chase, 2),
             confidence=final_conf,
             created_at=now_iso,
             is_live=is_authentic_live,
@@ -820,11 +917,17 @@ def detect_commodity_breakouts(
                 "atr": atr,
                 "atr_14d": atr,
                 "rvol": rvol,
+                "rsi_5m": rsi_5m,
                 "lot_size": lot_sz,
                 "segment": "COMMODITY",
                 "has_options_chain": bool(opt_recommendation),
                 "confluence": confluence_str,
                 "spot": ltp,
+                "no_chase_boundary": round(chosen_no_chase, 2),
+                "target_1": t1_price,
+                "target_2": t2_price,
+                "target_3": t3_price,
+                "runner_target": t3_price,
             },
             actionable_plan=plan_dict,
         )

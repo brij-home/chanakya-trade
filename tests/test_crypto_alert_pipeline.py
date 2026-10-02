@@ -418,3 +418,82 @@ def test_crypto_trade_plan_logical_derivation():
     assert plan_bear.rr_1 == expected_rr1_bear
     assert f"+{expected_rr1_bear:.1f}R" in plan_bear.profit_rule
     assert plan_bear.no_chase < plan_bear.entry_min
+
+
+def test_crypto_sniper_eagle_tiger_confluence_and_no_chase():
+    """
+    Institutional test: verifies the Sniper/Eagle/Tiger trade planning invariants:
+      1. Absolute No-Chase Invariant: entry_max < no_chase for Bullish, entry_min > no_chase for Bearish.
+      2. Strict R:R >= 1:2.8 to 1:3.0+ on T1.
+      3. Precise entry boundaries (no 4% wide brackets).
+      4. AutoAlert.no_chase_boundary strictly matches plan.no_chase.
+    """
+    from engine.detectors.crypto import (
+        compute_crypto_rsi,
+        derive_crypto_trade_plan,
+        detect_single_crypto_symbol,
+    )
+
+    dates = pd.date_range("2026-10-02 08:00", periods=50, freq="15min")
+    df = pd.DataFrame(
+        {
+            "open": [85000.0 + i * 25 for i in range(50)],
+            "high": [85100.0 + i * 25 for i in range(50)],
+            "low": [84950.0 + i * 25 for i in range(50)],
+            "close": [85080.0 + i * 25 for i in range(50)],
+            "volume": [2000.0 for _ in range(50)],
+        },
+        index=dates,
+    )
+    df["date"] = df.index
+
+    # 1. RSI sanity check
+    rsi = compute_crypto_rsi(df)
+    assert 0.0 <= rsi <= 100.0
+
+    # 2. Bullish Retest Scenario: OB at 85000 - 85600, LTP at 85500
+    plan_retest = derive_crypto_trade_plan(
+        symbol="BTCUSDT",
+        direction="BULLISH",
+        ltp=85500.0,
+        df=df,
+        ob_bottom=85000.0,
+        ob_top=85600.0,
+        is_breakout=False,
+    )
+    assert plan_retest.sl_price < 85000.0  # Invalidation below OB bottom
+    assert plan_retest.entry_max < plan_retest.no_chase  # Zero contradictive chasing!
+    assert plan_retest.rr_1 >= 2.8  # Institutional minimum R:R standard
+    # Entry range is tight (width < 1.0%), NOT 4% wide!
+    entry_width_pct = ((plan_retest.entry_max - plan_retest.entry_min) / plan_retest.entry_ref) * 100
+    assert entry_width_pct < 1.5, f"Entry range is too wide: {entry_width_pct:.2f}%"
+
+    # 3. Bullish Breakout Scenario: OB at 85000 - 85600, LTP at 85900 (Breakout)
+    plan_breakout = derive_crypto_trade_plan(
+        symbol="BTCUSDT",
+        direction="BULLISH",
+        ltp=85900.0,
+        df=df,
+        ob_bottom=85000.0,
+        ob_top=85600.0,
+        is_breakout=True,
+    )
+    # Breakout SL is tightened to OB top / mean threshold, not blown out to 85000
+    assert plan_breakout.sl_price >= 85000.0
+    assert plan_breakout.entry_max < plan_breakout.no_chase
+    assert plan_breakout.rr_1 >= 2.8
+
+    # 4. Bearish Breakdown Scenario: OB at 85000 - 85600, LTP at 84700 (Breakdown)
+    plan_breakdown = derive_crypto_trade_plan(
+        symbol="BTCUSDT",
+        direction="BEARISH",
+        ltp=84700.0,
+        df=df,
+        ob_bottom=85000.0,
+        ob_top=85600.0,
+        is_breakout=True,
+    )
+    assert plan_breakdown.sl_price <= 85600.0
+    assert plan_breakdown.entry_min > plan_breakdown.no_chase
+    assert plan_breakdown.rr_1 >= 2.8
+

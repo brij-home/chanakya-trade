@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
-fno_data = json.loads(Path("tools/fno_master_sep26.json").read_text("utf-8"))
+master_path = Path("tools/fno_master_oct26.json")
+if not master_path.exists():
+    master_path = Path("tools/fno_master_sep26.json")
+fno_data = json.loads(master_path.read_text("utf-8"))
 # Filter to equity/index F&O symbols (exclude commodities and currencies)
 non_eq = {
     "ALUMINIUM",
@@ -41,7 +44,7 @@ if start_idx == -1 or end_idx == -1:
 
 symbols_block = '    "fno_universe": {\n'
 symbols_block += '        "name": "⚡ Complete Liquid F&O Universe",\n'
-symbols_block += f'        "description": "All {len(fno_symbols)} official NSE derivatives contracts (Sep-2026 Master).",\n'
+symbols_block += f'        "description": "All {len(fno_symbols)} official NSE derivatives contracts (Oct-2026 Master).",\n'
 symbols_block += '        "symbols": [\n'
 for s in fno_symbols:
     symbols_block += f'            "{s}",\n'

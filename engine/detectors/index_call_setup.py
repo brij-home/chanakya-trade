@@ -440,7 +440,21 @@ def detect_index_call_setup(
                         f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: {hbcm_res.rejection_reason}"
                     )
                     return []
-                elif _roc_hbcm_pass:
+                else:
+                    _bypass_reason = (
+                        "ROC_ACCELERATION"
+                        if _roc_hbcm_pass
+                        else ("EXPLOSIVE_MOMENTUM" if _explosive_momentum_hbcm_pass else "V_BOTTOM_CONFLUENCE")
+                    )
+                    hbcm_res.confluence_pass = True
+                    hbcm_res.rejection_reason = None
+                    hbcm_dict = hbcm_res.to_dict()
+                    hbcm_dict["confluence_pass"] = True
+                    hbcm_dict["hbcm_bypassed"] = True
+                    hbcm_dict["bypass_reason"] = _bypass_reason
+                    hbcm_dict["rejection_reason"] = None
+
+                if _roc_hbcm_pass:
                     logger.info(
                         f"[IndexCallSetup] ROC ACCELERATION HBCM Bypass: CE setup on {clean_sym} allowed "
                         f"with {hbcm_res.bullish_count}/5 bullish heavyweights — "
@@ -1713,6 +1727,7 @@ def detect_index_call_setup(
                 },
             ],
         }
+        is_long_dated_monthly = dte_days >= 8
         is_spread_mandated = bool(
             (
                 is_low_vix_range
@@ -1720,6 +1735,7 @@ def detect_index_call_setup(
                 or is_midday_chop_window
                 or is_0dte_midday_trap
                 or is_call_wall_collision
+                or is_long_dated_monthly
             )
             and hedge_plan is not None
         )

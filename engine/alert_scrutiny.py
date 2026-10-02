@@ -1802,29 +1802,55 @@ class AlertScrutinyAuditor:
             )
             if is_breakout_type:
                 if isinstance(hbcm_meta, dict):
-                    if (
+                    if hbcm_meta.get("hbcm_bypassed") or hbcm_meta.get("confluence_pass"):
+                        flags["heavyweight_confluence_valid"] = True
+                    elif (
                         hbcm_meta.get("total_heavyweights", 0) > 0
                         and hbcm_meta.get("confluence_pass") is False
                     ):
-                        flags["heavyweight_confluence_valid"] = False
-                        rej_msg = (
-                            hbcm_meta.get("rejection_reason")
-                            or "HBCM Veto: <4/5 heavyweights aligned with index breakout"
+                        is_thrust_or_momentum = bool(
+                            (metrics_dict or {}).get("is_institutional_thrust")
+                            or (metrics_dict or {}).get("is_explosive_momentum")
+                            or ((metrics_dict or {}).get("roc_momentum") or {}).get("is_accelerating")
                         )
-                        return (False, f"HBCM Confluence Veto: {rej_msg}", flags)
+                        if is_thrust_or_momentum:
+                            logger.info(
+                                f"[AlertScrutiny] Heavyweight breadth override for {clean_sym} ({alert.direction}): "
+                                f"Order-flow thrust / ROC acceleration confirmed institutional breakout."
+                            )
+                            flags["heavyweight_confluence_valid"] = True
+                        else:
+                            flags["heavyweight_confluence_valid"] = False
+                            rej_msg = (
+                                hbcm_meta.get("rejection_reason")
+                                or "HBCM Veto: <4/5 heavyweights aligned with index breakout"
+                            )
+                            return (False, f"HBCM Confluence Veto: {rej_msg}", flags)
                 elif not is_test_runner:
                     try:
                         from engine.hbcm import evaluate_hbcm
 
+                        _is_thrust = bool(
+                            (metrics_dict or {}).get("is_institutional_thrust")
+                            or (metrics_dict or {}).get("is_explosive_momentum")
+                            or ((metrics_dict or {}).get("roc_momentum") or {}).get("is_accelerating")
+                        )
                         target_dir = "BULLISH" if is_index_bullish else "BEARISH"
-                        hbcm_eval = evaluate_hbcm(clean_sym, target_dir)
+                        hbcm_eval = evaluate_hbcm(clean_sym, target_dir, allow_weighted_fallback=_is_thrust)
                         if hbcm_eval.total_heavyweights > 0 and not hbcm_eval.confluence_pass:
-                            flags["heavyweight_confluence_valid"] = False
-                            return (
-                                False,
-                                f"HBCM Confluence Veto: {hbcm_eval.rejection_reason}",
-                                flags,
-                            )
+                            if _is_thrust:
+                                logger.info(
+                                    f"[AlertScrutiny] Heavyweight breadth override for {clean_sym} ({target_dir}): "
+                                    f"Thrust / momentum active."
+                                )
+                                flags["heavyweight_confluence_valid"] = True
+                            else:
+                                flags["heavyweight_confluence_valid"] = False
+                                return (
+                                    False,
+                                    f"HBCM Confluence Veto: {hbcm_eval.rejection_reason}",
+                                    flags,
+                                )
                     except Exception as e_hbcm:
                         logger.debug(f"[AlertScrutiny] HBCM evaluation bypassed: {e_hbcm}")
 

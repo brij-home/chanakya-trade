@@ -367,3 +367,162 @@ def test_auto_alert_upgrade_preserves_telegram_root(tmp_path, monkeypatch):
     upgraded = next(a for a in engine.get_alerts() if a.symbol == "HDFCBANK")
     assert upgraded.stage == "IGNITED"
     assert upgraded.telegram_root_message_id == 99001
+
+
+def test_cross_day_signals_do_not_hijack_threads():
+    """
+    Verify that an alert from yesterday (e.g. 30SEP) does not thread
+    into a fresh alert for the same symbol on today (e.g. 01OCT).
+    """
+    chat_id = "-1004393392375"
+    yesterday_sig = "SIG_ICICIPRULI_30SEP_1459"
+    yesterday_alert_id = "aa-squeeze-breakdown-icicipruli-bear-20260930"
+
+    # Yesterday's alert sent with msg_id 955
+    record_signal_message_id(yesterday_sig, 955, chat_id=chat_id, alert_id=yesterday_alert_id)
+    assert get_signal_message_id(yesterday_sig, chat_id=chat_id) == 955
+
+    # Today's alert for the same symbol must NOT match yesterday's message
+    today_sig = "SIG_ICICIPRULI_01OCT_0938"
+    today_alert_id = "aa-squeeze-breakdown-icicipruli-bear-20261001"
+    assert get_signal_message_id(today_sig, chat_id=chat_id, alert_id=today_alert_id) is None
+
+
+def test_new_calls_across_all_categories_never_thread_as_updates():
+    """
+    Verify that across ALL categories (Crypto, F&O Options, MCX, Currency, Radar),
+    a new call message containing full execution playbook words ('Scale', 'trail', 'stop', 'target')
+    never attaches reply_to_message_id, even when an earlier morning signal exists for the symbol today.
+    """
+    chat_crypto = "-1004323607372"
+    chat_fno = "-1004393392375"
+    chat_mcx = "-1004351234567"
+    chat_cds = "-1004367890123"
+
+    # Simulate earlier morning alerts on same symbols today
+    record_signal_message_id("SIG_BTCUSDT_02OCT_0712", 216, chat_id=chat_crypto)
+    record_signal_message_id("SIG_RELIANCE_2600CE_02OCT_0915", 301, chat_id=chat_fno)
+    record_signal_message_id("SIG_CRUDEOIL_02OCT_0900", 401, chat_id=chat_mcx)
+    record_signal_message_id("SIG_USDINR_02OCT_0900", 501, chat_id=chat_cds)
+
+    # 1. Crypto 24x7 New Call with full playbook
+    crypto_msg = (
+        "🪙 <b>[CRYPTO 24x7] NEW CALL · ALPHA VORTEX</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🟢 CRYPTO SMC ALPHA: BTCUSDT Demand Order Block Reclaim @ $85,600.00\n"
+        "• Action: BUY SPOT / LONG BTCUSDT @ $83,400.00 – $85,771.20\n"
+        "• SL: $82,983.00\n"
+        "• T1: $91,619.10 | T2: $100,045.84 | Runner: $101,249.66\n"
+        "• Playbook: Scale 50% at T1 (+2.3R) & trail stop to breakeven. Scale 25% at T2 (+5.5R). Trail runner to T3.\n"
+        "💡 Reason: Structural reclaim at 15m Demand OB. Upside target: $91,619.10\n"
+        "🏷️ #SIG_BTCUSDT_02OCT_0931"
+    )
+    p_crypto = format_telegram_push_payload(
+        crypto_msg, chat_id=chat_crypto, signal_id="SIG_BTCUSDT_02OCT_0931", is_update=False
+    )
+    assert "reply_to_message_id" not in p_crypto
+
+    # Also verify fallback heuristic without explicit is_update (detects NEW CALL header)
+    p_crypto_auto = format_telegram_push_payload(
+        crypto_msg, chat_id=chat_crypto, signal_id="SIG_BTCUSDT_02OCT_0931"
+    )
+    assert "reply_to_message_id" not in p_crypto_auto
+
+    # 2. Equity F&O Options New Call
+    fno_msg = (
+        "🟢 <b>[REAL/LIVE] NEW CALL · OPTIONS BREAKOUT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🟢 <b>RELIANCE 2600 CE</b> @ ₹42.50\n"
+        "• SL: ₹32.00\n"
+        "• T1: ₹58.00 | T2: ₹75.00\n"
+        "• Playbook: Scale 50% at T1 & trail stop to breakeven.\n"
+        "🏷️ #SIG_RELIANCE_2600CE_02OCT_1130"
+    )
+    p_fno = format_telegram_push_payload(
+        fno_msg, chat_id=chat_fno, signal_id="SIG_RELIANCE_2600CE_02OCT_1130", is_update=False
+    )
+    assert "reply_to_message_id" not in p_fno
+
+    # 3. MCX Commodity New Call
+    mcx_msg = (
+        "🛢️ <b>[REAL/LIVE] NEW CALL · MCX MOMENTUM</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🟢 CRUDEOIL @ ₹6,150.00\n"
+        "• SL: ₹6,080.00 | T1: ₹6,280.00\n"
+        "• Playbook: Scale 50% at T1 & trail stop to breakeven.\n"
+        "🏷️ #SIG_CRUDEOIL_02OCT_1400"
+    )
+    p_mcx = format_telegram_push_payload(
+        mcx_msg, chat_id=chat_mcx, signal_id="SIG_CRUDEOIL_02OCT_1400", is_update=False
+    )
+    assert "reply_to_message_id" not in p_mcx
+
+    # 4. Currency CDS New Call
+    cds_msg = (
+        "𒒱 <b>[REAL/LIVE] NEW CALL · CURRENCY BREAKOUT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🟢 USDINR @ ₹83.95\n"
+        "• SL: ₹83.80 | T1: ₹84.20\n"
+        "• Playbook: Scale 50% at T1 & trail stop to breakeven.\n"
+        "🏷️ #SIG_USDINR_02OCT_1015"
+    )
+    p_cds = format_telegram_push_payload(
+        cds_msg, chat_id=chat_cds, signal_id="SIG_USDINR_02OCT_1015", is_update=False
+    )
+    assert "reply_to_message_id" not in p_cds
+
+
+def test_same_day_distinct_calls_maintain_independent_threads():
+    """
+    Verify that two distinct calls for the same symbol on the same day:
+    1. Both send as independent top-level root messages (no reply_to_message_id).
+    2. Milestone updates for Call #1 link strictly to Call #1's message ID.
+    3. Milestone updates for Call #2 link strictly to Call #2's message ID.
+    """
+    chat_id = "-1004323607372"
+
+    # Call #1 at 07:12 IST
+    sig_1 = "SIG_BTCUSDT_02OCT_0712"
+    msg_1 = (
+        "🪙 <b>[CRYPTO 24x7] NEW CALL · ALPHA VORTEX</b>\n"
+        "🟢 BTCUSDT @ $85,000.00\n"
+        f"🏷️ #{sig_1}"
+    )
+    p_1 = format_telegram_push_payload(msg_1, chat_id=chat_id, signal_id=sig_1, is_update=False)
+    assert "reply_to_message_id" not in p_1
+
+    # Simulate Call #1 sent with message ID 216
+    record_signal_message_id(sig_1, 216, chat_id=chat_id)
+
+    # Call #2 at 09:31 IST
+    sig_2 = "SIG_BTCUSDT_02OCT_0931"
+    msg_2 = (
+        "🪙 <b>[CRYPTO 24x7] NEW CALL · ALPHA VORTEX</b>\n"
+        "🟢 BTCUSDT @ $85,600.00\n"
+        f"🏷️ #{sig_2}"
+    )
+    p_2 = format_telegram_push_payload(msg_2, chat_id=chat_id, signal_id=sig_2, is_update=False)
+    assert "reply_to_message_id" not in p_2, "Call #2 must NOT thread under Call #1!"
+
+    # Simulate Call #2 sent with message ID 221
+    record_signal_message_id(sig_2, 221, chat_id=chat_id)
+
+    # Milestone for Call #1 (e.g. Target 1 for Call #1) -> must thread to 216
+    up_1 = (
+        "🎯 [REAL/LIVE] UPDATE #1 · TARGET 1 HIT\n"
+        "🏆 BTCUSDT Target 1 Hit\n"
+        f"🏷️ Ref: #{sig_1}"
+    )
+    p_up_1 = format_telegram_push_payload(up_1, chat_id=chat_id, signal_id=sig_1, is_update=True)
+    assert p_up_1["reply_to_message_id"] == 216
+
+    # Milestone for Call #2 (e.g. Target 1 for Call #2) -> must thread to 221
+    up_2 = (
+        "🎯 [REAL/LIVE] UPDATE #1 · TARGET 1 HIT\n"
+        "🏆 BTCUSDT Target 1 Hit\n"
+        f"🏷️ Ref: #{sig_2}"
+    )
+    p_up_2 = format_telegram_push_payload(up_2, chat_id=chat_id, signal_id=sig_2, is_update=True)
+    assert p_up_2["reply_to_message_id"] == 221
+
+

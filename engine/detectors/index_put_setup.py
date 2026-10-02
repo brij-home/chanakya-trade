@@ -441,7 +441,21 @@ def detect_index_put_setup(
                         f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: {hbcm_res.rejection_reason}"
                     )
                     return []
-                elif _roc_hbcm_pass:
+                else:
+                    _bypass_reason = (
+                        "ROC_ACCELERATION"
+                        if _roc_hbcm_pass
+                        else ("EXPLOSIVE_MOMENTUM" if _explosive_momentum_hbcm_pass else "V_TOP_CONFLUENCE")
+                    )
+                    hbcm_res.confluence_pass = True
+                    hbcm_res.rejection_reason = None
+                    hbcm_dict = hbcm_res.to_dict()
+                    hbcm_dict["confluence_pass"] = True
+                    hbcm_dict["hbcm_bypassed"] = True
+                    hbcm_dict["bypass_reason"] = _bypass_reason
+                    hbcm_dict["rejection_reason"] = None
+
+                if _roc_hbcm_pass:
                     logger.info(
                         f"[IndexPutSetup] ROC ACCELERATION HBCM Bypass: PE setup on {clean_sym} allowed "
                         f"with {hbcm_res.bearish_count}/5 bearish heavyweights — "
@@ -704,7 +718,43 @@ def detect_index_put_setup(
         max_rejection_envelope = (
             0.25 if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX") else 0.18
         )
-        if day_high_vs_vwap >= -0.1 and (0.03 <= vwap_fail_pct <= max_rejection_envelope):
+
+        # Ascending Bounce Guard: If spot is bouncing up strongly from Day Low towards VWAP,
+        # it is a recovery bounce / short squeeze, NOT a VWAP rejection.
+        _bounce_from_dl_pct = (
+            ((spot - day_low) / max(1.0, day_low) * 100.0)
+            if (day_low and day_low > 0 and spot > day_low)
+            else 0.0
+        )
+        _is_ascending_bounce_from_low = (
+            _bounce_from_dl_pct >= 0.15 and _bounce_from_dl_pct >= vwap_fail_pct
+        )
+
+        # Candle Rejection Guard: Last 5m candle must show bearish posture, not strong green expansion
+        _is_candle_bearish = True
+        if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+            try:
+                col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                col_h = "high" if "high" in active_ohlcv.columns else "High"
+                col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                _lb = active_ohlcv.iloc[-1]
+                _c = float(_lb[col_c])
+                _o = float(_lb[col_o])
+                _h = float(_lb[col_h])
+                _l = float(_lb[col_l])
+                _rng = max(0.1, _h - _l)
+                if _c > _o and (_h - _c) / _rng < 0.25:
+                    _is_candle_bearish = False
+            except Exception:
+                pass
+
+        if (
+            day_high_vs_vwap >= -0.1
+            and (0.03 <= vwap_fail_pct <= max_rejection_envelope)
+            and not _is_ascending_bounce_from_low
+            and _is_candle_bearish
+        ):
             signals.append("VWAP_REJECTION")
             signal_tags["vwap_rejection"] = {
                 "vwap": effective_vwap,
@@ -1761,6 +1811,7 @@ def detect_index_put_setup(
                 },
             ],
         }
+        is_long_dated_monthly = dte_days >= 8
         is_spread_mandated = bool(
             (
                 is_low_vix_range
@@ -1768,6 +1819,7 @@ def detect_index_put_setup(
                 or is_midday_chop_window
                 or is_0dte_midday_trap
                 or is_put_wall_collision
+                or is_long_dated_monthly
             )
             and hedge_plan is not None
         )

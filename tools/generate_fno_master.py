@@ -11,15 +11,27 @@ r.raise_for_status()
 
 f = io.StringIO(r.text)
 reader = csv.reader(f)
+rows = list(reader)
+
+if not rows:
+    raise ValueError("Empty CSV returned by NSE")
+
+header = rows[0]
+col_map = {h.strip().upper(): i for i, h in enumerate(header) if h.strip()}
+
+# Detect active month column (prefer OCT-26, or fallback to first expiry column index 2)
+active_col = col_map.get("OCT-26", 2)
+active_col_name = header[active_col].strip() if len(header) > active_col else "OCT-26"
+print(f"Detected active contract column: {active_col_name} (index {active_col})")
 
 fno_dict = {}
-for row in reader:
-    if not row or len(row) < 3:
+for row in rows[1:]:
+    if not row or len(row) <= active_col:
         continue
     sym = row[1].strip().upper()
-    sep26 = row[2].strip()
-    if sym and sep26 and sep26.isdigit():
-        fno_dict[sym] = int(sep26)
+    val = row[active_col].strip()
+    if sym and sym not in ("SYMBOL", "UNDERLYING") and val.isdigit():
+        fno_dict[sym] = int(val)
 
 commodities = {
     "ALUMINIUM": 5000,
@@ -56,10 +68,16 @@ full_dict.update(currencies)
 full_dict.update(bse)
 if "NIFTY" in full_dict:
     full_dict["NIFTY50"] = full_dict["NIFTY"]
+if "TATAMOTORS" not in full_dict:
+    full_dict["TATAMOTORS"] = 575
 
-out_path = Path(__file__).resolve().parent / "fno_master_sep26.json"
-out_path.write_text(json.dumps(full_dict, indent=2), encoding="utf-8")
-print(f"Saved {len(full_dict)} instruments to {out_path}")
+out_path_oct = Path(__file__).resolve().parent / "fno_master_oct26.json"
+out_path_oct.write_text(json.dumps(full_dict, indent=2), encoding="utf-8")
+print(f"Saved {len(full_dict)} instruments to {out_path_oct}")
+
+# Backwards compatibility symlink/mirror
+out_path_sep = Path(__file__).resolve().parent / "fno_master_sep26.json"
+out_path_sep.write_text(json.dumps(full_dict, indent=2), encoding="utf-8")
 
 keys = sorted(full_dict.keys())
 code_lines = ["_F_AND_O_LOT_SIZES: dict[str, int] = {"]
@@ -70,3 +88,4 @@ code_lines.append("}")
 py_path = Path(__file__).resolve().parent / "fno_code_block.py"
 py_path.write_text("\n".join(code_lines), encoding="utf-8")
 print(f"Generated python code block with {len(keys)} entries at {py_path}")
+

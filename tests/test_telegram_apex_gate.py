@@ -418,3 +418,53 @@ def test_options_oi_wall_defending_trap_suppressed():
     passed, reason = engine._eval_telegram_apex_gate(alert, in_market=True)
     assert not passed
     assert "Options OI wall resistance trap" in reason
+
+
+def test_telegram_stocks_hourly_pacing_apex_override():
+    """A 95%+ confidence APEX stock setup must bypass the 6/hr routine limit up to 8/hr."""
+    engine = AutoAlertEngine()
+    engine._hourly_telegram_dispatches = {"INDEX": [], "STOCKS": []}
+
+    now_t = time.time()
+    # Simulate 6 routine stock alerts already dispatched in the last 40 minutes
+    engine._hourly_telegram_dispatches["STOCKS"] = [now_t - (i * 300) for i in range(6)]
+
+    # 7th alert arriving, but it is an APEX setup with confidence=95
+    alert_apex = _make_dummy_alert(
+        "stk-mm-apex",
+        "M&M",
+        alert_type="INTRADAY_BREAKDOWN_SPARK",
+        direction="BEARISH",
+        opt_type="PE",
+        segment="FNO_STOCK",
+        confidence=95,
+        rvol=3.94,
+    )
+    passed, reason = engine._eval_telegram_apex_gate(alert_apex, in_market=True)
+    assert passed, f"Expected APEX 95% stock setup to pass pacing override, but got: {reason}"
+
+
+def test_telegram_index_hourly_pacing_apex_override():
+    """A 95%+ confidence APEX index setup must bypass the 3/hr routine limit up to 5/hr."""
+    engine = AutoAlertEngine()
+    engine._hourly_telegram_dispatches = {"INDEX": [], "STOCKS": []}
+
+    now_t = time.time()
+    # Simulate 3 routine index alerts already dispatched in the last 30 minutes
+    engine._hourly_telegram_dispatches["INDEX"] = [
+        now_t - 1500.0,
+        now_t - 900.0,
+        now_t - 300.0,
+    ]
+
+    # 4th alert arriving, but it is an APEX setup with confidence=95
+    alert_apex = _make_dummy_alert(
+        "idx-nifty-apex",
+        "NIFTY",
+        confidence=95,
+        is_0dte=True,
+        rvol=3.5,
+    )
+    passed, reason = engine._eval_telegram_apex_gate(alert_apex, in_market=True)
+    assert passed, f"Expected APEX 95% index setup to pass pacing override, but got: {reason}"
+

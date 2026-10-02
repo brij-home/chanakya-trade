@@ -314,11 +314,12 @@ def detect_intraday_mover_sparks(
                 tp_dict = None
 
             tick_offset = max(0.05, min(0.5, round(ltp * 0.001, 2)))
+            no_chase_lvl = round(min(t1_price - tick_offset, ltp * 1.008), 2)
             e_min = round(max(sl_price + tick_offset, ltp * 0.998), 1)
-            e_max = round(min(t1_price - tick_offset, ltp * 1.005), 1)
+            e_max = round(min(no_chase_lvl - tick_offset, ltp * 1.005), 1)
             if e_min >= e_max:
-                e_min = round(ltp * 0.998, 1)
-                e_max = round(ltp * 1.005, 1)
+                e_max = round(no_chase_lvl - 0.05, 1)
+                e_min = round(max(sl_price + tick_offset, ltp * 0.998), 1)
 
             fut_advice = None
             if seg != "INDEX":
@@ -351,9 +352,10 @@ def detect_intraday_mover_sparks(
                 "target_2": f"₹{t2_price:,.1f}",
                 "target_3": f"₹{t3_price:,.1f}",
                 "target_moonshot": f"₹{t3_price:,.1f}",
+                "no_chase_boundary": f"₹{no_chase_lvl:,.1f}",
                 "risk_reward": rr_str,
                 "when_to_buy": f"Enter on 1m/5m consolidation holding above VWAP (₹{vwap:,.1f}).",
-                "when_to_wait": f"Do not chase if price moves > {round(chg + 1.2, 1)}% from open.",
+                "when_to_wait": f"Do not chase if price moves beyond ₹{no_chase_lvl:,.1f}.",
                 "profit_rule": "Book 50% at T1, trail SL to Breakeven for T2 & Runner.",
                 "trade_plan": tp_dict
                 or {
@@ -365,6 +367,7 @@ def detect_intraday_mover_sparks(
                     "target_1": t1_price,
                     "target_2": t2_price,
                     "target_3": t3_price,
+                    "no_chase_boundary": no_chase_lvl,
                     "risk_reward": rr_str,
                 },
             }
@@ -441,11 +444,12 @@ def detect_intraday_mover_sparks(
                 tp_dict = None
 
             tick_offset = max(0.05, min(0.5, round(ltp * 0.001, 2)))
+            no_chase_lvl = round(max(t1_price + tick_offset, ltp * 0.992), 2)
             e_max = round(min(sl_price - tick_offset, ltp * 1.002), 1)
-            e_min = round(max(t1_price + tick_offset, ltp * 0.995), 1)
+            e_min = round(max(no_chase_lvl + tick_offset, ltp * 0.995), 1)
             if e_min >= e_max:
-                e_min = round(ltp * 0.995, 1)
-                e_max = round(ltp * 1.002, 1)
+                e_min = round(no_chase_lvl + 0.05, 1)
+                e_max = round(min(sl_price - tick_offset, ltp * 1.002), 1)
 
             fut_advice = None
             if seg != "INDEX":
@@ -478,9 +482,10 @@ def detect_intraday_mover_sparks(
                 "target_2": f"₹{t2_price:,.1f}",
                 "target_3": f"₹{t3_price:,.1f}",
                 "target_moonshot": f"₹{t3_price:,.1f}",
+                "no_chase_boundary": f"₹{no_chase_lvl:,.1f}",
                 "risk_reward": rr_str,
                 "when_to_buy": f"Short on rejection retest of VWAP (₹{vwap:,.1f}) from below.",
-                "when_to_wait": f"Do not chase if breakdown already exceeds {round(abs(chg) + 1.2, 1)}%.",
+                "when_to_wait": f"Do not chase if price moves beyond ₹{no_chase_lvl:,.1f}.",
                 "profit_rule": "Cover 50% at T1, trail stop to breakeven for T2 & Runner.",
                 "trade_plan": tp_dict
                 or {
@@ -492,6 +497,7 @@ def detect_intraday_mover_sparks(
                     "target_1": t1_price,
                     "target_2": t2_price,
                     "target_3": t3_price,
+                    "no_chase_boundary": no_chase_lvl,
                     "risk_reward": rr_str,
                 },
             }
@@ -583,6 +589,7 @@ def detect_intraday_mover_sparks(
             trigger_level=ltp,
             target_level=t1_price,
             stop_loss=sl_price,
+            no_chase_boundary=no_chase_lvl,
             confidence=min(
                 95,
                 int(75 + rvol * 5 + sector_tailwind_bonus + confirmation_bonus + divergence_bonus),
@@ -597,6 +604,10 @@ def detect_intraday_mover_sparks(
                 "change_pct": chg,
                 "segment": seg,
                 "atr": atr_val,
+                "no_chase_boundary": no_chase_lvl,
+                "target_1": t1_price,
+                "target_2": t2_price,
+                "target_3": t3_price,
                 "nifty_change_pct": nifty_chg if nifty_q else None,
                 "nifty_below_vwap": (
                     ((nifty_ltp < nifty_vwap) if nifty_vwap > 0 else (nifty_chg < 0))
