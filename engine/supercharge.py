@@ -282,3 +282,31 @@ def render_comparison_dashboard(
         )
 
     return "\n".join(lines)
+
+
+def log_evolution_entry(
+    baseline_id: str,
+    baseline_card: dict[str, Any],
+    variants: list[StrategyVariant],
+    context: Optional[dict[str, Any]] = None,
+) -> None:
+    """Helper to log an optimization cycle to the evolution journal."""
+    logger = EvolutionLog()
+    logger.log_entry(
+        "optimization_round",
+        {
+            "baseline_id": baseline_id,
+            "baseline_card": baseline_card,
+            "variants": [
+                {
+                    "variant_id": v.variant_id,
+                    "is_accepted": v.is_accepted,
+                    "scorecard": v.scorecard,
+                    "rejection_reason": v.rejection_reason,
+                }
+                for v in variants
+            ],
+            "context": context or {},
+        },
+    )
+

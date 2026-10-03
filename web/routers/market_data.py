@@ -55,6 +55,24 @@ async def get_market_regime():
         from engine.market_regime_gate import evaluate_market_regime
 
         snap = await asyncio.to_thread(evaluate_market_regime)
+        gov_dict = None
+        try:
+            from analysis.regime_governor import classify_market_regime
+
+            gov = await asyncio.to_thread(classify_market_regime)
+            gov_dict = {
+                "regime": gov.regime,
+                "name": gov.name,
+                "breakout_weight": gov.breakout_weight,
+                "mean_reversion_weight": gov.mean_reversion_weight,
+                "position_size_multiplier": gov.position_size_multiplier,
+                "min_scrutiny_score": gov.min_scrutiny_score,
+                "active_detectors": gov.active_detectors,
+                "summary": gov.summary,
+            }
+        except Exception:
+            pass
+
         return {
             "status": "ok",
             "is_edgeless": snap.is_edgeless,
@@ -68,6 +86,7 @@ async def get_market_regime():
             "reason": snap.reason,
             "is_locomotive_polarized": getattr(snap, "is_locomotive_polarized", False),
             "locomotive_detail": getattr(snap, "locomotive_detail", ""),
+            "governor": gov_dict,
         }
     except Exception as exc:
         return {
@@ -833,3 +852,24 @@ async def post_fyers_tbt_subscribe_endpoint(req: dict[str, Any]):
 
     fyers_tbt_manager.subscribe(symbols)
     return {"status": "ok", "subscribed": symbols}
+
+
+@router.get("/api/market/symbol/search", tags=["Symbol Master"])
+async def search_symbols_endpoint(q: str, limit: int = 10):
+    """Fast token-free symbol search across public Fyers master."""
+    from market.symbol_master import get_symbol_master
+
+    sm = get_symbol_master()
+    res = await asyncio.to_thread(sm.search_symbols, q, limit=limit)
+    return {"status": "ok", "query": q, "count": len(res), "data": res}
+
+
+@router.get("/api/market/symbol/info", tags=["Symbol Master"])
+async def get_symbol_info_endpoint(symbol: str):
+    """Returns lot size, tick size, and validity for a symbol."""
+    from market.symbol_master import get_symbol_master
+
+    sm = get_symbol_master()
+    info = await asyncio.to_thread(sm.get_symbol_info, symbol)
+    return {"status": "ok", "symbol": symbol, "data": info}
+

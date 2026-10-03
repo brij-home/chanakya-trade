@@ -1388,6 +1388,8 @@ async def cmd_asymmetric(update, context) -> None:
                 "RUBBER_BAND_200EMA": "🧲",
                 "EXPIRY_0DTE_GAMMA": "⚡",
                 "TURTLE_SOUP_SHORT": "🐢",
+                "TURTLE_SOUP_SWEEP": "🐢",
+                "TURTLE_SOUP_PLUS_ONE_LONG": "🐢",
                 "IRON_CONDOR_PINNING": "🦅",
                 "COMMODITY": "⛏️",
             }.get(o.setup_type, "🎯")

@@ -2562,7 +2562,7 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
     )
 
     direction = str(data.get("direction") or metrics.get("direction") or "BULLISH").upper()
-    setup_type = str(data.get("setup_type") or metrics.get("setup_type") or "").upper()
+    setup_type = str(data.get("setup_type") or metrics.get("setup_type") or data.get("alert_type") or "").upper()
     is_bearish = direction in ("BEARISH", "SHORT", "SELL") or "SHORT" in setup_type
     is_neutral = (
         direction in ("NEUTRAL", "DELTA_NEUTRAL")
@@ -2571,7 +2571,11 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
     )
 
     if "TURTLE_SOUP" in setup_type:
-        setup_title_tag = "TURTLE SOUP SHORT"
+        setup_title_tag = (
+            "TURTLE SOUP SHORT (BEARISH UPTHRUST)"
+            if is_bearish
+            else "TURTLE SOUP LONG (BULLISH SPRING)"
+        )
     elif "IRON_CONDOR" in setup_type:
         setup_title_tag = "IRON CONDOR PINNING (DELTA-NEUTRAL)"
     elif is_bearish:
@@ -3907,8 +3911,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         d = alert.to_dict() if hasattr(alert, "to_dict") else vars(alert)
         return render_precursor_alert(d, in_market=in_market)
 
-    # 6. Asymmetric Opportunity
-    if getattr(alert, "alert_type", "") == "ASYMMETRIC_OPPORTUNITY":
+    # 6. Asymmetric Opportunity & Opportunity Interception (Turtle Soup)
+    if getattr(alert, "alert_type", "") in ("ASYMMETRIC_OPPORTUNITY", "TURTLE_SOUP_SWEEP"):
         d = alert.to_dict() if hasattr(alert, "to_dict") else vars(alert)
         return render_asymmetric_alert(d, in_market=in_market)
 

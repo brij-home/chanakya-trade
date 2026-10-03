@@ -205,3 +205,37 @@ def get_tick_size(symbol: str, fallback: float = 0.05) -> float:
     if info:
         return float(info.get("tickSize", fallback) or fallback)
     return fallback
+
+
+class SymbolMaster:
+    """Convenience class wrapper around symbol master functions."""
+
+    def load_master(self, master: str = "NSE_CM", force: bool = False) -> dict[str, Any]:
+        return load_master(master, force=force)
+
+    def search_symbols(self, term: str, master: str = "NSE_CM", limit: int = 25, **kwargs) -> list[dict[str, Any]]:
+        return search_symbols(term, master=master, limit=limit, **kwargs)
+
+    def get_symbol_info(self, symbol: str) -> Optional[dict[str, Any]]:
+        return get_symbol_info(symbol)
+
+    def validate_symbol(self, symbol: str) -> dict[str, Any]:
+        return validate_symbol(symbol)
+
+    def get_lot_size(self, symbol: str, fallback: int = 1) -> int:
+        return get_lot_size(symbol, fallback=fallback)
+
+    def get_tick_size(self, symbol: str, fallback: float = 0.05) -> float:
+        return get_tick_size(symbol, fallback=fallback)
+
+
+_symbol_master_instance: Optional[SymbolMaster] = None
+
+
+def get_symbol_master() -> SymbolMaster:
+    """Return singleton SymbolMaster instance."""
+    global _symbol_master_instance
+    if _symbol_master_instance is None:
+        _symbol_master_instance = SymbolMaster()
+    return _symbol_master_instance
+

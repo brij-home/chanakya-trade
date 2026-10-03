@@ -2492,6 +2492,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       } else if (selectedFilter === 'MULTI_FLOW') {
         const rel = a.metrics?.related_strikes || a.related_strikes
         if (!Array.isArray(rel) || rel.length === 0) return false
+      } else if (selectedFilter === 'TURTLE_SOUP_SWEEP') {
+        const at = String(a.alert_type || a.event_type || '')
+        if (!at.includes('TURTLE_SOUP')) return false
       } else if (selectedFilter !== 'ALL' && a.alert_type !== selectedFilter && a.event_type !== selectedFilter) {
         return false
       }
@@ -3319,6 +3322,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   <option value="RRG_ORDERBOOK_CONVERGENCE">🔄 RRG × Order-Book Convergence</option>
                   <option value="PROMOTER_SKIN_IN_THE_GAME">💎 Promoter Skin-in-the-Game</option>
                   <option value="SMC_SWEEP">🌊 SMC Sweep</option>
+                  <option value="TURTLE_SOUP_SWEEP">🐢 Turtle Soup Sweep</option>
                   <option value="TURTLE_SOUP_PLUS_ONE_LONG">🐢 Turtle Soup Bullish Inversion</option>
                   <option value="TURTLE_SOUP_SHORT">🐢 Turtle Soup Bearish Upthrust</option>
                   <option value="PRECURSOR_RADAR">⚡ Precursor Radar</option>

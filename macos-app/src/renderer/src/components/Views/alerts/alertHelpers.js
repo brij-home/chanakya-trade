@@ -195,6 +195,27 @@ export const AUTO_TYPE_STYLE = {
     bg: 'rgba(16, 185, 129, 0.08)',
     border: 'rgba(16, 185, 129, 0.20)',
   },
+  TURTLE_SOUP_SWEEP: {
+    icon: '🐢',
+    label: 'TURTLE SOUP SWEEP',
+    color: '#38bdf8',
+    bg: 'rgba(56, 189, 248, 0.08)',
+    border: 'rgba(56, 189, 248, 0.20)',
+  },
+  TURTLE_SOUP_SPRING: {
+    icon: '🐢',
+    label: 'TURTLE SOUP SPRING',
+    color: '#10b981',
+    bg: 'rgba(16, 185, 129, 0.08)',
+    border: 'rgba(16, 185, 129, 0.20)',
+  },
+  TURTLE_SOUP_UPTHRUST: {
+    icon: '🐢',
+    label: 'TURTLE SOUP UPTHRUST',
+    color: '#f43f5e',
+    bg: 'rgba(244, 63, 94, 0.08)',
+    border: 'rgba(244, 63, 94, 0.20)',
+  },
   IRON_CONDOR_PINNING: {
     icon: '🦅',
     label: 'IRON CONDOR PINNING',
@@ -1250,7 +1271,7 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   const isFuture = Boolean(rawContract?.toUpperCase().includes('FUT') || alert.symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
 
   const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE')) && alert.exchange === 'NFO')
-  const isSpotSetup = !isFuture && !isPureOption && (alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'TURTLE_SOUP_PLUS_ONE_LONG' || alert.alert_type === 'IRON_CONDOR_PINNING' || alert.alert_type === 'CRYPTO_SQUEEZE' || alert.alert_type === 'CRYPTO_MOMENTUM')
+  const isSpotSetup = !isFuture && !isPureOption && (alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'TURTLE_SOUP_PLUS_ONE_LONG' || alert.alert_type === 'TURTLE_SOUP_SWEEP' || alert.alert_type === 'IRON_CONDOR_PINNING' || alert.alert_type === 'CRYPTO_SQUEEZE' || alert.alert_type === 'CRYPTO_MOMENTUM')
   const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || rawContract)))
 
   const isBull = alert.direction === 'BULLISH'
