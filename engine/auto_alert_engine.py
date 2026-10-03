@@ -4237,7 +4237,7 @@ class AutoAlertEngine:
                 a
                 for a in self._alerts
                 if not a.is_invalidated
-                and a.stage == "EARLY_WARNING"
+                and a.stage in ("EARLY_WARNING", "STALK", "PRIMED")
                 and not (a.environment == "TEST" or not a.is_live)
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
@@ -4285,6 +4285,34 @@ class AutoAlertEngine:
                 elif not is_payoff_up and cur_ltp <= trigger:
                     has_ignited = True
 
+                if not has_ignited:
+                    # High-Precision Proximity Surveillance (STALK / EARLY_WARNING -> PRIMED transition):
+                    # When price approaches within ±0.35% of the trigger level, promote to PRIMED.
+                    dist_ratio = abs(cur_ltp - trigger) / trigger if trigger > 0 else 1.0
+                    if dist_ratio <= 0.0035 and alert.stage in ("EARLY_WARNING", "STALK"):
+                        with self._lock:
+                            if alert.promote_stage(
+                                "PRIMED",
+                                reason=f"LTP ₹{cur_ltp:,.2f} within {dist_ratio * 100.0:.2f}% of trigger ₹{trigger:,.2f}",
+                                ltp=cur_ltp,
+                                actor="INTERCEPTION_RADAR",
+                            ):
+                                self._save()
+                        try:
+                            from web.sse import event_bus
+
+                            event_bus.publish_sync(
+                                "alerts",
+                                {
+                                    "type": "alert_primed",
+                                    "alert": alert.to_dict(),
+                                    "proximity_pct": round(dist_ratio * 100.0, 3),
+                                },
+                            )
+                        except Exception:
+                            pass
+                    continue
+
                 if has_ignited:
                     # Directional Whiplash / Conflict Guard on Ignition:
                     # Prevent igniting an early warning if an opposing active ignited trade is already running
@@ -4316,6 +4344,8 @@ class AutoAlertEngine:
                                 and a.stage
                                 not in (
                                     "EARLY_WARNING",
+                                    "STALK",
+                                    "PRIMED",
                                     "INVALIDATED",
                                     "COMPLETED",
                                     "EXPIRED",
@@ -4352,10 +4382,12 @@ class AutoAlertEngine:
 
                     with self._lock:
                         now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-                        alert.stage = "IGNITED"
-                        alert.ltp = cur_ltp
-                        alert.updated_at = now_str
-                        alert.triggered_at = now_str
+                        alert.promote_stage(
+                            "IGNITED",
+                            reason=f"Trigger level ₹{trigger:,.2f} crossed by LTP ₹{cur_ltp:,.2f}",
+                            ltp=cur_ltp,
+                            actor="INTERCEPTION_TRIGGER",
+                        )
                         env_tag = (
                             "[TEST]"
                             if (alert.environment == "TEST" or not alert.is_live)

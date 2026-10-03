@@ -257,10 +257,14 @@ class AlertScrutinyAuditor:
             "SUPERPERFORMER",
         ):
             max_risk = 30.0
+        elif time_horizon in ("SWING_SHORT", "SWING_MID", "SWING", "POSITIONAL"):
+            max_risk = 14.0
         elif atype == "OPTIONS_MOMENTUM":
             max_risk = 32.0
         elif is_option_premium_levels:
-            max_risk = 45.0
+            max_risk = 25.0 if time_horizon in ("SCALP", "INTRADAY_SCALP_ONLY") else 45.0
+        elif time_horizon in ("SCALP", "INTRADAY_SCALP_ONLY"):
+            max_risk = 3.5
         else:
             max_risk = self.max_intraday_risk_pct
         risk_pct = (risk_pts / ltp) * 100.0 if ltp > 0 else 0.0
@@ -319,6 +323,25 @@ class AlertScrutinyAuditor:
                 f"Impossibly tight stop-loss ({risk_pct:.2f}% < 0.10% tick noise threshold)",
                 flags,
             )
+
+        # 3c. Dynamic Market Regime Eligibility Gate
+        try:
+            from analysis.regime_governor import (
+                classify_market_regime,
+                is_detector_eligible_for_regime,
+            )
+
+            regime = classify_market_regime()
+            rvol_val = 1.0
+            metrics_d = getattr(alert, "metrics", {}) or {}
+            if isinstance(metrics_d, dict):
+                rvol_val = float(metrics_d.get("rvol") or metrics_d.get("rvol_val") or 1.0)
+            is_elig, supp_reason = is_detector_eligible_for_regime(atype, regime, rvol=rvol_val)
+            if not is_elig:
+                flags["risk_within_bounds"] = False
+                return False, supp_reason, flags
+        except Exception:
+            pass
 
         flags["risk_within_bounds"] = True
 
@@ -2599,20 +2622,7 @@ class AlertScrutinyAuditor:
     def _compute_regime_scrutiny_threshold(self, alert: Any) -> int:
         """
         Computes the adaptive minimum scrutiny score based on the current market regime.
-
-        Returns:
-            75  — Compressed VIX regime (VIX < 12.5): false breakout rate elevated on
-                  range-bound / low-vol expiry sessions. Raise bar to filter noise.
-            75  — Nifty trapped inside Opening 30-Minute Range (ORB): price has not
-                  established directional conviction; intraday momentum breakouts are
-                  statistically unreliable.
-            70  — Normal regime: standard institutional threshold.
-
-        The result is cached (30s TTL) at engine start-up level to avoid repeated
-        market data round-trips across rapid 5s scan loops.
         """
-        # Only apply regime uplift for intraday momentum / breakout alert types.
-        # Positional, swing, and index hedge types are unaffected.
         _BREAKOUT_TYPES = (
             "SQUEEZE_BREAKOUT",
             "OPTIONS_MOMENTUM",
@@ -2627,82 +2637,13 @@ class AlertScrutinyAuditor:
         if atype not in _BREAKOUT_TYPES:
             return 70  # Standard threshold for non-breakout types
 
-        # --- VIX Regime Check ---
-        vix_val: Optional[float] = None
         try:
-            from market.indices import get_vix
+            from analysis.regime_governor import classify_market_regime
 
-            vix_raw = get_vix()
-            if isinstance(vix_raw, (int, float)) and vix_raw > 0:
-                vix_val = float(vix_raw)
-            elif hasattr(vix_raw, "ltp") and vix_raw.ltp:
-                vix_val = float(vix_raw.ltp)
-            elif isinstance(vix_raw, dict):
-                vix_val = float(vix_raw.get("ltp") or vix_raw.get("value") or 0.0) or None
+            regime = classify_market_regime()
+            return regime.min_scrutiny_score
         except Exception:
-            pass
-
-        if vix_val is not None and vix_val < 12.5:
-            logger.debug(
-                f"[AlertScrutiny] Regime uplift: VIX {vix_val:.2f} < 12.5 → min_score raised 70→75 "
-                f"for {atype} (compressed volatility / range-bound regime)"
-            )
-            return 75
-
-        # --- Nifty ORB Trap Check (Opening 30-Minute Range) ---
-        # ORB is formed during 09:15–09:45 IST. If Nifty spot is still inside the ORB
-        # and we are past 10:30 IST (ORB should have resolved by then), it signals a
-        # range-bound session where breakout momentum is statistically unreliable.
-        try:
-            from market.quotes import _QUOTE_CACHE, _quote_cache_lock
-            from datetime import datetime as _dt_now, time as _dtime
-
-            now_ist_t = _dt_now.now(IST).time()
-            if _dtime(10, 30) <= now_ist_t <= _dtime(14, 0):
-                orb_high: Optional[float] = None
-                orb_low: Optional[float] = None
-                nifty_ltp: Optional[float] = None
-
-                # Pull from in-memory quote cache only (zero network I/O)
-                with _quote_cache_lock:
-                    for k in ("NSE:NIFTY 50", "NIFTY 50", "NSE:NIFTY", "NIFTY"):
-                        if k in _QUOTE_CACHE:
-                            _, q_obj = _QUOTE_CACHE[k]
-                            nifty_ltp = float(
-                                getattr(q_obj, "last_price", 0.0)
-                                or getattr(q_obj, "ltp", 0.0)
-                                or 0.0
-                            )
-                            orb_high = float(
-                                getattr(q_obj, "ohlc", {}).get("open", 0.0)
-                                if hasattr(q_obj, "ohlc")
-                                else 0.0
-                            )
-                            orb_low = orb_high  # fallback if no ORB levels in cache
-                            # Prefer explicit ORB fields if populated
-                            orb_high = float(getattr(q_obj, "orb_high", 0.0) or orb_high)
-                            orb_low = float(getattr(q_obj, "orb_low", 0.0) or orb_low)
-                            break
-
-                if nifty_ltp and orb_high and orb_low and orb_high > orb_low:
-                    inside_orb = orb_low <= nifty_ltp <= orb_high
-                    # Also consider it ORB-trapped if range is narrow (< 0.25% of spot)
-                    orb_range_pct = (
-                        (orb_high - orb_low) / nifty_ltp * 100.0 if nifty_ltp > 0 else 0.0
-                    )
-                    if (
-                        inside_orb and orb_range_pct < 0.5
-                    ):  # Nifty trapped in a tight < 0.5% ORB band
-                        logger.debug(
-                            f"[AlertScrutiny] Regime uplift: Nifty trapped inside ORB "
-                            f"[{orb_low:.1f}–{orb_high:.1f}, {orb_range_pct:.2f}%] → min_score raised 70→75 "
-                            f"for {atype} (ORB-trapped range-bound session)"
-                        )
-                        return 75
-        except Exception:
-            pass
-
-        return 70  # Normal regime — standard institutional threshold
+            return 70
 
     def _execute_fast_llm_scrutiny(
         self, alert: Any, flags: dict[str, bool], timeout: float = 2.5, min_score: int = 70

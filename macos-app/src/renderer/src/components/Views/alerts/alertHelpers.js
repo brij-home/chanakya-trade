@@ -188,6 +188,13 @@ export const AUTO_TYPE_STYLE = {
     bg: 'rgba(244, 63, 94, 0.08)',
     border: 'rgba(244, 63, 94, 0.20)',
   },
+  TURTLE_SOUP_PLUS_ONE_LONG: {
+    icon: '🐢',
+    label: 'TURTLE SOUP LONG',
+    color: '#10b981',
+    bg: 'rgba(16, 185, 129, 0.08)',
+    border: 'rgba(16, 185, 129, 0.20)',
+  },
   IRON_CONDOR_PINNING: {
     icon: '🦅',
     label: 'IRON CONDOR PINNING',
@@ -1028,7 +1035,9 @@ export function resolveHorizonAndETA(alert) {
     String(alert.symbol || '').toUpperCase().startsWith('CRYPTO:')
 
   let key = 'INTRADAY'
-  if (rawHorizon === 'ROLLING_24H' || (isCrypto && (!rawHorizon || rawHorizon === 'INTRADAY'))) {
+  if (rawHorizon === 'SCALP' || rawHorizon === 'INTRADAY_SCALP_ONLY' || rawHorizon === 'FAST_SCALP') {
+    key = 'SCALP'
+  } else if (rawHorizon === 'ROLLING_24H' || (isCrypto && (!rawHorizon || rawHorizon === 'INTRADAY'))) {
     key = 'ROLLING_24H'
   } else if (rawHorizon === 'MULTIBAGGER') {
     key = 'MULTIBAGGER'
@@ -1050,7 +1059,7 @@ export function resolveHorizonAndETA(alert) {
   } else if (rawType.includes('COILING') || rawType.includes('CIRCUIT') || rawType.includes('VCP')) {
     key = 'SWING_SHORT'
   } else if (rawType.includes('GAMMA') || rawType.includes('SPARK') || rawType.includes('ORB') || rawType.includes('CONTAGION')) {
-    key = 'INTRADAY'
+    key = (alert.headline || '').toUpperCase().includes('SCALP') ? 'SCALP' : 'INTRADAY'
   } else if (rawHorizon) {
     key = rawHorizon
   }
@@ -1085,6 +1094,9 @@ export function resolveHorizonAndETA(alert) {
         etaLabel = '2–5d'
         etaFull = '2–5 Sessions'
       }
+    } else if (key === 'SCALP') {
+      etaLabel = '15–45m'
+      etaFull = '15–45 Minutes (Fast Scalp)'
     } else if (key === 'ROLLING_24H') {
       etaLabel = '24h'
       etaFull = '24h Rolling Window'
@@ -1116,6 +1128,19 @@ export function resolveHorizonAndETA(alert) {
 
   // Token styles & metadata
   switch (key) {
+    case 'SCALP':
+      return {
+        key: 'SCALP',
+        label: 'SCALP',
+        shortLabel: 'SCALP',
+        icon: '⚡',
+        etaLabel: etaLabel || '15–45m',
+        etaFull: etaFull || '15–45 Minutes (Fast Scalp)',
+        compactBadge: `⚡ SCALP • ${etaLabel || '15–45m'}`,
+        badgeClasses: 'bg-amber-500/20 text-amber-300 border-amber-500/40 ring-1 ring-amber-500/20',
+        etaClasses: 'bg-amber-500/10 text-amber-300 border-amber-500/30',
+        tooltip: 'High-Velocity Scalp: Fast momentum target (15–45m), mandatory square-off before 15:00 IST.',
+      }
     case 'ROLLING_24H':
       return {
         key: 'ROLLING_24H',
@@ -1225,7 +1250,7 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   const isFuture = Boolean(rawContract?.toUpperCase().includes('FUT') || alert.symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
 
   const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE')) && alert.exchange === 'NFO')
-  const isSpotSetup = !isFuture && !isPureOption && (alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'IRON_CONDOR_PINNING' || alert.alert_type === 'CRYPTO_SQUEEZE' || alert.alert_type === 'CRYPTO_MOMENTUM')
+  const isSpotSetup = !isFuture && !isPureOption && (alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'TURTLE_SOUP_PLUS_ONE_LONG' || alert.alert_type === 'IRON_CONDOR_PINNING' || alert.alert_type === 'CRYPTO_SQUEEZE' || alert.alert_type === 'CRYPTO_MOMENTUM')
   const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || rawContract)))
 
   const isBull = alert.direction === 'BULLISH'
@@ -1375,6 +1400,8 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   let isTrail = false
   let isEarly = false
   let isIgnited = false
+  let isPrimed = false
+  let isStalk = false
   let resolvedStage = String(alert.stage || '').toUpperCase()
 
   const rawStage = String(alert.stage || '').toUpperCase()
@@ -1467,6 +1494,8 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     isTrail = rawStage === 'TRAILING_UPDATE'
     isEarly = rawStage === 'EARLY_WARNING'
     isIgnited = rawStage === 'IGNITED'
+    isPrimed = rawStage === 'PRIMED'
+    isStalk = rawStage === 'STALK'
     resolvedStage = isSLHit ? 'SL_HIT' : isT3Hit ? 'TARGET_ACHIEVED' : isT2Hit ? 'T2_ACHIEVED' : isT1Hit ? 'T1_ACHIEVED' : rawStage
   }
 
@@ -1501,6 +1530,12 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   } else if (isTrail) {
     stagePill = { label: '📈 TRAIL', cls: 'bg-blue-500/20 text-blue-300 border-blue-500/40', icon: '📈' }
     trajectoryStatus = { badge: '📈 TRAILING ACTIVE', text: alert.trailing_rationale || 'Trailing stop active to protect gains', theme: 'blue' }
+  } else if (isPrimed) {
+    stagePill = { label: '🎯 PRIMED', cls: 'bg-amber-400/20 text-amber-300 border-amber-400/50 ring-1 ring-amber-400/30 animate-pulse', icon: '🎯' }
+    trajectoryStatus = { badge: '🎯 PRIMED', text: 'Micro-proximity triggered (±0.35%) — sniper ready for ignition', theme: 'amber' }
+  } else if (isStalk) {
+    stagePill = { label: '🦅 STALK', cls: 'bg-sky-500/15 text-sky-400 border-sky-500/30', icon: '🦅' }
+    trajectoryStatus = { badge: '🦅 STALK', text: 'Setup tracked on radar — waiting for trigger zone approach', theme: 'sky' }
   } else if (isEarly) {
     stagePill = { label: '⏳ EARLY', cls: 'bg-amber-500/15 text-amber-400 border-amber-500/30', icon: '⏳' }
     trajectoryStatus = { badge: '⏳ EARLY WARNING', text: 'Setup forming — awaiting trigger breakout', theme: 'amber' }
@@ -1586,6 +1621,8 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     isTrail,
     isEarly,
     isIgnited,
+    isPrimed,
+    isStalk,
     horizonInfo,
   }
 }

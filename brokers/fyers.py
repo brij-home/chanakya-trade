@@ -36,7 +36,9 @@ Docs: https://myapi.fyers.in/docsv3
 
 from __future__ import annotations
 
+from decimal import Decimal, ROUND_HALF_UP
 import json
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -124,13 +126,22 @@ _MONTH_MAP = {
     "12": "12",
 }
 
+_WEEKLY_MONTH_MAP = {
+    "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
+    "O": 10, "N": 11, "D": 12,
+}
 
-def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str) -> str:
+
+def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str = "") -> str:
     """
     Parse expiry date from a Fyers option symbol string.
 
-    Fyers weekly format : NSE:NIFTY2640722100CE  → YY=26, M=4, DD=07 → 2026-04-07
-    Fyers monthly format: NSE:NIFTY26APR22100CE  → YY=26, MMM=APR, last Thursday
+    Fyers weekly format :
+      - Jan-Sep: NSE:NIFTY2640722100CE → YY=26, M=4, DD=07 → 2026-04-07
+      - Oct-Dec: NSE:NIFTY26O0824000CE → YY=26, M=O (Oct), DD=08 → 2026-10-08
+      - Nov:     NSE:NIFTY26N1524000CE → YY=26, M=N (Nov), DD=15 → 2026-11-15
+      - Dec:     NSE:NIFTY26D2424000CE → YY=26, M=D (Dec), DD=24 → 2026-12-24
+    Fyers monthly format: NSE:NIFTY26APR22100CE → YY=26, MMM=APR, last Thursday
     Returns YYYY-MM-DD string or empty string on failure.
     """
     import re
@@ -141,16 +152,16 @@ def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str) -> str:
         sym = re.sub(r"^[A-Z]+:", "", symbol)  # strip "NSE:"
         sym = re.sub(r"(CE|PE)$", "", sym)  # strip option type
 
-        # Match: underlying(letters) + YY(2 digits) + date_part + strike(digits)
-        # Monthly: 3 uppercase letters; Weekly: 3 or 4 digits
-        m = re.match(r"^[A-Z]+(\d{2})([A-Z]{3}|\d{3,4})(\d+)$", sym)
+        # Match: underlying + YY(2 digits) + date_part + strike(digits)
+        # Monthly: 3 letters; Weekly: [1-9OND] + 2 digits, or 4 digits
+        m = re.match(r"^[A-Za-z0-9_&]+?(\d{2})([A-Za-z]{3}|[1-9ONDond]\d{2}|\d{4})(\d+)$", sym)
         if not m:
             return ""
         yy, date_part, _ = m.groups()
         year = int("20" + yy)
 
-        # Monthly: 3-letter month e.g. APR
-        if re.match(r"^[A-Z]{3}$", date_part):
+        # Monthly: 3-letter month e.g. APR, OCT
+        if re.match(r"^[A-Za-z]{3}$", date_part):
             month = int(_MONTH_MAP.get(date_part.lower(), "0"))
             if not month:
                 return ""
@@ -160,14 +171,16 @@ def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str) -> str:
                 d -= dt.timedelta(days=1)
             return d.strftime("%Y-%m-%d")
 
-        # Weekly digits — try 3-digit first (single-digit month + 2-digit day),
-        # fall back to 4-digit (2-digit month + 2-digit day)
-        # 3-digit e.g. "407" = month=4, day=07
-        if len(date_part) >= 3:
-            m3 = int(date_part[0])
-            d3 = int(date_part[1:3])
-            if 1 <= m3 <= 9 and 1 <= d3 <= 31:
-                return dt.date(year, m3, d3).strftime("%Y-%m-%d")
+        # Weekly single-char month code (1-9, O=Oct, N=Nov, D=Dec) + 2-digit day
+        # e.g. "O08" -> month 10, day 08; "407" -> month 4, day 07
+        if len(date_part) == 3:
+            code = date_part[0].upper()
+            if code in _WEEKLY_MONTH_MAP:
+                m_val = _WEEKLY_MONTH_MAP[code]
+                d_val = int(date_part[1:3])
+                if 1 <= d_val <= 31:
+                    return dt.date(year, m_val, d_val).strftime("%Y-%m-%d")
+
         # 4-digit e.g. "1024" = month=10, day=24
         if len(date_part) == 4:
             m4 = int(date_part[:2])
@@ -177,6 +190,87 @@ def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str) -> str:
     except Exception:
         pass
     return ""
+
+
+# ── Precision Order Utilities (Decimal Tick Rounding & Lot Validation) ─────────
+
+def round_price_to_tick(price: float | None, tick_size: float = 0.05) -> float:
+    """
+    Round price to the nearest valid tick increment using Decimal arithmetic.
+    Eliminates IEEE 754 floating-point drift (e.g. 805.0500000000001) that triggers
+    Fyers API -50 'invalid parameter' or -300 rejections.
+    """
+    if price is None or price <= 0:
+        return 0.0
+    if tick_size <= 0:
+        return float(price)
+    tick = Decimal(str(tick_size))
+    p = Decimal(str(price))
+    rounded = (p / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+    return float(rounded)
+
+
+def validate_lot_qty(qty: int, lot_size: int = 1) -> None:
+    """Raise ValueError if qty is not a non-zero positive multiple of lot_size."""
+    if lot_size <= 0:
+        raise ValueError(f"lot_size must be positive, got {lot_size}")
+    if qty <= 0:
+        raise ValueError(f"qty must be positive, got {qty}")
+    if qty % lot_size != 0:
+        raise ValueError(
+            f"qty {qty} is not a multiple of lot size {lot_size}; "
+            f"nearest valid lots: {(qty // lot_size) * lot_size} or "
+            f"{(qty // lot_size + 1) * lot_size}"
+        )
+
+
+def round_qty_to_lot(qty: int, lot_size: int = 1) -> int:
+    """Round qty DOWN to nearest valid lot multiple. Raises ValueError if result is 0."""
+    if lot_size <= 0:
+        raise ValueError(f"lot_size must be positive, got {lot_size}")
+    rounded = (qty // lot_size) * lot_size
+    if rounded <= 0:
+        raise ValueError(f"qty {qty} is smaller than one lot ({lot_size}); cannot round down")
+    return rounded
+
+
+class FyersRateLimiter:
+    """
+    Thread-safe client-side sliding-window rate limiter for Fyers API v3.
+    Guarantees strict safety margins:
+      - Max 8.0 req/sec (Fyers hard cap: 10/s)
+      - Max 160.0 req/min (Fyers hard cap: 200/min; 3 strikes in 1 day = account blocked for rest of day!)
+    """
+    def __init__(self, max_per_sec: float = 8.0, max_per_min: float = 160.0):
+        self._lock = threading.Lock()
+        self._max_per_sec = max_per_sec
+        self._max_per_min = max_per_min
+        self._timestamps_sec: list[float] = []
+        self._timestamps_min: list[float] = []
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.time()
+            self._timestamps_sec = [t for t in self._timestamps_sec if now - t < 1.0]
+            self._timestamps_min = [t for t in self._timestamps_min if now - t < 60.0]
+
+            sleep_needed = 0.0
+            if len(self._timestamps_sec) >= self._max_per_sec:
+                sleep_needed = max(sleep_needed, 1.0 - (now - self._timestamps_sec[0]) + 0.01)
+            if len(self._timestamps_min) >= self._max_per_min:
+                sleep_needed = max(sleep_needed, 60.0 - (now - self._timestamps_min[0]) + 0.05)
+
+            if sleep_needed > 0:
+                time.sleep(sleep_needed)
+                now = time.time()
+                self._timestamps_sec = [t for t in self._timestamps_sec if now - t < 1.0]
+                self._timestamps_min = [t for t in self._timestamps_min if now - t < 60.0]
+
+            self._timestamps_sec.append(now)
+            self._timestamps_min.append(now)
+
+
+_fyers_rate_limiter = FyersRateLimiter()
 
 
 def _resolve_commodity_contract(symbol: str) -> str:
@@ -1141,18 +1235,21 @@ class FyersAPI(BrokerAPI):
         }
         fyers_sym = _to_fyers_symbol(f"{req.exchange}:{req.symbol}" if req.exchange else req.symbol)
         eff_type = self._to_fyers_order_type(req.order_type)
+        limit_px = round_price_to_tick(float(req.price)) if eff_type in (1, 4) and req.price else 0.0
+        stop_px = round_price_to_tick(float(req.trigger_price)) if req.trigger_price else 0.0
         payload = {
             "symbol": fyers_sym,
-            "qty": req.quantity,
+            "qty": int(req.quantity),
             "type": eff_type,
             "side": 1 if req.transaction_type == "BUY" else -1,
             "productType": product_map.get(req.product, "CNC"),
-            "limitPrice": float(req.price) if eff_type in (1, 4) else 0.0,
-            "stopPrice": float(req.trigger_price) if req.trigger_price else 0.0,
+            "limitPrice": limit_px,
+            "stopPrice": stop_px,
             "validity": req.validity or "DAY",
             "disclosedQty": 0,
             "offlineOrder": False,
         }
+        _fyers_rate_limiter.acquire()
         data = fyers.place_order(payload)
         return OrderResponse(
             order_id=str(data.get("id", "")),
@@ -1178,20 +1275,23 @@ class FyersAPI(BrokerAPI):
                 f"{req.exchange}:{req.symbol}" if req.exchange else req.symbol
             )
             eff_type = self._to_fyers_order_type(req.order_type)
+            limit_px = round_price_to_tick(float(req.price)) if eff_type in (1, 4) and req.price else 0.0
+            stop_px = round_price_to_tick(float(req.trigger_price)) if req.trigger_price else 0.0
             payload_orders.append(
                 {
                     "symbol": fyers_sym,
-                    "qty": req.quantity,
+                    "qty": int(req.quantity),
                     "type": eff_type,
                     "side": 1 if req.transaction_type == "BUY" else -1,
                     "productType": product_map.get(req.product, "CNC"),
-                    "limitPrice": float(req.price) if eff_type in (1, 4) else 0.0,
-                    "stopPrice": float(req.trigger_price) if req.trigger_price else 0.0,
+                    "limitPrice": limit_px,
+                    "stopPrice": stop_px,
                     "validity": req.validity or "DAY",
                     "disclosedQty": 0,
                     "offlineOrder": False,
                 }
             )
+        _fyers_rate_limiter.acquire()
         data = fyers.place_basket_orders(payload_orders)
         responses = []
         for item in data.get("data", []):
@@ -1220,12 +1320,14 @@ class FyersAPI(BrokerAPI):
             side_code = 1 if raw_side in ("1", "BUY") else -1
             raw_type = str(leg.get("type", "LIMIT")).upper()
             type_code = 1 if raw_type in ("1", "LIMIT") else 2
+            raw_px = float(leg.get("limitPrice", leg.get("limit_price", 0.0)) or 0.0)
+            limit_px = round_price_to_tick(raw_px) if type_code == 1 and raw_px else 0.0
             payload_legs[f"leg{idx}"] = {
                 "symbol": _to_fyers_symbol(leg["symbol"]),
                 "qty": int(leg["qty"]),
                 "side": side_code,
                 "type": type_code,
-                "limitPrice": float(leg.get("limitPrice", leg.get("limit_price", 0.0))),
+                "limitPrice": limit_px,
             }
         payload = {
             "productType": product_type,
@@ -1234,6 +1336,7 @@ class FyersAPI(BrokerAPI):
             "validity": "IOC",
             "legs": payload_legs,
         }
+        _fyers_rate_limiter.acquire()
         data = fyers.place_multileg_order(payload)
         return OrderResponse(
             order_id=str(data.get("id", "")),
@@ -1245,6 +1348,7 @@ class FyersAPI(BrokerAPI):
         """1-click square off specific position or panic square off all positions."""
         fyers = self._get_fyers()
         try:
+            _fyers_rate_limiter.acquire()
             data = fyers.exit_positions(id=position_id) if position_id else fyers.exit_positions()
             return data.get("s") == "ok"
         except Exception:
@@ -1252,6 +1356,7 @@ class FyersAPI(BrokerAPI):
 
     def get_orders(self) -> list[Order]:
         fyers = self._get_fyers()
+        _fyers_rate_limiter.acquire()
         data = fyers.orderbook()
         orders = []
         for item in data.get("orderBook", []):
@@ -1277,6 +1382,7 @@ class FyersAPI(BrokerAPI):
     def cancel_order(self, order_id: str) -> bool:
         fyers = self._get_fyers()
         try:
+            _fyers_rate_limiter.acquire()
             data = fyers.cancel_order({"id": order_id})
             return data.get("s") == "ok"
         except Exception:
@@ -1294,14 +1400,15 @@ class FyersAPI(BrokerAPI):
         fyers = self._get_fyers()
         payload: dict[str, Any] = {"id": str(order_id)}
         if price is not None:
-            payload["limitPrice"] = float(price)
+            payload["limitPrice"] = round_price_to_tick(float(price))
         if trigger_price is not None:
-            payload["stopPrice"] = float(trigger_price)
+            payload["stopPrice"] = round_price_to_tick(float(trigger_price))
         if qty is not None:
             payload["qty"] = int(qty)
         if order_type is not None:
             payload["type"] = self._to_fyers_order_type(order_type)
         try:
+            _fyers_rate_limiter.acquire()
             data = fyers.modify_order(payload)
             return OrderResponse(
                 order_id=str(data.get("id", order_id)),
@@ -1326,6 +1433,11 @@ class FyersAPI(BrokerAPI):
 
         Maps intervals ('day', '60minute', '15minute', '5minute', '1minute', etc.)
         to Fyers resolutions ('D', '60', '15', '5', '1').
+        Automatically chunks date ranges exceeding Fyers single-request limits:
+          - Minute resolutions: max 95 days per chunk (Fyers cap: 100 days)
+          - Daily resolutions : max 360 days per chunk (Fyers cap: 366 days)
+          - Seconds resolutions: max 25 days per chunk (Fyers cap: 30 days)
+        Concatenates seamlessly and deduplicates by candle timestamp.
         """
         from datetime import timedelta
 
@@ -1376,38 +1488,70 @@ class FyersAPI(BrokerAPI):
         else:
             eff_from = from_date
 
-        payload = {
-            "symbol": fyers_sym,
-            "resolution": res_str,
-            "date_format": "1",
-            "range_from": eff_from.strftime("%Y-%m-%d"),
-            "range_to": eff_to.strftime("%Y-%m-%d"),
-            "cont_flag": "1",
-        }
+        if eff_from > eff_to:
+            eff_from, eff_to = eff_to, eff_from
 
-        try:
-            data = fyers.history(payload)
-            if not isinstance(data, dict) or data.get("s") != "ok":
-                return []
-            candles = data.get("candles", [])
-            rows = []
-            for c in candles:
-                if len(c) >= 6:
-                    epoch = c[0]
-                    dt = datetime.fromtimestamp(epoch)
-                    rows.append(
-                        {
-                            "date": dt,
-                            "open": float(c[1]),
-                            "high": float(c[2]),
-                            "low": float(c[3]),
-                            "close": float(c[4]),
-                            "volume": float(c[5]),
-                        }
-                    )
-            return rows
-        except Exception:
-            return []
+        # Determine safe chunk window per Fyers limits
+        if res_str in ("1", "2", "3", "5", "10", "15", "20", "30", "60"):
+            max_chunk_days = 95
+        elif res_str.endswith("S"):
+            max_chunk_days = 25
+        else:
+            max_chunk_days = 360
+
+        total_days = max(1, (eff_to - eff_from).days)
+        chunks: list[tuple[datetime, datetime]] = []
+        if total_days <= max_chunk_days:
+            chunks.append((eff_from, eff_to))
+        else:
+            curr_start = eff_from
+            while curr_start < eff_to:
+                curr_end = min(curr_start + timedelta(days=max_chunk_days), eff_to)
+                chunks.append((curr_start, curr_end))
+                curr_start = curr_end + timedelta(days=1)
+
+        all_candles: list[list] = []
+        for c_from, c_to in chunks:
+            _fyers_rate_limiter.acquire()
+            payload = {
+                "symbol": fyers_sym,
+                "resolution": res_str,
+                "date_format": "1",
+                "range_from": c_from.strftime("%Y-%m-%d"),
+                "range_to": c_to.strftime("%Y-%m-%d"),
+                "cont_flag": "1",
+            }
+            try:
+                data = fyers.history(payload)
+                if isinstance(data, dict) and data.get("s") == "ok":
+                    all_candles.extend(data.get("candles", []))
+            except Exception:
+                continue
+
+        # Deduplicate candles by epoch timestamp and sort chronologically
+        seen_epochs = set()
+        unique_candles = []
+        for c in all_candles:
+            if len(c) >= 6 and c[0] not in seen_epochs:
+                seen_epochs.add(c[0])
+                unique_candles.append(c)
+        unique_candles.sort(key=lambda c: c[0])
+
+        rows = []
+        for c in unique_candles:
+            epoch = c[0]
+            dt = datetime.fromtimestamp(epoch)
+            rows.append(
+                {
+                    "date": dt,
+                    "open": float(c[1]),
+                    "high": float(c[2]),
+                    "low": float(c[3]),
+                    "close": float(c[4]),
+                    "volume": float(c[5]),
+                }
+            )
+        return rows
 
     # ── Advanced Institutional Orders & Screeners ─────────────
 

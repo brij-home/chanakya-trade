@@ -679,3 +679,47 @@ def generate_execution_ticket(
         "notes": res.notes,
         "conviction_tier": conviction_tier,
     }
+
+
+def calibrate_off_number_stop(
+    direction: str,
+    raw_stop: float,
+    atr: float,
+    tick_size: float = 0.05,
+) -> float:
+    """
+    Calibrates stop-loss placement away from psychological round numbers (magnets for stop-runs).
+    Institutional market makers run stops 2-5 ticks through major round numbers before reversing.
+    If the calculated raw stop is within 0.15% of a round number (e.g. 50, 100, 500, 1000, 2500),
+    this buffers the stop outside the liquidity hunting pool.
+    """
+    if raw_stop <= 0:
+        return raw_stop
+
+    is_bullish = direction.upper() in ("BULLISH", "BUY", "LONG")
+    buffer = max(0.15 * atr, 3 * tick_size, raw_stop * 0.0015)
+
+    # Determine relevant round intervals based on magnitude
+    if raw_stop >= 1000:
+        intervals = [500.0, 100.0, 50.0]
+    elif raw_stop >= 100:
+        intervals = [50.0, 10.0, 5.0]
+    else:
+        intervals = [5.0, 1.0, 0.5]
+
+    for interval in intervals:
+        nearest_round = round(raw_stop / interval) * interval
+        dist_to_round = abs(raw_stop - nearest_round)
+        # If raw_stop is within 0.15% of this psychological round level
+        if dist_to_round <= (raw_stop * 0.0015):
+            if is_bullish:
+                # For Long trades, stop must be placed BELOW the round level
+                calibrated = min(raw_stop, nearest_round - buffer)
+                return round(round(calibrated / tick_size) * tick_size, 2)
+            else:
+                # For Short trades, stop must be placed ABOVE the round level
+                calibrated = max(raw_stop, nearest_round + buffer)
+                return round(round(calibrated / tick_size) * tick_size, 2)
+
+    return round(round(raw_stop / tick_size) * tick_size, 2)
+

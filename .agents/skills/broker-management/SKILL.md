@@ -60,10 +60,23 @@ Fyers (data) → Zerodha/Angel One (execution) → yfinance (fallback) → Mock 
    - Must query `get_broker().get_positions()` and `get_broker().get_funds()` directly.
    - If no authenticated broker session exists, returns `status="UNAVAILABLE"` immediately — never compares the internal ledger against itself.
    - Always includes `broker_account_id`, `broker_snapshot_at`, and `correlation_id` in valid reports.
-4. **SEBI IPv4 Binding**: Indian broker APIs enforce whitelisted static IPv4 addresses. Keep the `socket.getaddrinfo` override in `app/main.py`.
-5. **Credential Safety**: Never commit API keys, TOTP secrets, or tokens. Use OS keychain via `config.credentials`.
-6. **Graceful Degradation**: Always fall back through the broker chain → `yfinance` → Mock when live brokers are disconnected.
-7. **Connection Lifecycle**: Wrap `httpx.Client` in `with` context managers to prevent TCP socket leaks.
+4. **Authoritative Symbol Master Validation**:
+   - Symbols must be verified against official daily exchange masters via [`market.symbol_master.validate_symbol()`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/symbol_master.py) before dispatch.
+   - Prevents `-300 Invalid Symbol` rejections and guarantees canonical lot sizes and tick sizes.
+5. **Decimal Tick-Size Quantization**:
+   - Limit and stop prices must be rounded via [`brokers.fyers.round_price_to_tick()`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/fyers.py) using `Decimal` arithmetic.
+   - Eliminates IEEE 754 floating point drift (e.g. `805.0500000000001`) that causes broker `-50 Invalid Parameter` rejections.
+6. **Broker Rate-Limit Defense (The 3-Strike Invariant)**:
+   - FYERS API v3 enforces: 10 req/s, 200 req/min, 100k req/day.
+   - **Breaching the per-minute cap (>200 req/min) >3 times in one trading day triggers an account-wide ban for the rest of the day.**
+   - All calls must pace through [`FyersRateLimiter`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/fyers.py) (capped at $\le 8$ req/s and 160 req/min).
+7. **Historical Candle Range Chunking**:
+   - Minute resolutions are capped by Fyers at **100 days** per request; daily resolutions at **366 days**.
+   - Queries spanning larger windows must use the automatic sequential chunking in `get_historical_data()`.
+8. **SEBI IPv4 Binding**: Indian broker APIs enforce whitelisted static IPv4 addresses. Keep the `socket.getaddrinfo` override in `app/main.py`.
+9. **Credential Safety**: Never commit API keys, TOTP secrets, or tokens. Use OS keychain via `config.credentials`.
+10. **Graceful Degradation**: Always fall back through the broker chain → `yfinance` → Mock when live brokers are disconnected.
+11. **Connection Lifecycle**: Wrap `httpx.Client` in `with` context managers to prevent TCP socket leaks.
 
 ---
 

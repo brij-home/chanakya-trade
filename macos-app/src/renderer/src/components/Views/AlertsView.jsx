@@ -2519,7 +2519,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       // 7b. Time Horizon Filter
       if (selectedHorizon !== 'ALL') {
         const hzInfo = resolveHorizonAndETA(a)
-        if (selectedHorizon === 'MULTIBAGGER') {
+        if (selectedHorizon === 'SCALP') {
+          if (hzInfo.key !== 'SCALP' && a.time_horizon !== 'SCALP' && a.time_horizon !== 'INTRADAY_SCALP_ONLY') return false
+        } else if (selectedHorizon === 'MULTIBAGGER') {
           if (hzInfo.key !== 'MULTIBAGGER') return false
         } else if (selectedHorizon === 'LONG_TERM' || selectedHorizon === 'POSITIONAL') {
           if (hzInfo.key !== 'LONG_TERM' && hzInfo.key !== 'POSITIONAL') return false
@@ -3317,6 +3319,8 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   <option value="RRG_ORDERBOOK_CONVERGENCE">🔄 RRG × Order-Book Convergence</option>
                   <option value="PROMOTER_SKIN_IN_THE_GAME">💎 Promoter Skin-in-the-Game</option>
                   <option value="SMC_SWEEP">🌊 SMC Sweep</option>
+                  <option value="TURTLE_SOUP_PLUS_ONE_LONG">🐢 Turtle Soup Bullish Inversion</option>
+                  <option value="TURTLE_SOUP_SHORT">🐢 Turtle Soup Bearish Upthrust</option>
                   <option value="PRECURSOR_RADAR">⚡ Precursor Radar</option>
                   <option value="ASYMMETRIC_OPPORTUNITY">🎯 Asymmetric R:R</option>
                   <option value="CIRCUIT_WARNING">🔒 Circuit Warning</option>
@@ -3342,6 +3346,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   title="Filter by trade time horizon & ETA"
                 >
                   <option value="ALL">All Horizons</option>
+                  <option value="SCALP">⚡ Scalp (15–45 Min)</option>
                   <option value="INTRADAY">⏱️ Intraday (Today)</option>
                   <option value="ROLLING_24H">🪙 24H Rolling (Crypto)</option>
                   <option value="SWING_SHORT">⚡ 2–5D Short Swing</option>
@@ -3373,8 +3378,10 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   title="Filter by trade lifecycle stage"
                 >
                   <option value="ALL">All Stages</option>
+                  <option value="STALK">🦅 Stalk (Radar)</option>
+                  <option value="PRIMED">🎯 Primed (Proximity)</option>
+                  <option value="IGNITED">🔥 Ignited (In-Flight)</option>
                   <option value="EARLY_WARNING">⏳ Early Warning</option>
-                  <option value="IGNITED">🔥 Ignited</option>
                   <option value="T1_ACHIEVED">🎯 Target 1 Hit</option>
                   <option value="TARGET_ACHIEVED">🏁 Final Target</option>
                   <option value="INVALIDATED">❌ Invalidated</option>

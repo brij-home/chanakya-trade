@@ -19,6 +19,15 @@ from engine.alert_expiry import (
 
 IST = ZoneInfo("Asia/Kolkata")
 
+# ── Interception Pipeline Stages ───────────────────────────────────────────
+STAGE_STALK = "STALK"  # Radar tracking & coiling base identified
+STAGE_PRIMED = "PRIMED"  # High-frequency surveillance (within ±0.35% of trigger)
+STAGE_EARLY_WARNING = "EARLY_WARNING"  # Backward-compatible early warning
+STAGE_IGNITED = "IGNITED"  # Trigger level crossed with micro-confirmation
+STAGE_INVALIDATED = "INVALIDATED"  # Stop-loss breached or setup structure broken
+STAGE_EXPIRED = "EXPIRED"  # Session or TTL expired
+STAGE_COMPLETED = "COMPLETED"  # Final profit targets or runner exited
+
 INDEX_WEEKLY_EXPIRY_WEEKDAY = {
     "MIDCPNIFTY": 0,  # Monday
     "BANKEX": 0,  # Monday
@@ -101,7 +110,7 @@ class AutoAlert:
     alert_type: (
         str  # GAMMA_BLAST | SQUEEZE_BREAKOUT | CIRCUIT_WARNING | SMC_SWEEP | CONFLUENCE_INFLECTION
     )
-    stage: str  # "EARLY_WARNING" | "IGNITED" | "INVALIDATED" | "EXPIRED"
+    stage: str  # "STALK" | "PRIMED" | "EARLY_WARNING" | "IGNITED" | "INVALIDATED" | "EXPIRED"
     symbol: str
     exchange: str
     direction: str  # "BULLISH" | "BEARISH" | "NEUTRAL"
@@ -158,7 +167,7 @@ class AutoAlert:
     in_flight_warning_at: Optional[str] = None
     mtf_confluence: Optional[str] = None
     vix_regime: Optional[str] = None
-    time_horizon: str = "INTRADAY"  # "INTRADAY" | "SWING_SHORT" | "SWING_MID" | "LONG_TERM" | "POSITIONAL" | "MULTIBAGGER"
+    time_horizon: str = "INTRADAY"  # "SCALP" | "INTRADAY" | "SWING_SHORT" | "SWING_MID" | "LONG_TERM" | "POSITIONAL" | "MULTIBAGGER" | "ROLLING_24H"
     eta_label: Optional[str] = None
     setup_style: str = "CONTINUATION"  # "CONTINUATION" | "REVERSAL"
     entry_type: str = "LIMIT_ON_PULLBACK"  # "LIMIT_ON_PULLBACK" | "BREAKOUT_STOP" | "MARKET_NOW"
@@ -397,6 +406,14 @@ class AutoAlert:
                 or (getattr(self, "segment", "") or "").upper() == "CRYPTO"
             ):
                 self.time_horizon = "ROLLING_24H"
+            elif atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST") and (
+                "SCALP" in (self.headline or "").upper()
+                or "SCALP" in (self.summary or "").upper()
+                or "0DTE" in (self.headline or "").upper()
+            ):
+                self.time_horizon = "SCALP"
+            elif atype in ("INTRADAY_SCALP_ONLY", "FAST_SCALP"):
+                self.time_horizon = "SCALP"
             elif atype in (
                 "GAMMA_BLAST",
                 "INTRADAY_SPARK",
@@ -421,7 +438,9 @@ class AutoAlert:
             self.eta_label = "24h Rolling"
         elif not self.eta_label:
             th = (self.time_horizon or "INTRADAY").upper()
-            if th == "INTRADAY":
+            if th in ("SCALP", "INTRADAY_SCALP_ONLY"):
+                self.eta_label = "15–45m Scalp"
+            elif th == "INTRADAY":
                 if exch == "MCX":
                     self.eta_label = "Today 23:15 IST"
                 else:
@@ -763,7 +782,7 @@ class AutoAlert:
                 or ("PYTEST_CURRENT_TEST" in os.environ)
                 or (self.environment == "TEST")
             )
-            if th in ("INTRADAY", "ROLLING_24H") and (
+            if th in ("SCALP", "INTRADAY", "INTRADAY_SCALP_ONLY", "ROLLING_24H") and (
                 not is_test_env or getattr(self, "_force_test_expiry", False)
             ):
                 has_future_expiry = False
@@ -823,7 +842,7 @@ class AutoAlert:
             # 2c. Unignited Early Warning Setup Time-Stop:
             # Pre-breakout early warnings expire if left unignited from a prior day,
             # or if 60 minutes have elapsed without triggering during an active session (4h for 24x7 crypto).
-            if self.stage == "EARLY_WARNING":
+            if self.stage in ("EARLY_WARNING", "STALK", "PRIMED"):
                 exch = (self.exchange or "NSE").upper()
                 seg = (getattr(self, "segment", "") or "").upper()
                 is_crypto = (
@@ -836,6 +855,8 @@ class AutoAlert:
                     if (now - created_dt).total_seconds() >= 14400:
                         return True
                 elif created_dt.date() < now.date():
+                    return True
+                elif th in ("SCALP", "INTRADAY_SCALP_ONLY") and (now - created_dt).total_seconds() >= 1800:
                     return True
                 elif th == "INTRADAY" and (now - created_dt).total_seconds() >= 3600:
                     return True
@@ -914,6 +935,70 @@ class AutoAlert:
     @is_active.setter
     def is_active(self, val: bool) -> None:
         self.is_archived = not val
+
+    @property
+    def is_stalk(self) -> bool:
+        """True if the alert is in radar stalking or precursor mode."""
+        return self.stage in ("STALK", "PRECURSOR")
+
+    @property
+    def is_primed(self) -> bool:
+        """True if the alert is in high-priority proximity surveillance (within ±0.35% of trigger)."""
+        return self.stage == "PRIMED"
+
+    @property
+    def is_ignited(self) -> bool:
+        """True if the alert has fired its execution trigger."""
+        return self.stage in ("IGNITED", "TRIGGERED")
+
+    def promote_stage(
+        self,
+        new_stage: str,
+        reason: str = "",
+        ltp: Optional[float] = None,
+        actor: str = "INTERCEPTION_ENGINE",
+    ) -> bool:
+        """
+        Transitions alert across the 3-stage interception pipeline:
+        STALK -> PRIMED -> IGNITED (or EARLY_WARNING -> PRIMED -> IGNITED).
+        Records an audit event and updates timestamps.
+        """
+        valid_stages = (
+            "STALK",
+            "PRIMED",
+            "EARLY_WARNING",
+            "IGNITED",
+            "INVALIDATED",
+            "EXPIRED",
+            "COMPLETED",
+        )
+        if new_stage not in valid_stages and not hasattr(self, "_custom_stages"):
+            return False
+        if self.stage == new_stage:
+            return False
+
+        old_stage = self.stage
+        self.stage = new_stage
+        if ltp is not None and ltp > 0:
+            self.ltp = float(ltp)
+        now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        self.updated_at = now_str
+
+        if new_stage == "IGNITED" and not self.triggered_at:
+            self.triggered_at = now_str
+
+        self.record_audit(
+            event_type="STAGE_PROMOTION",
+            message=f"Stage transitioned: {old_stage} -> {new_stage} ({reason})",
+            actor=actor,
+            details={
+                "old_stage": old_stage,
+                "new_stage": new_stage,
+                "reason": reason,
+                "ltp": self.ltp,
+            },
+        )
+        return True
 
     @property
     def entry_price(self) -> float:

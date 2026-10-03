@@ -29,21 +29,23 @@ description: >-
 
 ---
 
-## 1. Alert Lifecycle
+## 1. Alert Lifecycle & Predatory Interception Pipeline
 
 ```
-CREATED -> PENDING -> ACTIVE -> TRIGGERED -> [INVALIDATED or EXPIRED]
-                             -> CANCELLED (user dismiss)
+[STALK] (Radar Tracking) ──> [PRIMED] (Within ±0.35% Proximity) ──> [IGNITED] (Sniper Trigger)
+                              ──> [INVALIDATED / TARGET_ACHIEVED / EXPIRED]
 ```
 
 | State | Meaning |
 |-------|---------|
-| `CREATED` | Alert just written to storage |
-| `PENDING` | Waiting for trigger condition |
-| `ACTIVE` | Trigger condition partially met (precursor) |
-| `TRIGGERED` | Full condition met — dispatched to channels |
-| `INVALIDATED` | Stop-loss hit or setup structure broken |
-| `EXPIRED` | TTL exceeded or expiry date passed |
+| `STALK` | Candidate qualified (coiling base / VCP / Order block anchor identified) |
+| `PRIMED` | Spot entered high-frequency micro-proximity surveillance ($\pm 0.35\%$ of trigger) |
+| `EARLY_WARNING` | Precursor alert awaiting trigger breach (backward compatible) |
+| `IGNITED` | Trigger level crossed with micro-confirmation — immediate 1-click execution draft |
+| `T1_ACHIEVED` | Target 1 (+2R) hit: 50% profit booked, stop-loss shifted to Breakeven (+0.2%) |
+| `T2_ACHIEVED` | Target 2 (+4R) hit: 25% profit booked, trailing via Chandelier / structure |
+| `INVALIDATED` | Invalidation stop-loss breached or setup structure broken |
+| `EXPIRED` | TTL exceeded or session ended |
 | `CANCELLED` | User manually dismissed |
 
 ### Key Fields in `AutoAlert` (engine/alert_model.py)

@@ -1,4 +1,4 @@
-﻿---
+---
 name: live-trading-execution
 description: >-
   Order lifecycle state machine, safety gate sequence, live vs paper mode
@@ -97,8 +97,13 @@ result = get_execution_broker().place_order(order)
 **Rules:**
 - Do NOT add a 4th mode
 - Do NOT infer mode client-side — always call `GET /api/mode`
-- `ModeBanner.jsx` reads exclusively from `/api/mode`
 - If an unknown backend mode is received, raise — never silently default to `PAPER`
+
+### 3.1 Two-Gate Rule for Live Execution
+Under all circumstances, an agent or automated script may dispatch a real-money live order ONLY when **BOTH** gates hold:
+- **Gate A (Code-Level Opt-In)**: The code/script itself requires an explicit, non-default flag set by the user (e.g. `--live` or `ALLOW_LIVE_TRADING=1`). The AI agent must **NEVER** enable this flag on the user's behalf.
+- **Gate B (Plain-Language Confirmation)**: The agent has received plain-language, unambiguous typed confirmation from the user in chat for that specific order action.
+*Neither gate substitutes for the other — a CLI flag without typed chat confirmation, or chat confirmation without the active environment flag, is strictly prohibited from placing live broker orders.*
 
 ---
 

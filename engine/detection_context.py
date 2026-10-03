@@ -337,6 +337,7 @@ def register_default_detectors() -> None:
     from engine.detectors.currency import detect_currency_breakouts
     from engine.detectors.crypto import detect_single_crypto_symbol
     from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
+    from engine.detectors.turtle_soup import detect_turtle_soup_sweep
 
     def _circuit_adapter(ctx: DetectionContext):
         if ctx.ltp > 0 and ctx.prev_close and ctx.prev_close > 0:
@@ -519,7 +520,29 @@ def register_default_detectors() -> None:
             return detect_pairs_arbitrage(ctx)
         return None
 
+    def _turtle_soup_adapter(ctx: DetectionContext):
+        df = ctx.candles_5m if ctx.candles_5m is not None else ctx.candles_15m
+        if df is None:
+            df = ctx.candles_daily
+        if df is not None and len(df) >= 15:
+            return detect_turtle_soup_sweep(
+                symbol=ctx.symbol,
+                df=df,
+                ltp=ctx.ltp,
+                vwap=ctx.vwap,
+                exchange=ctx.exchange,
+                rvol=ctx.rvol or 1.0,
+                session_date=ctx.timestamp.date() if ctx.timestamp else None,
+            )
+        return None
+
     adapters = [
+        FunctionalDetectorAdapter(
+            "turtle_soup_sweep",
+            "Turtle Soup Liquidity Sweep Reversal",
+            ("EQUITY", "FNO_STOCK", "FNO_INDEX", "COMMODITY"),
+            _turtle_soup_adapter,
+        ),
         FunctionalDetectorAdapter(
             "circuit_proximity", "Upper Circuit Proximity", ("EQUITY",), _circuit_adapter
         ),

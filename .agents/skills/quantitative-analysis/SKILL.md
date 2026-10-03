@@ -256,7 +256,60 @@ dossier = build_security_360_dossier("RELIANCE")
 
 ---
 
-## 14. Testing
+---
+
+## 14. 3-Stage Interception State Machine
+
+[`engine/alert_model.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/alert_model.py), [`engine/auto_alert_engine.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/auto_alert_engine.py)
+
+Eliminates the "Candle Close Lag vs Premature Entry" dilemma:
+
+```
+[STALK] (Radar Tracking) ──> [PRIMED] (Within ±0.35% of Pivot) ──> [IGNITED] (Sniper Trigger)
+```
+
+- **`STALK`**: Precursor radar coiling / VCP / Order Block anchor identified.
+- **`PRIMED`**: Price enters high-frequency micro-proximity ($\pm 0.35\%$). Triggers UI `alert_primed` SSE notification.
+- **`IGNITED`**: Decisive tick/micro-confirmation past trigger level in payoff direction. Sub-second execution draft.
+
+---
+
+## 15. Turtle Soup Liquidity Sweep Reversal
+
+[`engine/detectors/turtle_soup.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/detectors/turtle_soup.py)
+
+Weaponizes retail breakout traps into institutional asymmetric reversals ($\text{R:R} \ge 1:3.0$):
+- **Bullish Spring (Bear Trap Inversion)**: Spot sweeps Previous Day Low (PDL) by $\le 0.75\%$, prints rejection lower wick ($\ge 35\%$), and closes back above support. Enters Long targeting VWAP (+2R) and PDH (+3.5R).
+- **Bearish Upthrust (Bull Trap Inversion)**: Spot sweeps Previous Day High (PDH) by $\le 0.75\%$, prints rejection upper wick ($\ge 35\%$), and closes back below resistance. Enters Short targeting VWAP (+2R) and PDL (+3.5R).
+
+---
+
+## 16. Real-Time Dynamic Market Regime Governor
+
+[`analysis/regime_governor.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/regime_governor.py)
+
+Continuously classifies macro Dalal Street sessions into 4 operating regimes:
+
+| Regime | Condition | Active Detectors | Min Scrutiny |
+| :--- | :--- | :--- | :---: |
+| **`TREND_EXPANSION`** | VIX 13.0–18.5, benchmark trending outside ORB | Breakouts, Squeeze, Gamma Blast | 70% |
+| **`BALANCED_CHOP`** | VIX < 12.5 or ORB-trapped band (<0.45%) | SMC OB Retest, Turtle Soup, Neutral | 80% (RVOL $\ge 2.0\times$) |
+| **`VOLATILITY_EXPANSION_EXPIRY`** | Expiry Day post 13:15 IST | Gamma Blast, Options Momentum | 75% |
+| **`MACRO_SHOCK`** | VIX $\ge 19.0$ or Macro Score $\le -50$ | Defined-Risk Spreads only | 85% |
+
+---
+
+## 17. Off-Number Ballistic Stop-Loss Calibration
+
+[`engine/position_sizer.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/position_sizer.py) — `calibrate_off_number_stop()`
+
+Institutional market makers hunt liquidity at obvious psychological round numbers (₹500, ₹1000, ₹2500).
+- **Long Trades**: If stop loss falls within 0.15% of a round number, buffers stop **downward** by $0.15 \times \text{ATR}$ below the level.
+- **Short Trades**: Buffers stop **upward** by $0.15 \times \text{ATR}$ above the level.
+
+---
+
+## 18. Testing
 
 ```powershell
 # Security 360 truthfulness & unavailable status verification
@@ -265,6 +318,7 @@ dossier = build_security_360_dossier("RELIANCE")
 # Quantitative, global macro, retail protection & structural test suites
 .venv\Scripts\pytest.exe tests/test_global_macro.py tests/test_market_structure.py tests/test_volume_profile.py tests/test_multibagger.py tests/test_trade_lifecycle.py tests/test_execution_gate.py tests/test_retail_protection.py -v
 
-# Complete fast suite
-.venv\Scripts\pytest.exe -n 4
+# Interception, Turtle Soup & Dynamic Regime Governor suites
+& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_interception_engine.py tests/test_turtle_soup.py tests/test_regime_governor.py -q
 ```
+
