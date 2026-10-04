@@ -263,3 +263,64 @@ def test_dedicated_index_scanner_thread_lifecycle():
     engine.stop_polling()
     assert engine._is_running is False
     assert engine._index_scanner_thread is None
+
+
+# ── Test 6: Domestic WebSocket Real-Time Event Routing ────────────────────────
+
+def test_domestic_websocket_tick_invalidation_and_ratchet(monkeypatch):
+    """Verifies that sub-second domestic ticks trigger instant lifecycle updates without polling."""
+    from engine.alert_model import AutoAlert
+
+    engine = AutoAlertEngine()
+    test_aid = "test-ws-nifty-20261005"
+    alert = AutoAlert(
+        alert_id=test_aid,
+        symbol="NIFTY",
+        contract_symbol="NSE:NIFTY26OCT25000CE",
+        exchange="NFO",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        direction="BULLISH",
+        headline="NIFTY 25000 CE Breakout",
+        summary="Test WS streaming",
+        ltp=150.0,
+        trigger_level=150.0,
+        stop_loss=120.0,
+        target_level=210.0,
+        confidence=90.0,
+        created_at="2026-10-05 09:30:00 IST",
+        segment="FNO_INDEX",
+        environment="TEST",
+        is_live=False,
+    )
+    alert.is_active = True
+    alert.should_trail = True
+    alert.actionable_plan = {
+        "option_plan": {
+            "entry": 150.0,
+            "sl": 120.0,
+            "target_1": 210.0,
+        }
+    }
+
+    with engine._lock:
+        engine._alerts = [alert]
+
+    # Mock dispatch to avoid network calls during test
+    dispatched = []
+    monkeypatch.setattr(engine, "_dispatch", lambda a: dispatched.append(a))
+
+    # Send a domestic tick below SL (115.0 < 120.0)
+    fake_tick = {
+        "symbol": "NSE:NIFTY26OCT25000CE",
+        "ltp": 115.0,
+        "timestamp": 1759635000.0,
+    }
+    engine._on_domestic_tick(fake_tick)
+
+    # Invalidation should happen immediately
+    assert alert.is_invalidated is True
+    assert alert.stage == "INVALIDATED"
+    assert len(dispatched) == 1
+    assert dispatched[0].alert_id == test_aid
+

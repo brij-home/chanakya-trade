@@ -2545,6 +2545,12 @@ class AutoAlertEngine:
 
         # Multi-channel notification outside lock
         if to_dispatch:
+            # Auto-subscribe active alert symbol and option contract to real-time tick & 50-depth stream
+            to_sub = [to_dispatch.symbol]
+            if getattr(to_dispatch, "contract_symbol", None):
+                to_sub.append(to_dispatch.contract_symbol)
+            self._auto_subscribe_stream(to_sub)
+
             self._dispatch(to_dispatch)
             return True
         return False
@@ -8826,6 +8832,172 @@ class AutoAlertEngine:
                 found.append(a)
         return found
 
+    # ── Real-Time Domestic WebSocket & 50-Depth TBT Streaming ──────────
+
+    def _auto_subscribe_stream(self, symbols: list[str]) -> None:
+        """
+        Dynamically subscribes active trade setups, candidate option strikes, and indices
+        to Fyers real-time tick stream and Fyers 50-Level Depth of Market (TBT DOM).
+        Ensures sub-second tick feeds and Level-3 order-book imbalance are active.
+        """
+        if not symbols:
+            return
+        cleaned = [s.strip() for s in symbols if s and isinstance(s, str) and s.strip()]
+        if not cleaned:
+            return
+
+        def _worker():
+            try:
+                from market.websocket import ws_manager
+
+                ws_manager.subscribe(cleaned)
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] General WS subscribe error: {e}")
+
+            try:
+                from market.fyers_tbt_manager import FyersTbtManager
+
+                tbt = FyersTbtManager()
+                if tbt.is_connected:
+                    tbt.subscribe(cleaned)
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] TBT 50-depth subscribe error: {e}")
+
+        t = threading.Thread(target=_worker, daemon=True, name="stream-sub")
+        t.start()
+
+    def _init_domestic_stream_listener(self) -> None:
+        """Hooks AutoAlertEngine into Fyers domestic WebSocket tick stream for sub-second trade management."""
+        if getattr(self, "_domestic_listener_initialized", False):
+            return
+        try:
+            from market.websocket import ws_manager
+
+            ws_manager.on_tick(self._on_domestic_tick)
+            self._domestic_listener_initialized = True
+            logger.info("[AutoAlertEngine] ⚡ Successfully connected to domestic WebSocket tick stream.")
+        except Exception as e:
+            logger.debug(f"[AutoAlertEngine] Failed to register domestic tick listener: {e}")
+
+    def _on_domestic_tick(self, tick: dict[str, Any]) -> None:
+        """
+        Sub-second event-driven handler for domestic (NSE/BSE/NFO) ticks.
+        Evaluates active in-flight positions (invalidations, trailing ratchets, target milestones)
+        the millisecond a price update arrives without waiting for the next polling interval.
+        """
+        if not tick or not isinstance(tick, dict):
+            return
+
+        raw_sym = str(tick.get("symbol") or "")
+        clean_sym = self._clean_sym(raw_sym)
+        ltp = float(tick.get("ltp") or 0.0)
+        if not clean_sym or ltp <= 0:
+            return
+
+        now_ts = float(tick.get("timestamp") or time.time())
+
+        # Inspect active alerts matching symbol or contract_symbol
+        with self._lock:
+            active_alerts = [
+                a
+                for a in self._alerts
+                if not a.is_invalidated
+                and not a.is_archived
+                and a.stage not in ("INVALIDATED", "COMPLETED", "TARGET_ACHIEVED", "RUNNER_EXIT")
+                and (
+                    self._clean_sym(a.symbol) == clean_sym
+                    or self._clean_sym(getattr(a, "contract_symbol", "") or "") == clean_sym
+                )
+            ]
+
+        for alert in active_alerts:
+            # 1. Instant Invalidation
+            reason = evaluate_alert_invalidation(alert, current_ltp=ltp)
+            if reason:
+                now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+                has_hit_target = bool(
+                    "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
+                    or getattr(alert, "target_status", "")
+                    in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
+                    or getattr(alert, "stage", "")
+                    in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "FINAL_TARGET", "TARGET_ACHIEVED")
+                )
+                is_trailing_exit = (
+                    has_hit_target
+                    or "trailing runner stop" in reason.lower()
+                    or "trailing stop" in reason.lower()
+                    or "profit secured" in reason.lower()
+                    or "breakeven" in reason.lower()
+                )
+
+                tag = "[TEST]" if ((alert.environment == "TEST") or (not alert.is_live)) else "[REAL/LIVE]"
+
+                with self._lock:
+                    alert.is_active = False
+                    alert.should_trail = False
+                    alert.is_archived = True
+                    alert.archived_at = now_iso
+                    alert.archive_reason = reason
+                    if alert.achieved_milestones is None:
+                        alert.achieved_milestones = []
+
+                    if is_trailing_exit:
+                        alert.is_invalidated = False
+                        alert.stage = "RUNNER_EXIT"
+                        alert.target_status = "RUNNER_CLOSED"
+                        alert.trailing_decision = "RUNNER_CLOSED"
+                        if "RUNNER_EXIT" not in alert.achieved_milestones:
+                            alert.achieved_milestones.append("RUNNER_EXIT")
+                        entry_p = (
+                            getattr(alert, "entry_price", None)
+                            or getattr(alert, "option_premium", None)
+                            or getattr(alert, "trigger_level", None)
+                            or 0.0
+                        )
+                        if entry_p and entry_p > 0 and ltp > 0:
+                            is_bull = alert.direction in ("BULLISH", "LONG", "BUY")
+                            pts = round(ltp - entry_p if is_bull else entry_p - ltp, 2)
+                            pct = round((pts / entry_p) * 100.0, 1)
+                            if alert.pnl_pct is None or alert.pnl_pct == 0.0:
+                                alert.pnl_pct = pct
+                            alert.locked_profit_pts = max(0.0, pts)
+                            alert.locked_profit_pct = max(0.0, pct)
+                        inst_label = (
+                            alert.contract_symbol
+                            or f"{alert.symbol} {getattr(alert, 'strike', '') or ''} {getattr(alert, 'option_type', '') or ''}".strip()
+                        )
+                        alert.headline = f"🏁 {tag} RUNNER CLOSED (PROFIT SECURED): {inst_label}"
+                        alert.summary = reason
+                        logger.info(
+                            f"[AutoAlertEngine] ⚡ Sub-Second Domestic Runner Exit for {alert.symbol}: {reason}"
+                        )
+                    else:
+                        alert.is_invalidated = True
+                        alert.invalidation_reason = reason
+                        alert.invalidated_at = now_iso
+                        alert.stage = "INVALIDATED"
+                        alert.target_status = "INVALIDATED"
+                        alert.trailing_decision = "INVALIDATED"
+                        if "INVALIDATED" not in alert.achieved_milestones:
+                            alert.achieved_milestones.append("INVALIDATED")
+                        alert.headline = f"⚠️ {tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type.replace('_', ' ')}"
+                        alert.summary = reason
+                        logger.warning(
+                            f"[AutoAlertEngine] ⚡ Sub-Second Domestic Live Invalidation for {alert.symbol}: {reason}"
+                        )
+                    self._save()
+
+                self._dispatch(alert)
+                continue
+
+            # 2. Instant Target 1 / Target 2 / Ratchet Milestone
+            eval_res = evaluate_alert_targets_and_trailing(alert, current_ltp=ltp)
+            if eval_res and eval_res.new_milestone:
+                if self._apply_milestone_evaluation(alert, eval_res, cur_quote_ltp=ltp, now_ts=now_ts):
+                    logger.info(
+                        f"[AutoAlertEngine] ⚡ Sub-Second Domestic Target/Trail Hit for {alert.symbol}: {eval_res.trailing_decision}"
+                    )
+
     # ── 24x7 Real-Time Crypto Streaming & Autonomous Detection ─────────
 
     def _init_crypto_stream_listener(self) -> None:
@@ -9149,6 +9321,17 @@ class AutoAlertEngine:
         self._stop_event.clear()
         # Initialize 24x7 real-time crypto stream listener for sub-second event execution
         self._init_crypto_stream_listener()
+        # Initialize domestic WebSocket stream listener for sub-second tick updates
+        self._init_domestic_stream_listener()
+        # Seed streaming subscriptions for core liquid indices
+        self._auto_subscribe_stream([
+            "NSE:NIFTY50-INDEX",
+            "NSE:NIFTYBANK-INDEX",
+            "NSE:FINNIFTY-INDEX",
+            "NSE:MIDCAP100-INDEX",
+            "BSE:SENSEX-INDEX",
+            "NSE:INDIAVIX-INDEX",
+        ])
         self._poller_thread = threading.Thread(
             target=self._run_loop,
             args=(interval_seconds,),
