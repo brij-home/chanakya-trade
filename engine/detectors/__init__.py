@@ -25,6 +25,7 @@ from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
 from engine.detectors.defined_risk_neutral import detect_defined_risk_neutral
 from engine.detectors.pairs_arbitrage import detect_pairs_arbitrage
 from engine.detectors.turtle_soup import detect_turtle_soup_sweep
+from engine.detectors.swing_inflection import detect_swing_inflection_setups
 
 from engine.detection_context import (
     BaseDetector,
@@ -66,4 +67,5 @@ __all__ = [
     "detect_defined_risk_neutral",
     "detect_pairs_arbitrage",
     "detect_turtle_soup_sweep",
+    "detect_swing_inflection_setups",
 ]

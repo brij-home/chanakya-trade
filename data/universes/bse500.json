@@ -4,3499 +4,3999 @@
     "name": "360 ONE WAM Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE466L01038"
+    "isin": "INE466L01038",
+    "exchange": "BSE"
   },
   {
     "symbol": "3MINDIA",
     "name": "3M India Ltd.",
     "industry": "Diversified",
     "series": "EQ",
-    "isin": "INE470A01017"
+    "isin": "INE470A01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "ABB",
     "name": "ABB India Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE117A01022"
+    "isin": "INE117A01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "ACC",
     "name": "ACC Ltd.",
     "industry": "Construction Materials",
     "series": "EQ",
-    "isin": "INE012A01025"
+    "isin": "INE012A01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "ACMESOLAR",
     "name": "ACME Solar Holdings Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE622W01025"
+    "isin": "INE622W01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "AIAENG",
     "name": "AIA Engineering Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE212H01026"
+    "isin": "INE212H01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "APLAPOLLO",
     "name": "APL Apollo Tubes Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE702C01027"
+    "isin": "INE702C01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "AUBANK",
     "name": "AU Small Finance Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE949L01017"
+    "isin": "INE949L01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "AWL",
     "name": "AWL Agri Business Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE699H01024"
+    "isin": "INE699H01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "AADHARHFC",
     "name": "Aadhar Housing Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE883F01010"
+    "isin": "INE883F01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "AARTIIND",
     "name": "Aarti Industries Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE769A01020"
+    "isin": "INE769A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "AAVAS",
     "name": "Aavas Financiers Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE216P01012"
+    "isin": "INE216P01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "ABBOTINDIA",
     "name": "Abbott India Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE358A01014"
+    "isin": "INE358A01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "ACE",
     "name": "Action Construction Equipment Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE731H01025"
+    "isin": "INE731H01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "ACUTAAS",
     "name": "Acutaas Chemicals Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE00FF01025"
+    "isin": "INE00FF01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "ADANIENSOL",
     "name": "Adani Energy Solutions Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE931S01010"
+    "isin": "INE931S01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "ADANIENT",
     "name": "Adani Enterprises Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE423A01024"
+    "isin": "INE423A01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "ADANIGREEN",
     "name": "Adani Green Energy Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE364U01010"
+    "isin": "INE364U01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "ADANIPORTS",
     "name": "Adani Ports and Special Economic Zone Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE742F01042"
+    "isin": "INE742F01042",
+    "exchange": "BSE"
   },
   {
     "symbol": "ADANIPOWER",
     "name": "Adani Power Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE814H01029"
+    "isin": "INE814H01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "ATGL",
     "name": "Adani Total Gas Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE399L01023"
+    "isin": "INE399L01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "ABCAPITAL",
     "name": "Aditya Birla Capital Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE674K01013"
+    "isin": "INE674K01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "ABFRL",
     "name": "Aditya Birla Fashion and Retail Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE647O01011"
+    "isin": "INE647O01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "ABLBL",
     "name": "Aditya Birla Lifestyle Brands Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE14LE01019"
+    "isin": "INE14LE01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "ABREL",
     "name": "Aditya Birla Real Estate Ltd.",
     "industry": "Realty",
     "series": "EQ",
-    "isin": "INE055A01016"
+    "isin": "INE055A01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "ABSLAMC",
     "name": "Aditya Birla Sun Life AMC Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE404A01024"
+    "isin": "INE404A01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "CPPLUS",
     "name": "Aditya Infotech Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE819V01029"
+    "isin": "INE819V01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "AEGISLOG",
     "name": "Aegis Logistics Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE208C01025"
+    "isin": "INE208C01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "AEGISVOPAK",
     "name": "Aegis Vopak Terminals Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE0INX01018"
+    "isin": "INE0INX01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "AFCONS",
     "name": "Afcons Infrastructure Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE101I01011"
+    "isin": "INE101I01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "AFFLE",
     "name": "Affle 3i Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE00WC01027"
+    "isin": "INE00WC01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "AJANTPHARM",
     "name": "Ajanta Pharmaceuticals Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE031B01049"
+    "isin": "INE031B01049",
+    "exchange": "BSE"
   },
   {
     "symbol": "ALKEM",
     "name": "Alkem Laboratories Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE540L01014"
+    "isin": "INE540L01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "ABDL",
     "name": "Allied Blenders and Distillers Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE552Z01027"
+    "isin": "INE552Z01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "ARE&M",
     "name": "Amara Raja Energy & Mobility Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE885A01032"
+    "isin": "INE885A01032",
+    "exchange": "BSE"
   },
   {
     "symbol": "AMBER",
     "name": "Amber Enterprises India Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE371P01015"
+    "isin": "INE371P01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "AMBUJACEM",
     "name": "Ambuja Cements Ltd.",
     "industry": "Construction Materials",
     "series": "EQ",
-    "isin": "INE079A01024"
+    "isin": "INE079A01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "ANANDRATHI",
     "name": "Anand Rathi Wealth Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE463V01026"
+    "isin": "INE463V01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "ANANTRAJ",
     "name": "Anant Raj Ltd.",
     "industry": "Realty",
     "series": "EQ",
-    "isin": "INE242C01024"
+    "isin": "INE242C01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "ANGELONE",
     "name": "Angel One Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE732I01021"
+    "isin": "INE732I01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "ANTHEM",
     "name": "Anthem Biosciences Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE0CZ201020"
+    "isin": "INE0CZ201020",
+    "exchange": "BSE"
   },
   {
     "symbol": "ANURAS",
     "name": "Anupam Rasayan India Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE930P01018"
+    "isin": "INE930P01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "APARINDS",
     "name": "Apar Industries Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE372A01015"
+    "isin": "INE372A01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "APOLLOHOSP",
     "name": "Apollo Hospitals Enterprise Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE437A01024"
+    "isin": "INE437A01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "APOLLOTYRE",
     "name": "Apollo Tyres Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE438A01022"
+    "isin": "INE438A01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "APTUS",
     "name": "Aptus Value Housing Finance India Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE852O01025"
+    "isin": "INE852O01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "ASAHIINDIA",
     "name": "Asahi India Glass Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE439A01020"
+    "isin": "INE439A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "ASHOKLEY",
     "name": "Ashok Leyland Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE208A01029"
+    "isin": "INE208A01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "ASIANPAINT",
     "name": "Asian Paints Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE021A01026"
+    "isin": "INE021A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "ASTERDM",
     "name": "Aster DM Quality Care Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE914M01019"
+    "isin": "INE914M01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "ASTRAL",
     "name": "Astral Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE006I01046"
+    "isin": "INE006I01046",
+    "exchange": "BSE"
   },
   {
     "symbol": "ATHERENERG",
     "name": "Ather Energy Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE0LEZ01016"
+    "isin": "INE0LEZ01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "ATUL",
     "name": "Atul Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE100A01010"
+    "isin": "INE100A01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "AUROPHARMA",
     "name": "Aurobindo Pharma Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE406A01037"
+    "isin": "INE406A01037",
+    "exchange": "BSE"
   },
   {
     "symbol": "AIIL",
     "name": "Authum Investment & Infrastructure Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE206F01022"
+    "isin": "INE206F01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "DMART",
     "name": "Avenue Supermarts Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE192R01011"
+    "isin": "INE192R01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "AXISBANK",
     "name": "Axis Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE238A01034"
+    "isin": "INE238A01034",
+    "exchange": "BSE"
   },
   {
     "symbol": "BEML",
     "name": "BEML Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE258A01024"
+    "isin": "INE258A01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "BLS",
     "name": "BLS International Services Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE153T01027"
+    "isin": "INE153T01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "BSE",
     "name": "BSE Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE118H01025"
+    "isin": "INE118H01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "BAJAJ-AUTO",
     "name": "Bajaj Auto Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE917I01010"
+    "isin": "INE917I01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "BAJFINANCE",
     "name": "Bajaj Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE296A01032"
+    "isin": "INE296A01032",
+    "exchange": "BSE"
   },
   {
     "symbol": "BAJAJFINSV",
     "name": "Bajaj Finserv Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE918I01026"
+    "isin": "INE918I01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "BAJAJHLDNG",
     "name": "Bajaj Holdings & Investment Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE118A01012"
+    "isin": "INE118A01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "BAJAJHFL",
     "name": "Bajaj Housing Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE377Y01014"
+    "isin": "INE377Y01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "BALKRISIND",
     "name": "Balkrishna Industries Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE787D01026"
+    "isin": "INE787D01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "BALRAMCHIN",
     "name": "Balrampur Chini Mills Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE119A01028"
+    "isin": "INE119A01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "BANDHANBNK",
     "name": "Bandhan Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE545U01014"
+    "isin": "INE545U01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "BANKBARODA",
     "name": "Bank of Baroda",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE028A01039"
+    "isin": "INE028A01039",
+    "exchange": "BSE"
   },
   {
     "symbol": "BANKINDIA",
     "name": "Bank of India",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE084A01016"
+    "isin": "INE084A01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "MAHABANK",
     "name": "Bank of Maharashtra",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE457A01014"
+    "isin": "INE457A01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "BATAINDIA",
     "name": "Bata India Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE176A01028"
+    "isin": "INE176A01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "BAYERCROP",
     "name": "Bayer Cropscience Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE462A01022"
+    "isin": "INE462A01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "BELRISE",
     "name": "Belrise Industries Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE894V01022"
+    "isin": "INE894V01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "BERGEPAINT",
     "name": "Berger Paints India Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE463A01038"
+    "isin": "INE463A01038",
+    "exchange": "BSE"
   },
   {
     "symbol": "BDL",
     "name": "Bharat Dynamics Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE171Z01026"
+    "isin": "INE171Z01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "BEL",
     "name": "Bharat Electronics Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE263A01024"
+    "isin": "INE263A01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "BHARATFORG",
     "name": "Bharat Forge Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE465A01025"
+    "isin": "INE465A01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "BHEL",
     "name": "Bharat Heavy Electricals Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE257A01026"
+    "isin": "INE257A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "BPCL",
     "name": "Bharat Petroleum Corporation Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE029A01011"
+    "isin": "INE029A01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "BHARTIARTL",
     "name": "Bharti Airtel Ltd.",
     "industry": "Telecommunication",
     "series": "EQ",
-    "isin": "INE397D01024"
+    "isin": "INE397D01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "BHARTIHEXA",
     "name": "Bharti Hexacom Ltd.",
     "industry": "Telecommunication",
     "series": "EQ",
-    "isin": "INE343G01021"
+    "isin": "INE343G01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "BIKAJI",
     "name": "Bikaji Foods International Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE00E101023"
+    "isin": "INE00E101023",
+    "exchange": "BSE"
   },
   {
     "symbol": "GROWW",
     "name": "Billionbrains Garage Ventures Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE0HOQ01053"
+    "isin": "INE0HOQ01053",
+    "exchange": "BSE"
   },
   {
     "symbol": "BIOCON",
     "name": "Biocon Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE376G01013"
+    "isin": "INE376G01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "BSOFT",
     "name": "Birlasoft Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE836A01035"
+    "isin": "INE836A01035",
+    "exchange": "BSE"
   },
   {
     "symbol": "BLUEDART",
     "name": "Blue Dart Express Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE233B01017"
+    "isin": "INE233B01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "BLUEJET",
     "name": "Blue Jet Healthcare Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE0KBH01020"
+    "isin": "INE0KBH01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "BLUESTARCO",
     "name": "Blue Star Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE472A01039"
+    "isin": "INE472A01039",
+    "exchange": "BSE"
   },
   {
     "symbol": "BBTC",
     "name": "Bombay Burmah Trading Corporation Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE050A01025"
+    "isin": "INE050A01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "BOSCHLTD",
     "name": "Bosch Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE323A01026"
+    "isin": "INE323A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "FIRSTCRY",
     "name": "Brainbees Solutions Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE02RE01045"
+    "isin": "INE02RE01045",
+    "exchange": "BSE"
   },
   {
     "symbol": "BRIGADE",
     "name": "Brigade Enterprises Ltd.",
     "industry": "Realty",
     "series": "EQ",
-    "isin": "INE791I01019"
+    "isin": "INE791I01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "BRITANNIA",
     "name": "Britannia Industries Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE216A01030"
+    "isin": "INE216A01030",
+    "exchange": "BSE"
   },
   {
     "symbol": "MAPMYINDIA",
     "name": "C.E. Info Systems Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE0BV301023"
+    "isin": "INE0BV301023",
+    "exchange": "BSE"
   },
   {
     "symbol": "CCL",
     "name": "CCL Products (I) Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE421D01022"
+    "isin": "INE421D01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "CESC",
     "name": "CESC Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE486A01021"
+    "isin": "INE486A01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "CGPOWER",
     "name": "CG Power and Industrial Solutions Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE067A01029"
+    "isin": "INE067A01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "CIEINDIA",
     "name": "CIE Automotive India Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE536H01010"
+    "isin": "INE536H01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "CRISIL",
     "name": "CRISIL Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE007A01025"
+    "isin": "INE007A01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "CANFINHOME",
     "name": "Can Fin Homes Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE477A01020"
+    "isin": "INE477A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "CANBK",
     "name": "Canara Bank",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE476A01022"
+    "isin": "INE476A01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "CANHLIFE",
     "name": "Canara HSBC Life Insurance Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE01TY01017"
+    "isin": "INE01TY01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "CAPLIPOINT",
     "name": "Caplin Point Laboratories Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE475E01026"
+    "isin": "INE475E01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "CGCL",
     "name": "Capri Global Capital Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE180C01042"
+    "isin": "INE180C01042",
+    "exchange": "BSE"
   },
   {
     "symbol": "CARBORUNIV",
     "name": "Carborundum Universal Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE120A01034"
+    "isin": "INE120A01034",
+    "exchange": "BSE"
   },
   {
     "symbol": "CARTRADE",
     "name": "Cartrade Tech Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE290S01011"
+    "isin": "INE290S01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "CASTROLIND",
     "name": "Castrol India Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE172A01027"
+    "isin": "INE172A01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "CEATLTD",
     "name": "Ceat Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE482A01020"
+    "isin": "INE482A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "CEMPRO",
     "name": "Cemindia Projects Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE686A01026"
+    "isin": "INE686A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "CENTRALBK",
     "name": "Central Bank of India",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE483A01010"
+    "isin": "INE483A01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "CDSL",
     "name": "Central Depository Services (India) Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE736A01011"
+    "isin": "INE736A01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "CHALET",
     "name": "Chalet Hotels Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE427F01016"
+    "isin": "INE427F01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "CHAMBLFERT",
     "name": "Chambal Fertilizers & Chemicals Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE085A01013"
+    "isin": "INE085A01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "CHENNPETRO",
     "name": "Chennai Petroleum Corporation Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE178A01016"
+    "isin": "INE178A01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "CHOICEIN",
     "name": "Choice International Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE102B01014"
+    "isin": "INE102B01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "CHOLAHLDNG",
     "name": "Cholamandalam Financial Holdings Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE149A01033"
+    "isin": "INE149A01033",
+    "exchange": "BSE"
   },
   {
     "symbol": "CHOLAFIN",
     "name": "Cholamandalam Investment and Finance Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE121A01024"
+    "isin": "INE121A01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "CIPLA",
     "name": "Cipla Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE059A01026"
+    "isin": "INE059A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "CUB",
     "name": "City Union Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE491A01021"
+    "isin": "INE491A01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "CLEAN",
     "name": "Clean Science and Technology Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE227W01023"
+    "isin": "INE227W01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "COALINDIA",
     "name": "Coal India Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE522F01014"
+    "isin": "INE522F01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "COCHINSHIP",
     "name": "Cochin Shipyard Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE704P01025"
+    "isin": "INE704P01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "COFORGE",
     "name": "Coforge Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE591G01025"
+    "isin": "INE591G01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "COHANCE",
     "name": "Cohance Lifesciences Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE03QK01018"
+    "isin": "INE03QK01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "COLPAL",
     "name": "Colgate Palmolive (India) Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE259A01022"
+    "isin": "INE259A01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "CAMS",
     "name": "Computer Age Management Services Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE596I01020"
+    "isin": "INE596I01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "CONCORDBIO",
     "name": "Concord Biotech Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE338H01029"
+    "isin": "INE338H01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "CONCOR",
     "name": "Container Corporation of India Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE111A01025"
+    "isin": "INE111A01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "COROMANDEL",
     "name": "Coromandel International Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE169A01031"
+    "isin": "INE169A01031",
+    "exchange": "BSE"
   },
   {
     "symbol": "CRAFTSMAN",
     "name": "Craftsman Automation Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE00LO01017"
+    "isin": "INE00LO01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "CREDITACC",
     "name": "CreditAccess Grameen Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE741K01010"
+    "isin": "INE741K01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "CROMPTON",
     "name": "Crompton Greaves Consumer Electricals Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE299U01018"
+    "isin": "INE299U01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "CUMMINSIND",
     "name": "Cummins India Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE298A01020"
+    "isin": "INE298A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "CYIENT",
     "name": "Cyient Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE136B01020"
+    "isin": "INE136B01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "DCMSHRIRAM",
     "name": "DCM Shriram Ltd.",
     "industry": "Diversified",
     "series": "EQ",
-    "isin": "INE499A01024"
+    "isin": "INE499A01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "DLF",
     "name": "DLF Ltd.",
     "industry": "Realty",
     "series": "EQ",
-    "isin": "INE271C01023"
+    "isin": "INE271C01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "DOMS",
     "name": "DOMS Industries Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE321T01012"
+    "isin": "INE321T01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "DABUR",
     "name": "Dabur India Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE016A01026"
+    "isin": "INE016A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "DALBHARAT",
     "name": "Dalmia Bharat Ltd.",
     "industry": "Construction Materials",
     "series": "EQ",
-    "isin": "INE00R701025"
+    "isin": "INE00R701025",
+    "exchange": "BSE"
   },
   {
     "symbol": "DATAPATTNS",
     "name": "Data Patterns (India) Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE0IX101010"
+    "isin": "INE0IX101010",
+    "exchange": "BSE"
   },
   {
     "symbol": "DEEPAKFERT",
     "name": "Deepak Fertilisers & Petrochemicals Corp. Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE501A01019"
+    "isin": "INE501A01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "DEEPAKNTR",
     "name": "Deepak Nitrite Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE288B01029"
+    "isin": "INE288B01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "DELHIVERY",
     "name": "Delhivery Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE148O01028"
+    "isin": "INE148O01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "DEVYANI",
     "name": "Devyani International Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE872J01023"
+    "isin": "INE872J01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "DIVISLAB",
     "name": "Divi's Laboratories Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE361B01024"
+    "isin": "INE361B01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "DIXON",
     "name": "Dixon Technologies (India) Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE935N01020"
+    "isin": "INE935N01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "LALPATHLAB",
     "name": "Dr. Lal Path Labs Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE600L01024"
+    "isin": "INE600L01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "DRREDDY",
     "name": "Dr. Reddy's Laboratories Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE089A01031"
+    "isin": "INE089A01031",
+    "exchange": "BSE"
   },
   {
     "symbol": "EIDPARRY",
     "name": "E.I.D. Parry (India) Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE126A01031"
+    "isin": "INE126A01031",
+    "exchange": "BSE"
   },
   {
     "symbol": "EIHOTEL",
     "name": "EIH Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE230A01023"
+    "isin": "INE230A01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "EICHERMOT",
     "name": "Eicher Motors Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE066A01021"
+    "isin": "INE066A01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "ELECON",
     "name": "Elecon Engineering Co. Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE205B01031"
+    "isin": "INE205B01031",
+    "exchange": "BSE"
   },
   {
     "symbol": "ELGIEQUIP",
     "name": "Elgi Equipments Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE285A01027"
+    "isin": "INE285A01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "EMAMILTD",
     "name": "Emami Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE548C01032"
+    "isin": "INE548C01032",
+    "exchange": "BSE"
   },
   {
     "symbol": "EMCURE",
     "name": "Emcure Pharmaceuticals Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE168P01015"
+    "isin": "INE168P01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "EMMVEE",
     "name": "Emmvee Photovoltaic Power Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE1C6T01020"
+    "isin": "INE1C6T01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "ENDURANCE",
     "name": "Endurance Technologies Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE913H01037"
+    "isin": "INE913H01037",
+    "exchange": "BSE"
   },
   {
     "symbol": "ENGINERSIN",
     "name": "Engineers India Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE510A01028"
+    "isin": "INE510A01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "ERIS",
     "name": "Eris Lifesciences Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE406M01024"
+    "isin": "INE406M01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "ESCORTS",
     "name": "Escorts Kubota Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE042A01014"
+    "isin": "INE042A01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "ETERNAL",
     "name": "Eternal Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE758T01015"
+    "isin": "INE758T01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "EXIDEIND",
     "name": "Exide Industries Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE302A01020"
+    "isin": "INE302A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "NYKAA",
     "name": "FSN E-Commerce Ventures Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE388Y01029"
+    "isin": "INE388Y01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "FEDERALBNK",
     "name": "Federal Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE171A01029"
+    "isin": "INE171A01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "FACT",
     "name": "Fertilisers and Chemicals Travancore Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE188A01015"
+    "isin": "INE188A01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "FINCABLES",
     "name": "Finolex Cables Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE235A01022"
+    "isin": "INE235A01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "FSL",
     "name": "Firstsource Solutions Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE684F01012"
+    "isin": "INE684F01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "FIVESTAR",
     "name": "Five-Star Business Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE128S01021"
+    "isin": "INE128S01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "FORCEMOT",
     "name": "Force Motors Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE451A01017"
+    "isin": "INE451A01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "FORTIS",
     "name": "Fortis Healthcare Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE061F01013"
+    "isin": "INE061F01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "GAIL",
     "name": "GAIL (India) Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE129A01019"
+    "isin": "INE129A01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "GVT&D",
     "name": "GE Vernova T&D India Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE200A01026"
+    "isin": "INE200A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "GMRAIRPORT",
     "name": "GMR Airports Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE776C01039"
+    "isin": "INE776C01039",
+    "exchange": "BSE"
   },
   {
     "symbol": "GABRIEL",
     "name": "Gabriel India Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE524A01029"
+    "isin": "INE524A01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "GALLANTT",
     "name": "Gallantt Ispat Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE297H01019"
+    "isin": "INE297H01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "GRSE",
     "name": "Garden Reach Shipbuilders & Engineers Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE382Z01011"
+    "isin": "INE382Z01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "GICRE",
     "name": "General Insurance Corporation of India",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE481Y01014"
+    "isin": "INE481Y01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "GILLETTE",
     "name": "Gillette India Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE322A01010"
+    "isin": "INE322A01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "GLAND",
     "name": "Gland Pharma Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE068V01023"
+    "isin": "INE068V01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "GLAXO",
     "name": "Glaxosmithkline Pharmaceuticals Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE159A01016"
+    "isin": "INE159A01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "GLENMARK",
     "name": "Glenmark Pharmaceuticals Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE935A01035"
+    "isin": "INE935A01035",
+    "exchange": "BSE"
   },
   {
     "symbol": "MEDANTA",
     "name": "Global Health Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE474Q01031"
+    "isin": "INE474Q01031",
+    "exchange": "BSE"
   },
   {
     "symbol": "GODIGIT",
     "name": "Go Digit General Insurance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE03JT01014"
+    "isin": "INE03JT01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "GPIL",
     "name": "Godawari Power & Ispat Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE177H01039"
+    "isin": "INE177H01039",
+    "exchange": "BSE"
   },
   {
     "symbol": "GODFRYPHLP",
     "name": "Godfrey Phillips India Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE260B01028"
+    "isin": "INE260B01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "GODREJCP",
     "name": "Godrej Consumer Products Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE102D01028"
+    "isin": "INE102D01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "GODREJIND",
     "name": "Godrej Industries Ltd.",
     "industry": "Diversified",
     "series": "EQ",
-    "isin": "INE233A01035"
+    "isin": "INE233A01035",
+    "exchange": "BSE"
   },
   {
     "symbol": "GODREJPROP",
     "name": "Godrej Properties Ltd.",
     "industry": "Realty",
     "series": "EQ",
-    "isin": "INE484J01027"
+    "isin": "INE484J01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "GRANULES",
     "name": "Granules India Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE101D01020"
+    "isin": "INE101D01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "GRAPHITE",
     "name": "Graphite India Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE371A01025"
+    "isin": "INE371A01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "GRASIM",
     "name": "Grasim Industries Ltd.",
     "industry": "Construction Materials",
     "series": "EQ",
-    "isin": "INE047A01021"
+    "isin": "INE047A01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "GRAVITA",
     "name": "Gravita India Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE024L01027"
+    "isin": "INE024L01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "GESHIP",
     "name": "Great Eastern Shipping Co. Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE017A01032"
+    "isin": "INE017A01032",
+    "exchange": "BSE"
   },
   {
     "symbol": "FLUOROCHEM",
     "name": "Gujarat Fluorochemicals Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE09N301011"
+    "isin": "INE09N301011",
+    "exchange": "BSE"
   },
   {
     "symbol": "GMDCLTD",
     "name": "Gujarat Mineral Development Corporation Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE131A01031"
+    "isin": "INE131A01031",
+    "exchange": "BSE"
   },
   {
     "symbol": "HEG",
     "name": "H.E.G. Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE545A01024"
+    "isin": "INE545A01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "HBLENGINE",
     "name": "HBL Engineering Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE292B01021"
+    "isin": "INE292B01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "HCLTECH",
     "name": "HCL Technologies Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE860A01027"
+    "isin": "INE860A01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "HDBFS",
     "name": "HDB Financial Services Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE756I01012"
+    "isin": "INE756I01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "HDFCAMC",
     "name": "HDFC Asset Management Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE127D01025"
+    "isin": "INE127D01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "HDFCBANK",
     "name": "HDFC Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE040A01034"
+    "isin": "INE040A01034",
+    "exchange": "BSE"
   },
   {
     "symbol": "HDFCLIFE",
     "name": "HDFC Life Insurance Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE795G01014"
+    "isin": "INE795G01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "HFCL",
     "name": "HFCL Ltd.",
     "industry": "Telecommunication",
     "series": "BE",
-    "isin": "INE548A01028"
+    "isin": "INE548A01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "HAVELLS",
     "name": "Havells India Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE176B01034"
+    "isin": "INE176B01034",
+    "exchange": "BSE"
   },
   {
     "symbol": "HEROMOTOCO",
     "name": "Hero MotoCorp Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE158A01026"
+    "isin": "INE158A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "HEXT",
     "name": "Hexaware Technologies Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE093A01041"
+    "isin": "INE093A01041",
+    "exchange": "BSE"
   },
   {
     "symbol": "HSCL",
     "name": "Himadri Speciality Chemical Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE019C01026"
+    "isin": "INE019C01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "HINDALCO",
     "name": "Hindalco Industries Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE038A01020"
+    "isin": "INE038A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "HAL",
     "name": "Hindustan Aeronautics Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE066F01020"
+    "isin": "INE066F01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "HINDCOPPER",
     "name": "Hindustan Copper Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE531E01026"
+    "isin": "INE531E01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "HINDPETRO",
     "name": "Hindustan Petroleum Corporation Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE094A01015"
+    "isin": "INE094A01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "HINDUNILVR",
     "name": "Hindustan Unilever Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE030A01027"
+    "isin": "INE030A01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "HINDZINC",
     "name": "Hindustan Zinc Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE267A01025"
+    "isin": "INE267A01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "POWERINDIA",
     "name": "Hitachi Energy India Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE07Y701011"
+    "isin": "INE07Y701011",
+    "exchange": "BSE"
   },
   {
     "symbol": "HOMEFIRST",
     "name": "Home First Finance Company India Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE481N01025"
+    "isin": "INE481N01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "HONASA",
     "name": "Honasa Consumer Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE0J5401028"
+    "isin": "INE0J5401028",
+    "exchange": "BSE"
   },
   {
     "symbol": "HONAUT",
     "name": "Honeywell Automation India Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE671A01010"
+    "isin": "INE671A01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "HUDCO",
     "name": "Housing & Urban Development Corporation Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE031A01017"
+    "isin": "INE031A01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "HYUNDAI",
     "name": "Hyundai Motor India Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE0V6F01027"
+    "isin": "INE0V6F01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "ICICIBANK",
     "name": "ICICI Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE090A01021"
+    "isin": "INE090A01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "ICICIGI",
     "name": "ICICI Lombard General Insurance Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE765G01017"
+    "isin": "INE765G01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "ICICIAMC",
     "name": "ICICI Prudential Asset Management Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE346A01027"
+    "isin": "INE346A01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "ICICIPRULI",
     "name": "ICICI Prudential Life Insurance Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE726G01019"
+    "isin": "INE726G01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "IDBI",
     "name": "IDBI Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE008A01015"
+    "isin": "INE008A01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "IDFCFIRSTB",
     "name": "IDFC First Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE092T01019"
+    "isin": "INE092T01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "IFCI",
     "name": "IFCI Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE039A01010"
+    "isin": "INE039A01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "IIFL",
     "name": "IIFL Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE530B01024"
+    "isin": "INE530B01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "IRB",
     "name": "IRB Infrastructure Developers Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE821I01022"
+    "isin": "INE821I01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "IRCON",
     "name": "IRCON International Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE962Y01021"
+    "isin": "INE962Y01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "ITCHOTELS",
     "name": "ITC Hotels Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE379A01028"
+    "isin": "INE379A01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "ITC",
     "name": "ITC Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE154A01025"
+    "isin": "INE154A01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "ITI",
     "name": "ITI Ltd.",
     "industry": "Telecommunication",
     "series": "EQ",
-    "isin": "INE248A01017"
+    "isin": "INE248A01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "INDGN",
     "name": "Indegene Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE065X01017"
+    "isin": "INE065X01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "INDIACEM",
     "name": "India Cements Ltd.",
     "industry": "Construction Materials",
     "series": "EQ",
-    "isin": "INE383A01012"
+    "isin": "INE383A01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "INDIAMART",
     "name": "Indiamart Intermesh Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE933S01016"
+    "isin": "INE933S01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "INDIANB",
     "name": "Indian Bank",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE562A01011"
+    "isin": "INE562A01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "IEX",
     "name": "Indian Energy Exchange Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE022Q01020"
+    "isin": "INE022Q01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "INDHOTEL",
     "name": "Indian Hotels Co. Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE053A01029"
+    "isin": "INE053A01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "IOC",
     "name": "Indian Oil Corporation Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE242A01010"
+    "isin": "INE242A01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "IOB",
     "name": "Indian Overseas Bank",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE565A01014"
+    "isin": "INE565A01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "IRCTC",
     "name": "Indian Railway Catering And Tourism Corporation Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE335Y01020"
+    "isin": "INE335Y01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "IRFC",
     "name": "Indian Railway Finance Corporation Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE053F01010"
+    "isin": "INE053F01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "IREDA",
     "name": "Indian Renewable Energy Development Agency Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE202E01016"
+    "isin": "INE202E01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "IGL",
     "name": "Indraprastha Gas Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE203G01027"
+    "isin": "INE203G01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "INDUSTOWER",
     "name": "Indus Towers Ltd.",
     "industry": "Telecommunication",
     "series": "EQ",
-    "isin": "INE121J01017"
+    "isin": "INE121J01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "INDUSINDBK",
     "name": "IndusInd Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE095A01012"
+    "isin": "INE095A01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "NAUKRI",
     "name": "Info Edge (India) Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE663F01032"
+    "isin": "INE663F01032",
+    "exchange": "BSE"
   },
   {
     "symbol": "INFY",
     "name": "Infosys Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE009A01021"
+    "isin": "INE009A01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "INOXWIND",
     "name": "Inox Wind Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE066P01011"
+    "isin": "INE066P01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "INTELLECT",
     "name": "Intellect Design Arena Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE306R01017"
+    "isin": "INE306R01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "INDIGO",
     "name": "InterGlobe Aviation Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE646L01027"
+    "isin": "INE646L01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "IGIL",
     "name": "International Gemological Institute Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE0Q9301021"
+    "isin": "INE0Q9301021",
+    "exchange": "BSE"
   },
   {
     "symbol": "IKS",
     "name": "Inventurus Knowledge Solutions Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE115Q01022"
+    "isin": "INE115Q01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "IPCALAB",
     "name": "Ipca Laboratories Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE571A01038"
+    "isin": "INE571A01038",
+    "exchange": "BSE"
   },
   {
     "symbol": "JKCEMENT",
     "name": "J.K. Cement Ltd.",
     "industry": "Construction Materials",
     "series": "EQ",
-    "isin": "INE823G01014"
+    "isin": "INE823G01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "JBMA",
     "name": "JBM Auto Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE927D01051"
+    "isin": "INE927D01051",
+    "exchange": "BSE"
   },
   {
     "symbol": "JKTYRE",
     "name": "JK Tyre & Industries Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE573A01042"
+    "isin": "INE573A01042",
+    "exchange": "BSE"
   },
   {
     "symbol": "JMFINANCIL",
     "name": "JM Financial Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE780C01023"
+    "isin": "INE780C01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "JSWCEMENT",
     "name": "JSW Cement Ltd.",
     "industry": "Construction Materials",
     "series": "EQ",
-    "isin": "INE718I01012"
+    "isin": "INE718I01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "JSWDULUX",
     "name": "JSW Dulux Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE133A01011"
+    "isin": "INE133A01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "JSWENERGY",
     "name": "JSW Energy Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE121E01018"
+    "isin": "INE121E01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "JSWINFRA",
     "name": "JSW Infrastructure Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE880J01026"
+    "isin": "INE880J01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "JSWSTEEL",
     "name": "JSW Steel Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE019A01038"
+    "isin": "INE019A01038",
+    "exchange": "BSE"
   },
   {
     "symbol": "JAINREC",
     "name": "Jain Resource Recycling Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE0YD401026"
+    "isin": "INE0YD401026",
+    "exchange": "BSE"
   },
   {
     "symbol": "JPPOWER",
     "name": "Jaiprakash Power Ventures Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE351F01018"
+    "isin": "INE351F01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "J&KBANK",
     "name": "Jammu & Kashmir Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE168A01041"
+    "isin": "INE168A01041",
+    "exchange": "BSE"
   },
   {
     "symbol": "JINDALSAW",
     "name": "Jindal Saw Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE324A01032"
+    "isin": "INE324A01032",
+    "exchange": "BSE"
   },
   {
     "symbol": "JSL",
     "name": "Jindal Stainless Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE220G01021"
+    "isin": "INE220G01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "JINDALSTEL",
     "name": "Jindal Steel Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE749A01030"
+    "isin": "INE749A01030",
+    "exchange": "BSE"
   },
   {
     "symbol": "JIOFIN",
     "name": "Jio Financial Services Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE758E01017"
+    "isin": "INE758E01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "JUBLFOOD",
     "name": "Jubilant Foodworks Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE797F01020"
+    "isin": "INE797F01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "JUBLINGREA",
     "name": "Jubilant Ingrevia Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE0BY001018"
+    "isin": "INE0BY001018",
+    "exchange": "BSE"
   },
   {
     "symbol": "JUBLPHARMA",
     "name": "Jubilant Pharmova Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE700A01033"
+    "isin": "INE700A01033",
+    "exchange": "BSE"
   },
   {
     "symbol": "JWL",
     "name": "Jupiter Wagons Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE209L01016"
+    "isin": "INE209L01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "JYOTICNC",
     "name": "Jyoti CNC Automation Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE980O01024"
+    "isin": "INE980O01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "KPRMILL",
     "name": "K.P.R. Mill Ltd.",
     "industry": "Textiles",
     "series": "EQ",
-    "isin": "INE930H01031"
+    "isin": "INE930H01031",
+    "exchange": "BSE"
   },
   {
     "symbol": "KEI",
     "name": "KEI Industries Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE878B01027"
+    "isin": "INE878B01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "KPITTECH",
     "name": "KPIT Technologies Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE04I401011"
+    "isin": "INE04I401011",
+    "exchange": "BSE"
   },
   {
     "symbol": "KAJARIACER",
     "name": "Kajaria Ceramics Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE217B01036"
+    "isin": "INE217B01036",
+    "exchange": "BSE"
   },
   {
     "symbol": "KPIL",
     "name": "Kalpataru Projects International Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE220B01022"
+    "isin": "INE220B01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "KALYANKJIL",
     "name": "Kalyan Jewellers India Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE303R01014"
+    "isin": "INE303R01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "KARURVYSYA",
     "name": "Karur Vysya Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE036D01028"
+    "isin": "INE036D01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "KAYNES",
     "name": "Kaynes Technology India Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE918Z01012"
+    "isin": "INE918Z01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "KEC",
     "name": "Kec International Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE389H01022"
+    "isin": "INE389H01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "KFINTECH",
     "name": "Kfin Technologies Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE138Y01010"
+    "isin": "INE138Y01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "KIRLOSENG",
     "name": "Kirloskar Oil Eng Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE146L01010"
+    "isin": "INE146L01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "KOTAKBANK",
     "name": "Kotak Mahindra Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE237A01036"
+    "isin": "INE237A01036",
+    "exchange": "BSE"
   },
   {
     "symbol": "KIMS",
     "name": "Krishna Institute of Medical Sciences Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE967H01025"
+    "isin": "INE967H01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "LTF",
     "name": "L&T Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE498L01015"
+    "isin": "INE498L01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "LTTS",
     "name": "L&T Technology Services Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE010V01017"
+    "isin": "INE010V01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "LGEINDIA",
     "name": "LG Electronics India Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE324D01010"
+    "isin": "INE324D01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "LICHSGFIN",
     "name": "LIC Housing Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE115A01026"
+    "isin": "INE115A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "LTFOODS",
     "name": "LT Foods Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE818H01020"
+    "isin": "INE818H01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "LTM",
     "name": "LTM Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE214T01019"
+    "isin": "INE214T01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "LT",
     "name": "Larsen & Toubro Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE018A01030"
+    "isin": "INE018A01030",
+    "exchange": "BSE"
   },
   {
     "symbol": "LATENTVIEW",
     "name": "Latent View Analytics Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE0I7C01011"
+    "isin": "INE0I7C01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "LAURUSLABS",
     "name": "Laurus Labs Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE947Q01028"
+    "isin": "INE947Q01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "THELEELA",
     "name": "Leela Palaces Hotels & Resorts Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE0AQ201015"
+    "isin": "INE0AQ201015",
+    "exchange": "BSE"
   },
   {
     "symbol": "LEMONTREE",
     "name": "Lemon Tree Hotels Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE970X01018"
+    "isin": "INE970X01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "LENSKART",
     "name": "Lenskart Solutions Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE956O01016"
+    "isin": "INE956O01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "LICI",
     "name": "Life Insurance Corporation of India",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE0J1Y01017"
+    "isin": "INE0J1Y01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "LINDEINDIA",
     "name": "Linde India Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE473A01011"
+    "isin": "INE473A01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "LLOYDSME",
     "name": "Lloyds Metals And Energy Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE281B01032"
+    "isin": "INE281B01032",
+    "exchange": "BSE"
   },
   {
     "symbol": "LODHA",
     "name": "Lodha Developers Ltd.",
     "industry": "Realty",
     "series": "EQ",
-    "isin": "INE670K01029"
+    "isin": "INE670K01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "LUPIN",
     "name": "Lupin Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE326A01037"
+    "isin": "INE326A01037",
+    "exchange": "BSE"
   },
   {
     "symbol": "MMTC",
     "name": "MMTC Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE123F01029"
+    "isin": "INE123F01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "MRF",
     "name": "MRF Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE883A01011"
+    "isin": "INE883A01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "MGL",
     "name": "Mahanagar Gas Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE002S01010"
+    "isin": "INE002S01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "M&MFIN",
     "name": "Mahindra & Mahindra Financial Services Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE774D01024"
+    "isin": "INE774D01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "M&M",
     "name": "Mahindra & Mahindra Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE101A01026"
+    "isin": "INE101A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "MANAPPURAM",
     "name": "Manappuram Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE522D01027"
+    "isin": "INE522D01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "MRPL",
     "name": "Mangalore Refinery & Petrochemicals Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE103A01014"
+    "isin": "INE103A01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "MANKIND",
     "name": "Mankind Pharma Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE634S01028"
+    "isin": "INE634S01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "MARICO",
     "name": "Marico Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE196A01026"
+    "isin": "INE196A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "MARUTI",
     "name": "Maruti Suzuki India Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE585B01010"
+    "isin": "INE585B01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "MFSL",
     "name": "Max Financial Services Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE180A01020"
+    "isin": "INE180A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "MAXHEALTH",
     "name": "Max Healthcare Institute Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE027H01010"
+    "isin": "INE027H01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "MAZDOCK",
     "name": "Mazagoan Dock Shipbuilders Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE249Z01020"
+    "isin": "INE249Z01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "MEESHO",
     "name": "Meesho Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE0VDM01015"
+    "isin": "INE0VDM01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "MINDACORP",
     "name": "Minda Corporation Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE842C01021"
+    "isin": "INE842C01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "MSUMI",
     "name": "Motherson Sumi Wiring India Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE0FS801015"
+    "isin": "INE0FS801015",
+    "exchange": "BSE"
   },
   {
     "symbol": "MOTILALOFS",
     "name": "Motilal Oswal Financial Services Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE338I01027"
+    "isin": "INE338I01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "MPHASIS",
     "name": "MphasiS Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE356A01018"
+    "isin": "INE356A01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "MCX",
     "name": "Multi Commodity Exchange of India Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE745G01043"
+    "isin": "INE745G01043",
+    "exchange": "BSE"
   },
   {
     "symbol": "MUTHOOTFIN",
     "name": "Muthoot Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE414G01012"
+    "isin": "INE414G01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "NATCOPHARM",
     "name": "NATCO Pharma Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE987B01026"
+    "isin": "INE987B01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "NBCC",
     "name": "NBCC (India) Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE095N01031"
+    "isin": "INE095N01031",
+    "exchange": "BSE"
   },
   {
     "symbol": "NCC",
     "name": "NCC Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE868B01028"
+    "isin": "INE868B01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "NHPC",
     "name": "NHPC Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE848E01016"
+    "isin": "INE848E01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "NLCINDIA",
     "name": "NLC India Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE589A01014"
+    "isin": "INE589A01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "NMDC",
     "name": "NMDC Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE584A01023"
+    "isin": "INE584A01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "NSLNISP",
     "name": "NMDC Steel Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE0NNS01018"
+    "isin": "INE0NNS01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "NTPCGREEN",
     "name": "NTPC Green Energy Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE0ONG01011"
+    "isin": "INE0ONG01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "NTPC",
     "name": "NTPC Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE733E01010"
+    "isin": "INE733E01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "NH",
     "name": "Narayana Hrudayalaya Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE410P01011"
+    "isin": "INE410P01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "NATIONALUM",
     "name": "National Aluminium Co. Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE139A01034"
+    "isin": "INE139A01034",
+    "exchange": "BSE"
   },
   {
     "symbol": "NAVA",
     "name": "Nava Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE725A01030"
+    "isin": "INE725A01030",
+    "exchange": "BSE"
   },
   {
     "symbol": "NAVINFLUOR",
     "name": "Navin Fluorine International Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE048G01026"
+    "isin": "INE048G01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "NESTLEIND",
     "name": "Nestle India Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE239A01024"
+    "isin": "INE239A01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "NETWEB",
     "name": "Netweb Technologies India Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE0NT901020"
+    "isin": "INE0NT901020",
+    "exchange": "BSE"
   },
   {
     "symbol": "NEULANDLAB",
     "name": "Neuland Laboratories Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE794A01010"
+    "isin": "INE794A01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "NEWGEN",
     "name": "Newgen Software Technologies Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE619B01017"
+    "isin": "INE619B01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "NAM-INDIA",
     "name": "Nippon Life India Asset Management Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE298J01013"
+    "isin": "INE298J01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "NIVABUPA",
     "name": "Niva Bupa Health Insurance Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE995S01015"
+    "isin": "INE995S01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "NUVAMA",
     "name": "Nuvama Wealth Management Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE531F01023"
+    "isin": "INE531F01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "NUVOCO",
     "name": "Nuvoco Vistas Corporation Ltd.",
     "industry": "Construction Materials",
     "series": "EQ",
-    "isin": "INE118D01016"
+    "isin": "INE118D01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "OBEROIRLTY",
     "name": "Oberoi Realty Ltd.",
     "industry": "Realty",
     "series": "EQ",
-    "isin": "INE093I01010"
+    "isin": "INE093I01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "ONGC",
     "name": "Oil & Natural Gas Corporation Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE213A01029"
+    "isin": "INE213A01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "OIL",
     "name": "Oil India Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE274J01014"
+    "isin": "INE274J01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "OLAELEC",
     "name": "Ola Electric Mobility Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE0LXG01040"
+    "isin": "INE0LXG01040",
+    "exchange": "BSE"
   },
   {
     "symbol": "OLECTRA",
     "name": "Olectra Greentech Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE260D01016"
+    "isin": "INE260D01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "PAYTM",
     "name": "One 97 Communications Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE982J01020"
+    "isin": "INE982J01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "ONESOURCE",
     "name": "Onesource Specialty Pharma Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE013P01021"
+    "isin": "INE013P01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "OFSS",
     "name": "Oracle Financial Services Software Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE881D01027"
+    "isin": "INE881D01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "POLICYBZR",
     "name": "PB Fintech Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE417T01026"
+    "isin": "INE417T01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "PCBL",
     "name": "PCBL Chemical Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE602A01031"
+    "isin": "INE602A01031",
+    "exchange": "BSE"
   },
   {
     "symbol": "PGEL",
     "name": "PG Electroplast Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE457L01029"
+    "isin": "INE457L01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "PIIND",
     "name": "PI Industries Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE603J01030"
+    "isin": "INE603J01030",
+    "exchange": "BSE"
   },
   {
     "symbol": "PNBHOUSING",
     "name": "PNB Housing Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE572E01012"
+    "isin": "INE572E01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "PTCIL",
     "name": "PTC Industries Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE596F01018"
+    "isin": "INE596F01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "PVRINOX",
     "name": "PVR INOX Ltd.",
     "industry": "Media Entertainment & Publication",
     "series": "EQ",
-    "isin": "INE191H01014"
+    "isin": "INE191H01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "PAGEIND",
     "name": "Page Industries Ltd.",
     "industry": "Textiles",
     "series": "EQ",
-    "isin": "INE761H01022"
+    "isin": "INE761H01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "PARADEEP",
     "name": "Paradeep Phosphates Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE088F01024"
+    "isin": "INE088F01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "PATANJALI",
     "name": "Patanjali Foods Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE619A01035"
+    "isin": "INE619A01035",
+    "exchange": "BSE"
   },
   {
     "symbol": "PERSISTENT",
     "name": "Persistent Systems Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE262H01021"
+    "isin": "INE262H01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "PETRONET",
     "name": "Petronet LNG Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE347G01014"
+    "isin": "INE347G01014",
+    "exchange": "BSE"
   },
   {
     "symbol": "PFIZER",
     "name": "Pfizer Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE182A01018"
+    "isin": "INE182A01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "PHOENIXLTD",
     "name": "Phoenix Mills Ltd.",
     "industry": "Realty",
     "series": "EQ",
-    "isin": "INE211B01039"
+    "isin": "INE211B01039",
+    "exchange": "BSE"
   },
   {
     "symbol": "PWL",
     "name": "Physicswallah Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE0LP301011"
+    "isin": "INE0LP301011",
+    "exchange": "BSE"
   },
   {
     "symbol": "PIDILITIND",
     "name": "Pidilite Industries Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE318A01026"
+    "isin": "INE318A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "PINELABS",
     "name": "Pine Labs Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE15B701018"
+    "isin": "INE15B701018",
+    "exchange": "BSE"
   },
   {
     "symbol": "PIRAMALFIN",
     "name": "Piramal Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE202B01038"
+    "isin": "INE202B01038",
+    "exchange": "BSE"
   },
   {
     "symbol": "PPLPHARMA",
     "name": "Piramal Pharma Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE0DK501011"
+    "isin": "INE0DK501011",
+    "exchange": "BSE"
   },
   {
     "symbol": "POLYMED",
     "name": "Poly Medicure Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE205C01021"
+    "isin": "INE205C01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "POLYCAB",
     "name": "Polycab India Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE455K01017"
+    "isin": "INE455K01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "POONAWALLA",
     "name": "Poonawalla Fincorp Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE511C01022"
+    "isin": "INE511C01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "PFC",
     "name": "Power Finance Corporation Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE134E01011"
+    "isin": "INE134E01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "POWERGRID",
     "name": "Power Grid Corporation of India Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE752E01010"
+    "isin": "INE752E01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "PREMIERENE",
     "name": "Premier Energies Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE0BS701011"
+    "isin": "INE0BS701011",
+    "exchange": "BSE"
   },
   {
     "symbol": "PRESTIGE",
     "name": "Prestige Estates Projects Ltd.",
     "industry": "Realty",
     "series": "EQ",
-    "isin": "INE811K01011"
+    "isin": "INE811K01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "PFOCUS",
     "name": "Prime Focus Ltd.",
     "industry": "Media Entertainment & Publication",
     "series": "EQ",
-    "isin": "INE367G01038"
+    "isin": "INE367G01038",
+    "exchange": "BSE"
   },
   {
     "symbol": "PNB",
     "name": "Punjab National Bank",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE160A01022"
+    "isin": "INE160A01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "RRKABEL",
     "name": "R R Kabel Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE777K01022"
+    "isin": "INE777K01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "RBLBANK",
     "name": "RBL Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE976G01028"
+    "isin": "INE976G01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "RECLTD",
     "name": "REC Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE020B01018"
+    "isin": "INE020B01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "RHIM",
     "name": "RHI MAGNESITA INDIA LTD.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE743M01012"
+    "isin": "INE743M01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "RITES",
     "name": "RITES Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE320J01015"
+    "isin": "INE320J01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "RADICO",
     "name": "Radico Khaitan Ltd",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE944F01028"
+    "isin": "INE944F01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "RVNL",
     "name": "Rail Vikas Nigam Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE415G01027"
+    "isin": "INE415G01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "RAILTEL",
     "name": "Railtel Corporation Of India Ltd.",
     "industry": "Telecommunication",
     "series": "EQ",
-    "isin": "INE0DD101019"
+    "isin": "INE0DD101019",
+    "exchange": "BSE"
   },
   {
     "symbol": "RAINBOW",
     "name": "Rainbow Childrens Medicare Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE961O01016"
+    "isin": "INE961O01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "RKFORGE",
     "name": "Ramkrishna Forgings Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE399G01023"
+    "isin": "INE399G01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "REDINGTON",
     "name": "Redington Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE891D01026"
+    "isin": "INE891D01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "RELIANCE",
     "name": "Reliance Industries Ltd.",
     "industry": "Oil Gas & Consumable Fuels",
     "series": "EQ",
-    "isin": "INE002A01018"
+    "isin": "INE002A01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "RPOWER",
     "name": "Reliance Power Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE614G01033"
+    "isin": "INE614G01033",
+    "exchange": "BSE"
   },
   {
     "symbol": "SBFC",
     "name": "SBFC Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE423Y01016"
+    "isin": "INE423Y01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "SBICARD",
     "name": "SBI Cards and Payment Services Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE018E01016"
+    "isin": "INE018E01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "SBILIFE",
     "name": "SBI Life Insurance Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE123W01016"
+    "isin": "INE123W01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "SJVN",
     "name": "SJVN Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE002L01015"
+    "isin": "INE002L01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "SRF",
     "name": "SRF Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE647A01010"
+    "isin": "INE647A01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "SAGILITY",
     "name": "Sagility Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE0W2G01015"
+    "isin": "INE0W2G01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "SAILIFE",
     "name": "Sai Life Sciences Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE570L01029"
+    "isin": "INE570L01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "SAMMAANCAP",
     "name": "Sammaan Capital Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE148I01020"
+    "isin": "INE148I01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "MOTHERSON",
     "name": "Samvardhana Motherson International Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE775A01035"
+    "isin": "INE775A01035",
+    "exchange": "BSE"
   },
   {
     "symbol": "SAPPHIRE",
     "name": "Sapphire Foods India Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE806T01020"
+    "isin": "INE806T01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "SARDAEN",
     "name": "Sarda Energy and Minerals Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE385C01021"
+    "isin": "INE385C01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "SAREGAMA",
     "name": "Saregama India Ltd",
     "industry": "Media Entertainment & Publication",
     "series": "EQ",
-    "isin": "INE979A01025"
+    "isin": "INE979A01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "SCHAEFFLER",
     "name": "Schaeffler India Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE513A01022"
+    "isin": "INE513A01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "SCHNEIDER",
     "name": "Schneider Electric Infrastructure Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE839M01018"
+    "isin": "INE839M01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "SCI",
     "name": "Shipping Corporation of India Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE109A01011"
+    "isin": "INE109A01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "SHREECEM",
     "name": "Shree Cement Ltd.",
     "industry": "Construction Materials",
     "series": "EQ",
-    "isin": "INE070A01015"
+    "isin": "INE070A01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "SHRIRAMFIN",
     "name": "Shriram Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE721A01047"
+    "isin": "INE721A01047",
+    "exchange": "BSE"
   },
   {
     "symbol": "SHYAMMETL",
     "name": "Shyam Metalics and Energy Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE810G01011"
+    "isin": "INE810G01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "ENRIN",
     "name": "Siemens Energy India Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE1NPP01017"
+    "isin": "INE1NPP01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "SIEMENS",
     "name": "Siemens Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE003A01024"
+    "isin": "INE003A01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "SIGNATURE",
     "name": "Signatureglobal (India) Ltd.",
     "industry": "Realty",
     "series": "EQ",
-    "isin": "INE903U01023"
+    "isin": "INE903U01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "SOBHA",
     "name": "Sobha Ltd.",
     "industry": "Realty",
     "series": "EQ",
-    "isin": "INE671H01015"
+    "isin": "INE671H01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "SOLARINDS",
     "name": "Solar Industries India Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE343H01029"
+    "isin": "INE343H01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "SONACOMS",
     "name": "Sona BLW Precision Forgings Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE073K01018"
+    "isin": "INE073K01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "SONATSOFTW",
     "name": "Sonata Software Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE269A01021"
+    "isin": "INE269A01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "STARHEALTH",
     "name": "Star Health and Allied Insurance Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE575P01011"
+    "isin": "INE575P01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "SBIN",
     "name": "State Bank of India",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE062A01020"
+    "isin": "INE062A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "SAIL",
     "name": "Steel Authority of India Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE114A01011"
+    "isin": "INE114A01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "SUMICHEM",
     "name": "Sumitomo Chemical India Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE258G01013"
+    "isin": "INE258G01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "SUNPHARMA",
     "name": "Sun Pharmaceutical Industries Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE044A01036"
+    "isin": "INE044A01036",
+    "exchange": "BSE"
   },
   {
     "symbol": "SUNTV",
     "name": "Sun TV Network Ltd.",
     "industry": "Media Entertainment & Publication",
     "series": "EQ",
-    "isin": "INE424H01027"
+    "isin": "INE424H01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "SUNDARMFIN",
     "name": "Sundaram Finance Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE660A01013"
+    "isin": "INE660A01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "SUPREMEIND",
     "name": "Supreme Industries Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE195A01028"
+    "isin": "INE195A01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "SPLPETRO",
     "name": "Supreme Petrochem Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE663A01033"
+    "isin": "INE663A01033",
+    "exchange": "BSE"
   },
   {
     "symbol": "SUZLON",
     "name": "Suzlon Energy Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE040H01021"
+    "isin": "INE040H01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "SWANCORP",
     "name": "Swan Corp Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE665A01038"
+    "isin": "INE665A01038",
+    "exchange": "BSE"
   },
   {
     "symbol": "SWIGGY",
     "name": "Swiggy Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE00H001014"
+    "isin": "INE00H001014",
+    "exchange": "BSE"
   },
   {
     "symbol": "SYNGENE",
     "name": "Syngene International Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE398R01022"
+    "isin": "INE398R01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "SYRMA",
     "name": "Syrma SGS Technology Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE0DYJ01015"
+    "isin": "INE0DYJ01015",
+    "exchange": "BSE"
   },
   {
     "symbol": "TBOTEK",
     "name": "TBO Tek Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE673O01025"
+    "isin": "INE673O01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "TVSMOTOR",
     "name": "TVS Motor Company Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE494B01023"
+    "isin": "INE494B01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "TATACAP",
     "name": "Tata Capital Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE976I01016"
+    "isin": "INE976I01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "TATACHEM",
     "name": "Tata Chemicals Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE092A01019"
+    "isin": "INE092A01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "TATACOMM",
     "name": "Tata Communications Ltd.",
     "industry": "Telecommunication",
     "series": "EQ",
-    "isin": "INE151A01013"
+    "isin": "INE151A01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "TCS",
     "name": "Tata Consultancy Services Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE467B01029"
+    "isin": "INE467B01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "TATACONSUM",
     "name": "Tata Consumer Products Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE192A01025"
+    "isin": "INE192A01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "TATAELXSI",
     "name": "Tata Elxsi Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE670A01012"
+    "isin": "INE670A01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "TATAINVEST",
     "name": "Tata Investment Corporation Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE672A01026"
+    "isin": "INE672A01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "TMCV",
     "name": "Tata Motors Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE1TAE01010"
+    "isin": "INE1TAE01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "TMPV",
     "name": "Tata Motors Passenger Vehicles Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE155A01022"
+    "isin": "INE155A01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "TATAPOWER",
     "name": "Tata Power Co. Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE245A01021"
+    "isin": "INE245A01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "TATASTEEL",
     "name": "Tata Steel Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE081A01020"
+    "isin": "INE081A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "TATATECH",
     "name": "Tata Technologies Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE142M01025"
+    "isin": "INE142M01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "TTML",
     "name": "Tata Teleservices (Maharashtra) Ltd.",
     "industry": "Telecommunication",
     "series": "EQ",
-    "isin": "INE517B01013"
+    "isin": "INE517B01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "TECHM",
     "name": "Tech Mahindra Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE669C01036"
+    "isin": "INE669C01036",
+    "exchange": "BSE"
   },
   {
     "symbol": "TECHNOE",
     "name": "Techno Electric & Engineering Company Ltd.",
     "industry": "Construction",
     "series": "EQ",
-    "isin": "INE285K01026"
+    "isin": "INE285K01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "TEGA",
     "name": "Tega Industries Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE011K01018"
+    "isin": "INE011K01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "TEJASNET",
     "name": "Tejas Networks Ltd.",
     "industry": "Telecommunication",
     "series": "EQ",
-    "isin": "INE010J01012"
+    "isin": "INE010J01012",
+    "exchange": "BSE"
   },
   {
     "symbol": "TENNIND",
     "name": "Tenneco Clean Air India Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE19RI01016"
+    "isin": "INE19RI01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "NIACL",
     "name": "The New India Assurance Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE470Y01017"
+    "isin": "INE470Y01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "RAMCOCEM",
     "name": "The Ramco Cements Ltd.",
     "industry": "Construction Materials",
     "series": "EQ",
-    "isin": "INE331A01037"
+    "isin": "INE331A01037",
+    "exchange": "BSE"
   },
   {
     "symbol": "THERMAX",
     "name": "Thermax Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE152A01029"
+    "isin": "INE152A01029",
+    "exchange": "BSE"
   },
   {
     "symbol": "TIMKEN",
     "name": "Timken India Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE325A01013"
+    "isin": "INE325A01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "TITAGARH",
     "name": "Titagarh Rail Systems Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE615H01020"
+    "isin": "INE615H01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "TITAN",
     "name": "Titan Company Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE280A01028"
+    "isin": "INE280A01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "TORNTPHARM",
     "name": "Torrent Pharmaceuticals Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE685A01028"
+    "isin": "INE685A01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "TORNTPOWER",
     "name": "Torrent Power Ltd.",
     "industry": "Power",
     "series": "EQ",
-    "isin": "INE813H01021"
+    "isin": "INE813H01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "TARIL",
     "name": "Transformers And Rectifiers (India) Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE763I01026"
+    "isin": "INE763I01026",
+    "exchange": "BSE"
   },
   {
     "symbol": "TRAVELFOOD",
     "name": "Travel Food Services Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE103V01028"
+    "isin": "INE103V01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "TRENT",
     "name": "Trent Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE849A01020"
+    "isin": "INE849A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "TRIDENT",
     "name": "Trident Ltd.",
     "industry": "Textiles",
     "series": "EQ",
-    "isin": "INE064C01022"
+    "isin": "INE064C01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "TRITURBINE",
     "name": "Triveni Turbine Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE152M01016"
+    "isin": "INE152M01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "TIINDIA",
     "name": "Tube Investments of India Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE974X01010"
+    "isin": "INE974X01010",
+    "exchange": "BSE"
   },
   {
     "symbol": "UCOBANK",
     "name": "UCO Bank",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE691A01018"
+    "isin": "INE691A01018",
+    "exchange": "BSE"
   },
   {
     "symbol": "UNOMINDA",
     "name": "UNO Minda Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE405E01023"
+    "isin": "INE405E01023",
+    "exchange": "BSE"
   },
   {
     "symbol": "UPL",
     "name": "UPL Ltd.",
     "industry": "Chemicals",
     "series": "EQ",
-    "isin": "INE628A01036"
+    "isin": "INE628A01036",
+    "exchange": "BSE"
   },
   {
     "symbol": "UTIAMC",
     "name": "UTI Asset Management Company Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE094J01016"
+    "isin": "INE094J01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "ULTRACEMCO",
     "name": "UltraTech Cement Ltd.",
     "industry": "Construction Materials",
     "series": "EQ",
-    "isin": "INE481G01011"
+    "isin": "INE481G01011",
+    "exchange": "BSE"
   },
   {
     "symbol": "UNIONBANK",
     "name": "Union Bank of India",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE692A01016"
+    "isin": "INE692A01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "UBL",
     "name": "United Breweries Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE686F01025"
+    "isin": "INE686F01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "UNITDSPR",
     "name": "United Spirits Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE854D01024"
+    "isin": "INE854D01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "URBANCO",
     "name": "Urban Company Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE0CAZ01013"
+    "isin": "INE0CAZ01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "USHAMART",
     "name": "Usha Martin Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE228A01035"
+    "isin": "INE228A01035",
+    "exchange": "BSE"
   },
   {
     "symbol": "VTL",
     "name": "Vardhman Textiles Ltd.",
     "industry": "Textiles",
     "series": "EQ",
-    "isin": "INE825A01020"
+    "isin": "INE825A01020",
+    "exchange": "BSE"
   },
   {
     "symbol": "VBL",
     "name": "Varun Beverages Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE200M01039"
+    "isin": "INE200M01039",
+    "exchange": "BSE"
   },
   {
     "symbol": "VEDL",
     "name": "Vedanta Ltd.",
     "industry": "Metals & Mining",
     "series": "EQ",
-    "isin": "INE205A01025"
+    "isin": "INE205A01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "VIJAYA",
     "name": "Vijaya Diagnostic Centre Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE043W01024"
+    "isin": "INE043W01024",
+    "exchange": "BSE"
   },
   {
     "symbol": "VMM",
     "name": "Vishal Mega Mart Ltd.",
     "industry": "Consumer Services",
     "series": "EQ",
-    "isin": "INE01EA01019"
+    "isin": "INE01EA01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "IDEA",
     "name": "Vodafone Idea Ltd.",
     "industry": "Telecommunication",
     "series": "EQ",
-    "isin": "INE669E01016"
+    "isin": "INE669E01016",
+    "exchange": "BSE"
   },
   {
     "symbol": "VOLTAS",
     "name": "Voltas Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE226A01021"
+    "isin": "INE226A01021",
+    "exchange": "BSE"
   },
   {
     "symbol": "WAAREEENER",
     "name": "Waaree Energies Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE377N01017"
+    "isin": "INE377N01017",
+    "exchange": "BSE"
   },
   {
     "symbol": "WELCORP",
     "name": "Welspun Corp Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE191B01025"
+    "isin": "INE191B01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "WELSPUNLIV",
     "name": "Welspun Living Ltd.",
     "industry": "Textiles",
     "series": "EQ",
-    "isin": "INE192B01031"
+    "isin": "INE192B01031",
+    "exchange": "BSE"
   },
   {
     "symbol": "WHIRLPOOL",
     "name": "Whirlpool of India Ltd.",
     "industry": "Consumer Durables",
     "series": "EQ",
-    "isin": "INE716A01013"
+    "isin": "INE716A01013",
+    "exchange": "BSE"
   },
   {
     "symbol": "WIPRO",
     "name": "Wipro Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE075A01022"
+    "isin": "INE075A01022",
+    "exchange": "BSE"
   },
   {
     "symbol": "WOCKPHARMA",
     "name": "Wockhardt Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE049B01025"
+    "isin": "INE049B01025",
+    "exchange": "BSE"
   },
   {
     "symbol": "YESBANK",
     "name": "Yes Bank Ltd.",
     "industry": "Financial Services",
     "series": "EQ",
-    "isin": "INE528G01035"
+    "isin": "INE528G01035",
+    "exchange": "BSE"
   },
   {
     "symbol": "ZFCVINDIA",
     "name": "ZF Commercial Vehicle Control Systems India Ltd.",
     "industry": "Automobile and Auto Components",
     "series": "EQ",
-    "isin": "INE342J01019"
+    "isin": "INE342J01019",
+    "exchange": "BSE"
   },
   {
     "symbol": "ZEEL",
     "name": "Zee Entertainment Enterprises Ltd.",
     "industry": "Media Entertainment & Publication",
     "series": "EQ",
-    "isin": "INE256A01028"
+    "isin": "INE256A01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "ZENTEC",
     "name": "Zen Technologies Ltd.",
     "industry": "Capital Goods",
     "series": "EQ",
-    "isin": "INE251B01027"
+    "isin": "INE251B01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "ZENSARTECH",
     "name": "Zensar Technolgies Ltd.",
     "industry": "Information Technology",
     "series": "EQ",
-    "isin": "INE520A01027"
+    "isin": "INE520A01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "ZYDUSLIFE",
     "name": "Zydus Lifesciences Ltd.",
     "industry": "Healthcare",
     "series": "EQ",
-    "isin": "INE010B01027"
+    "isin": "INE010B01027",
+    "exchange": "BSE"
   },
   {
     "symbol": "ZYDUSWELL",
     "name": "Zydus Wellness Ltd.",
     "industry": "Fast Moving Consumer Goods",
     "series": "EQ",
-    "isin": "INE768C01028"
+    "isin": "INE768C01028",
+    "exchange": "BSE"
   },
   {
     "symbol": "ECLERX",
     "name": "eClerx Services Ltd.",
     "industry": "Services",
     "series": "EQ",
-    "isin": "INE738I01010"
+    "isin": "INE738I01010",
+    "exchange": "BSE"
   }
 ]

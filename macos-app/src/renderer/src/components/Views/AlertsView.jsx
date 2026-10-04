@@ -1392,6 +1392,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const [serverCounts, setServerCounts] = useState(null)
   const [autoLoading, setAutoLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
+  const [scanningSwing, setScanningSwing] = useState(false)
   const [testing, setTesting] = useState(false)
   const [showTools, setShowTools] = useState(false) // Unified maintenance + simulation dropdown
   const toolsMenuRef = useRef(null)
@@ -1951,6 +1952,29 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     } catch (_) {
     } finally {
       setScanning(false)
+    }
+  }
+
+  // Dedicated Institutional Swing & Positional scan trigger across NSE & BSE
+  const handleScanSwing = async () => {
+    setScanningSwing(true)
+    try {
+      const res = await callRef.current('/skills/alerts/auto/scan_swing', {
+        universe: 'all_equities_nse_bse',
+        min_score: 60,
+        limit: 40,
+      })
+      const fresh = res?.data ?? []
+      if (Array.isArray(fresh) && fresh.length > 0) {
+        setAutoAlerts((prev) => mergeAlertsInPlace(prev, fresh))
+      } else {
+        await loadAutoAlerts(false)
+      }
+      setHorizonFilter('SWING_ALL')
+      setViewMode('ACTIVE')
+    } catch (_) {
+    } finally {
+      setScanningSwing(false)
     }
   }
 
@@ -2524,6 +2548,8 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         const hzInfo = resolveHorizonAndETA(a)
         if (selectedHorizon === 'SCALP') {
           if (hzInfo.key !== 'SCALP' && a.time_horizon !== 'SCALP' && a.time_horizon !== 'INTRADAY_SCALP_ONLY') return false
+        } else if (selectedHorizon === 'SWING_ALL' || selectedHorizon === 'SWING') {
+          if (!['SWING', 'SWING_SHORT', 'SWING_MID'].includes(hzInfo.key) && !['SWING', 'SWING_SHORT', 'SWING_MID'].includes(a.time_horizon)) return false
         } else if (selectedHorizon === 'MULTIBAGGER') {
           if (hzInfo.key !== 'MULTIBAGGER') return false
         } else if (selectedHorizon === 'LONG_TERM' || selectedHorizon === 'POSITIONAL') {
@@ -3020,11 +3046,20 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
               <div className="flex items-center gap-1.5">
                 <button
                   onClick={handleScanNow}
-                  disabled={scanning}
+                  disabled={scanning || scanningSwing}
                   className="btn btn-sm btn-gold text-xs flex items-center gap-1 font-bold shadow-sm py-1 px-3"
                   title="Scan live market feeds now"
                 >
                   {scanning ? '⚡ Scanning…' : '⚡ Scan Now'}
+                </button>
+
+                <button
+                  onClick={handleScanSwing}
+                  disabled={scanningSwing || scanning}
+                  className="btn btn-sm btn-ghost text-xs text-sky-400 border border-sky-500/30 hover:bg-sky-500/10 flex items-center gap-1 font-bold shadow-sm py-1 px-2.5 transition-all"
+                  title="Deep quantitative sweep across NSE & BSE for institutional swing, positional, and multibagger setups"
+                >
+                  {scanningSwing ? '🌊 Scanning Swings…' : '🌊 Scan Swings'}
                 </button>
 
                 <button
@@ -3272,9 +3307,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
               </button>
             </div>
 
-            {/* ROW 3: Search + Category chips (scrollable) + Dropdowns */}
+            {/* ROW 3: Search + Category chips + Dropdowns */}
             <div className="flex items-center justify-between flex-wrap gap-2 pt-1.5 border-t border-border/40 text-[11px]">
-              <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap min-w-0">
                 {/* Symbol / Contract Search Input */}
                 <div className="relative w-44 flex-shrink-0">
                   <input
@@ -3299,7 +3334,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 <select
                   value={selectedFilter}
                   onChange={(e) => setSelectedFilter(e.target.value)}
-                  className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer flex-shrink-0 ${
+                  className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer max-w-[210px] truncate ${
                     selectedFilter !== 'ALL'
                       ? 'border-gold text-gold font-bold bg-gold/10'
                       : 'border-border hover:border-gold/50'
@@ -3342,7 +3377,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 <select
                   value={selectedHorizon}
                   onChange={(e) => setSelectedHorizon(e.target.value)}
-                  className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer flex-shrink-0 ${
+                  className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
                     selectedHorizon !== 'ALL'
                       ? 'border-sky-400 text-sky-300 font-bold bg-sky-500/10'
                       : 'border-border hover:border-gold/50'
@@ -3350,18 +3385,19 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   title="Filter by trade time horizon & ETA"
                 >
                   <option value="ALL">All Horizons</option>
-                  <option value="SCALP">⚡ Scalp (15–45 Min)</option>
-                  <option value="INTRADAY">⏱️ Intraday (Today)</option>
-                  <option value="ROLLING_24H">🪙 24H Rolling (Crypto)</option>
+                  <option value="SWING_ALL">🌊 All Swings (Short + Mid)</option>
                   <option value="SWING_SHORT">⚡ 2–5D Short Swing</option>
                   <option value="SWING_MID">📈 1–4W Mid Swing</option>
                   <option value="POSITIONAL">🏛️ 1–6M Long Positional</option>
                   <option value="MULTIBAGGER">🚀 6–24M Multibagger Alpha</option>
+                  <option value="INTRADAY">⏱️ Intraday (Today)</option>
+                  <option value="SCALP">⚡ Scalp (15–45 Min)</option>
+                  <option value="ROLLING_24H">🪙 24H Rolling (Crypto)</option>
                 </select>
               </div>
 
               {/* Right: compact inline dropdowns + density + sort + reset */}
-              <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 {/* Direction Filter */}
                 <select
                   value={selectedDirection}
@@ -3499,8 +3535,16 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 Try adjusting the segment rail or clearing the category filter.
               </p>
               <div className="flex items-center justify-center gap-2 pt-2 flex-wrap">
-                <button onClick={handleScanNow} disabled={scanning} className="btn btn-sm btn-gold">
+                <button onClick={handleScanNow} disabled={scanning || scanningSwing} className="btn btn-sm btn-gold">
                   ⚡ Scan Now
+                </button>
+                <button
+                  onClick={handleScanSwing}
+                  disabled={scanningSwing || scanning}
+                  className="btn btn-sm btn-ghost text-sky-400 border border-sky-500/30 hover:bg-sky-500/10 font-bold"
+                  title="Deep sweep across NSE & BSE for swing and positional trades"
+                >
+                  {scanningSwing ? '🌊 Scanning Swings…' : '🌊 Scan Swings (NSE+BSE)'}
                 </button>
                 {(selectedSegment !== 'ALL' || selectedFilter !== 'ALL' || selectedStage !== 'ALL' || searchQuery) && (
                   <button onClick={handleResetFilters} className="btn btn-sm btn-ghost text-gold border border-gold/30">

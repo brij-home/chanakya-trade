@@ -695,6 +695,94 @@ class AlertScrutinyAuditor:
                         )
             except (ValueError, TypeError):
                 pass
+        # 6b. Order Book Bid-Ask Spread & Exit Liquidity Gate:
+        # Veto illiquid contracts with wide bid-ask spread (> 2.5% for index, > 4.5% for stock options)
+        # or contracts with zero bid (total lack of exit liquidity).
+        if is_option_premium_levels and isinstance(metrics_dict, dict):
+            spread_pct = metrics_dict.get("bid_ask_spread_pct")
+            bid_val = metrics_dict.get("bid") or metrics_dict.get("best_bid")
+            ask_val = metrics_dict.get("ask") or metrics_dict.get("best_ask")
+            if spread_pct is None and bid_val is not None and ask_val is not None:
+                try:
+                    b_f, a_f = float(bid_val), float(ask_val)
+                    if a_f > 0 and b_f >= 0:
+                        spread_pct = round(((a_f - b_f) / a_f) * 100.0, 2)
+                        if b_f == 0:
+                            return (
+                                False,
+                                f"Zero Bid Liquidity Veto: Contract has Ask ₹{a_f:,.2f} but ₹0.00 Bid. Complete lack of exit liquidity.",
+                                flags,
+                            )
+                except (ValueError, TypeError):
+                    pass
+            if spread_pct is not None:
+                max_spr = 2.5 if is_index_sym else 4.5
+                if spread_pct > max_spr:
+                    return (
+                        False,
+                        f"Illiquid Order Book Veto: Bid-Ask spread ({spread_pct:.1f}%) exceeds maximum slippage tolerance ({max_spr:.1f}%).",
+                        flags,
+                    )
+
+        # 6c. 0DTE Expiry-Day Afternoon Theta Cliff & Pin Risk Gate:
+        # On same-day expiry contracts (0 DTE):
+        # 1. Post-13:30 IST: Naked Out-of-the-Money (OTM) options face rapid theta decay.
+        #    Unless structured as a defined-risk spread (credit/debit spread) or deep ITM/ATM, veto.
+        # 2. Post-14:15 IST: Striking near large Open Interest straddle walls faces pinning, where
+        #    market makers pin the underlying and premiums collapse to 0.
+        if is_option_premium_levels or has_opt_marker:
+            try:
+                from engine.alert_expiry import is_0dte_expiry
+
+                exp_date_str = getattr(alert, "expiry_date", "") or (
+                    metrics_dict.get("expiry_date") if isinstance(metrics_dict, dict) else ""
+                )
+                now_ist = datetime.now(IST)
+
+                if exp_date_str and is_0dte_expiry(str(exp_date_str), ref_dt=now_ist):
+                    hhmm = now_ist.hour * 100 + now_ist.minute
+                    plan_dict = getattr(alert, "actionable_plan", {}) or {}
+                    has_spread = bool(
+                        isinstance(plan_dict, dict) and plan_dict.get("hedged_spread")
+                    )
+
+                    # Post 13:30 IST naked OTM check
+                    if hhmm >= 1330 and not has_spread:
+                        opt_t = getattr(alert, "option_type", "")
+                        stk_val = float(getattr(alert, "strike", 0.0) or 0.0)
+                        spot_p = float(spot_val or 0.0)
+                        if stk_val > 0 and spot_p > 0:
+                            is_otm = (opt_t == "CE" and stk_val > spot_p * 1.004) or (
+                                opt_t == "PE" and stk_val < spot_p * 0.996
+                            )
+                            if is_otm:
+                                return (
+                                    False,
+                                    f"0DTE Afternoon Theta Cliff Veto: Naked OTM {opt_t} ({stk_val:,.0f} vs spot {spot_p:,.1f}) post-13:30 IST faces rapid theta collapse. Requires defined-risk spread or next weekly expiry.",
+                                    flags,
+                                )
+
+                    # Post 14:15 IST pin risk check
+                    if hhmm >= 1415 and not has_spread:
+                        oi_wall = (
+                            float(
+                                metrics_dict.get("oi_wall_strike", 0.0)
+                                or metrics_dict.get("max_oi_strike", 0.0)
+                                or 0.0
+                            )
+                            if isinstance(metrics_dict, dict)
+                            else 0.0
+                        )
+                        if oi_wall > 0 and spot_val > 0:
+                            dist_to_wall_pct = (abs(spot_val - oi_wall) / spot_val) * 100.0
+                            if dist_to_wall_pct <= 0.25:
+                                return (
+                                    False,
+                                    f"0DTE Expiry Pin Risk Veto: Spot {spot_val:,.1f} is pinned at major OI Wall {oi_wall:,.0f} (within {dist_to_wall_pct:.2f}%). Terminal pinning decay active.",
+                                    flags,
+                                )
+            except Exception as e:
+                logger.debug(f"[AlertScrutiny] 0DTE gate check evaluation skipped: {e}")
 
         # 7. Closed-Loop Learning Engine Lockout:
         # Reject signals on assets that failed twice or are under active post-mortem lockout
@@ -2292,6 +2380,11 @@ class AlertScrutinyAuditor:
                         or getattr(alert, "option_type", "") == "PE"
                     )
 
+                    _alert_hz = (getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY").upper()
+                    is_multi_session = _alert_hz in (
+                        "SWING_SHORT", "SWING_MID", "SWING", "LONG_TERM", "POSITIONAL", "MULTIBAGGER"
+                    )
+
                     # Broad market liquidation (declines heavily outnumber advances)
                     if (
                         mb.verdict == "BROAD_DECLINE"
@@ -2314,6 +2407,7 @@ class AlertScrutinyAuditor:
                                 and (
                                     (metrics_dict.get("is_decoupler") is True)
                                     or (float(metrics_dict.get("sector_rs", 0.0) or 0.0) >= 1.5)
+                                    or is_multi_session
                                 )
                             )
                             hbcm_meta_mb = (
@@ -2372,6 +2466,7 @@ class AlertScrutinyAuditor:
                                 and (
                                     (metrics_dict.get("is_decoupler") is True)
                                     or (float(metrics_dict.get("sector_rs", 0.0) or 0.0) <= -1.5)
+                                    or is_multi_session
                                 )
                             )
                             hbcm_meta_mb = (

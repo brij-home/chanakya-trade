@@ -46,6 +46,8 @@ _SETUP_ICONS = {
     "DISTRIBUTION_TOP": "🔥",  # Mid-session VWAP overextension + session-high rejection
     "VWAP_REJECTION": "🔴",
     "VWAP_BREAKDOWN": "📉",
+    "CPR_SUPPLY_REJECTION": "🔴",
+    "CAMARILLA_L4_BREAKDOWN": "📉",
     "SUPPLY_ZONE_SWEEP": "⚡",
     "BEARISH_OB_CONFLUENCE": "🎯",
     "DOUBLE_TOP_BREAKDOWN": "🔴",
@@ -66,6 +68,7 @@ def detect_index_put_setup(
     ohlcv_5m: Optional[Any] = None,  # pandas DataFrame, 5-minute bars
     ref_time: Optional[datetime] = None,
     ignore_time_gate: bool = False,
+    prev_close: Optional[float] = None,
 ) -> list[AutoAlert]:
     """
     Scans for institutional PUT entry setups on index options using SMC price action signals.
@@ -265,13 +268,32 @@ def detect_index_put_setup(
     if not pe_contracts:
         return []
 
-    # Sort by optimal Gamma-Torque (high liquidity, proximity to ATM, and sweet-spot premium)
+    step_val = (
+        25.0
+        if clean_sym == "MIDCPNIFTY"
+        else (100.0 if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX") else 50.0)
+    )
+
+    # Sort by optimal Institutional Moneyness, Delta Torque & Liquidity (ATM / 1-Strike ITM Priority)
     def _contract_score(c: Any) -> float:
         lp = float(getattr(c, "last_price", 0.0) or 0.0)
         vol = int(getattr(c, "volume", 0) or 0)
         oi = int(getattr(c, "oi", 0) or 1)
         vol_oi = min(4.0, vol / max(1, oi))
-        dist_pct = abs(float(getattr(c, "strike", 0.0) or 0.0) - spot) / max(1.0, spot)
+        c_strike = float(getattr(c, "strike", 0.0) or 0.0)
+        dist_pts = abs(c_strike - spot)
+        dist_pct = dist_pts / max(1.0, spot)
+
+        # Institutional Moneyness Engine: Prioritize ATM and 1-strike ITM for highest delta efficiency and liquidity
+        moneyness_bonus = 0.0
+        if dist_pts <= (step_val * 0.55):
+            moneyness_bonus = 25.0  # ATM sweet spot (Delta ~ -0.50)
+        elif c_strike > spot and dist_pts <= (step_val * 1.35):
+            moneyness_bonus = 20.0  # 1-strike ITM powerhouse (Delta ~ -0.58 to -0.65, zero time-decay trap)
+        elif c_strike < spot:
+            # OTM penalty grows with distance to prevent selecting low-delta decay traps
+            moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 15.0)
+
         # BSE indices (SENSEX/BANKEX) trade at much higher absolute levels and have higher absolute premiums
         if clean_sym in ("SENSEX", "BANKEX"):
             ideal_prem = 250.0
@@ -280,7 +302,13 @@ def detect_index_put_setup(
         else:  # NIFTY, BANKNIFTY
             ideal_prem = 125.0
         prem_dist = abs(lp - ideal_prem) / ideal_prem if lp > 0 else 2.0
-        return (vol_oi * 10.0) + (min(10.0, vol / 500.0)) - (dist_pct * 800.0) - (prem_dist * 5.0)
+        return (
+            moneyness_bonus
+            + (vol_oi * 10.0)
+            + (min(10.0, vol / 500.0))
+            - (dist_pct * 600.0)
+            - (prem_dist * 5.0)
+        )
 
     pe_contracts.sort(key=_contract_score, reverse=True)
 
@@ -617,6 +645,61 @@ def detect_index_put_setup(
             )
         except Exception:
             pass
+
+    # ── Central Pivot Range (CPR) & Camarilla Confluence ────────────────────────
+    cpr_data: dict[str, Any] = {}
+    is_narrow_cpr = False
+    if prev_day_high and prev_day_low and prev_day_high > prev_day_low > 0:
+        ref_c = prev_close if (prev_close and prev_close > 0) else (prev_day_high + prev_day_low) / 2.0
+        cpr_pivot = (prev_day_high + prev_day_low + ref_c) / 3.0
+        cpr_bc = (prev_day_high + prev_day_low) / 2.0
+        cpr_tc = (cpr_pivot - cpr_bc) + cpr_pivot
+        cpr_top = max(cpr_tc, cpr_bc)
+        cpr_bottom = min(cpr_tc, cpr_bc)
+        cpr_width_pct = abs(cpr_tc - cpr_bc) / max(1.0, cpr_pivot) * 100.0
+        is_narrow_cpr = cpr_width_pct <= (0.22 if clean_sym in ("BANKNIFTY", "SENSEX") else 0.15)
+
+        # Camarilla Breakdown levels
+        cam_range = prev_day_high - prev_day_low
+        cam_h3 = ref_c + (cam_range * 1.1 / 4.0)
+        cam_h4 = ref_c + (cam_range * 1.1 / 2.0)
+        cam_l3 = ref_c - (cam_range * 1.1 / 4.0)
+        cam_l4 = ref_c - (cam_range * 1.1 / 2.0)
+
+        cpr_data = {
+            "pivot": round(cpr_pivot, 1),
+            "bc": round(cpr_bc, 1),
+            "tc": round(cpr_tc, 1),
+            "cpr_top": round(cpr_top, 1),
+            "cpr_bottom": round(cpr_bottom, 1),
+            "cpr_width_pct": round(cpr_width_pct, 3),
+            "is_narrow_cpr": is_narrow_cpr,
+            "regime": "NARROW_CPR_TRENDING" if is_narrow_cpr else ("WIDE_CPR_RANGE" if cpr_width_pct >= 0.35 else "AVERAGE_CPR"),
+            "cam_h3": round(cam_h3, 1),
+            "cam_h4": round(cam_h4, 1),
+            "cam_l3": round(cam_l3, 1),
+            "cam_l4": round(cam_l4, 1),
+        }
+        signal_tags["cpr_data"] = cpr_data
+
+        # Camarilla L4 Breakdown Check (Explosive Institutional Trend Breakdown)
+        if spot <= cam_l4 and (cam_l4 - spot) / cam_l4 * 100.0 <= 0.65 and is_breakdown_momentum:
+            signals.append("CAMARILLA_L4_BREAKDOWN")
+            signal_tags["camarilla_l4_breakdown"] = {
+                "cam_l4": round(cam_l4, 1),
+                "breakdown_pct": round((cam_l4 - spot) / cam_l4 * 100.0, 3),
+                "is_narrow_cpr": is_narrow_cpr,
+            }
+
+        # CPR Supply Rejection Check: Spot tested CPR Bottom from below and is rejecting with supply
+        cpr_bottom_prox = abs(spot - cpr_bottom) / max(1.0, cpr_bottom) * 100.0
+        if spot <= cpr_bottom and cpr_bottom_prox <= 0.25 and not is_5m_bull_trend:
+            signals.append("CPR_SUPPLY_REJECTION")
+            signal_tags["cpr_supply_rejection"] = {
+                "cpr_bottom": round(cpr_bottom, 1),
+                "proximity_pct": round(cpr_bottom_prox, 3),
+                "is_narrow_cpr": is_narrow_cpr,
+            }
 
     # 1. PDH Supply Rejection
     # Spot came within 0.25% of prev_day_high and is now pulling back
@@ -1331,7 +1414,15 @@ def detect_index_put_setup(
         confidence += 5
     elif prem_vel >= 10.0:
         confidence += 3
-    confidence = min(96, confidence)
+    # Narrow CPR Breakdown Confluence Boost
+    if is_narrow_cpr and (
+        "DAY_LOW_BREAKDOWN" in signals
+        or "CAMARILLA_L4_BREAKDOWN" in signals
+        or is_institutional_thrust
+    ):
+        confidence += 6
+
+    confidence = min(98, confidence)
 
     # Single-signal unconfirmed guard: if only 1 secondary signal, cap at 72%
     if (
@@ -1361,6 +1452,7 @@ def detect_index_put_setup(
                 expiry=exp_date or "",
                 option_ltp=opt_ltp,
                 lot_size=lot_sz,
+                spot=spot,
             )
             if (opt_ltp > 0 and exp_date)
             else None
@@ -1375,6 +1467,17 @@ def detect_index_put_setup(
     t3_premium = opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 1.90, 1)
     sl_premium = opt_plan["sl_premium"] if opt_plan else round(max(0.5, opt_ltp * 0.80), 1)
     rr_str = opt_plan.get("option_rr", "1:1.9") if opt_plan else "1:1.9"
+    net_rr_str = opt_plan.get("net_option_rr", rr_str) if opt_plan else rr_str
+    friction_pts = (
+        opt_plan.get("friction_pts", round(opt_ltp * 0.012 + 0.35, 2))
+        if opt_plan
+        else round(opt_ltp * 0.012 + 0.35, 2)
+    )
+    max_loss_rupees = (
+        opt_plan.get("max_loss_per_lot", round(max(0.1, opt_ltp - sl_premium) * lot_sz, 0))
+        if opt_plan
+        else round(max(0.1, opt_ltp - sl_premium) * lot_sz, 0)
+    )
     t1_pct = opt_plan.get("t1_pct", 30.0) if opt_plan else 30.0
     sl_pct = opt_plan.get("sl_pct", -20.0) if opt_plan else -20.0
 
@@ -1441,6 +1544,23 @@ def detect_index_put_setup(
             f"Bull Trap / Liquidity Sweep above Day High: Spot (₹{spot:,.1f}) pierced Session High (₹{fdh.get('day_high', 0):,.1f}) "
             f"by {fdh.get('pierce_pct', 0):.2f}% to ₹{fdh.get('pierce_high', 0):,.1f}, then failed and closed back below with a "
             f"{fdh.get('upper_wick_pct', 0):.0f}% supply rejection wick. Trapped buyers vulnerable to liquidation. "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "CAMARILLA_L4_BREAKDOWN" in signals:
+        l4_info = signal_tags.get("camarilla_l4_breakdown", {})
+        headline = f"📉 CAMARILLA L4 BREAKDOWN: {clean_sym} {int(strike)} PE"
+        summary = (
+            f"Camarilla L4 Institutional Trend Breakdown: Spot (₹{spot:,.1f}) broke L4 (₹{l4_info.get('cam_l4', 0):,.1f}) "
+            f"with breakdown momentum & Put volume expansion ({volume:,} contracts, {vol_oi_ratio:.1f}x Vol/OI). "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "CPR_SUPPLY_REJECTION" in signals:
+        cpr_info = signal_tags.get("cpr_supply_rejection", {})
+        headline = f"🔴 CPR SUPPLY REJECTION: {clean_sym} {int(strike)} PE"
+        summary = (
+            f"Central Pivot Range Supply Rejection: Spot (₹{spot:,.1f}) rejected CPR Bottom (₹{cpr_info.get('cpr_bottom', 0):,.1f}) "
+            f"and failed resistance with sellers dominating. "
+            f"Put volume: {volume:,} contracts ({vol_oi_ratio:.1f}x Vol/OI). "
             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
         )
     elif "DAY_HIGH_SUPPLY_REJECTION" in signals:
@@ -1905,6 +2025,8 @@ def detect_index_put_setup(
             "day_low": day_low,
             "prev_day_high": prev_day_high,
             "prev_day_low": prev_day_low,
+            "cpr_data": cpr_data,
+            "is_narrow_cpr": is_narrow_cpr,
             "pcr": chain_pcr,
             "heavyweights_posture": hw_posture.get("summary", "UNAVAILABLE"),
             "hbcm": hbcm_dict,
@@ -1925,6 +2047,9 @@ def detect_index_put_setup(
             "breakout_bar_high": thrust_details.get("breakout_bar_high"),
             "india_vix": vix_val,
             "is_high_iv_risk": is_high_iv_risk,
+            "friction_pts": friction_pts,
+            "net_risk_reward": net_rr_str,
+            "max_loss_rupees": max_loss_rupees,
         },
         actionable_plan={
             "action": act_verb,
@@ -1958,6 +2083,10 @@ def detect_index_put_setup(
             "target_moonshot": f"₹{t3_premium:,.2f}",
             "stop_loss": f"₹{sl_premium:,.2f}",
             "risk_reward": rr_str,
+            "net_risk_reward": net_rr_str,
+            "friction_pts": friction_pts,
+            "max_loss_rupees": max_loss_rupees,
+            "max_loss_capped": max_loss_rupees,
             "profit_rule": (
                 f"Scale Blueprint: Book 50% at T1 (₹{t1_premium:,.1f}) & move SL to Cost/Breakeven (Zero Risk). "
                 f"Book 25% at T2 (₹{t2_premium:,.1f}). Leave 25% runner trailing on 5m 9-EMA."

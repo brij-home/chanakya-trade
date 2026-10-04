@@ -2342,7 +2342,7 @@ def test_crypto_milestone_update_numbering_and_currency():
         direction="BEARISH",
         headline="🏆 🔴 CRYPTO:SOLUSDT (CRYPTO MOMENTUM) — TARGET 1 ACHIEVED",
         summary="Target 1 hit at $120.07",
-        ltp=123.86,
+        ltp=120.00,
         trigger_level=124.12,
         target_level=120.07,
         stop_loss=125.65,
@@ -2381,7 +2381,7 @@ def test_crypto_milestone_update_numbering_and_currency():
 
     # 3. Currency symbol must be $ throughout, zero ₹
     assert "₹" not in rendered
-    assert "$123.86" in rendered
+    assert "$120.00" in rendered
     assert "T1:</b> $120.07" in rendered
     assert "Trail Stop:</b> <code>$123.87</code>" in rendered
     assert "Entry: $124.12 | SL: $125.65 | T1: $120.07 | T2: $117.12" in rendered

@@ -247,7 +247,31 @@ def run_maintenance_purge(
     except Exception as e:
         logger.warning(f"Error pruning exports: {e}")
 
-    # 5. Checkpoint WAL logs for SQLite databases
+    # 4b. Tier D: Purge orphaned temporary and legacy backup files
+    try:
+        app_dir = app_data_dir()
+        cutoff_tmp = (now - timedelta(hours=24)).timestamp()
+        deleted_tmp = 0
+        for f in app_dir.glob("*"):
+            if f.is_file():
+                name = f.name
+                is_obsolete = (
+                    name.endswith((".bak", ".tmp"))
+                    or ".bak." in name
+                    or ".bak_" in name
+                    or ".remediated." in name
+                    or ".tmp." in name
+                )
+                if is_obsolete and f.stat().st_mtime < cutoff_tmp:
+                    f.unlink(missing_ok=True)
+                    deleted_tmp += 1
+        if deleted_tmp > 0:
+            actions.append(f"Purged {deleted_tmp} orphaned backup and temporary files older than 24 hours.")
+            items_deleted += deleted_tmp
+    except Exception as e:
+        logger.warning(f"Error pruning temporary files: {e}")
+
+    # 5. Checkpoint WAL logs for SQLite databases with active TRUNCATE
     databases = [
         app_data_path("orders.db"),
         app_data_path("audit.db"),
@@ -255,6 +279,9 @@ def run_maintenance_purge(
         app_data_path("market_data.db"),
         app_data_path("analysis_cache.db"),
         app_data_path("analysis_search.db"),
+        app_data_path("chanakya_ledger.db"),
+        app_data_path("risk_limits.db"),
+        app_data_path("persona_track_records.db"),
         Path("data/eod_bars.db"),
     ]
 
@@ -263,11 +290,11 @@ def run_maintenance_purge(
             conn = None
             try:
                 conn = sqlite3.connect(str(db_file), timeout=10.0)
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 if vacuum_databases:
                     conn.execute("VACUUM")
-            except Exception:
-                pass
+            except Exception as e_wal:
+                logger.debug(f"WAL checkpoint note for {db_file.name}: {e_wal}")
             finally:
                 if conn is not None:
                     try:

@@ -548,7 +548,7 @@ class SmartFunnel:
                 from analysis.multibagger import classify_weinstein_stage
 
                 _df_gate = get_cached_ohlcv(
-                    symbol.upper().replace(".NS", "").replace("NSE:", ""), days=300
+                    symbol.upper().replace(".NS", "").replace("NSE:", ""), days=504
                 )
                 if _df_gate is not None and len(_df_gate) >= 50:
                     _ws, _ = classify_weinstein_stage(_df_gate)

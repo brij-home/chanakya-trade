@@ -234,20 +234,71 @@ def evaluate_century_compounder(
     """
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
 
-    # 1. Resolve Price
+    # 1. Resolve Dataframe & Price — Multi-tier fallback:
+    # Tier 1a: Provided df
+    # Tier 1b: Local SQLite OHLCV store (eod_bars.db)
+    # Tier 1c: Network OHLCV fetch
+    # Tier 2: Live quote (market.quotes)
+    # Tier 3: EOD SQLite symbol_meta last_close
+    # INVARIANT: Never fall back to a hardcoded price. If price is unavailable, raise ValueError.
+    if df is None or len(df) == 0:
+        try:
+            from engine.eod_store import get_cached_ohlcv
+
+            local_df = get_cached_ohlcv(clean_sym, days=60)
+            if local_df is not None and len(local_df) > 0 and "close" in local_df.columns:
+                df = local_df
+        except Exception as e:
+            logger.warning(f"[CenturyCompounder] Local OHLCV lookup failed for {clean_sym}: {e}")
+
+    if df is None or len(df) == 0:
+        try:
+            from market.history import get_ohlcv
+
+            hist_df = get_ohlcv(clean_sym, period="1mo")
+            if hist_df is not None and len(hist_df) > 0 and "close" in hist_df.columns:
+                df = hist_df
+        except Exception as e:
+            logger.warning(f"[CenturyCompounder] History OHLCV lookup failed for {clean_sym}: {e}")
+
     if ltp is None or ltp <= 0:
         if df is not None and len(df) > 0 and "close" in df.columns:
             ltp = float(df["close"].iloc[-1])
         else:
+            # Tier 2: Live quote
             try:
                 from market.quotes import get_quote
 
                 q = get_quote(f"NSE:{clean_sym}")
                 if q:
                     ltp = float(getattr(q, "last_price", getattr(q, "ltp", 0.0)))
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[CenturyCompounder] Quote fetch failed for NSE:{clean_sym}: {e}")
                 ltp = 0.0
-    ltp = round(float(ltp if ltp and ltp > 0 else 100.0), 2)
+
+            # Tier 3: EOD SQLite last_close
+            if not ltp or ltp <= 0:
+                try:
+                    from engine.eod_store import get_symbol_meta
+
+                    meta = get_symbol_meta(clean_sym)
+                    if meta and meta.get("last_close") and float(meta["last_close"]) > 0:
+                        ltp = float(meta["last_close"])
+                        logger.info(
+                            f"[CenturyCompounder] Using EOD last_close for {clean_sym}: {ltp}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[CenturyCompounder] EOD last_close lookup failed for {clean_sym}: {e}"
+                    )
+                    ltp = 0.0
+
+    if not ltp or ltp <= 0:
+        raise ValueError(
+            f"[CenturyCompounder] No real price available for {clean_sym}. "
+            "Refusing to evaluate — this would produce a poisoned record (Invariant 11)."
+        )
+    ltp = round(float(ltp), 2)
 
     # 2. Gather Fundamentals
     mcap_cr = 2500.0
@@ -485,8 +536,10 @@ def evaluate_century_compounder(
                 fv_source = "VOLUME_PROFILE_POC"
             highs = df["high"].values if "high" in df.columns else df["close"].values
             pivot = round(float(np.max(highs[-20:])), 2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                f"[century_compounder] Volume profile POC computation failed for {symbol}: {e}"
+            )
 
     acc_low = round(fair_value * 0.98, 2)
     acc_high = round(fair_value * 1.025, 2)
@@ -553,25 +606,25 @@ def resolve_compounder_universe(universe: Optional[list[str] | str] = None) -> l
     """Resolves string preset or list into a clean list of NSE/BSE tickers."""
     if isinstance(universe, str) and universe:
         try:
-            from analysis.universe import resolve_universe
+            from analysis.universe import resolve_dynamic_universe
 
-            symbols, _ = resolve_universe(universe)
+            symbols, _ = resolve_dynamic_universe(universe, max_stocks=3000)
             if symbols:
                 return symbols
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[CenturyCompounder] Error resolving universe '{universe}': {e}")
     elif isinstance(universe, list) and universe:
         return universe
 
     # Default institutional high-asymmetry universe (Microcaps + Smallcaps)
     try:
-        from analysis.universe import resolve_universe
+        from analysis.universe import resolve_dynamic_universe
 
-        syms, _ = resolve_universe("microcap250")
+        syms, _ = resolve_dynamic_universe("microcap250", max_stocks=3000)
         if syms:
             return syms
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[CenturyCompounder] Fallback dynamic resolution for microcap250 failed: {e}")
 
     return [
         "TRENT",
@@ -600,11 +653,15 @@ def scan_century_compounders(
     min_score: int = 65,
     top_n: int = 15,
     use_cache: bool = True,
+    refresh: bool = False,
 ) -> list[CenturyCompounderReport]:
     """
     Scans full Indian market universe (NSE EQ series & BSE compounders) to surface 100x & 1,000x candidates.
     Leverages persistent SQLite caching to deliver instantaneous (<100ms) multi-stock results.
     """
+    if refresh:
+        use_cache = False
+
     sym_list = resolve_compounder_universe(universe)
     cached_map: dict[str, dict[str, Any]] = {}
 
@@ -614,108 +671,130 @@ def scan_century_compounders(
 
             cached_map = get_cached_century_compounders_batch(sym_list, max_age_days=7)
         except Exception as e:
-            logger.debug(f"[CenturyCompounder] SQLite cache read error: {e}")
+            logger.warning(f"[CenturyCompounder] SQLite cache read error: {e}")
 
     results: list[CenturyCompounderReport] = []
     to_persist: list[dict[str, Any]] = []
-    fresh_evaluated = 0
-    max_fresh = 6 if use_cache and not os.environ.get("CHANAKYA_TESTING") else len(sym_list)
 
-    for sym in sym_list:
-        clean_s = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
-        # 1. Use cached report if available
-        if clean_s in cached_map:
-            cached_d = cached_map[clean_s]
-            if cached_d.get("century_score", 0) >= min_score:
-                try:
-                    te_d = cached_d.get("twin_engines", {})
-                    af_d = cached_d.get("anti_fomo", {})
-                    te = TwinEngineForecast(
-                        current_market_cap_cr=float(te_d.get("current_market_cap_cr", 0.0)),
-                        current_pe=float(te_d.get("current_pe", 0.0)),
-                        projected_terminal_pe=float(te_d.get("projected_terminal_pe", 0.0)),
-                        pe_expansion_multiple=float(te_d.get("pe_expansion_multiple", 1.0)),
-                        current_pat_cr=float(te_d.get("current_pat_cr", 0.0)),
-                        forecast_pat_cagr_pct=float(te_d.get("forecast_pat_cagr_pct", 0.0)),
-                        years_horizon=int(te_d.get("years_horizon", 10)),
-                        pat_expansion_multiple=float(te_d.get("pat_expansion_multiple", 1.0)),
-                        total_projected_multiple=float(te_d.get("total_projected_multiple", 1.0)),
-                        target_market_cap_cr=float(te_d.get("target_market_cap_cr", 0.0)),
-                        compounder_tier=str(te_d.get("compounder_tier", "STANDARD")),
-                    )
-                    af = AntiFomoExecutionBlueprint(
-                        fair_value_anchor=float(af_d.get("fair_value_anchor", 0.0)),
-                        fair_value_source=str(af_d.get("fair_value_source", "VOLUME_PROFILE_POC")),
-                        accumulate_low=float(af_d.get("accumulate_low", 0.0)),
-                        accumulate_high=float(af_d.get("accumulate_high", 0.0)),
-                        pivot_trigger=float(af_d.get("pivot_trigger", 0.0)),
-                        no_chase_boundary=float(af_d.get("no_chase_boundary", 0.0)),
-                        pullback_limit_entry=float(af_d.get("pullback_limit_entry", 0.0)),
-                        invalidation_stop=float(af_d.get("invalidation_stop", 0.0)),
-                        risk_reward_to_2x=str(af_d.get("risk_reward_to_2x", "1:4.0")),
-                        action_directive=str(af_d.get("action_directive", "STALK_PIVOT")),
-                    )
-                    rep = CenturyCompounderReport(
-                        symbol=clean_s,
-                        ltp=float(cached_d.get("ltp", 0.0)),
-                        century_score=int(cached_d.get("century_score", 0)),
-                        is_qualified_compounder=bool(
-                            cached_d.get("is_qualified_compounder", False)
-                        ),
-                        compounder_tier=str(cached_d.get("compounder_tier", "STANDARD")),
-                        twin_engines=te,
-                        runway_score=int(cached_d.get("runway_score", 0)),
-                        reinvestment_score=int(cached_d.get("reinvestment_score", 0)),
-                        operating_leverage_score=int(cached_d.get("operating_leverage_score", 0)),
-                        multiple_rerating_score=int(cached_d.get("multiple_rerating_score", 0)),
-                        institutional_catalyst_score=int(
-                            cached_d.get("institutional_catalyst_score", 0)
-                        ),
-                        forensic_fortress_score=int(cached_d.get("forensic_fortress_score", 0)),
-                        smile_framework_score=int(cached_d.get("smile_framework_score", 0)),
-                        pillar_notes=cached_d.get("pillar_notes", []),
-                        catalyst_badges=cached_d.get("catalyst_badges", []),
-                        anti_fomo=af,
-                        summary=str(cached_d.get("summary", "")),
-                    )
-                    results.append(rep)
-                    continue
-                except Exception:
-                    pass
+    # 1. Harvest ALL cached compounders for this universe from in-memory cached_map
+    if use_cache:
+        for sym in sym_list:
+            clean_s = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+            if clean_s in cached_map:
+                cached_d = cached_map[clean_s]
+                if cached_d.get("century_score", 0) >= min_score:
+                    try:
+                        te_d = cached_d.get("twin_engines", {})
+                        af_d = cached_d.get("anti_fomo", {})
+                        te = TwinEngineForecast(
+                            current_market_cap_cr=float(te_d.get("current_market_cap_cr", 0.0)),
+                            current_pe=float(te_d.get("current_pe", 0.0)),
+                            projected_terminal_pe=float(te_d.get("projected_terminal_pe", 0.0)),
+                            pe_expansion_multiple=float(te_d.get("pe_expansion_multiple", 1.0)),
+                            current_pat_cr=float(te_d.get("current_pat_cr", 0.0)),
+                            forecast_pat_cagr_pct=float(te_d.get("forecast_pat_cagr_pct", 0.0)),
+                            years_horizon=int(te_d.get("years_horizon", 10)),
+                            pat_expansion_multiple=float(te_d.get("pat_expansion_multiple", 1.0)),
+                            total_projected_multiple=float(te_d.get("total_projected_multiple", 1.0)),
+                            target_market_cap_cr=float(te_d.get("target_market_cap_cr", 0.0)),
+                            compounder_tier=str(te_d.get("compounder_tier", "STANDARD")),
+                        )
+                        af = AntiFomoExecutionBlueprint(
+                            fair_value_anchor=float(af_d.get("fair_value_anchor", 0.0)),
+                            fair_value_source=str(af_d.get("fair_value_source", "VOLUME_PROFILE_POC")),
+                            accumulate_low=float(af_d.get("accumulate_low", 0.0)),
+                            accumulate_high=float(af_d.get("accumulate_high", 0.0)),
+                            pivot_trigger=float(af_d.get("pivot_trigger", 0.0)),
+                            no_chase_boundary=float(af_d.get("no_chase_boundary", 0.0)),
+                            pullback_limit_entry=float(af_d.get("pullback_limit_entry", 0.0)),
+                            invalidation_stop=float(af_d.get("invalidation_stop", 0.0)),
+                            risk_reward_to_2x=str(af_d.get("risk_reward_to_2x", "1:4.0")),
+                            action_directive=str(af_d.get("action_directive", "STALK_PIVOT")),
+                        )
+                        rep = CenturyCompounderReport(
+                            symbol=clean_s,
+                            ltp=float(cached_d.get("ltp", 0.0)),
+                            century_score=int(cached_d.get("century_score", 0)),
+                            is_qualified_compounder=bool(
+                                cached_d.get("is_qualified_compounder", False)
+                            ),
+                            compounder_tier=str(cached_d.get("compounder_tier", "STANDARD")),
+                            twin_engines=te,
+                            runway_score=int(cached_d.get("runway_score", 0)),
+                            reinvestment_score=int(cached_d.get("reinvestment_score", 0)),
+                            operating_leverage_score=int(cached_d.get("operating_leverage_score", 0)),
+                            multiple_rerating_score=int(cached_d.get("multiple_rerating_score", 0)),
+                            institutional_catalyst_score=int(
+                                cached_d.get("institutional_catalyst_score", 0)
+                            ),
+                            forensic_fortress_score=int(cached_d.get("forensic_fortress_score", 0)),
+                            smile_framework_score=int(cached_d.get("smile_framework_score", 0)),
+                            pillar_notes=cached_d.get("pillar_notes", []),
+                            catalyst_badges=cached_d.get("catalyst_badges", []),
+                            anti_fomo=af,
+                            summary=str(cached_d.get("summary", "")),
+                        )
+                        results.append(rep)
+                    except Exception as e:
+                        logger.warning(f"[CenturyCompounder] Failed to reconstruct cached report for {clean_s}: {e}")
 
-        # If cache satisfied top_n, stop early
-        if len(results) >= top_n and use_cache:
-            break
+        # Sort harvested cached results best-first
+        results.sort(
+            key=lambda r: (r.century_score, r.twin_engines.total_projected_multiple), reverse=True
+        )
 
-        # Bound on-the-fly network evaluations to keep responses snappy
-        if fresh_evaluated >= max_fresh:
-            continue
+        # 2. If cached results already satisfy top_n, return immediately (<10ms)!
+        if len(results) >= top_n:
+            return results[:top_n]
 
-        # 2. Evaluate fresh
-        try:
-            rep = evaluate_century_compounder(clean_s)
-            fresh_evaluated += 1
-            if rep.century_score >= min_score:
-                results.append(rep)
-            to_persist.append(rep.to_dict())
-        except Exception as e:
-            logger.debug(f"[CenturyCompounder] Error evaluating {clean_s}: {e}")
+    # 3. If cache does not have enough candidates (e.g. freshly selected universe or refresh),
+    # evaluate a bounded batch of uncached symbols concurrently
+    if use_cache:
+        uncached_syms = [
+            s for s in sym_list
+            if s.upper().replace(".NS", "").replace("NSE:", "").strip() not in cached_map
+        ]
+        max_fresh = 40 if not os.environ.get("CHANAKYA_TESTING") else len(uncached_syms)
+        eval_batch = uncached_syms[:max_fresh]
+    else:
+        eval_batch = sym_list[:min(50, len(sym_list))]
 
-    # Bulk persist freshly computed reports into SQLite
-    if to_persist and not os.environ.get("CHANAKYA_TESTING"):
-        try:
-            from engine.eod_store import save_century_compounders_batch
+    if eval_batch:
+        import concurrent.futures
 
-            save_century_compounders_batch(to_persist)
-        except Exception as e:
-            logger.debug(f"[CenturyCompounder] Error persisting to SQLite: {e}")
+        def _eval(s: str):
+            try:
+                clean_s = s.upper().replace(".NS", "").replace("NSE:", "").strip()
+                return evaluate_century_compounder(clean_s)
+            except Exception as e:
+                logger.info(f"[CenturyCompounder] Evaluation skipped for {s}: {e}")
+                return None
 
-    # Fallback to top cached compounders if results are empty and cache requested
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(eval_batch))) as executor:
+            for rep in executor.map(_eval, eval_batch):
+                if rep:
+                    to_persist.append(rep.to_dict())
+                    if rep.century_score >= min_score:
+                        results.append(rep)
+
+        # Bulk persist freshly computed reports into SQLite
+        if to_persist and not os.environ.get("CHANAKYA_TESTING"):
+            try:
+                from engine.eod_store import save_century_compounders_batch
+
+                save_century_compounders_batch(to_persist)
+            except Exception as e:
+                logger.warning(f"[CenturyCompounder] Error persisting to SQLite: {e}")
+
+    # 4. Scoped fallback: if still no results meeting min_score and use_cache requested,
+    # strictly query cached compounders belonging to THIS universe (never leak unrelated stocks)
     if not results and use_cache and not os.environ.get("CHANAKYA_TESTING"):
         try:
             from engine.eod_store import get_top_cached_century_compounders
 
-            top_cached = get_top_cached_century_compounders(min_score=min_score, limit=top_n)
+            top_cached = get_top_cached_century_compounders(
+                min_score=min_score, limit=top_n, symbols=sym_list
+            )
             for c_d in top_cached:
                 try:
                     te_d = c_d.get("twin_engines", {})
@@ -768,10 +847,10 @@ def scan_century_compounders(
                             summary=str(c_d.get("summary", "")),
                         )
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"[CenturyCompounder] Failed to reconstruct fallback cached report for {c_d.get('symbol')}: {e}")
         except Exception as e:
-            logger.debug(f"[CenturyCompounder] Fallback to top cached error: {e}")
+            logger.warning(f"[CenturyCompounder] Scoped fallback error: {e}")
 
     results.sort(
         key=lambda r: (r.century_score, r.twin_engines.total_projected_multiple), reverse=True
@@ -781,7 +860,7 @@ def scan_century_compounders(
 
 def sync_and_precompute_market_compounders(
     universe_name: str = "microcap250",
-    max_symbols: int = 120,
+    max_symbols: int = 500,
 ) -> dict[str, Any]:
     """
     Institutional Background Task: Parallel syncs fundamentals/EOD for a whole market universe
@@ -791,7 +870,11 @@ def sync_and_precompute_market_compounders(
     import time
 
     start_t = time.perf_counter()
-    syms = resolve_compounder_universe(universe_name)[:max_symbols]
+    all_syms = resolve_compounder_universe(universe_name)
+
+    # Use symbols directly from the requested universe without cross-universe contamination
+    syms = all_syms[:max_symbols] if len(all_syms) > max_symbols else all_syms
+
     logger.info(
         f"[CenturyCompounder] Starting parallel market precompute for {len(syms)} symbols ({universe_name})..."
     )
@@ -802,11 +885,14 @@ def sync_and_precompute_market_compounders(
     def _eval_sym(s: str):
         try:
             return evaluate_century_compounder(s)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                f"[century_compounder] Precompute evaluation failed for {s} in {universe_name}: {e}"
+            )
             return None
 
-    # Parallel evaluation with 6 worker threads
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+    # Parallel evaluation with 8 worker threads
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(_eval_sym, s): s for s in syms}
         for fut in concurrent.futures.as_completed(futures):
             rep = fut.result()
@@ -821,7 +907,7 @@ def sync_and_precompute_market_compounders(
 
             save_century_compounders_batch(to_persist)
         except Exception as e:
-            logger.debug(f"[CenturyCompounder] Error persisting precompute batch: {e}")
+            logger.warning(f"[CenturyCompounder] Error persisting precompute batch: {e}")
 
     dur = round(time.perf_counter() - start_t, 2)
     return {

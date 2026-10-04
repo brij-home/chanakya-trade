@@ -322,3 +322,18 @@ Institutional market makers hunt liquidity at obvious psychological round number
 & "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_interception_engine.py tests/test_turtle_soup.py tests/test_regime_governor.py -q
 ```
 
+---
+
+## 19. Data Reliability, Honest Degradation & Zero Silent Swallowing
+
+1. **Zero Silent Swallowing in Calculations**:
+   - Math or pandas exceptions (division by zero, empty series, index mismatch) MUST be logged with `logger.warning` or handled explicitly with NaN/None guards.
+   - Banned pattern: `except Exception: pass` masking missing imports, stale schemas, or corrupted data frames.
+2. **Strict Universe & Cache Boundaries**:
+   - Quant scanners must query cached records strictly scoped by the requested universe / symbol list.
+   - Never cross-contaminate results from other universes to disguise empty or uncomputed cache states.
+3. **Honest Empty State & Provenance**:
+   - When a quant screen returns zero candidates, emit an honest empty list with status `COMPLETE_ZERO_MATCHES` or `UNAVAILABLE`.
+   - Never substitute pre-baked static tickers or synthetic prices to populate UI cards.
+
+

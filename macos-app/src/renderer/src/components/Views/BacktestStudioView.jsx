@@ -4,6 +4,7 @@ import { useChatStore } from '../../store/chatStore'
 import { formatINR, formatINRFull, formatPct } from '../../utils/formatINR'
 import SmartTypeahead from '../Common/SmartTypeahead'
 import UnavailableState from '../Common/UnavailableState'
+import Tooltip, { HelpHint } from '../UI/Tooltip'
 import { fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 const STRATEGY_PRESETS = [
@@ -437,7 +438,10 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
 
         {/* Sharpe Ratio */}
         <div className="bg-panel border border-border/80 rounded-xl p-2 sm:p-2.5 shadow-xs space-y-0.5">
-          <span className="text-[9px] uppercase font-bold text-muted font-ui block">Sharpe Ratio</span>
+          <div className="flex items-center justify-between">
+            <span className="text-[9px] uppercase font-bold text-muted font-ui block">Sharpe Ratio</span>
+            <HelpHint metricKey="sharpe_ratio" size="xs" />
+          </div>
           <span className="text-base sm:text-lg font-black font-mono text-amber tabular-nums block">
             {sharpe.toFixed(2)}
           </span>
@@ -448,7 +452,10 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
 
         {/* Max Drawdown */}
         <div className="bg-panel border border-border/80 rounded-xl p-2 sm:p-2.5 shadow-xs space-y-0.5">
-          <span className="text-[9px] uppercase font-bold text-muted font-ui block">Max Drawdown</span>
+          <div className="flex items-center justify-between">
+            <span className="text-[9px] uppercase font-bold text-muted font-ui block">Max Drawdown</span>
+            <HelpHint metricKey="max_drawdown" size="xs" />
+          </div>
           <span className="text-base sm:text-lg font-black font-mono text-red tabular-nums block">
             {maxDd.toFixed(2)}%
           </span>
@@ -480,7 +487,10 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
 
         {/* Profit Factor */}
         <div className="bg-panel border border-border/80 rounded-xl p-2 sm:p-2.5 shadow-xs space-y-0.5">
-          <span className="text-[9px] uppercase font-bold text-muted font-ui block">Profit Factor</span>
+          <div className="flex items-center justify-between">
+            <span className="text-[9px] uppercase font-bold text-muted font-ui block">Profit Factor</span>
+            <HelpHint metricKey="profit_factor" size="xs" />
+          </div>
           <span className="text-base sm:text-lg font-black font-mono text-cyan-400 tabular-nums block">
             {profitFactor.toFixed(2)}×
           </span>

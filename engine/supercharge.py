@@ -28,8 +28,14 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from engine.quantstats_report import key_metrics, calculate_robustness_score
+from config.paths import app_data_path
 
-LOG_PATH = Path.home() / ".trading_platform" / "evolution_log.jsonl"
+
+def get_evolution_log_path() -> Path:
+    return app_data_path("evolution_log.jsonl")
+
+
+LOG_PATH = get_evolution_log_path()
 
 
 @dataclass

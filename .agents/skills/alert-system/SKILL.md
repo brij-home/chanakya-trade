@@ -355,3 +355,19 @@ When diagnosing alert storms, UI popup bursts, or unexpected state transitions:
 & "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_alert_revamp.py tests/test_alert_horizon_and_liquidity.py -q
 ```
 
+---
+
+## 12. Data Reliability, Honest Provenance & Zero Silent Swallowing Standard
+
+1. **Zero Silent Swallowing (`except: pass` Banned)**:
+   - Every exception in detectors or evaluation loops MUST be logged with `logger.warning` or `logger.error` including `symbol`, `detector_name`, and exception details.
+   - Never use empty `pass` in `except` blocks. If an indicator calculation fails for an illiquid instrument, log the skip reason at `warning` or `debug` level with full context.
+2. **Signals ONLY on Real, Reliable Data**:
+   - Detectors MUST NEVER trigger on synthetic, placeholder, or zero quotes.
+   - If market data feed is unreachable, stale, or zero, return `None` or emit explicit `DATA_UNAVAILABLE` / `DATA_DEGRADED` status codes.
+   - Every alert carries unambiguous provenance metadata: `source` (`REAL/LIVE`, `EOD_VERIFIED`, `OFF_MARKET`, `DEGRADED`).
+3. **Zero Hardcoded Symbols or Multiples**:
+   - Never inject arbitrary hardcoded stock lists inside detector evaluation loops. Symbols must originate from canonical universe resolvers (`analysis.universe.resolve_dynamic_universe`).
+   - Sizing, targets, and invalidations must be derived dynamically from market structure (ATR, Swing Pivots, Order Blocks), never arbitrary multipliers.
+
+

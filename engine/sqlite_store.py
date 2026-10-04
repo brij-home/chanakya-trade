@@ -33,9 +33,11 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 def get_default_db_path() -> Path:
     """Returns canonical path to Chanakya ledger SQLite database."""
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "chanakya_ledger.db"
+    from config.paths import app_data_path
+
+    p = app_data_path("chanakya_ledger.db")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 class SQLiteAlertStore:
@@ -113,6 +115,11 @@ class SQLiteAlertStore:
         alert_id = d.get("alert_id") or ""
         if not alert_id:
             logger.warning("[SQLiteAlertStore] Skipped saving alert missing alert_id")
+            return
+
+        from engine.data_sanctity import assert_production_data_sanctity
+
+        if not assert_production_data_sanctity(d, "SQLiteAlertStore"):
             return
 
         symbol = str(d.get("symbol") or "")
@@ -193,6 +200,13 @@ class SQLiteAlertStore:
         """
         if not alerts:
             return 0
+
+        from engine.data_sanctity import assert_production_data_sanctity
+
+        alerts = [a for a in alerts if assert_production_data_sanctity(a, "SQLiteAlertStore")]
+        if not alerts:
+            return 0
+
         now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
         rows_to_insert = []
         for alert_or_dict in alerts:

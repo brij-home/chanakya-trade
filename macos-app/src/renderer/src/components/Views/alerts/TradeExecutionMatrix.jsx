@@ -221,6 +221,10 @@ export function TradeExecutionMatrix({
             <div className="text-[8px] text-cyan-300 font-bold truncate">
               ⚡ Trail {currSym}{formatNum(trailingStop)}
             </div>
+          ) : levels.max_loss !== null && levels.max_loss !== undefined ? (
+            <div className="text-[8px] text-rose-400 font-bold truncate" title="Maximum Risk per lot (incl. STT & slippage)">
+              Risk: -{currSym}{formatNum(levels.max_loss)}/lot
+            </div>
           ) : levels.optPlanRef?.sl_pnl_per_lot !== undefined ? (
             <div className="text-[8px] text-rose-400/80 font-bold">
               {formatPnl(levels.optPlanRef.sl_pnl_per_lot)}
@@ -276,7 +280,7 @@ export function TradeExecutionMatrix({
               🎯 Target 1 (T1)
             </span>
             <span className={`font-bold ${isT1Hit ? 'text-emerald-100 bg-emerald-600/70 px-1 rounded' : 'text-emerald-400'}`}>
-              {isT1Hit ? '✅ HIT!' : levels.t1_rr ? `${levels.t1_rr}R` : levels.t1_pct ? `+${levels.t1_pct}%` : '—'}
+              {isT1Hit ? '✅ HIT!' : levels.net_risk_reward ? `Net ${levels.net_risk_reward}` : levels.t1_rr ? `${levels.t1_rr}R` : levels.t1_pct ? `+${levels.t1_pct}%` : '—'}
             </span>
           </div>
           <div className={`text-xs font-black mt-0.5 ${isT1Hit ? 'text-white' : 'text-emerald-300'}`}>

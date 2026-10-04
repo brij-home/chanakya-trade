@@ -363,11 +363,19 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
           {alert.stop_loss && (
             <div className="text-rose-400">
               • <b>SL:</b> ₹{Number(alert.stop_loss).toFixed(1)}
+              {(() => {
+                const ml = alert.actionable_plan?.max_loss_capped ?? alert.actionable_plan?.max_loss_rupees ?? alert.actionable_plan?.max_loss_per_lot ?? alert.metrics?.max_loss_rupees ?? null
+                return ml ? ` [Risk: ₹${Math.round(ml).toLocaleString('en-IN')}/lot]` : ''
+              })()}
             </div>
           )}
           {alert.target_level && (
             <div className="text-emerald-400">
               • <b>T1:</b> ₹{Number(alert.target_level).toFixed(1)}
+              {(() => {
+                const nrr = alert.actionable_plan?.net_risk_reward ?? alert.metrics?.net_risk_reward ?? null
+                return nrr ? ` (Net ${nrr})` : ''
+              })()}
             </div>
           )}
         </div>

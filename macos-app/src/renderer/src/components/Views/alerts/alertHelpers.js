@@ -877,6 +877,9 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     isUpwardPayoff,
     isOptionSell,
     optPlanRef: optPlan || null,
+    net_risk_reward: plan.net_risk_reward || alert.metrics?.net_risk_reward || optPlan?.net_option_rr || null,
+    max_loss: plan.max_loss_capped ?? plan.max_loss_rupees ?? plan.max_loss_per_lot ?? alert.metrics?.max_loss_rupees ?? optPlan?.max_loss_per_lot ?? null,
+    friction_pts: plan.friction_pts || alert.metrics?.friction_pts || optPlan?.friction_pts || null,
     no_chase_boundary: alert.no_chase_boundary || tradePlan.no_chase_boundary || null,
     entry_range: alert.entry_range || alert.optimal_entry_range || tradePlan.optimal_entry_range || null,
     anchored_levels: alert.anchored_levels || tradePlan.anchored_levels || null,
@@ -1423,18 +1426,33 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   let isIgnited = false
   let isPrimed = false
   let isStalk = false
+  let isActionable = false
   let resolvedStage = String(alert.stage || '').toUpperCase()
 
   const rawStage = String(alert.stage || '').toUpperCase()
   const targetStatus = String(alert.target_status || alert.targetStatus || '').toUpperCase()
   const reason = String(alert.invalidation_reason || alert.archive_reason || alert.summary || '').toUpperCase()
 
+  const isTriggered = Boolean(
+    alert.triggered ||
+    alert.triggered_at ||
+    alert.is_triggered ||
+    rawStage === 'IGNITED' ||
+    rawStage === 'TRIGGERED' ||
+    rawStage === 'T1_ACHIEVED' ||
+    rawStage === 'T2_ACHIEVED' ||
+    rawStage === 'TARGET_ACHIEVED' ||
+    rawStage === 'RUNNER_EXIT' ||
+    rawStage === 'SL_HIT'
+  )
+  const isPreTrigger = !isTriggered && ['EARLY_WARNING', 'STALK', 'PRIMED', 'PENDING', 'ACTIONABLE'].includes(rawStage)
+
   if (isTerminal) {
     // IMMUTABLE HISTORICAL RECORD: Read stage strictly from backend SSOT
     if (rawStage === 'TIME_STOP_EXIT' || targetStatus === 'TIME_STOP_EXIT' || reason.includes('TIME-STOP') || reason.includes('TIME STOP')) {
       resolvedStage = 'TIME_STOP_EXIT'
       isTimeStop = true
-    } else if (rawStage === 'SL_HIT' || targetStatus === 'SL_HIT' || reason.includes('STOP_LOSS') || reason.includes('SL HIT') || reason.includes('SL BREACH')) {
+    } else if (rawStage === 'SL_HIT' || targetStatus === 'SL_HIT' || (isTriggered && (reason.includes('STOP_LOSS') || reason.includes('SL HIT') || reason.includes('SL BREACH')))) {
       resolvedStage = 'SL_HIT'
       isSLHit = true
     } else if (rawStage === 'EXPIRED' || alert.is_expired || alert.isExpired) {
@@ -1470,16 +1488,16 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
       if (alert.achieved_milestones.includes('TARGET_ACHIEVED') || alert.achieved_milestones.includes('T3_ACHIEVED')) isT3Hit = true
     }
   } else {
-    // ACTIVE IN-FLIGHT TRADE: Dynamic evaluation
+    // ACTIVE IN-FLIGHT OR PRE-TRIGGER TRADE: Dynamic evaluation
     const isExplicitSL = Boolean(
       rawStage === 'SL_HIT' ||
       targetStatus === 'SL_HIT' ||
-      reason.includes('STOP_LOSS') ||
-      reason.includes('SL HIT') ||
-      reason.includes('SL BREACH')
+      (isTriggered && (reason.includes('STOP_LOSS') || reason.includes('SL HIT') || reason.includes('SL BREACH')))
     )
 
-    const isPriceBreachedSL = Boolean(
+    // CRITICAL INVARIANT: Stop-loss and Target checks ONLY apply to triggered / in-flight positions!
+    // Untriggered / pre-trigger setups have not entered yet and cannot breach SL or hit targets.
+    const isPriceBreachedSL = !isPreTrigger && Boolean(
       slNum && currentPrice && (
         isDerivative
           ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
@@ -1491,21 +1509,21 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
 
     isSLHit = isExplicitSL || isPriceBreachedSL
 
-    isT3Hit = Boolean(
+    isT3Hit = !isPreTrigger && Boolean(
       rawStage === 'TARGET_ACHIEVED' || rawStage === 'COMPLETED' || targetStatus === 'TARGET_ACHIEVED' ||
       (t3Num && currentPrice && !isSLHit && (
         isDerivative ? (isOptionSell ? currentPrice <= t3Num : currentPrice >= t3Num) : (isBull ? currentPrice >= t3Num : currentPrice <= t3Num)
       ))
     )
 
-    isT2Hit = Boolean(
+    isT2Hit = !isPreTrigger && Boolean(
       isT3Hit || rawStage === 'T2_ACHIEVED' || targetStatus === 'T2_ACHIEVED' ||
       (t2Num && currentPrice && !isSLHit && (
         isDerivative ? (isOptionSell ? currentPrice <= t2Num : currentPrice >= t2Num) : (isBull ? currentPrice >= t2Num : currentPrice <= t2Num)
       ))
     )
 
-    isT1Hit = Boolean(
+    isT1Hit = !isPreTrigger && Boolean(
       isT2Hit || rawStage === 'T1_ACHIEVED' || targetStatus === 'T1_ACHIEVED' ||
       (t1Num && currentPrice && !isSLHit && (
         isDerivative ? (isOptionSell ? currentPrice <= t1Num : currentPrice >= t1Num) : (isBull ? currentPrice >= t1Num : currentPrice <= t1Num)
@@ -1517,6 +1535,7 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     isIgnited = rawStage === 'IGNITED'
     isPrimed = rawStage === 'PRIMED'
     isStalk = rawStage === 'STALK'
+    isActionable = rawStage === 'ACTIONABLE'
     resolvedStage = isSLHit ? 'SL_HIT' : isT3Hit ? 'TARGET_ACHIEVED' : isT2Hit ? 'T2_ACHIEVED' : isT1Hit ? 'T1_ACHIEVED' : rawStage
   }
 
@@ -1551,19 +1570,29 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   } else if (isTrail) {
     stagePill = { label: '📈 TRAIL', cls: 'bg-blue-500/20 text-blue-300 border-blue-500/40', icon: '📈' }
     trajectoryStatus = { badge: '📈 TRAILING ACTIVE', text: alert.trailing_rationale || 'Trailing stop active to protect gains', theme: 'blue' }
+  } else if (rawStage === 'ACTIONABLE') {
+    const isWeekend = new Date().getDay() === 0 || new Date().getDay() === 6
+    const isClosed = alert.market_status === 'SESSION_CLOSED' || isWeekend
+    if (isClosed) {
+      stagePill = { label: '📅 MONDAY OPEN', cls: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 ring-1 ring-indigo-500/30', icon: '📅' }
+      trajectoryStatus = { badge: '📅 WEEKEND RADAR', text: 'Off-market swing playbook — stalk for Monday 09:15 open', theme: 'indigo' }
+    } else {
+      stagePill = { label: '⚡ ACTIONABLE', cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 ring-1 ring-emerald-500/30 animate-pulse', icon: '⚡' }
+      trajectoryStatus = { badge: '⚡ ACTIONABLE NOW', text: `Setup active at entry level ${isCrypto ? '$' : '₹'}${entryNum ? entryNum.toFixed(1) : ''} — ready to execute`, theme: 'emerald' }
+    }
   } else if (isPrimed) {
     stagePill = { label: '🎯 PRIMED', cls: 'bg-amber-400/20 text-amber-300 border-amber-400/50 ring-1 ring-amber-400/30 animate-pulse', icon: '🎯' }
-    trajectoryStatus = { badge: '🎯 PRIMED', text: 'Micro-proximity triggered (±0.35%) — sniper ready for ignition', theme: 'amber' }
+    trajectoryStatus = { badge: '🎯 PRIMED', text: `Proximity zone reached — awaiting trigger breakout at ${isCrypto ? '$' : '₹'}${entryNum ? entryNum.toFixed(1) : ''}`, theme: 'amber' }
   } else if (isStalk) {
     stagePill = { label: '🦅 STALK', cls: 'bg-sky-500/15 text-sky-400 border-sky-500/30', icon: '🦅' }
-    trajectoryStatus = { badge: '🦅 STALK', text: 'Setup tracked on radar — waiting for trigger zone approach', theme: 'sky' }
+    trajectoryStatus = { badge: '🦅 STALK', text: `Setup tracked on radar — waiting for trigger zone approach at ${isCrypto ? '$' : '₹'}${entryNum ? entryNum.toFixed(1) : ''}`, theme: 'sky' }
   } else if (isEarly) {
     stagePill = { label: '⏳ EARLY', cls: 'bg-amber-500/15 text-amber-400 border-amber-500/30', icon: '⏳' }
-    trajectoryStatus = { badge: '⏳ EARLY WARNING', text: 'Setup forming — awaiting trigger breakout', theme: 'amber' }
+    trajectoryStatus = { badge: '⏳ EARLY WARNING', text: `Setup forming in base — awaiting breakout above ${isCrypto ? '$' : '₹'}${entryNum ? entryNum.toFixed(1) : ''}`, theme: 'amber' }
   } else if (isIgnited) {
     stagePill = { label: '🔥 IGNITED', cls: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 animate-pulse', icon: '🔥' }
     trajectoryStatus = { badge: '🔥 IGNITED', text: 'Breakout confirmed — trade active in flight', theme: 'emerald' }
-  } else if (liveReturn && currentPrice && entryNum) {
+  } else if (!isPreTrigger && liveReturn && currentPrice && entryNum) {
     if (liveReturn.isProfitable) {
       if (t1Num) {
         const t1Dist = Math.abs(t1Num - entryNum)
@@ -1628,7 +1657,10 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     spotNum,
     premiumNum,
     liveReturn,
+    resolvedStage,
     stage: resolvedStage,
+    isPreTrigger,
+    isActionable,
     stagePill,
     trajectoryStatus,
     isTimeStop,

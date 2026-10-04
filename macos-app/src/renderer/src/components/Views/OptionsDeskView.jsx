@@ -4,6 +4,7 @@ import { useAPI } from '../../hooks/useAPI'
 import PayoffSimulatorCard from '../Cards/PayoffSimulatorCard'
 import ConvictionScoreCard from '../Cards/ConvictionScoreCard'
 import { getSymbolExchange, resolveInstrument } from '../../data/universeData'
+import Tooltip, { HelpHint } from '../UI/Tooltip'
 
 // Cumulative standard normal distribution for Greeks
 function normalCDF(x) {
@@ -1059,7 +1060,10 @@ export default function OptionsDeskView({
           {/* Factor 1: GEX Regime */}
           <div className="bg-surface/80 p-2 rounded-lg border border-border/60 space-y-0.5">
             <div className="flex items-center justify-between text-[9px] text-muted">
-              <span>1. GEX REGIME</span>
+              <div className="flex items-center gap-1">
+                <span>1. GEX REGIME</span>
+                <HelpHint metricKey="gex" size="xs" />
+              </div>
               <span className={decisionMatrix.isPosGamma ? 'text-emerald-600 dark:text-emerald-400 font-bold' : 'text-rose-600 dark:text-rose-400 font-bold'}>
                 {decisionMatrix.isPosGamma ? '+GEX PINNING' : '-GEX EXPANSION'}
               </span>
@@ -1078,7 +1082,10 @@ export default function OptionsDeskView({
           {/* Factor 2: Put-Call Ratio (PCR) */}
           <div className="bg-surface/80 p-2 rounded-lg border border-border/60 space-y-0.5">
             <div className="flex items-center justify-between text-[9px] text-muted">
-              <span>2. PCR SENTIMENT</span>
+              <div className="flex items-center gap-1">
+                <span>2. PCR SENTIMENT</span>
+                <HelpHint metricKey="pcr" size="xs" />
+              </div>
               <span className={`font-bold ${pcr >= 1.05 ? 'text-emerald-600 dark:text-emerald-400' : pcr <= 0.85 ? 'text-rose-600 dark:text-rose-400' : 'text-amber'}`}>
                 PCR {pcr}
               </span>
@@ -1095,7 +1102,10 @@ export default function OptionsDeskView({
           {/* Factor 3: Max Pain Magnet */}
           <div className="bg-surface/80 p-2 rounded-lg border border-border/60 space-y-0.5">
             <div className="flex items-center justify-between text-[9px] text-muted">
-              <span>3. MAX PAIN PIN</span>
+              <div className="flex items-center gap-1">
+                <span>3. MAX PAIN PIN</span>
+                <HelpHint metricKey="max_pain" size="xs" />
+              </div>
               <span className="text-amber font-bold">
                 {maxPain > 0 ? `₹${Number(maxPain).toLocaleString('en-IN')}` : '—'}
               </span>
@@ -1141,7 +1151,10 @@ export default function OptionsDeskView({
           {/* Factor 5: IV & Expected Move */}
           <div className="bg-surface/80 p-2 rounded-lg border border-border/60 space-y-0.5">
             <div className="flex items-center justify-between text-[9px] text-muted">
-              <span>5. 1D EXPECTED MOVE</span>
+              <div className="flex items-center gap-1">
+                <span>5. 1D EXPECTED MOVE</span>
+                <HelpHint metricKey="iv_smile" size="xs" />
+              </div>
               <span className="text-emerald-600 dark:text-emerald-400 font-bold">ATM IV {minIV.toFixed(1)}%</span>
             </div>
             <div className="text-xs font-bold text-text">
@@ -1270,7 +1283,7 @@ export default function OptionsDeskView({
                 </span>
               </div>
               <div>
-                <span className="text-muted text-[9px] block">Risk : Reward</span>
+                <span className="text-muted text-[9px] block">R:R Ratio</span>
                 <span className="text-cyan-400 font-bold font-mono">{decisionMatrix.riskReward}</span>
               </div>
               <div>

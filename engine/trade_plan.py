@@ -1092,13 +1092,14 @@ def get_market_status(exchange: str = "NSE") -> dict[str, Any]:
 
 
 def calculate_option_execution_plan(
-    trade_plan: "TradePlan",
-    option_type: str,  # "CE" | "PE"
-    strike: float,
-    expiry: str,  # ISO date "YYYY-MM-DD"
-    option_ltp: float,  # Current option premium (LTP)
+    trade_plan: Optional["TradePlan"] = None,
+    option_type: str = "CE",  # "CE" | "PE"
+    strike: float = 0.0,
+    expiry: str = "",  # ISO date "YYYY-MM-DD"
+    option_ltp: float = 0.0,  # Current option premium (LTP)
     lot_size: int = 25,
     expiry_type: str = "WEEKLY",  # "WEEKLY" | "MONTHLY" | "DAILY" | "QUARTERLY"
+    spot: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     Maps Spot-level trade plan milestones to option contract premiums using
@@ -1114,13 +1115,19 @@ def calculate_option_execution_plan(
         Θ   = Daily Theta (in option points per trading day)
 
     Returns a dict with option price estimates at SL, T1, T2, T3, plus
-    Rupee P&L per lot at each milestone.
+    Rupee P&L per lot at each milestone and institutional statutory friction.
     """
+    entry_spot = (
+        spot
+        if (spot is not None and spot > 0)
+        else (getattr(trade_plan, "entry_price", None) or strike or option_ltp)
+    )
+
     try:
         from analysis.options import compute_greeks
 
         greeks = compute_greeks(
-            spot=trade_plan.entry_price,
+            spot=entry_spot,
             strike=strike,
             expiry=expiry,
             option_type=option_type,
@@ -1138,16 +1145,17 @@ def calculate_option_execution_plan(
         theta_per_bar = 0.0
         iv_pct = None
 
-    spot = trade_plan.entry_price
-
     def _option_price_at_spot(target_spot: float, bars_elapsed: int) -> float:
         """Estimate option price at a given spot using Delta/Gamma/Theta."""
-        ds = target_spot - spot  # positive = up
+        ds = target_spot - entry_spot  # positive = up
         theta_drag = theta_per_bar * bars_elapsed
         estimated = option_ltp + (delta * ds) + (0.5 * gamma * ds * ds) - theta_drag
         return max(0.05, round(estimated, 2))
 
-    raw_sl_prem = _option_price_at_spot(trade_plan.invalidation_stop, bars_elapsed=1)
+    if trade_plan and hasattr(trade_plan, "invalidation_stop") and trade_plan.invalidation_stop:
+        raw_sl_prem = _option_price_at_spot(trade_plan.invalidation_stop, bars_elapsed=1)
+    else:
+        raw_sl_prem = round(max(0.05, option_ltp * 0.75), 2)
 
     # ── Timeframe-Calibrated Options Risk & Targets ──────────────────────────
     tf = (getattr(trade_plan, "timeframe", "") or "INTRADAY").upper()
@@ -1207,17 +1215,23 @@ def calculate_option_execution_plan(
 
     opt_risk = max(0.20, option_ltp - sl_prem)
     t0_5_prem = round(max(option_ltp + opt_risk, option_ltp * 1.16), 2) if option_ltp > 0 else None
-    raw_t1_prem = _option_price_at_spot(
-        trade_plan.target_1, bars_elapsed=trade_plan.expected_bars_t1
-    )
-    raw_t2_prem = _option_price_at_spot(
-        trade_plan.target_2, bars_elapsed=trade_plan.expected_bars_t2
-    )
-    raw_t3_prem = (
-        _option_price_at_spot(trade_plan.target_3, bars_elapsed=trade_plan.expected_bars_t3)
-        if trade_plan.target_3 > 0
-        else None
-    )
+
+    if trade_plan and hasattr(trade_plan, "target_1") and trade_plan.target_1:
+        raw_t1_prem = _option_price_at_spot(
+            trade_plan.target_1, bars_elapsed=getattr(trade_plan, "expected_bars_t1", 3)
+        )
+        raw_t2_prem = _option_price_at_spot(
+            trade_plan.target_2, bars_elapsed=getattr(trade_plan, "expected_bars_t2", 6)
+        )
+        raw_t3_prem = (
+            _option_price_at_spot(trade_plan.target_3, bars_elapsed=getattr(trade_plan, "expected_bars_t3", 10))
+            if getattr(trade_plan, "target_3", 0) > 0
+            else None
+        )
+    else:
+        raw_t1_prem = round(option_ltp + (1.6 * opt_risk), 2) if option_ltp > 0 else 0.0
+        raw_t2_prem = round(raw_t1_prem + (1.2 * opt_risk), 2) if option_ltp > 0 else 0.0
+        raw_t3_prem = round(raw_t2_prem + (1.5 * opt_risk), 2) if option_ltp > 0 else None
 
     if option_ltp > 0:
         if tf == "INTRADAY":
@@ -1286,11 +1300,22 @@ def calculate_option_execution_plan(
     option_rr = f"1:{round(opt_t1_gain / opt_risk, 2)}" if option_ltp > 0 else "1:2"
     option_rr_t2 = f"1:{round(opt_t2_gain / opt_risk, 2)}" if option_ltp > 0 else "1:3"
 
+    # Realistic Institutional Round-Trip Friction (STT 0.1%, Brokerage, Exchange Turnover, GST, Bid-Ask Slippage)
+    friction_pts = max(0.40, round(option_ltp * 0.012 + 0.35, 2)) if option_ltp > 0 else 0.50
+    net_t1_gain = max(0.05, opt_t1_gain - friction_pts)
+    net_t2_gain = max(0.05, opt_t2_gain - friction_pts)
+    net_opt_risk = max(0.1, opt_risk + friction_pts)
+    net_option_rr = f"1:{round(net_t1_gain / net_opt_risk, 2)}" if option_ltp > 0 else "1:1.8"
+    net_option_rr_t2 = f"1:{round(net_t2_gain / net_opt_risk, 2)}" if option_ltp > 0 else "1:2.6"
+    max_loss_per_lot = round(net_opt_risk * lot_size, 0)
+    risk_per_lot = round(opt_risk * lot_size, 0)
+
     # Spot reference level at each milestone
-    spot_t1 = round(trade_plan.target_1, 2)
-    spot_t2 = round(trade_plan.target_2, 2)
-    spot_t3 = round(trade_plan.target_3, 2) if trade_plan.target_3 > 0 else None
-    spot_sl = round(trade_plan.invalidation_stop, 2)
+    is_ce = option_type.upper() == "CE"
+    spot_t1 = round(trade_plan.target_1, 2) if (trade_plan and getattr(trade_plan, "target_1", None)) else round(entry_spot * (1.008 if is_ce else 0.992), 2)
+    spot_t2 = round(trade_plan.target_2, 2) if (trade_plan and getattr(trade_plan, "target_2", None)) else round(entry_spot * (1.015 if is_ce else 0.985), 2)
+    spot_t3 = round(trade_plan.target_3, 2) if (trade_plan and getattr(trade_plan, "target_3", 0) > 0) else round(entry_spot * (1.025 if is_ce else 0.975), 2)
+    spot_sl = round(trade_plan.invalidation_stop, 2) if (trade_plan and getattr(trade_plan, "invalidation_stop", None)) else round(entry_spot * (0.995 if is_ce else 1.005), 2)
 
     # Dynamic Risk Compression (DRC) Ladder (Pillars 1 & 2)
     de_risk_0_5r_prem = round(option_ltp + (0.5 * opt_risk), 2)
@@ -1333,7 +1358,7 @@ def calculate_option_execution_plan(
     elif sym_u == "FINNIFTY":
         step = 50.0
     else:
-        step = 50.0 if spot >= 2500 else (20.0 if spot >= 1000 else 10.0)
+        step = 50.0 if entry_spot >= 2500 else (20.0 if entry_spot >= 1000 else 10.0)
 
     is_long_opt = option_type.upper() == "CE"
     if is_long_opt:
@@ -1347,7 +1372,7 @@ def calculate_option_execution_plan(
 
     dist_short = abs(short_strike - strike)
     short_prem_est = max(
-        0.50, round(option_ltp * max(0.20, 1.0 - (dist_short / (spot * 0.015 + dist_short))), 2)
+        0.50, round(option_ltp * max(0.20, 1.0 - (dist_short / (entry_spot * 0.015 + dist_short))), 2)
     )
     net_debit = max(0.10, round(option_ltp - short_prem_est, 2))
     spread_width = abs(short_strike - strike)
@@ -1423,6 +1448,11 @@ def calculate_option_execution_plan(
         "theta_drag_per_bar": round(theta_per_bar, 4),
         "option_rr": option_rr,
         "option_rr_t2": option_rr_t2,
+        "net_option_rr": net_option_rr,
+        "net_option_rr_t2": net_option_rr_t2,
+        "friction_pts": friction_pts,
+        "max_loss_per_lot": max_loss_per_lot,
+        "risk_per_lot": risk_per_lot,
         # SL
         "sl_spot": spot_sl,
         "sl_premium": sl_prem,
@@ -1449,13 +1479,13 @@ def calculate_option_execution_plan(
         "t1_premium": t1_prem,
         "t1_pnl_per_lot": t1_pnl,
         "t1_pct": round(((t1_prem - option_ltp) / option_ltp) * 100, 1) if option_ltp > 0 else None,
-        "t1_eta": trade_plan.eta_t1_str,
+        "t1_eta": getattr(trade_plan, "eta_t1_str", "~25 mins"),
         # T2
         "t2_spot": spot_t2,
         "t2_premium": t2_prem,
         "t2_pnl_per_lot": t2_pnl,
         "t2_pct": round(((t2_prem - option_ltp) / option_ltp) * 100, 1) if option_ltp > 0 else None,
-        "t2_eta": trade_plan.eta_t2_str,
+        "t2_eta": getattr(trade_plan, "eta_t2_str", "~50 mins"),
         # T3
         "t3_spot": spot_t3,
         "t3_premium": t3_prem,
@@ -1463,7 +1493,7 @@ def calculate_option_execution_plan(
         "t3_pct": round(((t3_prem - option_ltp) / option_ltp) * 100, 1)
         if (t3_prem and option_ltp > 0)
         else None,
-        "t3_eta": trade_plan.eta_t3_str,
+        "t3_eta": getattr(trade_plan, "eta_t3_str", "~80 mins"),
         # Hedged Defined-Risk Spread Blueprint (Theta Neutralization & Wall Monetization)
         "hedged_spread": hedged_spread_plan,
         # Free-Roll Execution Protocol (+2R Scale 50% & Zero-Risk Runner)

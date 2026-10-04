@@ -68,10 +68,12 @@ class RiskLimitError(Exception):
 
 
 def _db_path() -> Path:
+    from config.paths import app_data_path
+
     path = os.environ.get("RISK_DB_PATH")
     if path:
         return Path(path)
-    return Path.home() / ".trading_platform" / "risk_limits.db"
+    return app_data_path("risk_limits.db")
 
 
 class RiskLimits:

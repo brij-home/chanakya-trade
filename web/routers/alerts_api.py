@@ -390,3 +390,93 @@ async def send_alert_to_telegram(payload: dict):
         "in_market": in_market,
         "sent_at": now.strftime("%Y-%m-%d %H:%M:%S IST"),
     }
+
+
+@router.post("/api/alerts/scan/swing")
+@router.get("/api/alerts/scan/swing")
+async def scan_swing_trades(
+    universe: str = "nifty_total_market",
+    min_score: int = 60,
+    limit: int = 40,
+    min_turnover_cr: float = 0.5,
+    bypass_cache: bool = False,
+    exchange: str = "NSE",
+):
+    """
+    On-demand sweep for institutional Swing & Positional trades across NSE and BSE universe.
+    Evaluates Minervini VCP, John Carter TTM Squeeze, Stan Weinstein Stage 1-to-2 markup,
+    Wyckoff SMC springs, and JdK RRG sector leaders with forensic accounting verification.
+    Records new setups directly into AutoAlertEngine and broadcasts via SSE to Alert Manager UI.
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+
+    alerts = await asyncio.to_thread(
+        auto_alert_engine.scan_swing_inflections,
+        universe=universe,
+        min_score=min_score,
+        top_n=limit,
+        min_turnover_cr=min_turnover_cr,
+        use_local_cache=not bypass_cache,
+        bypass_inflection_cache=bypass_cache,
+        exchange=exchange,
+    )
+
+    try:
+        from web.sse import event_bus
+
+        for a in alerts:
+            await event_bus.broadcast(
+                {
+                    "type": "auto_alert_new",
+                    "alert": a.to_dict(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "universe": universe,
+        "count": len(alerts),
+        "data": [a.to_dict() for a in alerts],
+    }
+
+
+@router.post("/api/alerts/auto/eod-review")
+async def trigger_eod_session_review(force: bool = True, broadcast: bool = True):
+    """
+    On-demand trigger for End-Of-Day (EOD) quantitative session review and performance attribution.
+    Computes win rate, profit factor, best setup, and recalibrates factor weights.
+    """
+    from engine.alert_postmortem_runner import run_eod_alert_postmortems
+
+    report = await asyncio.to_thread(
+        run_eod_alert_postmortems,
+        force=force,
+        broadcast=broadcast,
+    )
+    return report
+
+
+@router.get("/api/alerts/auto/eod-scorecard")
+async def get_eod_session_scorecard():
+    """
+    Retrieve current session quantitative scorecard (wins, losses, win rate, profit factor, net R).
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+    from engine.alert_postmortem_runner import generate_session_scorecard
+
+    alerts = await asyncio.to_thread(auto_alert_engine.get_alerts, limit=500)
+    now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    today_date = now_ist.strftime("%Y-%m-%d")
+
+    today_alerts = [
+        a for a in alerts if (getattr(a, "created_at", "") or "").startswith(today_date)
+    ]
+    scorecard = await asyncio.to_thread(
+        generate_session_scorecard, today_alerts, session_date=today_date
+    )
+    return scorecard
+
+

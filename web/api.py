@@ -205,9 +205,24 @@ async def lifespan(app: FastAPI):
 
     warmer_task = asyncio.create_task(_background_cache_warmer())
     maintenance_task = asyncio.create_task(_background_maintenance_scheduler())
+
+    # Start the autonomous periodic data synchronization engine
+    try:
+        from engine.data_sync_scheduler import data_sync_scheduler
+
+        data_sync_scheduler.start()
+    except Exception as e_sync:
+        logger.warning(f"[lifespan] Failed starting data sync scheduler: {e_sync}")
+
     yield
     warmer_task.cancel()
     maintenance_task.cancel()
+    try:
+        from engine.data_sync_scheduler import data_sync_scheduler
+
+        data_sync_scheduler.stop()
+    except Exception:
+        pass
     try:
         from engine.auto_alert_engine import auto_alert_engine
 
@@ -997,6 +1012,74 @@ async def get_storage_allocation():
     from engine.maintenance import get_storage_breakdown
 
     return JSONResponse(get_storage_breakdown().to_dict())
+
+
+@app.post("/api/maintenance/purge-poisoned-compounders", tags=["Maintenance"])
+async def purge_poisoned_century_compounders_endpoint():
+    """
+    Audit and purge century_compounder_cache records that were persisted with the
+    hardcoded sentinel fair_value_anchor=100.0 (Invariant 11 violation).
+
+    Safe to call at any time. After purging, trigger
+    POST /skills/century_sync_market to recompute with real EOD prices.
+    """
+    import asyncio
+    from engine.eod_store import purge_poisoned_century_compounders
+
+    result = await asyncio.to_thread(purge_poisoned_century_compounders)
+    return JSONResponse(result)
+
+
+@app.get("/api/maintenance/sync-status", tags=["Maintenance"])
+async def get_data_sync_status():
+    """Retrieve operational state and last run timestamps of periodic data synchronization."""
+    from engine.data_sync_scheduler import data_sync_scheduler
+
+    return JSONResponse(data_sync_scheduler.get_sync_status())
+
+
+@app.post("/api/maintenance/sync-eod", tags=["Maintenance"])
+async def trigger_eod_sync(universe: str = "NIFTY500", force: bool = False):
+    """
+    On-demand or scheduled post-market EOD bar synchronization.
+    Delta-syncs missing daily bars into data/eod_bars.db, verifies envelopes, and checkpoints WAL.
+    """
+    import asyncio
+    from engine.data_sync_scheduler import data_sync_scheduler
+
+    result = await asyncio.to_thread(
+        data_sync_scheduler.sync_daily_eod, force=force, universe=universe
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/maintenance/sync-fundamentals", tags=["Maintenance"])
+async def trigger_fundamentals_sync(limit: int = 500, force: bool = False):
+    """
+    Weekly or on-demand balance sheet fundamentals and forensic accounting audit synchronization.
+    """
+    import asyncio
+    from engine.data_sync_scheduler import data_sync_scheduler
+
+    result = await asyncio.to_thread(
+        data_sync_scheduler.sync_weekly_fundamentals, limit=limit, force=force
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/maintenance/sync-full", tags=["Maintenance"])
+async def trigger_full_system_resync(universe: str = "NIFTY500"):
+    """
+    Deep system recalibration: wipes split/bonus drifts, force re-downloads multi-year bars,
+    re-scores compounders & inflection archetypes, and executes SQLite VACUUM.
+    """
+    import asyncio
+    from engine.data_sync_scheduler import data_sync_scheduler
+
+    result = await asyncio.to_thread(
+        data_sync_scheduler.run_full_system_resync, universe=universe
+    )
+    return JSONResponse(result)
 
 
 @app.get("/api/provider_health", tags=["Observability"])

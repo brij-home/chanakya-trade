@@ -256,28 +256,31 @@ def run_preflight(verbose: bool = True) -> PreflightReport:
     # 7. Database Integrity Checks (PRAGMA quick_check)
     try:
         import sqlite3
+        from pathlib import Path
         from config.paths import app_data_path
 
         dbs_to_check = [
-            "users.db",
-            "orders.db",
-            "audit.db",
-            "market_data.db",
-            "analysis_cache.db",
-            "analysis_search.db",
+            app_data_path("users.db"),
+            app_data_path("orders.db"),
+            app_data_path("audit.db"),
+            app_data_path("market_data.db"),
+            app_data_path("analysis_cache.db"),
+            app_data_path("analysis_search.db"),
+            app_data_path("chanakya_ledger.db"),
+            app_data_path("risk_limits.db"),
+            Path("data/eod_bars.db"),
         ]
         corrupt_dbs = []
-        for db_name in dbs_to_check:
-            db_p = app_data_path(db_name)
+        for db_p in dbs_to_check:
             if db_p.exists():
                 conn = None
                 try:
                     conn = sqlite3.connect(str(db_p), timeout=5.0)
                     row = conn.execute("PRAGMA quick_check").fetchone()
                     if not row or row[0] != "ok":
-                        corrupt_dbs.append(f"{db_name}: {row[0] if row else 'empty'}")
+                        corrupt_dbs.append(f"{db_p.name}: {row[0] if row else 'empty'}")
                 except Exception as err:
-                    corrupt_dbs.append(f"{db_name}: {err}")
+                    corrupt_dbs.append(f"{db_p.name}: {err}")
                 finally:
                     if conn is not None:
                         try:
@@ -300,7 +303,7 @@ def run_preflight(verbose: bool = True) -> PreflightReport:
                     name="Database Integrity",
                     status="PASS",
                     message="All SQLite database files passed PRAGMA quick_check.",
-                    details={"verified_dbs": dbs_to_check},
+                    details={"verified_dbs": [str(p) for p in dbs_to_check]},
                 )
             )
     except Exception as e:

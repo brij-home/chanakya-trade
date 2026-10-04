@@ -75,15 +75,27 @@ def evaluate_alert_invalidation(
                 cutoff_time = "23:15" if exch == "MCX" else "15:15"
                 return f"Intraday session expired ({cutoff_time} IST cutoff reached). Trade closed."
 
-        # 0b. Time-Stop for unignited EARLY_WARNING setups (default 60 mins for intraday)
+        # 0b. Time-Stop for unignited EARLY_WARNING setups
         if getattr(alert, "stage", "") == "EARLY_WARNING":
             elapsed_sec = (now_ist - created_dt).total_seconds()
-            ttl_sec = getattr(alert, "ttl_seconds", None) or (
-                3600 if th == "INTRADAY" else 86400 * 5
-            )
+            if th == "INTRADAY":
+                default_ttl = 3600
+            elif th == "SWING_SHORT":
+                default_ttl = 86400 * 10
+            elif th in ("SWING_MID", "SWING"):
+                default_ttl = 86400 * 25
+            elif th == "POSITIONAL":
+                default_ttl = 86400 * 60
+            elif th in ("MULTIBAGGER", "LONG_TERM"):
+                default_ttl = 86400 * 180
+            else:
+                default_ttl = 86400 * 14
+            ttl_sec = getattr(alert, "ttl_seconds", None) or default_ttl
             if elapsed_sec >= ttl_sec:
+                days = int(ttl_sec / 86400)
                 mins = int(ttl_sec / 60)
-                return f"Time-Stop expired: Setup did not trigger within {mins}-minute momentum window."
+                dur_str = f"{days}-day" if days >= 1 else f"{mins}-minute"
+                return f"Time-Stop expired: Setup did not trigger within {dur_str} momentum window."
 
     is_option = is_alert_option_premium_level(alert)
 
@@ -122,6 +134,16 @@ def evaluate_alert_invalidation(
 
     if current_ltp is None or current_ltp <= 0:
         return None  # Cannot evaluate without live price quote
+
+    # Check Market Hours: outside active market hours and weekends, static closing quotes cannot trigger live stop losses
+    if not is_test_runner:
+        try:
+            from market.calendar import is_market_open
+
+            if not is_market_open(exch):
+                return None
+        except Exception:
+            pass
 
     # 1. Stop-Loss Invalidation
     if alert.stop_loss and alert.stop_loss > 0:
@@ -360,6 +382,15 @@ def evaluate_alert_invalidation(
                         f"({getattr(alert, 'alert_id', '')}): T1 achieved but stop_loss={alert.stop_loss:.2f} "
                         f"> ref_entry={ref_entry:.2f}. Treating as scratch exit, not profit."
                     )
+
+                baseline_p = alert.ltp or ref_entry
+                if not is_ratcheted and alert.stop_loss and baseline_p > 0 and alert.stop_loss <= baseline_p:
+                    logger.warning(
+                        f"[AlertEvaluator] Inverted stop-loss detected for {alert.symbol} ({alert.alert_id}): "
+                        f"SL {curr_sym}{alert.stop_loss:.2f} <= Baseline {curr_sym}{baseline_p:.2f}. Suppressing invalidation."
+                    )
+                    return None
+
                 if current_ltp > (alert.stop_loss + vol_noise_margin):
                     if is_ratcheted:
                         init_sl_str = (
@@ -394,16 +425,6 @@ def evaluate_alert_invalidation(
                         f"Price surged to {curr_sym}{current_ltp:,.1f} "
                         f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
                     )
-                if (
-                    session_high
-                    and session_high > (alert.stop_loss + vol_noise_margin)
-                    and is_live_alert
-                    and not is_ratcheted
-                ):
-                    return (
-                        f"Session high surged to {curr_sym}{session_high:,.1f} "
-                        f"(breached stop-loss ceiling {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
-                    )
             else:
                 # Bullish / Neutral long positions: stop loss moved upward above entry
                 # Use initial_stop_loss to derive original entry proxy; alert.ltp is the
@@ -422,6 +443,15 @@ def evaluate_alert_invalidation(
                         f"({getattr(alert, 'alert_id', '')}): T1 achieved but stop_loss={alert.stop_loss:.2f} "
                         f"< trigger_level/entry={ref_entry:.2f}. Treating runner exit as scratch, not profit."
                     )
+
+                baseline_p = alert.ltp or ref_entry
+                if not is_ratcheted and alert.stop_loss and baseline_p > 0 and alert.stop_loss >= baseline_p:
+                    logger.warning(
+                        f"[AlertEvaluator] Inverted stop-loss detected for {alert.symbol} ({alert.alert_id}): "
+                        f"SL {curr_sym}{alert.stop_loss:.2f} >= Baseline {curr_sym}{baseline_p:.2f}. Suppressing invalidation."
+                    )
+                    return None
+
                 if current_ltp < (alert.stop_loss - vol_noise_margin):
                     if is_ratcheted:
                         init_sl_str = (
@@ -456,16 +486,6 @@ def evaluate_alert_invalidation(
                     return (
                         f"Price dropped to {curr_sym}{current_ltp:,.1f} "
                         f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bullish thesis invalidated."
-                    )
-                if (
-                    session_low
-                    and session_low < (alert.stop_loss - vol_noise_margin)
-                    and is_live_alert
-                    and not is_ratcheted
-                ):
-                    return (
-                        f"Session low plunged to {curr_sym}{session_low:,.1f} "
-                        f"(breached stop-loss floor {curr_sym}{alert.stop_loss:,.1f}). Bullish thesis invalidated."
                     )
 
     # 2. Detector-Specific Structural Breakdown
@@ -552,12 +572,20 @@ class TargetTrailingEvaluation:
     risk_reduction_pct: float = 0.0
 
     @property
+    def is_t0_5_hit(self) -> bool:
+        return self.new_milestone == "T0_5_ACHIEVED"
+
+    @property
     def is_t1_hit(self) -> bool:
-        return self.new_milestone in ("T1_ACHIEVED", "TARGET_ACHIEVED", "T0_5_ACHIEVED")
+        return self.new_milestone == "T1_ACHIEVED"
+
+    @property
+    def is_t2_hit(self) -> bool:
+        return self.new_milestone == "T2_ACHIEVED"
 
     @property
     def is_target_hit(self) -> bool:
-        return self.new_milestone in ("TARGET_ACHIEVED", "T2_ACHIEVED", "FINAL_ACHIEVED")
+        return self.new_milestone in ("TARGET_ACHIEVED", "FINAL_ACHIEVED")
 
     @property
     def trailing_ratcheted(self) -> bool:
@@ -694,8 +722,24 @@ def calculate_strike_roll_recommendation(
     exp_date = getattr(alert, "expiry_date", None)
     cur_contract = getattr(alert, "contract_symbol", "")
     new_contract = None
-    if cur_contract and str(int(cur_strike)) in cur_contract:
-        new_contract = cur_contract.replace(str(int(cur_strike)), str(int(roll_target_strike)))
+    if cur_contract:
+        # 1. Spaced format: e.g. "NIFTY 25000 CE" or "HAL 4800 PE"
+        pattern_spaced = re.compile(
+            r"\b" + re.escape(str(int(cur_strike))) + r"\s+(CE|PE)\b", re.IGNORECASE
+        )
+        if pattern_spaced.search(cur_contract):
+            new_contract = pattern_spaced.sub(f"{int(roll_target_strike)} \\1", cur_contract)
+        else:
+            # 2. Compact exchange format: e.g. "NIFTY26OCT25000CE", "NIFTY2692425000CE", "M&M202610272950PE"
+            pattern_compact = re.compile(
+                re.escape(str(int(cur_strike))) + r"(CE|PE)$", re.IGNORECASE
+            )
+            if pattern_compact.search(cur_contract):
+                new_contract = pattern_compact.sub(f"{int(roll_target_strike)}\\1", cur_contract)
+            else:
+                new_contract = cur_contract.replace(
+                    str(int(cur_strike)), str(int(roll_target_strike))
+                )
     else:
         new_contract = f"{sym} {int(roll_target_strike)} {opt_type}"
     return {
@@ -1251,8 +1295,9 @@ def evaluate_alert_targets_and_trailing(
             )
 
     # 2. Target 2 (T2) Check - Target 2 at +4R (lock SL to +2R / T1 level)
+    # Physical Price Invariant: Target 2 is only achieved if price actually reached t2_level
     if (
-        (is_t2_hit or r_multiple >= 4.0)
+        is_t2_hit
         and pnl_pts > 0
         and t2_level
         and (target_final > t2_level if is_bullish else target_final < t2_level)
@@ -1292,8 +1337,9 @@ def evaluate_alert_targets_and_trailing(
         )
 
     # 3. Target 1 (T1) Check - Auto-partial at +2R (close 50%, lock SL to Breakeven)
+    # Physical Price Invariant: Target 1 is only achieved if price actually reached t1_level
     if (
-        (is_t1_hit or r_multiple >= 1.8)
+        is_t1_hit
         and pnl_pts > 0
         and r_multiple >= 0.5
         and "T1_ACHIEVED" not in achieved
@@ -1380,7 +1426,20 @@ def evaluate_alert_targets_and_trailing(
             trail_dist = round(initial_risk * 1.8, 2)
 
         if is_bullish:
-            higher_trail = round(max(alert.trailing_stop, current_ltp - trail_dist), 2)
+            # High-Watermark Guaranteed Profit Floor for Options & High-R Trades:
+            # Prevents large unrealized gains (+1.8R to +4R) from round-tripping back to mere Breakeven.
+            guaranteed_floor = alert.trailing_stop
+            if r_multiple >= 3.5:
+                # Up 3.5R+: lock in at least +2.0R (T1 level profit guaranteed)
+                guaranteed_floor = max(guaranteed_floor, round(entry + (initial_risk * 2.0), 2))
+            elif r_multiple >= 2.5:
+                # Up 2.5R+: lock in at least +1.0R (50% risk unit permanently locked)
+                guaranteed_floor = max(guaranteed_floor, round(entry + (initial_risk * 1.0), 2))
+            elif r_multiple >= 1.8:
+                # Up 1.8R+: lock in at least +0.3R (buffer above breakeven to cover all slippage/brokerage)
+                guaranteed_floor = max(guaranteed_floor, round(entry + (initial_risk * 0.3), 2))
+
+            higher_trail = round(max(guaranteed_floor, current_ltp - trail_dist), 2)
             min_dist = 0.5 if is_option else 2.0
             if (
                 higher_trail >= round(alert.trailing_stop * 1.0075, 2)
@@ -1408,10 +1467,19 @@ def evaluate_alert_targets_and_trailing(
                     is_superperforming=is_superperforming,
                 )
         else:
-            lower_trail = round(min(alert.trailing_stop, current_ltp + trail_dist), 2)
+            guaranteed_floor = alert.trailing_stop
+            if r_multiple >= 3.5:
+                guaranteed_floor = min(guaranteed_floor, round(entry - (initial_risk * 2.0), 2))
+            elif r_multiple >= 2.5:
+                guaranteed_floor = min(guaranteed_floor, round(entry - (initial_risk * 1.0), 2))
+            elif r_multiple >= 1.8:
+                guaranteed_floor = min(guaranteed_floor, round(entry - (initial_risk * 0.3), 2))
+
+            lower_trail = round(min(guaranteed_floor, current_ltp + trail_dist), 2)
+            min_dist = 0.5 if is_option else 2.0
             if (
                 lower_trail <= round(alert.trailing_stop * 0.9925, 2)
-                and (alert.trailing_stop - lower_trail) >= 2.0
+                and (alert.trailing_stop - lower_trail) >= min_dist
             ):
                 locked_pts = entry - lower_trail
                 locked_pct = round((locked_pts / entry) * 100, 2)

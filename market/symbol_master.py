@@ -33,7 +33,9 @@ MASTERS = (
 )
 
 BASE_URL = "https://public.fyers.in/sym_details/{}_sym_master.json"
-CACHE_DIR = Path.home() / ".trading_platform" / "sym_master"
+from config.paths import app_data_path
+
+CACHE_DIR = app_data_path("sym_master")
 
 # Map exchange prefix to applicable master files
 _EXCHANGE_MASTERS = {

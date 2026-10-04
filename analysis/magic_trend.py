@@ -327,7 +327,7 @@ def calculate_magic_trend_score(
         try:
             from market.history import get_ohlcv
 
-            df = get_ohlcv(clean_sym, exchange=exchange, interval="day", days=300)
+            df = get_ohlcv(clean_sym, exchange=exchange, interval="day", days=730)
         except Exception:
             df = None
 

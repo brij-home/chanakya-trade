@@ -117,7 +117,7 @@ export default function BigMoveCard({ data, onOpenOrderTicket }) {
           <p className="font-bold text-green text-sm font-mono mt-0.5">₹{d.target_price?.toLocaleString()}</p>
         </div>
         <div>
-          <span className="text-[10px] text-muted uppercase block font-mono">Risk : Reward</span>
+          <span className="text-[10px] text-muted uppercase block font-mono">R:R Ratio</span>
           <p className="font-bold text-amber text-sm font-mono mt-0.5">1 : {d.risk_reward_ratio}</p>
         </div>
       </div>

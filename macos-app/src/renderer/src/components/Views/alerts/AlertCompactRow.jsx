@@ -522,6 +522,24 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           </span>
         )}
 
+        {(plan.max_loss_capped || alert.metrics?.max_loss_rupees) && (
+          <span
+            className="text-[8px] font-mono font-bold text-rose-300/90 bg-rose-500/15 px-1 py-px rounded border border-rose-500/30 whitespace-nowrap hidden lg:inline"
+            title="Monetary risk per lot based on Stop-Loss"
+          >
+            Risk {currSym}{Number(plan.max_loss_capped || alert.metrics?.max_loss_rupees).toLocaleString('en-IN')}
+          </span>
+        )}
+
+        {(plan.net_risk_reward || alert.metrics?.net_risk_reward) && (
+          <span
+            className="text-[8px] font-mono font-bold text-sky-300/90 bg-sky-500/15 px-1 py-px rounded border border-sky-500/30 whitespace-nowrap hidden xl:inline"
+            title="Net friction-adjusted R:R (accounting for STT and slippage)"
+          >
+            Net {plan.net_risk_reward || alert.metrics?.net_risk_reward}
+          </span>
+        )}
+
         {/* Target Levels (Highlighted with Checkmarks when hit) */}
         {t1Num && (
           <span className="text-[9px] font-mono whitespace-nowrap flex items-center gap-1">

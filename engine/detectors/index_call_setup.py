@@ -44,6 +44,8 @@ _SETUP_ICONS = {
     "FAILED_DAY_LOW_BREAKDOWN": "⚡",
     "VWAP_RECLAIM": "🟢",
     "VWAP_BREAKOUT": "🚀",
+    "CPR_DEMAND_BOUNCE": "🟢",
+    "CAMARILLA_H4_BREAKOUT": "🚀",
     "DEMAND_ZONE_SWEEP": "⚡",
     "BEARISH_EXHAUSTION_CE": "🎯",
     "DOUBLE_BOTTOM_BREAKOUT": "🟢",
@@ -66,6 +68,7 @@ def detect_index_call_setup(
     ohlcv_5m: Optional[Any] = None,  # pandas DataFrame, 5-minute bars
     ref_time: Optional[datetime] = None,
     ignore_time_gate: bool = False,
+    prev_close: Optional[float] = None,
 ) -> list[AutoAlert]:
     """
     Scans for institutional CALL entry setups on index options using SMC price action signals.
@@ -266,16 +269,41 @@ def detect_index_call_setup(
     if not ce_contracts:
         return []
 
-    # Sort by optimal Gamma-Torque (high liquidity, proximity to ATM, and sweet-spot premium)
+    step_val = (
+        25.0
+        if clean_sym == "MIDCPNIFTY"
+        else (100.0 if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX") else 50.0)
+    )
+
+    # Sort by optimal Institutional Moneyness, Delta Torque & Liquidity (ATM / 1-Strike ITM Priority)
     def _contract_score(c: Any) -> float:
         lp = float(getattr(c, "last_price", 0.0) or 0.0)
         vol = int(getattr(c, "volume", 0) or 0)
         oi = int(getattr(c, "oi", 0) or 1)
         vol_oi = min(4.0, vol / max(1, oi))
-        dist_pct = abs(float(getattr(c, "strike", 0.0) or 0.0) - spot) / max(1.0, spot)
+        c_strike = float(getattr(c, "strike", 0.0) or 0.0)
+        dist_pts = abs(c_strike - spot)
+        dist_pct = dist_pts / max(1.0, spot)
+
+        # Institutional Moneyness Engine: Prioritize ATM and 1-strike ITM for highest delta efficiency and liquidity
+        moneyness_bonus = 0.0
+        if dist_pts <= (step_val * 0.55):
+            moneyness_bonus = 25.0  # ATM sweet spot (Delta ~0.50)
+        elif c_strike < spot and dist_pts <= (step_val * 1.35):
+            moneyness_bonus = 20.0  # 1-strike ITM powerhouse (Delta ~0.58-0.65, zero time-decay trap)
+        elif c_strike > spot:
+            # OTM penalty grows with distance to prevent selecting low-delta decay traps
+            moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 15.0)
+
         ideal_prem = 40.0 if clean_sym in ("MIDCPNIFTY", "FINNIFTY", "SENSEX") else 125.0
         prem_dist = abs(lp - ideal_prem) / ideal_prem if lp > 0 else 2.0
-        return (vol_oi * 10.0) + (min(10.0, vol / 500.0)) - (dist_pct * 800.0) - (prem_dist * 5.0)
+        return (
+            moneyness_bonus
+            + (vol_oi * 10.0)
+            + (min(10.0, vol / 500.0))
+            - (dist_pct * 600.0)
+            - (prem_dist * 5.0)
+        )
 
     ce_contracts.sort(key=_contract_score, reverse=True)
 
@@ -621,6 +649,61 @@ def detect_index_call_setup(
             )
         except Exception:
             pass
+
+    # ── Central Pivot Range (CPR) & Camarilla Confluence ────────────────────────
+    cpr_data: dict[str, Any] = {}
+    is_narrow_cpr = False
+    if prev_day_high and prev_day_low and prev_day_high > prev_day_low > 0:
+        ref_c = prev_close if (prev_close and prev_close > 0) else (prev_day_high + prev_day_low) / 2.0
+        cpr_pivot = (prev_day_high + prev_day_low + ref_c) / 3.0
+        cpr_bc = (prev_day_high + prev_day_low) / 2.0
+        cpr_tc = (cpr_pivot - cpr_bc) + cpr_pivot
+        cpr_top = max(cpr_tc, cpr_bc)
+        cpr_bottom = min(cpr_tc, cpr_bc)
+        cpr_width_pct = abs(cpr_tc - cpr_bc) / max(1.0, cpr_pivot) * 100.0
+        is_narrow_cpr = cpr_width_pct <= (0.22 if clean_sym in ("BANKNIFTY", "SENSEX") else 0.15)
+
+        # Camarilla Breakout levels
+        cam_range = prev_day_high - prev_day_low
+        cam_h3 = ref_c + (cam_range * 1.1 / 4.0)
+        cam_h4 = ref_c + (cam_range * 1.1 / 2.0)
+        cam_l3 = ref_c - (cam_range * 1.1 / 4.0)
+        cam_l4 = ref_c - (cam_range * 1.1 / 2.0)
+
+        cpr_data = {
+            "pivot": round(cpr_pivot, 1),
+            "bc": round(cpr_bc, 1),
+            "tc": round(cpr_tc, 1),
+            "cpr_top": round(cpr_top, 1),
+            "cpr_bottom": round(cpr_bottom, 1),
+            "cpr_width_pct": round(cpr_width_pct, 3),
+            "is_narrow_cpr": is_narrow_cpr,
+            "regime": "NARROW_CPR_TRENDING" if is_narrow_cpr else ("WIDE_CPR_RANGE" if cpr_width_pct >= 0.35 else "AVERAGE_CPR"),
+            "cam_h3": round(cam_h3, 1),
+            "cam_h4": round(cam_h4, 1),
+            "cam_l3": round(cam_l3, 1),
+            "cam_l4": round(cam_l4, 1),
+        }
+        signal_tags["cpr_data"] = cpr_data
+
+        # Camarilla H4 Breakout Check (Explosive Institutional Trend Ignition)
+        if spot >= cam_h4 and (spot - cam_h4) / cam_h4 * 100.0 <= 0.65 and is_breakout_momentum:
+            signals.append("CAMARILLA_H4_BREAKOUT")
+            signal_tags["camarilla_h4_breakout"] = {
+                "cam_h4": round(cam_h4, 1),
+                "breakout_pct": round((spot - cam_h4) / cam_h4 * 100.0, 3),
+                "is_narrow_cpr": is_narrow_cpr,
+            }
+
+        # CPR Demand Bounce Check: Spot tested CPR Top and is bouncing with demand confirmation
+        cpr_top_prox = abs(spot - cpr_top) / max(1.0, cpr_top) * 100.0
+        if spot >= cpr_top and cpr_top_prox <= 0.25 and not is_5m_bear_trend:
+            signals.append("CPR_DEMAND_BOUNCE")
+            signal_tags["cpr_demand_bounce"] = {
+                "cpr_top": round(cpr_top, 1),
+                "proximity_pct": round(cpr_top_prox, 3),
+                "is_narrow_cpr": is_narrow_cpr,
+            }
 
     # 1. PDL Demand Rejection (symmetric to PDH Supply Rejection in put detector)
     # Spot came within 0.25% of prev_day_low and is now bouncing
@@ -1251,7 +1334,15 @@ def detect_index_call_setup(
         confidence += 5
     elif prem_vel >= 10.0:
         confidence += 3
-    confidence = min(96, confidence)
+    # Narrow CPR Breakout Confluence Boost
+    if is_narrow_cpr and (
+        "DAY_HIGH_BREAKOUT" in signals
+        or "CAMARILLA_H4_BREAKOUT" in signals
+        or is_institutional_thrust
+    ):
+        confidence += 6
+
+    confidence = min(98, confidence)
 
     # Single-signal unconfirmed guard: if only 1 secondary signal, cap at 72%
     if (
@@ -1283,6 +1374,7 @@ def detect_index_call_setup(
                 expiry=exp_date or "",
                 option_ltp=opt_ltp,
                 lot_size=lot_sz,
+                spot=spot,
             )
             if (opt_ltp > 0 and exp_date)
             else None
@@ -1297,6 +1389,17 @@ def detect_index_call_setup(
     t3_premium = opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 1.90, 1)
     sl_premium = opt_plan["sl_premium"] if opt_plan else round(max(0.5, opt_ltp * 0.80), 1)
     rr_str = opt_plan.get("option_rr", "1:1.9") if opt_plan else "1:1.9"
+    net_rr_str = opt_plan.get("net_option_rr", rr_str) if opt_plan else rr_str
+    friction_pts = (
+        opt_plan.get("friction_pts", round(opt_ltp * 0.012 + 0.35, 2))
+        if opt_plan
+        else round(opt_ltp * 0.012 + 0.35, 2)
+    )
+    max_loss_rupees = (
+        opt_plan.get("max_loss_per_lot", round(max(0.1, opt_ltp - sl_premium) * lot_sz, 0))
+        if opt_plan
+        else round(max(0.1, opt_ltp - sl_premium) * lot_sz, 0)
+    )
     t1_pct = opt_plan.get("t1_pct", 30.0) if opt_plan else 30.0
 
     # ── Velocity Regime Check ────────────────────────────────────
@@ -1379,6 +1482,23 @@ def detect_index_call_setup(
             f"Bear Trap / Liquidity Sweep below Day Low: Spot (₹{spot:,.1f}) swept below Session Low (₹{fdl.get('day_low', 0):,.1f}) "
             f"by {fdl.get('sweep_pct', 0):.2f}% to ₹{fdl.get('breach_low', 0):,.1f}, then sharply reclaimed back above with a "
             f"{fdl.get('lower_wick_pct', 0):.0f}% demand absorption wick. Trapped shorters vulnerable to short-squeeze. "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "CAMARILLA_H4_BREAKOUT" in signals:
+        h4_info = signal_tags.get("camarilla_h4_breakout", {})
+        headline = f"🚀 CAMARILLA H4 BREAKOUT: {clean_sym} {int(strike)} CE"
+        summary = (
+            f"Camarilla H4 Institutional Trend Breakout: Spot (₹{spot:,.1f}) crossed H4 (₹{h4_info.get('cam_h4', 0):,.1f}) "
+            f"with breakout momentum & Call volume expansion ({volume:,} contracts, {vol_oi_ratio:.1f}x Vol/OI). "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "CPR_DEMAND_BOUNCE" in signals:
+        cpr_info = signal_tags.get("cpr_demand_bounce", {})
+        headline = f"🟢 CPR DEMAND BOUNCE: {clean_sym} {int(strike)} CE"
+        summary = (
+            f"Central Pivot Range Demand Bounce: Spot (₹{spot:,.1f}) tested CPR Top (₹{cpr_info.get('cpr_top', 0):,.1f}) "
+            f"and held structural support with buyers stepping in. "
+            f"Call volume: {volume:,} contracts ({vol_oi_ratio:.1f}x Vol/OI). "
             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
         )
     elif "DAY_LOW_DEMAND_BOUNCE" in signals:
@@ -1829,6 +1949,8 @@ def detect_index_call_setup(
             "call_wall_dist_pct": call_wall_dist_pct,
             "is_call_wall_collision": is_call_wall_collision,
             "is_short_squeeze_unwind": is_short_squeeze_unwind,
+            "cpr_data": cpr_data,
+            "is_narrow_cpr": is_narrow_cpr,
             "roc_momentum": roc_metric.to_dict(),
             "premium_velocity": round(prem_vel, 2),
             "oi_roc": cand_ce_oi_roc,
@@ -1841,6 +1963,9 @@ def detect_index_call_setup(
             "breakout_bar_low": thrust_details.get("breakout_bar_low"),
             "india_vix": vix_val,
             "is_high_iv_risk": is_high_iv_risk,
+            "friction_pts": friction_pts,
+            "net_risk_reward": net_rr_str,
+            "max_loss_rupees": max_loss_rupees,
         },
         actionable_plan={
             "action": act_verb,
@@ -1874,6 +1999,10 @@ def detect_index_call_setup(
             "target_moonshot": f"₹{t3_premium:,.2f}",
             "stop_loss": f"₹{sl_premium:,.2f}",
             "risk_reward": rr_str,
+            "net_risk_reward": net_rr_str,
+            "friction_pts": friction_pts,
+            "max_loss_rupees": max_loss_rupees,
+            "max_loss_capped": max_loss_rupees,
             "profit_rule": (
                 f"Scale Blueprint: Book 50% at T1 (₹{t1_premium:,.1f}) & move SL to Cost/Breakeven (Zero Risk). "
                 f"Book 25% at T2 (₹{t2_premium:,.1f}). Leave 25% runner trailing on 5m 9-EMA."

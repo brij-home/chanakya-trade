@@ -7,7 +7,7 @@
 
 <!-- TOC -->
 - [1. Project Overview & Component Map](#1-project-overview--component-map)
-- [2. Safety & Trading Guardrails (20 Core Invariants)](#2-safety--trading-guardrails-20-core-invariants)
+- [2. Safety & Trading Guardrails (24 Core Invariants)](#2-safety--trading-guardrails-24-core-invariants)
 - [3. LLM Model Hierarchy & Multi-Key Resilience](#3-llm-model-hierarchy--multi-key-resilience)
 - [4. Environment & Common Commands](#4-environment--common-commands)
 - [5. On-Demand Skills Directory](#5-on-demand-skills-directory)
@@ -35,7 +35,7 @@
 
 ---
 
-## 2. Safety & Trading Guardrails (20 Core Invariants)
+## 2. Safety & Trading Guardrails (24 Core Invariants)
 
 > **⚠️ Never commit `.env` — see [`config/credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) for secure token management.**
 
@@ -120,6 +120,40 @@
    - **The Single-Writer Rule**: Exactly ONE domain engine owns state mutation per domain. Modules outside that domain must NEVER write to storage files or push to output sinks directly.
    - **Auditability Mandate**: Every lifecycle event (creation, scrutiny, SSE broadcast, Telegram gate decision, milestone progress, invalidation) MUST append an immutable record to `alert.audit_trail` via `alert.record_audit()`.
    - **Fast Troubleshooting**: Query any alert's full chronological journey in <60 seconds via `GET /api/alerts/auto/{alert_id}/audit` or the global timeline via `GET /api/alerts/auto/audit-trail`.
+21. **Zero Silent Swallowing & Traceable Observability Contract (Never `pass` on Errors or Warnings)**:
+   - Bare `except:` or `except Exception: pass` or empty frontend `catch {}` without logging is strictly prohibited across the codebase.
+   - Every caught exception MUST be logged with meaningful operational context (`module`, `symbol`/`universe`, `operation`, `error`):
+     ```python
+     # Standardized Pattern:
+     import logging
+     logger = logging.getLogger(__name__)
+
+     try:
+         ...
+     except SpecificError as e:
+         logger.warning(f"[{__name__}] {op_name} degraded for {symbol}: {e}")
+     except Exception as e:
+         logger.error(f"[{__name__}] Unexpected failure in {op_name} for {symbol}: {e}", exc_info=True)
+         raise  # or handle gracefully with explicit fallback provenance
+     ```
+   - Never suppress warnings with broad `warnings.filterwarnings('ignore')` or silent drops. Warnings signal impending API deprecations, pandas performance regressions, or stale feeds.
+   - Every UI error boundary and React `try / catch` must report errors to console and state (`console.warn` / `console.error`), rendering honest error or empty states.
+
+22. **Universal SSOT, Modular Taxonomy & Zero Ad-Hoc Hardcoded Lists**:
+   - Universal business logic (symbol resolution, taxonomy categorization, lot sizes, token mappings, DCF formulas) MUST reside in single canonical modules (`analysis.universe`, `market.instruments`, `engine.alert_identity`).
+   - Ad-hoc local hardcoded lists of "magic fallback tickers", hardcoded multiples (e.g. `price * 1.15`), or duplicated resolver functions are strictly prohibited.
+   - When a fallback is architecturally required (e.g. offline research), it must be explicitly tagged with provenance (`PROVENANCE=OFFLINE_FALLBACK`), never masquerade as a clean live response.
+   - When new market universe presets are created, register them centrally in `analysis/universe.py` with normalized uppercase keys and documented descriptions.
+
+23. **Pure Provenance Integrity (Signals & Alerts Trigger ONLY on Real Verified Data)**:
+   - Every quantitative scanner, radar candidate, and trade setup MUST be backed by genuine, live, or verified historical market feeds.
+   - If market data is unreachable, stale, or zero, the system MUST return explicit `UNAVAILABLE` or `DEGRADED` status with transparent diagnostic reasons.
+   - Fabricating synthetic prices, placeholder setups, or hallucinated order books to "populate empty UI cards" is an institutional violation. Alerts fire ONLY when data is real, complete, and mathematically verified.
+
+24. **Modular Decoupling, Async Event Loop Health & Query Boundary Honesty**:
+   - **Async Offloading**: Synchronous, CPU-heavy, or blocking I/O operations (e.g., pandas quant calculations, SQLite bulk queries, sequential network scraping) inside FastAPI endpoints MUST be offloaded using `asyncio.to_thread(...)` to keep the main event loop responsive for SSE streams and heartbeats.
+   - **Query Boundary Honesty**: Cache and database queries must strictly enforce caller filters (symbol lists, universe boundaries, dates). Caches MUST NEVER leak global data across universes when a specific subset is requested.
+   - **Informative Empty States**: When a universe or scanner query returns 0 records, the system and UI must honestly communicate the empty state (e.g. "No cached compounders found for {universe}. Run Sync Market into DB to compute") with a 1-click action, rather than displaying cross-universe data.
 
 ---
 

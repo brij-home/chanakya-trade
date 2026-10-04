@@ -2177,6 +2177,10 @@ def send_push(
     _get_push_executor().submit(_send)
 
 
+# Canonical alias for sending messages / broadcasts
+send_message = send_push
+
+
 def push_alert(alert_desc: str) -> None:
     """Push an alert trigger notification."""
     send_push(f"🔔 <b>ALERT TRIGGERED</b>\n\n{alert_desc}")

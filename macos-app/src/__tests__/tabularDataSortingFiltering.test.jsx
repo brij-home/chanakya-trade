@@ -58,6 +58,7 @@ const sampleInflectionData = {
       archetype_label: 'VCP Pivot Breakout',
       timing_state: 'TRIGGER_NOW',
       timing_label: '🔥 Trigger Now',
+      horizon: 'SHORT_TERM',
       weinstein_stage: 'STAGE_2_UPTREND',
       squeeze_state: 'NORMAL',
       rvol_20d: 2.2,
@@ -82,6 +83,7 @@ const sampleInflectionData = {
       archetype_label: 'TTM Squeeze',
       timing_state: 'COILING_IMMINENT',
       timing_label: '⏳ Coiling (1–3d)',
+      horizon: 'MID_TERM',
       weinstein_stage: 'STAGE_2_UPTREND',
       squeeze_state: 'COILING',
       rvol_20d: 1.1,
@@ -106,6 +108,7 @@ const sampleInflectionData = {
       archetype_label: 'Stage 1→2 Markup',
       timing_state: 'TRIGGER_NOW',
       timing_label: '🔥 Trigger Now',
+      horizon: 'LONG_TERM',
       weinstein_stage: 'STAGE_2_UPTREND',
       squeeze_state: 'COILING',
       rvol_20d: 2.8,
@@ -218,9 +221,74 @@ const samplePortfolioData = {
   ],
 }
 
+const sampleCenturyData = [
+  {
+    symbol: 'KAYNES',
+    ltp: 4500.0,
+    century_score: 88,
+    compounder_tier: '100X_CENTURY',
+    twin_engines: {
+      current_market_cap_cr: 26000.0,
+      current_pe: 45.0,
+      projected_terminal_pe: 65.0,
+      pe_expansion_multiple: 1.44,
+      forecast_pat_cagr_pct: 38.5,
+      pat_expansion_multiple: 31.0,
+      total_projected_multiple: 78.5,
+      target_market_cap_cr: 2041000.0,
+      compounder_tier: '100X_CENTURY',
+    },
+    catalyst_badges: ['ROCE > 22%', 'Operating Leverage', 'Order Book 3x'],
+    anti_fomo: {
+      fair_value_anchor: 4400.0,
+      accumulate_low: 4350.0,
+      accumulate_high: 4450.0,
+      no_chase_boundary: 4650.0,
+      pullback_limit_entry: 4400.0,
+      invalidation_stop: 4100.0,
+      action_directive: 'ACCUMULATE_FAIR_VALUE',
+    },
+    summary: 'High-growth EMS champion with massive capex expansion.',
+  },
+  {
+    symbol: 'BANCOINDIA',
+    ltp: 295.0,
+    century_score: 72,
+    compounder_tier: '25X_MULTIBAGGER',
+    twin_engines: {
+      current_market_cap_cr: 2100.0,
+      current_pe: 14.0,
+      projected_terminal_pe: 28.0,
+      pe_expansion_multiple: 2.0,
+      forecast_pat_cagr_pct: 24.0,
+      pat_expansion_multiple: 8.6,
+      total_projected_multiple: 26.0,
+      target_market_cap_cr: 54600.0,
+      compounder_tier: '25X_MULTIBAGGER',
+    },
+    catalyst_badges: ['High ROCE', 'Zero Debt'],
+    anti_fomo: {
+      fair_value_anchor: 285.0,
+      accumulate_low: 280.0,
+      accumulate_high: 290.0,
+      no_chase_boundary: 310.0,
+      pullback_limit_entry: 285.0,
+      invalidation_stop: 265.0,
+      action_directive: 'WAIT_FOR_PULLBACK',
+    },
+    summary: 'Auto components specialist expanding cooling systems.',
+  },
+]
+
 // Global fetch mock
 global.fetch = vi.fn().mockImplementation((url, opts) => {
   const urlStr = String(url)
+  if (urlStr.includes('/skills/century_compounders')) {
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ data: { candidates: sampleCenturyData } }),
+    })
+  }
   if (urlStr.includes('/skills/inflection_scan')) {
     return Promise.resolve({
       ok: true,
@@ -308,9 +376,9 @@ describe('Tabular Data Sorting and Multi-Criteria Filtering', () => {
         expect(screen.getByText('DIXON')).toBeInTheDocument()
       })
 
-      // Click VCP Pivots archetype tab
-      const vcpTab = screen.getByRole('button', { name: /vcp pivots/i })
-      fireEvent.click(vcpTab)
+      // Select VCP Pivots archetype from dropdown
+      const archetypeSelect = screen.getByTitle(/filter by quantitative inflection archetype/i)
+      fireEvent.change(archetypeSelect, { target: { value: 'VCP_PIVOT_BREAKOUT' } })
 
       // Only DIXON should be visible (BEL and TRENT filtered out)
       expect(screen.getByText('DIXON')).toBeInTheDocument()
@@ -318,10 +386,38 @@ describe('Tabular Data Sorting and Multi-Criteria Filtering', () => {
       expect(screen.queryByText('TRENT')).not.toBeInTheDocument()
 
       // Reset back to All Inflections
-      fireEvent.click(screen.getByRole('button', { name: /all inflections/i }))
+      fireEvent.change(archetypeSelect, { target: { value: 'ALL' } })
       expect(screen.getByText('DIXON')).toBeInTheDocument()
       expect(screen.getByText('BEL')).toBeInTheDocument()
       expect(screen.getByText('TRENT')).toBeInTheDocument()
+    })
+
+    it('filters candidates by horizon dropdown and Reset Filters clears horizon', async () => {
+      render(<InflectionScannerView />)
+
+      fireEvent.click(screen.getAllByRole('button', { name: /scan/i })[0])
+      await waitFor(() => {
+        expect(screen.getByText('DIXON')).toBeInTheDocument()
+      })
+
+      // Select SHORT_TERM horizon — only DIXON should show
+      const horizonSelect = screen.getByTitle('Filter by investment / holding horizon')
+      fireEvent.change(horizonSelect, { target: { value: 'SHORT_TERM' } })
+
+      await waitFor(() => {
+        expect(screen.getByText('DIXON')).toBeInTheDocument()
+        expect(screen.queryByText('BEL')).not.toBeInTheDocument()
+        expect(screen.queryByText('TRENT')).not.toBeInTheDocument()
+      })
+
+      // Reset Filters resets horizon back to ALL
+      const resetBtn = screen.getByRole('button', { name: /reset filters/i })
+      fireEvent.click(resetBtn)
+      await waitFor(() => {
+        expect(screen.getByText('DIXON')).toBeInTheDocument()
+        expect(screen.getByText('BEL')).toBeInTheDocument()
+        expect(screen.getByText('TRENT')).toBeInTheDocument()
+      })
     })
 
     it('supports quick condition toggles (e.g. Squeeze Coiling, Exclude UC)', async () => {
@@ -345,6 +441,46 @@ describe('Tabular Data Sorting and Multi-Criteria Filtering', () => {
       const resetBtn = screen.getByRole('button', { name: /reset filters/i })
       fireEvent.click(resetBtn)
       expect(screen.getByText('TRENT')).toBeInTheDocument()
+    })
+
+    it('renders Century Compounder tabular view with sortable columns and filters', async () => {
+      render(<InflectionScannerView />)
+
+      // Switch to 100x Century Compounders tab
+      const centuryTab = screen.getByRole('button', { name: /100x century compounders/i })
+      fireEvent.click(centuryTab)
+
+      await waitFor(() => {
+        expect(screen.getByText('KAYNES')).toBeInTheDocument()
+        expect(screen.getByText('BANCOINDIA')).toBeInTheDocument()
+      })
+
+      // Verify table view is active by default with sortable headers
+      expect(screen.getByTitle(/sort by symbol/i)).toBeInTheDocument()
+      expect(screen.getByTitle(/sort by score/i)).toBeInTheDocument()
+      expect(screen.getByTitle(/sort by 10y multiple/i)).toBeInTheDocument()
+
+      // Filter by Tier (100X_CENTURY)
+      const tierSelect = screen.getByTitle(/filter by projected compounding multiple tier/i)
+      fireEvent.change(tierSelect, { target: { value: '100X_CENTURY' } })
+
+      expect(screen.getByText('KAYNES')).toBeInTheDocument()
+      expect(screen.queryByText('BANCOINDIA')).not.toBeInTheDocument()
+
+      // Reset filters clears tier filter
+      const resetBtn = screen.getByRole('button', { name: /reset filters/i })
+      fireEvent.click(resetBtn)
+      expect(screen.getByText('BANCOINDIA')).toBeInTheDocument()
+
+      // Switch to Cards View
+      const cardsBtn = screen.getByTitle(/century compounders cards matrix/i)
+      fireEvent.click(cardsBtn)
+      expect(screen.getAllByText(/anti-fomo accumulation blueprint/i).length).toBeGreaterThan(0)
+
+      // Switch back to Table View
+      const tableBtn = screen.getByTitle(/century compounders table view/i)
+      fireEvent.click(tableBtn)
+      expect(screen.getByTitle(/sort by symbol/i)).toBeInTheDocument()
     })
   })
 

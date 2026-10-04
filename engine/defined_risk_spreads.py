@@ -345,7 +345,7 @@ def print_defined_risk_spread(spread: DefinedRiskSpread) -> None:
         f"  [bold]Net Cashflow[/bold]      : [{flow_style}]{flow_label}[/{flow_style}]",
         f"  [bold]Max Profit[/bold]        : [bold green]₹{spread.max_profit:,.2f}[/bold green]",
         f"  [bold]Max Loss (Capped)[/bold] : [bold red]₹{spread.max_loss:,.2f}[/bold red]",
-        f"  [bold]Risk : Reward[/bold]     : [bold]1 : {spread.risk_reward_ratio:.2f}[/bold]",
+        f"  [bold]R:R Ratio[/bold]         : [bold]1 : {spread.risk_reward_ratio:.2f}[/bold]",
         f"  [bold]Breakeven(s)[/bold]      : {', '.join(f'₹{b:,.2f}' for b in spread.breakeven_points)}",
         f"  [bold]Capital / Margin[/bold]  : ₹{spread.capital_required:,.2f}",
     ]

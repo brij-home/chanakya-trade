@@ -23,6 +23,9 @@ import secrets
 import socket
 import threading
 import uuid
+import logging
+import os
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -33,9 +36,19 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from config.paths import app_data_path
+
+logger = logging.getLogger(__name__)
 console = Console()
 
-ALERTS_FILE = Path.home() / ".trading_platform" / "alerts.json"
+
+def get_alerts_file() -> Path:
+    """Returns canonical path to price/technical alerts JSON file."""
+    return app_data_path("alerts.json")
+
+
+ALERTS_FILE = get_alerts_file()
+
 
 
 def validate_webhook_url(url: str) -> str:
@@ -990,27 +1003,41 @@ class AlertManager:
 
         return True  # all conditions passed
 
-    # ── Persistence ───────────────────────────────────────────
-
     def _save(self) -> None:
         try:
-            ALERTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            data = [asdict(a) for a in self._alerts]
-            ALERTS_FILE.write_text(json.dumps(data, indent=2))
-        except Exception:
-            pass
+            target_path = get_alerts_file()
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            from engine.data_sanctity import assert_production_data_sanctity
+
+            clean_alerts = [
+                a for a in self._alerts
+                if assert_production_data_sanctity(a, "AlertManager")
+            ]
+            data = [asdict(a) for a in clean_alerts]
+            payload = json.dumps(data, indent=2)
+            temp_path = target_path.with_name(f"{target_path.name}.tmp.{os.getpid()}_{time.time_ns()}")
+            try:
+                temp_path.write_text(payload, encoding="utf-8")
+                os.replace(temp_path, target_path)
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"[AlertManager] _save error: {e}")
 
     def _load(self) -> None:
         try:
-            if ALERTS_FILE.exists():
-                data = json.loads(ALERTS_FILE.read_text())
+            target_path = get_alerts_file()
+            if target_path.exists():
+                data = json.loads(target_path.read_text(encoding="utf-8"))
                 valid_keys = set(Alert.__dataclass_fields__.keys())
                 self._alerts = [
                     Alert(**{k: v for k, v in d.items() if k in valid_keys})
                     for d in data
                     if isinstance(d, dict)
                 ]
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[AlertManager] _load error: {e}")
             self._alerts = []
 
 

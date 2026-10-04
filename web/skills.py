@@ -1783,6 +1783,40 @@ async def skill_auto_alerts_scan_now():
         raise _err(str(e))
 
 
+@router.post("/alerts/auto/scan_swing")
+async def skill_auto_alerts_scan_swing(req: Optional[dict[str, Any]] = None):
+    """Trigger on-demand sweep for institutional Swing & Positional trades across NSE & BSE."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        d = req or {}
+        universe = d.get("universe", "nifty_total_market")
+        min_score = int(d.get("min_score", 60))
+        limit = int(d.get("limit", 40))
+        min_turnover_cr = float(d.get("min_turnover_cr", 0.5))
+        bypass_cache = bool(d.get("bypass_cache", False))
+        exchange = d.get("exchange", "NSE")
+
+        alerts = await asyncio.to_thread(
+            auto_alert_engine.scan_swing_inflections,
+            universe=universe,
+            min_score=min_score,
+            top_n=limit,
+            min_turnover_cr=min_turnover_cr,
+            use_local_cache=not bypass_cache,
+            bypass_inflection_cache=bypass_cache,
+            exchange=exchange,
+        )
+        return {
+            "status": "ok",
+            "universe": universe,
+            "count": len(alerts),
+            "data": [a.to_dict() for a in alerts],
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
 @router.post("/alerts/auto/cleanup")
 async def skill_auto_alerts_cleanup(
     req: Optional[Union[AutoAlertCleanupRequest, dict[str, Any]]] = None,
@@ -4115,6 +4149,7 @@ class CenturyCompounderSkillRequest(BaseModel):
     min_score: int = 65
     top_n: int = 20
     use_cache: bool = True
+    refresh: bool = False
 
 
 class CenturySyncMarketSkillRequest(BaseModel):
@@ -4122,7 +4157,7 @@ class CenturySyncMarketSkillRequest(BaseModel):
 
 
 class PreInflectionEarlyWarningRequest(BaseModel):
-    universe: Optional[list[str]] = None
+    universe: Optional[str | list[str]] = None
     top_n: int = 10
 
 
@@ -4134,6 +4169,7 @@ async def skill_century_compounders(req: Optional[CenturyCompounderSkillRequest]
     the empirical Twin Engines math (PAT Growth × PE Expansion) and the 7 Dalal Street pillars.
     """
     try:
+        import asyncio
         from analysis.century_compounder import (
             evaluate_century_compounder,
             scan_century_compounders,
@@ -4141,18 +4177,25 @@ async def skill_century_compounders(req: Optional[CenturyCompounderSkillRequest]
 
         target_sym = req.symbol if req and req.symbol else None
         if target_sym:
-            rep = evaluate_century_compounder(target_sym)
+            rep = await asyncio.to_thread(evaluate_century_compounder, target_sym)
             return _ok(rep.to_dict())
         else:
             universe = req.universe if req and req.universe else None
             min_score = req.min_score if req else 65
             top_n = req.top_n if req else 20
             use_cache = req.use_cache if req else True
-            reps = scan_century_compounders(
-                universe=universe, min_score=min_score, top_n=top_n, use_cache=use_cache
+            refresh = req.refresh if req else False
+            reps = await asyncio.to_thread(
+                scan_century_compounders,
+                universe=universe,
+                min_score=min_score,
+                top_n=top_n,
+                use_cache=use_cache,
+                refresh=refresh,
             )
             return _ok({"candidates": [r.to_dict() for r in reps], "count": len(reps)})
     except Exception as e:
+        logger.warning(f"[skills] century_compounders error: {e}")
         raise _err(str(e))
 
 
@@ -4163,10 +4206,11 @@ async def skill_century_sync_market(req: Optional[CenturySyncMarketSkillRequest]
     100x Century Compounder ratings into the persistent SQLite database.
     """
     try:
+        import asyncio
         from analysis.century_compounder import sync_and_precompute_market_compounders
 
         u_name = req.universe if req else "microcap250"
-        res = sync_and_precompute_market_compounders(universe_name=u_name)
+        res = await asyncio.to_thread(sync_and_precompute_market_compounders, universe_name=u_name)
         return _ok(res)
     except Exception as e:
         raise _err(str(e))
@@ -4182,40 +4226,54 @@ async def skill_pre_inflection_early_warning(
     generating actionable anti-FOMO entry brackets before the breakout candle detonates.
     """
     try:
+        import asyncio
         from engine.detectors.pre_inflection_dryup import detect_pre_inflection_dryup
         from market.history import get_ohlcv
 
-        universe = (req.universe if req and req.universe else None) or [
-            "TRENT",
-            "DIXON",
-            "KAYNES",
-            "PREMIERENE",
-            "WAAREEENER",
-            "INOXWIND",
-            "KPITTECH",
-            "ZENTEC",
-            "DATAPATTNS",
-            "ARE&M",
-            "NEWGEN",
-            "RATEGAIN",
-            "ASTRAL",
-            "POLYCAB",
-            "KALYANKJIL",
-            "CDSL",
-            "BSE",
-            "MCX",
-        ]
+        u_raw = req.universe if req and req.universe else None
+        if isinstance(u_raw, str):
+            from analysis.universe import resolve_dynamic_universe
+
+            universe, _ = resolve_dynamic_universe(u_raw, max_stocks=100)
+        elif isinstance(u_raw, list) and u_raw:
+            universe = u_raw
+        else:
+            universe = [
+                "TRENT",
+                "DIXON",
+                "KAYNES",
+                "PREMIERENE",
+                "WAAREEENER",
+                "INOXWIND",
+                "KPITTECH",
+                "ZENTEC",
+                "DATAPATTNS",
+                "ARE&M",
+                "NEWGEN",
+                "RATEGAIN",
+                "ASTRAL",
+                "POLYCAB",
+                "KALYANKJIL",
+                "CDSL",
+                "BSE",
+                "MCX",
+            ]
         top_n = req.top_n if req else 10
-        alerts = []
-        for sym in universe:
-            clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
-            df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
-            if df is not None and len(df) >= 25:
-                ltp = float(df["close"].iloc[-1])
-                alt = detect_pre_inflection_dryup(clean_sym, df, ltp)
-                if alt:
-                    alerts.append(alt.to_dict())
-        return _ok({"alerts": alerts[:top_n], "count": len(alerts[:top_n])})
+
+        def _do_early_warning_scan():
+            alerts = []
+            for sym in universe:
+                clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+                df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
+                if df is not None and len(df) >= 25:
+                    ltp = float(df["close"].iloc[-1])
+                    alt = detect_pre_inflection_dryup(clean_sym, df, ltp)
+                    if alt:
+                        alerts.append(alt.to_dict())
+            return alerts[:top_n]
+
+        alerts = await asyncio.to_thread(_do_early_warning_scan)
+        return _ok({"alerts": alerts, "count": len(alerts)})
     except Exception as e:
         raise _err(str(e))
 

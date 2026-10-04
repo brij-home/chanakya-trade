@@ -243,6 +243,22 @@ def _unavailable(symbol: str) -> dict:
 # ── Scoring logic ────────────────────────────────────────────
 
 
+import math
+
+
+def _safe_float(val: Any) -> Optional[float]:
+    """Converts value to finite float. Returns None for None, non-numeric strings, NaN, or Inf."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
+    except (ValueError, TypeError):
+        return None
+
+
 def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
     """
     Score fundamentals 0–100 using quality thresholds for Indian equities.
@@ -251,8 +267,9 @@ def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
     score = 50  # start neutral
     flags: list[FundamentalFlag] = []
 
-    def flag(metric, value, good_cond, bad_cond, good_pts, bad_pts, good_msg, bad_msg):
+    def flag(metric, raw_val, good_cond, bad_cond, good_pts, bad_pts, good_msg, bad_msg):
         nonlocal score
+        value = _safe_float(raw_val)
         if value is None:
             return
         if good_cond(value):
@@ -269,8 +286,8 @@ def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
             )
 
     # PE Ratio (lower is cheaper, but negative = loss-making)
-    pe = parsed.get("pe")
-    if pe and pe > 0:
+    pe = _safe_float(parsed.get("pe"))
+    if pe is not None and pe > 0:
         if pe < 15:
             flags.append(FundamentalFlag("P/E", round(pe, 1), "GOOD", "Undervalued (<15)"))
             score += 10
@@ -282,11 +299,16 @@ def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
         else:
             flags.append(FundamentalFlag("P/E", round(pe, 1), "BAD", "Expensive (>40)"))
             score -= 10
-    elif pe and pe < 0:
+    elif pe is not None and pe < 0:
         flags.append(
             FundamentalFlag("P/E", round(pe, 1), "BAD", "Negative — company making losses")
         )
         score -= 20
+    elif str(parsed.get("pe", "")).lower() in ("infinity", "inf", "-inf"):
+        flags.append(
+            FundamentalFlag("P/E", "N/A", "BAD", "Infinite P/E — zero or negligible earnings")
+        )
+        score -= 15
 
     flag(
         "ROE %",
@@ -355,7 +377,7 @@ def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
     )
 
     # Promoter holding
-    ph = parsed.get("promoter_holding")
+    ph = _safe_float(parsed.get("promoter_holding"))
     if ph is not None:
         if ph >= 50:
             flags.append(
@@ -381,7 +403,7 @@ def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
             )
 
     # Pledged %
-    pledged = parsed.get("pledged_pct")
+    pledged = _safe_float(parsed.get("pledged_pct"))
     if pledged is not None and pledged > 0:
         if pledged > 25:
             flags.append(
@@ -399,14 +421,14 @@ def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
             score -= 5
 
     # ── Governance risk (59e) ────────────────────────────────
-    overall_risk = parsed.get("overall_risk")
+    overall_risk = _safe_float(parsed.get("overall_risk"))
     if overall_risk is not None:
         if overall_risk >= 8:
             score -= 5
             flags.append(
                 FundamentalFlag(
                     "Governance Risk",
-                    f"{overall_risk}/10",
+                    f"{overall_risk:.0f}/10",
                     "WARN",
                     f"High governance risk (audit={parsed.get('audit_risk')}, board={parsed.get('board_risk')})",
                 )
@@ -416,7 +438,7 @@ def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
             flags.append(
                 FundamentalFlag(
                     "Governance Risk",
-                    f"{overall_risk}/10",
+                    f"{overall_risk:.0f}/10",
                     "GOOD",
                     "Low governance risk — strong corporate governance",
                 )

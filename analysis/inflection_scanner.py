@@ -61,6 +61,7 @@ from analysis.multibagger import (
 from analysis.institutional_catalysts import (
     get_institutional_catalysts,
 )
+from engine.alert_identity import canonical_alert_symbol
 from analysis.sector_rotation import get_stock_tailwind
 from analysis.universe import (
     THEMATIC_PRESETS,
@@ -218,13 +219,13 @@ def evaluate_single_stock_inflection(
     """
     Evaluates whether a single stock is at an inflection point ready for a big or multibagger move.
     """
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = canonical_alert_symbol(symbol)
 
     if df is None or len(df) == 0:
         try:
             from engine.eod_store import get_cached_ohlcv
 
-            df = get_cached_ohlcv(clean_sym, days=300)
+            df = get_cached_ohlcv(clean_sym, days=504)
         except Exception:
             pass
 
@@ -232,7 +233,7 @@ def evaluate_single_stock_inflection(
         try:
             from market.history import get_ohlcv
 
-            df = get_ohlcv(clean_sym, exchange=exchange, interval="day", days=300)
+            df = get_ohlcv(clean_sym, exchange=exchange, interval="day", days=730)
         except Exception:
             df = None
 
@@ -987,7 +988,7 @@ def scan_inflections_universe(
             if meta_map:
                 active_symbols = []
                 for s in symbols:
-                    clean_s = s.upper().replace(".NS", "").replace("NSE:", "").strip()
+                    clean_s = canonical_alert_symbol(s)
                     m = meta_map.get(clean_s)
                     if m:
                         if m.get("bar_count", 0) < 25:
@@ -1009,7 +1010,7 @@ def scan_inflections_universe(
         try:
             from engine.eod_store import get_cached_ohlcv_batch, sync_universe_eod
 
-            df_cache = get_cached_ohlcv_batch(symbols, days=300, copy=False)
+            df_cache = get_cached_ohlcv_batch(symbols, days=504, copy=False)
             cache_state = "LOCAL_SQLITE_EOD"
 
             if sync_missing:
@@ -1020,7 +1021,7 @@ def scan_inflections_universe(
                 # to prevent broad scans (2,000+ stocks) from blocking on obsolete/unlisted tickers
                 if missing and len(missing) <= 60 and len(symbols) <= 100:
                     sync_universe_eod(missing, exchange=exchange)
-                    newly_cached = get_cached_ohlcv_batch(missing, days=300, copy=False)
+                    newly_cached = get_cached_ohlcv_batch(missing, days=504, copy=False)
                     df_cache.update(newly_cached)
         except Exception:
             pass

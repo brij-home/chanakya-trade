@@ -661,6 +661,72 @@ class AutoAlert:
                     return False, f"Inverted Bearish Stop-Loss: SL (₹{sl:,.2f}) <= LTP (₹{ltp:,.2f})"
                 if t1 >= ltp:
                     return False, f"Inverted Bearish Target: Target (₹{t1:,.2f}) >= LTP (₹{ltp:,.2f})"
+
+            # Multi-Target Monotonicity Guard
+            # Enforce that Target 2 (if present) extends strictly beyond Target 1 in the trade's direction
+            plan_dict = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
+            opt_plan_dict = (
+                plan_dict.get("option_plan", {})
+                if isinstance(plan_dict.get("option_plan"), dict)
+                else {}
+            )
+            raw_t1 = (
+                opt_plan_dict.get("t1_premium")
+                if is_opt
+                else (self.target_1 or plan_dict.get("target_1"))
+            )
+            raw_t2 = (
+                opt_plan_dict.get("t2_premium") if is_opt else plan_dict.get("target_2")
+            )
+            t1_f, t2_f = None, None
+            if raw_t1:
+                try:
+                    t1_f = float(str(raw_t1).replace(",", "").replace("₹", "").replace("$", ""))
+                except Exception:
+                    pass
+            if raw_t2:
+                try:
+                    t2_f = float(str(raw_t2).replace(",", "").replace("₹", "").replace("$", ""))
+                except Exception:
+                    pass
+
+            if t1_f and t2_f:
+                if is_long and t2_f <= t1_f:
+                    return (
+                        False,
+                        f"Inverted Target Hierarchy: Target 2 (₹{t2_f:,.2f}) <= Target 1 (₹{t1_f:,.2f})",
+                    )
+                elif is_short and t2_f >= t1_f:
+                    return (
+                        False,
+                        f"Inverted Bearish Target Hierarchy: Target 2 (₹{t2_f:,.2f}) >= Target 1 (₹{t1_f:,.2f})",
+                    )
+
+            # Zero / Micro Risk Guard:
+            entry_ref = float(self.trigger_level or getattr(self, "entry_price", 0.0) or ltp)
+            risk_dist = abs(entry_ref - sl)
+            if entry_ref > 0 and (risk_dist / entry_ref) < 0.0005:
+                return (
+                    False,
+                    f"Micro-Risk Noise Trap: Stop-loss distance (₹{risk_dist:,.2f}) is < 0.05% of entry (₹{entry_ref:,.2f})",
+                )
+
+            # Cash Equity Daily Circuit Limit Guard (NSE/BSE max 20% single-day bands)
+            exch_str = str(self.exchange or "NSE").upper()
+            is_cash_equity = (
+                not is_opt
+                and exch_str in ("NSE", "BSE")
+                and not str(self.symbol).endswith("FUT")
+                and getattr(self, "time_horizon", "INTRADAY") == "INTRADAY"
+            )
+            if is_cash_equity and entry_ref > 0 and not is_test:
+                move_pct = (abs(t1 - entry_ref) / entry_ref) * 100.0
+                if move_pct > 25.0:
+                    return (
+                        False,
+                        f"Circuit Limit Violation: Intraday cash equity target move ({move_pct:.1f}%) exceeds maximum daily circuit band (20%)",
+                    )
+
         else:
             # For trailing stops, validate that initial stop was geometrically sound
             init_sl = float(getattr(self, "initial_stop_loss", 0.0) or 0.0)
@@ -842,7 +908,16 @@ class AutoAlert:
             # 2c. Unignited Early Warning Setup Time-Stop:
             # Pre-breakout early warnings expire if left unignited from a prior day,
             # or if 60 minutes have elapsed without triggering during an active session (4h for 24x7 crypto).
-            if self.stage in ("EARLY_WARNING", "STALK", "PRIMED"):
+            # Multi-session setups (SWING, POSITIONAL, MULTIBAGGER) are explicitly exempt from single-session cutoff.
+            is_multi_session = th in (
+                "SWING",
+                "SWING_SHORT",
+                "SWING_MID",
+                "LONG_TERM",
+                "POSITIONAL",
+                "MULTIBAGGER",
+            )
+            if self.stage in ("EARLY_WARNING", "STALK", "PRIMED") and not is_multi_session:
                 exch = (self.exchange or "NSE").upper()
                 seg = (getattr(self, "segment", "") or "").upper()
                 is_crypto = (
@@ -1024,7 +1099,7 @@ class AutoAlert:
     def target_1(self) -> Optional[float]:
         """Canonical Target 1 price level."""
         plan = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
-        t1_val = plan.get("target_1") or plan.get("target")
+        t1_val = plan.get("target_1")
         if t1_val:
             try:
                 import re
@@ -1034,7 +1109,34 @@ class AutoAlert:
                     return float(m[0])
             except Exception:
                 pass
-        return self.target_level if self.target_level > 0 else None
+
+        # If not explicitly defined as target_1, compute canonical +2R milestone if entry & SL exist
+        ep = self.entry_price
+        sl = self.stop_loss
+        if ep and sl and ep != sl:
+            risk = abs(ep - sl)
+            dir_str = str(getattr(self, "direction", "BULLISH")).upper()
+            is_bullish = dir_str not in ("BEARISH", "SELL", "SHORT")
+            t1_calc = round(ep + (risk * 2.0) if is_bullish else ep - (risk * 2.0), 2)
+            tgt_lvl = float(self.target_level or 0.0)
+            if tgt_lvl > 0:
+                if is_bullish and tgt_lvl > ep and t1_calc >= tgt_lvl:
+                    return round(ep + (tgt_lvl - ep) * 0.5, 2)
+                elif not is_bullish and tgt_lvl < ep and t1_calc <= tgt_lvl:
+                    return round(ep - (ep - tgt_lvl) * 0.5, 2)
+            return t1_calc
+
+        fallback = plan.get("target") or self.target_level
+        if fallback:
+            try:
+                import re
+
+                m = re.findall(r"[\d.]+", str(fallback).replace(",", ""))
+                if m:
+                    return float(m[0])
+            except Exception:
+                pass
+        return self.target_level if (self.target_level and self.target_level > 0) else None
 
     @property
     def target_2(self) -> Optional[float]:

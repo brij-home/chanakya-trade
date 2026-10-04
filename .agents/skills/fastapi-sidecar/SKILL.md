@@ -92,6 +92,8 @@ The frontend must always display the current feed mode so the user knows their d
 15. **Pre-Commit Gate**: Run `.venv\Scripts\python.exe scripts/validate_all.py --fast` (< 20s) before any commit.
 16. **Pre-Push Gate**: Run `.venv\Scripts\python.exe scripts/validate_all.py --full` (< 40s) for full 2,188+ test matrix.
 17. **Cleanup Utility**: Run `.venv\Scripts\python.exe scripts/cleanup.py` to kill orphaned workers and free port 8765.
+18. **Async Event Loop Health**: Heavy synchronous quant evaluations, bulk database queries, or network scraping MUST be offloaded using `asyncio.to_thread(...)` so SSE streaming and heartbeat connections never freeze.
+19. **Traceable Error Logging**: Endpoints must never silently swallow exceptions with bare `pass`. Log all exceptions with `logger.error(..., exc_info=True)` and return honest structured JSON error responses with correlation IDs.
 
 ---
 
