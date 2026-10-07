@@ -38,11 +38,14 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
 import json
+import logging
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from brokers.base import (
     BrokerAPI,
@@ -71,32 +74,33 @@ _FYERS_INDEX_MAP = {
     "INDIA VIX": "NSE:INDIAVIX-INDEX",
     "VIX": "NSE:INDIAVIX-INDEX",
     "SENSEX": "BSE:SENSEX-INDEX",
+    "BSE:SENSEX": "BSE:SENSEX-INDEX",
+    "BANKEX": "BSE:BANKEX-INDEX",
+    "BSE:BANKEX": "BSE:BANKEX-INDEX",
     "NIFTY IT": "NSE:NIFTYIT-INDEX",
-    "NIFTY PHARMA": "NSE:CNXPHARMA-INDEX",
-    "NIFTY AUTO": "NSE:CNXAUTO-INDEX",
-    "NIFTY FMCG": "NSE:CNXFMCG-INDEX",
-    "NIFTY REALTY": "NSE:CNXREALTY-INDEX",
-    "NIFTY METAL": "NSE:CNXMETAL-INDEX",
-    "NIFTY ENERGY": "NSE:CNXENERGY-INDEX",
-    "NIFTY FIN SERVICE": "NSE:CNXFIN-INDEX",
-    "NIFTY MIDCAP 100": "NSE:MIDCAP100-INDEX",
+    "NIFTY PHARMA": "NSE:NIFTYPHARMA-INDEX",
+    "NIFTY AUTO": "NSE:NIFTYAUTO-INDEX",
+    "NIFTY FMCG": "NSE:NIFTYFMCG-INDEX",
+    "NIFTY REALTY": "NSE:NIFTYREALTY-INDEX",
+    "NIFTY METAL": "NSE:NIFTYMETAL-INDEX",
+    "NIFTY ENERGY": "NSE:NIFTYENERGY-INDEX",
+    "NIFTY FIN SERVICE": "NSE:FINNIFTY-INDEX",
     "FINNIFTY": "NSE:FINNIFTY-INDEX",
+    "NIFTY MIDCAP 100": "NSE:NIFTYMIDCAP100-INDEX",
+    "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+    "NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
+    "NSE:NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
 }
 
-_INDEX_KEYWORDS = {
+_INDEX_PREFIXES = (
     "NIFTY",
-    "SENSEX",
-    "VIX",
-    "MIDCAP",
-    "FINNIFTY",
     "BANKNIFTY",
-    "PHARMA",
-    "AUTO",
-    "FMCG",
-    "REALTY",
-    "METAL",
-    "ENERGY",
-}
+    "SENSEX",
+    "FINNIFTY",
+    "MIDCPNIFTY",
+    "INDIAVIX",
+)
+
 
 
 _MONTH_MAP = {
@@ -234,43 +238,26 @@ def round_qty_to_lot(qty: int, lot_size: int = 1) -> int:
     return rounded
 
 
+from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+from market.fyers_rate_gate import FyersCallCategory, UnifiedFyersRateGate, get_fyers_rate_gate
+
+
 class FyersRateLimiter:
     """
     Thread-safe client-side sliding-window rate limiter for Fyers API v3.
-    Guarantees strict safety margins:
-      - Max 8.0 req/sec (Fyers hard cap: 10/s)
-      - Max 160.0 req/min (Fyers hard cap: 200/min; 3 strikes in 1 day = account blocked for rest of day!)
+    Delegates to UnifiedFyersRateGate for cross-module coordination and prioritization.
     """
+
     def __init__(self, max_per_sec: float = 8.0, max_per_min: float = 160.0):
-        self._lock = threading.Lock()
-        self._max_per_sec = max_per_sec
-        self._max_per_min = max_per_min
-        self._timestamps_sec: list[float] = []
-        self._timestamps_min: list[float] = []
+        self._gate = UnifiedFyersRateGate(max_per_sec=max_per_sec, max_per_min=max_per_min)
 
-    def acquire(self) -> None:
-        with self._lock:
-            now = time.time()
-            self._timestamps_sec = [t for t in self._timestamps_sec if now - t < 1.0]
-            self._timestamps_min = [t for t in self._timestamps_min if now - t < 60.0]
-
-            sleep_needed = 0.0
-            if len(self._timestamps_sec) >= self._max_per_sec:
-                sleep_needed = max(sleep_needed, 1.0 - (now - self._timestamps_sec[0]) + 0.01)
-            if len(self._timestamps_min) >= self._max_per_min:
-                sleep_needed = max(sleep_needed, 60.0 - (now - self._timestamps_min[0]) + 0.05)
-
-            if sleep_needed > 0:
-                time.sleep(sleep_needed)
-                now = time.time()
-                self._timestamps_sec = [t for t in self._timestamps_sec if now - t < 1.0]
-                self._timestamps_min = [t for t in self._timestamps_min if now - t < 60.0]
-
-            self._timestamps_sec.append(now)
-            self._timestamps_min.append(now)
+    def acquire(self, category: Any = None, timeout: Optional[float] = None) -> bool:
+        if category is None:
+            category = FyersCallCategory.ORDER
+        return self._gate.acquire(category=category, timeout=timeout)
 
 
-_fyers_rate_limiter = FyersRateLimiter()
+_fyers_rate_limiter = get_fyers_rate_gate()
 
 
 def _resolve_commodity_contract(symbol: str) -> str:
@@ -323,6 +310,19 @@ def _resolve_commodity_contract(symbol: str) -> str:
             target_year = now.year
         target_dt = dt.date(target_year, cand_m, 1)
         return f"MCX:SILVER{target_dt.strftime('%y%b').upper()}FUT"
+
+    # SILVERM (Silver Mini): active contract months: FEB(2), APR(4), JUN(6), AUG(8), NOV(11)
+    if clean in ("SILVERM", "SILMIC"):
+        silverm_months = [2, 4, 6, 8, 11]
+        cand_m = now.month if (now.month in silverm_months and now.day <= 3) else None
+        if not cand_m:
+            future_m = [m for m in silverm_months if m > now.month]
+            cand_m = future_m[0] if future_m else silverm_months[0]
+            target_year = now.year if future_m else now.year + 1
+        else:
+            target_year = now.year
+        target_dt = dt.date(target_year, cand_m, 1)
+        return f"MCX:{clean}{target_dt.strftime('%y%b').upper()}FUT"
 
     # COPPER, ZINC, ALUMINIUM: monthly
     if clean in ("COPPER", "ZINC", "ALUMINIUM", "LEAD", "NICKEL"):
@@ -406,9 +406,9 @@ def _to_fyers_symbol(instrument: str) -> str:
     ):
         return f"NSE:{sym_upper}"
 
-    # Check if index by keywords (only if not an option/futures contract)
-    if any(kw in sym_upper for kw in _INDEX_KEYWORDS):
-        clean = sym_upper.replace(" ", "")
+    # Check if index by explicit prefixes (only if not an option/futures contract)
+    clean = sym_upper.replace(" ", "")
+    if clean.startswith(_INDEX_PREFIXES) or clean in ("VIX", "INDIAVIX"):
         return f"{exch_upper}:{clean}-INDEX"
 
     # BSE Equity
@@ -772,6 +772,17 @@ class FyersAPI(BrokerAPI):
 
     def is_authenticated(self) -> bool:
         if not self._access_token:
+            self._load_token()
+            if self._access_token:
+                return True
+            if self._fy_id and self._totp_secret and self._pin and self._app_id and self._secret_key:
+                try:
+                    logger.info("[FyersAPI] Auto-authenticating headlessly via TOTP + PIN credentials...")
+                    self.complete_login()
+                    return bool(self._access_token)
+                except Exception as e:
+                    logger.warning(f"[FyersAPI] Headless auto-login attempt failed: {e}")
+                    return False
             return False
         if self._token_ts and time.time() - self._token_ts >= TOKEN_EXPIRY:
             self._access_token = ""
@@ -780,6 +791,14 @@ class FyersAPI(BrokerAPI):
                 TOKEN_FILE.unlink(missing_ok=True)
             except Exception:
                 pass
+            if self._fy_id and self._totp_secret and self._pin and self._app_id and self._secret_key:
+                try:
+                    logger.info("[FyersAPI] Token expired, refreshing headlessly via TOTP + PIN...")
+                    self.complete_login()
+                    return bool(self._access_token)
+                except Exception as e:
+                    logger.warning(f"[FyersAPI] Headless auto-login refresh failed: {e}")
+                    return False
             return False
         # Token exists and is < 12 hours old — trust it (no API call)
         return True
@@ -892,12 +911,15 @@ class FyersAPI(BrokerAPI):
 
     # ── Quotes ────────────────────────────────────────────────
 
-    def get_quote(self, instruments: list[str]) -> dict[str, Quote]:
+    def get_quote(self, instruments: list[str] | str) -> dict[str, Quote]:
         """
         Get quotes. Instruments: ["NSE:RELIANCE", "NSE:NIFTY 50", "GOLD", "USDINR"]
         Fyers format: "NSE:RELIANCE-EQ", "NSE:NIFTY50-INDEX", "MCX:GOLD26OCTFUT"
         Batch chunking by 50 to honor Fyers API constraints.
         """
+        if isinstance(instruments, str):
+            instruments = [instruments]
+
         fyers = self._get_fyers()
         if not fyers:
             return {}
@@ -914,12 +936,23 @@ class FyersAPI(BrokerAPI):
         unique_fyers_symbols = list(dict.fromkeys(fyers_symbols))
         result: dict[str, Quote] = {}
 
+        if get_fyers_circuit_breaker().is_tripped():
+            logger.warning("[FyersAPI] Circuit breaker is OPEN. Fast-failing get_quote to protect Fyers account.")
+            return {}
+
         # Chunk in batches of 50
         CHUNK_SIZE = 50
         for i in range(0, len(unique_fyers_symbols), CHUNK_SIZE):
             chunk = unique_fyers_symbols[i : i + CHUNK_SIZE]
             try:
+                _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
                 data = fyers.quotes({"symbols": ",".join(chunk)})
+                if not isinstance(data, dict) or data.get("s") != "ok":
+                    err_msg = str(data.get("message", "Fyers quotes error")) if isinstance(data, dict) else "Invalid quotes response"
+                    if "429" in err_msg or "rate limit" in err_msg.lower():
+                        get_fyers_circuit_breaker().record_failure(status_code=429, error_message=err_msg)
+                else:
+                    get_fyers_circuit_breaker().record_success()
                 for item in data.get("d", []):
                     raw = item.get("n", "")
                     v = item.get("v", {})
@@ -972,7 +1005,16 @@ class FyersAPI(BrokerAPI):
                             upper_circuit=float(v.get("upper_ckt", 0.0) or 0.0) or None,
                             lower_circuit=float(v.get("lower_ckt", 0.0) or 0.0) or None,
                         )
-            except Exception:
+            except Exception as exc:
+                err_str = str(exc)
+                get_fyers_circuit_breaker().record_failure(
+                    status_code=429 if "429" in err_str else 0,
+                    error_message=err_str,
+                )
+                logger.warning(
+                    f"[FyersAPI] Quotes fetch error for chunk ({len(chunk)} symbols): {exc}",
+                    exc_info=True,
+                )
                 continue
 
         return result
@@ -991,6 +1033,7 @@ class FyersAPI(BrokerAPI):
             return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
         fyers_sym = _to_fyers_symbol(symbol)
         try:
+            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
             data = fyers.depth({"symbol": fyers_sym, "ohlcv_flag": 1})
             if data.get("s") != "ok":
                 return {
@@ -1036,6 +1079,7 @@ class FyersAPI(BrokerAPI):
         if not fyers:
             return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
         try:
+            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
             res = fyers.market_status()
             if isinstance(res, dict) and res.get("s") == "ok":
                 return {
@@ -1054,6 +1098,9 @@ class FyersAPI(BrokerAPI):
         """Fyers options chain with live Greeks, ΔOI, and institutional PCR via SDK."""
         fyers = self._get_fyers()
         if not fyers:
+            return []
+        if get_fyers_circuit_breaker().is_tripped():
+            logger.warning(f"[FyersAPI] Circuit breaker is OPEN. Suppressing options chain for {underlying}.")
             return []
         try:
             fyers_sym = _to_fyers_symbol(underlying)
@@ -1075,6 +1122,7 @@ class FyersAPI(BrokerAPI):
                     if exp_ts:
                         params["timestamp"] = str(exp_ts)
 
+            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
             data = fyers.optionchain(params)
             payload = data.get("data", {})
             chain: list[OptionsContract] = []
@@ -1091,6 +1139,14 @@ class FyersAPI(BrokerAPI):
                 "expiry_data": payload.get("expiryData", []),
                 "indiavix": payload.get("indiavixData", {}).get("ltp"),
             }
+
+            def _parse_greek_val(val: Any) -> Optional[float]:
+                if val is None or val == "":
+                    return None
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    return None
 
             for item in payload.get("optionsChain", []):
                 stk = item.get("strike_price")
@@ -1119,60 +1175,108 @@ class FyersAPI(BrokerAPI):
                         oi_change=int(item.get("doi", item.get("oich", item.get("oiChange", 0))) or 0),
                         pchange_oi=float(item.get("pdoi", item.get("oichp", 0.0)) or 0.0) or None,
                         volume=int(item.get("volume", 0) or 0),
-                        iv=float(greeks.get("iv", 0.0) or 0.0) or None,
-                        delta=float(greeks.get("delta", 0.0) or 0.0) or None,
-                        gamma=float(greeks.get("gamma", 0.0) or 0.0) or None,
-                        theta=float(greeks.get("theta", 0.0) or 0.0) or None,
-                        vega=float(greeks.get("vega", 0.0) or 0.0) or None,
+                        iv=_parse_greek_val(greeks.get("iv")),
+                        delta=_parse_greek_val(greeks.get("delta")),
+                        gamma=_parse_greek_val(greeks.get("gamma")),
+                        theta=_parse_greek_val(greeks.get("theta")),
+                        vega=_parse_greek_val(greeks.get("vega")),
                         bid=float(item.get("bid", 0.0) or 0.0) or None,
                         ask=float(item.get("ask", 0.0) or 0.0) or None,
                         lot_size=int(item.get("lotSize", 50) or 50),
-                        exchange="NFO",
+                        exchange=(
+                            "MCX"
+                            if (item.get("symbol", "").startswith("MCX:") or fyers_sym.startswith("MCX:"))
+                            else "NFO"
+                        ),
                     )
                 )
             return chain
         except Exception:
             return []
 
+    _expiry_ts_cache: dict[str, tuple[float, str]] = {}
+    _expiries_dates_cache: dict[str, tuple[float, list[str]]] = {}
+
     def get_expiries(self, underlying: str) -> list[str]:
         """Extract all official available expiry dates from Fyers formatted as YYYY-MM-DD."""
         fyers = self._get_fyers()
         if not fyers:
             return []
+        fyers_sym = _to_fyers_symbol(underlying)
+        now_ts = time.time()
+        cached = self._expiries_dates_cache.get(fyers_sym)
+        if cached and (now_ts - cached[0] < 43200.0):
+            return list(cached[1])
+
         try:
-            fyers_sym = _to_fyers_symbol(underlying)
+            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
             data = fyers.optionchain({"symbol": fyers_sym, "strikecount": 1})
             expiry_data = data.get("data", {}).get("expiryData", [])
             dates = []
             for item in expiry_data:
                 d_str = item.get("date", "")
+                exp_val = item.get("expiry")
                 if "-" in d_str:
                     parts = d_str.split("-")
                     if len(parts) == 3:
-                        dates.append(f"{parts[2]}-{parts[1]}-{parts[0]}")
-            return sorted(set(dates))
-        except Exception:
+                        iso_date = f"{parts[2]}-{parts[1]}-{parts[0]}"
+                        dates.append(iso_date)
+                        if exp_val:
+                            self._expiry_ts_cache[f"{fyers_sym}:{iso_date}"] = (now_ts, str(exp_val))
+            res = sorted(set(dates))
+            if res:
+                self._expiries_dates_cache[fyers_sym] = (now_ts, res)
+            return res
+        except Exception as exc:
+            logger.warning(f"[FyersAPI] Failed to get expiries for {fyers_sym}: {exc}", exc_info=True)
             return []
 
     def _resolve_expiry_timestamp(
         self, fyers_symbol: str, target_expiry_iso: str
     ) -> Optional[str]:
-        """Convert YYYY-MM-DD to Fyers epoch timestamp."""
+        """Convert YYYY-MM-DD to Fyers epoch timestamp with 12h TTL cache."""
+        cache_key = f"{fyers_symbol}:{target_expiry_iso}"
+        now_ts = time.time()
+        cached = self._expiry_ts_cache.get(cache_key)
+        if cached and (now_ts - cached[0] < 43200.0):
+            return cached[1]
+
         fyers = self._get_fyers()
         if not fyers:
             return None
         try:
+            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
             data = fyers.optionchain({"symbol": fyers_symbol, "strikecount": 1})
             expiry_data = data.get("data", {}).get("expiryData", [])
             parts = target_expiry_iso.split("-")
             fyers_date_format = (
                 f"{parts[2]}-{parts[1]}-{parts[0]}" if len(parts) == 3 else target_expiry_iso
             )
+            matched_expiry = None
+            all_dates = []
             for item in expiry_data:
-                if item.get("date") == fyers_date_format:
-                    return str(item.get("expiry"))
-        except Exception:
-            pass
+                d_str = item.get("date", "")
+                exp_val = item.get("expiry")
+                if "-" in d_str and exp_val:
+                    d_parts = d_str.split("-")
+                    if len(d_parts) == 3:
+                        iso = f"{d_parts[2]}-{d_parts[1]}-{d_parts[0]}"
+                        self._expiry_ts_cache[f"{fyers_symbol}:{iso}"] = (now_ts, str(exp_val))
+                        all_dates.append(iso)
+                if item.get("date") == fyers_date_format and exp_val:
+                    matched_expiry = str(exp_val)
+
+            if all_dates:
+                self._expiries_dates_cache[fyers_symbol] = (now_ts, sorted(set(all_dates)))
+
+            if matched_expiry:
+                self._expiry_ts_cache[cache_key] = (now_ts, matched_expiry)
+                return matched_expiry
+        except Exception as exc:
+            logger.warning(
+                f"[FyersAPI] Failed to resolve expiry timestamp for {fyers_symbol} ({target_expiry_iso}): {exc}",
+                exc_info=True,
+            )
         return None
 
     def get_options_snapshot(
@@ -1444,6 +1548,9 @@ class FyersAPI(BrokerAPI):
         fyers = self._get_fyers()
         if not fyers:
             raise RuntimeError("Fyers broker not initialized or logged in")
+        if get_fyers_circuit_breaker().is_tripped():
+            logger.warning(f"[FyersAPI] Circuit breaker is OPEN. Suppressing historical data for {symbol}.")
+            return []
 
         fyers_sym = _to_fyers_symbol(symbol)
         if exchange and not fyers_sym.startswith(f"{exchange}:") and ":" not in fyers_sym:
@@ -1512,7 +1619,7 @@ class FyersAPI(BrokerAPI):
 
         all_candles: list[list] = []
         for c_from, c_to in chunks:
-            _fyers_rate_limiter.acquire()
+            _fyers_rate_limiter.acquire(category=FyersCallCategory.HISTORICAL)
             payload = {
                 "symbol": fyers_sym,
                 "resolution": res_str,
@@ -1525,7 +1632,11 @@ class FyersAPI(BrokerAPI):
                 data = fyers.history(payload)
                 if isinstance(data, dict) and data.get("s") == "ok":
                     all_candles.extend(data.get("candles", []))
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    f"[FyersAPI] Historical data fetch failed for {fyers_sym} ({res_str}, {c_from} to {c_to}): {exc}",
+                    exc_info=True,
+                )
                 continue
 
         # Deduplicate candles by epoch timestamp and sort chronologically

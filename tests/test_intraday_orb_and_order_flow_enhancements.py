@@ -254,6 +254,7 @@ def test_early_pre_0930_signals_unmuted_by_orb():
     # Mock scanners returning early signals
     with (
         patch.object(engine, "_get_cycle_quotes", return_value={}),
+        patch.object(engine, "scan_index_micro_scalp", return_value=[]),
         patch.object(engine, "scan_index_call_setups", return_value=[]),
         patch.object(engine, "scan_index_put_setups", return_value=[]),
         patch.object(engine, "scan_opening_drives", return_value=[]),
@@ -270,6 +271,7 @@ def test_early_pre_0930_signals_unmuted_by_orb():
         patch.object(engine, "scan_pre_inflection_dryup", return_value=[]),
         patch.object(engine, "scan_incubation_triggers", return_value=[]),
         patch.object(engine, "scan_smc_orderblock_retests", return_value=[]),
+        patch.object(engine, "scan_swing_inflections", return_value=[]),
     ):  # ORB returns [] pre-09:30
         all_morning_alerts = engine.scan_equity_nfo_now()
 

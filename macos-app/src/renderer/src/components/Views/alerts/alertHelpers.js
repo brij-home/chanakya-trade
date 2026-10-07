@@ -954,10 +954,14 @@ export function isAlertActive(a) {
     stage === 'TIME_STOP_EXIT' ||
     stage === 'RUNNER_EXIT' ||
     stage === 'PROFIT_SECURED' ||
+    stage === 'SESSION_CLOSE_EXIT' ||
+    stage === 'SUPERSEDED' ||
     (targetStatus === 'TARGET_ACHIEVED' && !isTrailingRunner) ||
     targetStatus === 'RUNNER_CLOSED' ||
     targetStatus === 'SL_HIT' ||
-    targetStatus === 'TIME_STOP_EXIT'
+    targetStatus === 'TIME_STOP_EXIT' ||
+    targetStatus === 'SESSION_CLOSE_EXIT' ||
+    targetStatus === 'SUPERSEDED'
   ) return false
 
   // Check Intraday session expiration: strictly for explicit intraday setups!
@@ -1415,6 +1419,8 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   // 4. Stage & Milestones Resolution (SSOT)
   let isTimeStop = false
   let isSLHit = false
+  let isBreakevenHit = false
+  let isTrailedProfitHit = false
   let isExpired = false
   let isInvalidated = false
   let isT3Hit = false
@@ -1453,8 +1459,44 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
       resolvedStage = 'TIME_STOP_EXIT'
       isTimeStop = true
     } else if (rawStage === 'SL_HIT' || targetStatus === 'SL_HIT' || (isTriggered && (reason.includes('STOP_LOSS') || reason.includes('SL HIT') || reason.includes('SL BREACH')))) {
-      resolvedStage = 'SL_HIT'
-      isSLHit = true
+      const hasTerminalProfitMilestone = Boolean(
+        (alert.achieved_milestones && Array.isArray(alert.achieved_milestones) && (
+          alert.achieved_milestones.includes('T0_5_ACHIEVED') ||
+          alert.achieved_milestones.includes('BREAKEVEN_LOCKED') ||
+          alert.achieved_milestones.includes('DE_RISK_0_5R') ||
+          alert.achieved_milestones.includes('T1_ACHIEVED') ||
+          alert.achieved_milestones.includes('RUNNER_EXIT')
+        )) ||
+        targetStatus === 'RUNNER_CLOSED' ||
+        targetStatus === 'BREAKEVEN_CLOSED' ||
+        targetStatus === 'BREAKEVEN_LOCKED' ||
+        reason.includes('BREAKEVEN') ||
+        reason.includes('TRAILING') ||
+        reason.includes('PROFIT SECURED') ||
+        (slNum && entryNum && (
+          isDerivative
+            ? (isOptionSell ? slNum <= entryNum + 0.5 : slNum >= entryNum - 0.5)
+            : (isBull ? slNum >= entryNum - 0.5 : slNum <= entryNum + 0.5)
+        ))
+      )
+      if (hasTerminalProfitMilestone) {
+        resolvedStage = 'RUNNER_EXIT'
+        isRunnerExit = true
+        if (reason.includes('BREAKEVEN') || targetStatus === 'BREAKEVEN_CLOSED' || targetStatus === 'BREAKEVEN_LOCKED' || rawStage === 'BREAKEVEN_LOCKED') {
+          isBreakevenHit = true
+        } else {
+          isTrailedProfitHit = true
+        }
+      } else {
+        resolvedStage = 'SL_HIT'
+        isSLHit = true
+      }
+    } else if (rawStage === 'SESSION_CLOSE_EXIT' || targetStatus === 'SESSION_CLOSE_EXIT' || reason.includes('session expired') || reason.includes('SESSION EXPIRED') || reason.includes('Intraday session expired')) {
+      resolvedStage = 'SESSION_CLOSE_EXIT'
+      isExpired = true
+    } else if (rawStage === 'SUPERSEDED' || targetStatus === 'SUPERSEDED' || reason.includes('Superseded by')) {
+      resolvedStage = 'SUPERSEDED'
+      isExpired = true
     } else if (rawStage === 'EXPIRED' || alert.is_expired || alert.isExpired) {
       resolvedStage = 'EXPIRED'
       isExpired = true
@@ -1507,25 +1549,77 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
       )
     )
 
-    isSLHit = isExplicitSL || isPriceBreachedSL
+    const isBreachedStop = isExplicitSL || isPriceBreachedSL
+
+    const hasProfitMilestone = Boolean(
+      (alert.achieved_milestones && Array.isArray(alert.achieved_milestones) && (
+        alert.achieved_milestones.includes('T0_5_ACHIEVED') ||
+        alert.achieved_milestones.includes('BREAKEVEN_LOCKED') ||
+        alert.achieved_milestones.includes('DE_RISK_0_5R') ||
+        alert.achieved_milestones.includes('T1_ACHIEVED') ||
+        alert.achieved_milestones.includes('T2_ACHIEVED') ||
+        alert.achieved_milestones.includes('TARGET_ACHIEVED') ||
+        alert.achieved_milestones.includes('RUNNER_EXIT')
+      )) ||
+      targetStatus === 'T0_5_ACHIEVED' ||
+      targetStatus === 'BREAKEVEN_LOCKED' ||
+      targetStatus === 'RUNNER_CLOSED' ||
+      targetStatus === 'BREAKEVEN_CLOSED' ||
+      rawStage === 'RUNNER_EXIT' ||
+      rawStage === 'BREAKEVEN_LOCKED' ||
+      reason.includes('BREAKEVEN') ||
+      reason.includes('TRAILING') ||
+      reason.includes('PROFIT SECURED') ||
+      reason.includes('SCALE 1') ||
+      reason.includes('TARGET 0.5')
+    )
+
+    // Check if the current stop-loss level is at or above breakeven:
+    const isStopAtOrAboveBreakeven = Boolean(
+      slNum && entryNum && (
+        isDerivative
+          ? (isOptionSell ? slNum <= entryNum + 0.5 : slNum >= entryNum - 0.5)
+          : (isBull ? slNum >= entryNum - 0.5 : slNum <= entryNum + 0.5)
+      )
+    )
+
+    const isBreakevenOrTrailedStop = isBreachedStop && (hasProfitMilestone || isStopAtOrAboveBreakeven)
+
+    if (isBreakevenOrTrailedStop) {
+      isSLHit = false
+      const isSecuredProfit = Boolean(
+        slNum && entryNum && (
+          isDerivative
+            ? (isOptionSell ? slNum < entryNum - 1.0 : slNum > entryNum + 1.0)
+            : (isBull ? slNum > entryNum + 1.0 : slNum < entryNum - 1.0)
+        )
+      )
+      if (isSecuredProfit) {
+        isTrailedProfitHit = true
+      } else {
+        isBreakevenHit = true
+      }
+    } else {
+      isSLHit = isBreachedStop
+    }
 
     isT3Hit = !isPreTrigger && Boolean(
       rawStage === 'TARGET_ACHIEVED' || rawStage === 'COMPLETED' || targetStatus === 'TARGET_ACHIEVED' ||
-      (t3Num && currentPrice && !isSLHit && (
+      (t3Num && currentPrice && !isSLHit && !isBreakevenOrTrailedStop && (
         isDerivative ? (isOptionSell ? currentPrice <= t3Num : currentPrice >= t3Num) : (isBull ? currentPrice >= t3Num : currentPrice <= t3Num)
       ))
     )
 
     isT2Hit = !isPreTrigger && Boolean(
       isT3Hit || rawStage === 'T2_ACHIEVED' || targetStatus === 'T2_ACHIEVED' ||
-      (t2Num && currentPrice && !isSLHit && (
+      (t2Num && currentPrice && !isSLHit && !isBreakevenOrTrailedStop && (
         isDerivative ? (isOptionSell ? currentPrice <= t2Num : currentPrice >= t2Num) : (isBull ? currentPrice >= t2Num : currentPrice <= t2Num)
       ))
     )
 
     isT1Hit = !isPreTrigger && Boolean(
       isT2Hit || rawStage === 'T1_ACHIEVED' || targetStatus === 'T1_ACHIEVED' ||
-      (t1Num && currentPrice && !isSLHit && (
+      (t1Num && currentPrice && !isSLHit && !isBreakevenOrTrailedStop && (
         isDerivative ? (isOptionSell ? currentPrice <= t1Num : currentPrice >= t1Num) : (isBull ? currentPrice >= t1Num : currentPrice <= t1Num)
       ))
     )
@@ -1536,7 +1630,19 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     isPrimed = rawStage === 'PRIMED'
     isStalk = rawStage === 'STALK'
     isActionable = rawStage === 'ACTIONABLE'
-    resolvedStage = isSLHit ? 'SL_HIT' : isT3Hit ? 'TARGET_ACHIEVED' : isT2Hit ? 'T2_ACHIEVED' : isT1Hit ? 'T1_ACHIEVED' : rawStage
+    resolvedStage = isTrailedProfitHit
+      ? 'RUNNER_EXIT'
+      : isBreakevenHit
+      ? 'BREAKEVEN_EXIT'
+      : isSLHit
+      ? 'SL_HIT'
+      : isT3Hit
+      ? 'TARGET_ACHIEVED'
+      : isT2Hit
+      ? 'T2_ACHIEVED'
+      : isT1Hit
+      ? 'T1_ACHIEVED'
+      : rawStage
   }
 
   // 5. Stage Pill & Trajectory Status
@@ -1546,6 +1652,12 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   if (isTimeStop) {
     stagePill = { label: '⏱️ TIME STOP', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/40', icon: '⏱️' }
     trajectoryStatus = { badge: '⏱️ TIME STOP', text: alert.invalidation_reason || 'Velocity time stop reached — closed at CMP', theme: 'amber' }
+  } else if (isTrailedProfitHit) {
+    stagePill = { label: '💰 TRAIL SL HIT', cls: 'bg-emerald-500/25 text-emerald-200 border-emerald-400/60 ring-1 ring-emerald-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '💰' }
+    trajectoryStatus = { badge: '💰 TRAILED SL HIT', text: alert.invalidation_reason || 'Trailed stop hit — secured profit locked in', theme: 'emerald' }
+  } else if (isBreakevenHit) {
+    stagePill = { label: '🛡️ BREAKEVEN HIT', cls: 'bg-amber-500/25 text-amber-200 border-amber-400/60 ring-1 ring-amber-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🛡️' }
+    trajectoryStatus = { badge: '🛡️ BREAKEVEN HIT', text: alert.invalidation_reason || 'Trailed stop triggered at breakeven — capital protected', theme: 'amber' }
   } else if (isSLHit) {
     stagePill = { label: '🛑 SL HIT', cls: 'bg-rose-500/25 text-rose-300 border-rose-500/60 ring-1 ring-rose-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🛑' }
     trajectoryStatus = { badge: '🛑 SL BREACHED', text: alert.invalidation_reason || 'Stop loss triggered — trade thesis invalidated', theme: 'rose' }

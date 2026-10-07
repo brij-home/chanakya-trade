@@ -873,3 +873,55 @@ async def get_symbol_info_endpoint(symbol: str):
     info = await asyncio.to_thread(sm.get_symbol_info, symbol)
     return {"status": "ok", "symbol": symbol, "data": info}
 
+
+@router.get("/api/indices/regime", tags=["Index Adaptive Intelligence"])
+@router.get("/api/indices/regime/{symbol}", tags=["Index Adaptive Intelligence"])
+async def get_index_adaptive_regime_endpoint(symbol: Optional[str] = "NIFTY"):
+    """
+    Eagle Eye, Tiger Stalking & Sniper Execution Adaptive Regime Engine.
+    Evaluates:
+      1. Choppiness Index (CHOP) & Wilder's ADX trend strength
+      2. Time-of-Day phase (Opening Discovery, Midday Theta Trap, Power Hour)
+      3. Higher Timeframe 15m/1h Trend & 20-EMA slope
+      4. Heavyweight Locomotive Confluence & Breadth
+      5. Tiger Strategy Mandate (MOMENTUM_EXPANSION vs PRESERVE_CAPITAL vs TURTLE_SOUP)
+      6. Sniper Blueprint (No-Chase limit, tight OTE bracket, structure SL, 20m time-stop)
+    """
+    from engine.index_adaptive_regime import evaluate_index_adaptive_regime
+    from market.quotes import get_quote
+    from market.history import get_ohlcv
+
+    target_sym = (symbol or "NIFTY").upper().strip()
+    if target_sym in ("ALL", "MAJOR", "OVERVIEW"):
+        symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+    else:
+        symbols = [target_sym]
+
+    def _eval_single(sym: str) -> dict[str, Any]:
+        clean = sym.replace("NSE:", "").replace("BSE:", "").strip().upper()
+        # Fetch spot quote
+        quote_sym = f"NSE:{clean}" if clean != "SENSEX" else "BSE:SENSEX"
+        q_map = get_quote([quote_sym])
+        spot = float(getattr(q_map.get(quote_sym), "last_price", 0.0) or 0.0)
+        # Fetch 5m intraday OHLCV
+        df_5m = None
+        try:
+            df_5m = get_ohlcv(clean, days=5, timeframe="5m")
+        except Exception:
+            pass
+
+        decision = evaluate_index_adaptive_regime(
+            underlying=clean,
+            spot=spot,
+            ohlcv_5m=df_5m,
+        )
+        return decision.to_dict()
+
+    results = {}
+    for s in symbols:
+        results[s] = await asyncio.to_thread(_eval_single, s)
+
+    if len(symbols) == 1:
+        return {"status": "ok", "symbol": symbols[0], "regime": results[symbols[0]]}
+    return {"status": "ok", "regimes": results}
+

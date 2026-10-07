@@ -251,11 +251,41 @@ def detect_opening_drive(
                 opt_ltp = float(chosen.last_price)
                 opt_strike = float(chosen.strike)
                 opt_expiry = getattr(chosen, "expiry", None)
-                opt_sl = round(max(0.1, opt_ltp * 0.78), 2)
-                opt_t1 = round(opt_ltp * 1.50, 2)
-                opt_t2 = round(opt_ltp * 2.00, 2)
-                opt_runner = round(opt_ltp * 2.60, 2)
-                opt_no_chase = round(opt_ltp * 1.08, 2)
+                opt_plan = None
+                try:
+                    from engine.trade_plan import calculate_option_execution_plan
+
+                    opt_plan = calculate_option_execution_plan(
+                        trade_plan=None,
+                        option_type=opt_type,
+                        strike=opt_strike,
+                        expiry=str(opt_expiry) if opt_expiry else "",
+                        option_ltp=opt_ltp,
+                        lot_size=lot_sz,
+                        spot=ltp,
+                        contract_symbol=opt_contract_sym,
+                    )
+                except Exception:
+                    opt_plan = None
+
+                if opt_plan:
+                    opt_sl = float(opt_plan["sl_premium"])
+                    opt_t1 = float(opt_plan["t1_premium"])
+                    opt_t2 = float(
+                        opt_plan.get("t2_premium")
+                        or round(opt_ltp * (1.32 if is_index else 1.42), 2)
+                    )
+                    opt_runner = float(
+                        opt_plan.get("t3_premium")
+                        or round(opt_ltp * (1.55 if is_index else 1.70), 2)
+                    )
+                    opt_no_chase = round(opt_ltp * 1.04, 2)
+                else:
+                    opt_sl = round(max(0.1, opt_ltp * (0.82 if is_index else 0.78)), 2)
+                    opt_t1 = round(opt_ltp * (1.18 if is_index else 1.24), 2)
+                    opt_t2 = round(opt_ltp * (1.32 if is_index else 1.42), 2)
+                    opt_runner = round(opt_ltp * (1.55 if is_index else 1.70), 2)
+                    opt_no_chase = round(opt_ltp * 1.04, 2)
     except Exception as e:
         logger.debug(f"[OpeningDrive] Option lookup failed for {clean_sym}: {e}")
 
@@ -265,11 +295,11 @@ def detect_opening_drive(
         opt_strike = round(ltp / step) * step
         opt_contract_sym = f"{clean_sym} {int(opt_strike)} {opt_type}"
         opt_ltp = round(max(25.0, ltp * 0.007), 1)
-        opt_sl = round(opt_ltp * 0.78, 1)
-        opt_t1 = round(opt_ltp * 1.50, 1)
-        opt_t2 = round(opt_ltp * 2.00, 1)
-        opt_runner = round(opt_ltp * 2.60, 1)
-        opt_no_chase = round(opt_ltp * 1.08, 1)
+        opt_sl = round(opt_ltp * 0.82, 1)
+        opt_t1 = round(opt_ltp * 1.18, 1)
+        opt_t2 = round(opt_ltp * 1.32, 1)
+        opt_runner = round(opt_ltp * 1.55, 1)
+        opt_no_chase = round(opt_ltp * 1.04, 1)
 
     has_opt = bool(opt_contract_sym and opt_ltp and (is_index or opt_ltp > 0))
     resolved_no_chase = round(opt_no_chase if has_opt else no_chase_lvl, 2)
@@ -291,8 +321,12 @@ def detect_opening_drive(
         "target_2": f"₹{opt_t2:,.1f}" if (has_opt and opt_t2) else f"₹{t2_price:,.1f}",
         "target_3": f"₹{opt_runner:,.1f}" if (has_opt and opt_runner) else f"₹{t3_price:,.1f}",
         "runner_target": f"₹{opt_runner:,.1f}" if (has_opt and opt_runner) else f"₹{t3_price:,.1f}",
+        "entry_type": "LIMIT_ON_PULLBACK",
+        "optimal_entry_limit": bar_open,
+        "retest_entry": bar_open,
         "no_chase_boundary": f"₹{resolved_no_chase:,.1f}",
         "risk_reward": rr_str,
+        "asymmetric_rr": f"1:{max(3.0, rr_ratio):.1f}",
         "underlying_spot": f"₹{ltp:,.1f}",
         "underlying_sl": f"₹{sl_price:,.1f}",
         "underlying_target": f"₹{t1_price:,.1f}",
@@ -305,12 +339,12 @@ def detect_opening_drive(
             "range_pct": round(range_pct, 2),
         },
         "when_to_buy": (
-            f"Enter {opt_contract_sym} on ask while spot holds {'above' if is_bull_drive else 'below'} ₹{bar_open:,.1f}."
+            f"Enter {opt_contract_sym} while spot holds {'above' if is_bull_drive else 'below'} ₹{bar_open:,.1f}. Prefer Limit order in pullback zone."
             if has_opt
-            else f"Enter {'LONG' if is_bull_drive else 'SHORT'} on ask while holding {'above' if is_bull_drive else 'below'} ₹{bar_open:,.1f}."
+            else f"Enter {'LONG' if is_bull_drive else 'SHORT'} on pullback while holding {'above' if is_bull_drive else 'below'} ₹{bar_open:,.1f}."
         ),
-        "when_to_wait": f"DISQUALIFIED if price crosses back through opening extreme ₹{bar_open:,.1f} or moves beyond no-chase boundary ₹{resolved_no_chase:,.1f}.",
-        "profit_rule": "Scale 50% at T1, move SL to Cost/Breakeven, trail runner on 5m 20-EMA.",
+        "when_to_wait": f"DO NOT CHASE beyond ₹{resolved_no_chase:,.1f}. If price > ₹{resolved_no_chase:,.1f}, wait for pullback to ₹{bar_open:,.1f} or cancel.",
+        "profit_rule": "Scale 50% at T1 (+2.0R to +3.0R), move SL to Cost/Breakeven, risk drops to ₹0.00 (Free-Roll). Hold 25% for T2, trail runner on 5m 20-EMA.",
     }
 
     if has_opt:

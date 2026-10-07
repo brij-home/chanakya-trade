@@ -156,3 +156,63 @@ def test_api_ticker_stream_generator_logic():
             break
 
     asyncio.run(_test())
+
+
+def test_ticker_stream_ws_alive_detection():
+    stream = MarketTickerStream()
+    assert not stream.is_ws_alive()
+
+    # Simulate WS tick on Nifty
+    tick = MStockTick(
+        mode=3,
+        exchange_type=1,
+        token="26000",
+        symbol="NSE:NIFTY 50",
+        sequence=1,
+        timestamp=1756980000.0,
+        ltp=24800.0,
+        open=24700.0,
+        high=24850.0,
+        low=24690.0,
+        close=24750.0,
+        volume=100000,
+    )
+    stream._on_mstock_tick(tick)
+    assert stream.is_ws_alive(max_staleness_seconds=8.0) is True
+
+    # Artificially age the tick beyond staleness window
+    stream._items["nifty_50"].updated_ts -= 10.0
+    assert stream.is_ws_alive(max_staleness_seconds=8.0) is False
+
+
+def test_ws_tick_not_overwritten_by_stale_rest():
+    stream = MarketTickerStream()
+
+    # Provide live WS tick with price 25000.0
+    tick = MStockTick(
+        mode=3,
+        exchange_type=1,
+        token="26000",
+        symbol="NSE:NIFTY 50",
+        sequence=1,
+        timestamp=1756980000.0,
+        ltp=25000.0,
+        open=24700.0,
+        high=25050.0,
+        low=24690.0,
+        close=24750.0,
+        volume=100000,
+    )
+    stream._on_mstock_tick(tick)
+
+    # Force REST refresh with stale price 24500.0
+    mock_ribbon = [
+        {"symbol": "NIFTY", "display_name": "NIFTY 50", "inst": "NSE:NIFTY 50", "ltp": 24500.0, "change": -50.0, "change_pct": -0.2}
+    ]
+    with patch("market.ticker_stream.compute_ribbon_tickers", return_value=mock_ribbon):
+        stream.refresh_indices_sync(force_ribbon=True)
+
+    # NIFTY price must remain 25000.0 because WS tick was received < 5 seconds ago
+    assert stream._items["nifty_50"].price == 25000.0
+    assert stream._items["nifty_50"].source == "MSTOCK_WS"
+

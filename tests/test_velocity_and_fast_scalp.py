@@ -411,3 +411,55 @@ def test_profitable_time_stop_marked_completed_not_invalidated():
     assert u.stage == "COMPLETED"
     assert u.is_invalidated is False
     assert "TIME-STOP PROFIT SECURED" in u.headline
+
+
+def test_bot_template_expired_untriggered_setup_rendering():
+    """Regression test: Untriggered time-stop expired setup must render SETUP EXPIRED notice, NEVER a NEW CALL."""
+    from bot.alert_templates import render_auto_alert
+    from bot.free_index_templates import render_free_index_alert
+
+    alert = AutoAlert(
+        alert_id="aa-gamma-blast-nifty-pe-22750-20261007",
+        alert_type="GAMMA_BLAST",
+        stage="EXPIRED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BEARISH",
+        option_type="PE",
+        strike=22750.0,
+        headline="⏱️ [REAL/LIVE] TIME-STOP EXPIRED: NIFTY",
+        summary="Time-Stop expired: Setup did not trigger within 60-minute momentum window.",
+        invalidation_reason="Time-Stop expired: Setup did not trigger within 60-minute momentum window.",
+        archive_reason="Time-Stop expired: Setup did not trigger within 60-minute momentum window.",
+        ltp=190.50,
+        trigger_level=190.50,
+        target_level=254.50,
+        stop_loss=167.60,
+        contract_symbol="NIFTY26O1322750PE",
+        is_live=True,
+        environment="LIVE",
+        target_status="TIME_EXPIRED",
+        actionable_plan={
+            "action": "BUY NIFTY 22750 PE @ ₹190.50",
+            "recommended_entry": "₹190.50",
+            "stop_loss": "₹167.60",
+            "target_1": "₹227.10",
+            "target_2": "₹254.50",
+        },
+    )
+
+    rendered_main = render_auto_alert(alert, in_market=True)
+    # 1. Must NOT be rendered as a NEW CALL
+    assert "NEW CALL" not in rendered_main
+    assert "Action: BUY" not in rendered_main
+    # 2. Must clearly state that setup expired and to cancel orders
+    assert "SETUP EXPIRED (TIME-STOP)" in rendered_main
+    assert "MOMENTUM WINDOW LAPSED" in rendered_main
+    assert "CANCEL ORDER / DO NOT ENTER (SETUP DID NOT TRIGGER)" in rendered_main
+    assert "Time-Stop expired" in rendered_main
+
+    # 3. Free index template check
+    rendered_free = render_free_index_alert(alert, in_market=True)
+    assert "SETUP EXPIRED" in rendered_free
+    assert "Cancel pending orders" in rendered_free
+

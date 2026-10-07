@@ -70,3 +70,32 @@ def test_analyze_symbol_order_book_returns_snapshot():
         "SELL_LEAN",
         "HEAVY_DISTRIBUTION",
     )
+
+
+def test_compute_order_book_metrics_fyers_volume_keys():
+    """Verifies that Fyers L2 depth containing 'volume' and 'ord' computes OBI accurately."""
+    fyers_raw_depth = {
+        "buy": [
+            {"price": 8652, "volume": 10, "ord": 4},
+            {"price": 8651, "volume": 8, "ord": 2},
+            {"price": 8650, "volume": 38, "ord": 9},
+            {"price": 8649, "volume": 4, "ord": 3},
+            {"price": 8648, "volume": 9, "ord": 7},
+        ],
+        "sell": [
+            {"price": 8654, "volume": 4, "ord": 2},
+            {"price": 8655, "volume": 4, "ord": 3},
+            {"price": 8656, "volume": 10, "ord": 3},
+            {"price": 8657, "volume": 17, "ord": 10},
+            {"price": 8658, "volume": 11, "ord": 6},
+        ],
+    }
+    snap = compute_order_book_metrics("CRUDEOIL", fyers_raw_depth, ltp=8653.0)
+    assert snap.total_bid_qty == 69
+    assert snap.total_ask_qty == 46
+    assert snap.obi_5 > 0.0
+    assert snap.total_bid_qty > snap.total_ask_qty
+    assert snap.liquidity_status == "NORMAL"
+    assert snap.bids[0]["quantity"] == 10
+    assert snap.bids[0]["orders"] == 4
+

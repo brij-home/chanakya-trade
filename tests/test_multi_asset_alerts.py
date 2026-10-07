@@ -340,18 +340,19 @@ def test_commodity_alert_includes_defined_risk_option_alternative():
     mock_quote.change_pct = 2.1
     mock_quote.volume = 45000
 
-    with patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}):
-        with patch("market.history.get_ohlcv", return_value=None):
-            with patch("market.quotes.get_ltp", return_value=6500.0):
-                alerts = engine.scan_commodities_now()
-                assert len(alerts) >= 1
-                crude_alert = alerts[0]
-                assert "option_alternative" in crude_alert.actionable_plan
-                opt_alt = crude_alert.actionable_plan["option_alternative"]
-                assert opt_alt["option_type"] == "CE"
-                assert opt_alt["strike"] == 6500.0
-                assert opt_alt["max_loss_capped"] > 0
-                assert "MCX:CRUDEOIL" in opt_alt["contract"]
+    with patch("market.options.get_data_broker", side_effect=Exception("No live broker in unit test")):
+        with patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}):
+            with patch("market.history.get_ohlcv", return_value=None):
+                with patch("market.quotes.get_ltp", return_value=6500.0):
+                    alerts = engine.scan_commodities_now()
+                    assert len(alerts) >= 1
+                    crude_alert = alerts[0]
+                    assert "option_alternative" in crude_alert.actionable_plan
+                    opt_alt = crude_alert.actionable_plan["option_alternative"]
+                    assert opt_alt["option_type"] == "CE"
+                    assert opt_alt["strike"] == 6500.0
+                    assert opt_alt["max_loss_capped"] > 0
+                    assert "MCX:CRUDEOIL" in opt_alt["contract"]
 
 
 def test_mock_data_strictly_tagged_test_and_blocks_telegram():

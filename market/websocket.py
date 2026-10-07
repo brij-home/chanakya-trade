@@ -47,7 +47,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_SYMBOLS = [
     "NSE:NIFTY50-INDEX",
     "NSE:NIFTYBANK-INDEX",
+    "NSE:FINNIFTY-INDEX",
+    "NSE:MIDCPNIFTY-INDEX",
+    "BSE:SENSEX-INDEX",
     "NSE:INDIAVIX-INDEX",
+    "MCX:CRUDEOIL",
+    "MCX:NATURALGAS",
+    "MCX:GOLD",
+    "MCX:SILVER",
 ]
 
 # Map our instrument format to Fyers WebSocket format
@@ -57,35 +64,27 @@ _SYMBOL_MAP = {
     "NSE:INDIA VIX": "NSE:INDIAVIX-INDEX",
     "BSE:SENSEX": "BSE:SENSEX-INDEX",
     "NSE:NIFTY FIN SERVICE": "NSE:FINNIFTY-INDEX",
-    "NSE:NIFTY MIDCAP 100": "NSE:MIDCAP100-INDEX",
+    "NSE:NIFTY MIDCAP 100": "NSE:NIFTYMIDCAP100-INDEX",
+    "NSE:MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+    "NSE:NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
+    "BSE:BANKEX": "BSE:BANKEX-INDEX",
     "NSE:NIFTY IT": "NSE:NIFTYIT-INDEX",
-    "NSE:NIFTY PHARMA": "NSE:CNXPHARMA-INDEX",
-    "NSE:NIFTY AUTO": "NSE:CNXAUTO-INDEX",
-    "NSE:NIFTY FMCG": "NSE:CNXFMCG-INDEX",
-    "NSE:NIFTY REALTY": "NSE:CNXREALTY-INDEX",
-    "NSE:NIFTY METAL": "NSE:CNXMETAL-INDEX",
-    "NSE:NIFTY ENERGY": "NSE:CNXENERGY-INDEX",
+    "NSE:NIFTY PHARMA": "NSE:NIFTYPHARMA-INDEX",
+    "NSE:NIFTY AUTO": "NSE:NIFTYAUTO-INDEX",
+    "NSE:NIFTY FMCG": "NSE:NIFTYFMCG-INDEX",
+    "NSE:NIFTY REALTY": "NSE:NIFTYREALTY-INDEX",
+    "NSE:NIFTY METAL": "NSE:NIFTYMETAL-INDEX",
+    "NSE:NIFTY ENERGY": "NSE:NIFTYENERGY-INDEX",
 }
 
-# Known index patterns — anything with these keywords is an INDEX, not EQ
-_INDEX_KEYWORDS = {
+_INDEX_PREFIXES = (
     "NIFTY",
-    "SENSEX",
-    "VIX",
-    "MIDCAP",
-    "FINNIFTY",
     "BANKNIFTY",
-    "PHARMA",
-    "AUTO",
-    "FMCG",
-    "REALTY",
-    "METAL",
-    "ENERGY",
-    "IT",
-    "FIN SERVICE",
-    "BANK",
-    "INDEX",
-}
+    "SENSEX",
+    "FINNIFTY",
+    "MIDCPNIFTY",
+    "INDIAVIX",
+)
 
 
 def _to_ws_symbol(instrument: str) -> str:
@@ -117,9 +116,9 @@ def _to_ws_symbol(instrument: str) -> str:
         if map_key in _SYMBOL_MAP:
             return _SYMBOL_MAP[map_key]
 
-        # Check if it's an index (contains NIFTY, SENSEX, VIX, etc.)
-        if any(kw in sym_upper for kw in _INDEX_KEYWORDS):
-            clean = sym_upper.replace(" ", "")
+        # Check if it's an index by explicit prefixes
+        clean = sym_upper.replace(" ", "")
+        if clean.startswith(_INDEX_PREFIXES) or clean in ("VIX", "INDIAVIX"):
             return f"{exch}:{clean}-INDEX"
 
         return f"{exch}:{sym}-EQ"
@@ -243,8 +242,19 @@ class WebSocketManager:
         if not self._ws or not self._connected:
             return
 
+        # Filter out crypto symbols — Fyers only handles Indian market instruments (NSE, BSE, MCX, CDS)
+        filtered = []
+        for s in symbols:
+            s_up = str(s).strip().upper()
+            if s_up.startswith("CRYPTO:") or s_up.endswith("USDT") or s_up in ("BTC", "ETH", "SOL", "BNB", "DOGE"):
+                continue
+            filtered.append(s)
+
+        if not filtered:
+            return
+
         # Convert to Fyers format
-        ws_symbols = [_to_ws_symbol(s) for s in symbols]
+        ws_symbols = [_to_ws_symbol(s) for s in filtered]
         new_symbols = [s for s in ws_symbols if s not in self._subscribed]
 
         if not new_symbols:
@@ -254,8 +264,14 @@ class WebSocketManager:
             self._ws.subscribe(new_symbols)
             self._subscribed.update(new_symbols)
             logger.info(f"Subscribed to {len(new_symbols)} symbols")
+            try:
+                from market.ws_subscription_manager import get_ws_subscription_manager
+
+                get_ws_subscription_manager().add_subscriptions(new_symbols)
+            except Exception as exc:
+                logger.warning(f"[WebSocket] Could not persist subscription update: {exc}")
         except Exception as e:
-            logger.error(f"Subscribe failed: {e}")
+            logger.error(f"Subscribe failed: {e}", exc_info=True)
 
     def unsubscribe(self, symbols: list[str]) -> None:
         """Unsubscribe from symbols."""
@@ -318,6 +334,15 @@ class WebSocketManager:
     def _on_connect(self) -> None:
         self._connected = True
         logger.info("WebSocket: connected")
+        try:
+            from market.ws_subscription_manager import get_ws_subscription_manager
+
+            get_ws_subscription_manager().on_ws_connected(self)
+        except Exception as exc:
+            logger.warning(
+                f"[WebSocket] Failed to restore subscriptions on connect: {exc}",
+                exc_info=True,
+            )
 
     def _on_close(self, *args, **kwargs) -> None:
         self._connected = False

@@ -666,6 +666,7 @@ def detect_gamma_blast(
                         expiry=exp_date or "",
                         option_ltp=opt_ltp,
                         lot_size=lot_sz,
+                        contract_symbol=contract_sym,
                     )
                     if opt_ltp > 0 and exp_date
                     else None
@@ -886,11 +887,18 @@ def detect_gamma_blast(
                         else "Market",
                         "entry_range": entry_range_ce,
                         "no_chase": f"DO NOT CHASE above ₹{no_chase_ce}",
+                        "target_0_5": f"₹{opt_plan['t0_5_premium']:,.2f}" if (opt_plan and opt_plan.get("t0_5_premium")) else None,
                         "target_1": f"₹{target_premium:,.2f}",
                         "target": f"₹{target_premium:,.2f} ({t1_pct_str})",
                         "target_2": f"₹{t2_premium:,.2f}"
                         if t2_premium
                         else f"₹{round(target_premium * 1.6, 2):,.2f}",
+                        "target_3": f"₹{t3_premium:,.2f}"
+                        if t3_premium
+                        else f"₹{round(target_premium * 2.5, 2):,.2f}",
+                        "runner_target": f"₹{t3_premium:,.2f}"
+                        if t3_premium
+                        else f"₹{round(target_premium * 2.5, 2):,.2f}",
                         "target_moonshot": f"₹{t3_premium:,.2f}"
                         if t3_premium
                         else f"₹{round(target_premium * 2.5, 2):,.2f}",
@@ -1280,6 +1288,7 @@ def detect_gamma_blast(
                         expiry=exp_date or "",
                         option_ltp=opt_ltp,
                         lot_size=lot_sz,
+                        contract_symbol=contract_sym,
                     )
                     if opt_ltp > 0 and exp_date
                     else None
@@ -1504,11 +1513,18 @@ def detect_gamma_blast(
                         else "Market",
                         "entry_range": entry_range_pe,
                         "no_chase": f"DO NOT CHASE above ₹{no_chase_pe}",
+                        "target_0_5": f"₹{opt_plan['t0_5_premium']:,.2f}" if (opt_plan and opt_plan.get("t0_5_premium")) else None,
                         "target_1": f"₹{target_premium:,.2f}",
                         "target": f"₹{target_premium:,.2f} ({t1_pct_str})",
                         "target_2": f"₹{t2_premium:,.2f}"
                         if t2_premium
                         else f"₹{round(target_premium * 1.6, 2):,.2f}",
+                        "target_3": f"₹{t3_premium:,.2f}"
+                        if t3_premium
+                        else f"₹{round(target_premium * 2.5, 2):,.2f}",
+                        "runner_target": f"₹{t3_premium:,.2f}"
+                        if t3_premium
+                        else f"₹{round(target_premium * 2.5, 2):,.2f}",
                         "target_moonshot": f"₹{t3_premium:,.2f}"
                         if t3_premium
                         else f"₹{round(target_premium * 2.5, 2):,.2f}",

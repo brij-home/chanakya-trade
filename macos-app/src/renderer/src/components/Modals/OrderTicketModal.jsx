@@ -52,6 +52,9 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const [previewOrder, setPreviewOrder] = useState(null)
   const [isValidatingRisk, setIsValidatingRisk] = useState(false)
   const [smartRouting, setSmartRouting] = useState(null)
+  const [noChaseLimit, setNoChaseLimit] = useState(null)
+  const [isExtendedChase, setIsExtendedChase] = useState(false)
+  const [optimalEntryZone, setOptimalEntryZone] = useState(null)
 
   // Sync state whenever modal opens or initialData changes
   useEffect(() => {
@@ -78,7 +81,31 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
       setProduct(initialData.product || (isFO ? 'NRML' : 'MIS'))
 
       const p = Number(initialData.price ?? 0)
-      setPrice(p > 0 ? p : (initialData.price ?? ''))
+      const rawNoChase = Number(initialData.no_chase_boundary || initialData.noChase || 0)
+      const rawRetest = Number(initialData.optimal_entry_limit || initialData.retest_entry || initialData.trigger_level || 0)
+      const rawZone = initialData.optimal_entry_range || initialData.entry_range || null
+
+      setNoChaseLimit(rawNoChase > 0 ? rawNoChase : null)
+      setOptimalEntryZone(rawZone)
+
+      const isExtended = Boolean(
+        rawNoChase > 0 &&
+        p > 0 &&
+        (act === 'BUY' ? p > rawNoChase : p < rawNoChase)
+      )
+      setIsExtendedChase(isExtended)
+
+      if (isExtended) {
+        // Enforce Anti-FOMO Discipline: Lock to LIMIT order at retest level
+        setOrderType('LIMIT')
+        if (rawRetest > 0) {
+          setPrice(rawRetest)
+        } else {
+          setPrice(p > 0 ? p : (initialData.price ?? ''))
+        }
+      } else {
+        setPrice(p > 0 ? p : (initialData.price ?? ''))
+      }
 
       const rawSL = initialData.stopLoss ?? initialData.stop_loss
       const rawTgt = initialData.target ?? initialData.target_1 ?? initialData.target_2
@@ -381,6 +408,32 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
         <div className="p-5 space-y-4 text-xs">
           {step === 1 ? (
             <>
+              {/* Anti-FOMO No-Chase Protection Banner */}
+              {isExtendedChase && (
+                <div
+                  className="rounded-xl p-3 border text-xs space-y-1 font-mono transition-all animate-fadeIn"
+                  style={{
+                    background: 'rgba(244, 63, 94, 0.12)',
+                    borderColor: 'rgba(244, 63, 94, 0.4)',
+                    color: '#fda4af',
+                  }}
+                >
+                  <div className="flex items-center justify-between font-bold text-rose-200">
+                    <span className="flex items-center gap-1.5">
+                      <span>⚠️</span>
+                      <span>ANTI-FOMO NO-CHASE GUARD</span>
+                    </span>
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-rose-500/20 text-rose-200 uppercase font-ui">
+                      Execution Protected
+                    </span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed">
+                    Market price has extended beyond the safe No-Chase boundary ({noChaseLimit != null ? `₹${Number(noChaseLimit).toLocaleString('en-IN')}` : 'boundary'}).
+                    Chasing market orders at this price destroys your R:R. Order locked to <strong>LIMIT ON RETEST</strong>{optimalEntryZone ? ` (${optimalEntryZone})` : ''} at ₹{price}.
+                  </p>
+                </div>
+              )}
+
               {/* Action & Symbol Header */}
               <div className="grid grid-cols-2 gap-3">
                 <div>

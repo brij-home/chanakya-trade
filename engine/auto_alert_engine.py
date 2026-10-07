@@ -219,15 +219,12 @@ class AutoAlertEngine:
             "ITC",
         ]
         self._watched_equities = list(self._default_watched_equities)
-        # Watched commodities & currency universe (continuous monitoring 09:00 - 23:30 IST)
+        # Watched commodities universe (continuous monitoring 09:00 - 23:30 IST)
         self._watched_commodities = [
             "CRUDEOIL",
-            "CRUDEOILM",
-            "GOLD",
-            "GOLDM",
-            "SILVER",
-            "SILVERM",
             "NATURALGAS",
+            "GOLD",
+            "SILVER",
             "COPPER",
             "ZINC",
             "ALUMINIUM",
@@ -843,7 +840,12 @@ class AutoAlertEngine:
                     and abs(alert.ltp - float(opt_prem)) < max(1.0, float(opt_prem) * 0.15)
                 )
             )
-            if is_opt:
+            is_micro_scalp = bool(
+                getattr(alert, "alert_type", "") in ("INDEX_MICRO_SCALP", "MICRO_SCALP")
+                or getattr(alert, "time_horizon", "") == "SCALP"
+                or (alert.actionable_plan and isinstance(alert.actionable_plan, dict) and "1m Micro" in str(getattr(alert, "headline", "") or ""))
+            )
+            if is_opt and not is_micro_scalp:
                 # Option premium risk floor: SL must give at least 15% breathing room from entry
                 opt_risk_pct = (abs(alert.ltp - alert.stop_loss) / alert.ltp) * 100.0
                 if opt_risk_pct < 10.0:
@@ -853,15 +855,22 @@ class AutoAlertEngine:
                     min_t2 = round(alert.ltp + 3.2 * new_opt_risk, 2)
                     min_t3 = round(alert.ltp + 5.0 * new_opt_risk, 2)
                     final_opt_tgt = max(alert.target_level, min_t3)
-                    alert.target_level = final_opt_tgt
+                    # Canonical invariant: target_level and actionable_plan["target"] must represent Target 1 (primary target),
+                    # never be overwritten with Target 3 (runner) which causes T1 > T2 display inversions.
+                    alert.target_level = min_t1
                     if alert.actionable_plan and isinstance(alert.actionable_plan, dict):
                         alert.actionable_plan["stop_loss"] = f"₹{alert.stop_loss:,.1f}"
                         alert.actionable_plan["target_1"] = f"₹{min_t1:,.1f}"
                         alert.actionable_plan["target_2"] = f"₹{min_t2:,.1f}"
                         alert.actionable_plan["target_3"] = f"₹{final_opt_tgt:,.1f}"
-                        alert.actionable_plan["target"] = f"₹{final_opt_tgt:,.1f}"
+                        alert.actionable_plan["runner_target"] = f"₹{final_opt_tgt:,.1f}"
+                        alert.actionable_plan["target"] = f"₹{min_t1:,.1f}"
                         alert.actionable_plan["risk_reward"] = (
-                            f"1:{round((final_opt_tgt - alert.ltp) / new_opt_risk, 1)}"
+                            f"1:{round((min_t1 - alert.ltp) / new_opt_risk, 1)}"
+                        )
+                        alert.actionable_plan["profit_rule"] = (
+                            f"Scale Blueprint: Book 50% at Target 1 (₹{min_t1:,.1f}) and trail SL to Cost/Breakeven. "
+                            f"Book 25% at Target 2 (₹{min_t2:,.1f}). Hold 25% runner trailing on EMA."
                         )
                         if isinstance(alert.actionable_plan.get("trade_plan"), dict):
                             tp_ref = alert.actionable_plan["trade_plan"]
@@ -869,7 +878,7 @@ class AutoAlertEngine:
                             tp_ref["target_1"] = min_t1
                             tp_ref["target_2"] = min_t2
                             tp_ref["target_3"] = final_opt_tgt
-            else:
+            elif not is_opt:
                 # Equity risk floor: minimum 0.85% distance from entry
                 eq_risk_pct = (abs(alert.ltp - alert.stop_loss) / alert.ltp) * 100.0
                 if eq_risk_pct < 0.60:
@@ -890,15 +899,20 @@ class AutoAlertEngine:
                         if is_bull
                         else min(alert.target_level, min_t3)
                     )
-                    alert.target_level = final_eq_tgt
+                    alert.target_level = min_t1
                     if alert.actionable_plan and isinstance(alert.actionable_plan, dict):
                         alert.actionable_plan["stop_loss"] = f"₹{alert.stop_loss:,.1f}"
                         alert.actionable_plan["target_1"] = f"₹{min_t1:,.1f}"
                         alert.actionable_plan["target_2"] = f"₹{min_t2:,.1f}"
                         alert.actionable_plan["target_3"] = f"₹{final_eq_tgt:,.1f}"
-                        alert.actionable_plan["target"] = f"₹{final_eq_tgt:,.1f}"
+                        alert.actionable_plan["runner_target"] = f"₹{final_eq_tgt:,.1f}"
+                        alert.actionable_plan["target"] = f"₹{min_t1:,.1f}"
                         alert.actionable_plan["risk_reward"] = (
-                            f"1:{round(abs(final_eq_tgt - alert.ltp) / new_eq_risk, 1)}"
+                            f"1:{round(abs(min_t1 - alert.ltp) / new_eq_risk, 1)}"
+                        )
+                        alert.actionable_plan["profit_rule"] = (
+                            f"Scale Blueprint: Book 50% at Target 1 (₹{min_t1:,.1f}) and trail SL to Cost/Breakeven. "
+                            f"Book 25% at Target 2 (₹{min_t2:,.1f}). Hold 25% runner trailing on EMA."
                         )
                         pullback_entry = round(alert.ltp * (0.994 if is_bull else 1.006), 1)
                         alert.actionable_plan["entry_breakout"] = f"₹{alert.ltp:,.1f}"
@@ -914,6 +928,12 @@ class AutoAlertEngine:
                             tp_ref["target_3"] = final_eq_tgt
                             tp_ref["entry_breakout"] = alert.ltp
                             tp_ref["entry_pullback_limit"] = pullback_entry
+
+            # Enforce target hierarchy monotonicity and consistency after any risk calibrations
+            if hasattr(alert, "normalize_target_hierarchy") and callable(
+                getattr(alert, "normalize_target_hierarchy")
+            ):
+                alert.normalize_target_hierarchy()
 
         # 00d2. Institutional Risk-Adjusted Position Sizing Population
         try:
@@ -1000,7 +1020,6 @@ class AutoAlertEngine:
         # 00f-2. Active Opposing Direction Conflict Gate (Simultaneous Hedging / Whipsaw Defense):
         # Prevents contradictory in-flight recommendations on the same underlying within 30 minutes.
         # If an index or stock already has an active, un-invalidated alert in direction X (e.g. BULLISH / CE),
-        # an incoming opposing alert in direction Y (e.g. BEARISH / PE) is suppressed to avoid simultaneous long/short churn.
         _INDEX_SYMS_SET = frozenset(
             {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"}
         )
@@ -1467,8 +1486,8 @@ class AutoAlertEngine:
 
                         # ── 1c-IN-FLIGHT: In-Flight Directional Lockout for Index Assets ──────
                         # For index F&O (NIFTY, BANKNIFTY, MIDCPNIFTY, etc.), an active in-flight trade
-                        # has absolute directional authority. Opposing signals cannot unseat an in-flight index position;
-                        # it must close via SL or Target before an opposing stance is entertained.
+                        # has absolute directional authority UNLESS a verified structural reversal (CHoCH / MSS / Supply/Demand sweep)
+                        # occurs, or the prior in-flight trade has breached its invalidation boundaries.
                         if (
                             clean_target in _INDEX_SYMS_SET
                             and existing_opp.is_active
@@ -1485,12 +1504,96 @@ class AutoAlertEngine:
                                 "RUNNER",
                             )
                         ):
-                            logger.info(
-                                f"[AutoAlertEngine] 🛑 In-Flight Directional Lockout for {clean_target}: "
-                                f"Active {existing_opp.direction} index trade ({existing_opp.alert_type}, stage={existing_opp.stage}) is in-flight. "
-                                f"Incoming opposing {alert.direction} alert ({alert.alert_type}) strictly blocked to preserve trader capital."
+                            # Check for Institutional Reversal Exception (Change of Character / Supply/Demand Sweep)
+                            reversal_signals = frozenset(
+                                {
+                                    "PDH_SUPPLY_REJECTION",
+                                    "DAY_HIGH_SUPPLY_REJECTION",
+                                    "VWAP_BREAKDOWN",
+                                    "DAY_LOW_BREAKDOWN",
+                                    "CAMARILLA_L4_BREAKDOWN",
+                                    "LONG_UNWINDING_FLUSH",
+                                    "INSTITUTIONAL_EXPANSION_BREAKDOWN",
+                                    "PDL_DEMAND_REJECTION",
+                                    "DAY_LOW_DEMAND_BOUNCE",
+                                    "VWAP_BREAKOUT",
+                                    "CAMARILLA_H4_BREAKOUT",
+                                }
                             )
-                            return False
+                            incoming_sigs = set((alert.metrics or {}).get("signals", []))
+                            curr_spot_val = float(
+                                alert.underlying_spot or (alert.metrics or {}).get("spot") or 0.0
+                            )
+                            opp_spot_val = float(existing_opp.underlying_spot or 0.0)
+
+                            # Determine if opposing position is deteriorating / failing
+                            is_opp_failing = False
+                            if existing_opp.direction == "BULLISH" and curr_spot_val > 0 and opp_spot_val > 0:
+                                is_opp_failing = curr_spot_val < (opp_spot_val * 0.9992)
+                            elif existing_opp.direction == "BEARISH" and curr_spot_val > 0 and opp_spot_val > 0:
+                                is_opp_failing = curr_spot_val > (opp_spot_val * 1.0008)
+
+                            opp_created_sec = 0.0
+                            try:
+                                c_str = (existing_opp.created_at or "").replace(" IST", "").strip()
+                                opp_created_sec = datetime.fromisoformat(c_str).timestamp()
+                            except Exception:
+                                pass
+                            opp_elapsed_sec = (now - opp_created_sec) if opp_created_sec else 9999.0
+
+                            has_structural_reversal = bool(
+                                (alert.metrics or {}).get("choch")
+                                or (alert.metrics or {}).get("mss")
+                                or (alert.metrics or {}).get("is_institutional_thrust")
+                                or (incoming_sigs & reversal_signals)
+                                or re.search(
+                                    r"\b(choch|mss|change of character|market structure shift|trend reversal|structural reversal)\b",
+                                    summary_str,
+                                    re.IGNORECASE,
+                                )
+                            )
+
+                            can_intercept_reversal = (
+                                has_structural_reversal
+                                and (is_opp_failing or existing_opp.stage == "IN_FLIGHT_WARNING")
+                                and opp_elapsed_sec >= 900.0
+                            )
+
+                            if can_intercept_reversal:
+                                # Invalidate the failing trade immediately to allow predatory reversal interception
+                                now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+                                existing_opp.is_invalidated = True
+                                existing_opp.stage = "INVALIDATED"
+                                existing_opp.invalidation_reason = (
+                                    f"Superseded by institutional {alert.direction} reversal ({alert.alert_type}: "
+                                    f"{', '.join(incoming_sigs or [alert.alert_type])})"
+                                )
+                                existing_opp.invalidated_at = now_iso
+                                if hasattr(existing_opp, "record_audit"):
+                                    existing_opp.record_audit(
+                                        "REVERSAL_INVALIDATED",
+                                        existing_opp.invalidation_reason,
+                                        actor="DISPATCH_GATE",
+                                    )
+                                # Clear directional quarantine so incoming reversal setup can dispatch cleanly
+                                if clean_target in getattr(self, "_directional_quarantine", {}):
+                                    del self._directional_quarantine[clean_target]
+                                self._alerts = [
+                                    a for a in self._alerts if a.alert_id != existing_opp.alert_id
+                                ]
+                                self._save()
+                                logger.info(
+                                    f"[AutoAlertEngine] 🔄 Predatory Reversal Interception for {clean_target}: "
+                                    f"Invalidated struggling {existing_opp.direction} trade ({existing_opp.alert_type}) "
+                                    f"in favor of high-conviction {alert.direction} reversal ({alert.alert_type})."
+                                )
+                            else:
+                                logger.info(
+                                    f"[AutoAlertEngine] 🛑 In-Flight Directional Lockout for {clean_target}: "
+                                    f"Active {existing_opp.direction} index trade ({existing_opp.alert_type}, stage={existing_opp.stage}) is in-flight. "
+                                    f"Incoming opposing {alert.direction} alert ({alert.alert_type}) strictly blocked to preserve trader capital."
+                                )
+                                return False
 
                         # ── 1c-INDEX: Index Directional Supremacy Gate ────────────────────────
                         # For index F&O (NIFTY/BANKNIFTY/MIDCPNIFTY/etc), conflicting CE + PE setups
@@ -1498,7 +1601,7 @@ class AutoAlertEngine:
                         # Resolution: Compute a supremacy_score = confidence × R:R for each side.
                         # Winner (higher score, min 25-point gap) survives. If regime is CHOP_PINNED,
                         # both legs are upgraded to defined-risk spreads instead of naked singles.
-                        if clean_target in _INDEX_SYMS_SET:
+                        if clean_target in _INDEX_SYMS_SET and not getattr(existing_opp, "is_invalidated", False):
                             # Compute supremacy scores: confidence × R:R (capped at 99×10)
                             def _supremacy(a: AutoAlert) -> float:
                                 conf = float(a.confidence or 60)
@@ -1954,15 +2057,27 @@ class AutoAlertEngine:
 
                         is_incoming_premier = any(k in clean_target for k in ("NIFTY", "BANKNIFTY"))
                         is_existing_secondary = not any(k in best_existing.symbol for k in ("NIFTY", "BANKNIFTY"))
+                        # Active Trade Stability Window:
+                        # Existing active trade gets at least 15 minutes of stability before another premier index can unseat it.
+                        existing_age_mins = 999.0
+                        if getattr(best_existing, "created_at", None):
+                            try:
+                                dt_c = datetime.fromisoformat(best_existing.created_at.replace(" IST", "").strip())
+                                existing_age_mins = (datetime.now() - dt_c).total_seconds() / 60.0
+                            except Exception:
+                                pass
+
                         if is_incoming_premier and is_existing_secondary:
-                            WINNABILITY_UPGRADE_MARGIN = 0.0
+                            WINNABILITY_UPGRADE_MARGIN = 5.0
+                        elif existing_age_mins < 15.0:
+                            WINNABILITY_UPGRADE_MARGIN = 25.0
                         elif is_incoming_premier:
-                            WINNABILITY_UPGRADE_MARGIN = 1.0
+                            WINNABILITY_UPGRADE_MARGIN = 15.0
                         else:
-                            WINNABILITY_UPGRADE_MARGIN = 10.0
+                            WINNABILITY_UPGRADE_MARGIN = 20.0
 
                         if incoming_score >= best_score + WINNABILITY_UPGRADE_MARGIN or (
-                            is_incoming_premier and is_existing_secondary and incoming_score >= best_score
+                            is_incoming_premier and is_existing_secondary and incoming_score >= best_score + 5.0
                         ):
                             # Invariant: Never unseat or invalidate an active setup already dispatched to Telegram!
                             if getattr(best_existing, "telegram_dispatched", False):
@@ -1977,12 +2092,19 @@ class AutoAlertEngine:
                                     f"significantly outperforms existing {best_existing.symbol} ({best_score:.1f}). "
                                     f"Retiring weaker index setup to maintain single best winnable trade."
                                 )
-                                best_existing.is_invalidated = True
-                                best_existing.stage = "INVALIDATED"
+                                best_existing.is_invalidated = False
+                                best_existing.stage = "COMPLETED"
+                                best_existing.target_status = "SUPERSEDED"
                                 best_existing.invalidation_reason = (
                                     f"Superseded by premier winnable index trade {clean_target} "
                                     f"(Score {incoming_score:.1f} vs {best_score:.1f})"
                                 )
+                                if hasattr(best_existing, "record_audit"):
+                                    best_existing.record_audit(
+                                        "SUPERSEDED",
+                                        best_existing.invalidation_reason,
+                                        actor="INDEX_SELECTION_ENGINE",
+                                    )
                                 self._save()
                         else:
                             logger.info(
@@ -2733,12 +2855,16 @@ class AutoAlertEngine:
             "CRYPTO_BREAKOUT",
         )
         is_calibrated = (alert.alert_type in _calibrated_bar_whitelist) or is_non_equity
-        min_conf = (
-            82 if is_calibrated else getattr(alert_preferences.telegram, "min_confidence", 85)
-        )
-        # Index signals require >= 88% unless exceptional institutional thrust (90%+)
+        # Calibrated bar: commodities require >= 85% confidence floor for institutional edge
         if is_index:
-            min_conf = max(min_conf, 88)
+            min_conf = 88
+        elif is_non_equity:
+            min_conf = 85
+        elif is_calibrated:
+            min_conf = 82
+        else:
+            min_conf = getattr(alert_preferences.telegram, "min_confidence", 85)
+
         if alert.confidence < min_conf:
             return False, f"Confidence {alert.confidence}% below Telegram bar ({min_conf}%)"
 
@@ -2764,7 +2890,7 @@ class AutoAlertEngine:
             )
             if risk_pts > 0 and reward_pts > 0:
                 rr_ratio = reward_pts / risk_pts
-                min_rr = 1.4 if not is_index else 1.6
+                min_rr = 1.8 if is_non_equity else (1.6 if is_index else 1.4)
                 if rr_ratio < min_rr:
                     return False, f"R:R 1:{rr_ratio:.1f} below minimum 1:{min_rr:.1f} threshold"
 
@@ -2886,7 +3012,10 @@ class AutoAlertEngine:
                     else:  # NIFTY, BANKNIFTY
                         min_prem = 8.00
                 else:
-                    min_prem = 1.50
+                    if clean_target in ("NATURALGAS", "NATGASMINI"):
+                        min_prem = 0.50
+                    else:
+                        min_prem = 1.50
             else:
                 if is_index:
                     sym_u = alert.symbol.upper()
@@ -2899,7 +3028,10 @@ class AutoAlertEngine:
                     else:  # NIFTY
                         min_prem = 25.00
                 else:
-                    min_prem = 3.00
+                    if clean_target in ("NATURALGAS", "NATGASMINI"):
+                        min_prem = 0.80
+                    else:
+                        min_prem = 3.00
 
             if opt_prem < min_prem:
                 return (
@@ -3152,7 +3284,7 @@ class AutoAlertEngine:
         pacing_key = f"PACING:{seg or 'GENERAL'}"
         last_pace_t = self._dispatch_cooldowns.get(pacing_key, 0.0)
         burst_cooldown = 15.0 if alert.confidence >= 90 else 45.0
-        if (now_ts - last_pace_t) < burst_cooldown:
+        if not is_test_runner and (now_ts - last_pace_t) < burst_cooldown:
             return (
                 False,
                 f"Telegram pacing throttle active on {seg} ({int(now_ts - last_pace_t)}s < {int(burst_cooldown)}s)",
@@ -3432,14 +3564,22 @@ class AutoAlertEngine:
             or ("TARGET" in (alert.target_status or "") and not (is_t0_5 or is_t1 or is_t2))
         )
         is_target = is_t0_5 or is_t1 or is_t2 or is_final
-        is_trail = alert.stage in (
-            "TRAILING_UPDATE",
-            "DE_RISK_0_5R",
-            "BREAKEVEN_LOCKED",
-            "TRAIL_POST_SWEEP",
-            "COMPRESS_STALL_RISK",
-            "TIME_STOP_SCRATCH",
-            "TIME_STOP_EXIT",
+        is_time_stop_exit = (
+            alert.stage in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH", "EXPIRED")
+            or alert.target_status in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH", "TIME_EXPIRED")
+            or "time-stop expired" in str(getattr(alert, "archive_reason", "") or "").lower()
+            or "time-stop expired" in str(getattr(alert, "invalidation_reason", "") or "").lower()
+            or "time-stop expired" in str(getattr(alert, "summary", "") or "").lower()
+        )
+        is_trail = (
+            alert.stage in (
+                "TRAILING_UPDATE",
+                "DE_RISK_0_5R",
+                "BREAKEVEN_LOCKED",
+                "TRAIL_POST_SWEEP",
+                "COMPRESS_STALL_RISK",
+            )
+            and not is_time_stop_exit
         )
         is_spread_milestone = (
             str(alert.stage or "").startswith("SPREAD_")
@@ -3538,6 +3678,8 @@ class AutoAlertEngine:
                 sys_type = "invalidation_alert"
             elif is_runner_exit:
                 sys_type = "runner_exit_achieved"
+            elif is_time_stop_exit:
+                sys_type = "time_stop_expired"
             elif is_t0_5:
                 sys_type = "target_0_5_achieved"
             elif is_t1:
@@ -3593,6 +3735,14 @@ class AutoAlertEngine:
                         alert.archive_reason
                         or alert.summary
                         or "Trailing stop triggered, profit secured."
+                    )
+                elif is_time_stop_exit:
+                    desktop_title = f"⏱️ {env_tag} [{ts_short}] SETUP EXPIRED (TIME-STOP): {item_label}"
+                    desktop_msg = (
+                        alert.archive_reason
+                        or alert.invalidation_reason
+                        or alert.summary
+                        or "Setup did not trigger within momentum window."
                     )
                 elif is_t0_5:
                     desktop_title = (
@@ -3685,10 +3835,14 @@ class AutoAlertEngine:
             is_milestone = (
                 alert.is_invalidated
                 or is_runner_exit
+                or is_time_stop_exit
                 or is_spread_milestone
                 or alert.stage
                 in (
                     "INVALIDATED",
+                    "EXPIRED",
+                    "TIME_STOP_EXIT",
+                    "TIME_STOP_SCRATCH",
                     "RUNNER_EXIT",
                     "PROFIT_SECURED",
                     "BREAKEVEN_EXIT",
@@ -3698,12 +3852,14 @@ class AutoAlertEngine:
                     "T2_ACHIEVED",
                     "TARGET_ACHIEVED",
                     "COMPLETED",
+                    "SESSION_CLOSE_EXIT",
                     "SPREAD_FREE_ROLL",
                     "SPREAD_PROFIT_70",
                     "SPREAD_SHORT_STRIKE_TOUCH",
                     "SPREAD_STOP_LOSS",
                     "FREE_ROLL_UNLOCKED",
                 )
+                or alert.target_status in ("TIME_EXPIRED", "TIME_STOP_EXIT", "TIME_STOP_SCRATCH")
                 or is_t0_5
                 or is_t1
                 or is_t2
@@ -3748,6 +3904,12 @@ class AutoAlertEngine:
             with self._lock:
                 aid = getattr(alert, "alert_id", "")
                 c_tag = getattr(alert, "contract_symbol", "") or alert.symbol
+                is_session_close = (
+                    getattr(alert, "target_status", "") == "SESSION_CLOSE_EXIT"
+                    or getattr(alert, "stage", "") in ("SESSION_CLOSE_EXIT", "SESSION_EXPIRED")
+                    or "session close exit" in (getattr(alert, "archive_reason", "") or "").lower()
+                    or "session expired" in (getattr(alert, "archive_reason", "") or "").lower()
+                )
 
                 if is_runner_exit:
                     # Fix 1: TERMINAL_EXIT is the shared canonical key covering BOTH
@@ -3755,6 +3917,34 @@ class AutoAlertEngine:
                     m_key_terminal = f"{aid}:TERMINAL_EXIT"
                     m_key1 = f"{alert.symbol}:{alert.alert_type}:RUNNER_EXIT"
                     m_key2 = f"{c_tag}:{aid}:RUNNER_EXIT"
+                    if (
+                        m_key_terminal in self._dispatched_milestones
+                        or m_key1 in self._dispatched_milestones
+                        or m_key2 in self._dispatched_milestones
+                    ):
+                        return
+                    self._dispatched_milestones.add(m_key_terminal)
+                    self._dispatched_milestones.add(m_key1)
+                    self._dispatched_milestones.add(m_key2)
+
+                elif is_session_close:
+                    m_key_terminal = f"{aid}:TERMINAL_EXIT"
+                    m_key1 = f"{alert.symbol}:{alert.alert_type}:SESSION_CLOSE"
+                    m_key2 = f"{c_tag}:{aid}:SESSION_CLOSE"
+                    if (
+                        m_key_terminal in self._dispatched_milestones
+                        or m_key1 in self._dispatched_milestones
+                        or m_key2 in self._dispatched_milestones
+                    ):
+                        return
+                    self._dispatched_milestones.add(m_key_terminal)
+                    self._dispatched_milestones.add(m_key1)
+                    self._dispatched_milestones.add(m_key2)
+
+                elif is_time_stop_exit:
+                    m_key_terminal = f"{aid}:TERMINAL_EXIT"
+                    m_key1 = f"{alert.symbol}:{alert.alert_type}:TIME_STOP"
+                    m_key2 = f"{c_tag}:{aid}:TIME_STOP"
                     if (
                         m_key_terminal in self._dispatched_milestones
                         or m_key1 in self._dispatched_milestones
@@ -3996,6 +4186,27 @@ class AutoAlertEngine:
                     except TypeError:
                         _telegram_notify(tg_msg)
 
+            # Secondary Multi-Channel Routing: Free Index Signals Channel (t.me/IndiaIndexSignals)
+            # Separate router & SEBI-compliant message formatter for community index channel
+            try:
+                from engine.free_index_router import free_index_router
+
+                if free_index_router.is_candidate(alert):
+                    free_cid = free_index_router.get_chat_id()
+                    if free_cid and str(free_cid) != str(tg_target_chat_id):
+                        free_index_router.dispatch(
+                            alert,
+                            in_market=in_market,
+                            is_milestone=is_milestone,
+                            sig_id=sig_id,
+                            disable_notification=disable_notification,
+                        )
+            except Exception as e:
+                logger.warning(
+                    f"[AutoAlertEngine] Free index router dispatch failed for {getattr(alert, 'symbol', '')}: {e}",
+                    exc_info=True,
+                )
+
             # Record channel delivery provenance, segment pacing timestamp, and sector Telegram ledger
             with self._lock:
                 alert.telegram_dispatched = True
@@ -4221,6 +4432,285 @@ class AutoAlertEngine:
 
     # ── Invalidation Monitoring & Alerting ──────────────────────
 
+    def _handle_alert_exit(
+        self,
+        alert: AutoAlert,
+        reason: str,
+        current_ltp: Optional[float] = None,
+        now_iso: Optional[str] = None,
+        loop_context: str = "Batch",
+    ) -> bool:
+        """
+        Single institutional authority for terminal alert exits:
+        - RUNNER_EXIT: Trailing stop / profit secured after T1.
+        - SESSION_CLOSE_EXIT: Intraday 15:15 IST / MCX 23:15 IST session cutoff (not an invalidation).
+        - TIME_STOP_EXPIRED: EARLY_WARNING setup timed out before triggering.
+        - INVALIDATED: Genuine stop-loss / technical structure breach.
+
+        Returns True if alert was invalidated (loss), False otherwise.
+        """
+        if not now_iso:
+            now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+
+        has_hit_target = bool(
+            any(
+                m in (getattr(alert, "achieved_milestones", []) or [])
+                for m in (
+                    "T1_ACHIEVED",
+                    "T2_ACHIEVED",
+                    "T3_ACHIEVED",
+                    "TARGET_ACHIEVED",
+                    "T0_5_ACHIEVED",
+                    "BREAKEVEN_LOCKED",
+                    "DE_RISK_0_5R",
+                )
+            )
+            or getattr(alert, "target_status", "")
+            in (
+                "T1_ACHIEVED",
+                "T2_ACHIEVED",
+                "FINAL_TARGET",
+                "TARGET_ACHIEVED",
+                "T0_5_ACHIEVED",
+                "BREAKEVEN_LOCKED",
+                "RUNNER_CLOSED",
+            )
+            or getattr(alert, "stage", "")
+            in (
+                "TARGET_1",
+                "T1_ACHIEVED",
+                "TARGET_2",
+                "FINAL_TARGET",
+                "TARGET_ACHIEVED",
+                "T0_5_ACHIEVED",
+                "BREAKEVEN_LOCKED",
+                "RUNNER_EXIT",
+            )
+        )
+        exit_p = current_ltp or alert.ltp or 0.0
+        entry_p = (
+            getattr(alert, "initial_entry_premium", None)
+            or getattr(alert, "entry_price", None)
+            or getattr(alert, "option_premium", None)
+            or getattr(alert, "trigger_level", None)
+            or 0.0
+        )
+        is_long = alert.direction in ("BULLISH", "LONG", "BUY") or getattr(
+            alert, "option_type", ""
+        ) in ("CE", "PE")
+        pts = round(exit_p - entry_p if is_long else entry_p - exit_p, 2) if (entry_p > 0 and exit_p > 0) else 0.0
+        pct = round((pts / entry_p) * 100.0, 1) if entry_p > 0 else 0.0
+
+        is_trailing_exit = (
+            has_hit_target
+            or "trailing runner stop" in reason.lower()
+            or "trailing stop" in reason.lower()
+            or "profit secured" in reason.lower()
+            or "breakeven" in reason.lower()
+            or (entry_p > 0 and exit_p >= entry_p - 0.5)
+            or (entry_p > 0 and alert.stop_loss and alert.stop_loss >= entry_p - 0.5)
+        )
+        is_session_close = (
+            "session expired" in reason.lower()
+            or "session cutoff" in reason.lower()
+            or "cutoff reached" in reason.lower()
+        )
+        is_time_stop = "time-stop expired" in reason.lower()
+
+        is_test = (alert.environment == "TEST") or (not alert.is_live)
+        tag = "[TEST]" if is_test else "[REAL/LIVE]"
+        inst_label = (
+            alert.contract_symbol
+            or f"{alert.symbol} {getattr(alert, 'strike', '') or ''} {getattr(alert, 'option_type', '') or ''}".strip()
+        )
+
+        init_sl = (
+            getattr(alert, "initial_stop_loss", None)
+            or getattr(alert, "stop_loss", None)
+            or 0.0
+        )
+        risk = abs(entry_p - init_sl) if init_sl > 0 else 0.0
+        r_mult = round(pts / risk, 2) if risk > 0 else None
+
+        if is_trailing_exit:
+            with self._lock:
+                alert.is_invalidated = False
+                alert.stage = "RUNNER_EXIT"
+                alert.target_status = "RUNNER_CLOSED" if pts > 0 else "BREAKEVEN_CLOSED"
+                alert.is_active = False
+                alert.should_trail = False
+                alert.trailing_decision = "RUNNER_CLOSED" if pts > 0 else "BREAKEVEN_CLOSED"
+                alert.is_archived = True
+                alert.archived_at = now_iso
+                alert.archive_reason = reason
+                if alert.achieved_milestones is None:
+                    alert.achieved_milestones = []
+                if "RUNNER_EXIT" not in alert.achieved_milestones:
+                    alert.achieved_milestones.append("RUNNER_EXIT")
+                if alert.pnl_pct is None or alert.pnl_pct == 0.0:
+                    alert.pnl_pct = pct
+                alert.locked_profit_pts = max(0.0, pts)
+                alert.locked_profit_pct = max(0.0, pct)
+                if r_mult is not None and (alert.r_multiple is None or alert.r_multiple == 0.0):
+                    alert.r_multiple = r_mult
+                if pts > 0:
+                    alert.headline = f"🏁 {tag} RUNNER CLOSED (PROFIT SECURED): {inst_label}"
+                else:
+                    alert.headline = f"🛡️ {tag} TRAILED BREAKEVEN EXIT: {inst_label}"
+                alert.summary = reason
+                if hasattr(alert, "record_audit"):
+                    alert.record_audit(
+                        "RUNNER_CLOSED",
+                        reason,
+                        actor="TRAILING_ENGINE",
+                        details={"exit_price": exit_p, "pnl_pct": alert.pnl_pct, "r_multiple": alert.r_multiple},
+                    )
+                self._save()
+
+            self._dispatch(alert)
+            logger.info(f"[AutoAlertEngine] Alert {alert.alert_id} RUNNER EXIT ({loop_context}): {reason}")
+            return False
+
+        elif is_session_close:
+            with self._lock:
+                alert.is_invalidated = False
+                alert.stage = "COMPLETED"
+                alert.target_status = "SESSION_CLOSE_EXIT"
+                alert.is_active = False
+                alert.should_trail = False
+                alert.trailing_decision = "SESSION_CLOSE_EXIT"
+                alert.is_archived = True
+                alert.archived_at = now_iso
+                alert.archive_reason = reason
+                if alert.achieved_milestones is None:
+                    alert.achieved_milestones = []
+                if "SESSION_CLOSE_EXIT" not in alert.achieved_milestones:
+                    alert.achieved_milestones.append("SESSION_CLOSE_EXIT")
+                if alert.pnl_pct is None or alert.pnl_pct == 0.0:
+                    alert.pnl_pct = pct
+                if r_mult is not None and (alert.r_multiple is None or alert.r_multiple == 0.0):
+                    alert.r_multiple = r_mult
+                pnl_str = f" ({alert.pnl_pct:+.1f}%)" if alert.pnl_pct is not None else ""
+                alert.headline = f"🌙 {tag} INTRADAY SESSION CLOSE EXIT{pnl_str}: {inst_label}"
+                alert.summary = reason
+                if hasattr(alert, "record_audit"):
+                    alert.record_audit(
+                        "SESSION_CLOSE_EXIT",
+                        reason,
+                        actor="SESSION_ENGINE",
+                        details={"exit_price": exit_p, "pnl_pct": alert.pnl_pct, "r_multiple": alert.r_multiple},
+                    )
+                self._save()
+
+            self._dispatch(alert)
+            logger.info(f"[AutoAlertEngine] Alert {alert.alert_id} SESSION CLOSE EXIT ({loop_context}): {reason}")
+            return False
+
+        elif is_time_stop:
+            with self._lock:
+                alert.is_invalidated = False
+                alert.stage = "EXPIRED"
+                alert.target_status = "TIME_EXPIRED"
+                alert.is_active = False
+                alert.should_trail = False
+                alert.trailing_decision = "TIME_EXPIRED"
+                alert.is_archived = True
+                alert.archived_at = now_iso
+                alert.archive_reason = reason
+                alert.invalidation_reason = reason
+                alert.r_multiple = 0.0
+                alert.pnl_pct = 0.0
+                if alert.achieved_milestones is None:
+                    alert.achieved_milestones = []
+                if "TIME_EXPIRED" not in alert.achieved_milestones:
+                    alert.achieved_milestones.append("TIME_EXPIRED")
+                alert.headline = f"⏱️ {tag} TIME-STOP EXPIRED: {alert.symbol}"
+                alert.summary = reason
+                if hasattr(alert, "record_audit"):
+                    alert.record_audit(
+                        "TIME_STOP_EXPIRED",
+                        reason,
+                        actor="TIME_STOP_ENGINE",
+                        details={"reason": reason},
+                    )
+                self._save()
+
+            self._dispatch(alert)
+            logger.info(f"[AutoAlertEngine] Alert {alert.alert_id} TIME-STOP EXPIRED ({loop_context}): {reason}")
+            return False
+
+        else:
+            # Genuine Invalidation (Stop-Loss Breach)
+            pm_dict = None
+            try:
+                from engine.learning_engine import pattern_learning_engine
+
+                pm = pattern_learning_engine.conduct_invalidation_post_mortem(
+                    alert, exit_price=exit_p, exchange=alert.exchange
+                )
+                pm_dict = pm.to_dict()
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Post-mortem error for {alert.symbol}: {e}")
+
+            with self._lock:
+                alert.is_invalidated = True
+                alert.is_active = False
+                alert.invalidation_reason = reason
+                alert.invalidated_at = now_iso
+                alert.stage = "INVALIDATED"
+                alert.target_status = "INVALIDATED"
+                clean_sym = self._clean_sym(alert.symbol)
+                self._directional_quarantine[clean_sym] = (time.time(), alert.direction)
+                underlying = (
+                    (alert.metrics or {}).get("underlying")
+                    if isinstance(alert.metrics, dict)
+                    else None
+                )
+                if underlying:
+                    self._directional_quarantine[str(underlying).upper()] = (
+                        time.time(),
+                        alert.direction,
+                    )
+                if alert.achieved_milestones is None:
+                    alert.achieved_milestones = []
+                if "INVALIDATED" not in alert.achieved_milestones:
+                    alert.achieved_milestones.append("INVALIDATED")
+                alert.should_trail = False
+                alert.trailing_decision = "INVALIDATED"
+                alert.pnl_pct = pct
+                alert.r_multiple = r_mult if r_mult is not None else -1.0
+                alert.is_archived = True
+                alert.archived_at = now_iso
+                alert.archive_reason = reason
+                if pm_dict:
+                    if not isinstance(alert.metrics, dict):
+                        alert.metrics = {}
+                    alert.metrics["post_mortem"] = pm_dict
+                alert.headline = f"⚠️ {tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type.replace('_', ' ')}"
+                alert.summary = reason
+                if hasattr(alert, "record_audit"):
+                    alert.record_audit(
+                        "INVALIDATED",
+                        reason,
+                        actor="INVALIDATION_ENGINE",
+                        details={"exit_price": exit_p, "pnl_pct": alert.pnl_pct, "r_multiple": alert.r_multiple, "reason": reason},
+                    )
+                self._save()
+
+            # Invalidate any recorded pattern outcomes
+            try:
+                from engine.learning_engine import pattern_learning_engine
+
+                pattern_learning_engine.invalidate_alert_outcomes(
+                    alert.alert_id, reason=reason
+                )
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Error invalidating pattern outcomes: {e}")
+
+            self._dispatch(alert)
+            logger.warning(f"[AutoAlertEngine] Alert {alert.alert_id} INVALIDATED ({loop_context}): {reason}")
+            return True
+
     def check_and_alert_invalidations(
         self, exchanges: Optional[list[str]] = None
     ) -> list[AutoAlert]:
@@ -4261,8 +4751,14 @@ class AutoAlertEngine:
             if fresh_ltp and fresh_ltp > 0:
                 is_opt = bool(alert.strike or alert.option_type or alert.contract_symbol)
                 clean_lookup = lookup_sym.split(":", 1)[1] if ":" in lookup_sym else lookup_sym
+                clean_contract = (
+                    alert.contract_symbol.split(":", 1)[1]
+                    if (alert.contract_symbol and ":" in alert.contract_symbol)
+                    else (alert.contract_symbol or "")
+                )
                 is_contract_quote = bool(
-                    alert.contract_symbol and clean_lookup == alert.contract_symbol
+                    alert.contract_symbol
+                    and (clean_lookup == clean_contract or lookup_sym == alert.contract_symbol)
                 )
                 if is_opt and not is_contract_quote:
                     alert.underlying_spot = fresh_ltp
@@ -4272,148 +4768,15 @@ class AutoAlertEngine:
                         alert.option_premium = fresh_ltp
             reason = evaluate_alert_invalidation(alert, current_ltp=fresh_ltp)
             if reason:
-                has_hit_target = bool(
-                    "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
-                    or getattr(alert, "target_status", "")
-                    in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
-                    or getattr(alert, "stage", "")
-                    in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "FINAL_TARGET", "TARGET_ACHIEVED")
+                is_inv = self._handle_alert_exit(
+                    alert,
+                    reason,
+                    current_ltp=fresh_ltp,
+                    now_iso=now_iso,
+                    loop_context="Batch",
                 )
-                is_trailing_exit = (
-                    has_hit_target
-                    or "trailing runner stop" in reason.lower()
-                    or "trailing stop" in reason.lower()
-                    or "profit secured" in reason.lower()
-                    or "breakeven" in reason.lower()
-                )
-
-                if is_trailing_exit:
-                    with self._lock:
-                        alert.is_invalidated = False
-                        alert.stage = "RUNNER_EXIT"
-                        alert.target_status = "RUNNER_CLOSED"
-                        alert.is_active = False  # Terminate in-flight tracking
-                        if alert.achieved_milestones is None:
-                            alert.achieved_milestones = []
-                        if "RUNNER_EXIT" not in alert.achieved_milestones:
-                            alert.achieved_milestones.append("RUNNER_EXIT")
-                        alert.should_trail = False
-                        alert.trailing_decision = "RUNNER_CLOSED"
-                        alert.is_archived = True
-                        alert.archived_at = now_iso
-                        alert.archive_reason = reason
-
-                        # Calculate final PnL at runner exit
-                        entry_p = (
-                            getattr(alert, "entry_price", None)
-                            or getattr(alert, "option_premium", None)
-                            or getattr(alert, "trigger_level", None)
-                            or 0.0
-                        )
-                        if entry_p > 0 and alert.ltp and alert.ltp > 0:
-                            is_bull = alert.direction in ("BULLISH", "LONG", "BUY") or getattr(
-                                alert, "option_type", ""
-                            ) in ("CE", "PE")
-                            pts = round(alert.ltp - entry_p if is_bull else entry_p - alert.ltp, 2)
-                            pct = round((pts / entry_p) * 100.0, 1)
-                            if alert.pnl_pct is None or alert.pnl_pct == 0.0:
-                                alert.pnl_pct = pct
-                            alert.locked_profit_pts = max(0.0, pts)
-                            alert.locked_profit_pct = max(0.0, pct)
-
-                        is_test = (alert.environment == "TEST") or (not alert.is_live)
-                        tag = "[TEST]" if is_test else "[REAL/LIVE]"
-                        inst_label = (
-                            alert.contract_symbol
-                            or f"{alert.symbol} {getattr(alert, 'strike', '') or ''} {getattr(alert, 'option_type', '') or ''}".strip()
-                        )
-                        alert.headline = f"🏁 {tag} RUNNER CLOSED (PROFIT SECURED): {inst_label}"
-                        alert.summary = reason
-                        if hasattr(alert, "record_audit"):
-                            alert.record_audit(
-                                "RUNNER_CLOSED",
-                                reason,
-                                actor="TRAILING_ENGINE",
-                                details={"exit_price": alert.ltp, "pnl_pct": alert.pnl_pct},
-                            )
-                        self._save()
-
-                    self._dispatch(alert)
-                    logger.info(f"[AutoAlertEngine] Alert {alert.alert_id} RUNNER EXIT: {reason}")
-                else:
-                    # Conduct forensic post-mortem retrospective
-                    pm_dict = None
-                    try:
-                        from engine.learning_engine import pattern_learning_engine
-
-                        pm = pattern_learning_engine.conduct_invalidation_post_mortem(
-                            alert, exit_price=alert.ltp, exchange=alert.exchange
-                        )
-                        pm_dict = pm.to_dict()
-                    except Exception as e:
-                        logger.debug(f"[AutoAlertEngine] Post-mortem error for {alert.symbol}: {e}")
-
-                    with self._lock:
-                        alert.is_invalidated = True
-                        alert.is_active = False  # Terminate in-flight tracking
-                        alert.invalidation_reason = reason
-                        alert.invalidated_at = now_iso
-                        alert.stage = "INVALIDATED"
-                        alert.target_status = "INVALIDATED"
-                        clean_sym = self._clean_sym(alert.symbol)
-                        self._directional_quarantine[clean_sym] = (time.time(), alert.direction)
-                        underlying = (
-                            (alert.metrics or {}).get("underlying")
-                            if isinstance(alert.metrics, dict)
-                            else None
-                        )
-                        if underlying:
-                            self._directional_quarantine[str(underlying).upper()] = (
-                                time.time(),
-                                alert.direction,
-                            )
-                        if alert.achieved_milestones is None:
-                            alert.achieved_milestones = []
-                        if "INVALIDATED" not in alert.achieved_milestones:
-                            alert.achieved_milestones.append("INVALIDATED")
-                        alert.should_trail = False
-                        alert.trailing_decision = "INVALIDATED"
-                        alert.r_multiple = 0.0
-                        alert.pnl_pct = 0.0
-                        alert.is_archived = True
-                        alert.archived_at = now_iso
-                        alert.archive_reason = reason
-                        if pm_dict:
-                            alert.metrics["post_mortem"] = pm_dict
-                        is_test = (alert.environment == "TEST") or (not alert.is_live)
-                        tag = "[TEST]" if is_test else "[REAL/LIVE]"
-                        alert.headline = f"⚠️ {tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type.replace('_', ' ')}"
-                        alert.summary = reason
-                        if hasattr(alert, "record_audit"):
-                            alert.record_audit(
-                                "INVALIDATED",
-                                reason,
-                                actor="INVALIDATION_ENGINE",
-                                details={"exit_price": alert.ltp, "reason": reason},
-                            )
-                        self._save()
-
-                    # Invalidate any recorded pattern outcomes so it is never counted as a win
-                    try:
-                        from engine.learning_engine import pattern_learning_engine
-
-                        pattern_learning_engine.invalidate_alert_outcomes(
-                            alert.alert_id, reason=reason
-                        )
-                    except Exception as e:
-                        logger.debug(f"[AutoAlertEngine] Error invalidating pattern outcomes: {e}")
-
-                    # Dispatch the invalidation notification immediately!
-                    self._dispatch(alert)
+                if is_inv:
                     invalidated_alerts.append(alert)
-                    logger.warning(
-                        f"[AutoAlertEngine] Alert {alert.alert_id} INVALIDATED: {reason}"
-                    )
 
         return invalidated_alerts
 
@@ -4639,20 +5002,26 @@ class AutoAlertEngine:
                             continue
 
                     # Strict No-Chase Distance Guard:
-                    # If price has already extended > 2.5% past trigger without entry fill, do not chase.
+                    # If price has already extended past trigger without entry fill, do not chase.
+                    # Equity shares: 2.5% max chase. Options: 6.0% max chase (options have higher beta and tick jumps).
                     if trigger > 0:
                         dist_past = (
                             ((cur_ltp - trigger) / trigger)
                             if is_payoff_up
                             else ((trigger - cur_ltp) / trigger)
                         )
-                        if dist_past > 0.025:
+                        is_opt_instrument = bool(
+                            alert.strike or alert.option_type or alert.contract_symbol
+                            or getattr(alert, "asset_type", "") == "OPTION"
+                        )
+                        max_chase_pct = 0.060 if is_opt_instrument else 0.025
+                        if dist_past > max_chase_pct:
                             with self._lock:
                                 alert.is_invalidated = True
                                 alert.stage = "EXPIRED"
                                 alert.invalidation_reason = (
                                     f"No-Chase Violation: Price extended {dist_past * 100:.1f}% "
-                                    f"past trigger ₹{trigger:,.1f}. Chase strictly prohibited."
+                                    f"past trigger ₹{trigger:,.1f} (max={max_chase_pct * 100:.1f}%). Chase strictly prohibited."
                                 )
                                 self._save()
                             logger.info(
@@ -4800,22 +5169,23 @@ class AutoAlertEngine:
         now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
 
         # Indian market hours for Equity/FNO: 09:15 to 15:30 IST.
-        # Run if time >= 15:30 IST or before 09:15 IST, or to retire prior-session alerts
-        is_test_runner = bool(
-            (os.environ.get("CHANAKYA_TESTING") == "1")
-            or (os.environ.get("DEPLOY_MODE") == "test")
-            or ("PYTEST_CURRENT_TEST" in os.environ)
+        # MCX hours: 09:00 to 23:30 IST.
+        # CDS hours: 09:00 to 17:00 IST.
+        is_equity_closed = (
+            now_dt.hour > 15
+            or (now_dt.hour == 15 and now_dt.minute >= 30)
+            or now_dt.hour < 9
+            or (now_dt.hour == 9 and now_dt.minute < 15)
         )
-        is_market_closed = (
-            not is_test_runner
-            and (
-                now_dt.hour > 15
-                or (now_dt.hour == 15 and now_dt.minute >= 30)
-                or now_dt.hour < 9
-                or (now_dt.hour == 9 and now_dt.minute < 15)
-            )
+        is_mcx_closed = (
+            now_dt.hour > 23
+            or (now_dt.hour == 23 and now_dt.minute >= 30)
+            or now_dt.hour < 9
         )
-
+        is_cds_closed = (
+            now_dt.hour >= 17
+            or now_dt.hour < 9
+        )
 
         resolved = []
         intraday_types = {
@@ -4833,6 +5203,9 @@ class AutoAlertEngine:
             "INDEX_PUT_SETUP",
             "ORB",
             "FAST_SCALP",
+            "COMMODITY_MOMENTUM",
+            "COMMODITY_BREAKOUT",
+            "CURRENCY_BREAKOUT",
         }
 
         # FIX 2: Exclusion list of terminal states — NOT an allowlist.
@@ -4862,8 +5235,18 @@ class AutoAlertEngine:
                     or getattr(alert, "time_horizon", "INTRADAY") in ("INTRADAY", "SCALP", "INTRADAY_SCALP_ONLY")
                 )
 
-                # Process if market is closed OR if this is an intraday alert from a prior calendar session!
-                if not (is_market_closed or is_prior_date):
+                if not is_intraday:
+                    continue
+
+                exch = (alert.exchange or "NSE").upper()
+                is_alert_market_closed = (
+                    is_mcx_closed if exch == "MCX" or alert.alert_type in ("COMMODITY_MOMENTUM", "COMMODITY_BREAKOUT")
+                    else (is_cds_closed if exch == "CDS" or alert.alert_type == "CURRENCY_BREAKOUT"
+                    else is_equity_closed)
+                )
+
+                # Process if this is an intraday alert from a prior calendar session OR if its market is currently closed!
+                if not (is_prior_date or is_alert_market_closed):
                     continue
 
                 if (
@@ -4871,10 +5254,7 @@ class AutoAlertEngine:
                     and not alert.is_archived
                     and alert.stage
                     not in ("INVALIDATED", "COMPLETED", "TARGET_ACHIEVED", "EXPIRED_SESSION_END")
-                    # FIX 2: was target_status in (None, "", "PENDING") — excluded partial milestones.
                     and (alert.target_status or "") not in _terminal_statuses
-                    and is_intraday
-                    and (alert.exchange or "NSE").upper() in ("NSE", "NFO", "BSE")
                 ):
                     entry_p = alert.trigger_level or alert.ltp or 0.0
                     cur_p = alert.ltp or entry_p
@@ -4894,11 +5274,15 @@ class AutoAlertEngine:
                     alert.target_status = "EXPIRED_SESSION_END"
                     alert.is_archived = True
                     alert.archived_at = now_iso
-                    reason_label = (
-                        f"Prior session alert retired ({alert.created_at[:10]})"
-                        if is_prior_date
-                        else "Intraday session closed at 15:30 IST"
-                    )
+                    if is_prior_date:
+                        reason_label = f"Prior session alert retired ({alert.created_at[:10]})"
+                    elif exch == "MCX":
+                        reason_label = "MCX session closed at 23:30 IST"
+                    elif exch == "CDS":
+                        reason_label = "CDS session closed at 17:00 IST"
+                    else:
+                        reason_label = "Intraday session closed at 15:30 IST"
+
                     alert.archive_reason = (
                         f"{reason_label} "
                         f"(Prior: {prior_status}{milestone_note}, Final MTM: {pnl_pct:+.2f}%)"
@@ -4930,23 +5314,32 @@ class AutoAlertEngine:
                 _t1 = getattr(alert, "target_1", None) or alert.target_level or 0.0
                 _env = "[REAL/LIVE]" if getattr(alert, "is_live", True) else "[TEST]"
 
+                exch = (alert.exchange or "NSE").upper()
+                close_time_str = (
+                    "23:30 IST" if exch == "MCX"
+                    else ("17:00 IST" if exch == "CDS" else "15:30 IST")
+                )
+
                 msg = (
-                    f"\U0001f514 <b>{_env} SESSION CLOSE \u2014 {_sym}</b>\n"
+                    f"🔔 <b>{_env} SESSION CLOSE — {_sym}</b>\n"
                     f"<code>"
-                    f"Status  : INTRADAY CLOSED (15:30 IST)\n"
+                    f"Status  : INTRADAY CLOSED ({close_time_str})\n"
                     f"Reached : {_ms_str}\n"
-                    f"Entry   : \u20b9{_entry:,.2f}  |  LTP: \u20b9{_ltp:,.2f}\n"
-                    f"T1      : \u20b9{_t1:,.2f}  |  MTM: {_pnl_sign}{_pnl:.1f}%\n"
+                    f"Entry   : ₹{_entry:,.2f}  |  LTP: ₹{_ltp:,.2f}\n"
+                    f"T1      : ₹{_t1:,.2f}  |  MTM: {_pnl_sign}{_pnl:.1f}%\n"
                     f"Action  : Position CLOSED at session end"
                     f"</code>\n"
                     f"<i>Intraday trade auto-closed. Re-evaluate next session if thesis holds.</i>"
                 )
+                from engine.alert_preferences import alert_preferences, classify_alert_segment
                 from bot.telegram_bot import send_message as _tg_send
 
-                _tg_send(msg, parse_mode="HTML")
+                target_seg = getattr(alert, "segment", None) or classify_alert_segment(alert)
+                target_cid = alert_preferences.get_telegram_chat_id(target_seg)
+                _tg_send(msg, parse_mode="HTML", chat_id=target_cid)
                 logger.info(
                     f"[AutoAlertEngine] Session-close Telegram sent for {_sym} "
-                    f"({alert.alert_id}): milestones={milestones}, MTM={_pnl_sign}{_pnl:.1f}%"
+                    f"({alert.alert_id}): milestones={milestones}, MTM={_pnl_sign}{_pnl:.1f}%, chat_id={target_cid}"
                 )
             except Exception as _tg_err:
                 logger.debug(
@@ -4954,6 +5347,69 @@ class AutoAlertEngine:
                 )
 
         return resolved
+
+    def _retry_pacing_throttled_alerts(self) -> list[AutoAlert]:
+        """
+        Retries Telegram dispatch for active in-flight alerts that were held back
+        by segment burst pacing cooldown or ad-hoc script suppression once conditions clear.
+        Guarantees that secondary commodities (e.g. Natural Gas detected 7s after Crude Oil)
+        are reliably dispatched to Telegram once the 15s pacing cooldown elapses,
+        eliminating silent permanent dropouts.
+        """
+        now_ts = time.time()
+        now_dt = datetime.now(IST)
+        now_date_str = now_dt.strftime("%Y-%m-%d")
+        dispatched: list[AutoAlert] = []
+
+        is_cli_adhoc = bool(sys.argv and sys.argv[0] == "-c")
+        if is_cli_adhoc and os.environ.get(
+            "ALLOW_MANUAL_TELEGRAM_DISPATCH", "0"
+        ).lower() not in ("1", "true"):
+            return dispatched
+
+        from engine.alert_preferences import alert_preferences, classify_alert_segment
+
+        with self._lock:
+            candidates = [
+                a
+                for a in self._alerts
+                if not a.is_invalidated
+                and not a.is_archived
+                and a.stage in ("IGNITED", "PRIMED", "EARLY_WARNING")
+                and not getattr(a, "telegram_dispatched", False)
+                and (
+                    str(getattr(a, "telegram_suppression_reason", "") or "").startswith(
+                        "Telegram pacing throttle active"
+                    )
+                    or "Ad-hoc script run"
+                    in str(getattr(a, "telegram_suppression_reason", "") or "")
+                )
+                and (not a.created_at or a.created_at[:10] == now_date_str)
+            ]
+
+        for alert in candidates:
+            seg = getattr(alert, "segment", None) or classify_alert_segment(alert)
+            pacing_key = f"PACING:{seg or 'GENERAL'}"
+            last_pace_t = self._dispatch_cooldowns.get(pacing_key, 0.0)
+            burst_cooldown = 15.0 if alert.confidence >= 90 else 45.0
+
+            if (now_ts - last_pace_t) >= burst_cooldown:
+                logger.info(
+                    f"[AutoAlertEngine] 🚀 Segment burst pacing cooldown ({int(burst_cooldown)}s) elapsed for {alert.symbol} "
+                    f"({alert.alert_id}). Retrying multi-channel Telegram dispatch..."
+                )
+                # Clear m_key IGNITED cooldown for this alert so retry dispatches cleanly
+                m_key = f"{alert.symbol}:{alert.alert_type}:IGNITED"
+                if m_key in self._dispatch_cooldowns:
+                    del self._dispatch_cooldowns[m_key]
+
+                self._dispatch(alert)
+                if getattr(alert, "telegram_dispatched", False):
+                    dispatched.append(alert)
+                    self._dispatch_cooldowns[pacing_key] = time.time()
+                    self._save()
+
+        return dispatched
 
     def check_session_closing_warning(self, force: bool = False) -> Optional[dict[str, Any]]:
         """
@@ -6054,40 +6510,15 @@ class AutoAlertEngine:
                 formatted.append(f"{exch}:{s}")
 
         unique_targets: list[str] = list(dict.fromkeys(formatted))
-        batch_size = 60
-        combined: dict[str, Any] = {}
+        from market.quote_dispatcher import get_quote_dispatcher
+        from market.fyers_rate_gate import FyersCallCategory
 
-        def _fetch_chunk(chunk: list[str]) -> dict[str, Any]:
-            try:
-                return get_quote(chunk)
-            except Exception as e:
-                logger.debug(f"[AutoAlertEngine] Batch quote fetch error for chunk: {e}")
-                return {}
-
-        chunks = [
-            unique_targets[i : i + batch_size] for i in range(0, len(unique_targets), batch_size)
-        ]
-        if len(chunks) == 1:
-            combined = _fetch_chunk(chunks[0])
-        elif len(chunks) > 1:
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(chunks))) as executor:
-                futures = [executor.submit(_fetch_chunk, ch) for ch in chunks]
-                for fut in concurrent.futures.as_completed(futures):
-                    try:
-                        res = fut.result()
-                        if isinstance(res, dict):
-                            combined.update(res)
-                    except Exception:
-                        pass
-
-        final_map: dict[str, Any] = dict(combined)
-        for k, v in combined.items():
-            if ":" in k:
-                short_k = k.split(":")[-1]
-                if short_k not in final_map:
-                    final_map[short_k] = v
+        # Serialized, coalesced quote fetching through unified rate gate
+        # Replaces parallel ThreadPoolExecutor blast that tripped Fyers rate limits
+        final_map = get_quote_dispatcher().fetch_quotes_batch(
+            unique_targets,
+            category=FyersCallCategory.SCANNER_QUOTE,
+        )
 
         if symbols is None:
             with self._cycle_quotes_lock:
@@ -7963,11 +8394,20 @@ class AutoAlertEngine:
 
     # ── Time-Partitioned Segment Scanning Loops ──────────────────
 
-    def _get_index_intraday_regime(self, df_5m: Any, spot: float) -> str:
+    def _get_index_intraday_regime(self, df_5m: Any, spot: float, symbol: str = "NIFTY") -> str:
         """Classifies index intraday regime: 'TRENDING', 'NORMAL', or 'CHOP_CONSOLIDATION'."""
         if df_5m is None or not hasattr(df_5m, "iloc") or len(df_5m) < 6 or spot <= 0:
             return "NORMAL"
         try:
+            from engine.index_adaptive_regime import compute_choppiness_index, compute_adx
+
+            chop = compute_choppiness_index(df_5m)
+            adx = compute_adx(df_5m)
+            if (chop is not None and chop >= 58.0) or (adx is not None and adx < 18.0):
+                return "CHOP_CONSOLIDATION"
+            elif (chop is not None and chop <= 40.0) or (adx is not None and adx >= 25.0):
+                return "TRENDING"
+
             col_h = "high" if "high" in df_5m.columns else "High"
             col_l = "low" if "low" in df_5m.columns else "Low"
             recent = df_5m.iloc[-12:] if len(df_5m) >= 12 else df_5m
@@ -8742,6 +9182,111 @@ class AutoAlertEngine:
 
         return found
 
+    def scan_index_micro_scalp(
+        self, quotes_map: Optional[dict[str, Any]] = None
+    ) -> list[AutoAlert]:
+        """
+        Scans liquid indices (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX)
+        for high-velocity 1m/3m micro option breakouts on ATM/ITM strikes.
+        Active during continuous trading session (09:18 - 15:15 IST).
+        """
+        from engine.detectors.index_micro_scalp import detect_index_micro_scalp
+        from market.options import get_options_chain
+        from market.history import get_ohlcv
+        from market.quotes import get_quote
+        from engine.alert_preferences import alert_preferences
+
+        if not alert_preferences.is_segment_allowed("FNO_INDEX"):
+            return []
+
+        now_dt = datetime.now(IST)
+        is_test_runner = (
+            os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+        )
+        is_active = (now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 18)) and (
+            now_dt.hour < 15 or (now_dt.hour == 15 and now_dt.minute <= 15)
+        )
+        if not is_active and not is_test_runner:
+            return []
+
+        found: list[AutoAlert] = []
+        _INDEX_SYMS = [
+            s
+            for s in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+            if s in self._watched_indices
+        ]
+
+        def _eval_index_micro(sym: str) -> list[AutoAlert]:
+            local_alerts: list[AutoAlert] = []
+            try:
+                exch = self._resolve_index_exchange(sym)
+                lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
+                q_obj = (quotes_map.get(lookup_sym) or quotes_map.get(sym)) if quotes_map else None
+                if q_obj is None:
+                    raw_q = get_quote(lookup_sym)
+                    q_obj = (
+                        raw_q.get(lookup_sym) or raw_q.get(sym)
+                        if isinstance(raw_q, dict)
+                        else raw_q
+                    )
+
+                spot = self._extract_quote_val(q_obj, "last_price", "ltp")
+                if spot <= 0:
+                    return local_alerts
+
+                vwap_val = self._extract_quote_val(q_obj, "vwap", "average_price")
+                day_high_val = self._extract_quote_val(q_obj, "high")
+                day_low_val = self._extract_quote_val(q_obj, "low")
+
+                df_1m = None
+                try:
+                    df_1m = get_ohlcv(sym, exchange=exch, interval="1m", days=1)
+                except Exception:
+                    pass
+
+                df_3m = None
+                try:
+                    df_3m = get_ohlcv(sym, exchange=exch, interval="3m", days=1)
+                except Exception:
+                    pass
+
+                chain = get_options_chain(sym)
+                if not chain:
+                    return local_alerts
+
+                alerts = detect_index_micro_scalp(
+                    underlying=sym,
+                    spot=spot,
+                    chain=chain,
+                    ohlcv_1m=df_1m,
+                    ohlcv_3m=df_3m,
+                    vwap=vwap_val if vwap_val > 0 else None,
+                    day_high=day_high_val if day_high_val > 0 else None,
+                    day_low=day_low_val if day_low_val > 0 else None,
+                    ref_time=now_dt,
+                )
+                local_alerts.extend(alerts)
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Index micro scalp scan error for {sym}: {e}")
+            return local_alerts
+
+        if _INDEX_SYMS:
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(5, len(_INDEX_SYMS))
+            ) as executor:
+                for alerts_sub in executor.map(_eval_index_micro, _INDEX_SYMS):
+                    for a in alerts_sub:
+                        if self.record_alert(a):
+                            found.append(a)
+                            logger.info(
+                                f"[AutoAlertEngine] ⚡ Index Micro Scalp Breakout fired: {a.headline} "
+                                f"LTP={a.ltp} SL={a.stop_loss} T1={a.target_level}"
+                            )
+
+        return found
+
     def scan_equity_nfo_now(self) -> list[AutoAlert]:
         """Runs all daytime Equity and NFO derivative detectors (09:15 - 15:30 IST)."""
         session = get_current_ist_session()
@@ -8771,6 +9316,7 @@ class AutoAlertEngine:
                 return []
 
         tasks = [
+            ("index_micro_scalp", lambda: self.scan_index_micro_scalp(quotes_map=quotes_map)),
             ("index_calls", lambda: self.scan_index_call_setups(quotes_map=quotes_map)),
             ("index_puts", lambda: self.scan_index_put_setups(quotes_map=quotes_map)),
             ("opening_drives", lambda: self.scan_opening_drives(quotes_map=quotes_map)),
@@ -8816,6 +9362,10 @@ class AutoAlertEngine:
         for a in alerts:
             if self.record_alert(a):
                 found.append(a)
+
+        # Retry any previously throttled commodity alerts if pacing cooldown has elapsed
+        self._retry_pacing_throttled_alerts()
+
         return found
 
     def scan_currency_now(self) -> list[AutoAlert]:
@@ -8911,83 +9461,17 @@ class AutoAlertEngine:
             ]
 
         for alert in active_alerts:
-            # 1. Instant Invalidation
+            # 1. Instant Invalidation or Terminal Exit
             reason = evaluate_alert_invalidation(alert, current_ltp=ltp)
             if reason:
                 now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-                has_hit_target = bool(
-                    "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
-                    or getattr(alert, "target_status", "")
-                    in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
-                    or getattr(alert, "stage", "")
-                    in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "FINAL_TARGET", "TARGET_ACHIEVED")
+                self._handle_alert_exit(
+                    alert,
+                    reason,
+                    current_ltp=ltp,
+                    now_iso=now_iso,
+                    loop_context="Sub-Second Domestic Live Tick",
                 )
-                is_trailing_exit = (
-                    has_hit_target
-                    or "trailing runner stop" in reason.lower()
-                    or "trailing stop" in reason.lower()
-                    or "profit secured" in reason.lower()
-                    or "breakeven" in reason.lower()
-                )
-
-                tag = "[TEST]" if ((alert.environment == "TEST") or (not alert.is_live)) else "[REAL/LIVE]"
-
-                with self._lock:
-                    alert.is_active = False
-                    alert.should_trail = False
-                    alert.is_archived = True
-                    alert.archived_at = now_iso
-                    alert.archive_reason = reason
-                    if alert.achieved_milestones is None:
-                        alert.achieved_milestones = []
-
-                    if is_trailing_exit:
-                        alert.is_invalidated = False
-                        alert.stage = "RUNNER_EXIT"
-                        alert.target_status = "RUNNER_CLOSED"
-                        alert.trailing_decision = "RUNNER_CLOSED"
-                        if "RUNNER_EXIT" not in alert.achieved_milestones:
-                            alert.achieved_milestones.append("RUNNER_EXIT")
-                        entry_p = (
-                            getattr(alert, "entry_price", None)
-                            or getattr(alert, "option_premium", None)
-                            or getattr(alert, "trigger_level", None)
-                            or 0.0
-                        )
-                        if entry_p and entry_p > 0 and ltp > 0:
-                            is_bull = alert.direction in ("BULLISH", "LONG", "BUY")
-                            pts = round(ltp - entry_p if is_bull else entry_p - ltp, 2)
-                            pct = round((pts / entry_p) * 100.0, 1)
-                            if alert.pnl_pct is None or alert.pnl_pct == 0.0:
-                                alert.pnl_pct = pct
-                            alert.locked_profit_pts = max(0.0, pts)
-                            alert.locked_profit_pct = max(0.0, pct)
-                        inst_label = (
-                            alert.contract_symbol
-                            or f"{alert.symbol} {getattr(alert, 'strike', '') or ''} {getattr(alert, 'option_type', '') or ''}".strip()
-                        )
-                        alert.headline = f"🏁 {tag} RUNNER CLOSED (PROFIT SECURED): {inst_label}"
-                        alert.summary = reason
-                        logger.info(
-                            f"[AutoAlertEngine] ⚡ Sub-Second Domestic Runner Exit for {alert.symbol}: {reason}"
-                        )
-                    else:
-                        alert.is_invalidated = True
-                        alert.invalidation_reason = reason
-                        alert.invalidated_at = now_iso
-                        alert.stage = "INVALIDATED"
-                        alert.target_status = "INVALIDATED"
-                        alert.trailing_decision = "INVALIDATED"
-                        if "INVALIDATED" not in alert.achieved_milestones:
-                            alert.achieved_milestones.append("INVALIDATED")
-                        alert.headline = f"⚠️ {tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type.replace('_', ' ')}"
-                        alert.summary = reason
-                        logger.warning(
-                            f"[AutoAlertEngine] ⚡ Sub-Second Domestic Live Invalidation for {alert.symbol}: {reason}"
-                        )
-                    self._save()
-
-                self._dispatch(alert)
                 continue
 
             # 2. Instant Target 1 / Target 2 / Ratchet Milestone
@@ -9052,103 +9536,17 @@ class AutoAlertEngine:
             ]
 
         for alert in active_crypto_alerts:
-            # 1a. Instant Invalidation — respects trailing-exit routing (Fix 1 & 2)
+            # 1a. Instant Invalidation or Terminal Exit — respects trailing-exit routing (Fix 1 & 2)
             reason = evaluate_alert_invalidation(alert, current_ltp=ltp)
             if reason:
                 now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-
-                # Fix 2: Apply identical is_trailing_exit routing as the batch loop
-                has_hit_target = bool(
-                    "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
-                    or getattr(alert, "target_status", "")
-                    in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
-                    or getattr(alert, "stage", "")
-                    in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "FINAL_TARGET", "TARGET_ACHIEVED")
+                self._handle_alert_exit(
+                    alert,
+                    reason,
+                    current_ltp=ltp,
+                    now_iso=now_iso,
+                    loop_context="Sub-Second Crypto Tick",
                 )
-                is_trailing_exit = (
-                    has_hit_target
-                    or "trailing runner stop" in reason.lower()
-                    or "trailing stop" in reason.lower()
-                    or "profit secured" in reason.lower()
-                    or "breakeven" in reason.lower()
-                )
-
-                pm_dict = None
-                try:
-                    from engine.learning_engine import pattern_learning_engine
-
-                    pm = pattern_learning_engine.conduct_invalidation_post_mortem(
-                        alert, exit_price=ltp, exchange=alert.exchange
-                    )
-                    pm_dict = pm.to_dict()
-                except Exception as e:
-                    logger.debug(f"[AutoAlertEngine] Post-mortem error for {alert.symbol}: {e}")
-
-                is_test_env = (alert.environment == "TEST") or (not alert.is_live)
-                tag = "[TEST]" if is_test_env else "[REAL/LIVE]"
-
-                with self._lock:
-                    # Fix 4: Set full terminal state (identical to batch loop)
-                    alert.is_active = False
-                    alert.should_trail = False
-                    alert.is_archived = True
-                    alert.archived_at = now_iso
-                    alert.archive_reason = reason
-                    if pm_dict:
-                        alert.metrics["post_mortem"] = pm_dict
-                    if alert.achieved_milestones is None:
-                        alert.achieved_milestones = []
-
-                    if is_trailing_exit:
-                        # Route to RUNNER_EXIT — same as batch loop
-                        alert.is_invalidated = False
-                        alert.stage = "RUNNER_EXIT"
-                        alert.target_status = "RUNNER_CLOSED"
-                        alert.trailing_decision = "RUNNER_CLOSED"
-                        if "RUNNER_EXIT" not in alert.achieved_milestones:
-                            alert.achieved_milestones.append("RUNNER_EXIT")
-                        # Calculate final PnL at runner exit
-                        entry_p = (
-                            getattr(alert, "entry_price", None)
-                            or getattr(alert, "option_premium", None)
-                            or getattr(alert, "trigger_level", None)
-                            or 0.0
-                        )
-                        if entry_p and entry_p > 0 and ltp and ltp > 0:
-                            is_bull = alert.direction in ("BULLISH", "LONG", "BUY")
-                            pts = round(ltp - entry_p if is_bull else entry_p - ltp, 2)
-                            pct = round((pts / entry_p) * 100.0, 1)
-                            if alert.pnl_pct is None or alert.pnl_pct == 0.0:
-                                alert.pnl_pct = pct
-                            alert.locked_profit_pts = max(0.0, pts)
-                            alert.locked_profit_pct = max(0.0, pct)
-                        inst_label = (
-                            alert.contract_symbol
-                            or f"{alert.symbol} {getattr(alert, 'strike', '') or ''} {getattr(alert, 'option_type', '') or ''}".strip()
-                        )
-                        alert.headline = f"🏁 {tag} RUNNER CLOSED (PROFIT SECURED): {inst_label}"
-                        alert.summary = reason
-                        logger.info(
-                            f"[AutoAlertEngine] ⚡ Sub-Second Runner Exit for {alert.symbol}: {reason}"
-                        )
-                    else:
-                        # Route to INVALIDATED
-                        alert.is_invalidated = True
-                        alert.invalidation_reason = reason
-                        alert.invalidated_at = now_iso
-                        alert.stage = "INVALIDATED"
-                        alert.target_status = "INVALIDATED"
-                        alert.trailing_decision = "INVALIDATED"
-                        if "INVALIDATED" not in alert.achieved_milestones:
-                            alert.achieved_milestones.append("INVALIDATED")
-                        alert.headline = f"⚠️ {tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type.replace('_', ' ')}"
-                        alert.summary = reason
-                        logger.warning(
-                            f"[AutoAlertEngine] ⚡ Sub-Second Live Invalidation for {alert.symbol}: {reason}"
-                        )
-                    self._save()
-
-                self._dispatch(alert)
                 continue
 
             # 1b. Instant Target 1 / Target 2 / Trailing Milestone
@@ -9323,14 +9721,18 @@ class AutoAlertEngine:
         self._init_crypto_stream_listener()
         # Initialize domestic WebSocket stream listener for sub-second tick updates
         self._init_domestic_stream_listener()
-        # Seed streaming subscriptions for core liquid indices
+        # Seed streaming subscriptions for core liquid indices and MCX commodities
         self._auto_subscribe_stream([
             "NSE:NIFTY50-INDEX",
             "NSE:NIFTYBANK-INDEX",
             "NSE:FINNIFTY-INDEX",
-            "NSE:MIDCAP100-INDEX",
+            "NSE:MIDCPNIFTY-INDEX",
             "BSE:SENSEX-INDEX",
             "NSE:INDIAVIX-INDEX",
+            "MCX:CRUDEOIL",
+            "MCX:NATURALGAS",
+            "MCX:GOLD",
+            "MCX:SILVER",
         ])
         self._poller_thread = threading.Thread(
             target=self._run_loop,
@@ -9483,8 +9885,20 @@ class AutoAlertEngine:
                         self.scan_gamma_blasts(indices_only=True)
                     except Exception as e_fast:
                         logger.debug(f"[AutoAlertEngine] HF Index scan error: {e_fast}")
+
+                # MCX Commodity Fast Scan during Golden Hours (17:30 - 22:30 IST)
+                is_golden_hours_window = (
+                    (now_ist.hour > 17 or (now_ist.hour == 17 and now_ist.minute >= 30))
+                    and (now_ist.hour < 22 or (now_ist.hour == 22 and now_ist.minute <= 30))
+                )
+                commodity_allowed = not alert_preferences.is_segment_globally_disabled("COMMODITY")
+                if is_golden_hours_window and commodity_allowed:
+                    try:
+                        self.scan_commodities_now()
+                    except Exception as e_comm_fast:
+                        logger.debug(f"[AutoAlertEngine] HF MCX Golden Hours scan error: {e_comm_fast}")
             except Exception as e_loop:
-                logger.warning(f"[AutoAlertEngine] HF Index scan loop error: {e_loop}")
+                logger.warning(f"[AutoAlertEngine] HF Index/MCX scan loop error: {e_loop}")
 
             self._stop_event.wait(interval)
 
@@ -9656,6 +10070,12 @@ class AutoAlertEngine:
                         )
                     _last_multibagger_scan = now_loop
 
+                # Retry any alerts held by segment burst pacing cooldown once elapsed
+                try:
+                    self._retry_pacing_throttled_alerts()
+                except Exception as _retry_err:
+                    logger.debug(f"[AutoAlertEngine] Pacing retry loop error: {_retry_err}")
+
             except Exception as e:
                 logger.warning(f"[AutoAlertEngine] Error in poll cycle: {e}")
 
@@ -9807,37 +10227,39 @@ class AutoAlertEngine:
     def get_counts(self) -> dict[str, int]:
         """Returns accurate thread-safe counts of active, archived, today, and total buffered alerts."""
         with self._lock:
-            from datetime import datetime
-            from config.constants import IST
+            alerts_copy = list(self._alerts)
 
-            today_str = datetime.now(IST).strftime("%Y-%m-%d")
-            seen_ids = set()
-            active = 0
-            archived = 0
-            today = 0
-            today_closed = 0
-            for a in self._alerts:
-                aid = a.alert_id or ""
-                if aid and aid in seen_ids:
-                    continue
-                if aid:
-                    seen_ids.add(aid)
-                is_tod = (a.created_at or "").startswith(today_str)
-                if is_tod:
-                    today += 1
-                    if not a.is_active:
-                        today_closed += 1
-                if a.is_active:
-                    active += 1
-                else:
-                    archived += 1
-            return {
-                "active": active,
-                "archived": archived,
-                "today": today,
-                "today_closed": today_closed,
-                "total": active + archived,
-            }
+        from datetime import datetime
+        from config.constants import IST
+
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        seen_ids = set()
+        active = 0
+        archived = 0
+        today = 0
+        today_closed = 0
+        for a in alerts_copy:
+            aid = a.alert_id or ""
+            if aid and aid in seen_ids:
+                continue
+            if aid:
+                seen_ids.add(aid)
+            is_tod = (a.created_at or "").startswith(today_str)
+            if is_tod:
+                today += 1
+                if not a.is_active:
+                    today_closed += 1
+            if a.is_active:
+                active += 1
+            else:
+                archived += 1
+        return {
+            "active": active,
+            "archived": archived,
+            "today": today,
+            "today_closed": today_closed,
+            "total": active + archived,
+        }
 
     def archive_alert_by_id(
         self,
@@ -10419,80 +10841,83 @@ class AutoAlertEngine:
                         continue
                     if aid:
                         seen_ids.add(aid)
-                    alerts.append(
-                        AutoAlert(
-                            alert_id=d.get("alert_id", ""),
-                            alert_type=d.get("alert_type", "GENERAL"),
-                            stage=d.get("stage", "EARLY_WARNING"),
-                            symbol=d.get("symbol", ""),
-                            exchange=d.get("exchange", "NSE"),
-                            direction=d.get("direction", "NEUTRAL"),
-                            headline=d.get("headline", ""),
-                            summary=d.get("summary", ""),
-                            ltp=float(d.get("ltp", 0.0)),
-                            trigger_level=float(d.get("trigger_level", 0.0)),
-                            target_level=float(d.get("target_level", 0.0)),
-                            stop_loss=float(d.get("stop_loss", 0.0)),
-                            strike=d.get("strike"),
-                            option_type=d.get("option_type"),
-                            contract_symbol=d.get("contract_symbol"),
-                            metrics=d.get("metrics", {}),
-                            actionable_plan=d.get("actionable_plan", {}),
-                            confidence=int(d.get("confidence", 75)),
-                            created_at=d.get("created_at", ""),
-                            read=d.get("read", False),
-                            is_live=d.get("is_live", True),
-                            environment=d.get("environment", "LIVE"),
-                            is_invalidated=d.get("is_invalidated", False),
-                            invalidation_reason=d.get("invalidation_reason"),
-                            invalidated_at=d.get("invalidated_at"),
-                            achieved_milestones=d.get("achieved_milestones", []),
-                            target_status=d.get("target_status", "PENDING"),
-                            should_trail=d.get("should_trail", False),
-                            trailing_decision=d.get("trailing_decision"),
-                            trailing_stop=d.get("trailing_stop"),
-                            trailing_rationale=d.get("trailing_rationale"),
-                            locked_profit_pts=d.get("locked_profit_pts"),
-                            locked_profit_pct=d.get("locked_profit_pct"),
-                            last_trail_alert_time=d.get("last_trail_alert_time"),
-                            is_archived=bool(d.get("is_archived", False)),
-                            archived_at=d.get("archived_at"),
-                            archive_reason=d.get("archive_reason"),
-                            expiry_date=d.get("expiry_date"),
-                            expiry_type=d.get("expiry_type"),
-                            underlying_spot=d.get("underlying_spot"),
-                            option_premium=d.get("option_premium"),
-                            market_status=d.get("market_status", "SESSION_CLOSED"),
-                            lot_size=d.get("lot_size"),
-                            segment=d.get("segment", ""),
-                            signal_ref=d.get("signal_ref"),
-                            r_multiple=d.get("r_multiple"),
-                            pnl_pct=d.get("pnl_pct"),
-                            updated_at=d.get("updated_at"),
-                            triggered_at=d.get("triggered_at"),
-                            original_call_time=d.get("original_call_time")
-                            or d.get("created_at"),
-                            in_flight_warning_sent=bool(d.get("in_flight_warning_sent", False)),
-                            in_flight_warning_reason=d.get("in_flight_warning_reason"),
-                            in_flight_warning_at=d.get("in_flight_warning_at"),
-                            mtf_confluence=d.get("mtf_confluence"),
-                            vix_regime=d.get("vix_regime"),
-                            time_horizon=d.get("time_horizon", "INTRADAY"),
-                            eta_label=d.get("eta_label"),
-                            setup_style=d.get("setup_style", "CONTINUATION"),
-                            entry_type=d.get("entry_type", "LIMIT_ON_PULLBACK"),
-                            no_chase_boundary=d.get("no_chase_boundary"),
-                            telegram_dispatched=bool(d.get("telegram_dispatched", False)),
-                            dispatched_channels=list(d.get("dispatched_channels", [])),
-                            telegram_suppression_reason=d.get("telegram_suppression_reason"),
-                            trace_id=d.get("trace_id"),
-                            quant_snapshot=d.get("quant_snapshot"),
-                            initial_stop_loss=d.get("initial_stop_loss"),
-                            update_count=int(d.get("update_count", 0)),
-                            telegram_update_count=int(d.get("telegram_update_count", 0)),
-                            audit_trail=list(d.get("audit_trail", [])),
+                    try:
+                        alerts.append(
+                            AutoAlert(
+                                alert_id=d.get("alert_id", ""),
+                                alert_type=d.get("alert_type", "GENERAL"),
+                                stage=d.get("stage", "EARLY_WARNING"),
+                                symbol=d.get("symbol", ""),
+                                exchange=d.get("exchange", "NSE"),
+                                direction=d.get("direction", "NEUTRAL"),
+                                headline=d.get("headline", ""),
+                                summary=d.get("summary", ""),
+                                ltp=float(d.get("ltp") or 0.0),
+                                trigger_level=float(d.get("trigger_level") or 0.0),
+                                target_level=float(d.get("target_level") or 0.0),
+                                stop_loss=float(d.get("stop_loss") or 0.0),
+                                strike=d.get("strike"),
+                                option_type=d.get("option_type"),
+                                contract_symbol=d.get("contract_symbol"),
+                                metrics=d.get("metrics", {}),
+                                actionable_plan=d.get("actionable_plan", {}),
+                                confidence=int(d.get("confidence") or 75),
+                                created_at=d.get("created_at", ""),
+                                read=d.get("read", False),
+                                is_live=d.get("is_live", True),
+                                environment=d.get("environment", "LIVE"),
+                                is_invalidated=d.get("is_invalidated", False),
+                                invalidation_reason=d.get("invalidation_reason"),
+                                invalidated_at=d.get("invalidated_at"),
+                                achieved_milestones=d.get("achieved_milestones", []),
+                                target_status=d.get("target_status", "PENDING"),
+                                should_trail=d.get("should_trail", False),
+                                trailing_decision=d.get("trailing_decision"),
+                                trailing_stop=d.get("trailing_stop"),
+                                trailing_rationale=d.get("trailing_rationale"),
+                                locked_profit_pts=d.get("locked_profit_pts"),
+                                locked_profit_pct=d.get("locked_profit_pct"),
+                                last_trail_alert_time=d.get("last_trail_alert_time"),
+                                is_archived=bool(d.get("is_archived", False)),
+                                archived_at=d.get("archived_at"),
+                                archive_reason=d.get("archive_reason"),
+                                expiry_date=d.get("expiry_date"),
+                                expiry_type=d.get("expiry_type"),
+                                underlying_spot=d.get("underlying_spot"),
+                                option_premium=d.get("option_premium"),
+                                market_status=d.get("market_status", "SESSION_CLOSED"),
+                                lot_size=d.get("lot_size"),
+                                segment=d.get("segment", ""),
+                                signal_ref=d.get("signal_ref"),
+                                r_multiple=d.get("r_multiple"),
+                                pnl_pct=d.get("pnl_pct"),
+                                updated_at=d.get("updated_at"),
+                                triggered_at=d.get("triggered_at"),
+                                original_call_time=d.get("original_call_time")
+                                or d.get("created_at"),
+                                in_flight_warning_sent=bool(d.get("in_flight_warning_sent", False)),
+                                in_flight_warning_reason=d.get("in_flight_warning_reason"),
+                                in_flight_warning_at=d.get("in_flight_warning_at"),
+                                mtf_confluence=d.get("mtf_confluence"),
+                                vix_regime=d.get("vix_regime"),
+                                time_horizon=d.get("time_horizon", "INTRADAY"),
+                                eta_label=d.get("eta_label"),
+                                setup_style=d.get("setup_style", "CONTINUATION"),
+                                entry_type=d.get("entry_type", "LIMIT_ON_PULLBACK"),
+                                no_chase_boundary=d.get("no_chase_boundary"),
+                                telegram_dispatched=bool(d.get("telegram_dispatched", False)),
+                                dispatched_channels=list(d.get("dispatched_channels", [])),
+                                telegram_suppression_reason=d.get("telegram_suppression_reason"),
+                                trace_id=d.get("trace_id"),
+                                quant_snapshot=d.get("quant_snapshot"),
+                                initial_stop_loss=d.get("initial_stop_loss"),
+                                update_count=int(d.get("update_count") or 0),
+                                telegram_update_count=int(d.get("telegram_update_count") or 0),
+                                audit_trail=list(d.get("audit_trail", [])),
+                            )
                         )
-                    )
+                    except Exception as item_err:
+                        logger.warning(f"[AutoAlertEngine] Failed to deserialize alert {aid}: {item_err}")
             # Rehabilitate alerts falsely marked as INVALIDATED after hitting T1 or breaching ratcheted trailing stop
             rehab_count = 0
             for a in alerts:
@@ -10561,15 +10986,24 @@ class AutoAlertEngine:
                     if a.is_active and (getattr(a, "time_horizon", None) or "").upper() in _MULTI_SWING_HORIZONS
                 ]
                 if len(active_swings) < 5:
-                    try:
-                        self.scan_swing_inflections(
-                            universe="nifty_total_market", min_score=65, top_n=25, use_local_cache=True
-                        )
-                    except Exception as _prime_err:
-                        logger.debug(f"[AutoAlertEngine] Startup swing priming error: {_prime_err}")
+                    threading.Thread(
+                        target=self._async_prime_swings,
+                        daemon=True,
+                        name="AutoAlertEngine-SwingPriming",
+                    ).start()
         except Exception as e:
-            logger.debug(f"[AutoAlertEngine] _load error: {e}")
-            self._alerts = []
+            logger.error(f"[AutoAlertEngine] _load error: {e}", exc_info=True)
+            if not hasattr(self, "_alerts") or self._alerts is None:
+                self._alerts = []
+
+    def _async_prime_swings(self) -> None:
+        """Asynchronously prime initial swing setups without blocking hot startup path."""
+        try:
+            self.scan_swing_inflections(
+                universe="nifty_total_market", min_score=65, top_n=25, use_local_cache=True
+            )
+        except Exception as _prime_err:
+            logger.debug(f"[AutoAlertEngine] Startup swing priming error: {_prime_err}")
 
     def rehabilitate_falsely_invalidated_options(self) -> int:
         """

@@ -87,22 +87,22 @@ def compute_order_book_metrics(
 
     bids = [
         DepthLevel(
-            price=float(b.get("price", 0.0) or 0.0),
-            quantity=int(b.get("quantity", 0) or 0),
-            orders=int(b.get("orders", 1) or 1),
+            price=float(b.get("price", 0.0) or b.get("bp", 0.0) or 0.0),
+            quantity=int(b.get("quantity") or b.get("volume") or b.get("qty") or b.get("bq") or 0),
+            orders=int(b.get("orders") or b.get("ord") or b.get("bno") or 1),
         )
         for b in bids_raw
-        if float(b.get("price", 0.0) or 0.0) > 0
+        if float(b.get("price", 0.0) or b.get("bp", 0.0) or 0.0) > 0
     ]
 
     asks = [
         DepthLevel(
-            price=float(a.get("price", 0.0) or 0.0),
-            quantity=int(a.get("quantity", 0) or 0),
-            orders=int(a.get("orders", 1) or 1),
+            price=float(a.get("price", 0.0) or a.get("sp", 0.0) or 0.0),
+            quantity=int(a.get("quantity") or a.get("volume") or a.get("qty") or a.get("sq") or 0),
+            orders=int(a.get("orders") or a.get("ord") or a.get("sno") or 1),
         )
         for a in asks_raw
-        if float(a.get("price", 0.0) or 0.0) > 0
+        if float(a.get("price", 0.0) or a.get("sp", 0.0) or 0.0) > 0
     ]
 
     # Best bid & best ask
@@ -207,7 +207,11 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
     Fetches real-time quote depth for symbol from active broker integration or market engine.
     Clearly marks whether live broker L2 feed is connected or falling back to synthetic tick L1.
     """
-    clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip().upper()
+    is_mcx = symbol.upper().startswith("MCX:")
+    is_bse = symbol.upper().startswith("BSE:")
+    clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").replace("MCX:", "").strip().upper()
+    query_sym = symbol if is_mcx else clean_sym
+
     try:
         from brokers.session import get_data_broker, get_execution_broker
 
@@ -223,7 +227,7 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
                 pass
 
         if brk and hasattr(brk, "get_market_depth"):
-            depth_dict = brk.get_market_depth(clean_sym)
+            depth_dict = brk.get_market_depth(query_sym)
             if depth_dict and (depth_dict.get("bids") or depth_dict.get("buy")):
                 raw_depth = {
                     "buy": depth_dict.get("bids") or depth_dict.get("buy", []),
@@ -238,7 +242,7 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
                 )
 
         if brk and hasattr(brk, "get_quote"):
-            q = brk.get_quote(clean_sym)
+            q = brk.get_quote(query_sym)
             if q and hasattr(q, "depth") and q.depth:
                 return compute_order_book_metrics(
                     clean_sym,
@@ -254,8 +258,9 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
     try:
         from market.quotes import get_quote
 
-        q_dict = get_quote([f"NSE:{clean_sym}"])
-        q = q_dict.get(f"NSE:{clean_sym}")
+        q_sym = symbol if is_mcx else (f"BSE:{clean_sym}" if is_bse else f"NSE:{clean_sym}")
+        q_dict = get_quote([q_sym])
+        q = q_dict.get(q_sym) or q_dict.get(clean_sym)
         if q:
             ltp = float(getattr(q, "last_price", 0.0) or 0.0)
             depth = getattr(q, "depth", None) or {}

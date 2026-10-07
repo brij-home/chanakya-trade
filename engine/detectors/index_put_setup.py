@@ -284,23 +284,32 @@ def detect_index_put_setup(
         dist_pts = abs(c_strike - spot)
         dist_pct = dist_pts / max(1.0, spot)
 
-        # Institutional Moneyness Engine: Prioritize ATM and 1-strike ITM for highest delta efficiency and liquidity
+        # Institutional Moneyness Engine: Prioritize ATM and 1-to-2 strike ITM for highest delta efficiency and liquidity
         moneyness_bonus = 0.0
-        if dist_pts <= (step_val * 0.55):
-            moneyness_bonus = 25.0  # ATM sweet spot (Delta ~ -0.50)
-        elif c_strike > spot and dist_pts <= (step_val * 1.35):
-            moneyness_bonus = 20.0  # 1-strike ITM powerhouse (Delta ~ -0.58 to -0.65, zero time-decay trap)
-        elif c_strike < spot:
-            # OTM penalty grows with distance to prevent selecting low-delta decay traps
-            moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 15.0)
+        is_morning_drive = curr_time < dtime(10, 30)
+        if is_morning_drive:
+            if c_strike > spot and dist_pts <= (step_val * 2.1):
+                moneyness_bonus = 35.0  # 1-to-2 strike ITM powerhouse (Delta -0.58 to -0.70)
+            elif dist_pts <= (step_val * 0.65):
+                moneyness_bonus = 25.0  # ATM sweet spot
+            elif c_strike < spot:
+                moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 18.0)  # OTM penalty
+        else:
+            if dist_pts <= (step_val * 0.55):
+                moneyness_bonus = 25.0  # ATM sweet spot (Delta ~ -0.50)
+            elif c_strike > spot and dist_pts <= (step_val * 1.35):
+                moneyness_bonus = 20.0  # 1-strike ITM powerhouse (Delta ~ -0.58 to -0.65, zero time-decay trap)
+            elif c_strike < spot:
+                # OTM penalty grows with distance to prevent selecting low-delta decay traps
+                moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 15.0)
 
         # BSE indices (SENSEX/BANKEX) trade at much higher absolute levels and have higher absolute premiums
         if clean_sym in ("SENSEX", "BANKEX"):
             ideal_prem = 250.0
         elif clean_sym in ("MIDCPNIFTY", "FINNIFTY"):
-            ideal_prem = 40.0
+            ideal_prem = 45.0
         else:  # NIFTY, BANKNIFTY
-            ideal_prem = 125.0
+            ideal_prem = 140.0 if clean_sym == "NIFTY" else 300.0
         prem_dist = abs(lp - ideal_prem) / ideal_prem if lp > 0 else 2.0
         return (
             moneyness_bonus
@@ -324,10 +333,12 @@ def detect_index_put_setup(
         else 0.0
     )
     is_breakdown_momentum = (
-        cand_pe_pchange >= 15.0 and cand_pe_vol_oi >= 1.2
-    ) or cand_pe_vol_oi >= 2.0
-    is_explosive_momentum = cand_pe_vol_oi >= 3.0 or (
-        cand_pe_pchange >= 25.0 and cand_pe_vol_oi >= 2.0
+        (cand_pe_pchange >= 15.0 and cand_pe_vol_oi >= 1.2 and cand_pe_vol >= min_vol)
+        or (cand_pe_vol_oi >= 2.0 and cand_pe_vol >= int(min_vol * 1.5))
+    )
+    is_explosive_momentum = (
+        (cand_pe_vol_oi >= 3.0 and cand_pe_vol >= min_vol * 2)
+        or (cand_pe_pchange >= 25.0 and cand_pe_vol_oi >= 2.0 and cand_pe_vol >= min_vol)
     )
 
     # ── Optimization 1: Intraday Put-Call Ratio (PCR) Confluence Gate ───
@@ -438,6 +449,15 @@ def detect_index_put_setup(
         ).startswith("HBCM_TEST_PASSTHROUGH")
         if has_hbcm_quotes:
             if not hbcm_res.confluence_pass:
+                # Institutional Grounding Invariant: Never bypass HBCM if heavyweights are net bullish!
+                # If >= 3 heavyweights are bullish or bulls outnumber bears, the index locomotive tide is bullish.
+                if hbcm_res.bullish_count >= 3:
+                    logger.info(
+                        f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Majority of heavyweights are bullish "
+                        f"({hbcm_res.bullish_count}/5 bulls). HBCM bypass strictly forbidden."
+                    )
+                    return []
+
                 # If market breadth bypassed via strong V-top retreat (price action voted)
                 # and at least 3 heavyweights are already bearish or net heavyweights bearish:
                 _v_top_hbcm_pass = _breadth_bypassed and (
@@ -519,11 +539,7 @@ def detect_index_put_setup(
                 and not hw_posture.get("all_bullish")
             )
             hw_bulls = hw_posture.get("bull_count", 0)
-            if (
-                hw_total >= 3
-                and hw_bulls > hw_bears
-                and not (is_explosive_momentum or _roc_hw_pass)
-            ):
+            if hw_total >= 3 and (hw_bulls >= 3 or (hw_bulls > hw_bears and not (is_explosive_momentum or _roc_hw_pass))):
                 hw_tags = [f"{h['symbol']} ({h['change_pct']:+.2f}%)" for h in active_hw]
                 logger.info(
                     f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Heavyweights are net bullish "
@@ -684,22 +700,70 @@ def detect_index_put_setup(
 
         # Camarilla L4 Breakdown Check (Explosive Institutional Trend Breakdown)
         if spot <= cam_l4 and (cam_l4 - spot) / cam_l4 * 100.0 <= 0.65 and is_breakdown_momentum:
-            signals.append("CAMARILLA_L4_BREAKDOWN")
-            signal_tags["camarilla_l4_breakdown"] = {
-                "cam_l4": round(cam_l4, 1),
-                "breakdown_pct": round((cam_l4 - spot) / cam_l4 * 100.0, 3),
-                "is_narrow_cpr": is_narrow_cpr,
-            }
+            # Candlestick Confirmation Guard:
+            # Do NOT sell into an absorption hammer (long lower wick or green rejection bar).
+            has_valid_l4_bar = True
+            if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+                try:
+                    col_h = "high" if "high" in active_ohlcv.columns else "High"
+                    col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                    col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                    col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                    last_b = active_ohlcv.iloc[-1]
+                    b_h = float(last_b[col_h])
+                    b_l = float(last_b[col_l])
+                    b_c = float(last_b[col_c])
+                    b_o = float(last_b[col_o])
+                    b_rng = max(0.1, b_h - b_l)
+                    l_wick_pct = (min(b_c, b_o) - b_l) / b_rng * 100.0
+                    # If lower wick >= 35% or green candle bouncing off lows, it is buyer absorption
+                    is_absorption_hammer = (l_wick_pct >= 35.0) or (b_c > b_o and (b_c - b_l) / b_rng >= 0.50)
+                    # Close must confirm breakdown (at or below Cam L4 * 1.0005)
+                    close_confirms = b_c <= cam_l4 * 1.0005
+                    has_valid_l4_bar = (not is_absorption_hammer) and close_confirms
+                except Exception:
+                    has_valid_l4_bar = True
+
+            if has_valid_l4_bar:
+                signals.append("CAMARILLA_L4_BREAKDOWN")
+                signal_tags["camarilla_l4_breakdown"] = {
+                    "cam_l4": round(cam_l4, 1),
+                    "breakdown_pct": round((cam_l4 - spot) / cam_l4 * 100.0, 3),
+                    "is_narrow_cpr": is_narrow_cpr,
+                }
 
         # CPR Supply Rejection Check: Spot tested CPR Bottom from below and is rejecting with supply
         cpr_bottom_prox = abs(spot - cpr_bottom) / max(1.0, cpr_bottom) * 100.0
         if spot <= cpr_bottom and cpr_bottom_prox <= 0.25 and not is_5m_bull_trend:
-            signals.append("CPR_SUPPLY_REJECTION")
-            signal_tags["cpr_supply_rejection"] = {
-                "cpr_bottom": round(cpr_bottom, 1),
-                "proximity_pct": round(cpr_bottom_prox, 3),
-                "is_narrow_cpr": is_narrow_cpr,
-            }
+            has_cpr_rejection_candle = True
+            if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+                try:
+                    col_h = "high" if "high" in active_ohlcv.columns else "High"
+                    col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                    col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                    col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                    last_b = active_ohlcv.iloc[-1]
+                    b_h = float(last_b[col_h])
+                    b_l = float(last_b[col_l])
+                    b_c = float(last_b[col_c])
+                    b_o = float(last_b[col_o])
+                    b_rng = max(0.1, b_h - b_l)
+                    u_wick_pct = (b_h - max(b_c, b_o)) / b_rng * 100.0
+                    # Rising green advancing candle is a breakout attempt, NOT supply rejection!
+                    is_advancing_green = b_c > b_o and (b_c - b_l) / b_rng >= 0.60
+                    # Price must show rejection (upper wick >= 35% or red candle closing near low)
+                    has_rejection = (u_wick_pct >= 35.0) or (b_c < b_o and (b_h - b_c) / b_rng >= 0.40)
+                    has_cpr_rejection_candle = (not is_advancing_green) and has_rejection
+                except Exception:
+                    has_cpr_rejection_candle = True
+
+            if has_cpr_rejection_candle:
+                signals.append("CPR_SUPPLY_REJECTION")
+                signal_tags["cpr_supply_rejection"] = {
+                    "cpr_bottom": round(cpr_bottom, 1),
+                    "proximity_pct": round(cpr_bottom_prox, 3),
+                    "is_narrow_cpr": is_narrow_cpr,
+                }
 
     # 1. PDH Supply Rejection
     # Spot came within 0.25% of prev_day_high and is now pulling back
@@ -1338,6 +1402,58 @@ def detect_index_put_setup(
     if not signals:
         return []
 
+    # ── Eagle, Tiger & Sniper Adaptive Regime Gate ───────────────
+    eagle_regime = None
+    tiger_mandate = None
+    try:
+        from engine.index_adaptive_regime import (
+            evaluate_index_adaptive_regime,
+            compute_sniper_execution_plan,
+        )
+
+        is_liq_sweep = bool(
+            "FAILED_DAY_HIGH_BREAKOUT" in signals
+            or "DISTRIBUTION_TOP" in signals
+            or "PDH_SUPPLY_REJECTION" in signals
+        )
+        adaptive_decision = evaluate_index_adaptive_regime(
+            underlying=clean_sym,
+            spot=spot,
+            ohlcv_5m=active_ohlcv,
+            ref_time=now_dt,
+            is_institutional_thrust=is_institutional_thrust,
+            is_liquidity_sweep=is_liq_sweep,
+            vix_override=vix_val,
+        )
+        eagle_regime = adaptive_decision.eagle
+        tiger_mandate = adaptive_decision.tiger
+
+        # Tiger Stalking Discipline: If in non-trending chop or midday lull,
+        # suppress routine breakdown / trend setups unless verified thrust or liquidity sweep!
+        if not ignore_time_gate and not tiger_mandate.allow_routine_breakouts:
+            routine_setups = {
+                "DAY_LOW_BREAKDOWN",
+                "TREND_PULLBACK_RECLAIM_PE",
+                "VWAP_REJECTION_PE",
+                "VWAP_BREAKDOWN_PE",
+                "DOUBLE_TOP_BREAKDOWN",
+                "CPR_SUPPLY_REJECTION",
+                "DAY_HIGH_SUPPLY_REJECTION",
+            }
+            has_qualifying_setup = bool(
+                is_institutional_thrust
+                or is_liq_sweep
+                or "LONG_UNWINDING_FLUSH" in signals
+            )
+            if not has_qualifying_setup and all(s in routine_setups for s in signals):
+                logger.info(
+                    f"[IndexPutSetup] Suppressed routine PE setup on {clean_sym} ({', '.join(signals)}): "
+                    f"TIGER STALKING active ({tiger_mandate.reason}). Preventing whipsaw bleeding."
+                )
+                return []
+    except Exception as e_adapt:
+        logger.debug(f"[IndexPutSetup] Adaptive regime evaluation error: {e_adapt}")
+
     # ── Select Best PE Contract ───────────────────────────────────
     best_pe = pe_contracts[0]
     strike = float(getattr(best_pe, "strike", spot))
@@ -1378,7 +1494,7 @@ def detect_index_put_setup(
             pass
 
     # ── Confidence Score ─────────────────────────────────────────
-    base_confidence = 68
+    base_confidence = 58
     signal_bonuses = {
         "PDH_SUPPLY_REJECTION": 14,
         "DAY_HIGH_SUPPLY_REJECTION": 14,
@@ -1424,12 +1540,8 @@ def detect_index_put_setup(
 
     confidence = min(98, confidence)
 
-    # Single-signal unconfirmed guard: if only 1 secondary signal, cap at 72%
-    if (
-        len(signals) == 1
-        and signals[0] in ("DAY_HIGH_SUPPLY_REJECTION", "SUPPLY_ZONE_SWEEP")
-        and not is_breakdown_momentum
-    ):
+    # Single-signal unconfirmed guard: if only 1 signal and without explosive momentum, cap at 72%
+    if len(signals) == 1 and not is_explosive_momentum:
         confidence = min(72, confidence)
 
     # Determine stage: IGNITED if premium is already expanding strongly, else EARLY_WARNING
@@ -1453,6 +1565,7 @@ def detect_index_put_setup(
                 option_ltp=opt_ltp,
                 lot_size=lot_sz,
                 spot=spot,
+                contract_symbol=contract_sym,
             )
             if (opt_ltp > 0 and exp_date)
             else None
@@ -1462,12 +1575,43 @@ def detect_index_put_setup(
         opt_plan = None
         mkt_status = {"status": "SESSION_OPEN", "label": "⚡ SESSION OPEN"}
 
-    t1_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.30, 1)
-    t2_premium = opt_plan.get("t2_premium") if opt_plan else round(opt_ltp * 1.55, 1)
-    t3_premium = opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 1.90, 1)
-    sl_premium = opt_plan["sl_premium"] if opt_plan else round(max(0.5, opt_ltp * 0.80), 1)
-    rr_str = opt_plan.get("option_rr", "1:1.9") if opt_plan else "1:1.9"
+    t1_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.18, 1)
+    t2_premium = opt_plan.get("t2_premium") if opt_plan else round(opt_ltp * 1.32, 1)
+    t3_premium = opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 1.55, 1)
+    sl_premium = opt_plan["sl_premium"] if opt_plan else round(max(0.5, opt_ltp * 0.82), 1)
+    t0_5_premium = (
+        opt_plan.get("t0_5_premium")
+        if opt_plan
+        else round(opt_ltp + (0.8 * max(1.0, opt_ltp - sl_premium)), 1)
+    )
+    rr_str = opt_plan.get("option_rr", "1:1.8") if opt_plan else "1:1.8"
     net_rr_str = opt_plan.get("net_option_rr", rr_str) if opt_plan else rr_str
+
+    # ── Intraday Feasibility & Greeks-Aligned Scalp Risk Engine ──
+    # For expensive index options (e.g. BankNifty/FinNifty monthly contracts trading at ₹400–₹1,000+),
+    # a flat 20-25% SL requires risking 100–250 option points, which is absurd and completely unfeasible
+    # for intraday trading. Intraday index stops must be strictly bounded by realistic market mechanics.
+    max_intraday_opt_risk = {
+        "NIFTY": 28.0,
+        "BANKNIFTY": 65.0,
+        "FINNIFTY": 30.0,
+        "MIDCPNIFTY": 18.0,
+        "SENSEX": 95.0,
+        "BANKEX": 95.0,
+    }.get(clean_sym, 35.0)
+
+    if opt_ltp > 0:
+        calc_risk = max(1.0, opt_ltp - sl_premium)
+        if calc_risk > max_intraday_opt_risk:
+            calc_risk = max_intraday_opt_risk
+            sl_premium = round(max(0.5, opt_ltp - calc_risk), 1)
+            t0_5_premium = round(opt_ltp + (calc_risk * 0.8), 1)
+            t1_premium = round(opt_ltp + (calc_risk * 1.5), 1)
+            t2_premium = round(opt_ltp + (calc_risk * 2.8), 1)
+            t3_premium = round(opt_ltp + (calc_risk * 4.5), 1)
+            rr_str = "1:1.5"
+            net_rr_str = "1:1.5"
+
     friction_pts = (
         opt_plan.get("friction_pts", round(opt_ltp * 0.012 + 0.35, 2))
         if opt_plan
@@ -1478,8 +1622,9 @@ def detect_index_put_setup(
         if opt_plan
         else round(max(0.1, opt_ltp - sl_premium) * lot_sz, 0)
     )
-    t1_pct = opt_plan.get("t1_pct", 30.0) if opt_plan else 30.0
-    sl_pct = opt_plan.get("sl_pct", -20.0) if opt_plan else -20.0
+    t1_pct = round(((t1_premium - opt_ltp) / max(0.1, opt_ltp)) * 100, 1) if opt_ltp > 0 else 30.0
+    sl_pct = round(((sl_premium - opt_ltp) / max(0.1, opt_ltp)) * 100, 1) if opt_ltp > 0 else -20.0
+
 
     # ── Velocity Regime Check ────────────────────────────────────
     vel_regime = "NORMAL_TREND"
@@ -1959,10 +2104,38 @@ def detect_index_put_setup(
         else contract_sym
     )
 
-    entry_min = round(max(0.5, opt_ltp * 0.94), 1) if opt_ltp > 0 else spot
-    entry_max = round(opt_ltp * 1.02, 1) if opt_ltp > 0 else spot
+    sniper_plan = None
+    if opt_ltp > 0:
+        try:
+            from engine.index_adaptive_regime import compute_sniper_execution_plan
+
+            sniper_plan = compute_sniper_execution_plan(
+                symbol=clean_sym,
+                direction="BEARISH",
+                spot=spot,
+                trigger_level=spot if not day_low else max(spot, day_low),
+                invalidation_level=round(spot * 1.004, 1),
+                target_1=round(spot * 0.992, 1),
+                opt_ltp=opt_ltp,
+                setup_name=primary_signal,
+                lot_size=lot_sz,
+            )
+        except Exception as e_snip:
+            logger.debug(f"[IndexPutSetup] Sniper plan error: {e_snip}")
+
+    entry_min = round(max(0.5, opt_ltp * 0.95), 1) if opt_ltp > 0 else spot
+    entry_max = round(opt_ltp * 1.015, 1) if opt_ltp > 0 else spot
     entry_range_str = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
-    no_chase_lvl = round(opt_ltp * 1.04, 1) if opt_ltp > 0 else round(spot * 0.996, 1)
+    no_chase_lvl = round(opt_ltp * 1.045, 1) if opt_ltp > 0 else round(spot * 0.996, 1)
+
+    if is_spread_mandated:
+        annotated_hl = f"🛡️ [HEDGED SPREAD MANDATE] {headline}"
+    elif tiger_mandate and tiger_mandate.mandate == "MOMENTUM_EXPANSION":
+        annotated_hl = f"🚀 [TIGER POUNCE] {headline}"
+    elif tiger_mandate and tiger_mandate.mandate == "TURTLE_SOUP_RANGE_FADE":
+        annotated_hl = f"⚡ [TURTLE SOUP FADE] {headline}"
+    else:
+        annotated_hl = headline
 
     alert = AutoAlert(
         alert_id=generate_alert_id(clean_sym, "INDEX_PUT_SETUP", variant=f"pe-{int(strike)}"),
@@ -1971,7 +2144,7 @@ def detect_index_put_setup(
         symbol=clean_sym,
         exchange=opt_exchange,
         direction="BEARISH",
-        headline=f"🛡️ [HEDGED SPREAD MANDATE] {headline}" if is_spread_mandated else headline,
+        headline=annotated_hl,
         summary=f"{summary} | OTE: {entry_range_str} | No Chase > ₹{no_chase_lvl:,.1f} | Rule: 50% @ T1 -> SL to BE",
         ltp=opt_ltp or spot,
         trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
@@ -2050,11 +2223,23 @@ def detect_index_put_setup(
             "friction_pts": friction_pts,
             "net_risk_reward": net_rr_str,
             "max_loss_rupees": max_loss_rupees,
+            "target_0_5_premium": t0_5_premium,
+            "target_1_premium": t1_premium,
+            "target_2_premium": t2_premium,
+            "target_3_premium": t3_premium,
+            "stop_loss_premium": sl_premium,
+            "entry_premium": opt_ltp,
+            "eagle_regime": eagle_regime.to_dict() if eagle_regime else None,
+            "tiger_mandate": tiger_mandate.to_dict() if tiger_mandate else None,
+            "sniper_plan": sniper_plan.to_dict() if sniper_plan else None,
         },
         actionable_plan={
             "action": act_verb,
             "contract": target_inst,
             "instrument": target_inst,
+            "sniper_plan": sniper_plan.to_dict() if sniper_plan else None,
+            "eagle_summary": eagle_regime.summary if eagle_regime else None,
+            "tiger_guidance": tiger_mandate.action_guidance if tiger_mandate else None,
             "instrument_type": "OPTION_SPREAD" if is_spread_mandated else "OPTION",
             "preferred_vehicle": hedge_plan.get(
                 "preferred_vehicle", "SPREAD_ONLY" if is_spread_mandated else "NAKED_OPTION"
@@ -2077,6 +2262,7 @@ def detect_index_put_setup(
             "entry_range": entry_range_str,
             "no_chase": f"DO NOT CHASE above ₹{no_chase_lvl:,.1f}",
             "impulse_trigger_level": round(opt_ltp * 1.01, 2) if opt_ltp > 0 else spot,
+            "target_0_5": f"₹{t0_5_premium:,.2f}" if t0_5_premium else None,
             "target_1": f"₹{t1_premium:,.2f}",
             "target": f"₹{t1_premium:,.2f} (+{t1_pct:.0f}%)",
             "target_2": f"₹{t2_premium:,.2f}",

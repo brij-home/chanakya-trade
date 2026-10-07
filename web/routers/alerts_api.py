@@ -8,14 +8,20 @@ All synchronous engine and file operations are offloaded via asyncio.to_thread.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import json
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 
 logger = logging.getLogger("chanakya.web.routers.alerts")
 router = APIRouter(tags=["Alerts"])
+
+_alerts_router_serializer_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="AlertsRouterSerializer"
+)
 
 
 @router.get("/api/alerts/auto")
@@ -37,8 +43,8 @@ async def get_auto_alerts(
     """
     from engine.auto_alert_engine import auto_alert_engine
 
-    alerts = await asyncio.to_thread(
-        auto_alert_engine.get_alerts,
+    # In-memory filtered slice (< 1ms). Direct execution avoids thread pool queue starvation.
+    alerts = auto_alert_engine.get_alerts(
         limit=limit,
         alert_type=alert_type,
         stage=stage,
@@ -50,7 +56,13 @@ async def get_auto_alerts(
         horizon=horizon,
         segment=segment,
     )
-    return {"status": "ok", "data": [a.to_dict() for a in alerts]}
+
+    def _encode_payload(alts):
+        return json.dumps({"status": "ok", "data": [a.to_dict() for a in alts]}, default=str).encode("utf-8")
+
+    loop = asyncio.get_running_loop()
+    raw_bytes = await loop.run_in_executor(_alerts_router_serializer_pool, _encode_payload, alerts)
+    return Response(content=raw_bytes, media_type="application/json")
 
 
 @router.post("/api/alerts/auto/archive")

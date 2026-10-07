@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import threading
 import webbrowser
 from typing import Optional
 
@@ -179,37 +180,41 @@ def unregister_broker(key: str) -> None:
 
 
 def _try_auto_restore_sessions() -> None:
-    """Attempt to restore persisted broker sessions (Fyers, mStock, Shoonya, etc.) when _brokers is empty."""
+    """Attempt to restore persisted broker sessions (Fyers, mStock, Shoonya, etc.)."""
     global _brokers, _primary_key, _data_key, _exec_key
-    if _brokers or os.environ.get("CHANAKYA_TESTING") == "1":
+    if os.environ.get("CHANAKYA_TESTING") == "1":
         return
 
     # 0. Fyers (Primary Institutional Data & Execution Broker)
-    try:
-        from brokers.fyers import FyersAPI, TOKEN_FILE as _FT
+    if "fyers" not in _brokers:
+        try:
+            from brokers.fyers import FyersAPI, TOKEN_FILE as _FT
 
-        if os.path.exists(_FT) or os.environ.get("FYERS_APP_ID"):
-            b = FyersAPI()
-            if b.is_authenticated():
-                register_broker("fyers", b, primary=True, role="both")
-                try:
-                    _start_websocket(b)
-                except Exception:
-                    pass
-                return
-    except Exception:
-        pass
+            if os.path.exists(_FT) or os.environ.get("FYERS_APP_ID"):
+                b = FyersAPI()
+                if b.is_authenticated():
+                    is_first = not _brokers
+                    register_broker("fyers", b, primary=is_first, role="both" if is_first else "data")
+                    try:
+                        threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
-    # 1. m.Stock
+    if _brokers:
+        return
+
+    # 1. m.Stock (only if configured in environment)
     try:
         from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
 
-        if os.path.exists(_MT):
+        if os.path.exists(_MT) and (os.environ.get("MSTOCK_API_KEY") or os.environ.get("MSTOCK_CLIENT_CODE")):
             b = MStockAPI()
             if b.is_authenticated():
                 register_broker("mstock", b, role="both")
                 try:
-                    _start_websocket(b)
+                    threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
                 except Exception:
                     pass
                 return
@@ -225,7 +230,7 @@ def _try_auto_restore_sessions() -> None:
             if b.is_authenticated():
                 register_broker("shoonya", b, role="both")
                 try:
-                    _start_websocket(b)
+                    threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
                 except Exception:
                     pass
                 return
@@ -241,7 +246,7 @@ def _try_auto_restore_sessions() -> None:
             if b.is_authenticated():
                 register_broker("kotak", b, role="both")
                 try:
-                    _start_websocket(b)
+                    threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
                 except Exception:
                     pass
                 return

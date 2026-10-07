@@ -40,6 +40,7 @@ class TickerIndexItem:
     low: float = 0.0
     source: str = "INITIALIZING"
     updated_at: str = ""
+    updated_ts: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -64,6 +65,13 @@ RIBBON_SPEC = [
         "symbol": "SENSEX",
         "display_name": "SENSEX",
         "inst": "BSE:SENSEX",
+        "category": "INDEX",
+        "unit": "₹",
+    },
+    {
+        "symbol": "MIDCPNIFTY",
+        "display_name": "MIDCAP NIFTY",
+        "inst": "NSE:NIFTY MID SELECT",
         "category": "INDEX",
         "unit": "₹",
     },
@@ -394,6 +402,8 @@ class MarketTickerStream:
             "NSE:FINNIFTY-INDEX": "finnifty",
             "26037": "finnifty",
             "NSE:NIFTY MIDCAP 100": "midcpnifty",
+            "NSE:NIFTYMIDCAP100-INDEX": "midcpnifty",
+            "NSE:MIDCPNIFTY-INDEX": "midcpnifty",
             "NSE:MIDCAP100-INDEX": "midcpnifty",
             "26014": "midcpnifty",
             "MCX:CRUDEOIL": "crudeoil",
@@ -428,24 +438,24 @@ class MarketTickerStream:
             from market.mstock_websocket import mstock_ws
 
             mstock_ws.on_tick(self._on_mstock_tick)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[TickerStream] Could not wire m.Stock WS listener: {exc}")
 
         # 2. Fyers WS
         try:
             from market.websocket import ws_manager
 
             ws_manager.on_tick(self._on_fyers_tick)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[TickerStream] Could not wire Fyers WS listener: {exc}")
 
         # 3. Binance Crypto WS (24x7)
         try:
             from market.crypto_stream import crypto_stream
 
             crypto_stream.on_tick(self._on_crypto_tick)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[TickerStream] Could not wire Crypto WS listener: {exc}")
 
     def _on_mstock_tick(self, tick: Any) -> None:
         """Handle live tick from m.Stock WebSocket."""
@@ -466,6 +476,7 @@ class MarketTickerStream:
                 item.low = float(tick.low)
             item.source = "MSTOCK_WS"
             item.updated_at = datetime.now(timezone.utc).isoformat()
+            item.updated_ts = time.time()
 
             # Sync ribbon entry in real-time
             if hasattr(self, "_cached_ribbon_tickers") and self._cached_ribbon_tickers:
@@ -493,8 +504,10 @@ class MarketTickerStream:
 
         with self._lock:
             item = self._items[key]
-            # Prioritize mstock if it's currently live, else use Fyers
-            if item.source != "MSTOCK_WS" or (time.time() - 3.0 > 0):
+            # Prioritize mstock if it was received within the last 3 seconds
+            now_ts = time.time()
+            mstock_fresh = item.source == "MSTOCK_WS" and (now_ts - item.updated_ts <= 3.0)
+            if not mstock_fresh:
                 item.price = float(tick.ltp)
                 item.change = float(getattr(tick, "change", 0.0))
                 item.change_pct = float(getattr(tick, "change_pct", 0.0))
@@ -504,6 +517,7 @@ class MarketTickerStream:
                     item.low = float(tick.low)
                 item.source = "FYERS_WS"
                 item.updated_at = datetime.now(timezone.utc).isoformat()
+                item.updated_ts = now_ts
 
                 # Sync ribbon entry in real-time
                 if hasattr(self, "_cached_ribbon_tickers") and self._cached_ribbon_tickers:
@@ -541,6 +555,7 @@ class MarketTickerStream:
                 item.low = float(tick.get("low", 0.0))
             item.source = "BINANCE_WS"
             item.updated_at = datetime.now(timezone.utc).isoformat()
+            item.updated_ts = time.time()
 
             # Sync ribbon entry in real-time
             if hasattr(self, "_cached_ribbon_tickers") and self._cached_ribbon_tickers:
@@ -593,44 +608,60 @@ class MarketTickerStream:
         except Exception as exc:
             logger.warning(f"[TickerStream] Ticker publish error: {exc}", exc_info=True)
 
-    def refresh_indices_sync(self) -> None:
+    def is_ws_alive(self, max_staleness_seconds: float = 8.0) -> bool:
+        """Check if any Indian market WS ticks have been received recently."""
+        now = time.time()
+        with self._lock:
+            return any(
+                "WS" in item.source and (now - item.updated_ts) <= max_staleness_seconds
+                for item in self._items.values()
+                if item.category == "INDIAN"
+            )
+
+    def refresh_indices_sync(self, force_ribbon: bool = False) -> None:
         """Fetch latest quotes for Indian and Global indices via REST feeds."""
+        now_ts = time.time()
         now_iso = datetime.now(timezone.utc).isoformat()
+        ws_active = self.is_ws_alive()
 
         # 1. Ribbon Tickers (NIFTY, BANKNIFTY, SENSEX, FINNIFTY, INDIA VIX, CRUDEOIL, GOLD, SILVER, BTC)
-        try:
-            ribbon = compute_ribbon_tickers()
-            self._cached_ribbon_tickers = ribbon
+        # Skip heavy REST fetch if WebSockets are actively streaming Indian market data, unless forced or periodic fallback
+        if force_ribbon or not ws_active:
+            try:
+                ribbon = compute_ribbon_tickers()
+                self._cached_ribbon_tickers = ribbon
 
-            key_map = {
-                "NIFTY": "nifty_50",
-                "BANKNIFTY": "bank_nifty",
-                "SENSEX": "sensex",
-                "FINNIFTY": "finnifty",
-                "INDIA VIX": "india_vix",
-                "CRUDEOIL": "crudeoil",
-                "NATURALGAS": "naturalgas",
-                "GOLD": "gold",
-                "SILVER": "silver",
-                "BTC": "btc",
-                "ETH": "eth",
-                "SOL": "sol",
-            }
-            with self._lock:
-                for r in ribbon:
-                    item_key = key_map.get(r.get("symbol"))
-                    if item_key and item_key in self._items:
-                        item = self._items[item_key]
-                        # Don't overwrite higher-priority live WebSocket tick if recently updated
-                        if "WS" not in item.source or (time.time() - 5.0 > 0):
-                            item.price = float(r.get("ltp", 0.0) or 0.0)
-                            item.change = float(r.get("change", 0.0) or 0.0)
-                            item.change_pct = float(r.get("change_pct", 0.0) or 0.0)
-                            if "WS" not in item.source:
-                                item.source = "LIVE_TICKER"
-                            item.updated_at = now_iso
-        except Exception as e:
-            logger.debug(f"Ribbon tickers refresh error: {e}")
+                key_map = {
+                    "NIFTY": "nifty_50",
+                    "BANKNIFTY": "bank_nifty",
+                    "SENSEX": "sensex",
+                    "FINNIFTY": "finnifty",
+                    "INDIA VIX": "india_vix",
+                    "CRUDEOIL": "crudeoil",
+                    "NATURALGAS": "naturalgas",
+                    "GOLD": "gold",
+                    "SILVER": "silver",
+                    "BTC": "btc",
+                    "ETH": "eth",
+                    "SOL": "sol",
+                }
+                with self._lock:
+                    for r in ribbon:
+                        item_key = key_map.get(r.get("symbol"))
+                        if item_key and item_key in self._items:
+                            item = self._items[item_key]
+                            # Don't overwrite higher-priority live WebSocket tick if recently updated (< 5.0s)
+                            ws_fresh = "WS" in item.source and (now_ts - item.updated_ts <= 5.0)
+                            if not ws_fresh:
+                                item.price = float(r.get("ltp", 0.0) or 0.0)
+                                item.change = float(r.get("change", 0.0) or 0.0)
+                                item.change_pct = float(r.get("change_pct", 0.0) or 0.0)
+                                if "WS" not in item.source:
+                                    item.source = "LIVE_TICKER"
+                                item.updated_at = now_iso
+                                item.updated_ts = now_ts
+            except Exception as e:
+                logger.warning(f"[TickerStream] Ribbon tickers refresh error: {e}", exc_info=True)
 
         # 2. Global Macro Report (GIFT Nifty, NASDAQ, S&P 500, DXY, US 10Y, Brent)
         try:
@@ -647,8 +678,9 @@ class MarketTickerStream:
                         item.change_pct = macro_item.change_pct
                         item.source = "LIVE_MACRO"
                         item.updated_at = now_iso
+                        item.updated_ts = now_ts
         except Exception as e:
-            logger.debug(f"Global macro refresh error: {e}")
+            logger.warning(f"[TickerStream] Global macro refresh error: {e}", exc_info=True)
 
         self._notify_listeners()
 
@@ -677,31 +709,40 @@ class MarketTickerStream:
         }
 
     def start(self, poll_interval_seconds: float = 3.0) -> None:
-        """Start background polling thread for global/macro tickers."""
+        """Start background polling thread for global/macro tickers with adaptive intervals."""
         if self._running:
             return
         self._running = True
 
         def _poll_worker():
-            print(
-                f"[TickerStream] Polling worker started (interval={poll_interval_seconds}s)",
-                flush=True,
+            logger.info(
+                f"[TickerStream] Polling worker started (interval={poll_interval_seconds}s)"
             )
+            last_macro_fetch = 0.0
+            last_ribbon_reconcile = 0.0
             while self._running:
                 try:
-                    self.refresh_indices_sync()
-                    cached_cnt = len(getattr(self, "_cached_ribbon_tickers", []) or [])
-                    print(
-                        f"[TickerStream] Worker updated {cached_cnt} ribbon tickers successfully",
-                        flush=True,
-                    )
+                    now = time.time()
+                    ws_active = self.is_ws_alive()
+                    # When WS is active: refresh macro every 15s, ribbon reconcile every 60s
+                    # When WS is inactive: poll both every poll_interval_seconds
+                    need_ribbon = (not ws_active) or (now - last_ribbon_reconcile >= 60.0)
+                    need_macro = (now - last_macro_fetch >= (15.0 if ws_active else poll_interval_seconds))
+
+                    if need_ribbon:
+                        last_ribbon_reconcile = now
+                    if need_macro:
+                        last_macro_fetch = now
+
+                    if need_ribbon or need_macro:
+                        self.refresh_indices_sync(force_ribbon=need_ribbon)
                 except Exception as e:
-                    print(f"[TickerStream] Refresh error: {e}", flush=True)
+                    logger.warning(f"[TickerStream] Refresh worker error: {e}", exc_info=True)
                 for _ in range(max(1, int(poll_interval_seconds * 10))):
                     if not self._running:
                         break
                     time.sleep(0.1)
-            print("[TickerStream] Polling worker stopped", flush=True)
+            logger.info("[TickerStream] Polling worker stopped")
 
         self._worker_thread = threading.Thread(
             target=_poll_worker, daemon=True, name="TickerStreamWorker"
@@ -714,8 +755,8 @@ class MarketTickerStream:
         if self._worker_thread and self._worker_thread.is_alive():
             try:
                 self._worker_thread.join(timeout=timeout)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(f"[TickerStream] Error joining worker thread: {exc}", exc_info=True)
         self._worker_thread = None
 
 

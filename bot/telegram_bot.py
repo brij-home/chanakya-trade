@@ -899,6 +899,13 @@ async def cmd_filter(update, context) -> None:
                 dest_lines.append(
                     f"• <b>F&O Index:</b> <code>Premium_Alpha_Vortex_FnO_Index</code> (<code>{fno_idx_cid}</code>)"
                 )
+            free_idx_cid = prefs.get("free_index_chat_id") or os.environ.get(
+                "TELEGRAM_FREE_INDEX_CHAT_ID", "-1004298387260"
+            )
+            if free_idx_cid:
+                dest_lines.append(
+                    f"• <b>Free Index Signals:</b> <code>Nifty BankNifty Free Signals</code> (<code>{free_idx_cid}</code>)"
+                )
             fno_cid = prefs.get("fno_chat_id") or os.environ.get("TELEGRAM_FNO_CHAT_ID", "")
             if fno_cid:
                 dest_lines.append(f"• <b>F&O Stock:</b> <code>{fno_cid}</code>")
@@ -1752,6 +1759,24 @@ def get_telegram_destinations() -> dict[str, Any]:
     else:
         equity_name = ""
 
+    free_index_chat_id = os.environ.get("TELEGRAM_FREE_INDEX_CHAT_ID", "").strip()
+    if not free_index_chat_id:
+        try:
+            from engine.alert_preferences import alert_preferences
+
+            free_index_chat_id = alert_preferences._preferences.free_index_chat_id or ""
+        except Exception:
+            pass
+    if not free_index_chat_id:
+        free_index_chat_id = "-1004298387260"
+
+    if "-1004298387260" in free_index_chat_id:
+        free_index_name = "Nifty BankNifty Free Signals"
+    elif free_index_chat_id:
+        free_index_name = "Free Index Signals Channel"
+    else:
+        free_index_name = ""
+
     return {
         "default_chat_id": str(default_chat) if default_chat else "",
         "channel_id": channel_id.strip(),
@@ -1759,12 +1784,20 @@ def get_telegram_destinations() -> dict[str, Any]:
         "fno_chat_name": fno_name,
         "fno_index_chat_id": fno_index_chat_id.strip(),
         "fno_index_chat_name": fno_index_name,
+        "free_index_chat_id": free_index_chat_id.strip(),
+        "free_index_chat_name": free_index_name,
+        "free_index_link": "https://t.me/IndiaIndexSignals",
         "mcx_chat_id": mcx_chat_id.strip(),
         "mcx_chat_name": mcx_name,
         "equity_chat_id": equity_chat_id.strip(),
         "equity_chat_name": equity_name,
         "is_configured": bool(
-            default_chat or fno_chat_id or fno_index_chat_id or mcx_chat_id or equity_chat_id
+            default_chat
+            or fno_chat_id
+            or fno_index_chat_id
+            or free_index_chat_id
+            or mcx_chat_id
+            or equity_chat_id
         ),
     }
 
@@ -1935,9 +1968,10 @@ def format_telegram_push_payload(
         if env_tid and env_tid.strip().isdigit():
             message_thread_id = int(env_tid.strip())
 
-    # Guard: FNO_INDEX channel (-1004380788314) strictly restricted to Nifty, Banknifty, Midcp, and Sensex
+    # Guard: FNO_INDEX channels (-1004380788314 and Free -1004298387260) strictly restricted to Nifty, Banknifty, Midcp, and Sensex
     fno_idx_env_id = os.environ.get("TELEGRAM_FNO_INDEX_CHAT_ID", "-1004380788314").strip()
-    if target_chat_id and str(target_chat_id) == fno_idx_env_id:
+    free_idx_env_id = os.environ.get("TELEGRAM_FREE_INDEX_CHAT_ID", "-1004298387260").strip()
+    if target_chat_id and str(target_chat_id) in (fno_idx_env_id, free_idx_env_id):
         m_blocked = re.search(
             r"\b(FINNIFTY|BANKEX|NIFTYNXT50|CNXIT|NIFTYIT|NIFTYAUTO|NIFTYPHARMA|NIFTYMETAL|NIFTYENERGY)\b",
             message,

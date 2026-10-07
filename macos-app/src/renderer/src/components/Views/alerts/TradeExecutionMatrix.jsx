@@ -262,7 +262,7 @@ export function TradeExecutionMatrix({
           ) : null}
           {levels.no_chase_boundary ? (
             <div className="text-[8px] text-rose-400 font-bold truncate" title="No-Chase Maximum Entry Limit">
-              🛑 Max {currSym}{formatNum(levels.no_chase_boundary)}
+              🛑 NoChase {currSym}{formatNum(levels.no_chase_boundary)}
             </div>
           ) : null}
         </div>

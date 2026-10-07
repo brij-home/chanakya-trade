@@ -293,10 +293,23 @@ def is_alert_option_premium_level(alert: Any) -> bool:
         return getattr(alert, key, default)
 
     atype = str(_g("alert_type", "") or "")
-    if atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE"):
+    if atype in (
+        "OPTIONS_MOMENTUM",
+        "OPTION_WRITE",
+        "INDEX_CALL_SETUP",
+        "INDEX_PUT_SETUP",
+        "INDEX_MICRO_SCALP",
+    ):
         return True
     if atype == "GAMMA_BLAST" and _g("option_type", None):
         return True
+
+    if atype == "COMMODITY_MOMENTUM":
+        deriv = str(_g("derivative_type", "") or "").upper()
+        csym_check = str(_g("contract_symbol", "") or "").upper()
+        if deriv == "OPT" or csym_check.endswith("CE") or csym_check.endswith("PE"):
+            return True
+        return False
 
     # Underlying stock/index setups are anchored to spot even if an option recommendation is attached
     if atype in (
@@ -310,7 +323,6 @@ def is_alert_option_premium_level(alert: Any) -> bool:
         "PRECURSOR_RADAR",
         "SMC_SWEEP",
         "CIRCUIT_WARNING",
-        "COMMODITY_MOMENTUM",
     ):
         return False
 

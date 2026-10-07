@@ -3,7 +3,7 @@ import { useChatStore } from '../../store/chatStore'
 export default function MorningBriefCard({ data }) {
   const sendDraft = useChatStore((s) => s.sendDraft)
   if (!data) return null
-  const { market_snapshot, institutional_flows, top_news, market_breadth } = data
+  const { market_snapshot, institutional_flows, top_news, market_breadth, battle_plan } = data
 
   // Build contextual chips from actual brief data
   const posture    = market_snapshot?.posture ?? null
@@ -76,6 +76,75 @@ export default function MorningBriefCard({ data }) {
                   <p className={`text-xs font-mono ${pos ? 'text-green' : 'text-red'}`}>
                     {pos ? '+' : ''}{Number(idx.change_pct ?? 0).toFixed(2)}%
                   </p>
+                </div>
+              )
+            })}
+          </div>
+        </Section>
+      )}
+
+      {/* Pre-Market Battle Plan — Key Inflection Levels Before Time */}
+      {battle_plan && Object.keys(battle_plan).length > 0 && (
+        <Section title="🎯 Pre-Market Battle Plan · Key Inflection Levels">
+          <div className="space-y-3">
+            {Object.entries(battle_plan).map(([sym, item]) => {
+              if (!item) return null
+              const cpr = item.cpr || {}
+              const cam = item.camarilla || {}
+              const bp = item.blueprint || {}
+              const isNarrow = cpr.is_narrow
+              const isWide = cpr.is_wide
+              return (
+                <div key={sym} className="bg-panel rounded-lg p-3 border border-border/80 space-y-2">
+                  <div className="flex items-center justify-between border-b border-border/50 pb-1.5">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-sm text-text font-ui">{sym}</span>
+                      <span className="text-xs font-mono text-muted">₹{Number(item.spot || 0).toLocaleString('en-IN')}</span>
+                    </div>
+                    <span className={`text-[10px] px-2 py-0.5 rounded font-mono font-bold ${
+                      isNarrow ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' :
+                      isWide ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' :
+                      'bg-slate-500/15 text-slate-300 border border-slate-500/30'
+                    }`}>
+                      {cpr.regime || 'AVERAGE_CPR'}
+                    </span>
+                  </div>
+
+                  {/* Level Grid */}
+                  <div className="grid grid-cols-4 gap-2 text-[10px] font-mono">
+                    <div className="bg-elevated/60 p-1.5 rounded border border-border/40">
+                      <span className="text-muted block text-[9px]">CPR RANGE</span>
+                      <span className="font-bold text-amber-300">₹{cpr.bottom} - ₹{cpr.top}</span>
+                      <span className="text-[8px] text-muted block">Width: {cpr.width_pct}%</span>
+                    </div>
+                    <div className="bg-elevated/60 p-1.5 rounded border border-border/40">
+                      <span className="text-muted block text-[9px]">CAM H4 (LONG)</span>
+                      <span className="font-bold text-emerald-400">₹{cam.h4}</span>
+                      <span className="text-[8px] text-muted block">H3: ₹{cam.h3}</span>
+                    </div>
+                    <div className="bg-elevated/60 p-1.5 rounded border border-border/40">
+                      <span className="text-muted block text-[9px]">CAM L4 (SHORT)</span>
+                      <span className="font-bold text-rose-400">₹{cam.l4}</span>
+                      <span className="text-[8px] text-muted block">L3: ₹{cam.l3}</span>
+                    </div>
+                    <div className="bg-elevated/60 p-1.5 rounded border border-border/40">
+                      <span className="text-muted block text-[9px]">PREV DAY RANGE</span>
+                      <span className="font-bold text-text">H: ₹{item.pdh}</span>
+                      <span className="text-[8px] text-muted block">L: ₹{item.pdl}</span>
+                    </div>
+                  </div>
+
+                  {/* Execution Blueprint */}
+                  <div className="text-[11px] font-mono text-zinc-300 bg-surface/70 p-2 rounded border border-border/30 space-y-1">
+                    <div className="flex items-start gap-1.5">
+                      <span className="text-emerald-400 font-bold">🚀 Trend:</span>
+                      <span>{bp.trend_long} | {bp.trend_short}</span>
+                    </div>
+                    <div className="flex items-start gap-1.5">
+                      <span className="text-amber-400 font-bold">⚖️ Reversal:</span>
+                      <span>{bp.reversal_long}</span>
+                    </div>
+                  </div>
                 </div>
               )
             })}

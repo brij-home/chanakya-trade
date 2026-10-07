@@ -2723,3 +2723,79 @@ def test_option_alert_action_line_clarity_with_hedged_spread():
     # The shield box must still be rendered below
     assert "🛡️ <b>DEFINED-RISK HEDGE SPREAD" in rendered
     assert "Net Debit / Max Loss:</b> <code>₹23.8/sh (₹1,547 total)</code>" in rendered
+
+
+def test_monotonic_target_resolution_prevents_t2_less_than_t1():
+    """Verify that inverted targets in actionable_plan (e.g. target=198.8, target_2=168.1)
+    are strictly sorted so T1 < T2 in rendered alert output."""
+    from bot.alert_templates import format_auto_alert_telegram
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-monotonic-tgt-001",
+        alert_type="INDEX_MICRO_SCALP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="⚡ NIFTY 22550 CE 1m Micro Breakout",
+        summary="NIFTY 22550 CE micro breakout ignited at ₹113.6",
+        ltp=113.60,
+        trigger_level=113.60,
+        target_level=198.80,
+        stop_loss=96.60,
+        strike=22550.0,
+        option_type="CE",
+        contract_symbol="NIFTY2026100622550CE",
+        confidence=95,
+        actionable_plan={
+            "action": "BUY NIFTY 22550 CE",
+            "entry_range": "₹113.6 – ₹117.2",
+            "recommended_entry": "₹113.6 – ₹117.2",
+            "stop_loss": "₹96.6",
+            "target": "₹198.8",
+            "target_2": "₹168.1",
+            "lot_size": 65,
+        },
+    )
+
+    rendered = format_auto_alert_telegram(alert)
+    assert "• <b>T1:</b> <code>₹168.1</code> | <b>T2:</b> <code>₹198.8</code>" in rendered
+    assert "• <b>T1:</b> <code>₹198.8</code> | <b>T2:</b> <code>₹168.1</code>" not in rendered
+
+
+def test_free_index_monotonic_target_sorting():
+    """Verify that free index channel templates sort inverted targets monotonically."""
+    from bot.free_index_templates import render_free_index_alert
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-free-index-monotonic-001",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="🟢 NIFTY 22600 CE Call Setup",
+        summary="NIFTY 22600 CE call setup ignited",
+        ltp=150.0,
+        trigger_level=150.0,
+        target_level=220.0,
+        stop_loss=120.0,
+        strike=22600.0,
+        option_type="CE",
+        contract_symbol="NIFTY2026100622600CE",
+        actionable_plan={
+            "action": "BUY CE",
+            "recommended_entry": "₹150.0",
+            "stop_loss": "₹120.0",
+            "target_1": "₹220.0",
+            "target_2": "₹180.0",  # Inverted: T2 < T1!
+            "lot_size": 65,
+        },
+    )
+
+    rendered = render_free_index_alert(alert, in_market=True)
+    assert "• <b>T1:</b> <code>₹180.0</code> | <b>T2:</b> <code>₹220.0</code>" in rendered
+
+

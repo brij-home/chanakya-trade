@@ -11,6 +11,7 @@ from engine.detectors.currency import detect_currency_breakouts
 from engine.detectors.gamma_blast import detect_gamma_blast
 from engine.detectors.index_call_setup import detect_index_call_setup
 from engine.detectors.index_put_setup import detect_index_put_setup
+from engine.detectors.index_micro_scalp import detect_index_micro_scalp
 from engine.detectors.intraday_spark import detect_intraday_mover_sparks
 from engine.detectors.multibagger import detect_multibagger_breakouts, get_multibagger_universe
 from engine.detectors.opening_drive import detect_opening_drive
@@ -46,6 +47,7 @@ __all__ = [
     "detect_gamma_blast",
     "detect_index_call_setup",
     "detect_index_put_setup",
+    "detect_index_micro_scalp",
     "detect_opening_drive",
     "detect_preopen_bias",
     "detect_squeeze_breakout",

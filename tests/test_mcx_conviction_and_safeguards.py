@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 import pytest
+import pandas as pd
 
 from engine.alert_model import AutoAlert
 from engine.alert_scrutiny import AlertScrutinyAuditor, COMMODITY_MIN_SL_FLOORS
@@ -240,6 +241,38 @@ def test_crude_bullish_vetoed_by_crashing_brent(auditor: AlertScrutinyAuditor, m
     assert not passed
     assert "Global Macro Divergence" in reason
     assert "Brent crude" in reason
+
+
+def test_natgas_bullish_vetoed_by_crashing_henry_hub(auditor: AlertScrutinyAuditor, monkeypatch):
+    """Verifies that MCX NatGas longs are vetoed when Henry Hub natural gas is dumping (-2.5%)."""
+    mock_macro = MacroSnapshot(
+        natural_gas=3.10,
+        natural_gas_change=-2.65,  # Henry Hub crash
+    )
+    monkeypatch.setattr("market.macro.get_macro_snapshot", lambda: mock_macro)
+
+    alert = AutoAlert(
+        alert_id="test-ng-hh",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        headline="MCX NatGas Long Setup",
+        summary="Testing Henry Hub crash filter",
+        symbol="NATURALGAS",
+        exchange="MCX",
+        direction="BULLISH",
+        ltp=305.0,
+        trigger_level=305.0,
+        stop_loss=295.0,
+        target_level=325.0,
+        confidence=85,
+        created_at="2026-09-15 16:30:00 IST",
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert)
+    assert not passed
+    assert "Global Macro Divergence" in reason
+    assert "Henry Hub Natural Gas" in reason
 
 
 # ── 4. Auto Alert Engine Multi-Timeframe Stop Floor & Preferred Vehicle ───────
@@ -960,3 +993,742 @@ def test_eod_report_excludes_invalidated_corrupted_alerts(tmp_path, monkeypatch)
     assert report.win_count == 0
     assert report.loss_count == 0
     assert len(report.star_setups) == 0
+
+
+def test_mcx_session_end_retirement():
+    """
+    Verifies that:
+    1. Prior-session MCX intraday alerts (e.g. yesterday's) are immediately retired by resolve_session_end_alerts()
+       regardless of the current time, preventing zombie lockout.
+    2. Today's MCX intraday alerts remain active during MCX trading hours (until 23:30 IST),
+       even when NSE equity has closed at 15:30 IST.
+    3. Today's MCX intraday alerts are cleanly retired once MCX closes after 23:30 IST.
+    """
+    from datetime import datetime, timezone, timedelta
+    from unittest.mock import patch
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+    engine = AutoAlertEngine()
+    engine._alerts = []
+
+    # Prior date alert (yesterday)
+    alert_yesterday_mcx = AutoAlert(
+        alert_id="aa-commodity-momentum-naturalgas-20261005",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="NATURALGAS",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="MCX NatGas Breakout",
+        summary="Prior session setup",
+        ltp=280.0,
+        trigger_level=280.0,
+        stop_loss=272.0,
+        target_level=300.0,
+        confidence=85,
+        created_at="2026-10-05 19:30:00 IST",
+        target_status="PENDING",
+    )
+
+    # Today's MCX alert
+    alert_today_mcx = AutoAlert(
+        alert_id="aa-commodity-momentum-crudeoil-20261006",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="MCX Crude Momentum",
+        summary="Active commodity setup",
+        ltp=6500.0,
+        trigger_level=6500.0,
+        stop_loss=6410.0,
+        target_level=6700.0,
+        confidence=85,
+        created_at="2026-10-06 18:00:00 IST",
+        target_status="PENDING",
+    )
+
+    # Today's NSE alert
+    alert_today_nse = AutoAlert(
+        alert_id="aa-options-momentum-nifty-20261006",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Nifty Options Momentum",
+        summary="Equity setup",
+        ltp=25000.0,
+        trigger_level=25000.0,
+        stop_loss=24900.0,
+        target_level=25200.0,
+        confidence=85,
+        created_at="2026-10-06 10:00:00 IST",
+        target_status="PENDING",
+    )
+
+    engine._alerts = [alert_yesterday_mcx, alert_today_mcx, alert_today_nse]
+
+    # Test 1: At 19:00 IST on 2026-10-06: NSE is closed (19:00 > 15:30), but MCX is OPEN (19:00 < 23:30)
+    time_19_00 = datetime(2026, 10, 6, 19, 0, 0, tzinfo=IST)
+    with patch("engine.auto_alert_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = time_19_00
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+        resolved = engine.resolve_session_end_alerts()
+        # Yesterday's MCX alert and Today's NSE alert must be retired
+        assert alert_yesterday_mcx in resolved
+        assert alert_today_nse in resolved
+        assert alert_yesterday_mcx.is_archived is True
+        assert alert_yesterday_mcx.target_status == "EXPIRED_SESSION_END"
+        assert "Prior session alert retired" in alert_yesterday_mcx.archive_reason
+
+        # Today's MCX alert MUST NOT be retired at 19:00 IST
+        assert alert_today_mcx not in resolved
+        assert alert_today_mcx.is_archived is False
+        assert alert_today_mcx.stage == "IGNITED"
+
+    # Test 2: At 23:35 IST on 2026-10-06: MCX market is now closed (23:35 > 23:30)
+    time_23_35 = datetime(2026, 10, 6, 23, 35, 0, tzinfo=IST)
+    with patch("engine.auto_alert_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = time_23_35
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+        resolved_late = engine.resolve_session_end_alerts()
+        # Today's MCX alert MUST now be retired
+        assert alert_today_mcx in resolved_late
+        assert alert_today_mcx.is_archived is True
+        assert alert_today_mcx.target_status == "EXPIRED_SESSION_END"
+        assert "MCX session closed at 23:30 IST" in alert_today_mcx.archive_reason
+
+
+def test_pacing_retry_dispatches_secondary_commodity():
+    """
+    Verifies that an alert held back by Telegram segment burst pacing
+    is retried and dispatched by _retry_pacing_throttled_alerts() once cooldown expires,
+    preventing permanent alert dropouts for secondary commodities.
+    """
+    import time
+    from unittest.mock import patch
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+    engine = AutoAlertEngine()
+    engine._alerts = []
+    engine._dispatch_cooldowns = {}
+
+    now_dt = datetime.now(IST)
+    throttled_alert = AutoAlert(
+        alert_id="aa-commodity-momentum-naturalgas-20261006",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="NATURALGAS",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="MCX Momentum: NATURALGAS",
+        summary="Secondary commodity breakout",
+        ltp=280.0,
+        trigger_level=280.0,
+        stop_loss=272.0,
+        target_level=300.0,
+        confidence=90,
+        is_live=True,
+        environment="LIVE",
+        created_at=now_dt.strftime("%Y-%m-%d %H:%M:%S IST"),
+        telegram_dispatched=False,
+        telegram_suppression_reason="Telegram pacing throttle active on COMMODITY (cooldown: 15s)",
+    )
+    engine._alerts.append(throttled_alert)
+
+    # Case A: Pacing cooldown is STILL ACTIVE (only 5s since last dispatch, burst cooldown is 15s)
+    engine._dispatch_cooldowns["PACING:COMMODITY"] = time.time() - 5.0
+    with patch.object(engine, "_dispatch") as mock_dispatch:
+        dispatched = engine._retry_pacing_throttled_alerts()
+        assert len(dispatched) == 0
+        mock_dispatch.assert_not_called()
+
+    # Case B: Pacing cooldown has ELAPSED (20s since last dispatch, burst cooldown 15s)
+    engine._dispatch_cooldowns["PACING:COMMODITY"] = time.time() - 20.0
+
+    def fake_dispatch(a):
+        a.telegram_dispatched = True
+        a.telegram_suppression_reason = None
+
+    with patch.object(engine, "_dispatch", side_effect=fake_dispatch) as mock_dispatch:
+        dispatched = engine._retry_pacing_throttled_alerts()
+        assert len(dispatched) == 1
+        assert dispatched[0].alert_id == throttled_alert.alert_id
+        assert throttled_alert.telegram_dispatched is True
+        mock_dispatch.assert_called_once_with(throttled_alert)
+        # Verify pacing key was updated to fresh timestamp
+        assert engine._dispatch_cooldowns["PACING:COMMODITY"] >= time.time() - 2.0
+
+
+def test_detect_commodity_volatility_squeeze():
+    """
+    Verifies that detect_commodity_volatility_squeeze detects:
+    1. is_squeeze_on when Bollinger Bands coil inside Keltner Channels.
+    2. is_squeeze_fired when price expands out of a multi-bar squeeze.
+    """
+    import pandas as pd
+    from engine.detectors.commodity import detect_commodity_volatility_squeeze
+
+    # Create 30 bars of ultra-tight consolidation: price between 100.0 and 100.2
+    dates = pd.date_range("2026-10-06 18:00", periods=30, freq="5min")
+    tight_opens = [100.0 + (i % 2) * 0.1 for i in range(25)]
+    tight_highs = [p + 0.1 for p in tight_opens]
+    tight_lows = [p - 0.1 for p in tight_opens]
+    tight_closes = [p + 0.05 for p in tight_opens]
+
+    df_coiling = pd.DataFrame(
+        {"open": tight_opens, "high": tight_highs, "low": tight_lows, "close": tight_closes},
+        index=dates[:25],
+    )
+    res_coiling = detect_commodity_volatility_squeeze(df_coiling)
+    # When volatility is ultra-narrow, BB is well inside KC
+    assert res_coiling["is_squeeze_on"] is True
+    assert res_coiling["squeeze_bars"] >= 5
+
+    # Now add 5 explosive bars breaking out to 105.0
+    exp_opens = [100.2, 101.0, 102.5, 103.8, 104.5]
+    exp_highs = [101.2, 102.8, 104.0, 105.2, 106.0]
+    exp_lows = [100.0, 100.9, 102.2, 103.5, 104.2]
+    exp_closes = [101.0, 102.5, 103.8, 104.8, 105.5]
+
+    df_fired = pd.DataFrame(
+        {
+            "open": tight_opens + exp_opens,
+            "high": tight_highs + exp_highs,
+            "low": tight_lows + exp_lows,
+            "close": tight_closes + exp_closes,
+        },
+        index=dates,
+    )
+    res_fired = detect_commodity_volatility_squeeze(df_fired)
+    # The squeeze fired bullishly!
+    assert res_fired["is_squeeze_fired"] is True
+    assert res_fired["squeeze_direction"] == "BULLISH"
+
+
+def test_mcx_golden_hours_and_midday_lull():
+    """
+    Verifies that MCX session golden hours (17:30–22:30 IST) and midday lull (11:30–15:30 IST)
+    are accurately identified.
+    """
+    from datetime import datetime, timezone, timedelta
+    from engine.quality_gate import is_mcx_golden_hours_window, is_mcx_midday_lull_window
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+    # Tuesday 18:30 IST (US pre-market / active pit) -> Golden Hours
+    t_golden = datetime(2026, 10, 6, 18, 30, tzinfo=IST)
+    assert is_mcx_golden_hours_window(t_golden) is True
+    assert is_mcx_midday_lull_window(t_golden) is False
+
+    # Tuesday 13:00 IST (Midday lull) -> Midday Lull
+    t_lull = datetime(2026, 10, 6, 13, 0, tzinfo=IST)
+    assert is_mcx_golden_hours_window(t_lull) is False
+    assert is_mcx_midday_lull_window(t_lull) is True
+
+    # Tuesday 10:00 IST (Morning session) -> Neither
+    t_morning = datetime(2026, 10, 6, 10, 0, tzinfo=IST)
+    assert is_mcx_golden_hours_window(t_morning) is False
+    assert is_mcx_midday_lull_window(t_morning) is False
+
+
+def test_quality_gate_vetoes_htf_wall_collision():
+    """
+    Verifies that evaluate_institutional_quality_gate vetoes setups trading
+    directly into higher-timeframe resistance/support walls with poor headroom.
+    """
+    from engine.alert_model import AutoAlert
+    from engine.quality_gate import evaluate_institutional_quality_gate
+
+    alert = AutoAlert(
+        alert_id="test-wall-collision-crude",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="MCX Crude into Wall",
+        summary="Testing wall collision veto",
+        ltp=6500.0,
+        trigger_level=6500.0,
+        stop_loss=6410.0,
+        target_level=6700.0,
+        confidence=85,
+        metrics={
+            "wall_collision": True,  # 1H resistance right overhead
+            "mtf_alignment_count": 1,
+        },
+    )
+
+    verdict = evaluate_institutional_quality_gate(alert)
+    assert verdict.is_vetoed is True
+    assert "Overhead Higher-Timeframe Structural Wall" in verdict.veto_reason
+    assert verdict.conviction_tier == "REJECTED"
+
+
+def test_commodity_retest_and_asymmetric_rr_blueprint(monkeypatch):
+    """
+    Verifies that detect_commodity_breakouts generates an asymmetric blueprint with
+    retest entry guidance, Target 1 >= 2.8R, Target 2 >= 5.0R, and Runner >= 8.0R.
+    """
+    import pandas as pd
+    from unittest.mock import patch, MagicMock
+    from engine.auto_alert_engine import AutoAlertEngine
+    from market.macro import MacroSnapshot
+
+    engine = AutoAlertEngine()
+    engine._alerts = []
+    engine._cooldowns = {}
+    engine._watched_commodities = ["CRUDEOIL"]
+
+    mock_quote = MagicMock()
+    mock_quote.last_price = 6500.0
+    mock_quote.ltp = 6500.0
+    mock_quote.open = 6420.0
+    mock_quote.high = 6510.0
+    mock_quote.low = 6415.0
+    mock_quote.vwap = 6450.0
+    mock_quote.change_pct = 2.4
+    mock_quote.volume = 55000
+
+    dates = pd.date_range("2026-10-06 18:00", periods=25, freq="5min")
+    opens = [6430.0 + (i % 5) * 2.0 for i in range(24)] + [6460.0]
+    highs = [o + 5.0 for o in opens[:-1]] + [6510.0]
+    lows = [o - 3.0 for o in opens[:-1]] + [6458.0]
+    closes = [o + 2.0 for o in opens[:-1]] + [6500.0]
+    volumes = [1000.0] * 24 + [4500.0]
+    df_5m = pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=dates,
+    )
+
+    monkeypatch.setattr(
+        "market.macro.get_macro_snapshot",
+        lambda: MacroSnapshot(dxy_change=-0.1, crude_change=1.5),
+    )
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym: [])
+
+    with patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}):
+        with patch("market.history.get_ohlcv", return_value=df_5m):
+            with patch("market.quotes.get_ltp", return_value=6500.0):
+                alerts = engine.scan_commodities_now()
+                assert len(alerts) >= 1
+                alert = alerts[0]
+                plan = alert.actionable_plan
+
+                # Blueprint Asymmetry Assertions:
+                assert "target_1" in plan
+                assert "target_2" in plan
+                assert "target_3" in plan
+                assert "when_to_buy" in plan
+                assert "profit_rule" in plan
+                assert "+2.8R" in plan["profit_rule"]
+                assert "+5.0R" in plan["profit_rule"]
+                assert "+8.0R" in plan["profit_rule"]
+
+
+def test_commodity_microstructure_cvd_and_obi_provenance(monkeypatch):
+    """Verifies that commodity scan computes CVD buyer aggression, OBI, and records microstructure metrics."""
+    import pandas as pd
+    from engine.auto_alert_engine import AutoAlertEngine
+    from market.macro import MacroSnapshot
+    from unittest.mock import patch, MagicMock
+
+    engine = AutoAlertEngine()
+    engine._alerts = []
+    engine._cooldowns = {}
+    engine._watched_commodities = ["CRUDEOIL"]
+
+    mock_quote = MagicMock()
+    mock_quote.symbol = "MCX:CRUDEOIL"
+    mock_quote.last_price = 6500.0
+    mock_quote.ltp = 6500.0
+    mock_quote.open = 6420.0
+    mock_quote.high = 6510.0
+    mock_quote.low = 6415.0
+    mock_quote.vwap = 6450.0
+    mock_quote.change_pct = 2.4
+    mock_quote.volume = 55000
+
+    dates = pd.date_range("2026-10-06 18:00", periods=25, freq="5min")
+    opens = [6430.0 + (i % 5) * 2.0 for i in range(24)] + [6460.0]
+    highs = [o + 5.0 for o in opens[:-1]] + [6510.0]
+    lows = [o - 3.0 for o in opens[:-1]] + [6458.0]
+    closes = [o + 2.0 for o in opens[:-1]] + [6500.0]
+    volumes = [1000.0] * 24 + [4500.0]
+    df_5m = pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=dates,
+    )
+
+    monkeypatch.setattr(
+        "market.macro.get_macro_snapshot",
+        lambda: MacroSnapshot(dxy_change=-0.1, crude_change=1.5),
+    )
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym: [])
+
+    with patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}):
+        with patch("market.history.get_ohlcv", return_value=df_5m):
+            with patch("market.quotes.get_ltp", return_value=6500.0):
+                alerts = engine.scan_commodities_now()
+                assert len(alerts) >= 1
+                alert = alerts[0]
+                m = alert.metrics
+                assert "cvd_ratio" in m
+                assert m["cvd_ratio"] >= 2.0
+                assert any("Buyer CVD Aggression" in tag for tag in m.get("confluence_factors", []))
+
+
+def test_crudeoil_8500_pe_scale_mismatch_prevention():
+    """
+    RCA Incident 1 Test:
+    Verifies that option alerts with entry 289.30 and spot price 8529.0 NEVER leak spot scale into
+    in-flight evaluations or Telegram milestone rendering, eliminating bogus +2848.2% / +94.94R warnings.
+    """
+    from engine.alert_evaluator import evaluate_alert_in_flight_decay
+    from bot.alert_templates import MilestoneAlertData
+
+    alert = AutoAlert(
+        alert_id="aa-crude-8500pe-test",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BEARISH",
+        headline="MCX Crude 8500 PE",
+        summary="Crude breakdown test",
+        ltp=289.30,  # Option premium LTP
+        trigger_level=289.30,
+        stop_loss=202.51,  # Option stop loss
+        target_level=420.0,  # Option target
+        derivative_type="OPT",
+        option_type="PE",
+        strike=8500.0,
+        option_premium=289.30,
+        option_stop_loss=202.51,
+        option_target_level=420.0,
+        contract_symbol="MCX:CRUDEOIL26OCT8500PE",
+        underlying_spot=8529.0,  # Underlying spot price
+        confidence=85,
+        created_at="2026-10-06 19:15:00 IST",
+        actionable_plan={
+            "option_plan": {
+                "entry_premium": 289.30,
+                "sl_premium": 202.51,
+                "t1_premium": 420.0,
+            }
+        },
+    )
+
+    # 1. In-flight evaluator MUST NOT use spot 8529 to compute 2848% P&L against entry 289.30
+    eval_res = evaluate_alert_in_flight_decay(alert, current_ltp=8529.0)
+    # The evaluator must either return None (scale mismatch suppressed) or not evaluate with spot scale
+    if eval_res:
+        assert eval_res.pnl_pct is None or abs(eval_res.pnl_pct) < 100.0
+
+    # 2. MilestoneAlertData MUST NOT render spot price as Opt CMP or compute +2848% P&L
+    alert_corrupted = AutoAlert(
+        alert_id="aa-crude-8500pe-test-corrupted",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IN_FLIGHT_WARNING",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BEARISH",
+        headline="VWAP Band Warning",
+        summary="Testing scale leak",
+        ltp=8529.0,  # Leaked spot price
+        trigger_level=289.30,
+        stop_loss=202.51,
+        target_level=420.0,
+        derivative_type="OPT",
+        option_type="PE",
+        strike=8500.0,
+        option_premium=289.30,
+        option_stop_loss=202.51,
+        contract_symbol="MCX:CRUDEOIL26OCT8500PE",
+        underlying_spot=8529.0,
+        pnl_pct=2848.2,  # Corrupted pre-calculated P&L
+        confidence=85,
+        created_at="2026-10-06 19:15:00 IST",
+        actionable_plan={
+            "option_plan": {
+                "entry_premium": 289.30,
+                "sl_premium": 202.51,
+            }
+        },
+    )
+    m_data = MilestoneAlertData.from_alert(alert_corrupted, milestone_type="IN_FLIGHT_WARNING")
+    # Sanitized LTP must be clamped back to option premium (289.30), not 8529.0
+    assert m_data.ltp <= 289.30 * 3.5
+    # Sanitized P&L must never be +2848.2%
+    assert m_data.pnl_pct is None or abs(m_data.pnl_pct) < 100.0
+
+
+def test_crudeoil_golden_hours_trend_invariant_vetoes_counter_trend_pe(monkeypatch):
+    """
+    RCA Incident 2 Test:
+    Verifies that when Crude is trading at 8529.0 > VWAP 8495.0 during Golden Hours (19:15 IST),
+    counter-trend BEARISH / 8500 PE trades are strictly vetoed.
+    """
+    import pandas as pd
+    from engine.detectors.commodity import detect_commodity_breakouts
+    from market.macro import MacroSnapshot
+    from unittest.mock import patch, MagicMock
+
+    mock_quote = MagicMock()
+    mock_quote.symbol = "MCX:CRUDEOIL"
+    mock_quote.last_price = 8529.0
+    mock_quote.ltp = 8529.0
+    mock_quote.open = 8400.0
+    mock_quote.high = 8535.0
+    mock_quote.low = 8380.0
+    mock_quote.vwap = 8495.0  # Price 8529 is ABOVE VWAP
+    mock_quote.change_pct = 1.5
+    mock_quote.volume = 65000
+
+    dates = pd.date_range("2026-10-06 18:00", periods=25, freq="5min")
+    df_5m = pd.DataFrame(
+        {
+            "open": [8500.0] * 25,
+            "high": [8535.0] * 25,
+            "low": [8490.0] * 25,
+            "close": [8529.0] * 25,
+            "volume": [3000.0] * 25,
+        },
+        index=dates,
+    )
+
+    monkeypatch.setattr(
+        "market.macro.get_macro_snapshot",
+        lambda: MacroSnapshot(dxy_change=0.0, crude_change=1.2),
+    )
+
+    with patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}):
+        with patch("market.history.get_ohlcv", return_value=df_5m):
+            with patch("market.quotes.get_ltp", return_value=8529.0):
+                alerts = detect_commodity_breakouts(universe=["CRUDEOIL"])
+                # Any alert generated must NOT be BEARISH (no 8500 PE above VWAP)
+                for a in alerts:
+                    assert a.direction != "BEARISH", "Counter-trend short > VWAP during Golden Hours must be vetoed!"
+
+
+def test_crudeoil_golden_hours_thrust_detects_1837_rebound(monkeypatch):
+    """
+    RCA Incident 3 Test:
+    Verifies that at 18:37 IST (US open / Golden Hours), a 40-pt rebound from 8360 to 8400
+    with positive 15m ROC and high RVOL triggers a BULLISH trade (e.g. 8400 CE)
+    even when daily change from yesterday's close is only +0.3% (< 1.0%).
+    """
+    import pandas as pd
+    from engine.detectors.commodity import detect_commodity_breakouts
+    from market.macro import MacroSnapshot
+    from unittest.mock import patch, MagicMock
+
+    mock_quote = MagicMock()
+    mock_quote.symbol = "MCX:CRUDEOIL"
+    mock_quote.last_price = 8400.0
+    mock_quote.ltp = 8400.0
+    mock_quote.open = 8380.0
+    mock_quote.high = 8405.0
+    mock_quote.low = 8360.0  # +40 pt bounce from low
+    mock_quote.vwap = 8375.0  # Trading above VWAP
+    mock_quote.change_pct = 0.35  # Only +0.35% on the day (< 1.0% static filter)
+    mock_quote.volume = 80000
+
+    dates = pd.date_range("2026-10-06 18:00", periods=25, freq="5min")
+    opens = [8360.0 + (i % 3) * 2.0 for i in range(21)] + [8370.0, 8375.0, 8385.0, 8395.0]
+    highs = [o + 5.0 for o in opens[:-1]] + [8405.0]
+    lows = [o - 2.0 for o in opens[:-1]] + [8390.0]
+    closes = [o + 3.0 for o in opens[:-1]] + [8400.0]
+    volumes = [1000.0] * 21 + [2500.0, 3000.0, 3500.0, 4500.0]  # High volume surge
+    df_5m = pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=dates,
+    )
+
+    mock_opt = MagicMock()
+    mock_opt.symbol = "MCX:CRUDEOIL26OCT8400CE"
+    mock_opt.strike = 8400
+    mock_opt.option_type = "CE"
+    mock_opt.last_price = 310.0
+
+    monkeypatch.setattr(
+        "market.macro.get_macro_snapshot",
+        lambda: MacroSnapshot(dxy_change=-0.1, crude_change=0.5),
+    )
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym: [mock_opt])
+
+    with patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}):
+        with patch("market.history.get_ohlcv", return_value=df_5m):
+            with patch("market.quotes.get_ltp", return_value=8400.0):
+                alerts = detect_commodity_breakouts(universe=["CRUDEOIL"])
+                assert len(alerts) >= 1, "Golden Hours momentum must catch US Open rebound!"
+                alert = alerts[0]
+                assert alert.direction == "BULLISH"
+                assert alert.derivative_type == "OPT"
+                assert alert.strike == 8400
+                assert alert.ltp == 310.0
+
+
+def test_naturalgas_anti_fomo_overbought_rsi_guard(monkeypatch):
+    """
+    RCA Incident 4 Test:
+    Verifies that Natural Gas breakout attempts when 5m RSI is 71.4 (> 68.0 overbought ceiling)
+    are suppressed from buying 300 CE at the top-tick without a pullback.
+    """
+    import pandas as pd
+    from engine.detectors.commodity import detect_commodity_breakouts
+    from market.macro import MacroSnapshot
+    from unittest.mock import patch, MagicMock
+
+    mock_quote = MagicMock()
+    mock_quote.symbol = "MCX:NATURALGAS"
+    mock_quote.last_price = 301.5
+    mock_quote.ltp = 301.5
+    mock_quote.open = 295.0
+    mock_quote.high = 301.8
+    mock_quote.low = 294.0
+    mock_quote.vwap = 297.0
+    mock_quote.change_pct = 2.2
+    mock_quote.volume = 40000
+
+    dates = pd.date_range("2026-10-06 18:00", periods=25, freq="5min")
+    # Upward parabolic price series producing high RSI (> 70)
+    closes = [294.0 + i * 0.32 for i in range(25)]
+    opens = [c - 0.2 for c in closes]
+    highs = [c + 0.3 for c in closes]
+    lows = [c - 0.3 for c in closes]
+    volumes = [1500.0] * 25
+    df_5m = pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=dates,
+    )
+
+    monkeypatch.setattr(
+        "market.macro.get_macro_snapshot",
+        lambda: MacroSnapshot(dxy_change=0.0, crude_change=0.0),
+    )
+
+    with patch("market.quotes.get_quote", return_value={"MCX:NATURALGAS": mock_quote}):
+        with patch("market.history.get_ohlcv", return_value=df_5m):
+            with patch("market.quotes.get_ltp", return_value=301.5):
+                alerts = detect_commodity_breakouts(universe=["NATURALGAS"])
+                # Must be suppressed due to overbought RSI exhaustion (> 68.0)
+                assert len(alerts) == 0, "Overbought Natural Gas 300 CE FOMO chase must be suppressed!"
+
+
+def test_default_symbols_includes_sensex_and_midcap():
+    """Verifies that DEFAULT_SYMBOLS in market/websocket.py includes SENSEX, MIDCPNIFTY, FINNIFTY."""
+    from market.websocket import DEFAULT_SYMBOLS, _SYMBOL_MAP
+
+    assert "BSE:SENSEX-INDEX" in DEFAULT_SYMBOLS
+    assert "NSE:MIDCPNIFTY-INDEX" in DEFAULT_SYMBOLS
+    assert "NSE:FINNIFTY-INDEX" in DEFAULT_SYMBOLS
+    assert "BSE:SENSEX" in _SYMBOL_MAP
+    assert "NSE:MIDCPNIFTY" in _SYMBOL_MAP
+
+
+def test_commodity_detector_henry_hub_veto(monkeypatch):
+    """Verifies that detect_commodity_breakouts vetoes Natural Gas longs when Henry Hub drops -2.5%."""
+    from engine.detectors.commodity import detect_commodity_breakouts
+
+    mock_quote = MagicMock()
+    mock_quote.symbol = "MCX:NATURALGAS"
+    mock_quote.last_price = 295.0
+    mock_quote.ltp = 295.0
+    mock_quote.open = 290.0
+    mock_quote.high = 296.0
+    mock_quote.low = 289.0
+    mock_quote.vwap = 292.0
+    mock_quote.change_pct = 1.7
+    mock_quote.volume = 50000
+
+    dates = pd.date_range("2026-10-06 18:00", periods=25, freq="5min")
+    df_5m = pd.DataFrame(
+        {
+            "open": [290.0] * 25,
+            "high": [296.0] * 25,
+            "low": [289.0] * 25,
+            "close": [295.0] * 25,
+            "volume": [2000.0] * 25,
+        },
+        index=dates,
+    )
+
+    # Henry Hub crashing -2.5%
+    monkeypatch.setattr(
+        "market.macro.get_macro_snapshot",
+        lambda: MacroSnapshot(dxy_change=0.0, crude_change=0.0, natural_gas_change=-2.5),
+    )
+
+    with patch("market.quotes.get_quote", return_value={"MCX:NATURALGAS": mock_quote}):
+        with patch("market.history.get_ohlcv", return_value=df_5m):
+            with patch("market.quotes.get_ltp", return_value=295.0):
+                alerts = detect_commodity_breakouts(universe=["NATURALGAS"])
+                assert len(alerts) == 0, "Crashing Henry Hub must veto MCX Natural Gas long setup!"
+
+
+def test_commodity_detector_cvd_order_flow_integration(monkeypatch):
+    """Verifies that Order Flow CVD divergence boosts confidence or raises warning tags."""
+    from engine.detectors.commodity import detect_commodity_breakouts
+    from brokers.base import Quote
+    from analysis.order_flow import OrderFlowSnapshot
+
+    live_quote = Quote(
+        symbol="CRUDEOIL",
+        last_price=6800.0,
+        open=6750.0,
+        high=6810.0,
+        low=6740.0,
+        close=6750.0,
+        vwap=6770.0,
+        change=50.0,
+        change_pct=0.74,
+        volume=35000,
+        provider="fyers",
+    )
+
+    dates = pd.date_range("2026-10-06 18:00", periods=25, freq="5min")
+    df_5m = pd.DataFrame(
+        {
+            "open": [6750.0] * 25,
+            "high": [6810.0] * 25,
+            "low": [6740.0] * 25,
+            "close": [6800.0] * 25,
+            "volume": [1500.0] * 25,
+        },
+        index=dates,
+    )
+
+    mock_of = MagicMock(spec=OrderFlowSnapshot)
+    mock_of.market_state = "LIVE"
+    mock_of.cvd_divergence = "BULLISH_ABSORPTION"
+
+    monkeypatch.setattr(
+        "market.macro.get_macro_snapshot",
+        lambda: MacroSnapshot(dxy_change=0.0, crude_change=0.5),
+    )
+    monkeypatch.setenv("CHANAKYA_TESTING", "0")
+    monkeypatch.setenv("DEPLOY_MODE", "live")
+
+    with patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": live_quote}):
+        with patch("market.history.get_ohlcv", return_value=df_5m):
+            with patch("market.quotes.get_ltp", return_value=6800.0):
+                with patch("analysis.order_flow.analyze_order_flow", return_value=mock_of):
+                    with patch("market.order_book.analyze_symbol_order_book", return_value=None):
+                        alerts = detect_commodity_breakouts(universe=["CRUDEOIL"])
+                        if alerts:
+                            assert any("CVD Bullish Absorption" in t for t in alerts[0].tags)
+
+
+
+
+

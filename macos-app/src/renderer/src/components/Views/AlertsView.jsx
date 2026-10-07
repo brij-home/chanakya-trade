@@ -449,7 +449,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
             )}
             {alert.no_chase_boundary && (
               <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-rose-500/10 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap" title="No-Chase Maximum Entry Limit">
-                🛑 Max ₹{Number(alert.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
+                🛑 NoChase ₹{Number(alert.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
               </span>
             )}
           </div>
@@ -1388,9 +1388,26 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const [purging, setPurging] = useState(false)
   const [cleanupNotice, setCleanupNotice] = useState(null)
   const [archiving, setArchiving] = useState(null)
-  const [autoAlerts, setAutoAlerts] = useState([])
+  const [autoAlerts, setAutoAlerts] = useState(() => {
+    try {
+      const storeItems = useNotificationStore.getState().notifications || []
+      const autoFromStore = storeItems.filter(
+        (n) => n.alert_type && !['PRICE', 'TECHNICAL', 'CONDITIONAL'].includes(n.alert_type) && !isTestOrSimAlert(n)
+      )
+      return autoFromStore
+    } catch (_) {
+      return []
+    }
+  })
   const [serverCounts, setServerCounts] = useState(null)
-  const [autoLoading, setAutoLoading] = useState(true)
+  const [autoLoading, setAutoLoading] = useState(() => {
+    try {
+      const storeItems = useNotificationStore.getState().notifications || []
+      return storeItems.length === 0
+    } catch (_) {
+      return true
+    }
+  })
   const [scanning, setScanning] = useState(false)
   const [scanningSwing, setScanningSwing] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -1840,7 +1857,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }, [loadAlerts, loadAutoAlerts, chimeEnabled])
 
-  // Extract all active / visible symbols to stream spot prices and option/future contract prices for
+  // Extract all active / visible symbols to stream spot prices and option/future contract prices for.
+  // Crucial: Only stream quotes for TRULY ACTIVE setups (filter out archived, invalidated, expired, or completed)
+  // to prevent saturating the broker rate limits and starving API requests.
   const activeSymbols = useMemo(() => {
     const syms = new Set()
     const addSym = (raw) => {
@@ -1850,36 +1869,43 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
 
     for (const alt of autoAlerts) {
+      if (!isAlertActive(alt)) continue
       addSym(alt.symbol)
       addSym(alt.contract_symbol)
       addSym(alt.actionable_plan?.option_plan?.contract_symbol)
       addSym(alt.actionable_plan?.option_contract)
       addSym(alt.metrics?.option_symbol)
-      const related = alt.related_strikes || alt.metrics?.related_strikes
-      if (Array.isArray(related)) {
-        related.forEach(addSym)
-      }
     }
     for (const a of alerts) {
+      if (a.triggered || a.is_invalidated || a.target_achieved) continue
       addSym(a.symbol)
       addSym(a.contract_symbol)
       addSym(a.actionable_plan?.option_plan?.contract_symbol)
       addSym(a.actionable_plan?.option_contract)
     }
-    return Array.from(syms)
+    // Cap to top 50 active symbols max per cycle to strictly preserve broker rate limit quotas
+    return Array.from(syms).slice(0, 50)
   }, [autoAlerts, alerts])
 
-  // Real-time batch quote streaming for all active alert symbols (2.0s interval)
-  // Real-time batch quote streaming — publishes to LiveSpotsContext.
-  // AlertsView itself does NOT re-render from price updates.
-  // Only the individual cards whose symbol changed re-render (via useLiveSpot hook).
+  // Real-time batch quote streaming for active alert symbols.
+  // Self-scheduling loop with in-flight guard and AbortSignal to prevent overlapping requests or thread pool congestion.
+  // Publishes to LiveSpotsContext — zero AlertsView re-renders.
   useEffect(() => {
     if (activeSymbols.length === 0 || !liveSpotsCtx) return
 
     let cancelled = false
+    let timerId = null
+    let inFlight = false
 
-    const fetchLiveSpots = async () => {
-      if (typeof document !== 'undefined' && document.hidden) return
+    const pollQuotes = async () => {
+      if (cancelled) return
+      if (typeof document !== 'undefined' && document.hidden) {
+        timerId = setTimeout(pollQuotes, 5000)
+        return
+      }
+      if (inFlight) return
+      inFlight = true
+
       try {
         const res = await callRef.current('/skills/quotes/batch', {
           symbols: activeSymbols,
@@ -1887,31 +1913,39 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         })
         if (cancelled) return
         const quotes = extractQuotes(res)
-        if (!quotes || Object.keys(quotes).length === 0) return
-        // Push into context — zero AlertsView re-renders
-        liveSpotsCtx.publish(quotes)
+        if (quotes && Object.keys(quotes).length > 0) {
+          liveSpotsCtx.publish(quotes)
+        }
       } catch (_) {
         // Silently tolerate temporary network blips
+      } finally {
+        inFlight = false
+        if (!cancelled) {
+          // Schedule NEXT request only AFTER current request completes
+          const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000
+          const istNow = new Date(Date.now() + new Date().getTimezoneOffset() * 60000 + IST_OFFSET_MS)
+          const hhmm = istNow.getHours() * 100 + istNow.getMinutes()
+          const day = istNow.getDay()
+          const isMarketOpen = day >= 1 && day <= 5 && hhmm >= 915 && hhmm < 1530
+          const delayMs = isMarketOpen ? 3000 : 7000
+          timerId = setTimeout(pollQuotes, delayMs)
+        }
       }
     }
 
-    fetchLiveSpots()
-    // Market-hours-aware interval: 2s during open hours, 5s when closed.
-    // This halves connection pressure outside trading hours (14:00–09:15 IST).
-    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000
-    const istNow = new Date(Date.now() + new Date().getTimezoneOffset() * 60000 + IST_OFFSET_MS)
-    const hhmm = istNow.getHours() * 100 + istNow.getMinutes()
-    const day = istNow.getDay()
-    const isMarketOpen = day >= 1 && day <= 5 && hhmm >= 915 && hhmm < 1530
-    const quoteIntervalMs = isMarketOpen ? 2000 : 5000
-    const quoteInterval = setInterval(fetchLiveSpots, quoteIntervalMs)
+    pollQuotes()
 
-    const handleVisibilityChange = () => { if (!document.hidden) fetchLiveSpots() }
+    const handleVisibilityChange = () => {
+      if (!document.hidden && !inFlight && !cancelled) {
+        if (timerId) clearTimeout(timerId)
+        pollQuotes()
+      }
+    }
     document.addEventListener('visibilitychange', handleVisibilityChange)
 
     return () => {
       cancelled = true
-      clearInterval(quoteInterval)
+      if (timerId) clearTimeout(timerId)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [activeSymbols, liveSpotsCtx])

@@ -555,6 +555,7 @@ class TestInFlightDecayAlerts:
             stop_loss=2760.0,
             target_level=2950.0,
             ltp=2820.0,
+            metrics={"vwap": 2800.0, "vwap_std": 10.0},
             is_live=True,
         )
         res_long = evaluate_alert_in_flight_decay(trent_long, current_ltp=2820.0)

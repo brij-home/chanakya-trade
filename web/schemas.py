@@ -132,6 +132,8 @@ class AlertPreferencesUpdateRequest(BaseModel):
     pause_disabled_scanners: Optional[bool] = None
     fno_chat_id: Optional[str] = None
     fno_index_chat_id: Optional[str] = None
+    free_index_chat_id: Optional[str] = None
+    free_index_enabled: Optional[bool] = None
     mcx_chat_id: Optional[str] = None
     equity_chat_id: Optional[str] = None
 

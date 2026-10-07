@@ -42,11 +42,13 @@ export default function AlertsCard({ data }) {
           const condition = a.condition ?? a.description ?? '—'
           const threshold = a.threshold != null ? `₹${Number(a.threshold).toLocaleString('en-IN')}` : ''
           const isTest = a.environment === 'TEST' || a.is_live === false
-          const isInvalidated = a.is_invalidated || a.stage === 'INVALIDATED'
+          const isRunnerExit = a.stage === 'RUNNER_EXIT' || a.target_status === 'RUNNER_CLOSED'
+          const isBreakevenExit = a.stage === 'BREAKEVEN_EXIT' || a.target_status === 'BREAKEVEN_CLOSED'
+          const isInvalidated = (a.is_invalidated || a.stage === 'INVALIDATED') && !isRunnerExit && !isBreakevenExit
           const isT1Hit = a.stage === 'T1_ACHIEVED' || a.target_status === 'T1_ACHIEVED' || a.target_status === 'T1_HIT'
           const isT2Hit = a.stage === 'T2_ACHIEVED' || a.target_status === 'T2_ACHIEVED'
           const isT3Hit = a.stage === 'TARGET_ACHIEVED' || a.target_status === 'TARGET_ACHIEVED' || a.target_status === 'TARGET_HIT' || a.stage === 'COMPLETED'
-          const triggered = Boolean(a.triggered || a.target_achieved || isT1Hit || isT2Hit || isT3Hit)
+          const triggered = Boolean(a.triggered || a.target_achieved || isT1Hit || isT2Hit || isT3Hit || isRunnerExit || isBreakevenExit)
           const hasTrail = Boolean(a.should_trail && a.trailing_stop)
 
           const rawPrice = a.option_premium || a.ltp || a.underlying_spot
@@ -59,7 +61,7 @@ export default function AlertsCard({ data }) {
 
           return (
             <div key={id} className={`flex items-start justify-between rounded-lg border px-3 py-2.5
-              ${isInvalidated ? 'border-rose-500/40 bg-rose-500/5' : isT3Hit ? 'border-purple-500/40 bg-purple-500/5' : isT2Hit ? 'border-cyan-500/40 bg-cyan-500/5' : isT1Hit ? 'border-emerald-500/40 bg-emerald-500/5' : triggered ? 'border-green/40 bg-green/5' : 'border-border bg-panel'}`}>
+              ${isRunnerExit ? 'border-emerald-500/40 bg-emerald-500/5' : isBreakevenExit ? 'border-amber-500/40 bg-amber-500/5' : isInvalidated ? 'border-rose-500/40 bg-rose-500/5' : isT3Hit ? 'border-purple-500/40 bg-purple-500/5' : isT2Hit ? 'border-cyan-500/40 bg-cyan-500/5' : isT1Hit ? 'border-emerald-500/40 bg-emerald-500/5' : triggered ? 'border-green/40 bg-green/5' : 'border-border bg-panel'}`}>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-text text-[12px] font-mono font-semibold">{symbol}</span>
@@ -96,10 +98,28 @@ export default function AlertsCard({ data }) {
                   ) : null}
                   {a.no_chase_boundary && (
                     <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-rose-500/10 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-300/60 dark:border-rose-500/30" title="No-Chase limit">
-                      Max ₹{Number(a.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
+                      NoChase ₹{Number(a.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
                     </span>
                   )}
-                  {isInvalidated ? (
+                  {a.metrics?.tiger_mandate && (
+                    <span
+                      className={`text-[8px] px-1 py-0.2 rounded font-mono font-bold border ${
+                        a.metrics.tiger_mandate.mandate === 'MOMENTUM_EXPANSION'
+                          ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
+                          : a.metrics.tiger_mandate.mandate === 'TURTLE_SOUP_RANGE_FADE'
+                          ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                      }`}
+                      title={a.metrics.tiger_mandate.reason || ''}
+                    >
+                      🐅 {a.metrics.tiger_mandate.mandate === 'MOMENTUM_EXPANSION' ? 'POUNCE' : a.metrics.tiger_mandate.mandate === 'TURTLE_SOUP_RANGE_FADE' ? 'TURTLE SOUP' : 'STALKER'}
+                    </span>
+                  )}
+                  {isRunnerExit ? (
+                    <span className="text-[10px] font-ui text-emerald-300 font-bold bg-emerald-500/20 px-1.5 py-0.5 rounded border border-emerald-500/40">💰 RUNNER CLOSED</span>
+                  ) : isBreakevenExit ? (
+                    <span className="text-[10px] font-ui text-amber-300 font-bold bg-amber-500/20 px-1.5 py-0.5 rounded border border-amber-500/40">🛡️ BREAKEVEN EXIT</span>
+                  ) : isInvalidated ? (
                     <span className="text-[10px] font-ui text-rose-300 font-bold bg-rose-500/20 px-1.5 py-0.5 rounded border border-rose-500/40 animate-pulse">🛑 SL HIT</span>
                   ) : isT3Hit ? (
                     <span className="text-[10px] font-ui text-purple-200 font-bold bg-purple-500/20 px-1.5 py-0.5 rounded border border-purple-400/40 animate-pulse">🚀 T3 HIT</span>

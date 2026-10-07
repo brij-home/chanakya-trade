@@ -39,6 +39,8 @@ class ResolvedOptionPlan:
     underlying_target: float
     is_estimated: bool = False
     expiry: Optional[str] = None
+    t0_5_premium: Optional[float] = None
+    t3_premium: Optional[float] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -49,8 +51,10 @@ class ResolvedOptionPlan:
             "expiry_date": self.expiry,
             "entry_premium": self.entry_premium,
             "sl_premium": self.sl_premium,
+            "t0_5_premium": self.t0_5_premium,
             "t1_premium": self.t1_premium,
             "t2_premium": self.t2_premium,
+            "t3_premium": self.t3_premium,
             "lot_size": self.lot_size,
             "underlying_spot": self.underlying_spot,
             "underlying_sl": self.underlying_sl,
@@ -154,11 +158,38 @@ def resolve_option_contract(
         opt_sym = f"{clean_sym} {int(opt_strike)} {opt_type}"
         is_est = True
 
-    # Step 3: Compute Premium-Space Invalidation Stop and Targets
-    # Option Stop-Loss: 22% premium risk (0.78x entry), or delta-anchored to underlying SL
-    opt_sl = round(max(0.1, opt_ltp * 0.78), 2)
-    opt_t1 = round(opt_ltp * 1.35, 2)
-    opt_t2 = round(opt_ltp * 1.70, 2)
+    # Step 3: Compute Premium-Space Invalidation Stop and Targets with Tiered Feasibility
+    if is_idx:
+        # Index Options: disciplined -18% stop-loss floor
+        disciplined_sl_floor = round(max(0.1, opt_ltp * 0.82), 2)
+        if opt_ltp >= 350:
+            # Expensive Index contracts (e.g. Bank Nifty ₹600-₹1200):
+            # Capped to achievable intraday points (+20% T1, +36% T2, +55% T3)
+            opt_t0_5 = round(opt_ltp * 1.08, 2)
+            opt_t1 = round(opt_ltp * 1.20, 2)
+            opt_t2 = round(opt_ltp * 1.36, 2)
+            opt_t3 = round(opt_ltp * 1.55, 2)
+            t1_ceiling = round(opt_ltp * 1.22, 2)
+            t2_ceiling = round(opt_ltp * 1.38, 2)
+        else:
+            # Lower-premium Index contracts (e.g. Nifty ATM ₹80-₹200):
+            opt_t0_5 = round(opt_ltp * 1.10, 2)
+            opt_t1 = round(opt_ltp * 1.28, 2)
+            opt_t2 = round(opt_ltp * 1.55, 2)
+            opt_t3 = round(opt_ltp * 1.90, 2)
+            t1_ceiling = round(opt_ltp * 1.60, 2)
+            t2_ceiling = round(opt_ltp * 2.20, 2)
+    else:
+        # Stock Options: disciplined -22% stop-loss floor
+        disciplined_sl_floor = round(max(0.1, opt_ltp * 0.78), 2)
+        opt_t0_5 = round(opt_ltp * 1.10, 2)
+        opt_t1 = round(opt_ltp * 1.22, 2)
+        opt_t2 = round(opt_ltp * 1.38, 2)
+        opt_t3 = round(opt_ltp * 1.60, 2)
+        t1_ceiling = round(opt_ltp * 1.24, 2)
+        t2_ceiling = round(opt_ltp * 1.42, 2)
+
+    opt_sl = disciplined_sl_floor
 
     # If underlying SL is provided, calibrate option stop with estimated delta (~0.50 for ATM)
     if underlying_sl and underlying_sl > 0:
@@ -166,15 +197,15 @@ def resolve_option_contract(
         delta = 0.50
         estimated_prem_risk = spot_risk * delta
         if 0 < estimated_prem_risk < opt_ltp:
-            opt_sl = round(max(opt_ltp * 0.70, opt_ltp - estimated_prem_risk), 2)
+            opt_sl = round(max(disciplined_sl_floor, opt_ltp - estimated_prem_risk), 2)
 
     if underlying_target and underlying_target > 0:
         spot_gain = abs(underlying_target - spot)
         delta = 0.50
         estimated_prem_gain = spot_gain * delta
         if estimated_prem_gain > 0:
-            opt_t1 = round(opt_ltp + estimated_prem_gain, 2)
-            opt_t2 = round(opt_ltp + 1.8 * estimated_prem_gain, 2)
+            opt_t1 = round(min(t1_ceiling, max(opt_t1, opt_ltp + estimated_prem_gain)), 2)
+            opt_t2 = round(min(t2_ceiling, max(opt_t2, opt_ltp + 1.8 * estimated_prem_gain)), 2)
 
     opt_exp = getattr(chosen_contract, "expiry", None) if chosen_contract else None
 
@@ -194,4 +225,6 @@ def resolve_option_contract(
         or (round(spot * 1.02, 1) if is_bull else round(spot * 0.98, 1)),
         is_estimated=is_est,
         expiry=opt_exp,
+        t0_5_premium=opt_t0_5,
+        t3_premium=opt_t3,
     )

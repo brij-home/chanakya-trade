@@ -2254,6 +2254,7 @@ def test_auto_alert_invalidation_lockout_gate():
 
     # Clear lockout and verify it records successfully
     pattern_learning_engine.clear_symbol_lockout("MANKIND")
+    alert.alert_id = "lockout-test-2"
     recorded2 = engine.record_alert(alert)
     assert recorded2 is True
     assert len(engine._alerts) == 1

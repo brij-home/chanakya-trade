@@ -274,11 +274,30 @@ def evaluate_alert_invalidation(
                         else "Put"
                     )
                     # Check if stop-loss was ratcheted into guaranteed profit by the trailing stop engine
-                    # or if Target 1 was already achieved
+                    # or if Target 1 / Target 0.5 was already achieved
                     has_hit_target = bool(
-                        "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
+                        any(
+                            m in (getattr(alert, "achieved_milestones", []) or [])
+                            for m in (
+                                "T1_ACHIEVED",
+                                "T2_ACHIEVED",
+                                "T3_ACHIEVED",
+                                "TARGET_ACHIEVED",
+                                "T0_5_ACHIEVED",
+                                "BREAKEVEN_LOCKED",
+                                "DE_RISK_0_5R",
+                            )
+                        )
                         or getattr(alert, "target_status", "")
-                        in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
+                        in (
+                            "T1_ACHIEVED",
+                            "T2_ACHIEVED",
+                            "FINAL_TARGET",
+                            "TARGET_ACHIEVED",
+                            "T0_5_ACHIEVED",
+                            "BREAKEVEN_LOCKED",
+                            "RUNNER_CLOSED",
+                        )
                         or getattr(alert, "stage", "")
                         in (
                             "TARGET_1",
@@ -286,6 +305,9 @@ def evaluate_alert_invalidation(
                             "TARGET_2",
                             "FINAL_TARGET",
                             "TARGET_ACHIEVED",
+                            "T0_5_ACHIEVED",
+                            "BREAKEVEN_LOCKED",
+                            "RUNNER_EXIT",
                         )
                     )
                     init_sl_val = getattr(alert, "initial_stop_loss", None)
@@ -294,7 +316,7 @@ def evaluate_alert_invalidation(
                         or (
                             init_sl_val is None
                             and opt_entry > 0
-                            and alert.stop_loss > opt_entry + 0.05
+                            and alert.stop_loss >= opt_entry - 0.5
                         )
                         or has_hit_target
                     )
@@ -316,16 +338,16 @@ def evaluate_alert_invalidation(
                         runner_pnl = current_ltp - opt_entry if opt_entry > 0 else None
                         if runner_pnl is not None and runner_pnl > 0:
                             tgt_note = (
-                                "Target 1 profit secured; runner also closed in profit."
+                                "Target profit secured; runner also closed in profit."
                                 if has_hit_target
                                 else "Profit secured."
                             )
                         elif has_hit_target:
                             tgt_note = (
-                                "T1 profit banked earlier; runner stopped at scratch/breakeven."
+                                "Profit banked earlier; runner stopped at scratch/breakeven."
                             )
                         else:
-                            tgt_note = "Runner stopped out (capital returned)."
+                            tgt_note = "Runner stopped out at breakeven (capital protected)."
                         return (
                             f"Trailing runner stop triggered at ₹{current_ltp:.1f} "
                             f"(breached ratcheted stop ₹{alert.stop_loss:.1f}{init_sl_str}). {opt_desc} {tgt_note}"
@@ -361,16 +383,49 @@ def evaluate_alert_invalidation(
                 getattr(alert, "is_live", True) and getattr(alert, "environment", "") != "TEST"
             )
             has_hit_target = bool(
-                "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
+                any(
+                    m in (getattr(alert, "achieved_milestones", []) or [])
+                    for m in (
+                        "T1_ACHIEVED",
+                        "T2_ACHIEVED",
+                        "T3_ACHIEVED",
+                        "TARGET_ACHIEVED",
+                        "T0_5_ACHIEVED",
+                        "BREAKEVEN_LOCKED",
+                        "DE_RISK_0_5R",
+                    )
+                )
                 or getattr(alert, "target_status", "")
-                in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
+                in (
+                    "T1_ACHIEVED",
+                    "T2_ACHIEVED",
+                    "FINAL_TARGET",
+                    "TARGET_ACHIEVED",
+                    "T0_5_ACHIEVED",
+                    "BREAKEVEN_LOCKED",
+                    "RUNNER_CLOSED",
+                )
                 or getattr(alert, "stage", "")
-                in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "FINAL_TARGET", "TARGET_ACHIEVED")
+                in (
+                    "TARGET_1",
+                    "T1_ACHIEVED",
+                    "TARGET_2",
+                    "FINAL_TARGET",
+                    "TARGET_ACHIEVED",
+                    "T0_5_ACHIEVED",
+                    "BREAKEVEN_LOCKED",
+                    "RUNNER_EXIT",
+                )
             )
             init_sl_val = getattr(alert, "initial_stop_loss", None)
             if alert.direction == "BEARISH":
                 # For short positions, stop loss is moved downward below entry
-                ref_entry = alert.ltp or alert.trigger_level or 0.0
+                ref_entry = (
+                    getattr(alert, "initial_entry_premium", None)
+                    or getattr(alert, "entry_price", None)
+                    or alert.trigger_level
+                    or (init_sl_val * 0.95 if init_sl_val else 0.0)
+                )
                 is_ratcheted = (ref_entry > 0 and alert.stop_loss < ref_entry) or (
                     init_sl_val is not None and alert.stop_loss < init_sl_val - 0.05
                 )
@@ -383,7 +438,7 @@ def evaluate_alert_invalidation(
                         f"> ref_entry={ref_entry:.2f}. Treating as scratch exit, not profit."
                     )
 
-                baseline_p = alert.ltp or ref_entry
+                baseline_p = ref_entry
                 if not is_ratcheted and alert.stop_loss and baseline_p > 0 and alert.stop_loss <= baseline_p:
                     logger.warning(
                         f"[AlertEvaluator] Inverted stop-loss detected for {alert.symbol} ({alert.alert_id}): "
@@ -429,7 +484,12 @@ def evaluate_alert_invalidation(
                 # Bullish / Neutral long positions: stop loss moved upward above entry
                 # Use initial_stop_loss to derive original entry proxy; alert.ltp is the
                 # LIVE ticker (not entry) and must NOT be used as entry reference here.
-                ref_entry = alert.trigger_level or (init_sl_val * 1.05 if init_sl_val else 0.0)
+                ref_entry = (
+                    getattr(alert, "initial_entry_premium", None)
+                    or getattr(alert, "entry_price", None)
+                    or alert.trigger_level
+                    or (init_sl_val * 1.05 if init_sl_val else 0.0)
+                )
                 is_ratcheted = (
                     init_sl_val is not None and alert.stop_loss > init_sl_val + 0.05
                 ) or has_hit_target
@@ -444,7 +504,7 @@ def evaluate_alert_invalidation(
                         f"< trigger_level/entry={ref_entry:.2f}. Treating runner exit as scratch, not profit."
                     )
 
-                baseline_p = alert.ltp or ref_entry
+                baseline_p = ref_entry
                 if not is_ratcheted and alert.stop_loss and baseline_p > 0 and alert.stop_loss >= baseline_p:
                     logger.warning(
                         f"[AlertEvaluator] Inverted stop-loss detected for {alert.symbol} ({alert.alert_id}): "
@@ -1988,6 +2048,32 @@ def evaluate_alert_in_flight_decay(
     if not entry or entry <= 0:
         entry = current_ltp
 
+    # Intercept spot price scale contamination for option setups
+    if is_option and entry and entry > 0 and current_ltp and current_ltp > 0:
+        spot_ref = getattr(alert, "underlying_spot", None)
+        is_spot_scale = (current_ltp > entry * 3.5) or (
+            spot_ref and abs(current_ltp - spot_ref) / max(1.0, spot_ref) < 0.15
+        )
+        if is_spot_scale:
+            c_sym = getattr(alert, "contract_symbol", None)
+            resolved_opt_ltp = None
+            if c_sym:
+                try:
+                    from market.quotes import get_ltp
+                    raw_opt_p = get_ltp(c_sym)
+                    if raw_opt_p and 0 < raw_opt_p <= (entry * 3.5):
+                        resolved_opt_ltp = raw_opt_p
+                except Exception:
+                    pass
+            if resolved_opt_ltp:
+                current_ltp = resolved_opt_ltp
+            else:
+                logger.warning(
+                    f"[evaluate_alert_in_flight_decay] Suppressed evaluation for {getattr(alert, 'symbol', '')}: "
+                    f"Scale mismatch (quote LTP ₹{current_ltp:,.2f} vs option entry ₹{entry:,.2f})"
+                )
+                return None
+
     # 3. Extract Stop Loss
     stop = None
     plan = getattr(alert, "actionable_plan", None)
@@ -2083,6 +2169,35 @@ def evaluate_alert_in_flight_decay(
                 summary=summary,
             )
 
+    # Compute trade elapsed lifespan
+    created_dt = None
+    elapsed_secs = 0.0
+    clean_ts = (
+        (
+            getattr(alert, "original_call_time", None)
+            or getattr(alert, "triggered_at", None)
+            or getattr(alert, "created_at", "")
+            or ""
+        )
+        .replace(" IST", "")
+        .strip()[:19]
+    )
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            created_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
+            break
+        except ValueError:
+            pass
+
+    if created_dt:
+        now_dt = datetime.now(IST)
+        if is_test_runner:
+            elapsed_secs = (now_dt - created_dt).total_seconds()
+        else:
+            from market.calendar import get_trading_minutes_elapsed
+
+            elapsed_secs = get_trading_minutes_elapsed(created_dt, now_dt, exchange=exch) * 60.0
+
     # 6. Trigger B: In-Flight Theta Decay & Stagnation (Option Greeks-Aware Horizon)
     is_deriv_alert = bool(
         is_option
@@ -2091,33 +2206,7 @@ def evaluate_alert_in_flight_decay(
         or getattr(alert, "alert_type", "")
         in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "OPTIONS_MOMENTUM_BREAKOUT")
     )
-    if is_deriv_alert and not is_option_sell:
-        created_dt = None
-        clean_ts = (
-            (
-                getattr(alert, "original_call_time", None)
-                or getattr(alert, "triggered_at", None)
-                or getattr(alert, "created_at", "")
-                or ""
-            )
-            .replace(" IST", "")
-            .strip()[:19]
-        )
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-            try:
-                created_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
-                break
-            except ValueError:
-                pass
-
-        if created_dt:
-            now_dt = datetime.now(IST)
-            if is_test_runner:
-                elapsed_secs = (now_dt - created_dt).total_seconds()
-            else:
-                from market.calendar import get_trading_minutes_elapsed
-
-                elapsed_secs = get_trading_minutes_elapsed(created_dt, now_dt, exchange=exch) * 60.0
+    if is_deriv_alert and not is_option_sell and created_dt:
 
             # Detect 0DTE (Same-Day Expiry) status
             is_0dte = False
@@ -2278,8 +2367,11 @@ def evaluate_alert_in_flight_decay(
         if not spot_price or spot_price <= 0:
             try:
                 from market.quotes import get_ltp
+                from market.indices import INDEX_INSTRUMENTS
 
-                lookup = f"NSE:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
+                raw_sym = str(getattr(alert, "symbol", "")).upper()
+                clean_sym = raw_sym.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
+                lookup = INDEX_INSTRUMENTS.get(clean_sym, f"NSE:{raw_sym}" if ":" not in raw_sym else raw_sym)
                 spot_price = get_ltp(lookup)
             except Exception:
                 pass
@@ -2296,8 +2388,11 @@ def evaluate_alert_in_flight_decay(
         if not effective_vwap or effective_vwap <= 0:
             try:
                 from market.quotes import get_quote
+                from market.indices import INDEX_INSTRUMENTS
 
-                lookup = f"NSE:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
+                raw_sym = str(getattr(alert, "symbol", "")).upper()
+                clean_sym = raw_sym.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
+                lookup = INDEX_INSTRUMENTS.get(clean_sym, f"NSE:{raw_sym}" if ":" not in raw_sym else raw_sym)
                 q_res = get_quote([lookup])
                 if q_res and getattr(q_res.get(lookup), "vwap", 0):
                     effective_vwap = float(q_res[lookup].vwap)
@@ -2305,6 +2400,44 @@ def evaluate_alert_in_flight_decay(
                 pass
 
     if spot_price and spot_price > 0 and effective_vwap and effective_vwap > 0:
+        # Cross-Sanity Feed Guard:
+        # Intraday VWAP for Indian indices or liquid equities cannot diverge by > 5.0%
+        # from spot in normal market sessions (exchange circuit filter is 10%).
+        # A divergence > 5.0% signals symbol cross-contamination or corrupted feed
+        # (e.g. Midcap spot compared against FinNifty VWAP).
+        divergence_ratio = abs(spot_price - effective_vwap) / effective_vwap
+        if divergence_ratio > 0.05:
+            logger.warning(
+                f"[AlertEvaluator] Suppressed bogus VWAP band warning for {alert.symbol}: "
+                f"Spot ₹{spot_price:,.2f} deviates {divergence_ratio * 100:.1f}% from VWAP ₹{effective_vwap:,.2f} (> 5% max tolerance). "
+                f"Likely symbol cross-contamination or stale feed."
+            )
+            return None
+        # Option Strike Sanity Guard:
+        # If alert is an option setup with a recorded strike price, underlying spot cannot
+        # diverge by > 15% from option strike (ATM/OTM setups never trade with underlying 50% away).
+        if is_option:
+            alert_strike = float(
+                getattr(alert, "strike", 0.0)
+                or (alert.metrics.get("strike") if isinstance(alert.metrics, dict) else 0.0)
+                or 0.0
+            )
+            if alert_strike > 0:
+                strike_divergence = abs(spot_price - alert_strike) / alert_strike
+                if strike_divergence > 0.15:
+                    logger.warning(
+                        f"[AlertEvaluator] Suppressed bogus VWAP band warning for option {alert.symbol}: "
+                        f"Underlying spot ₹{spot_price:,.2f} deviates {strike_divergence * 100:.1f}% from strike ₹{alert_strike:,.2f} (> 15% max tolerance). "
+                        f"Likely alien feed or strike mismatch."
+                    )
+                    return None
+
+        # Incubation Guard:
+        # In live trading, require trade to have been active for at least 180s (3 mins) before
+        # issuing a VWAP band breakdown warning, preventing trigger-happy false positives on entry spikes.
+        if not is_test_runner and elapsed_secs > 0 and elapsed_secs < 180.0:
+            return None
+
         vwap_std = 0.0
         if isinstance(alert.metrics, dict):
             vwap_std = float(
@@ -2315,6 +2448,7 @@ def evaluate_alert_in_flight_decay(
                 (alert.metrics or {}).get("atr") or (alert.metrics or {}).get("atr_14d") or 0.0
             )
             vwap_std = (atr_val * 0.50) if atr_val > 0 else (effective_vwap * 0.006)
+
 
         if is_bullish:
             lower_band = round(effective_vwap - vwap_std, 2)

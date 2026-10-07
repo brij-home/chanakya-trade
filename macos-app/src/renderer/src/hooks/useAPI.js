@@ -69,29 +69,45 @@ export function useAPI() {
       }
     }
 
-    let res = await fetch(`${base}${endpoint}`, {
-      method,
-      headers,
-      body: options.body !== undefined ? options.body : JSON.stringify(body),
-      ...fetchOpts,
-      ...options,
-    })
+    let timeoutId = null
+    let localSignal = options.signal
+    if (!localSignal) {
+      const controller = new AbortController()
+      localSignal = controller.signal
+      const timeoutMs = options.timeoutMs || 15000
+      timeoutId = setTimeout(() => controller.abort(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs)
+    }
 
-    // If 403 on mutation in web mode, try refreshing the CSRF token once and retry
-    if (res.status === 403 && isMutation) {
-      const freshToken = await fetchCsrfToken(base)
-      if (freshToken && freshToken !== headers['X-CSRF-Token']) {
-        res = await fetch(`${base}${endpoint}`, {
-          method,
-          headers: {
-            ...headers,
-            'X-CSRF-Token': freshToken,
-          },
-          body: options.body !== undefined ? options.body : JSON.stringify(body),
-          ...fetchOpts,
-          ...options,
-        })
+    let res
+    try {
+      res = await fetch(`${base}${endpoint}`, {
+        method,
+        headers,
+        body: options.body !== undefined ? options.body : JSON.stringify(body),
+        signal: localSignal,
+        ...fetchOpts,
+        ...options,
+      })
+
+      // If 403 on mutation in web mode, try refreshing the CSRF token once and retry
+      if (res.status === 403 && isMutation) {
+        const freshToken = await fetchCsrfToken(base)
+        if (freshToken && freshToken !== headers['X-CSRF-Token']) {
+          res = await fetch(`${base}${endpoint}`, {
+            method,
+            headers: {
+              ...headers,
+              'X-CSRF-Token': freshToken,
+            },
+            body: options.body !== undefined ? options.body : JSON.stringify(body),
+            signal: localSignal,
+            ...fetchOpts,
+            ...options,
+          })
+        }
       }
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId)
     }
 
     if (!res.ok) {
@@ -121,10 +137,24 @@ export function useAPI() {
         if (!ipcErr.message?.includes('API is not ready')) throw ipcErr
       }
     }
-    const res = await fetch(`${base}${endpoint}`, {
-      ...fetchOpts,
-      ...options,
-    })
+    let timeoutId = null
+    let localSignal = options.signal
+    if (!localSignal) {
+      const controller = new AbortController()
+      localSignal = controller.signal
+      const timeoutMs = options.timeoutMs || 15000
+      timeoutId = setTimeout(() => controller.abort(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs)
+    }
+    let res
+    try {
+      res = await fetch(`${base}${endpoint}`, {
+        signal: localSignal,
+        ...fetchOpts,
+        ...options,
+      })
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId)
+    }
     if (!res.ok) {
       if (res.status === 401 && window.__CHANAKYA_TRADE_WEB__) {
         window.location.href = '/'

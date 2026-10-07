@@ -812,6 +812,47 @@ async def telemetry_health():
     )
 
 
+@app.get("/api/diagnostics/fyers-budget", tags=["System"])
+async def api_fyers_budget():
+    """
+    Real-time Fyers API budget governor, rate gate telemetry, and circuit breaker status.
+    Offloaded to thread pool to preserve async event loop responsiveness per AGENTS.md Rule 24.
+    """
+    def _collect():
+        from datetime import datetime, timezone
+        from market.fyers_rate_gate import get_fyers_rate_gate
+        from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+        from market.ws_subscription_manager import get_ws_subscription_manager
+        from market.vwap_session_cache import get_vwap_session_cache
+
+        rate_diag = get_fyers_rate_gate().get_diagnostics()
+        cb_diag = get_fyers_circuit_breaker().get_diagnostics()
+        ws_mgr = get_ws_subscription_manager()
+        all_subs = ws_mgr.get_all_desired_subscriptions()
+
+        vwap_cache = get_vwap_session_cache()
+        with vwap_cache._lock:
+            cached_vwap_count = len(vwap_cache._memory_cache)
+
+        return {
+            "status": "HEALTHY" if not cb_diag["is_tripped"] else "DEGRADED",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "rate_gate": rate_diag,
+            "circuit_breaker": cb_diag,
+            "websocket_subscriptions": {
+                "total_count": len(all_subs),
+                "max_limit": ws_mgr._max_subscriptions,
+                "symbols": all_subs,
+            },
+            "vwap_session_cache": {
+                "cached_symbols_count": cached_vwap_count,
+            },
+        }
+
+    data = await asyncio.to_thread(_collect)
+    return JSONResponse(data)
+
+
 # ── P0-B: Canonical Mode Endpoint ────────────────────────────────────────────
 
 

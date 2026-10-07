@@ -546,6 +546,8 @@ class AlertScrutinyAuditor:
             "SILVERM",
             "CRUDEOIL",
             "CRUDEOILM",
+            "NATURALGAS",
+            "NATGASMINI",
         ):
             try:
                 from market.macro import get_macro_snapshot
@@ -586,6 +588,24 @@ class AlertScrutinyAuditor:
                             return (
                                 False,
                                 f"Global Macro Divergence: Global Brent crude surging +{brent_c:.2f}% disallows domestic MCX shorts.",
+                                flags,
+                            )
+                    # Natural Gas vs Henry Hub
+                    elif (
+                        clean_sym in ("NATURALGAS", "NATGASMINI")
+                        and getattr(macro_snap, "natural_gas_change", None) is not None
+                    ):
+                        ng_c = float(macro_snap.natural_gas_change)
+                        if direction in ("BULLISH", "LONG", "BUY") and ng_c <= -2.0:
+                            return (
+                                False,
+                                f"Global Macro Divergence: Henry Hub Natural Gas dumping {ng_c:.2f}% disallows domestic MCX longs.",
+                                flags,
+                            )
+                        elif direction in ("BEARISH", "SHORT", "SELL") and ng_c >= 2.0:
+                            return (
+                                False,
+                                f"Global Macro Divergence: Henry Hub Natural Gas surging +{ng_c:.2f}% disallows domestic MCX shorts.",
                                 flags,
                             )
             except Exception:

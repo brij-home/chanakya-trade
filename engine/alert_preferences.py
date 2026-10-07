@@ -34,6 +34,16 @@ SEGMENT_ALIASES: dict[str, list[str]] = {
     "INDEX_FNO": ["FNO_INDEX"],
     "FNO_STOCKS": ["FNO_STOCK"],
     "STOCK_FNO": ["FNO_STOCK"],
+    "MCX": ["COMMODITY"],
+    "COMMODITIES": ["COMMODITY"],
+    "COMMODITY": ["COMMODITY"],
+    "CDS": ["CURRENCY"],
+    "CURRENCIES": ["CURRENCY"],
+    "CURRENCY": ["CURRENCY"],
+    "EQUITIES": ["EQUITY"],
+    "STOCKS": ["EQUITY"],
+    "CASH": ["EQUITY"],
+    "EQUITY": ["EQUITY"],
     "CRYPTO": ["CRYPTO"],
     "CRYPTO_MAJORS": ["CRYPTO"],
     "BITCOIN": ["CRYPTO"],
@@ -340,10 +350,19 @@ class ChannelPreferences:
     def is_segment_allowed(self, segment: str) -> bool:
         if not self.enabled:
             return False
-        seg_upper = (segment or "").upper()
+        seg_upper = (segment or "").upper().strip()
         allowed_upper = [s.upper() for s in self.allowed_segments]
         if "ALL" in allowed_upper:
             return True
+
+        if seg_upper in allowed_upper:
+            return True
+
+        # Check aliases expansion (e.g. MCX -> COMMODITY, CDS -> CURRENCY)
+        target_segs = SEGMENT_ALIASES.get(seg_upper, [seg_upper])
+        for ts in target_segs:
+            if ts in allowed_upper:
+                return True
 
         if seg_upper == "FNO_INDEX":
             return "FNO_INDEX" in allowed_upper or "FNO" in allowed_upper
@@ -351,7 +370,7 @@ class ChannelPreferences:
             return "FNO_STOCK" in allowed_upper or "FNO" in allowed_upper
         elif seg_upper == "FNO":
             return any(s in allowed_upper for s in ("FNO", "FNO_INDEX", "FNO_STOCK"))
-        return seg_upper in allowed_upper
+        return False
 
 
 @dataclass
@@ -393,6 +412,10 @@ class AlertPreferences:
     # Dedicated 24x7 Crypto Telegram Destination (Crypto_Premium_Alpha_Vortex)
     crypto_chat_id: Optional[str] = "-1004323607372"
 
+    # Dedicated Free Index Signals Telegram Destination (Nifty BankNifty Free Signals)
+    free_index_chat_id: Optional[str] = "-1004298387260"
+    free_index_enabled: bool = True
+
     # Allowed index symbols for Telegram FNO_INDEX channel (Nifty, Banknifty, Midcp, Sensex)
     fno_index_allowed_symbols: list[str] = field(
         default_factory=lambda: ["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"]
@@ -422,6 +445,12 @@ class AlertPreferences:
                 self.crypto_chat_id
                 or os.environ.get("TELEGRAM_CRYPTO_CHAT_ID", "").strip()
                 or "-1004323607372"  # Crypto_Premium_Alpha_Vortex
+            )
+        if seg in ("FREE_INDEX", "FREE_INDEX_SIGNALS", "FREE_FNO_INDEX"):
+            return (
+                self.free_index_chat_id
+                or os.environ.get("TELEGRAM_FREE_INDEX_CHAT_ID", "").strip()
+                or "-1004298387260"
             )
         if seg in ("FNO_INDEX", "INDEX_FNO", "FNO_INDICES", "FNO_INDEXES"):
             return (
@@ -470,6 +499,12 @@ class AlertPreferences:
                 or os.environ.get("TELEGRAM_FNO_INDEX_CHAT_ID", "").strip()
                 or "-1004380788314"
             ),
+            "free_index_chat_id": (
+                self.free_index_chat_id
+                or os.environ.get("TELEGRAM_FREE_INDEX_CHAT_ID", "").strip()
+                or "-1004298387260"
+            ),
+            "free_index_enabled": self.free_index_enabled,
             "mcx_chat_id": (
                 self.mcx_chat_id
                 or os.environ.get("TELEGRAM_MCX_CHAT_ID", "").strip()
@@ -537,6 +572,8 @@ class AlertPreferences:
             ),
             fno_chat_id=data.get("fno_chat_id"),
             fno_index_chat_id=data.get("fno_index_chat_id"),
+            free_index_chat_id=data.get("free_index_chat_id", "-1004298387260"),
+            free_index_enabled=bool(data.get("free_index_enabled", True)),
             mcx_chat_id=data.get("mcx_chat_id"),
             equity_chat_id=data.get("equity_chat_id"),
             crypto_chat_id=data.get("crypto_chat_id", "-1004323607372"),
@@ -663,6 +700,13 @@ class AlertPreferencesManager:
                 val = data["fno_index_chat_id"]
                 self._preferences.fno_index_chat_id = str(val).strip() if val else None
 
+            if "free_index_chat_id" in data:
+                val = data["free_index_chat_id"]
+                self._preferences.free_index_chat_id = str(val).strip() if val else None
+
+            if "free_index_enabled" in data:
+                self._preferences.free_index_enabled = bool(data["free_index_enabled"])
+
             if "mcx_chat_id" in data:
                 val = data["mcx_chat_id"]
                 self._preferences.mcx_chat_id = str(val).strip() if val else None
@@ -673,6 +717,28 @@ class AlertPreferencesManager:
 
             self._save()
             return self._preferences.to_dict()
+
+    def get_free_index_chat_id(self) -> Optional[str]:
+        """Returns target chat ID for Free Index Channel (-1004298387260)."""
+        with self._lock:
+            env_id = os.environ.get("TELEGRAM_FREE_INDEX_CHAT_ID", "").strip()
+            if env_id:
+                return env_id
+            if self._preferences.free_index_chat_id:
+                return self._preferences.free_index_chat_id
+            if os.environ.get("CHANAKYA_TESTING") != "1":
+                return "-1004298387260"
+            return None
+
+    def is_free_index_enabled(self) -> bool:
+        """Returns True if Free Index Channel routing is enabled."""
+        with self._lock:
+            env_flag = os.environ.get("TELEGRAM_FREE_INDEX_ENABLED", "").strip().lower()
+            if env_flag in ("0", "false", "no"):
+                return False
+            if env_flag in ("1", "true", "yes"):
+                return True
+            return bool(self._preferences.free_index_enabled)
 
     def set_allowed_segments(
         self,
@@ -885,8 +951,25 @@ class AlertPreferencesManager:
                         return False
 
             # General confidence threshold (applies to IGNITED, IN_FLIGHT, etc. — not whitelisted EARLY_WARNING)
+            if isinstance(alert, dict):
+                alt_type = str(alert.get("alert_type") or "").upper()
+            else:
+                alt_type = str(getattr(alert, "alert_type", "") or "").upper()
 
-            if conf < ch_pref.min_confidence:
+            effective_min_conf = ch_pref.min_confidence
+            if alt_type in (
+                "PRECURSOR_RADAR",
+                "ASYMMETRIC_OPPORTUNITY",
+                "COMMODITY_MOMENTUM",
+                "CURRENCY_BREAKOUT",
+                "CRYPTO_SQUEEZE",
+                "CRYPTO_MOMENTUM",
+                "CRYPTO_VOLATILITY",
+                "CRYPTO_BREAKOUT",
+            ) or seg in ("COMMODITY", "CURRENCY", "CRYPTO"):
+                effective_min_conf = min(ch_pref.min_confidence, 82)
+
+            if conf < effective_min_conf:
                 return False
 
             return True
@@ -899,11 +982,15 @@ class AlertPreferencesManager:
         with self._lock:
             if not self._preferences.pause_disabled_scanners:
                 return False
-            seg_upper = segment.upper()
-            ui_ok = self._preferences.ui.is_segment_allowed(seg_upper)
-            tg_ok = self._preferences.telegram.is_segment_allowed(seg_upper)
-            desk_ok = self._preferences.desktop.is_segment_allowed(seg_upper)
-            return not (ui_ok or tg_ok or desk_ok)
+            seg_upper = (segment or "").upper().strip()
+            canonical_targets = SEGMENT_ALIASES.get(seg_upper, [seg_upper])
+            for target in canonical_targets:
+                ui_ok = self._preferences.ui.is_segment_allowed(target)
+                tg_ok = self._preferences.telegram.is_segment_allowed(target)
+                desk_ok = self._preferences.desktop.is_segment_allowed(target)
+                if ui_ok or tg_ok or desk_ok:
+                    return False
+            return True
 
     def get_telegram_chat_id(self, segment: str = "EQUITY") -> Optional[str]:
         """Returns the target Telegram chat ID for a given segment."""

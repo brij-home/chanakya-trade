@@ -49,8 +49,17 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional, Union
 from uuid import uuid4
+import concurrent.futures
 
 logger = logging.getLogger("chanakya.web.skills")
+
+# Dedicated bounded thread pool for quote batch fetches to prevent starving general API endpoints
+_quotes_batch_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=3, thread_name_prefix="QuotesBatchWorker"
+)
+_alerts_serializer_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="AlertsSerializer"
+)
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
 if sys.platform == "win32":
@@ -65,7 +74,7 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from rich.console import Console
@@ -301,9 +310,12 @@ async def skill_quotes_batch(req: BatchQuotesRequest):
                 continue
             clean = s.strip().upper()
             inst = clean if ":" in clean else normalize_instrument(clean)
-            instruments.append(inst)
+        # Cap instruments to 60 symbols to protect broker rate limit budget
+        if len(instruments) > 60:
+            instruments = instruments[:60]
 
-        quotes_dict = await asyncio.to_thread(get_quote, instruments)
+        loop = asyncio.get_running_loop()
+        quotes_dict = await loop.run_in_executor(_quotes_batch_executor, get_quote, instruments)
         out = {}
         for k, q in quotes_dict.items():
             if q and getattr(q, "last_price", 0) > 0:
@@ -1407,9 +1419,16 @@ async def skill_morning_brief():
                 gift = get_gift_nifty()
             except Exception:
                 pass
-            return snap, fl, nw, br, ev, gift
+            battle_plan = None
+            try:
+                from market.indices import get_premarket_battle_plan
 
-        snapshot, flows, news, breadth, events, gift = await asyncio.to_thread(_fetch_brief)
+                battle_plan = get_premarket_battle_plan()
+            except Exception:
+                pass
+            return snap, fl, nw, br, ev, gift, battle_plan
+
+        snapshot, flows, news, breadth, events, gift, battle_plan = await asyncio.to_thread(_fetch_brief)
 
         return {
             "status": "ok",
@@ -1423,6 +1442,30 @@ async def skill_morning_brief():
                     "gift_nifty": _serialise(gift) if gift else None,
                     "implied_gap_pct": getattr(gift, "implied_gap_pct", 0.0) if gift else 0.0,
                 },
+                "battle_plan": battle_plan or {},
+            },
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/premarket_battle_plan")
+@router.post("/premarket_battle_plan")
+async def skill_premarket_battle_plan():
+    """
+    Computes institutional Pre-Market Battle Plan for benchmark and major indices.
+    Calculates Virgin CPR (Pivot, BC, TC, width %), Camarilla Pivots (H4, H3, L3, L4),
+    and Previous Day Levels (PDH, PDL, PDC) with actionable trade blueprints before 09:15.
+    """
+    try:
+        from market.indices import get_premarket_battle_plan
+
+        plan = await asyncio.to_thread(get_premarket_battle_plan)
+        return {
+            "status": "ok",
+            "data": {
+                "battle_plan": plan,
+                "as_of_ist": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S IST"),
             },
         }
     except Exception as e:
@@ -1644,7 +1687,8 @@ async def skill_alerts_list():
     try:
         from engine.alerts import alert_manager
 
-        alerts = await asyncio.to_thread(alert_manager.list_alerts)
+        # In-memory list (< 0.1ms). Avoid thread pool queue starvation.
+        alerts = alert_manager.list_alerts()
         return {"status": "ok", "data": alerts}
     except Exception as e:
         raise _err(str(e))
@@ -1703,8 +1747,8 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
         segment = req.segment if req else None
         horizon = req.horizon if req else None
 
-        alerts = await asyncio.to_thread(
-            auto_alert_engine.get_alerts,
+        # In-memory filtered slice (< 1ms). Avoid thread pool queue starvation.
+        alerts = auto_alert_engine.get_alerts(
             limit=limit,
             alert_type=alert_type,
             stage=stage,
@@ -1717,7 +1761,17 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
             horizon=horizon,
         )
         counts = auto_alert_engine.get_counts()
-        return {"status": "ok", "data": [a.to_dict() for a in alerts], "counts": counts}
+
+        # Serialize off-event-loop and return direct Response to bypass FastAPI's slow jsonable_encoder recursion
+        def _encode_payload(alts, cnts):
+            return json.dumps(
+                {"status": "ok", "data": [a.to_dict() for a in alts], "counts": cnts},
+                default=str,
+            ).encode("utf-8")
+
+        loop = asyncio.get_running_loop()
+        raw_bytes = await loop.run_in_executor(_alerts_serializer_pool, _encode_payload, alerts, counts)
+        return Response(content=raw_bytes, media_type="application/json")
     except Exception as e:
         raise _err(str(e))
 

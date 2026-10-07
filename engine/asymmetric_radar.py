@@ -1031,6 +1031,11 @@ class AsymmetricOpportunityRadar:
         """
         clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
 
+        # Positional 200-EMA mean-reversion is strictly an individual equity franchise model,
+        # never applicable to macro index benchmarks where wide daily SLs distort intraday channels.
+        if clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
+            return None
+
         if quote is None:
             from market.quotes import get_quote
 

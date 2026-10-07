@@ -947,35 +947,40 @@ def detect_options_momentum_breakouts(
                             expiry=str(expiry_date) if expiry_date else "",
                             option_ltp=opt_ltp,
                             lot_size=lot_sz,
+                            contract_symbol=contract_sym,
                         )
                 except Exception as e_tp:
                     logger.debug(f"[OptionsBreakout] Trade plan calculation failed: {e_tp}")
 
+                is_index_sym = clean_sym in (
+                    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"
+                )
                 if opt_plan and opt_plan.get("sl_premium") and opt_plan.get("t1_premium"):
                     opt_sl = float(opt_plan["sl_premium"])
                     opt_t1 = float(opt_plan["t1_premium"])
-                    max_opt_sl_risk = round(opt_ltp * 0.28, 2)
-                    opt_sl = max(opt_sl, round(opt_ltp - max_opt_sl_risk, 2))
+                    opt_t2 = float(
+                        opt_plan.get("t2_premium")
+                        or round(opt_ltp * (1.30 if is_index_sym else 1.38), 2)
+                    )
+                    opt_moonshot = float(
+                        opt_plan.get("t3_premium")
+                        or round(opt_ltp * (1.50 if is_index_sym else 1.65), 2)
+                    )
                     opt_risk = max(0.2, opt_ltp - opt_sl)
-                    opt_t0_5 = round(opt_ltp + 1.0 * opt_risk, 2)
-                    opt_t1 = max(
-                        float(opt_plan.get("t1_premium") or 0.0), round(opt_ltp + 1.8 * opt_risk, 2)
+                    opt_t0_5 = float(
+                        opt_plan.get("t0_5_premium") or round(opt_ltp + (0.8 * opt_risk), 2)
                     )
-                    opt_t2 = max(
-                        float(opt_plan.get("t2_premium") or 0.0), round(opt_ltp + 3.0 * opt_risk, 2)
+                    rr_str = opt_plan.get(
+                        "option_rr", f"1:{round((opt_t1 - opt_ltp) / max(0.01, opt_risk), 1)}"
                     )
-                    opt_moonshot = max(
-                        float(opt_plan.get("t3_premium") or 0.0), round(opt_ltp + 5.0 * opt_risk, 2)
-                    )
-                    rr_val = round((opt_t1 - opt_ltp) / max(0.01, opt_risk), 1)
-                    rr_str = f"1:{rr_val}"
                 else:
-                    risk_pts = round(max(0.20, min(opt_ltp * 0.28, opt_ltp - 0.05)), 2)
+                    max_sl_pct = 0.18 if is_index_sym else 0.22
+                    risk_pts = round(max(0.20, min(opt_ltp * max_sl_pct, opt_ltp - 0.05)), 2)
                     opt_sl = round(max(0.05, opt_ltp - risk_pts), 2)
-                    opt_t0_5 = round(opt_ltp + 1.0 * risk_pts, 2)
-                    opt_t1 = round(opt_ltp + 1.8 * risk_pts, 2)
-                    opt_t2 = round(opt_ltp + 3.0 * risk_pts, 2)
-                    opt_moonshot = round(opt_ltp + 5.0 * risk_pts, 2)
+                    opt_t0_5 = round(opt_ltp + (0.8 * risk_pts), 2)
+                    opt_t1 = round(opt_ltp + (1.4 * risk_pts), 2)
+                    opt_t2 = round(opt_ltp + (2.2 * risk_pts), 2)
+                    opt_moonshot = round(opt_ltp + (3.5 * risk_pts), 2)
                     rr_val = round((opt_t1 - opt_ltp) / max(0.01, risk_pts), 1)
                     rr_str = f"1:{rr_val}"
 

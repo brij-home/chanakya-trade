@@ -37,6 +37,8 @@ def make_alert(**overrides) -> AutoAlert:
         "environment": "LIVE",
     }
     defaults.update(overrides)
+    if "ltp" in overrides and "trigger_level" not in overrides:
+        defaults["trigger_level"] = overrides["ltp"]
     return AutoAlert(**defaults)
 
 
@@ -419,8 +421,8 @@ def test_0dte_expiry_day_afternoon_theta_cliff_veto(monkeypatch):
     import engine.alert_scrutiny as scr
 
     ist = ZoneInfo("Asia/Kolkata")
-    today_str = datetime.now(ist).strftime("%Y-%m-%d")
     fake_now = datetime(2026, 10, 5, 13, 45, tzinfo=ist)
+    today_str = fake_now.strftime("%Y-%m-%d")
 
     class FakeDatetime(datetime):
         @classmethod
@@ -473,8 +475,8 @@ def test_0dte_expiry_pin_risk_veto(monkeypatch):
     import engine.alert_scrutiny as scr
 
     ist = ZoneInfo("Asia/Kolkata")
-    today_str = datetime.now(ist).strftime("%Y-%m-%d")
     fake_now = datetime(2026, 10, 5, 14, 25, tzinfo=ist)
+    today_str = fake_now.strftime("%Y-%m-%d")
 
     class FakeDatetime(datetime):
         @classmethod
@@ -573,6 +575,255 @@ def test_eod_session_scorecard_and_review(monkeypatch):
     # Calling again without force must return None due to single-session latch
     rep2 = engine.check_eod_session_review(force=False)
     assert rep2 is None
+
+
+def test_options_inverted_target_without_option_plan_vetoed():
+    """Option alert with inverted targets (target_2 <= target_1) is vetoed even when option_plan is absent."""
+    alert = make_alert(
+        alert_type="INDEX_MICRO_SCALP",
+        symbol="NIFTY",
+        contract_symbol="NIFTY2026100622550CE",
+        option_type="CE",
+        strike=22550.0,
+        ltp=113.6,
+        trigger_level=113.6,
+        stop_loss=103.4,
+        target_level=198.8,
+        actionable_plan={"target_1": 198.8, "target_2": 168.1},
+    )
+    is_valid, reason = alert.validate_data_integrity()
+    assert is_valid is False
+    assert "Inverted Target Hierarchy" in reason
+
+
+def test_alert_normalize_target_hierarchy_self_healing():
+    """Verify that normalize_target_hierarchy corrects inverted target dictionaries."""
+    alert = make_alert(
+        alert_type="INDEX_MICRO_SCALP",
+        symbol="NIFTY",
+        contract_symbol="NIFTY2026100622550CE",
+        option_type="CE",
+        strike=22550.0,
+        ltp=113.6,
+        trigger_level=113.6,
+        stop_loss=103.4,
+        target_level=198.8,
+        actionable_plan={
+            "action": "BUY NIFTY 22550 CE",
+            "target": "₹198.8",
+            "target_2": "₹168.1",
+            "target_1": "₹144.2",
+        },
+    )
+    alert.normalize_target_hierarchy()
+    assert alert.target_level == 144.2
+    assert alert.actionable_plan["target"] == "₹144.2"
+    assert alert.actionable_plan["target_1"] == "₹144.2"
+    assert alert.actionable_plan["target_2"] == "₹168.1"
+    assert alert.actionable_plan["target_3"] == "₹198.8"
+    assert alert.actionable_plan["runner_target"] == "₹198.8"
+
+
+def test_micro_scalp_exempt_from_anti_whipsaw_widening():
+    """INDEX_MICRO_SCALP alert with tight 9% stop is preserved and not widened to 15%."""
+    from engine.auto_alert_engine import AutoAlertEngine
+
+    engine = AutoAlertEngine()
+    engine.clear_alerts()
+
+    scalp_alert = make_alert(
+        alert_id="test-micro-scalp-tight-stop",
+        alert_type="INDEX_MICRO_SCALP",
+        symbol="NIFTY",
+        contract_symbol="NIFTY2026100622550CE",
+        option_type="CE",
+        strike=22550.0,
+        ltp=113.6,
+        trigger_level=113.6,
+        stop_loss=103.4,  # 8.98% risk
+        target_level=123.8,
+        time_horizon="SCALP",
+        actionable_plan={
+            "action": "BUY NIFTY 22550 CE",
+            "entry_range": "₹113.6 – ₹117.2",
+            "recommended_entry": "₹113.6 – ₹117.2",
+            "stop_loss": "₹103.4",
+            "target": "₹123.8",
+            "target_1": "₹123.8",
+            "target_2": "₹134.0",
+            "runner_target": "₹146.3",
+            "lot_size": 65,
+        },
+    )
+
+    success = engine.record_alert(scalp_alert)
+    assert success is True
+    # Verify stop loss was NOT widened to 96.6 (15%)
+    assert scalp_alert.actionable_plan["target_2"] == "₹134.0"
+
+
+def test_0dte_afternoon_option_target_calibration_and_diffusion():
+    """Verify that a 0-DTE ITM option trade at 14:27 IST has realistic, achievable T1 and T2 levels.
+
+    Prevents the bug where a distant +4.5R structural spot target was directly set as T1 (e.g. ₹207.7),
+    violating the basic risk management definition of an initial 50% scale-out level.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from engine.trade_plan import calculate_trade_plan, calculate_option_execution_plan
+
+    IST = ZoneInfo("Asia/Kolkata")
+    ref_dt = datetime(2026, 10, 6, 14, 27, tzinfo=IST)
+    spot = 22685.5
+    strike = 22600.0
+    opt_ltp = 92.15
+
+    # 1. Spot TradePlan should enforce temporal diffusion budget
+    tp = calculate_trade_plan(
+        symbol="NIFTY",
+        direction="BUY",
+        spot=spot,
+        timeframe="INTRADAY",
+        exchange="NFO",
+        has_active_blast=True,
+        ref_dt=ref_dt,
+    )
+    # At 14:27 IST (~48m to close), T1 distance should be bounded by session budget / 1.2R floor (~40-95 pts, not 180+ pts)
+    t1_spot_dist = tp.target_1 - tp.entry_price
+    assert 20.0 <= t1_spot_dist <= 105.0, f"Spot T1 distance {t1_spot_dist} violates 14:27 IST diffusion budget"
+
+    # 2. Option Execution Plan must provide realistic scale-out R-multiples
+    opt_plan = calculate_option_execution_plan(
+        trade_plan=tp,
+        option_type="CE",
+        strike=strike,
+        expiry="2026-10-06",
+        option_ltp=opt_ltp,
+        lot_size=65,
+        spot=spot,
+    )
+
+    t1_prem = opt_plan["t1_premium"]
+    t2_prem = opt_plan["t2_premium"]
+    t3_prem = opt_plan["t3_premium"]
+    sl_prem = opt_plan["sl_premium"]
+    opt_risk = opt_ltp - sl_prem
+
+    # Target 1 must be an achievable scale-out: +1.4R to +2.0R (e.g. ₹128 to ₹145, not ₹207.7)
+    rr_t1 = (t1_prem - opt_ltp) / opt_risk
+    assert 1.40 <= rr_t1 <= 2.10, f"Option T1 R:R {rr_t1} is outside institutional scale-out range"
+    assert 120.0 <= t1_prem <= 145.0, f"Option T1 premium {t1_prem} is unrealistic"
+
+    # Target 2 must be a sensible structural expansion: +2.4R to +4.0R
+    rr_t2 = (t2_prem - opt_ltp) / opt_risk
+    assert 2.40 <= rr_t2 <= 4.00, f"Option T2 R:R {rr_t2} is outside structural expansion range"
+    assert 140.0 <= t2_prem <= 195.0, f"Option T2 premium {t2_prem} is unrealistic"
+
+    # Target 3 (Moonshot Runner) must preserve higher potential
+    assert t3_prem > t2_prem
+    assert t3_prem >= 190.0
+
+    # Monotonicity check
+    assert sl_prem < opt_ltp < t1_prem < t2_prem < t3_prem
+
+
+def test_vwap_band_warning_suppressed_on_feed_divergence_or_cross_contamination():
+    """Underlying spot deviating > 5% from VWAP or > 15% from strike must be suppressed as corrupted feed."""
+    from engine.alert_evaluator import evaluate_alert_in_flight_decay
+
+    alert = make_alert(
+        alert_id="aa-test-vwap-divergence-001",
+        alert_type="INDEX_CALL_SETUP",
+        symbol="NIFTY",
+        contract_symbol="NIFTY22650CE",
+        option_type="CE",
+        strike=22650.0,
+        ltp=63.4,
+        trigger_level=64.3,
+        option_premium=64.3,
+        stop_loss=48.22,
+        target_level=90.0,
+        underlying_spot=10852.10,  # Corrupted alien feed!
+        metrics={"vwap": 22600.0, "vwap_std": 35.0, "spot": 10852.10},
+        is_live=True,
+    )
+
+    # Cross-sanity feed guard must suppress this completely
+    eval_res = evaluate_alert_in_flight_decay(alert, current_ltp=63.4)
+    assert eval_res is None
+
+
+def test_vwap_band_warning_never_renders_contradictory_zero_rupee_hedge_defense():
+    """VWAP band warning alerts must never render contradictory hedge defense blocks with ₹0.0 values."""
+    from bot.alert_templates import render_auto_alert
+
+    alert = make_alert(
+        alert_id="aa-test-vwap-no-ghost-hedge",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IN_FLIGHT_WARNING",
+        symbol="NIFTY",
+        contract_symbol="NIFTY22650CE",
+        option_type="CE",
+        strike=22650.0,
+        ltp=63.4,
+        stop_loss=48.22,
+        target_level=90.0,
+        in_flight_warning_sent=True,
+        in_flight_warning_reason="VWAP BAND BREAKDOWN: Price ₹22,480.00 broke below -1.0σ band (₹22,493.54).",
+        trailing_decision="SCRATCH_OR_TIGHTEN_TO_VWAP",
+        actionable_plan={
+            "hedge_plan": {
+                "strategy": "BULL_CALL_SPREAD",
+                "short_strike": 22750.0,
+                "net_debit_per_share": 41.75,
+            }
+        },
+        is_live=True,
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "VWAP BAND WARNING" in rendered
+    assert "SCRATCH OR TIGHTEN TO VWAP" in rendered
+    # Contradictory hedge defense must be completely absent
+    assert "HEDGE DEFENSE" not in rendered
+    assert "@ ~₹0.0" not in rendered
+    assert "Risk Frozen: ₹0.0" not in rendered
+    assert "22750.0" not in rendered
+
+
+def test_mstock_quote_mapping_never_cross_contaminates_unmatched_tokens():
+    """mStock get_quote must not map an unmatched broker token onto inst_list[0]."""
+    from brokers.mstock import MStockAPI
+    from unittest.mock import MagicMock
+
+    api = MStockAPI()
+    api._token = "valid_test_token"
+    api._headers = lambda: {"Authorization": "Bearer test"}
+
+    # Mock client post returning an alien token 10852 when query was for NIFTY (token 26000)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "status": True,
+        "data": {
+            "fetched": [
+                {
+                    "exchange": "NSE",
+                    "tradingSymbol": "ULTRACEMCO",
+                    "symbolToken": "10852",
+                    "ltp": 10852.10,
+                    "close": 10800.0,
+                }
+            ]
+        },
+    }
+    api._client.post = MagicMock(return_value=mock_resp)
+
+    # Query for NSE:NIFTY 50 (whose token is 26000, not 10852)
+    quotes = api.get_quote(["NSE:NIFTY 50"])
+    assert "NSE:NIFTY 50" not in quotes
+    assert "NIFTY 50" not in quotes
+
 
 
 

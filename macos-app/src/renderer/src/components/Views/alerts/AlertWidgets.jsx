@@ -49,10 +49,10 @@ export function MilestoneDots({ targetStatus, stage, isSLHit = false, isExpired 
     )
   }
 
-  if (isExpired || stage === 'EXPIRED') {
+  if (isExpired || stage === 'EXPIRED' || stage === 'SESSION_CLOSE_EXIT' || stage === 'SUPERSEDED') {
     return (
       <span className="flex items-center gap-0.5 font-mono text-[9px] text-zinc-400 font-bold" title="Expired / Session Closed">
-        <span>⏱️</span>
+        <span>🌙</span>
       </span>
     )
   }

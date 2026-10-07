@@ -66,17 +66,7 @@ class FyersTbtManager:
 
         self._thread = threading.Thread(target=self._connect, daemon=True)
         self._thread.start()
-
-        # Wait briefly for handshake
-        for _ in range(15):
-            if self._connected:
-                break
-            time.sleep(0.2)
-
-        if self._connected:
-            logger.info("Fyers 50-Depth TBT Socket connected")
-        else:
-            logger.warning("Fyers 50-Depth TBT Socket connection timed out")
+        logger.info("Fyers 50-Depth TBT Socket background thread started")
 
     def _connect(self) -> None:
         try:
@@ -209,10 +199,19 @@ class FyersTbtManager:
         }
 
     def subscribe(self, symbols: list[str]) -> None:
-        """Subscribe to 50-level depth for specific symbols."""
+        # Filter out crypto symbols — Fyers TBT only handles Indian exchange instruments
+        filtered = [
+            s for s in symbols
+            if not str(s).upper().startswith("CRYPTO:")
+            and not str(s).upper().endswith("USDT")
+            and str(s).upper() not in ("BTC", "ETH", "SOL", "BNB", "DOGE")
+        ]
+        if not filtered:
+            return
+
         from brokers.fyers import _to_fyers_symbol
 
-        formatted = {_to_fyers_symbol(s) for s in symbols}
+        formatted = {_to_fyers_symbol(s) for s in filtered}
         new_syms = formatted - self._subscribed
         if not new_syms:
             return
