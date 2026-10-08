@@ -299,7 +299,9 @@ def detect_index_call_setup(
             if dist_pts <= (step_val * 0.55):
                 moneyness_bonus = 25.0  # ATM sweet spot (Delta ~0.50)
             elif c_strike < spot and dist_pts <= (step_val * 1.35):
-                moneyness_bonus = 20.0  # 1-strike ITM powerhouse (Delta ~0.58-0.65, zero time-decay trap)
+                moneyness_bonus = (
+                    20.0  # 1-strike ITM powerhouse (Delta ~0.58-0.65, zero time-decay trap)
+                )
             elif c_strike > spot:
                 # OTM penalty grows with distance to prevent selecting low-delta decay traps
                 moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 15.0)
@@ -333,12 +335,10 @@ def detect_index_call_setup(
         else 0.0
     )
     is_breakout_momentum = (
-        (cand_ce_pchange >= 15.0 and cand_ce_vol_oi >= 1.2 and cand_ce_vol >= min_vol)
-        or (cand_ce_vol_oi >= 2.0 and cand_ce_vol >= int(min_vol * 1.5))
-    )
-    is_explosive_momentum = (
-        (cand_ce_vol_oi >= 3.0 and cand_ce_vol >= min_vol * 2)
-        or (cand_ce_pchange >= 25.0 and cand_ce_vol_oi >= 2.0 and cand_ce_vol >= min_vol)
+        cand_ce_pchange >= 15.0 and cand_ce_vol_oi >= 1.2 and cand_ce_vol >= min_vol
+    ) or (cand_ce_vol_oi >= 2.0 and cand_ce_vol >= int(min_vol * 1.5))
+    is_explosive_momentum = (cand_ce_vol_oi >= 3.0 and cand_ce_vol >= min_vol * 2) or (
+        cand_ce_pchange >= 25.0 and cand_ce_vol_oi >= 2.0 and cand_ce_vol >= min_vol
     )
 
     # ── Optimization 1: Intraday Put-Call Ratio (PCR) Confluence Gate ───
@@ -497,7 +497,11 @@ def detect_index_call_setup(
                     _bypass_reason = (
                         "ROC_ACCELERATION"
                         if _roc_hbcm_pass
-                        else ("EXPLOSIVE_MOMENTUM" if _explosive_momentum_hbcm_pass else "V_BOTTOM_CONFLUENCE")
+                        else (
+                            "EXPLOSIVE_MOMENTUM"
+                            if _explosive_momentum_hbcm_pass
+                            else "V_BOTTOM_CONFLUENCE"
+                        )
                     )
                     hbcm_res.confluence_pass = True
                     hbcm_res.rejection_reason = None
@@ -543,7 +547,10 @@ def detect_index_call_setup(
                 and not hw_posture.get("all_bearish")
             )
             hw_bears = hw_posture.get("bear_count", 0)
-            if hw_total >= 3 and (hw_bears >= 3 or (hw_bears > hw_bulls and not (is_explosive_momentum or _roc_hw_pass))):
+            if hw_total >= 3 and (
+                hw_bears >= 3
+                or (hw_bears > hw_bulls and not (is_explosive_momentum or _roc_hw_pass))
+            ):
                 hw_tags = [f"{h['symbol']} ({h['change_pct']:+.2f}%)" for h in active_hw]
                 logger.info(
                     f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Heavyweights are net bearish "
@@ -675,7 +682,9 @@ def detect_index_call_setup(
     cpr_data: dict[str, Any] = {}
     is_narrow_cpr = False
     if prev_day_high and prev_day_low and prev_day_high > prev_day_low > 0:
-        ref_c = prev_close if (prev_close and prev_close > 0) else (prev_day_high + prev_day_low) / 2.0
+        ref_c = (
+            prev_close if (prev_close and prev_close > 0) else (prev_day_high + prev_day_low) / 2.0
+        )
         cpr_pivot = (prev_day_high + prev_day_low + ref_c) / 3.0
         cpr_bc = (prev_day_high + prev_day_low) / 2.0
         cpr_tc = (cpr_pivot - cpr_bc) + cpr_pivot
@@ -699,7 +708,9 @@ def detect_index_call_setup(
             "cpr_bottom": round(cpr_bottom, 1),
             "cpr_width_pct": round(cpr_width_pct, 3),
             "is_narrow_cpr": is_narrow_cpr,
-            "regime": "NARROW_CPR_TRENDING" if is_narrow_cpr else ("WIDE_CPR_RANGE" if cpr_width_pct >= 0.35 else "AVERAGE_CPR"),
+            "regime": "NARROW_CPR_TRENDING"
+            if is_narrow_cpr
+            else ("WIDE_CPR_RANGE" if cpr_width_pct >= 0.35 else "AVERAGE_CPR"),
             "cam_h3": round(cam_h3, 1),
             "cam_h4": round(cam_h4, 1),
             "cam_l3": round(cam_l3, 1),
@@ -712,7 +723,11 @@ def detect_index_call_setup(
             # Candlestick Confirmation Guard:
             # Do NOT buy into an inverted hammer / shooting star (long upper wick or red rejection bar).
             has_valid_h4_bar = True
-            if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+            if (
+                active_ohlcv is not None
+                and hasattr(active_ohlcv, "iloc")
+                and len(active_ohlcv) >= 1
+            ):
                 try:
                     col_h = "high" if "high" in active_ohlcv.columns else "High"
                     col_l = "low" if "low" in active_ohlcv.columns else "Low"
@@ -726,7 +741,9 @@ def detect_index_call_setup(
                     b_rng = max(0.1, b_h - b_l)
                     u_wick_pct = (b_h - max(b_c, b_o)) / b_rng * 100.0
                     # If upper wick >= 35% or red candle dumping off highs, it is seller rejection
-                    is_shooting_star = (u_wick_pct >= 35.0) or (b_c < b_o and (b_h - b_c) / b_rng >= 0.50)
+                    is_shooting_star = (u_wick_pct >= 35.0) or (
+                        b_c < b_o and (b_h - b_c) / b_rng >= 0.50
+                    )
                     # Close must confirm breakout (at or above Cam H4 * 0.9995)
                     close_confirms = b_c >= cam_h4 * 0.9995
                     has_valid_h4_bar = (not is_shooting_star) and close_confirms
@@ -756,7 +773,11 @@ def detect_index_call_setup(
             and not is_dead_cat_cpr
         ):
             has_cpr_bounce_candle = True
-            if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+            if (
+                active_ohlcv is not None
+                and hasattr(active_ohlcv, "iloc")
+                and len(active_ohlcv) >= 1
+            ):
                 try:
                     col_h = "high" if "high" in active_ohlcv.columns else "High"
                     col_l = "low" if "low" in active_ohlcv.columns else "Low"
@@ -1213,7 +1234,9 @@ def detect_index_call_setup(
 
                         # Bullish moving average alignment & holding firmly above VWAP without Day High distribution
                         drop_from_high_pct = (
-                            ((day_high - spot) / max(1.0, day_high)) * 100.0 if (day_high and day_high > 0) else 0.0
+                            ((day_high - spot) / max(1.0, day_high)) * 100.0
+                            if (day_high and day_high > 0)
+                            else 0.0
                         )
                         is_vwap_healthy = effective_vwap <= 0 or spot >= (effective_vwap * 0.9995)
                         is_not_distributing = drop_from_high_pct < 0.22
@@ -1421,13 +1444,10 @@ def detect_index_call_setup(
                 is_institutional_thrust
                 or is_liq_sweep
                 or "SHORT_SQUEEZE_UNWIND" in signals
-                or "DAY_HIGH_BREAKOUT" in signals
                 or "INTRADAY_CAPITULATION_BOTTOM" in signals
-                or "DOUBLE_BOTTOM_BREAKOUT" in signals
-                or "VWAP_RECLAIM" in signals
             )
-            # If signals only contain routine setups and no qualifying setup exists:
-            if not has_qualifying_setup and all(s in routine_setups for s in signals):
+            # If signals contain routine setups and no qualifying setup exists:
+            if not has_qualifying_setup and any(s in routine_setups for s in signals):
                 logger.info(
                     f"[IndexCallSetup] Suppressed routine CE setup on {clean_sym} ({', '.join(signals)}): "
                     f"TIGER STALKING active ({tiger_mandate.reason}). Preventing whipsaw bleeding."
@@ -1603,7 +1623,6 @@ def detect_index_call_setup(
         else round(max(0.1, opt_ltp - sl_premium) * lot_sz, 0)
     )
     t1_pct = round(((t1_premium - opt_ltp) / max(0.1, opt_ltp)) * 100, 1) if opt_ltp > 0 else 30.0
-
 
     # ── Velocity Regime Check ────────────────────────────────────
     vel_regime = "NORMAL_TREND"

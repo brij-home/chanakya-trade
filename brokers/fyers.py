@@ -39,11 +39,10 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +101,6 @@ _INDEX_PREFIXES = (
 )
 
 
-
 _MONTH_MAP = {
     "jan": "01",
     "feb": "02",
@@ -131,8 +129,18 @@ _MONTH_MAP = {
 }
 
 _WEEKLY_MONTH_MAP = {
-    "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
-    "O": 10, "N": 11, "D": 12,
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
+    "6": 6,
+    "7": 7,
+    "8": 8,
+    "9": 9,
+    "O": 10,
+    "N": 11,
+    "D": 12,
 }
 
 
@@ -197,6 +205,7 @@ def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str = "") -> str:
 
 
 # ── Precision Order Utilities (Decimal Tick Rounding & Lot Validation) ─────────
+
 
 def round_price_to_tick(price: float | None, tick_size: float = 0.05) -> float:
     """
@@ -404,7 +413,9 @@ def _to_fyers_symbol(instrument: str) -> str:
     if any(sym_upper.endswith(suffix) for suffix in ("FUT", "CE", "PE")) and any(
         c.isdigit() for c in sym_upper
     ):
-        if exch_upper in ("BSE", "BFO") or any(sym_upper.startswith(x) for x in ("SENSEX", "BANKEX")):
+        if exch_upper in ("BSE", "BFO") or any(
+            sym_upper.startswith(x) for x in ("SENSEX", "BANKEX")
+        ):
             return f"BSE:{sym_upper}"
         if exch_upper == "MCX":
             return f"MCX:{sym_upper}"
@@ -499,9 +510,16 @@ class FyersAPI(BrokerAPI):
             or os.environ.get("FYERS_REDIRECT_URL", "")
             or os.environ.get("FYERS_REDIRECT_URI", "")
         ).strip()
-        if fy_id and totp_secret and pin and (not redirect_uri or redirect_uri == "http://127.0.0.1:8765/fyers/callback"):
+        if (
+            fy_id
+            and totp_secret
+            and pin
+            and (not redirect_uri or redirect_uri == "http://127.0.0.1:8765/fyers/callback")
+        ):
             redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
-        self._redirect_uri = (redirect_uri or "https://trade.fyers.in/api-login/redirect-uri/index.html").strip()
+        self._redirect_uri = (
+            redirect_uri or "https://trade.fyers.in/api-login/redirect-uri/index.html"
+        ).strip()
         # Auto-login credentials (headless TOTP flow)
         self._fy_id = fy_id
         self._totp_secret = totp_secret
@@ -591,18 +609,15 @@ class FyersAPI(BrokerAPI):
         """
         import hashlib
         from urllib import parse
+
         try:
             import pyotp
         except ImportError:
-            raise RuntimeError(
-                "pyotp not installed. Run: pip install pyotp"
-            )
+            raise RuntimeError("pyotp not installed. Run: pip install pyotp")
         try:
             import requests as _req
         except ImportError:
-            raise RuntimeError(
-                "requests not installed. Run: pip install requests"
-            )
+            raise RuntimeError("requests not installed. Run: pip install requests")
 
         # Derive the bare app_id (strip the -100/-200 suffix for vagator hash)
         bare_app_id = self._app_id.split("-")[0] if "-" in self._app_id else self._app_id
@@ -641,7 +656,9 @@ class FyersAPI(BrokerAPI):
             timeout=15,
         )
         if r2.status_code != 200:
-            raise RuntimeError(f"Fyers auto-login step 2 (TOTP) failed (HTTP {r2.status_code}): {r2.text}")
+            raise RuntimeError(
+                f"Fyers auto-login step 2 (TOTP) failed (HTTP {r2.status_code}): {r2.text}"
+            )
         data2 = r2.json()
         request_key2 = data2.get("request_key", "")
         if not request_key2:
@@ -660,7 +677,9 @@ class FyersAPI(BrokerAPI):
             timeout=15,
         )
         if r3.status_code != 200:
-            raise RuntimeError(f"Fyers auto-login step 3 (PIN) failed (HTTP {r3.status_code}): {r3.text}")
+            raise RuntimeError(
+                f"Fyers auto-login step 3 (PIN) failed (HTTP {r3.status_code}): {r3.text}"
+            )
         data3 = r3.json()
         intermediate_token = data3.get("data", {}).get("access_token", "")
         if not intermediate_token:
@@ -688,7 +707,9 @@ class FyersAPI(BrokerAPI):
             timeout=15,
         )
         if r4.status_code not in (200, 308):
-            raise RuntimeError(f"Fyers auto-login step 4 (token) failed (HTTP {r4.status_code}): {r4.text}")
+            raise RuntimeError(
+                f"Fyers auto-login step 4 (token) failed (HTTP {r4.status_code}): {r4.text}"
+            )
         url = r4.json().get("Url", "")
         if not url:
             raise RuntimeError(f"Fyers auto-login step 4: no Url in response: {r4.text}")
@@ -711,7 +732,9 @@ class FyersAPI(BrokerAPI):
             timeout=15,
         )
         if r5.status_code != 200:
-            raise RuntimeError(f"Fyers auto-login step 5 (validate-authcode) failed (HTTP {r5.status_code}): {r5.text}")
+            raise RuntimeError(
+                f"Fyers auto-login step 5 (validate-authcode) failed (HTTP {r5.status_code}): {r5.text}"
+            )
         data5 = r5.json()
         access_token = data5.get("access_token", "")
         if not access_token:
@@ -779,9 +802,17 @@ class FyersAPI(BrokerAPI):
             self._load_token()
             if self._access_token:
                 return True
-            if self._fy_id and self._totp_secret and self._pin and self._app_id and self._secret_key:
+            if (
+                self._fy_id
+                and self._totp_secret
+                and self._pin
+                and self._app_id
+                and self._secret_key
+            ):
                 try:
-                    logger.info("[FyersAPI] Auto-authenticating headlessly via TOTP + PIN credentials...")
+                    logger.info(
+                        "[FyersAPI] Auto-authenticating headlessly via TOTP + PIN credentials..."
+                    )
                     self.complete_login()
                     return bool(self._access_token)
                 except Exception as e:
@@ -795,7 +826,13 @@ class FyersAPI(BrokerAPI):
                 TOKEN_FILE.unlink(missing_ok=True)
             except Exception:
                 pass
-            if self._fy_id and self._totp_secret and self._pin and self._app_id and self._secret_key:
+            if (
+                self._fy_id
+                and self._totp_secret
+                and self._pin
+                and self._app_id
+                and self._secret_key
+            ):
                 try:
                     logger.info("[FyersAPI] Token expired, refreshing headlessly via TOTP + PIN...")
                     self.complete_login()
@@ -941,7 +978,9 @@ class FyersAPI(BrokerAPI):
         result: dict[str, Quote] = {}
 
         if get_fyers_circuit_breaker().is_tripped():
-            logger.warning("[FyersAPI] Circuit breaker is OPEN. Fast-failing get_quote to protect Fyers account.")
+            logger.warning(
+                "[FyersAPI] Circuit breaker is OPEN. Fast-failing get_quote to protect Fyers account."
+            )
             return {}
 
         # Chunk in batches of 50
@@ -952,9 +991,15 @@ class FyersAPI(BrokerAPI):
                 _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
                 data = fyers.quotes({"symbols": ",".join(chunk)})
                 if not isinstance(data, dict) or data.get("s") != "ok":
-                    err_msg = str(data.get("message", "Fyers quotes error")) if isinstance(data, dict) else "Invalid quotes response"
+                    err_msg = (
+                        str(data.get("message", "Fyers quotes error"))
+                        if isinstance(data, dict)
+                        else "Invalid quotes response"
+                    )
                     if "429" in err_msg or "rate limit" in err_msg.lower():
-                        get_fyers_circuit_breaker().record_failure(status_code=429, error_message=err_msg)
+                        get_fyers_circuit_breaker().record_failure(
+                            status_code=429, error_message=err_msg
+                        )
                 else:
                     get_fyers_circuit_breaker().record_success()
                 for item in data.get("d", []):
@@ -1113,7 +1158,9 @@ class FyersAPI(BrokerAPI):
         if not fyers:
             return []
         if get_fyers_circuit_breaker().is_tripped():
-            logger.warning(f"[FyersAPI] Circuit breaker is OPEN. Suppressing options chain for {underlying}.")
+            logger.warning(
+                f"[FyersAPI] Circuit breaker is OPEN. Suppressing options chain for {underlying}."
+            )
             return []
         try:
             fyers_sym = _to_fyers_symbol(underlying)
@@ -1146,7 +1193,8 @@ class FyersAPI(BrokerAPI):
                 "call_oi": payload.get("callOi", 0),
                 "put_oi": payload.get("putOi", 0),
                 "pcr": round(
-                    float(payload.get("putOi", 0) or 0) / max(float(payload.get("callOi", 1) or 1), 1),
+                    float(payload.get("putOi", 0) or 0)
+                    / max(float(payload.get("callOi", 1) or 1), 1),
                     4,
                 ),
                 "expiry_data": payload.get("expiryData", []),
@@ -1185,7 +1233,9 @@ class FyersAPI(BrokerAPI):
                         option_type=opt_type,
                         last_price=float(item.get("ltp", 0.0) or 0.0),
                         oi=int(item.get("oi", 0) or 0),
-                        oi_change=int(item.get("doi", item.get("oich", item.get("oiChange", 0))) or 0),
+                        oi_change=int(
+                            item.get("doi", item.get("oich", item.get("oiChange", 0))) or 0
+                        ),
                         pchange_oi=float(item.get("pdoi", item.get("oichp", 0.0)) or 0.0) or None,
                         volume=int(item.get("volume", 0) or 0),
                         iv=_parse_greek_val(greeks.get("iv")),
@@ -1198,7 +1248,10 @@ class FyersAPI(BrokerAPI):
                         lot_size=int(item.get("lotSize", 50) or 50),
                         exchange=(
                             "MCX"
-                            if (item.get("symbol", "").startswith("MCX:") or fyers_sym.startswith("MCX:"))
+                            if (
+                                item.get("symbol", "").startswith("MCX:")
+                                or fyers_sym.startswith("MCX:")
+                            )
                             else "NFO"
                         ),
                     )
@@ -1235,18 +1288,21 @@ class FyersAPI(BrokerAPI):
                         iso_date = f"{parts[2]}-{parts[1]}-{parts[0]}"
                         dates.append(iso_date)
                         if exp_val:
-                            self._expiry_ts_cache[f"{fyers_sym}:{iso_date}"] = (now_ts, str(exp_val))
+                            self._expiry_ts_cache[f"{fyers_sym}:{iso_date}"] = (
+                                now_ts,
+                                str(exp_val),
+                            )
             res = sorted(set(dates))
             if res:
                 self._expiries_dates_cache[fyers_sym] = (now_ts, res)
             return res
         except Exception as exc:
-            logger.warning(f"[FyersAPI] Failed to get expiries for {fyers_sym}: {exc}", exc_info=True)
+            logger.warning(
+                f"[FyersAPI] Failed to get expiries for {fyers_sym}: {exc}", exc_info=True
+            )
             return []
 
-    def _resolve_expiry_timestamp(
-        self, fyers_symbol: str, target_expiry_iso: str
-    ) -> Optional[str]:
+    def _resolve_expiry_timestamp(self, fyers_symbol: str, target_expiry_iso: str) -> Optional[str]:
         """Convert YYYY-MM-DD to Fyers epoch timestamp with 12h TTL cache."""
         cache_key = f"{fyers_symbol}:{target_expiry_iso}"
         now_ts = time.time()
@@ -1352,7 +1408,9 @@ class FyersAPI(BrokerAPI):
         }
         fyers_sym = _to_fyers_symbol(f"{req.exchange}:{req.symbol}" if req.exchange else req.symbol)
         eff_type = self._to_fyers_order_type(req.order_type)
-        limit_px = round_price_to_tick(float(req.price)) if eff_type in (1, 4) and req.price else 0.0
+        limit_px = (
+            round_price_to_tick(float(req.price)) if eff_type in (1, 4) and req.price else 0.0
+        )
         stop_px = round_price_to_tick(float(req.trigger_price)) if req.trigger_price else 0.0
         payload = {
             "symbol": fyers_sym,
@@ -1392,7 +1450,9 @@ class FyersAPI(BrokerAPI):
                 f"{req.exchange}:{req.symbol}" if req.exchange else req.symbol
             )
             eff_type = self._to_fyers_order_type(req.order_type)
-            limit_px = round_price_to_tick(float(req.price)) if eff_type in (1, 4) and req.price else 0.0
+            limit_px = (
+                round_price_to_tick(float(req.price)) if eff_type in (1, 4) and req.price else 0.0
+            )
             stop_px = round_price_to_tick(float(req.trigger_price)) if req.trigger_price else 0.0
             payload_orders.append(
                 {
@@ -1423,16 +1483,29 @@ class FyersAPI(BrokerAPI):
 
     def place_multileg_order(
         self,
-        legs: list[dict],
+        order_type_or_legs: Any = None,
+        legs: Optional[list[dict]] = None,
         order_type: Optional[str] = None,
-        product_type: str = "MARGIN",
+        product: Optional[str] = None,
+        product_type: Optional[str] = None,
+        **kwargs,
     ) -> OrderResponse:
         """Place multi-leg options strategy order (e.g. Bull Call Spread, Straddle, Iron Condor)."""
         fyers = self._get_fyers()
-        num_legs = len(legs)
-        eff_order_type = order_type or f"{num_legs}L"
+        actual_legs = legs
+        actual_order_type = order_type
+        if isinstance(order_type_or_legs, list):
+            actual_legs = order_type_or_legs
+        elif isinstance(order_type_or_legs, str):
+            actual_order_type = order_type_or_legs
+
+        actual_legs = actual_legs or []
+        num_legs = len(actual_legs)
+        eff_order_type = actual_order_type or f"{num_legs}L"
+        eff_product = product or product_type or "MARGIN"
+
         payload_legs = {}
-        for idx, leg in enumerate(legs, start=1):
+        for idx, leg in enumerate(actual_legs, start=1):
             raw_side = str(leg.get("side", "BUY")).upper()
             side_code = 1 if raw_side in ("1", "BUY") else -1
             raw_type = str(leg.get("type", "LIMIT")).upper()
@@ -1447,7 +1520,7 @@ class FyersAPI(BrokerAPI):
                 "limitPrice": limit_px,
             }
         payload = {
-            "productType": product_type,
+            "productType": eff_product,
             "offlineOrder": False,
             "orderType": eff_order_type,
             "validity": "IOC",
@@ -1459,6 +1532,7 @@ class FyersAPI(BrokerAPI):
             order_id=str(data.get("id", "")),
             status="SUBMITTED" if data.get("s") == "ok" else "REJECTED",
             message=data.get("message", "Multi-leg order placed"),
+            raw=data if isinstance(data, dict) else None,
         )
 
     def exit_positions(self, position_id: Optional[str] = None) -> bool:
@@ -1562,7 +1636,9 @@ class FyersAPI(BrokerAPI):
         if not fyers:
             raise RuntimeError("Fyers broker not initialized or logged in")
         if get_fyers_circuit_breaker().is_tripped():
-            logger.warning(f"[FyersAPI] Circuit breaker is OPEN. Suppressing historical data for {symbol}.")
+            logger.warning(
+                f"[FyersAPI] Circuit breaker is OPEN. Suppressing historical data for {symbol}."
+            )
             return []
 
         fyers_sym = _to_fyers_symbol(symbol)
@@ -1832,16 +1908,6 @@ class FyersAPI(BrokerAPI):
         except Exception:
             return False
 
-    # ── Server-Side Candlestick Recognizers ──────────────────
-
-    def get_screener_candlestick(self, pattern: str = "hammer") -> dict[str, Any]:
-        """Query native Fyers server-side candlestick pattern recognizer."""
-        fyers = self._get_fyers()
-        try:
-            return fyers.screeners_candlestick({"screener": pattern})
-        except Exception as e:
-            return {"status": "error", "error": str(e)}
-
     # ── Real-Time Sector Breadth & Heatmap ───────────────────
 
     def get_sector_heatmap(self) -> dict[str, Any]:
@@ -1957,14 +2023,16 @@ class FyersAPI(BrokerAPI):
                 fyers_payload["stopPrice"] = stop_p
 
             fyers_orders.append(fyers_payload)
-            parsed_orders.append({
-                "raw_symbol": raw_sym,
-                "fyers_symbol": fyers_sym,
-                "qty": qty,
-                "side": "BUY" if side_code == 1 else "SELL",
-                "product_type": pt,
-                "price": limit_p,
-            })
+            parsed_orders.append(
+                {
+                    "raw_symbol": raw_sym,
+                    "fyers_symbol": fyers_sym,
+                    "qty": qty,
+                    "side": "BUY" if side_code == 1 else "SELL",
+                    "product_type": pt,
+                    "price": limit_p,
+                }
+            )
 
         # 1. Query Fyers official multiorder margin endpoint
         margin_url = "https://api-t1.fyers.in/api/v3/multiorder/margin"
@@ -1978,7 +2046,9 @@ class FyersAPI(BrokerAPI):
         fyers_err = None
 
         try:
-            resp = requests.post(margin_url, headers=headers, json={"data": fyers_orders}, timeout=5.0)
+            resp = requests.post(
+                margin_url, headers=headers, json={"data": fyers_orders}, timeout=5.0
+            )
             if resp.status_code == 200:
                 res_data = resp.json()
                 if res_data.get("s") == "ok" and "data" in res_data:
@@ -1996,7 +2066,9 @@ class FyersAPI(BrokerAPI):
         if margin_avail <= 0:
             try:
                 funds = self.get_funds()
-                margin_avail = float(funds.available_margin or funds.equity_margin or funds.total_balance or 0.0)
+                margin_avail = float(
+                    funds.available_margin or funds.equity_margin or funds.total_balance or 0.0
+                )
             except Exception:
                 pass
 
@@ -2044,21 +2116,31 @@ class FyersAPI(BrokerAPI):
             total_sebi += costs.sebi_charges
             total_charges += costs.total_charges
 
-            order_details.append({
-                "symbol": sym,
-                "fyers_symbol": p["fyers_symbol"],
-                "side": p["side"],
-                "qty": p["qty"],
-                "estimated_price": round(exec_price, 2),
-                "segment": seg,
-                "notional_turnover": float(costs.notional_turnover),
-                "charges": costs.to_dict(),
-            })
+            order_details.append(
+                {
+                    "symbol": sym,
+                    "fyers_symbol": p["fyers_symbol"],
+                    "side": p["side"],
+                    "qty": p["qty"],
+                    "estimated_price": round(exec_price, 2),
+                    "segment": seg,
+                    "notional_turnover": float(costs.notional_turnover),
+                    "charges": costs.to_dict(),
+                }
+            )
 
         net_charges_float = float(total_charges)
-        total_cash_required = round(margin_total + (net_charges_float if any(p["side"] == "BUY" for p in parsed_orders) else 0.0), 2)
+        total_cash_required = round(
+            margin_total
+            + (net_charges_float if any(p["side"] == "BUY" for p in parsed_orders) else 0.0),
+            2,
+        )
         is_sufficient = (margin_avail >= total_cash_required) if margin_avail > 0 else True
-        shortfall = max(0.0, round(total_cash_required - margin_avail, 2)) if margin_avail > 0 and not is_sufficient else 0.0
+        shortfall = (
+            max(0.0, round(total_cash_required - margin_avail, 2))
+            if margin_avail > 0 and not is_sufficient
+            else 0.0
+        )
 
         return {
             "status": "ok" if not fyers_err else "DEGRADED",
@@ -2081,4 +2163,3 @@ class FyersAPI(BrokerAPI):
             },
             "orders": order_details,
         }
-

@@ -4,12 +4,8 @@ tests/test_supercharge.py
 Deterministic unit tests for engine/supercharge.py.
 """
 
-import pytest
-from pathlib import Path
-
 from engine.supercharge import (
     COUNCIL_ROSTER,
-    StrategistSeat,
     StrategyVariant,
     EvolutionLog,
     evaluate_variant_vetoes,
@@ -71,13 +67,25 @@ def test_evolution_log_and_dashboard(tmp_path):
     assert history[0]["entry_type"] == "round_start"
 
     # Dashboard rendering
-    base_sc = {"total_return_pct": 25.0, "cagr": 20.0, "sharpe": 1.4, "max_drawdown": 12.0, "robustness_score": 0.8}
+    base_sc = {
+        "total_return_pct": 25.0,
+        "cagr": 20.0,
+        "sharpe": 1.4,
+        "max_drawdown": 12.0,
+        "robustness_score": 0.8,
+    }
     v1 = StrategyVariant(
         variant_id="v1_trail_stop",
         round_no=1,
         objective="sharpe",
         params={},
-        scorecard={"total_return_pct": 32.0, "cagr": 26.0, "sharpe": 1.85, "max_drawdown": 9.5, "robustness_score": 0.88},
+        scorecard={
+            "total_return_pct": 32.0,
+            "cagr": 26.0,
+            "sharpe": 1.85,
+            "max_drawdown": 9.5,
+            "robustness_score": 0.88,
+        },
         rules_changed=["Added ATR 2.5x trailing stop"],
         is_accepted=True,
     )

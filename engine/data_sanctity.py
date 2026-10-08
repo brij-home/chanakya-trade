@@ -64,7 +64,7 @@ def is_test_or_mock_payload(item: Any) -> Tuple[bool, str]:
     clean_sym = raw_sym
     for pfx in ("NSE:", "BSE:", "MCX:", "NFO:", "BFO:", "CDS:", "CRYPTO:"):
         if clean_sym.startswith(pfx):
-            clean_sym = clean_sym[len(pfx):]
+            clean_sym = clean_sym[len(pfx) :]
             break
 
     for pfx in FORBIDDEN_SYMBOL_PREFIXES:

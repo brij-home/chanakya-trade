@@ -12,6 +12,7 @@ Evaluates top liquid crypto benchmarks (BTC, ETH, SOL, BNB) across:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -75,7 +76,7 @@ def compute_crypto_rsi(df: Optional[pd.DataFrame], period: int = 14) -> float:
         c = df[cols["close"]].astype(float)
         delta = c.diff()
         gain = delta.where(delta > 0, 0.0)
-        loss = (-delta.where(delta < 0, 0.0))
+        loss = -delta.where(delta < 0, 0.0)
         avg_gain = gain.rolling(window=period, min_periods=period).mean()
         avg_loss = loss.rolling(window=period, min_periods=period).mean()
         rs = avg_gain / avg_loss.replace(0, float("nan"))
@@ -119,7 +120,9 @@ def derive_crypto_trade_plan(
         if is_breakout:
             # Explicit Breakout Mode: invalidation is a failed breakout falling back below OB top / mid
             if ob_top is not None:
-                sl_candidate = max(ob_top * 0.994, (ob_top + ob_bottom) / 2.0 if ob_bottom else ob_top * 0.994)
+                sl_candidate = max(
+                    ob_top * 0.994, (ob_top + ob_bottom) / 2.0 if ob_bottom else ob_top * 0.994
+                )
                 if swing_low is not None and (ob_top * 0.988 <= swing_low <= ltp):
                     sl_candidate = swing_low * 0.997
             elif df is not None and len(df) >= 10:
@@ -204,7 +207,9 @@ def derive_crypto_trade_plan(
         # 1. Structural Stop-Loss (Inval)
         if is_breakout:
             if ob_bottom is not None:
-                sl_candidate = min(ob_bottom * 1.006, (ob_top + ob_bottom) / 2.0 if ob_top else ob_bottom * 1.006)
+                sl_candidate = min(
+                    ob_bottom * 1.006, (ob_top + ob_bottom) / 2.0 if ob_top else ob_bottom * 1.006
+                )
                 if swing_high is not None and (ltp <= swing_high <= ob_bottom * 1.012):
                     sl_candidate = swing_high * 1.003
             elif df is not None and len(df) >= 10:
@@ -443,18 +448,23 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
             )
             regime = (smc.regime or "").upper()
             rsi = compute_crypto_rsi(df)
-            v20 = float(df["volume"].iloc[-21:-1].mean()) if len(df) >= 21 else float(df["volume"].mean())
+            v20 = (
+                float(df["volume"].iloc[-21:-1].mean())
+                if len(df) >= 21
+                else float(df["volume"].mean())
+            )
             cur_vol = float(df["volume"].iloc[-1])
             rvol = round(cur_vol / max(v20, 1.0), 2)
             ema20 = float(df["close"].ewm(span=20, adjust=False).mean().iloc[-1])
-            ema50 = float(df["close"].ewm(span=50, adjust=False).mean().iloc[-1])
 
             # ── A. BULLISH SMC: Demand OB Reclaim / Retest OR Confirmed Breakout ──
-            is_bull_struct = (regime == "BULLISH" or (smc.choch_detected and smc.choch_type == "BULLISH_CHOCH"))
+            is_bull_struct = regime == "BULLISH" or (
+                smc.choch_detected and smc.choch_type == "BULLISH_CHOCH"
+            )
             if is_bull_struct and smc.active_demand_zones:
                 ob = smc.active_demand_zones[0]
-                is_in_retest = (ob.bottom * 0.998 <= ltp <= ob.top * 1.004)
-                is_breakout = (ob.top * 1.004 < ltp <= ob.top * 1.018)
+                is_in_retest = ob.bottom * 0.998 <= ltp <= ob.top * 1.004
+                is_breakout = ob.top * 1.004 < ltp <= ob.top * 1.018
 
                 # Eagle / Tiger discipline: do not chase if price extended > 1.8% past OB top
                 if is_in_retest or is_breakout:
@@ -464,7 +474,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
 
                     passes_breakout_vol = True
                     if is_breakout:
-                        passes_breakout_vol = (rvol >= 1.15 or ob.volume_ratio >= 1.15) and is_bull_candle
+                        passes_breakout_vol = (
+                            rvol >= 1.15 or ob.volume_ratio >= 1.15
+                        ) and is_bull_candle
 
                     # Momentum must-have: not overbought (RSI <= 74), bullish momentum floor (RSI >= 42)
                     if (42.0 <= rsi <= 74.0) and passes_breakout_vol:
@@ -498,9 +510,15 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                         if 0 < risk_usd <= (ltp * 0.05):
                             # Multi-Confluence Scoring (Institutional Conviction Matrix)
                             conf_score = 75
-                            confluences = ["15m Bullish Regime" if regime == "BULLISH" else "15m Bullish CHoCH Reversal"]
+                            confluences = [
+                                "15m Bullish Regime"
+                                if regime == "BULLISH"
+                                else "15m Bullish CHoCH Reversal"
+                            ]
                             if is_in_retest:
-                                confluences.append(f"Unmitigated Demand OB (${ob.bottom:,.1f} - ${ob.top:,.1f}) OTE Retest")
+                                confluences.append(
+                                    f"Unmitigated Demand OB (${ob.bottom:,.1f} - ${ob.top:,.1f}) OTE Retest"
+                                )
                                 conf_score += 10
                             else:
                                 confluences.append(f"OB Top (${ob.top:,.1f}) Breakout Expansion")
@@ -540,7 +558,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                                 action = "BUY_SPOT / LONG (BREAKOUT)"
                                 when_to_buy = f"Enter on momentum breakout candle above OB Top (${ob.top:,.2f})."
 
-                            alert_id = generate_alert_id(clean_sym, "CRYPTO_MOMENTUM", variant="demand")
+                            alert_id = generate_alert_id(
+                                clean_sym, "CRYPTO_MOMENTUM", variant="demand"
+                            )
                             alert = AutoAlert(
                                 alert_id=alert_id,
                                 alert_type="CRYPTO_MOMENTUM",
@@ -554,7 +574,12 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                                 headline=headline,
                                 summary=summary,
                                 ltp=ltp,
-                                trigger_level=round(ob.top if is_breakout else (getattr(ob, "ote_price", 0.0) or ob.top), 2),
+                                trigger_level=round(
+                                    ob.top
+                                    if is_breakout
+                                    else (getattr(ob, "ote_price", 0.0) or ob.top),
+                                    2,
+                                ),
                                 target_level=t1_price,
                                 stop_loss=sl_price,
                                 confidence=smc_confidence,
@@ -604,11 +629,13 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                             found.append(alert)
 
             # ── B. BEARISH SMC: Supply OB Rejection OR Confirmed Breakdown ──
-            is_bear_struct = (regime == "BEARISH" or (smc.choch_detected and smc.choch_type == "BEARISH_CHOCH"))
+            is_bear_struct = regime == "BEARISH" or (
+                smc.choch_detected and smc.choch_type == "BEARISH_CHOCH"
+            )
             if is_bear_struct and smc.active_supply_zones:
                 ob = smc.active_supply_zones[0]
-                is_in_rejection = (ob.bottom * 0.996 <= ltp <= ob.top * 1.002)
-                is_breakdown = (ob.bottom * 0.982 <= ltp < ob.bottom * 0.996)
+                is_in_rejection = ob.bottom * 0.996 <= ltp <= ob.top * 1.002
+                is_breakdown = ob.bottom * 0.982 <= ltp < ob.bottom * 0.996
 
                 if is_in_rejection or is_breakdown:
                     cur_open = float(df["open"].iloc[-1])
@@ -617,7 +644,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
 
                     passes_breakdown_vol = True
                     if is_breakdown:
-                        passes_breakdown_vol = (rvol >= 1.15 or ob.volume_ratio >= 1.15) and is_bear_candle
+                        passes_breakdown_vol = (
+                            rvol >= 1.15 or ob.volume_ratio >= 1.15
+                        ) and is_bear_candle
 
                     # Momentum must-have: not oversold (RSI >= 26), bearish momentum ceiling (RSI <= 58)
                     if (26.0 <= rsi <= 58.0) and passes_breakdown_vol:
@@ -648,12 +677,20 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
 
                         if 0 < risk_usd <= (ltp * 0.05):
                             conf_score = 75
-                            confluences = ["15m Bearish Regime" if regime == "BEARISH" else "15m Bearish CHoCH Reversal"]
+                            confluences = [
+                                "15m Bearish Regime"
+                                if regime == "BEARISH"
+                                else "15m Bearish CHoCH Reversal"
+                            ]
                             if is_in_rejection:
-                                confluences.append(f"Supply OB (${ob.bottom:,.1f} - ${ob.top:,.1f}) Rejection")
+                                confluences.append(
+                                    f"Supply OB (${ob.bottom:,.1f} - ${ob.top:,.1f}) Rejection"
+                                )
                                 conf_score += 10
                             else:
-                                confluences.append(f"OB Bottom (${ob.bottom:,.1f}) Breakdown Expansion")
+                                confluences.append(
+                                    f"OB Bottom (${ob.bottom:,.1f}) Breakdown Expansion"
+                                )
                                 conf_score += 8
 
                             if getattr(ob, "has_fvg_confluence", False) or smc.fair_value_gaps:
@@ -690,7 +727,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                                 action = "SELL_SHORT_FUTURES / SHORT (BREAKDOWN)"
                                 when_to_buy = f"Enter on momentum breakdown candle below OB Bottom (${ob.bottom:,.2f})."
 
-                            alert_id = generate_alert_id(clean_sym, "CRYPTO_MOMENTUM", variant="supply")
+                            alert_id = generate_alert_id(
+                                clean_sym, "CRYPTO_MOMENTUM", variant="supply"
+                            )
                             alert = AutoAlert(
                                 alert_id=alert_id,
                                 alert_type="CRYPTO_MOMENTUM",
@@ -704,7 +743,12 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                                 headline=headline,
                                 summary=summary,
                                 ltp=ltp,
-                                trigger_level=round(ob.bottom if is_breakdown else (getattr(ob, "ote_price", 0.0) or ob.bottom), 2),
+                                trigger_level=round(
+                                    ob.bottom
+                                    if is_breakdown
+                                    else (getattr(ob, "ote_price", 0.0) or ob.bottom),
+                                    2,
+                                ),
                                 target_level=t1_price,
                                 stop_loss=sl_price,
                                 confidence=smc_confidence,
@@ -1356,8 +1400,12 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
 
             if vol_regime in ("VOLATILITY_OVERPRICED_IV_RICH", "VOLATILITY_UNDERPRICED_IV_CHEAP"):
                 import time as _t
+
                 _cd_key = f"{clean_sym}:{vol_regime}"
-                if (_t.time() - _CRYPTO_VOL_ARB_COOLDOWN.get(_cd_key, 0.0)) < 300.0:
+                if (
+                    not os.environ.get("CHANAKYA_TESTING")
+                    and (_t.time() - _CRYPTO_VOL_ARB_COOLDOWN.get(_cd_key, 0.0)) < 300.0
+                ):
                     return found
                 _CRYPTO_VOL_ARB_COOLDOWN[_cd_key] = _t.time()
                 is_iv_rich = vol_regime == "VOLATILITY_OVERPRICED_IV_RICH"
@@ -1366,6 +1414,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     "CRYPTO_VOL_ARBITRAGE",
                     variant="iv-rich" if is_iv_rich else "iv-cheap",
                 )
+                weekly_vol_pct = max(0.025, (atm_iv / 100.0) * ((7.0 / 365.0) ** 0.5))
                 if is_iv_rich:
                     headline = f"🎯 DERIBIT VOL ARBITRAGE: {clean_sym} IV Overpriced (+{vol_spread:.1f}% vs 30d RV)"
                     summary = (
@@ -1374,9 +1423,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     )
                     action = "SELL_VOLATILITY / CREDIT_SPREADS"
                     conf = f"Deribit ATM IV ({atm_iv:.1f}%) vs 30d RV ({rv_30d:.1f}%) Rich Spread (+{vol_spread:.1f}%)"
-                    sl_val = round(ltp * 1.045, 2)
-                    tgt_1 = round(ltp * 0.96, 2)
-                    tgt_2 = round(ltp * 0.93, 2)
+                    sl_val = round(ltp * (1.0 + weekly_vol_pct), 2)
+                    tgt_1 = round(ltp * (1.0 - weekly_vol_pct), 2)
+                    tgt_2 = round(ltp * (1.0 - 1.5 * weekly_vol_pct), 2)
                 else:
                     headline = f"🎯 DERIBIT VOL ARBITRAGE: {clean_sym} IV Underpriced ({vol_spread:.1f}% vs 30d RV)"
                     summary = (
@@ -1385,9 +1434,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     )
                     action = "BUY_VOLATILITY / STRADDLES"
                     conf = f"Deribit ATM IV ({atm_iv:.1f}%) vs 30d RV ({rv_30d:.1f}%) Cheap Spread ({vol_spread:.1f}%)"
-                    sl_val = round(ltp * 0.955, 2)
-                    tgt_1 = round(ltp * 1.06, 2)
-                    tgt_2 = round(ltp * 1.12, 2)
+                    sl_val = round(ltp * (1.0 - weekly_vol_pct), 2)
+                    tgt_1 = round(ltp * (1.0 + weekly_vol_pct), 2)
+                    tgt_2 = round(ltp * (1.0 + 1.5 * weekly_vol_pct), 2)
 
                 alert = AutoAlert(
                     alert_id=alert_id,

@@ -72,7 +72,11 @@ KNOWN_CREDENTIALS: list[tuple[str, str, bool]] = [
     ("FYERS_SECRET_KEY", "Fyers Secret Key", True),
     # Auto-login credentials (headless TOTP flow — no browser needed)
     ("FYERS_FY_ID", "Fyers Client Login ID (e.g. XA12345) — for auto-login", False),
-    ("FYERS_TOTP_SECRET", "Fyers TOTP Secret (Base32, from security settings) — for auto-login", True),
+    (
+        "FYERS_TOTP_SECRET",
+        "Fyers TOTP Secret (Base32, from security settings) — for auto-login",
+        True,
+    ),
     ("FYERS_PIN", "Fyers Trading PIN (4/6 digits) — for auto-login", True),
     # ── Stoxkart (SMC) ───────────────────────────────────────
     ("STOXKART_API_KEY", "Stoxkart API Key", False),

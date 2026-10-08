@@ -624,7 +624,9 @@ def resolve_compounder_universe(universe: Optional[list[str] | str] = None) -> l
         if syms:
             return syms
     except Exception as e:
-        logger.warning(f"[CenturyCompounder] Fallback dynamic resolution for microcap250 failed: {e}")
+        logger.warning(
+            f"[CenturyCompounder] Fallback dynamic resolution for microcap250 failed: {e}"
+        )
 
     return [
         "TRENT",
@@ -695,13 +697,17 @@ def scan_century_compounders(
                             forecast_pat_cagr_pct=float(te_d.get("forecast_pat_cagr_pct", 0.0)),
                             years_horizon=int(te_d.get("years_horizon", 10)),
                             pat_expansion_multiple=float(te_d.get("pat_expansion_multiple", 1.0)),
-                            total_projected_multiple=float(te_d.get("total_projected_multiple", 1.0)),
+                            total_projected_multiple=float(
+                                te_d.get("total_projected_multiple", 1.0)
+                            ),
                             target_market_cap_cr=float(te_d.get("target_market_cap_cr", 0.0)),
                             compounder_tier=str(te_d.get("compounder_tier", "STANDARD")),
                         )
                         af = AntiFomoExecutionBlueprint(
                             fair_value_anchor=float(af_d.get("fair_value_anchor", 0.0)),
-                            fair_value_source=str(af_d.get("fair_value_source", "VOLUME_PROFILE_POC")),
+                            fair_value_source=str(
+                                af_d.get("fair_value_source", "VOLUME_PROFILE_POC")
+                            ),
                             accumulate_low=float(af_d.get("accumulate_low", 0.0)),
                             accumulate_high=float(af_d.get("accumulate_high", 0.0)),
                             pivot_trigger=float(af_d.get("pivot_trigger", 0.0)),
@@ -722,7 +728,9 @@ def scan_century_compounders(
                             twin_engines=te,
                             runway_score=int(cached_d.get("runway_score", 0)),
                             reinvestment_score=int(cached_d.get("reinvestment_score", 0)),
-                            operating_leverage_score=int(cached_d.get("operating_leverage_score", 0)),
+                            operating_leverage_score=int(
+                                cached_d.get("operating_leverage_score", 0)
+                            ),
                             multiple_rerating_score=int(cached_d.get("multiple_rerating_score", 0)),
                             institutional_catalyst_score=int(
                                 cached_d.get("institutional_catalyst_score", 0)
@@ -736,7 +744,9 @@ def scan_century_compounders(
                         )
                         results.append(rep)
                     except Exception as e:
-                        logger.warning(f"[CenturyCompounder] Failed to reconstruct cached report for {clean_s}: {e}")
+                        logger.warning(
+                            f"[CenturyCompounder] Failed to reconstruct cached report for {clean_s}: {e}"
+                        )
 
         # Sort harvested cached results best-first
         results.sort(
@@ -751,13 +761,14 @@ def scan_century_compounders(
     # evaluate a bounded batch of uncached symbols concurrently
     if use_cache:
         uncached_syms = [
-            s for s in sym_list
+            s
+            for s in sym_list
             if s.upper().replace(".NS", "").replace("NSE:", "").strip() not in cached_map
         ]
         max_fresh = 40 if not os.environ.get("CHANAKYA_TESTING") else len(uncached_syms)
         eval_batch = uncached_syms[:max_fresh]
     else:
-        eval_batch = sym_list[:min(50, len(sym_list))]
+        eval_batch = sym_list[: min(50, len(sym_list))]
 
     if eval_batch:
         import concurrent.futures
@@ -848,7 +859,9 @@ def scan_century_compounders(
                         )
                     )
                 except Exception as e:
-                    logger.warning(f"[CenturyCompounder] Failed to reconstruct fallback cached report for {c_d.get('symbol')}: {e}")
+                    logger.warning(
+                        f"[CenturyCompounder] Failed to reconstruct fallback cached report for {c_d.get('symbol')}: {e}"
+                    )
         except Exception as e:
             logger.warning(f"[CenturyCompounder] Scoped fallback error: {e}")
 

@@ -266,7 +266,9 @@ def run_maintenance_purge(
                     f.unlink(missing_ok=True)
                     deleted_tmp += 1
         if deleted_tmp > 0:
-            actions.append(f"Purged {deleted_tmp} orphaned backup and temporary files older than 24 hours.")
+            actions.append(
+                f"Purged {deleted_tmp} orphaned backup and temporary files older than 24 hours."
+            )
             items_deleted += deleted_tmp
     except Exception as e:
         logger.warning(f"Error pruning temporary files: {e}")

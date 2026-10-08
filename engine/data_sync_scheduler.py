@@ -85,7 +85,15 @@ class DataSyncScheduler:
             # 1. Resolve symbols from universe
             symbols = self._resolve_universe_symbols(universe)
             if not symbols:
-                symbols = ["NIFTY 50", "NIFTY BANK", "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK"]
+                symbols = [
+                    "NIFTY 50",
+                    "NIFTY BANK",
+                    "RELIANCE",
+                    "TCS",
+                    "HDFCBANK",
+                    "INFY",
+                    "ICICIBANK",
+                ]
 
             # 2. Delta-sync EOD bars
             res = sync_universe_eod(symbols, force=force, exchange="NSE")

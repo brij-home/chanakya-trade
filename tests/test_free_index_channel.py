@@ -18,16 +18,8 @@ Verifies:
 
 from __future__ import annotations
 
-import os
-import pytest
-from unittest.mock import MagicMock
 
 from bot.free_index_templates import (
-    DEFAULT_FREE_INDEX_CHAT_ID,
-    FREE_INDEX_CHANNEL_NAME,
-    FREE_INDEX_CHANNEL_LINK,
-    SEBI_STATUTORY_DERIVATIVES_DISCLOSURE,
-    SEBI_EDUCATIONAL_SAFE_HARBOR,
     render_free_index_alert,
     render_free_index_milestone,
 )
@@ -133,26 +125,50 @@ def test_free_index_milestones_rendering():
     assert "Nifty BankNifty Free Signals" not in rendered_t1
 
     # 2. Target 2 Achieved
-    t2_dict = dict(base_dict, milestone_type="TARGET_2", stage="T2_ACHIEVED", ltp=520.0, pnl_pts=210.0, pnl_pct=67.7)
+    t2_dict = dict(
+        base_dict,
+        milestone_type="TARGET_2",
+        stage="T2_ACHIEVED",
+        ltp=520.0,
+        pnl_pts=210.0,
+        pnl_pct=67.7,
+    )
     rendered_t2 = render_free_index_milestone(t2_dict, in_market=True)
     assert "T2 HIT" in rendered_t2
     assert "Harvest runner profits / trail SL aggressively" in rendered_t2
 
     # 3. Trailing Stop Ratchet
-    trail_dict = dict(base_dict, milestone_type="TRAIL_RATCHET", stage="TRAIL_RATCHET", ltp=450.0, trailing_stop=380.0)
+    trail_dict = dict(
+        base_dict,
+        milestone_type="TRAIL_RATCHET",
+        stage="TRAIL_RATCHET",
+        ltp=450.0,
+        trailing_stop=380.0,
+    )
     rendered_trail = render_free_index_milestone(trail_dict, in_market=True)
     assert "TRAIL SL" in rendered_trail
     assert "Move SL to <code>₹380.00</code>" in rendered_trail
 
-
     # 4. In-Flight Warning
-    inflight_dict = dict(base_dict, milestone_type="IN_FLIGHT_WARNING", stage="IN_FLIGHT_WARNING", ltp=305.0, invalidation_reason="Momentum stalled near VWAP")
+    inflight_dict = dict(
+        base_dict,
+        milestone_type="IN_FLIGHT_WARNING",
+        stage="IN_FLIGHT_WARNING",
+        ltp=305.0,
+        invalidation_reason="Momentum stalled near VWAP",
+    )
     rendered_inflight = render_free_index_milestone(inflight_dict, in_market=True)
     assert "IN-FLIGHT WARNING" in rendered_inflight
     assert "Scratch position at CMP or tighten SL" in rendered_inflight
 
     # 5. Invalidation / Stop Loss Hit
-    sl_dict = dict(base_dict, milestone_type="INVALIDATED", stage="INVALIDATED", ltp=225.0, invalidation_reason="Key support floor breached")
+    sl_dict = dict(
+        base_dict,
+        milestone_type="INVALIDATED",
+        stage="INVALIDATED",
+        ltp=225.0,
+        invalidation_reason="Key support floor breached",
+    )
     rendered_sl = render_free_index_milestone(sl_dict, in_market=True)
     assert "SL HIT / VIEW INVALIDATED" in rendered_sl
     assert "Close position / cancel pending orders" in rendered_sl
@@ -164,12 +180,17 @@ def test_free_index_milestones_rendering():
     assert "Momentum stagnated, theta bleed risk. Scratch at CMP" in rendered_time
 
     # Verify no update/milestone signals contain @IndiaIndexSignals or channel name
-    for r in [rendered_t1, rendered_t2, rendered_trail, rendered_inflight, rendered_sl, rendered_time]:
+    for r in [
+        rendered_t1,
+        rendered_t2,
+        rendered_trail,
+        rendered_inflight,
+        rendered_sl,
+        rendered_time,
+    ]:
         assert "@IndiaIndexSignals" not in r
         assert "https://t.me/IndiaIndexSignals" not in r
         assert "Nifty BankNifty Free Signals" not in r
-
-
 
 
 def test_free_index_router_candidate_filtering(monkeypatch):
@@ -242,12 +263,14 @@ def test_dual_dispatch_parity_premium_and_free_channels(monkeypatch):
     sent_messages = []
 
     def mock_tg_notify(msg, chat_id=None, **kwargs):
-        sent_messages.append({
-            "message": msg,
-            "chat_id": str(chat_id),
-            "signal_id": kwargs.get("signal_id"),
-            "reply_to": kwargs.get("reply_to_message_id"),
-        })
+        sent_messages.append(
+            {
+                "message": msg,
+                "chat_id": str(chat_id),
+                "signal_id": kwargs.get("signal_id"),
+                "reply_to": kwargs.get("reply_to_message_id"),
+            }
+        )
 
     monkeypatch.setattr("engine.alerts._telegram_notify", mock_tg_notify)
     free_index_router._dispatch_cooldowns.clear()
@@ -632,6 +655,3 @@ def test_free_index_new_call_vs_update_number_header_disambiguation():
     rendered_trail = render_free_index_alert(put_alert, in_market=True)
     assert "UPDATE #2 · TRAIL SL" in rendered_trail
     assert "NEW CALL" not in rendered_trail
-
-
-

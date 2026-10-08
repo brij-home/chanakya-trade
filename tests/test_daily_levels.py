@@ -13,15 +13,11 @@ Verifies:
 """
 
 import json
-from pathlib import Path
 import pytest
 import pandas as pd
 
 from engine.daily_levels import (
-    DailyLevels,
     DailyLevelsStore,
-    get_daily_levels,
-    prime_daily_levels,
 )
 
 
@@ -163,7 +159,9 @@ def test_pre_market_auction_indicative_open_and_gap_classification(temp_store, m
     temp_store.compute_and_store("BANKNIFTY", session_date="2026-10-08")
 
     # Case 1: Pre-market auction opens at 20300 (above yesterday's high 20200) -> PRO_GAP_UP
-    updated = temp_store.update_preopen("BANKNIFTY", pre_open_price=20300.0, session_date="2026-10-08")
+    updated = temp_store.update_preopen(
+        "BANKNIFTY", pre_open_price=20300.0, session_date="2026-10-08"
+    )
     assert updated is not None
     assert updated.pre_open["auction_settled"] is True
     assert updated.pre_open["price"] == 20300.0
@@ -172,7 +170,9 @@ def test_pre_market_auction_indicative_open_and_gap_classification(temp_store, m
     assert updated.pre_open["opening_bias"] == "BULLISH"
 
     # Case 2: Pre-market auction opens at 19900 (below yesterday's low 19950) -> PRO_GAP_DOWN
-    updated2 = temp_store.update_preopen("BANKNIFTY", pre_open_price=19900.0, session_date="2026-10-08")
+    updated2 = temp_store.update_preopen(
+        "BANKNIFTY", pre_open_price=19900.0, session_date="2026-10-08"
+    )
     assert updated2 is not None
     assert "PRO_GAP_DOWN" in updated2.pre_open["gap_type"]
     assert updated2.pre_open["opening_bias"] == "BEARISH"

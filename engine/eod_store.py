@@ -309,8 +309,8 @@ try:
     from engine.memory_guard import register_trim_callback
 
     register_trim_callback(clear_l1_caches)
-except Exception:
-    pass
+except Exception as e:
+    logger.debug(f"[eod_store] Memory guard registration skipped: {e}")
 
 
 # ── Market Hours & Trading Calendar Helpers ─────────────────────────
@@ -922,7 +922,9 @@ def save_fundamentals_batch(data_dict: dict[str, dict[str, Any]]) -> int:
         clean_sym = _clean_eod_symbol(sym)
         # Guard: In production store, never save test symbols
         if _get_db_path() == DEFAULT_EOD_DB_PATH and (
-            clean_sym.startswith("TEST") or clean_sym.startswith("DUMMY") or clean_sym.startswith("MOCK")
+            clean_sym.startswith("TEST")
+            or clean_sym.startswith("DUMMY")
+            or clean_sym.startswith("MOCK")
         ):
             continue
         rows.append(
@@ -1035,7 +1037,9 @@ def get_cached_fundamentals_batch(
                         _l1_fundamentals_cache[sym] = (now_ts, raw)
                     continue
                 except Exception as e:
-                    logger.warning(f"[eod_store] Failed parsing raw_json fundamentals for {sym}: {e}")
+                    logger.warning(
+                        f"[eod_store] Failed parsing raw_json fundamentals for {sym}: {e}"
+                    )
             results[sym] = d
             with _l1_lock:
                 _l1_fundamentals_cache[sym] = (now_ts, d)
@@ -1063,7 +1067,9 @@ def save_forensics_batch(data_dict: dict[str, dict[str, Any]]) -> int:
         clean_sym = _clean_eod_symbol(sym)
         # Guard: In production store, never save test symbols
         if _get_db_path() == DEFAULT_EOD_DB_PATH and (
-            clean_sym.startswith("TEST") or clean_sym.startswith("DUMMY") or clean_sym.startswith("MOCK")
+            clean_sym.startswith("TEST")
+            or clean_sym.startswith("DUMMY")
+            or clean_sym.startswith("MOCK")
         ):
             continue
         rows.append(
@@ -1562,11 +1568,7 @@ def get_stale_symbols_detailed(
       1. new_symbols: never downloaded / missing from SQLite store (needs full 1y history).
       2. delta_symbols: present in SQLite store, but last_date < latest expected trading date.
     """
-    clean_syms = [
-        _clean_eod_symbol(s)
-        for s in symbols
-        if not s.upper().startswith("DUMMY")
-    ]
+    clean_syms = [_clean_eod_symbol(s) for s in symbols if not s.upper().startswith("DUMMY")]
     latest_expected = get_latest_expected_trading_date()
 
     conn = _get_connection()
@@ -1715,13 +1717,7 @@ def sync_universe_eod(
     - If stocks are already up-to-date: returns in 0.001s without touching the network!
     """
     clean_syms = list(
-        dict.fromkeys(
-            [
-                _clean_eod_symbol(s)
-                for s in symbols
-                if not s.upper().startswith("DUMMY")
-            ]
-        )
+        dict.fromkeys([_clean_eod_symbol(s) for s in symbols if not s.upper().startswith("DUMMY")])
     )
 
     if force:

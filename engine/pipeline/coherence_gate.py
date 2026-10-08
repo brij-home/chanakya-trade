@@ -26,25 +26,26 @@ from __future__ import annotations
 
 import logging
 import re
-import time
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 logger = logging.getLogger("engine.pipeline.coherence_gate")
 
-_INDEX_BENCHMARKS = frozenset({
-    "NIFTY",
-    "NIFTY 50",
-    "NIFTY50",
-    "BANKNIFTY",
-    "NIFTY BANK",
-    "FINNIFTY",
-    "NIFTY FIN SERVICE",
-    "MIDCPNIFTY",
-    "NIFTY MID SELECT",
-    "SENSEX",
-    "BSE SENSEX",
-    "BANKEX",
-})
+_INDEX_BENCHMARKS = frozenset(
+    {
+        "NIFTY",
+        "NIFTY 50",
+        "NIFTY50",
+        "BANKNIFTY",
+        "NIFTY BANK",
+        "FINNIFTY",
+        "NIFTY FIN SERVICE",
+        "MIDCPNIFTY",
+        "NIFTY MID SELECT",
+        "SENSEX",
+        "BSE SENSEX",
+        "BANKEX",
+    }
+)
 
 
 def clean_canonical_symbol(symbol: str) -> str:
@@ -106,7 +107,8 @@ class CoherenceGate:
 
         # Find other active index alerts
         existing_indices = [
-            a for a in existing_active_alerts
+            a
+            for a in existing_active_alerts
             if getattr(a, "is_active", False)
             and not getattr(a, "is_invalidated", False)
             and getattr(a, "stage", "") in ("IGNITED", "TRIGGERED", "PARTIAL_PROFIT_TAKEN")
@@ -119,7 +121,8 @@ class CoherenceGate:
 
         # 1. Opposing Directional Conflict Guard
         opposing_indices = [
-            a for a in existing_indices
+            a
+            for a in existing_indices
             if str(getattr(a, "direction", "")).upper() in ("BULLISH", "BEARISH")
             and str(getattr(a, "direction", "")).upper() != direction
         ]

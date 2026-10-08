@@ -17,18 +17,17 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import os
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
 MASTERS = (
-    "NSE_CM",   # NSE Capital Market (Equity / Indices)
-    "NSE_FO",   # NSE Equity Derivatives (Futures / Options)
-    "NSE_CD",   # NSE Currency Derivatives
+    "NSE_CM",  # NSE Capital Market (Equity / Indices)
+    "NSE_FO",  # NSE Equity Derivatives (Futures / Options)
+    "NSE_CD",  # NSE Currency Derivatives
     "NSE_COM",  # NSE Commodity
-    "BSE_CM",   # BSE Capital Market
-    "BSE_FO",   # BSE Equity Derivatives
+    "BSE_CM",  # BSE Capital Market
+    "BSE_FO",  # BSE Equity Derivatives
     "MCX_COM",  # MCX Commodity
 )
 
@@ -215,7 +214,9 @@ class SymbolMaster:
     def load_master(self, master: str = "NSE_CM", force: bool = False) -> dict[str, Any]:
         return load_master(master, force=force)
 
-    def search_symbols(self, term: str, master: str = "NSE_CM", limit: int = 25, **kwargs) -> list[dict[str, Any]]:
+    def search_symbols(
+        self, term: str, master: str = "NSE_CM", limit: int = 25, **kwargs
+    ) -> list[dict[str, Any]]:
         return search_symbols(term, master=master, limit=limit, **kwargs)
 
     def get_symbol_info(self, symbol: str) -> Optional[dict[str, Any]]:
@@ -240,4 +241,3 @@ def get_symbol_master() -> SymbolMaster:
     if _symbol_master_instance is None:
         _symbol_master_instance = SymbolMaster()
     return _symbol_master_instance
-

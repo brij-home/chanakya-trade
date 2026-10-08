@@ -483,7 +483,9 @@ def register_default_detectors() -> None:
     from engine.detectors.pairs_arbitrage import detect_pairs_arbitrage
 
     def _options_momentum_adapter(ctx: DetectionContext):
-        if ctx.segment in ("FNO_INDEX", "FNO_STOCK", "EQUITY") and (ctx.is_index or ctx.option_chain):
+        if ctx.segment in ("FNO_INDEX", "FNO_STOCK", "EQUITY") and (
+            ctx.is_index or ctx.option_chain
+        ):
             return detect_options_momentum_breakouts(targets=[ctx.canonical_symbol])
         return None
 
@@ -646,4 +648,3 @@ def register_default_detectors() -> None:
 
 # Auto-populate default institutional detectors into registry
 register_default_detectors()
-

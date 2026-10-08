@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from analysis.inflection_scanner import InflectionSetup, scan_inflections_universe
@@ -262,7 +262,9 @@ def _format_swing_inflection_alert(
             "runner_target": f"₹{tgt_moon:,.1f}",
             "risk_reward": f"1:{rr_ratio:.1f}",
             "no_chase_boundary": no_chase_val,
-            "execution_style": "LIMIT_ON_PULLBACK" if setup.timing_state == "PULLBACK_RETEST" else "BREAKOUT_STOP",
+            "execution_style": "LIMIT_ON_PULLBACK"
+            if setup.timing_state == "PULLBACK_RETEST"
+            else "BREAKOUT_STOP",
             "when_to_buy": when_to_buy,
             "when_to_wait": when_to_wait,
             "profit_rule": profit_rule,
@@ -339,7 +341,10 @@ def detect_swing_inflection_setups(
 
         # High Conviction Timing Gate: For coiling bases, entry pivot must be within 4.0% of current LTP
         # Prevents premature alerts on distant setups that are wandering far below their breakout pivot
-        if candidate.timing_state == "COILING_IMMINENT" and candidate.entry_price > candidate.ltp * 1.04:
+        if (
+            candidate.timing_state == "COILING_IMMINENT"
+            and candidate.entry_price > candidate.ltp * 1.04
+        ):
             continue
 
         # Invariant: Positive Risk-Reward ratio check

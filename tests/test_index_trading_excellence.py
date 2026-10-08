@@ -12,9 +12,7 @@ Institutional Test Suite for Index Intraday Trading Excellence:
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
-from unittest.mock import patch, MagicMock
 import pandas as pd
-import pytest
 
 from engine.alert_model import AutoAlert
 from engine.alert_evaluator import evaluate_alert_targets_and_trailing
@@ -47,7 +45,9 @@ class MockOptionContract:
         self.expiry = "2026-10-08"
 
 
-def _make_dummy_5m_ohlcv(bars: int = 15, base_price: float = 25000.0, trend: str = "UP") -> pd.DataFrame:
+def _make_dummy_5m_ohlcv(
+    bars: int = 15, base_price: float = 25000.0, trend: str = "UP"
+) -> pd.DataFrame:
     records = []
     curr = base_price
     start_time = datetime(2026, 10, 5, 9, 30, tzinfo=IST)
@@ -59,20 +59,23 @@ def _make_dummy_5m_ohlcv(bars: int = 15, base_price: float = 25000.0, trend: str
         l = o - 4.0
         c = o + step
         curr = c
-        records.append({
-            "datetime": t,
-            "open": o,
-            "high": h,
-            "low": l,
-            "close": c,
-            "volume": 25000 + i * 200,
-        })
+        records.append(
+            {
+                "datetime": t,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": 25000 + i * 200,
+            }
+        )
     df = pd.DataFrame(records)
     df.set_index("datetime", inplace=True)
     return df
 
 
 # ── Test 1: Moneyness Selection (ATM / ITM Priority over Far OTM) ─────────────
+
 
 def test_atm_moneyness_selection_priority():
     """Confirms that ATM or 1-strike ITM option is selected over cheap far-OTM options even if OTM has high retail volume."""
@@ -86,7 +89,9 @@ def test_atm_moneyness_selection_priority():
         MockOptionContract(25000.0, "CE", 160.0, volume=12000, oi=9000, pchange=18.0),
         MockOptionContract(25050.0, "CE", 125.0, volume=18000, oi=12000, pchange=20.0),
         MockOptionContract(25100.0, "CE", 95.0, volume=15000, oi=10000, pchange=14.0),
-        MockOptionContract(25350.0, "CE", 25.0, volume=90000, oi=40000, pchange=25.0),  # 300 pts OTM
+        MockOptionContract(
+            25350.0, "CE", 25.0, volume=90000, oi=40000, pchange=25.0
+        ),  # 300 pts OTM
     ]
 
     ohlcv = _make_dummy_5m_ohlcv(bars=15, base_price=25000.0, trend="UP")
@@ -114,6 +119,7 @@ def test_atm_moneyness_selection_priority():
 
 
 # ── Test 2: CPR & Camarilla Confluence in Index Call Setup ────────────────────
+
 
 def test_cpr_and_camarilla_h4_confluence():
     """Confirms that CPR and Camarilla breakout levels are computed and tagged into metrics."""
@@ -156,10 +162,13 @@ def test_cpr_and_camarilla_h4_confluence():
     assert "bc" in cpr
     assert "cam_h4" in cpr
     # Check Camarilla H4 signal was triggered
-    assert "CAMARILLA_H4_BREAKOUT" in metrics["signals"] or "DAY_HIGH_BREAKOUT" in metrics["signals"]
+    assert (
+        "CAMARILLA_H4_BREAKOUT" in metrics["signals"] or "DAY_HIGH_BREAKOUT" in metrics["signals"]
+    )
 
 
 # ── Test 3: Camarilla L4 Breakdown in Index Put Setup ─────────────────────────
+
 
 def test_cpr_and_camarilla_l4_breakdown_put():
     """Confirms that Camarilla L4 breakdown is detected in index put setups."""
@@ -197,10 +206,13 @@ def test_cpr_and_camarilla_l4_breakdown_put():
     metrics = alert.metrics
     assert "cpr_data" in metrics
     assert "cam_l4" in metrics["cpr_data"]
-    assert "CAMARILLA_L4_BREAKDOWN" in metrics["signals"] or "DAY_LOW_BREAKDOWN" in metrics["signals"]
+    assert (
+        "CAMARILLA_L4_BREAKDOWN" in metrics["signals"] or "DAY_LOW_BREAKDOWN" in metrics["signals"]
+    )
 
 
 # ── Test 4: High-Watermark Guaranteed Profit Floor ────────────────────────────
+
 
 def test_high_watermark_guaranteed_profit_floor():
     """Confirms that when trade expands to +2.5R and +3.5R, trailing stop is ratcheted to lock guaranteed profit."""
@@ -247,6 +259,7 @@ def test_high_watermark_guaranteed_profit_floor():
 
 # ── Test 5: Dedicated High-Frequency Index Scanner Lifecycle ──────────────────
 
+
 def test_dedicated_index_scanner_thread_lifecycle():
     """Confirms that AutoAlertEngine initializes and cleanly stops the dedicated Index Scanner thread."""
     engine = AutoAlertEngine()
@@ -266,6 +279,7 @@ def test_dedicated_index_scanner_thread_lifecycle():
 
 
 # ── Test 6: Domestic WebSocket Real-Time Event Routing ────────────────────────
+
 
 def test_domestic_websocket_tick_invalidation_and_ratchet(monkeypatch):
     """Verifies that sub-second domestic ticks trigger instant lifecycle updates without polling."""
@@ -323,4 +337,3 @@ def test_domestic_websocket_tick_invalidation_and_ratchet(monkeypatch):
     assert alert.stage == "INVALIDATED"
     assert len(dispatched) == 1
     assert dispatched[0].alert_id == test_aid
-

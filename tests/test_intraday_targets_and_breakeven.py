@@ -7,7 +7,6 @@ Verifies that:
    NEVER as a failed/losing 'SL HIT' or 'INVALIDATED' loss.
 """
 
-import pytest
 from engine.alert_model import AutoAlert
 from engine.alert_evaluator import evaluate_alert_invalidation
 from engine.trade_plan import calculate_trade_plan, calculate_option_execution_plan
@@ -25,7 +24,9 @@ def test_intraday_index_option_targets_are_feasible():
     assert tp is not None
     # Intraday spot T1 must be within realistic single-wave ATR (max 0.25 * atr = ~162.5 pts)
     spot_move_t1 = tp.target_1 - 55229.0
-    assert spot_move_t1 <= 200.0, f"Spot T1 move {spot_move_t1:.1f} is excessively large for intraday"
+    assert spot_move_t1 <= 200.0, (
+        f"Spot T1 move {spot_move_t1:.1f} is excessively large for intraday"
+    )
 
     # Now calculate option execution plan for a ₹972 option
     opt_plan = calculate_option_execution_plan(
@@ -51,15 +52,21 @@ def test_intraday_index_option_targets_are_feasible():
 
     # 2. Risk must be disciplined on expensive index options (max ~18% drawdown, not -28%)
     opt_drawdown = (972.2 - sl_prem) / 972.2
-    assert opt_drawdown <= 0.18, f"Intraday index option drawdown {opt_drawdown:.1%} is excessively wide"
+    assert opt_drawdown <= 0.18, (
+        f"Intraday index option drawdown {opt_drawdown:.1%} is excessively wide"
+    )
 
     # 3. T1 gain must be reachable in 1 intraday wave (+8% to +20%, NOT +30% or +50%)
     t1_gain_pct = (t1_prem - 972.2) / 972.2
-    assert 0.08 <= t1_gain_pct <= 0.20, f"T1 gain {t1_gain_pct:.1%} must be feasible intraday (+8% to +20%)"
+    assert 0.08 <= t1_gain_pct <= 0.20, (
+        f"T1 gain {t1_gain_pct:.1%} must be feasible intraday (+8% to +20%)"
+    )
 
     # 4. T2 gain must be within session impulse (+18% to +35%)
     t2_gain_pct = (t2_prem - 972.2) / 972.2
-    assert 0.15 <= t2_gain_pct <= 0.35, f"T2 gain {t2_gain_pct:.1%} must be feasible intraday (+15% to +35%)"
+    assert 0.15 <= t2_gain_pct <= 0.35, (
+        f"T2 gain {t2_gain_pct:.1%} must be feasible intraday (+15% to +35%)"
+    )
 
     # 5. T3 gain must not exceed realistic trend day ceiling (+55%)
     t3_gain_pct = (t3_prem - 972.2) / 972.2

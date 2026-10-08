@@ -6,11 +6,8 @@ Verification suite for Defined-Risk Neutral (Iron Condor) and Pairs Arbitrage de
 
 from __future__ import annotations
 
-import os
 import pandas as pd
-import pytest
 
-from engine.alert_model import AutoAlert
 from engine.detection_context import DetectionContext, detector_registry
 from engine.detectors.defined_risk_neutral import detect_defined_risk_neutral, compute_adx
 from engine.detectors.pairs_arbitrage import detect_pairs_arbitrage
@@ -27,13 +24,15 @@ def _make_range_bound_candles(n: int = 50, center: float = 24500.0) -> pd.DataFr
         high_p = close_p + 10.0
         low_p = close_p - 10.0
         open_p = center - offset
-        records.append({
-            "open": open_p,
-            "high": high_p,
-            "low": low_p,
-            "close": close_p,
-            "volume": 5000,
-        })
+        records.append(
+            {
+                "open": open_p,
+                "high": high_p,
+                "low": low_p,
+                "close": close_p,
+                "volume": 5000,
+            }
+        )
     return pd.DataFrame(records)
 
 

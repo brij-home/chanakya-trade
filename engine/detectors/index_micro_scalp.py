@@ -23,17 +23,14 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from datetime import datetime, time as dtime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-import numpy as np
 import pandas as pd
 
 from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert, ActionableBlueprint
-from engine.alert_expiry import classify_expiry_type
 
 logger = logging.getLogger("chanakya.detectors.index_micro_scalp")
 IST = ZoneInfo("Asia/Kolkata")
@@ -102,6 +99,7 @@ def detect_index_micro_scalp(
     # Resolve lot size
     try:
         from engine.position_sizer import get_lot_size
+
         lot_sz = get_lot_size(clean_sym) or 1
     except Exception:
         lot_sz = 65 if clean_sym == "NIFTY" else (15 if clean_sym == "BANKNIFTY" else 1)
@@ -125,7 +123,6 @@ def detect_index_micro_scalp(
     # Sort candidates by volume/OI and optimal moneyness (prioritize 1-strike ITM and ATM)
     def _rank_contract(c: Any) -> float:
         c_strk = float(getattr(c, "strike", 0.0) or 0.0)
-        c_lp = float(getattr(c, "last_price", 0.0) or 0.0)
         c_v = int(getattr(c, "volume", 0) or 0)
         c_o = int(getattr(c, "oi", 0) or 1)
         dist = abs(c_strk - spot)
@@ -141,7 +138,9 @@ def detect_index_micro_scalp(
         elif dist <= (step_val * 0.6):
             itm_bonus = 15.0
 
-        return itm_bonus + (v_oi * 8.0) + (min(10.0, c_v / 1000.0)) - (dist / max(1.0, step_val) * 5.0)
+        return (
+            itm_bonus + (v_oi * 8.0) + (min(10.0, c_v / 1000.0)) - (dist / max(1.0, step_val) * 5.0)
+        )
 
     valid_contracts.sort(key=_rank_contract, reverse=True)
 
@@ -152,22 +151,19 @@ def detect_index_micro_scalp(
 
     results: list[AutoAlert] = []
 
-    # Prepare active micro dataframe (1m preferred, 3m fallback, 5m fallback)
-    active_micro_df = ohlcv_1m if ohlcv_1m is not None and len(ohlcv_1m) >= 3 else (
-        ohlcv_3m if ohlcv_3m is not None and len(ohlcv_3m) >= 3 else ohlcv_5m
-    )
-
     # Detect spot micro-structure
-    spot_chg_from_high = ((day_high - spot) / max(1.0, day_high) * 100.0) if (day_high and day_high > 0) else 0.0
-    spot_chg_from_low = ((spot - day_low) / max(1.0, day_low) * 100.0) if (day_low and day_low > 0) else 0.0
+    spot_chg_from_high = (
+        ((day_high - spot) / max(1.0, day_high) * 100.0) if (day_high and day_high > 0) else 0.0
+    )
+    spot_chg_from_low = (
+        ((spot - day_low) / max(1.0, day_low) * 100.0) if (day_low and day_low > 0) else 0.0
+    )
 
     is_spot_flushing = bool(
-        (effective_vwap > 0 and spot < effective_vwap * 0.9992)
-        or spot_chg_from_high >= 0.20
+        (effective_vwap > 0 and spot < effective_vwap * 0.9992) or spot_chg_from_high >= 0.20
     )
     is_spot_surging = bool(
-        (effective_vwap > 0 and spot > effective_vwap * 1.0008)
-        or spot_chg_from_low >= 0.20
+        (effective_vwap > 0 and spot > effective_vwap * 1.0008) or spot_chg_from_low >= 0.20
     )
 
     for c in candidate_contracts:
@@ -265,7 +261,7 @@ def detect_index_micro_scalp(
                     "vol_oi_ratio": c_vol_oi,
                     "underlying_spot": spot,
                     "target_3": tgt3,
-                }
+                },
             )
 
             # Build AutoAlert
@@ -315,6 +311,8 @@ def detect_index_micro_scalp(
             )
             results.append(alert)
         except Exception as e_c:
-            logger.debug(f"[IndexMicroScalp] Error evaluating contract {getattr(c, 'symbol', '')}: {e_c}")
+            logger.debug(
+                f"[IndexMicroScalp] Error evaluating contract {getattr(c, 'symbol', '')}: {e_c}"
+            )
 
     return results

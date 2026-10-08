@@ -28,7 +28,9 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class MockOptionContract:
-    def __init__(self, symbol, strike, option_type, ltp, volume=20000, oi=40000, pchange=18.0, oi_change=1200):
+    def __init__(
+        self, symbol, strike, option_type, ltp, volume=20000, oi=40000, pchange=18.0, oi_change=1200
+    ):
         self.symbol = symbol
         self.strike = strike
         self.option_type = option_type
@@ -40,7 +42,9 @@ class MockOptionContract:
         self.oi_change = oi_change
 
 
-def _make_dummy_5m_ohlcv(bars: int = 15, base_price: float = 24980.0, trend: str = "DOWN", date_str: str = "2026-10-07") -> pd.DataFrame:
+def _make_dummy_5m_ohlcv(
+    bars: int = 15, base_price: float = 24980.0, trend: str = "DOWN", date_str: str = "2026-10-07"
+) -> pd.DataFrame:
     records = []
     curr = base_price
     dt_base = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=9, minute=30, tzinfo=IST)
@@ -52,14 +56,16 @@ def _make_dummy_5m_ohlcv(bars: int = 15, base_price: float = 24980.0, trend: str
         l = o - 4.0
         c = o + step
         curr = c
-        records.append({
-            "datetime": t,
-            "open": o,
-            "high": h,
-            "low": l,
-            "close": c,
-            "volume": 25000 + i * 200,
-        })
+        records.append(
+            {
+                "datetime": t,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": 25000 + i * 200,
+            }
+        )
     df = pd.DataFrame(records)
     df.set_index("datetime", inplace=True)
     return df
@@ -75,7 +81,6 @@ def setup_env():
 def test_camarilla_l4_absorption_hammer_rejected():
     """Selling into a massive absorption hammer (75% lower wick, green body) at Cam L4 must be vetoed."""
     prev_high, prev_low, prev_close = 25100.0, 24950.0, 25000.0
-    cam_l4 = 24917.5
     spot = 24910.0  # Pierced Cam L4
 
     ref_t = datetime(2026, 10, 7, 10, 30, tzinfo=IST)
@@ -84,13 +89,33 @@ def test_camarilla_l4_absorption_hammer_rejected():
     records = []
     for i, t in enumerate(ts):
         if i == len(ts) - 1:
-            records.append({"datetime": t, "open": 24925.0, "high": 24935.0, "low": 24860.0, "close": 24930.0, "volume": 35000})
+            records.append(
+                {
+                    "datetime": t,
+                    "open": 24925.0,
+                    "high": 24935.0,
+                    "low": 24860.0,
+                    "close": 24930.0,
+                    "volume": 35000,
+                }
+            )
         else:
-            records.append({"datetime": t, "open": 25000.0 - i*5, "high": 25005.0 - i*5, "low": 24990.0 - i*5, "close": 24995.0 - i*5, "volume": 20000})
+            records.append(
+                {
+                    "datetime": t,
+                    "open": 25000.0 - i * 5,
+                    "high": 25005.0 - i * 5,
+                    "low": 24990.0 - i * 5,
+                    "close": 24995.0 - i * 5,
+                    "volume": 20000,
+                }
+            )
     df_5m = pd.DataFrame(records).set_index("datetime")
 
     chain = [
-        MockOptionContract("NSE:NIFTY26O1324900PE", 24900.0, "PE", 130.0, volume=25000, oi=12000, pchange=20.0)
+        MockOptionContract(
+            "NSE:NIFTY26O1324900PE", 24900.0, "PE", 130.0, volume=25000, oi=12000, pchange=20.0
+        )
     ]
 
     alerts = detect_index_put_setup(
@@ -110,7 +135,9 @@ def test_camarilla_l4_absorption_hammer_rejected():
 
     # Must NOT fire CAMARILLA_L4_BREAKDOWN because candle is an absorption hammer
     l4_alerts = [a for a in alerts if "CAMARILLA_L4_BREAKDOWN" in a.metrics.get("signals", [])]
-    assert len(l4_alerts) == 0, "Absorption hammer at Cam L4 must NOT trigger CAMARILLA_L4_BREAKDOWN"
+    assert len(l4_alerts) == 0, (
+        "Absorption hammer at Cam L4 must NOT trigger CAMARILLA_L4_BREAKDOWN"
+    )
 
 
 # ── 2. Decisive Bearish Breakdown at Camarilla L4 Accepted ─────────────────────
@@ -124,8 +151,12 @@ def test_camarilla_l4_clean_bearish_breakdown_accepted():
     # Since spot (24900) < L4 (24917.5), Camarilla L4 breakdown is active!
 
     chain = [
-        MockOptionContract("NSE:NIFTY26O1324900PE", 24900.0, "PE", 125.0, volume=22000, oi=11000, pchange=20.0),
-        MockOptionContract("NSE:NIFTY26O1324950PE", 24950.0, "PE", 155.0, volume=14000, oi=9000, pchange=16.0),
+        MockOptionContract(
+            "NSE:NIFTY26O1324900PE", 24900.0, "PE", 125.0, volume=22000, oi=11000, pchange=20.0
+        ),
+        MockOptionContract(
+            "NSE:NIFTY26O1324950PE", 24950.0, "PE", 155.0, volume=14000, oi=9000, pchange=16.0
+        ),
     ]
     ohlcv = _make_dummy_5m_ohlcv(bars=15, base_price=24980.0, trend="DOWN", date_str="2026-10-07")
     ref_t = datetime(2026, 10, 7, 10, 30, tzinfo=IST)
@@ -161,13 +192,33 @@ def test_cpr_supply_rejection_advancing_green_bar_rejected():
     records = []
     for i, t in enumerate(ts):
         if i == len(ts) - 1:
-            records.append({"datetime": t, "open": 22585.0, "high": 22618.0, "low": 22580.0, "close": 22615.0, "volume": 65000})
+            records.append(
+                {
+                    "datetime": t,
+                    "open": 22585.0,
+                    "high": 22618.0,
+                    "low": 22580.0,
+                    "close": 22615.0,
+                    "volume": 65000,
+                }
+            )
         else:
-            records.append({"datetime": t, "open": 22560.0 + i*2, "high": 22570.0 + i*2, "low": 22555.0 + i*2, "close": 22565.0 + i*2, "volume": 30000})
+            records.append(
+                {
+                    "datetime": t,
+                    "open": 22560.0 + i * 2,
+                    "high": 22570.0 + i * 2,
+                    "low": 22555.0 + i * 2,
+                    "close": 22565.0 + i * 2,
+                    "volume": 30000,
+                }
+            )
     df_5m = pd.DataFrame(records).set_index("datetime")
 
     chain = [
-        MockOptionContract("NSE:NIFTY26O1322600PE", 22600.0, "PE", 110.0, volume=35000, oi=45000, pchange=12.0)
+        MockOptionContract(
+            "NSE:NIFTY26O1322600PE", 22600.0, "PE", 110.0, volume=35000, oi=45000, pchange=12.0
+        )
     ]
 
     alerts = detect_index_put_setup(
@@ -203,7 +254,9 @@ def test_hbcm_majority_bullish_vetoes_put_setup():
     mock_hbcm.to_dict.return_value = {"bullish_count": 4, "bearish_count": 1}
 
     chain = [
-        MockOptionContract("NSE:BANKNIFTY26O1354500PE", 54500.0, "PE", 350.0, volume=35000, oi=15000, pchange=22.0)
+        MockOptionContract(
+            "NSE:BANKNIFTY26O1354500PE", 54500.0, "PE", 350.0, volume=35000, oi=15000, pchange=22.0
+        )
     ]
 
     with patch("engine.hbcm.evaluate_hbcm", return_value=mock_hbcm):
@@ -236,7 +289,9 @@ def test_hbcm_majority_bearish_vetoes_call_setup():
     mock_hbcm.to_dict.return_value = {"bullish_count": 1, "bearish_count": 4}
 
     chain = [
-        MockOptionContract("NSE:NIFTY26O1322600CE", 22600.0, "CE", 120.0, volume=45000, oi=25000, pchange=18.0)
+        MockOptionContract(
+            "NSE:NIFTY26O1322600CE", 22600.0, "CE", 120.0, volume=45000, oi=25000, pchange=18.0
+        )
     ]
 
     with patch("engine.hbcm.evaluate_hbcm", return_value=mock_hbcm):
@@ -299,7 +354,9 @@ def test_index_opposing_direction_conflict_blocks_30m_whipsaw():
     )
 
     accepted = engine.record_alert(ce_alert)
-    assert accepted is False, "Incoming CE alert within 30m of active PE alert on BANKNIFTY must be suppressed"
+    assert accepted is False, (
+        "Incoming CE alert within 30m of active PE alert on BANKNIFTY must be suppressed"
+    )
 
 
 # ── 6. Spot Coordinate Leakage Protection ─────────────────────────────────────
@@ -331,13 +388,17 @@ def test_spot_coordinate_not_overwritten_by_contract_quote():
     engine._alerts.append(alert)
 
     # Batch refresh returns contract quote 175.0 for "NSE:NIFTY26O1322650PE"
-    with patch.object(engine, "_batch_refresh_quotes", return_value={"NSE:NIFTY26O1322650PE": 175.0}):
+    with patch.object(
+        engine, "_batch_refresh_quotes", return_value={"NSE:NIFTY26O1322650PE": 175.0}
+    ):
         engine.check_and_alert_invalidations()
 
     # alert.ltp and option_premium should update to 175.0, but underlying_spot MUST stay 22650.0!
     assert alert.ltp == 175.0
     assert alert.option_premium == 175.0
-    assert alert.underlying_spot == 22650.0, "underlying_spot must NOT be corrupted by option premium quote"
+    assert alert.underlying_spot == 22650.0, (
+        "underlying_spot must NOT be corrupted by option premium quote"
+    )
 
 
 # ── 7. Zero Superseding & High-Quality Concurrent Sharing ─────────────────────
@@ -396,7 +457,9 @@ def test_zero_superseding_and_high_quality_concurrent_sharing():
     accepted_bn = engine.record_alert(incoming_bn)
     # ZERO SUPERSEDING: Active NIFTY trade must NOT be killed or marked SUPERSEDED!
     assert active_nifty.stage == "IGNITED", "Active trade must remain IGNITED and never superseded"
-    assert getattr(active_nifty, "target_status", "") != "SUPERSEDED", "Active trade must NOT be SUPERSEDED"
+    assert getattr(active_nifty, "target_status", "") != "SUPERSEDED", (
+        "Active trade must NOT be SUPERSEDED"
+    )
     # HIGH QUALITY SHARING: High-quality concurrent signal is approved and shared with traders!
     assert accepted_bn is True, "High-quality concurrent index signal must be shared with traders"
 
@@ -413,11 +476,13 @@ def test_zero_superseding_and_high_quality_concurrent_sharing():
         ltp=80.0,
         trigger_level=80.0,
         target_level=95.0,  # reward = 15
-        stop_loss=70.0,     # risk = 10 -> R:R = 1.5 < 2.0
-        confidence=72,      # conf < 80
+        stop_loss=70.0,  # risk = 10 -> R:R = 1.5 < 2.0
+        confidence=72,  # conf < 80
         metrics={"vol_oi_ratio": 1.1},
     )
-    assert engine.record_alert(weak_bn) is False, "Substandard secondary signal (<80% conf, <2.0 R:R) must be suppressed"
+    assert engine.record_alert(weak_bn) is False, (
+        "Substandard secondary signal (<80% conf, <2.0 R:R) must be suppressed"
+    )
 
     # 3. Inter-Index Directional Whipsaw (FINNIFTY CALL while NIFTY PE is active) must be suppressed
     conflicting_finnifty = AutoAlert(

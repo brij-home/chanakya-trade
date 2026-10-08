@@ -44,8 +44,7 @@ def test_no_silent_exception_swallowing_in_guarded_modules():
                     and (
                         (
                             isinstance(n.func, ast.Attribute)
-                            and n.func.attr
-                            in ("warning", "error", "exception", "info", "debug")
+                            and n.func.attr in ("warning", "error", "exception", "info", "debug")
                         )
                         or (isinstance(n.func, ast.Name) and n.func.id in ("print", "log"))
                     )

@@ -92,7 +92,11 @@ class TestHedgedSpreadPlanning:
         eval_res = evaluate_alert_in_flight_decay(alert, current_ltp=114.0)
         assert eval_res is not None
         assert eval_res.triggered is True
-        assert eval_res.warning_type in ("THETA_STAGNATION", "0DTE_INTRADAY_DECAY")
+        assert eval_res.warning_type in (
+            "THETA_STAGNATION",
+            "0DTE_INTRADAY_DECAY",
+            "0DTE_AFTERNOON_THETA_CLIFF",
+        )
         assert eval_res.hedge_plan is not None
         assert eval_res.hedge_plan["action"] == "SELL_OTM_HEDGE"
         assert "HEDGE DEFENSE" in eval_res.summary

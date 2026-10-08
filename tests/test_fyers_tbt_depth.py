@@ -6,7 +6,6 @@ OBI-50 calculations, Iceberg Wall detection, Slippage modeling,
 and Tier 2 Depth Audit Gatekeeper.
 """
 
-from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
@@ -126,7 +125,9 @@ def test_tbt_web_endpoints(client):
     assert data["data"]["obi_50"] > 0
 
     # 2. POST /api/fyers/tbt-audit
-    res_audit = client.post("/api/fyers/tbt-audit", json={"symbol": "NSE:NIFTY24OCTFUT", "side": "BUY"})
+    res_audit = client.post(
+        "/api/fyers/tbt-audit", json={"symbol": "NSE:NIFTY24OCTFUT", "side": "BUY"}
+    )
     assert res_audit.status_code == 200
     assert res_audit.json()["status"] == "ok"
     assert "verdict" in res_audit.json()["audit"]

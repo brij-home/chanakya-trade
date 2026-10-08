@@ -20,7 +20,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,12 @@ class FyersCircuitBreaker:
 
         with self._lock:
             # Check 429 Too Many Requests
-            if is_429 or status_code == 429 or "429" in error_message or "rate limit" in error_message.lower():
+            if (
+                is_429
+                or status_code == 429
+                or "429" in error_message
+                or "rate limit" in error_message.lower()
+            ):
                 trip_needed = True
                 reason = f"Fyers Rate Limit Exceeded (HTTP 429): {error_message}"
             else:
@@ -120,7 +125,9 @@ class FyersCircuitBreaker:
                 self._state = CircuitState.OPEN
                 self._tripped_at = now
                 self._trip_reason = reason
-                logger.error(f"[CircuitBreaker] TRIPPED! Reason: {reason}. Cooldown: {self._cooldown_sec}s")
+                logger.error(
+                    f"[CircuitBreaker] TRIPPED! Reason: {reason}. Cooldown: {self._cooldown_sec}s"
+                )
 
         if trip_needed:
             self._dispatch_trip_notifications(reason)
@@ -163,7 +170,9 @@ class FyersCircuitBreaker:
                 )
                 send_push(tg_msg, parse_mode="HTML", bypass_dedup=True)
             except Exception as exc:
-                logger.warning(f"[CircuitBreaker] Telegram notification failed: {exc}", exc_info=True)
+                logger.warning(
+                    f"[CircuitBreaker] Telegram notification failed: {exc}", exc_info=True
+                )
 
     def _notify_recovery(self) -> None:
         """Emit SSE event when circuit breaker recovers."""
@@ -188,7 +197,11 @@ class FyersCircuitBreaker:
         with self._lock:
             self._evaluate_state_locked()
             now = time.time()
-            remaining_cooldown = max(0.0, self._cooldown_sec - (now - self._tripped_at)) if self._state == CircuitState.OPEN else 0.0
+            remaining_cooldown = (
+                max(0.0, self._cooldown_sec - (now - self._tripped_at))
+                if self._state == CircuitState.OPEN
+                else 0.0
+            )
             return {
                 "state": self._state.value,
                 "is_tripped": self._state == CircuitState.OPEN,

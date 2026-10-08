@@ -177,11 +177,11 @@ def test_early_warning_ignition_on_trigger_level_crossing(monkeypatch):
     )
     engine._alerts.append(early_alert)
 
-    # 1. Price still below trigger (23288.0) -> stays EARLY_WARNING
+    # 1. Price still below trigger (23288.0) -> not ignited (EARLY_WARNING or proximity PRIMED)
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 23288.0)
     ignited = engine.check_and_ignite_early_warnings()
     assert len(ignited) == 0
-    assert early_alert.stage == "EARLY_WARNING"
+    assert early_alert.stage in ("EARLY_WARNING", "PRIMED")
 
     # 2. Price crosses trigger to 23295.0 -> transitions to IGNITED!
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 23295.0)

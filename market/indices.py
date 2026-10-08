@@ -635,7 +635,11 @@ def get_premarket_battle_plan(
         if dl:
             quotes = get_quote([inst])
             q = quotes.get(inst)
-            ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or dl.spot) if q else dl.spot
+            ltp = (
+                float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or dl.spot)
+                if q
+                else dl.spot
+            )
 
             results[clean_name] = {
                 "symbol": clean_name,
@@ -656,7 +660,6 @@ def get_premarket_battle_plan(
             continue
 
         # Fallback if daily levels engine could not resolve
-        exch = "BSE" if "BSE:" in inst or clean_name in ("SENSEX", "BANKEX") else "NSE"
         quotes = get_quote([inst])
         q = quotes.get(inst)
         ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0) if q else 0.0
@@ -675,9 +678,15 @@ def get_premarket_battle_plan(
         cpr_bottom = min(cpr_tc, cpr_bc)
         cpr_width_pct = abs(cpr_tc - cpr_bc) / max(1.0, cpr_pivot) * 100.0
 
-        is_narrow = cpr_width_pct <= (0.22 if clean_name in ("BANKNIFTY", "SENSEX", "BANKEX") else 0.15)
+        is_narrow = cpr_width_pct <= (
+            0.22 if clean_name in ("BANKNIFTY", "SENSEX", "BANKEX") else 0.15
+        )
         is_wide = cpr_width_pct >= 0.35
-        regime = "NARROW_CPR (Trend Day Expected)" if is_narrow else ("WIDE_CPR (Range/Chop Expected)" if is_wide else "AVERAGE_CPR")
+        regime = (
+            "NARROW_CPR (Trend Day Expected)"
+            if is_narrow
+            else ("WIDE_CPR (Range/Chop Expected)" if is_wide else "AVERAGE_CPR")
+        )
 
         cam_range = pdh - pdl
         cam_h4 = pdc + (cam_range * 1.1 / 2.0)

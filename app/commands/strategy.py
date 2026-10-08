@@ -423,7 +423,6 @@ def _cmd_supercharge(args: list[str]) -> None:
 
     from engine.strategy_builder import strategy_store
     from engine.backtest import Backtester, STRATEGIES
-    from engine.quantstats_report import key_metrics
     from engine.supercharge import (
         StrategyVariant,
         evaluate_variant_vetoes,
@@ -452,7 +451,9 @@ def _cmd_supercharge(args: list[str]) -> None:
             console.print(f"[red]Strategy '{name}' not found.[/red]")
             return
 
-    console.print(f"[bold cyan]🛡️ Activating 12-Seat Specialist Strategist Council for '{name}' on {symbol} ({period})...[/bold cyan]")
+    console.print(
+        f"[bold cyan]🛡️ Activating 12-Seat Specialist Strategist Council for '{name}' on {symbol} ({period})...[/bold cyan]"
+    )
 
     try:
         bt = Backtester(symbol=symbol, period=period)
@@ -476,14 +477,18 @@ def _cmd_supercharge(args: list[str]) -> None:
         v1_card["total_return_pct"] = round(base_card["total_return_pct"] * 1.12, 2)
         v1_card["max_drawdown"] = round(base_card["max_drawdown"] * 0.85, 2)
         v1_card["robustness_score"] = round(min(1.0, base_card["robustness_score"] * 1.05), 2)
-        ok1, vetoes1, rej1 = evaluate_variant_vetoes(base_card, v1_card, {"added_rules": ["regime_filter"]})
+        ok1, vetoes1, rej1 = evaluate_variant_vetoes(
+            base_card, v1_card, {"added_rules": ["regime_filter"]}
+        )
         v1 = StrategyVariant(
             variant_id=f"{name}_regime_gated",
             round_no=1,
             objective="sharpe",
             params={"regime_filter": True},
             scorecard=v1_card,
-            rules_changed=["Dampens breakout position size in edgeless chop regimes; amplifies in trend."],
+            rules_changed=[
+                "Dampens breakout position size in edgeless chop regimes; amplifies in trend."
+            ],
             veto_status=vetoes1,
             is_accepted=ok1,
             rejection_reason=rej1,
@@ -494,14 +499,18 @@ def _cmd_supercharge(args: list[str]) -> None:
         v2_card["sharpe"] = round(base_card["sharpe"] * 1.08, 2)
         v2_card["max_drawdown"] = round(base_card["max_drawdown"] * 0.90, 2)
         v2_card["trade_win_rate"] = round(base_card["trade_win_rate"] + 3.5, 1)
-        ok2, vetoes2, rej2 = evaluate_variant_vetoes(base_card, v2_card, {"added_rules": ["dynamic_trail"]})
+        ok2, vetoes2, rej2 = evaluate_variant_vetoes(
+            base_card, v2_card, {"added_rules": ["dynamic_trail"]}
+        )
         v2 = StrategyVariant(
             variant_id=f"{name}_dynamic_trail",
             round_no=1,
             objective="sharpe",
             params={"dynamic_trail_atr": 2.0},
             scorecard=v2_card,
-            rules_changed=["Tightens trailing stop from 2.5 ATR to 1.5 ATR after T1 (+2R) milestone."],
+            rules_changed=[
+                "Tightens trailing stop from 2.5 ATR to 1.5 ATR after T1 (+2R) milestone."
+            ],
             veto_status=vetoes2,
             is_accepted=ok2,
             rejection_reason=rej2,
@@ -511,8 +520,15 @@ def _cmd_supercharge(args: list[str]) -> None:
         md_text = render_comparison_dashboard(name, base_card, variants, objective="sharpe")
         console.print(Markdown(md_text))
 
-        log_evolution_entry(name, base_card, variants, {"decision": "Council generated 2 accepted optimization variants."})
-        console.print(f"\n[dim]Logged optimization cycle to ~/.trading_platform/evolution_log.jsonl[/dim]")
+        log_evolution_entry(
+            name,
+            base_card,
+            variants,
+            {"decision": "Council generated 2 accepted optimization variants."},
+        )
+        console.print(
+            "\n[dim]Logged optimization cycle to ~/.trading_platform/evolution_log.jsonl[/dim]"
+        )
     except Exception as e:
         console.print(f"[red]Supercharge loop error: {e}[/red]")
 
@@ -547,7 +563,9 @@ def _cmd_quantstats(args: list[str]) -> None:
             console.print(f"[red]Strategy '{name}' not found.[/red]")
             return
 
-    console.print(f"[dim]Running backtest for QuantStats tear sheet ({name} on {symbol}, {period})...[/dim]")
+    console.print(
+        f"[dim]Running backtest for QuantStats tear sheet ({name} on {symbol}, {period})...[/dim]"
+    )
 
     try:
         bt = Backtester(symbol=symbol, period=period)
@@ -559,7 +577,9 @@ def _cmd_quantstats(args: list[str]) -> None:
         )
         km = key_metrics(result.equity_curve)
 
-        console.print(f"\n[bold green]✅ Institutional QuantStats Tear Sheet Generated![/bold green]")
+        console.print(
+            "\n[bold green]✅ Institutional QuantStats Tear Sheet Generated![/bold green]"
+        )
         console.print(f"[bold cyan]Report File:[/bold cyan] {out_path}")
         console.print(
             f"  Sharpe: {km.get('sharpe', 0.0):.2f} | "
@@ -571,7 +591,6 @@ def _cmd_quantstats(args: list[str]) -> None:
         )
     except Exception as e:
         console.print(f"[red]QuantStats report generation failed: {e}[/red]")
-
 
 
 # ── strategy run ─────────────────────────────────────────────

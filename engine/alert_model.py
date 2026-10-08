@@ -679,9 +679,15 @@ class AutoAlert:
                     return False, f"Inverted Target: Target (₹{t1:,.2f}) <= LTP (₹{ltp:,.2f})"
             elif is_short:
                 if sl <= ltp:
-                    return False, f"Inverted Bearish Stop-Loss: SL (₹{sl:,.2f}) <= LTP (₹{ltp:,.2f})"
+                    return (
+                        False,
+                        f"Inverted Bearish Stop-Loss: SL (₹{sl:,.2f}) <= LTP (₹{ltp:,.2f})",
+                    )
                 if t1 >= ltp:
-                    return False, f"Inverted Bearish Target: Target (₹{t1:,.2f}) >= LTP (₹{ltp:,.2f})"
+                    return (
+                        False,
+                        f"Inverted Bearish Target: Target (₹{t1:,.2f}) >= LTP (₹{ltp:,.2f})",
+                    )
 
             # Multi-Target Monotonicity Guard
             # Enforce that Target 2 and Target 3 extend strictly beyond preceding targets in the trade's direction
@@ -855,11 +861,15 @@ class AutoAlert:
 
         try:
             from engine.alert_expiry import is_alert_option_premium_level
+
             is_opt = is_alert_option_premium_level(self)
         except Exception:
             is_opt = bool(
                 self.alert_type in ("OPTIONS_MOMENTUM", "OPTION_WRITE")
-                or (self.contract_symbol and (self.contract_symbol.endswith("CE") or self.contract_symbol.endswith("PE")))
+                or (
+                    self.contract_symbol
+                    and (self.contract_symbol.endswith("CE") or self.contract_symbol.endswith("PE"))
+                )
             )
 
         act_str = str(self.actionable_plan.get("action", "")).upper()
@@ -877,7 +887,9 @@ class AutoAlert:
         )
 
         plan_dict = self.actionable_plan
-        opt_plan = plan_dict.get("option_plan") if isinstance(plan_dict.get("option_plan"), dict) else {}
+        opt_plan = (
+            plan_dict.get("option_plan") if isinstance(plan_dict.get("option_plan"), dict) else {}
+        )
 
         # If the actionable plan represents an option vehicle (option buying/selling):
         if plan_is_option:
@@ -887,7 +899,13 @@ class AutoAlert:
                 or (plan_dict.get("option_alternative") or {}).get("ltp", 0.0)
                 or 0.0
             )
-            entry_ref = opt_entry if opt_entry > 0 else float(self.trigger_level or getattr(self, "entry_price", 0.0) or self.ltp or 0.0)
+            entry_ref = (
+                opt_entry
+                if opt_entry > 0
+                else float(
+                    self.trigger_level or getattr(self, "entry_price", 0.0) or self.ltp or 0.0
+                )
+            )
             target_sources = [
                 plan_dict.get("target_1"),
                 plan_dict.get("target_2"),
@@ -907,7 +925,9 @@ class AutoAlert:
             if is_opt:
                 target_sources.append(self.target_level)
         else:
-            entry_ref = float(self.trigger_level or getattr(self, "entry_price", 0.0) or self.ltp or 0.0)
+            entry_ref = float(
+                self.trigger_level or getattr(self, "entry_price", 0.0) or self.ltp or 0.0
+            )
             target_sources = [
                 plan_dict.get("target_1"),
                 plan_dict.get("target_2"),
@@ -923,7 +943,9 @@ class AutoAlert:
             if src is None:
                 continue
             try:
-                clean_num = float(str(src).replace(",", "").replace("₹", "").replace("$", "").strip())
+                clean_num = float(
+                    str(src).replace(",", "").replace("₹", "").replace("$", "").strip()
+                )
                 if clean_num > 0 and clean_num not in candidates:
                     # Avoid duplicates within 0.05
                     if not any(abs(clean_num - c) < 0.05 for c in candidates):
@@ -952,7 +974,11 @@ class AutoAlert:
             return
 
         curr = "$" if self.segment == "CRYPTO" else "₹"
-        dec = 4 if self.segment == "CDS" else (2 if self.ltp < 100 or (plan_is_option and entry_ref < 100) else 1)
+        dec = (
+            4
+            if self.segment == "CDS"
+            else (2 if self.ltp < 100 or (plan_is_option and entry_ref < 100) else 1)
+        )
 
         t1 = candidates[0]
         if not plan_is_option or is_opt:
@@ -1136,7 +1162,10 @@ class AutoAlert:
                         return True
                 elif created_dt.date() < now.date():
                     return True
-                elif th in ("SCALP", "INTRADAY_SCALP_ONLY") and (now - created_dt).total_seconds() >= 1800:
+                elif (
+                    th in ("SCALP", "INTRADAY_SCALP_ONLY")
+                    and (now - created_dt).total_seconds() >= 1800
+                ):
                     return True
                 elif th == "INTRADAY" and (now - created_dt).total_seconds() >= 3600:
                     return True
@@ -1173,6 +1202,10 @@ class AutoAlert:
                 if not self.expiry_date and clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY:
                     target_weekday = INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym]
                     days_ahead = (target_weekday - created_dt.weekday()) % 7
+                    if days_ahead == 0 and (
+                        created_dt.hour > 15 or (created_dt.hour == 15 and created_dt.minute >= 30)
+                    ):
+                        days_ahead = 7
                     exp_dt = created_dt.replace(hour=15, minute=30, second=0) + timedelta(
                         days=days_ahead
                     )
@@ -1294,7 +1327,8 @@ class AutoAlert:
                 (self.strike or self.option_type or self.contract_symbol)
                 and self.option_premium
                 and self.ltp
-                and abs(self.ltp - float(self.option_premium)) < max(1.0, float(self.option_premium) * 0.15)
+                and abs(self.ltp - float(self.option_premium))
+                < max(1.0, float(self.option_premium) * 0.15)
             )
         )
         if is_opt_primary and self.initial_entry_premium and self.initial_entry_premium > 0:
@@ -1341,10 +1375,13 @@ class AutoAlert:
                     or (
                         is_opt
                         and getattr(self, "option_premium", None)
-                        and abs(ep - float(self.option_premium)) < max(1.0, float(self.option_premium) * 0.15)
+                        and abs(ep - float(self.option_premium))
+                        < max(1.0, float(self.option_premium) * 0.15)
                     )
                 )
-                is_option_buyer = is_opt_prem and str(getattr(self, "option_write", False)).lower() not in ("true", "1")
+                is_option_buyer = is_opt_prem and str(
+                    getattr(self, "option_write", False)
+                ).lower() not in ("true", "1")
                 dir_str = str(getattr(self, "direction", "BULLISH")).upper()
                 is_bullish = dir_str not in ("BEARISH", "SELL", "SHORT")
                 is_expanding_up = is_option_buyer or is_bullish
@@ -1388,7 +1425,7 @@ class AutoAlert:
         sl = getattr(self, "initial_stop_loss", None) or self.stop_loss
         if t1 and ep and sl and ep != sl:
             risk = abs(ep - sl)
-            is_expanding_up = (t1 > ep)
+            is_expanding_up = t1 > ep
             # Enforce strict monotonicity relative to t1
             if t2_num is not None:
                 if is_expanding_up and t2_num > t1:
@@ -1432,7 +1469,9 @@ class AutoAlert:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["status"] = self.stage
-        d["scrutiny"] = (self.metrics or {}).get("scrutiny") if isinstance(self.metrics, dict) else None
+        d["scrutiny"] = (
+            (self.metrics or {}).get("scrutiny") if isinstance(self.metrics, dict) else None
+        )
         d["entry_price"] = self.entry_price
         d["target_1"] = self.target_1
         d["target_2"] = self.target_2

@@ -13,12 +13,15 @@ Comprehensive regression & calibration invariant tests for:
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
-import pytest
 
 from engine.alert_model import AutoAlert
 from engine.alert_evaluator import evaluate_alert_invalidation
 from brokers.fyers import _to_fyers_symbol
-from bot.free_index_templates import render_free_index_alert, render_free_index_milestone, MilestoneAlertData
+from bot.free_index_templates import (
+    render_free_index_alert,
+    render_free_index_milestone,
+    MilestoneAlertData,
+)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -54,13 +57,17 @@ def test_broker_zero_quote_does_not_suppress_fallback():
     mock_broker.get_quote.return_value = {"BSE:SENSEX26O0872000PE": dummy_zero_quote}
 
     # When broker returns 0.0, it should not be in final result unless fallback resolves it
-    with patch("market.quotes.get_data_broker", return_value=mock_broker), \
-         patch("market.quotes.get_data_broker_key", return_value="fyers"), \
-         patch("market.quotes._QUOTE_CACHE", OrderedDict()), \
-         patch("market.quotes._options_quotes", return_value={
-             "BSE:SENSEX26O0872000PE": Quote(symbol="SENSEX26O0872000PE", last_price=505.0)
-         }) as mock_opt_fallback:
-
+    with (
+        patch("market.quotes.get_data_broker", return_value=mock_broker),
+        patch("market.quotes.get_data_broker_key", return_value="fyers"),
+        patch("market.quotes._QUOTE_CACHE", OrderedDict()),
+        patch(
+            "market.quotes._options_quotes",
+            return_value={
+                "BSE:SENSEX26O0872000PE": Quote(symbol="SENSEX26O0872000PE", last_price=505.0)
+            },
+        ) as mock_opt_fallback,
+    ):
         quotes = get_quote(["BSE:SENSEX26O0872000PE"])
         # Fallback MUST be called because broker quote was 0.0
         assert mock_opt_fallback.called
@@ -128,7 +135,9 @@ def test_early_warning_time_stop_due_diligence_ignited_or_hit_targets():
     with patch("market.calendar.is_market_open", return_value=True):
         # Case 2: Market price is ₹460.85 (far above trigger ₹308.15, and above T1 ₹388.8 & T2 ₹439.3)
         reason = evaluate_alert_invalidation(alert, current_ltp=460.85)
-        assert reason is None, "Alert that ignited/reached targets MUST NOT expire with 'Setup did not trigger'"
+        assert reason is None, (
+            "Alert that ignited/reached targets MUST NOT expire with 'Setup did not trigger'"
+        )
 
         # Case 3: Market price was unignited (e.g. ₹290.0 < trigger ₹308.15) throughout TTL
         reason_unignited = evaluate_alert_invalidation(alert, current_ltp=290.0)

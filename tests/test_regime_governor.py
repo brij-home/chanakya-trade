@@ -9,14 +9,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import pytest
 
 from analysis.regime_governor import (
     classify_market_regime,
     is_detector_eligible_for_regime,
 )
-from engine.alert_model import AutoAlert
-from engine.alert_scrutiny import AlertScrutinyAuditor
 
 IST = ZoneInfo("Asia/Kolkata")
 

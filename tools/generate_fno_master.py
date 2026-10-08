@@ -88,4 +88,3 @@ code_lines.append("}")
 py_path = Path(__file__).resolve().parent / "fno_code_block.py"
 py_path.write_text("\n".join(code_lines), encoding="utf-8")
 print(f"Generated python code block with {len(keys)} entries at {py_path}")
-

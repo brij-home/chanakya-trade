@@ -953,7 +953,12 @@ def detect_options_momentum_breakouts(
                     logger.debug(f"[OptionsBreakout] Trade plan calculation failed: {e_tp}")
 
                 is_index_sym = clean_sym in (
-                    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"
+                    "NIFTY",
+                    "BANKNIFTY",
+                    "FINNIFTY",
+                    "MIDCPNIFTY",
+                    "SENSEX",
+                    "BANKEX",
                 )
                 if opt_plan and opt_plan.get("sl_premium") and opt_plan.get("t1_premium"):
                     opt_sl = float(opt_plan["sl_premium"])

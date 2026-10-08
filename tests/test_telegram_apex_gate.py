@@ -467,4 +467,3 @@ def test_telegram_index_hourly_pacing_apex_override():
     )
     passed, reason = engine._eval_telegram_apex_gate(alert_apex, in_market=True)
     assert passed, f"Expected APEX 95% index setup to pass pacing override, but got: {reason}"
-

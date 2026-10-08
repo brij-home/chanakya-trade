@@ -727,7 +727,9 @@ class MarketTickerStream:
                     # When WS is active: refresh macro every 15s, ribbon reconcile every 60s
                     # When WS is inactive: poll both every poll_interval_seconds
                     need_ribbon = (not ws_active) or (now - last_ribbon_reconcile >= 60.0)
-                    need_macro = (now - last_macro_fetch >= (15.0 if ws_active else poll_interval_seconds))
+                    need_macro = now - last_macro_fetch >= (
+                        15.0 if ws_active else poll_interval_seconds
+                    )
 
                     if need_ribbon:
                         last_ribbon_reconcile = now
@@ -738,7 +740,10 @@ class MarketTickerStream:
                         self.refresh_indices_sync(force_ribbon=need_ribbon)
                 except Exception as e:
                     logger.warning(f"[TickerStream] Refresh worker error: {e}", exc_info=True)
-                    if "interpreter shutdown" in str(e).lower() or "cannot schedule new futures" in str(e).lower():
+                    if (
+                        "interpreter shutdown" in str(e).lower()
+                        or "cannot schedule new futures" in str(e).lower()
+                    ):
                         break
                 for _ in range(max(1, int(poll_interval_seconds * 10))):
                     if not self._running:

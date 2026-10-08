@@ -12,11 +12,9 @@ Deterministic unit tests for institutional Fyers API v3 enhancements:
 """
 
 from unittest.mock import MagicMock, patch
-import pytest
 
-from brokers.base import OptionsContract, Quote
 from brokers.fyers import FyersAPI, _to_fyers_symbol
-from market.websocket import _to_ws_symbol, Tick, WebSocketManager
+from market.websocket import _to_ws_symbol
 
 
 def test_multi_segment_symbol_resolution():
@@ -222,27 +220,49 @@ def test_fyers_modify_order():
     """Verify modify_order dispatches patch call to SDK."""
     fyers = FyersAPI(app_id="TEST-100", secret_key="dummy")
     mock_sdk = MagicMock()
-    mock_sdk.modify_order.return_value = {"s": "ok", "id": "24100200001234", "message": "Order modified successfully"}
+    mock_sdk.modify_order.return_value = {
+        "s": "ok",
+        "id": "24100200001234",
+        "message": "Order modified successfully",
+    }
     fyers._fyers = mock_sdk
     fyers._access_token = "token"
 
     res = fyers.modify_order(order_id="24100200001234", price=2550.0, qty=100)
     assert res.status == "OPEN"
     assert res.order_id == "24100200001234"
-    mock_sdk.modify_order.assert_called_once_with({"id": "24100200001234", "limitPrice": 2550.0, "qty": 100})
+    mock_sdk.modify_order.assert_called_once_with(
+        {"id": "24100200001234", "limitPrice": 2550.0, "qty": 100}
+    )
 
 
 def test_fyers_place_multileg_order():
     """Verify place_multileg_order packages legs with canonical symbols."""
     fyers = FyersAPI(app_id="TEST-100", secret_key="dummy")
     mock_sdk = MagicMock()
-    mock_sdk.place_multileg_order.return_value = {"s": "ok", "id": "ML-998877", "message": "Spread order placed"}
+    mock_sdk.place_multileg_order.return_value = {
+        "s": "ok",
+        "id": "ML-998877",
+        "message": "Spread order placed",
+    }
     fyers._fyers = mock_sdk
     fyers._access_token = "token"
 
     legs = [
-        {"symbol": "NSE:NIFTY26OCT25000CE", "qty": 65, "side": "BUY", "type": "LIMIT", "limitPrice": 120.0},
-        {"symbol": "NSE:NIFTY26OCT25200CE", "qty": 65, "side": "SELL", "type": "LIMIT", "limitPrice": 50.0},
+        {
+            "symbol": "NSE:NIFTY26OCT25000CE",
+            "qty": 65,
+            "side": "BUY",
+            "type": "LIMIT",
+            "limitPrice": 120.0,
+        },
+        {
+            "symbol": "NSE:NIFTY26OCT25200CE",
+            "qty": 65,
+            "side": "SELL",
+            "type": "LIMIT",
+            "limitPrice": 50.0,
+        },
     ]
     res = fyers.place_multileg_order(legs=legs, order_type="2L", product_type="MARGIN")
     assert res.status == "SUBMITTED"
@@ -254,14 +274,20 @@ def test_fyers_gtt_orders():
     """Verify place_gtt_order and cancel_gtt_order payloads."""
     fyers = FyersAPI(app_id="TEST-100", secret_key="dummy")
     mock_sdk = MagicMock()
-    mock_sdk.place_gtt_order.return_value = {"s": "ok", "id": "GTT-1001", "message": "GTT order placed"}
+    mock_sdk.place_gtt_order.return_value = {
+        "s": "ok",
+        "id": "GTT-1001",
+        "message": "GTT order placed",
+    }
     mock_sdk.cancel_gtt_order.return_value = {"s": "ok"}
     mock_sdk.gtt_orderbook.return_value = {"orderBook": [{"id": "GTT-1001", "status": "ACTIVE"}]}
     fyers._fyers = mock_sdk
     fyers._access_token = "token"
 
     # Place GTT
-    gtt_res = fyers.place_gtt_order(symbol="RELIANCE", qty=10, side=1, trigger_price=2450.0, limit_price=2455.0)
+    gtt_res = fyers.place_gtt_order(
+        symbol="RELIANCE", qty=10, side=1, trigger_price=2450.0, limit_price=2455.0
+    )
     assert gtt_res["id"] == "GTT-1001"
 
     # Orderbook
@@ -279,13 +305,25 @@ def test_fyers_order_stream_subscription():
 
     manager = FyersOrderStreamManager()
     mock_order_ws = MagicMock()
+    mock_order_socket_cls = MagicMock(return_value=mock_order_ws)
+    mock_order_ws_mod = MagicMock(FyersOrderSocket=mock_order_socket_cls)
+    mock_fyers_ws = MagicMock(order_ws=mock_order_ws_mod)
+    mock_fyers_pkg = MagicMock(FyersWebsocket=mock_fyers_ws)
 
-    with patch("fyers_apiv3.FyersWebsocket.order_ws.FyersOrderSocket", return_value=mock_order_ws):
+    with patch.dict(
+        "sys.modules",
+        {
+            "fyers_apiv3": mock_fyers_pkg,
+            "fyers_apiv3.FyersWebsocket": mock_fyers_ws,
+            "fyers_apiv3.FyersWebsocket.order_ws": mock_order_ws_mod,
+        },
+    ):
         manager.start(access_token="test_token", app_id="APP-100")
         assert manager._access_token == "APP-100:test_token"
 
         # Trigger on_connect callback
         manager._handle_connect()
-        mock_order_ws.subscribe.assert_called_once_with(data_type="OnOrders,OnTrades,OnPositions,OnGeneral")
+        mock_order_ws.subscribe.assert_called_once_with(
+            data_type="OnOrders,OnTrades,OnPositions,OnGeneral"
+        )
         manager.stop()
-

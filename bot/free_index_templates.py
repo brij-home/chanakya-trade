@@ -67,13 +67,9 @@ SEBI_FULL_DISCLAIMER_BLOCK = (
     f"{SEBI_STATUTORY_DERIVATIVES_DISCLOSURE}"
 )
 
-SEBI_COMPACT_DISCLAIMER = (
-    "⚖️ <i>Edu/Simulation only · Strict SL mandatory · Not SEBI advice</i>"
-)
+SEBI_COMPACT_DISCLAIMER = "⚖️ <i>Edu/Simulation only · Strict SL mandatory · Not SEBI advice</i>"
 
-COMMUNITY_CTA_BLOCK = (
-    f"👥 <a href=\"{FREE_INDEX_CHANNEL_LINK}\">{FREE_INDEX_CHANNEL_HANDLE}</a>"
-)
+COMMUNITY_CTA_BLOCK = f'👥 <a href="{FREE_INDEX_CHANNEL_LINK}">{FREE_INDEX_CHANNEL_HANDLE}</a>'
 
 
 # ── Milestone / Lifecycle Template Formatter ────────────────────────────────
@@ -154,9 +150,7 @@ def render_free_index_milestone(
     color_icon = "🔴" if is_pe else "🟢"
 
     call_time_fmt, elapsed_fmt = _format_call_time_and_elapsed(d.call_time, d.timestamp)
-    call_time_part = (
-        f" · 📞 {call_time_fmt}{elapsed_fmt}" if call_time_fmt else ""
-    )
+    call_time_part = f" · 📞 {call_time_fmt}{elapsed_fmt}" if call_time_fmt else ""
     ref_line = (
         f"🏷️ <code>{d.signal_id}</code>{call_time_part}"
         if d.signal_id
@@ -178,7 +172,8 @@ def render_free_index_milestone(
         getattr(d, "option_type", None)
         or "PE" in str(d.contract or "").upper()
         or "CE" in str(d.contract or "").upper()
-        or getattr(d, "alert_type", "") in ("OPTIONS MOMENTUM", "GAMMA BLAST", "INDEX CALL SETUP", "INDEX PUT SETUP")
+        or getattr(d, "alert_type", "")
+        in ("OPTIONS MOMENTUM", "GAMMA BLAST", "INDEX CALL SETUP", "INDEX PUT SETUP")
     )
     if is_opt:
         act_str = str(getattr(d, "decisive_action", "") or "").upper()
@@ -264,7 +259,14 @@ def render_free_index_milestone(
         )
 
     # 3. Target 0.5 (De-Risking)
-    if d.milestone_type in ("TARGET_0_5", "T0_5_ACHIEVED", "DE_RISK_0_5R", "TARGET_0_5_HIT", "SCALE_1_ACHIEVED", "T0.5_ACHIEVED"):
+    if d.milestone_type in (
+        "TARGET_0_5",
+        "T0_5_ACHIEVED",
+        "DE_RISK_0_5R",
+        "TARGET_0_5_HIT",
+        "SCALE_1_ACHIEVED",
+        "T0.5_ACHIEVED",
+    ):
         return (
             f"⚡ <b>{update_prefix}T0.5 DE-RISK</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -289,7 +291,12 @@ def render_free_index_milestone(
         )
 
     # 4. Trailing Stop Ratchet
-    if d.milestone_type in ("TRAIL_RATCHET", "TRAILING_UPDATE", "TRAIL_POST_SWEEP", "COMPRESS_STALL_RISK"):
+    if d.milestone_type in (
+        "TRAIL_RATCHET",
+        "TRAILING_UPDATE",
+        "TRAIL_POST_SWEEP",
+        "COMPRESS_STALL_RISK",
+    ):
         trail_sl = d.trailing_stop or "COST / BREAKEVEN"
         trail_val_str = f"₹{trail_sl:,.2f}" if isinstance(trail_sl, (int, float)) else str(trail_sl)
         return (
@@ -328,7 +335,12 @@ def render_free_index_milestone(
         )
 
     # 7. Runner Exit / Breakeven Exit
-    if d.milestone_type in ("RUNNER_EXIT", "PROFIT_SECURED", "BREAKEVEN_EXIT", "TRAILING_STOP_EXIT"):
+    if d.milestone_type in (
+        "RUNNER_EXIT",
+        "PROFIT_SECURED",
+        "BREAKEVEN_EXIT",
+        "TRAILING_STOP_EXIT",
+    ):
         is_runner_profit = bool(d.pnl_pts is not None and d.pnl_pts > 0)
         action_title = "PROFIT SECURED" if is_runner_profit else "CAPITAL PRESERVED"
         return (
@@ -342,15 +354,25 @@ def render_free_index_milestone(
 
     # 8. Time-Stop Scratch Exit & Setup Expiry
     if d.milestone_type in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH", "EXPIRED", "TIME_EXPIRED"):
-        inv_text = str(getattr(d, "invalidation_reason", "") or getattr(d, "rationale", "") or "").lower()
+        inv_text = str(
+            getattr(d, "invalidation_reason", "") or getattr(d, "rationale", "") or ""
+        ).lower()
         is_untriggered = (
             "did not trigger" in inv_text
             or "setup did not trigger" in inv_text
             or getattr(d, "stage", "") == "EXPIRED"
             or getattr(d, "target_status", "") == "TIME_EXPIRED"
         )
-        header_text = f"⏳ <b>{update_prefix}SETUP EXPIRED</b>" if is_untriggered else f"⏳ <b>{update_prefix}TIME-STOP SCRATCH</b>"
-        reason_text = "Setup did not trigger within momentum window. Cancel pending orders." if is_untriggered else "Momentum stagnated, theta bleed risk. Scratch at CMP."
+        header_text = (
+            f"⏳ <b>{update_prefix}SETUP EXPIRED</b>"
+            if is_untriggered
+            else f"⏳ <b>{update_prefix}TIME-STOP SCRATCH</b>"
+        )
+        reason_text = (
+            "Setup did not trigger within momentum window. Cancel pending orders."
+            if is_untriggered
+            else "Momentum stagnated, theta bleed risk. Scratch at CMP."
+        )
         return (
             f"{header_text}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -376,7 +398,7 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
     """
     Renders an AutoAlert instance into a short, crisp, high-density SEBI-compliant
     Telegram message for the 'Nifty BankNifty Free Signals' channel.
-    
+
     Standards:
     - Zero direct 'BUY' or 'SELL' directives (shares Entry Zone, SL, T1, T2 levels).
     - Uses shortforms (CMP, SL, T1, T2, R:R, Lot, No-Chase).
@@ -385,6 +407,7 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
     """
     if isinstance(alert, dict):
         from engine.alert_model import AutoAlert
+
         alert = AutoAlert.from_dict(alert)
 
     symbol = getattr(alert, "symbol", "INDEX").upper()
@@ -398,21 +421,54 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
     is_milestone = (
         is_update_flag
         or getattr(alert, "is_invalidated", False)
-        or stage_str in (
-            "INVALIDATED", "STOPPED_OUT", "CANCELLED",
-            "T0_5_ACHIEVED", "TARGET_0_5", "TARGET_0_5_HIT", "SCALE_1_ACHIEVED",
-            "T1_ACHIEVED", "TARGET_1", "TARGET_1_HIT",
-            "T2_ACHIEVED", "TARGET_2", "TARGET_2_HIT",
-            "TARGET_ACHIEVED", "COMPLETED", "FINAL_TARGET",
-            "TRAILING_UPDATE", "DE_RISK_0_5R", "BREAKEVEN_LOCKED", "TRAIL_RATCHET",
-            "RUNNER_EXIT", "PROFIT_SECURED", "BREAKEVEN_EXIT", "TRAILING_STOP_EXIT",
-            "TIME_STOP_EXIT", "TIME_STOP_SCRATCH", "EXPIRED",
+        or stage_str
+        in (
+            "INVALIDATED",
+            "STOPPED_OUT",
+            "CANCELLED",
+            "T0_5_ACHIEVED",
+            "TARGET_0_5",
+            "TARGET_0_5_HIT",
+            "SCALE_1_ACHIEVED",
+            "T1_ACHIEVED",
+            "TARGET_1",
+            "TARGET_1_HIT",
+            "T2_ACHIEVED",
+            "TARGET_2",
+            "TARGET_2_HIT",
+            "TARGET_ACHIEVED",
+            "COMPLETED",
+            "FINAL_TARGET",
+            "TRAILING_UPDATE",
+            "DE_RISK_0_5R",
+            "BREAKEVEN_LOCKED",
+            "TRAIL_RATCHET",
+            "RUNNER_EXIT",
+            "PROFIT_SECURED",
+            "BREAKEVEN_EXIT",
+            "TRAILING_STOP_EXIT",
+            "TIME_STOP_EXIT",
+            "TIME_STOP_SCRATCH",
+            "EXPIRED",
             "IN_FLIGHT_WARNING",
         )
-        or target_status in (
-            "T0_5", "T0.5", "T1", "T2", "TARGET", "TARGET_HIT", "TARGET_ACHIEVED",
-            "FINAL_TARGET", "COMPLETED", "RUNNER_CLOSED", "RUNNER_EXIT", "PROFIT_SECURED",
-            "TIME_EXPIRED", "TIME_STOP_EXIT", "TIME_STOP_SCRATCH",
+        or target_status
+        in (
+            "T0_5",
+            "T0.5",
+            "T1",
+            "T2",
+            "TARGET",
+            "TARGET_HIT",
+            "TARGET_ACHIEVED",
+            "FINAL_TARGET",
+            "COMPLETED",
+            "RUNNER_CLOSED",
+            "RUNNER_EXIT",
+            "PROFIT_SECURED",
+            "TIME_EXPIRED",
+            "TIME_STOP_EXIT",
+            "TIME_STOP_SCRATCH",
         )
         or "time-stop expired" in str(getattr(alert, "archive_reason", "") or "").lower()
         or "time-stop expired" in str(getattr(alert, "summary", "") or "").lower()
@@ -424,7 +480,11 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
         m_type = "TRAIL_RATCHET"
         if getattr(alert, "milestone_type", None):
             m_type = str(alert.milestone_type).upper()
-        elif getattr(alert, "is_invalidated", False) or stage_str in ("INVALIDATED", "STOPPED_OUT", "CANCELLED"):
+        elif getattr(alert, "is_invalidated", False) or stage_str in (
+            "INVALIDATED",
+            "STOPPED_OUT",
+            "CANCELLED",
+        ):
             m_type = "INVALIDATED"
         elif stage_str == "IN_FLIGHT_WARNING":
             m_type = "IN_FLIGHT_WARNING"
@@ -436,16 +496,31 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
             or "time-stop expired" in str(getattr(alert, "invalidation_reason", "") or "").lower()
         ):
             m_type = "TIME_STOP_EXIT"
-        elif stage_str in ("RUNNER_EXIT", "PROFIT_SECURED", "BREAKEVEN_EXIT") or target_status in ("RUNNER_CLOSED", "RUNNER_EXIT", "PROFIT_SECURED"):
+        elif stage_str in ("RUNNER_EXIT", "PROFIT_SECURED", "BREAKEVEN_EXIT") or target_status in (
+            "RUNNER_CLOSED",
+            "RUNNER_EXIT",
+            "PROFIT_SECURED",
+        ):
             m_type = "RUNNER_EXIT"
-        elif stage_str in ("FINAL_TARGET", "TARGET_ACHIEVED", "COMPLETED") or target_status in ("FINAL_TARGET", "COMPLETED"):
+        elif stage_str in ("FINAL_TARGET", "TARGET_ACHIEVED", "COMPLETED") or target_status in (
+            "FINAL_TARGET",
+            "COMPLETED",
+        ):
             m_type = "FINAL_TARGET"
         elif stage_str in ("T2_ACHIEVED", "TARGET_2", "TARGET_2_HIT") or target_status == "T2":
             m_type = "TARGET_2"
         elif stage_str in ("T1_ACHIEVED", "TARGET_1", "TARGET_1_HIT") or target_status == "T1":
             m_type = "TARGET_1"
         elif (
-            stage_str in ("T0_5_ACHIEVED", "TARGET_0_5", "TARGET_0_5_HIT", "SCALE_1_ACHIEVED", "DE_RISK_0_5R", "T0.5_ACHIEVED")
+            stage_str
+            in (
+                "T0_5_ACHIEVED",
+                "TARGET_0_5",
+                "TARGET_0_5_HIT",
+                "SCALE_1_ACHIEVED",
+                "DE_RISK_0_5R",
+                "T0.5_ACHIEVED",
+            )
             or target_status in ("T0_5", "T0.5")
             or "TARGET 0.5" in str(getattr(alert, "headline", "") or "").upper()
             or "T0.5" in str(getattr(alert, "headline", "") or "").upper()
@@ -453,13 +528,20 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
             m_type = "TARGET_0_5"
         elif stage_str == "BREAKEVEN_LOCKED":
             m_type = "BREAKEVEN_LOCKED"
-        elif stage_str in ("TRAILING_UPDATE", "TRAIL_RATCHET", "TRAIL_POST_SWEEP", "COMPRESS_STALL_RISK"):
+        elif stage_str in (
+            "TRAILING_UPDATE",
+            "TRAIL_RATCHET",
+            "TRAIL_POST_SWEEP",
+            "COMPRESS_STALL_RISK",
+        ):
             m_type = "TRAIL_RATCHET"
 
         # Physical reach validation guard for TARGET_1 and TARGET_2
         if m_type in ("TARGET_1", "TARGET_2"):
             cur_p = float(getattr(alert, "ltp", 0.0) or getattr(alert, "current_ltp", 0.0) or 0.0)
-            entry_p = getattr(alert, "entry_price", None) or getattr(alert, "initial_entry_premium", None)
+            entry_p = getattr(alert, "entry_price", None) or getattr(
+                alert, "initial_entry_premium", None
+            )
             act_p = getattr(alert, "actionable_plan", {}) or {}
             if not entry_p and isinstance(act_p, dict):
                 rec_e = act_p.get("recommended_entry")
@@ -481,7 +563,8 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
                 or getattr(alert, "strike", None)
                 or "PE" in str(getattr(alert, "contract_symbol", "") or "")
                 or "CE" in str(getattr(alert, "contract_symbol", "") or "")
-                or alert_type_raw in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+                or alert_type_raw
+                in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
             )
             if is_opt:
                 is_option_seller = (
@@ -500,9 +583,17 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
                     if t1_cand:
                         is_downward = t1_cand < entry_p
                     else:
-                        is_downward = str(getattr(alert, "direction", "BULLISH")).upper() in ("BEARISH", "SHORT", "SELL")
+                        is_downward = str(getattr(alert, "direction", "BULLISH")).upper() in (
+                            "BEARISH",
+                            "SHORT",
+                            "SELL",
+                        )
                 else:
-                    is_downward = str(getattr(alert, "direction", "BULLISH")).upper() in ("BEARISH", "SHORT", "SELL")
+                    is_downward = str(getattr(alert, "direction", "BULLISH")).upper() in (
+                        "BEARISH",
+                        "SHORT",
+                        "SELL",
+                    )
 
             if m_type == "TARGET_1":
                 t1_raw = (
@@ -523,7 +614,12 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
                         sl_val = float(alert.stop_loss)
                         r_val = abs(entry_p - sl_val)
                         if r_val > 0:
-                            t1_num = round(entry_p + (r_val * 2.0) if not is_downward else entry_p - (r_val * 2.0), 2)
+                            t1_num = round(
+                                entry_p + (r_val * 2.0)
+                                if not is_downward
+                                else entry_p - (r_val * 2.0),
+                                2,
+                            )
                     except Exception:
                         pass
 
@@ -545,7 +641,9 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
                     m_type = "TARGET_0_5"
 
             elif m_type == "TARGET_2":
-                t2_raw = getattr(alert, "target_2", None) or (act_p.get("target_2") if isinstance(act_p, dict) else None)
+                t2_raw = getattr(alert, "target_2", None) or (
+                    act_p.get("target_2") if isinstance(act_p, dict) else None
+                )
                 t2_num = None
                 if t2_raw:
                     m_t2 = re.search(r"[\d,]+(?:\.\d+)?", str(t2_raw))
@@ -568,7 +666,9 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
                         f"[FreeIndexTemplates] Defensively vetoed false TARGET_2 in render_free_index_alert for {symbol}: "
                         f"LTP={cur_p} vs T2={t2_num} (downward={is_downward})."
                     )
-                    t1_raw = getattr(alert, "target_1", None) or (act_p.get("target_1") if isinstance(act_p, dict) else None)
+                    t1_raw = getattr(alert, "target_1", None) or (
+                        act_p.get("target_1") if isinstance(act_p, dict) else None
+                    )
                     t1_num = None
                     if t1_raw:
                         m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(t1_raw))
@@ -601,11 +701,11 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
     is_bear = direction in ("BEARISH", "SHORT", "SELL")
 
     actionable_plan = getattr(alert, "actionable_plan", {}) or {}
-    option_type = (getattr(alert, "option_type", "") or actionable_plan.get("option_type", "") or "").upper()
+    option_type = (
+        getattr(alert, "option_type", "") or actionable_plan.get("option_type", "") or ""
+    ).upper()
     raw_contract = (
-        getattr(alert, "contract_symbol", "")
-        or actionable_plan.get("contract", "")
-        or ""
+        getattr(alert, "contract_symbol", "") or actionable_plan.get("contract", "") or ""
     )
 
     # Strict CE/PE determination
@@ -688,13 +788,16 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
     if not lot_sz:
         try:
             from engine.position_sizer import get_lot_size
+
             lot_sz = get_lot_size(symbol)
         except Exception:
             lot_sz = None
     lot_str = f" | Lot: <b>{lot_sz}</b>" if lot_sz else ""
 
     # No Chase Boundary
-    no_chase_val = getattr(alert, "no_chase_boundary", None) or actionable_plan.get("no_chase_boundary")
+    no_chase_val = getattr(alert, "no_chase_boundary", None) or actionable_plan.get(
+        "no_chase_boundary"
+    )
     no_chase_str = ""
     if no_chase_val and float(no_chase_val) > 0:
         no_chase_str = f" | 🛑 No-Chase: > ₹{float(no_chase_val):,.1f}"
@@ -718,8 +821,12 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
         or getattr(alert, "summary", "")
         or "Institutional order flow buildup with VWAP support and momentum expansion."
     )
-    confluence = re.sub(r"^(?:T-0\s+)?Explosive\s+(?:Up|Down)side\s+Mover:\s*", "", confluence, flags=re.IGNORECASE)
-    confluence = re.sub(r"^(?:Intraday\s+)?(?:Momentum|Breakdown)\s+Spark:\s*", "", confluence, flags=re.IGNORECASE)
+    confluence = re.sub(
+        r"^(?:T-0\s+)?Explosive\s+(?:Up|Down)side\s+Mover:\s*", "", confluence, flags=re.IGNORECASE
+    )
+    confluence = re.sub(
+        r"^(?:Intraday\s+)?(?:Momentum|Breakdown)\s+Spark:\s*", "", confluence, flags=re.IGNORECASE
+    )
     confluence = re.sub(r"\s*\|\s*OTE:.*$", "", confluence)
     confluence = confluence.strip().rstrip(" .|")
 
@@ -754,6 +861,4 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
         f"🏷️ <code>{sig_ref}</code>",
     ]
 
-
     return "\n".join(lines)
-

@@ -10,12 +10,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import sys
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Tuple
 
 from engine.alert_model import AutoAlert
 
@@ -39,7 +38,10 @@ def get_auto_alerts_file() -> Path:
             if hasattr(aae, "AUTO_ALERTS_FILE"):
                 override = getattr(aae, "AUTO_ALERTS_FILE")
                 if override is not None:
-                    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
+                    base = Path(
+                        os.environ.get("TRADING_PLATFORM_DATA")
+                        or (Path.home() / ".trading_platform")
+                    )
                     default_path = base / "auto_alerts.json"
                     if Path(override) != default_path:
                         return Path(override)
@@ -85,7 +87,11 @@ class AlertRepository:
             )
 
             # Invariant: Never pollute default production storage during tests unless redirected to sandbox/tmp
-            if is_test_env and target_path == base_prod and not os.environ.get("TRADING_PLATFORM_DATA"):
+            if (
+                is_test_env
+                and target_path == base_prod
+                and not os.environ.get("TRADING_PLATFORM_DATA")
+            ):
                 return
 
             target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,8 +99,7 @@ class AlertRepository:
 
             if not is_test_env:
                 filtered_alerts = [
-                    a for a in alerts
-                    if assert_production_data_sanctity(a, "AlertRepository")
+                    a for a in alerts if assert_production_data_sanctity(a, "AlertRepository")
                 ]
             else:
                 filtered_alerts = list(alerts)
@@ -104,7 +109,9 @@ class AlertRepository:
 
             # Atomic persistence: write to sibling PID-tagged temp file then atomic replace
             payload = json.dumps(data, indent=2)
-            temp_path = target_path.with_name(f"{target_path.name}.tmp.{os.getpid()}_{time.time_ns()}")
+            temp_path = target_path.with_name(
+                f"{target_path.name}.tmp.{os.getpid()}_{time.time_ns()}"
+            )
             try:
                 temp_path.write_text(payload, encoding="utf-8")
                 for attempt in range(4):
@@ -121,7 +128,9 @@ class AlertRepository:
                     temp_path.unlink(missing_ok=True)
 
             # Dual-write to institutional SQLite WAL alert store (skip under test harness)
-            if not ("PYTEST_CURRENT_TEST" in os.environ or os.environ.get("CHANAKYA_TESTING") == "1"):
+            if not (
+                "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("CHANAKYA_TESTING") == "1"
+            ):
                 try:
                     from engine.sqlite_store import alert_sqlite_store
 
@@ -240,8 +249,7 @@ class AlertRepository:
                             pnl_pct=d.get("pnl_pct"),
                             updated_at=d.get("updated_at"),
                             triggered_at=d.get("triggered_at"),
-                            original_call_time=d.get("original_call_time")
-                            or d.get("created_at"),
+                            original_call_time=d.get("original_call_time") or d.get("created_at"),
                             in_flight_warning_sent=bool(d.get("in_flight_warning_sent", False)),
                             in_flight_warning_reason=d.get("in_flight_warning_reason"),
                             in_flight_warning_at=d.get("in_flight_warning_at"),
@@ -264,7 +272,9 @@ class AlertRepository:
                         )
                     )
                 except Exception as item_err:
-                    logger.warning(f"[AlertRepository] Failed to deserialize alert {aid}: {item_err}")
+                    logger.warning(
+                        f"[AlertRepository] Failed to deserialize alert {aid}: {item_err}"
+                    )
 
         # Rehabilitate alerts falsely marked as INVALIDATED after hitting T1 or breaching ratcheted trailing stop
         rehab_count = 0
@@ -298,9 +308,7 @@ class AlertRepository:
                         a.contract_symbol
                         or f"{a.symbol} {getattr(a, 'strike', '') or ''} {getattr(a, 'option_type', '') or ''}".strip()
                     )
-                    a.headline = (
-                        f"🏁 [REAL/LIVE] RUNNER CLOSED (PROFIT SECURED): {inst_label}"
-                    )
+                    a.headline = f"🏁 [REAL/LIVE] RUNNER CLOSED (PROFIT SECURED): {inst_label}"
                     rehab_count += 1
                     try:
                         from engine.learning_engine import pattern_learning_engine
@@ -570,9 +578,13 @@ class AlertRepository:
                         cutoff = "15:15 IST"
 
                     if has_won:
-                        reason = f"Trade completed in profit ({cutoff} cutoff reached). Position closed."
+                        reason = (
+                            f"Trade completed in profit ({cutoff} cutoff reached). Position closed."
+                        )
                     else:
-                        reason = f"Intraday session expired ({cutoff} cutoff reached). Trade closed."
+                        reason = (
+                            f"Intraday session expired ({cutoff} cutoff reached). Trade closed."
+                        )
                 else:
                     if has_won:
                         reason = f"Contract completed profit target ({exp_label}). Position closed."
@@ -632,9 +644,7 @@ class AlertRepository:
 
         return surviving, purged
 
-    def cleanup_corrupted_test_alerts(
-        self, alerts: list[AutoAlert]
-    ) -> Tuple[list[AutoAlert], int]:
+    def cleanup_corrupted_test_alerts(self, alerts: list[AutoAlert]) -> Tuple[list[AutoAlert], int]:
         """
         Removes synthetic test alerts incorrectly marked invalidated.
         """

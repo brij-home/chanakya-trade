@@ -221,7 +221,9 @@ class UnifiedFyersRateGate:
                 "requests_last_min_by_tier": by_category_last_min,
                 "total_requests_by_tier": by_category_total,
                 "uptime_seconds": round(now - self._started_at, 1),
-                "status": "HEALTHY" if utilization_pct < 85.0 else ("WARNING" if utilization_pct < 95.0 else "SATURATED"),
+                "status": "HEALTHY"
+                if utilization_pct < 85.0
+                else ("WARNING" if utilization_pct < 95.0 else "SATURATED"),
             }
 
 

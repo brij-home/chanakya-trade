@@ -22,11 +22,9 @@ Institutional Test Suite for Eagle, Tiger, and Sniper Adaptive Index Framework:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta, time as dtime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from unittest.mock import patch
 import pandas as pd
-import pytest
 
 from engine.index_adaptive_regime import (
     compute_choppiness_index,
@@ -80,14 +78,16 @@ def _generate_synthetic_candles(n_bars: int = 30, pattern: str = "TREND_UP") -> 
             c = o
             vol = 8000
 
-        records.append({
-            "datetime": t,
-            "open": o,
-            "high": h,
-            "low": l,
-            "close": c,
-            "volume": vol,
-        })
+        records.append(
+            {
+                "datetime": t,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": vol,
+            }
+        )
 
     df = pd.DataFrame(records)
     df.set_index("datetime", inplace=True)
@@ -240,7 +240,9 @@ def test_tiger_turtle_soup_fade_in_chop():
         ref_time=dt_midday,
     )
 
-    mandate = evaluate_tiger_mandate(eagle=eagle, is_institutional_thrust=False, is_liquidity_sweep=True)
+    mandate = evaluate_tiger_mandate(
+        eagle=eagle, is_institutional_thrust=False, is_liquidity_sweep=True
+    )
 
     assert mandate.mandate == "TURTLE_SOUP_RANGE_FADE"
     assert mandate.suggested_strategy == "FADE_BOUNDARY"
@@ -293,7 +295,9 @@ def test_sniper_execution_plan_chase_detection():
         setup_name="DAY_HIGH_BREAKOUT",
     )
 
-    assert plan.is_chasing is True, f"Expected chasing flag True for spot {spot} vs boundary {plan.no_chase_boundary}"
+    assert plan.is_chasing is True, (
+        f"Expected chasing flag True for spot {spot} vs boundary {plan.no_chase_boundary}"
+    )
 
 
 def test_unified_adaptive_index_decision():
@@ -320,8 +324,16 @@ def test_unified_adaptive_index_decision():
 
 # ── Integration Tests: Detectors Wired with Eagle, Tiger & Sniper ────────────
 
+
 class _MockContract:
-    def __init__(self, strike: float, option_type: str, last_price: float, volume: int = 20000, oi: int = 10000):
+    def __init__(
+        self,
+        strike: float,
+        option_type: str,
+        last_price: float,
+        volume: int = 20000,
+        oi: int = 10000,
+    ):
         self.strike = strike
         self.option_type = option_type
         self.last_price = last_price
@@ -376,13 +388,18 @@ def test_index_call_setup_ignites_on_thrust_in_chop():
     thrust_high = thrust_open + 55.0
     thrust_low = thrust_open - 2.0
     thrust_close = thrust_high - 3.0
-    thrust_row = pd.DataFrame([{
-        "open": thrust_open,
-        "high": thrust_high,
-        "low": thrust_low,
-        "close": thrust_close,
-        "volume": 120000,
-    }], index=[dt_midday])
+    thrust_row = pd.DataFrame(
+        [
+            {
+                "open": thrust_open,
+                "high": thrust_high,
+                "low": thrust_low,
+                "close": thrust_close,
+                "volume": 120000,
+            }
+        ],
+        index=[dt_midday],
+    )
     df_with_thrust = pd.concat([df_trend, thrust_row])
 
     spot = thrust_close
@@ -466,4 +483,3 @@ def test_orb_suppressed_in_severe_chop():
 
     # Must be suppressed to avoid false break traps
     assert alert is None
-

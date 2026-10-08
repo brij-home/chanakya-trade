@@ -5,7 +5,6 @@ Tests for QuoteDispatcher serialized batching and coalescing.
 """
 
 from unittest.mock import MagicMock, patch
-import pytest
 
 from market.quote_dispatcher import QuoteDispatcher
 from market.fyers_rate_gate import FyersCallCategory

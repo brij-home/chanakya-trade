@@ -11,13 +11,10 @@ Deterministic test suite verifying:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import pandas as pd
-import pytest
 
 from engine.alert_model import AutoAlert
-from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.detectors.index_micro_scalp import detect_index_micro_scalp
 from engine.detectors.index_call_setup import detect_index_call_setup
 from engine.detectors.index_put_setup import detect_index_put_setup
@@ -162,7 +159,9 @@ def test_morning_itm_strike_selection():
     assert len(alerts) > 0, "Expected put alert at 09:58"
     best_alert = alerts[0]
     # Selected strike must be >= spot (ITM Put)
-    assert best_alert.strike >= 22580.0, f"Expected ITM put strike >= 22580, got {best_alert.strike}"
+    assert best_alert.strike >= 22580.0, (
+        f"Expected ITM put strike >= 22580, got {best_alert.strike}"
+    )
     assert best_alert.strike in (22600.0, 22650.0, 22700.0)
 
 

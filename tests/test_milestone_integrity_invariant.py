@@ -101,19 +101,64 @@ def test_validate_milestone_integrity_long_and_short():
     )
 
     # Long: Below T1
-    assert engine.validate_milestone_integrity(long_alert, cur_quote_ltp=2520.0, milestone="T1_ACHIEVED")[0] is False
-    assert engine.validate_milestone_integrity(long_alert, cur_quote_ltp=2520.0, milestone="T2_ACHIEVED")[0] is False
-    assert engine.validate_milestone_integrity(long_alert, cur_quote_ltp=2520.0, milestone="TARGET_ACHIEVED")[0] is False
-    assert engine.validate_milestone_integrity(long_alert, cur_quote_ltp=2520.0, milestone="T0_5_ACHIEVED")[0] is True
+    assert (
+        engine.validate_milestone_integrity(
+            long_alert, cur_quote_ltp=2520.0, milestone="T1_ACHIEVED"
+        )[0]
+        is False
+    )
+    assert (
+        engine.validate_milestone_integrity(
+            long_alert, cur_quote_ltp=2520.0, milestone="T2_ACHIEVED"
+        )[0]
+        is False
+    )
+    assert (
+        engine.validate_milestone_integrity(
+            long_alert, cur_quote_ltp=2520.0, milestone="TARGET_ACHIEVED"
+        )[0]
+        is False
+    )
+    assert (
+        engine.validate_milestone_integrity(
+            long_alert, cur_quote_ltp=2520.0, milestone="T0_5_ACHIEVED"
+        )[0]
+        is True
+    )
 
     # Long: At or above T1
-    assert engine.validate_milestone_integrity(long_alert, cur_quote_ltp=2540.0, milestone="T1_ACHIEVED")[0] is True
-    assert engine.validate_milestone_integrity(long_alert, cur_quote_ltp=2541.0, milestone="T1_ACHIEVED")[0] is True
-    assert engine.validate_milestone_integrity(long_alert, cur_quote_ltp=2541.0, milestone="T2_ACHIEVED")[0] is False
+    assert (
+        engine.validate_milestone_integrity(
+            long_alert, cur_quote_ltp=2540.0, milestone="T1_ACHIEVED"
+        )[0]
+        is True
+    )
+    assert (
+        engine.validate_milestone_integrity(
+            long_alert, cur_quote_ltp=2541.0, milestone="T1_ACHIEVED"
+        )[0]
+        is True
+    )
+    assert (
+        engine.validate_milestone_integrity(
+            long_alert, cur_quote_ltp=2541.0, milestone="T2_ACHIEVED"
+        )[0]
+        is False
+    )
 
     # Long: At or above T2
-    assert engine.validate_milestone_integrity(long_alert, cur_quote_ltp=2580.0, milestone="T2_ACHIEVED")[0] is True
-    assert engine.validate_milestone_integrity(long_alert, cur_quote_ltp=2580.0, milestone="TARGET_ACHIEVED")[0] is True
+    assert (
+        engine.validate_milestone_integrity(
+            long_alert, cur_quote_ltp=2580.0, milestone="T2_ACHIEVED"
+        )[0]
+        is True
+    )
+    assert (
+        engine.validate_milestone_integrity(
+            long_alert, cur_quote_ltp=2580.0, milestone="TARGET_ACHIEVED"
+        )[0]
+        is True
+    )
 
     short_alert = AutoAlert(
         alert_id="aa-test-short",
@@ -132,13 +177,38 @@ def test_validate_milestone_integrity_long_and_short():
     )
 
     # Short: Above T1
-    assert engine.validate_milestone_integrity(short_alert, cur_quote_ltp=1480.0, milestone="T1_ACHIEVED")[0] is False
+    assert (
+        engine.validate_milestone_integrity(
+            short_alert, cur_quote_ltp=1480.0, milestone="T1_ACHIEVED"
+        )[0]
+        is False
+    )
     # Short: At or below T1
-    assert engine.validate_milestone_integrity(short_alert, cur_quote_ltp=1460.0, milestone="T1_ACHIEVED")[0] is True
-    assert engine.validate_milestone_integrity(short_alert, cur_quote_ltp=1459.0, milestone="T1_ACHIEVED")[0] is True
-    assert engine.validate_milestone_integrity(short_alert, cur_quote_ltp=1459.0, milestone="T2_ACHIEVED")[0] is False
+    assert (
+        engine.validate_milestone_integrity(
+            short_alert, cur_quote_ltp=1460.0, milestone="T1_ACHIEVED"
+        )[0]
+        is True
+    )
+    assert (
+        engine.validate_milestone_integrity(
+            short_alert, cur_quote_ltp=1459.0, milestone="T1_ACHIEVED"
+        )[0]
+        is True
+    )
+    assert (
+        engine.validate_milestone_integrity(
+            short_alert, cur_quote_ltp=1459.0, milestone="T2_ACHIEVED"
+        )[0]
+        is False
+    )
     # Short: At or below T2
-    assert engine.validate_milestone_integrity(short_alert, cur_quote_ltp=1420.0, milestone="T2_ACHIEVED")[0] is True
+    assert (
+        engine.validate_milestone_integrity(
+            short_alert, cur_quote_ltp=1420.0, milestone="T2_ACHIEVED"
+        )[0]
+        is True
+    )
 
 
 def test_template_rendering_demotes_false_t1():
@@ -231,7 +301,9 @@ def test_option_put_buyer_milestone_integrity_payoff_direction():
     )
 
     # 1. At CMP ₹96.55 (+0.57R, deficit ₹10.39 to T1), T1 MUST FAIL CLOSED!
-    is_valid, veto_reason = engine.validate_milestone_integrity(put_alert, cur_quote_ltp=96.55, milestone="T1_ACHIEVED")
+    is_valid, veto_reason = engine.validate_milestone_integrity(
+        put_alert, cur_quote_ltp=96.55, milestone="T1_ACHIEVED"
+    )
     assert is_valid is False
     assert "below Target 1" in veto_reason
 
@@ -260,10 +332,11 @@ def test_option_put_buyer_milestone_integrity_payoff_direction():
 
     # 3. When price physically reaches or crosses Target 1 (e.g. ₹107.00 >= ₹106.94), T1 MUST pass!
     put_alert.ltp = 107.00
-    is_valid_t1, _ = engine.validate_milestone_integrity(put_alert, cur_quote_ltp=107.00, milestone="T1_ACHIEVED")
+    is_valid_t1, _ = engine.validate_milestone_integrity(
+        put_alert, cur_quote_ltp=107.00, milestone="T1_ACHIEVED"
+    )
     assert is_valid_t1 is True
 
     free_msg_passed = render_free_index_alert(put_alert, in_market=True)
     assert "T1 HIT" in free_msg_passed
     assert "hit T1" in free_msg_passed
-

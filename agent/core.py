@@ -2230,15 +2230,11 @@ class GeminiProvider(LLMProvider):
         configured_models = [m.strip() for m in active_model_str.split(",") if m.strip()]
         candidate_models = []
         for m in configured_models + ["gemini-3.8-flash", "gemini-3.7-flash"]:
-            if (
-                m not in candidate_models
-                and m
-                not in (
-                    "gemini-2.5-flash",
-                    "gemini-2.0-flash",
-                    "gemini-1.5-flash",
-                    "gemini-1.5-flash-latest",
-                )
+            if m not in candidate_models and m not in (
+                "gemini-2.5-flash",
+                "gemini-2.0-flash",
+                "gemini-1.5-flash",
+                "gemini-1.5-flash-latest",
             ):
                 candidate_models.append(m)
         if not candidate_models:

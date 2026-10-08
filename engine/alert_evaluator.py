@@ -75,7 +75,6 @@ def evaluate_alert_invalidation(
                 cutoff_time = "23:15" if exch == "MCX" else "15:15"
                 return f"Intraday session expired ({cutoff_time} IST cutoff reached). Trade closed."
 
-
     is_option = is_alert_option_premium_level(alert)
 
     session_low: Optional[float] = None
@@ -115,7 +114,7 @@ def evaluate_alert_invalidation(
         return None  # Cannot evaluate without live price quote
 
     # Check Market Hours: outside active market hours and weekends, static closing quotes cannot trigger live stop losses
-    if not is_test_runner:
+    if not is_test_runner and not getattr(alert, "_force_test_expiry", False):
         try:
             from market.calendar import is_market_open
 
@@ -149,8 +148,12 @@ def evaluate_alert_invalidation(
 
         if elapsed_sec >= ttl_sec:
             # Due Diligence: Verify whether the setup actually triggered or hit targets during the session
-            trigger_p = float(getattr(alert, "trigger_level", 0.0) or getattr(alert, "entry_price", 0.0) or 0.0)
-            target_1_p = float(getattr(alert, "target_1", 0.0) or getattr(alert, "target_level", 0.0) or 0.0)
+            trigger_p = float(
+                getattr(alert, "trigger_level", 0.0) or getattr(alert, "entry_price", 0.0) or 0.0
+            )
+            target_1_p = float(
+                getattr(alert, "target_1", 0.0) or getattr(alert, "target_level", 0.0) or 0.0
+            )
 
             act = str((getattr(alert, "actionable_plan", None) or {}).get("action", "")).upper()
             is_opt_sell = act in ("SELL", "WRITE", "SHORT")
@@ -163,16 +166,24 @@ def evaluate_alert_invalidation(
             triggered = False
             if trigger_p > 0:
                 if is_payoff_up:
-                    triggered = (current_ltp >= trigger_p) or (session_high is not None and session_high >= trigger_p)
+                    triggered = (current_ltp >= trigger_p) or (
+                        session_high is not None and session_high >= trigger_p
+                    )
                 else:
-                    triggered = (current_ltp <= trigger_p) or (session_low is not None and session_low <= trigger_p)
+                    triggered = (current_ltp <= trigger_p) or (
+                        session_low is not None and session_low <= trigger_p
+                    )
 
             target_hit = False
             if target_1_p > 0:
                 if is_payoff_up:
-                    target_hit = (current_ltp >= target_1_p) or (session_high is not None and session_high >= target_1_p)
+                    target_hit = (current_ltp >= target_1_p) or (
+                        session_high is not None and session_high >= target_1_p
+                    )
                 else:
-                    target_hit = (current_ltp <= target_1_p) or (session_low is not None and session_low <= target_1_p)
+                    target_hit = (current_ltp <= target_1_p) or (
+                        session_low is not None and session_low <= target_1_p
+                    )
 
             if triggered or target_hit:
                 logger.info(
@@ -385,7 +396,9 @@ def evaluate_alert_invalidation(
                                 else "Profit secured."
                             )
                         elif has_hit_target:
-                            has_t1 = "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or []) or getattr(alert, "target_status", "") in ("T1_ACHIEVED", "TARGET_1")
+                            has_t1 = "T1_ACHIEVED" in (
+                                getattr(alert, "achieved_milestones", []) or []
+                            ) or getattr(alert, "target_status", "") in ("T1_ACHIEVED", "TARGET_1")
                             t_prefix = "T1 profit" if has_t1 else "Profit"
                             tgt_note = (
                                 f"{t_prefix} banked earlier; runner stopped at scratch/breakeven."
@@ -423,9 +436,6 @@ def evaluate_alert_invalidation(
                     else 0.10
                 )
 
-            is_live_alert = (
-                getattr(alert, "is_live", True) and getattr(alert, "environment", "") != "TEST"
-            )
             has_hit_target = bool(
                 any(
                     m in (getattr(alert, "achieved_milestones", []) or [])
@@ -483,7 +493,12 @@ def evaluate_alert_invalidation(
                     )
 
                 baseline_p = ref_entry
-                if not is_ratcheted and alert.stop_loss and baseline_p > 0 and alert.stop_loss <= baseline_p:
+                if (
+                    not is_ratcheted
+                    and alert.stop_loss
+                    and baseline_p > 0
+                    and alert.stop_loss <= baseline_p
+                ):
                     logger.warning(
                         f"[AlertEvaluator] Inverted stop-loss detected for {alert.symbol} ({alert.alert_id}): "
                         f"SL {curr_sym}{alert.stop_loss:.2f} <= Baseline {curr_sym}{baseline_p:.2f}. Suppressing invalidation."
@@ -549,7 +564,12 @@ def evaluate_alert_invalidation(
                     )
 
                 baseline_p = ref_entry
-                if not is_ratcheted and alert.stop_loss and baseline_p > 0 and alert.stop_loss >= baseline_p:
+                if (
+                    not is_ratcheted
+                    and alert.stop_loss
+                    and baseline_p > 0
+                    and alert.stop_loss >= baseline_p
+                ):
                     logger.warning(
                         f"[AlertEvaluator] Inverted stop-loss detected for {alert.symbol} ({alert.alert_id}): "
                         f"SL {curr_sym}{alert.stop_loss:.2f} >= Baseline {curr_sym}{baseline_p:.2f}. Suppressing invalidation."
@@ -944,14 +964,15 @@ def evaluate_alert_targets_and_trailing(
                         entry = float(matches[0].replace(",", ""))
                     except ValueError:
                         pass
-        if not entry and getattr(alert, "option_premium", None) and alert.option_premium > 0:
-            entry = alert.option_premium
         if not entry:
-            # For GAMMA_BLAST / OPTIONS_MOMENTUM, trigger_level is the option premium at creation time
-            # and is a far more reliable entry proxy than alert.ltp (which reflects current market price).
+            # For pure option setups (OPTIONS_MOMENTUM, GAMMA_BLAST, INDEX_CALL_SETUP, etc.), trigger_level
+            # is the immutable entry premium recorded at creation time and is far more reliable than
+            # option_premium or alert.ltp (which are refreshed to current market price in the background).
             trig = getattr(alert, "trigger_level", None)
             if trig and trig > 0 and (not getattr(alert, "strike", None) or trig != alert.strike):
                 entry = trig
+            elif getattr(alert, "option_premium", None) and alert.option_premium > 0:
+                entry = alert.option_premium
             elif (
                 alert.ltp
                 and alert.ltp > 0
@@ -1805,7 +1826,8 @@ def evaluate_alert_targets_and_trailing(
         and "T1_ACHIEVED" not in achieved
         and "T2_ACHIEVED" not in achieved
         and "TARGET_ACHIEVED" not in achieved
-        and getattr(alert, "stage", "") not in ("DE_RISK_0_5R", "BREAKEVEN_LOCKED", "T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED")
+        and getattr(alert, "stage", "")
+        not in ("DE_RISK_0_5R", "BREAKEVEN_LOCKED", "T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED")
         and r_multiple < 0.40
         and pnl_pct < 5.0
     ):
@@ -2107,6 +2129,7 @@ def evaluate_alert_in_flight_decay(
             if c_sym:
                 try:
                     from market.quotes import get_ltp
+
                     raw_opt_p = get_ltp(c_sym)
                     if raw_opt_p and 0 < raw_opt_p <= (entry * 3.5):
                         resolved_opt_ltp = raw_opt_p
@@ -2254,154 +2277,153 @@ def evaluate_alert_in_flight_decay(
         in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "OPTIONS_MOMENTUM_BREAKOUT")
     )
     if is_deriv_alert and not is_option_sell and created_dt:
-
-            # Detect 0DTE (Same-Day Expiry) status
-            is_0dte = False
-            clean_sym = str(getattr(alert, "symbol", "")).upper()
-            exp_type = str(getattr(alert, "expiry_type", "")).upper()
-            exp_raw = getattr(alert, "expiry_date", None) or (
-                alert.metrics.get("expiry_date") if isinstance(alert.metrics, dict) else None
-            )
-            has_future_exp = False
-            if exp_raw:
-                for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d%b%Y"):
-                    try:
-                        exp_d = datetime.strptime(str(exp_raw).strip(), fmt).date()
-                        if exp_d == now_dt.date():
-                            is_0dte = True
-                        elif exp_d > now_dt.date():
-                            has_future_exp = True
-                        break
-                    except ValueError:
-                        pass
-
-            if not is_0dte and not has_future_exp and exp_type != "MONTHLY":
-                if (
-                    clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY
-                    and INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym] == now_dt.weekday()
-                ):
-                    is_0dte = True
-                elif getattr(alert, "dte", None) == 0 or getattr(alert, "is_0dte", False):
-                    is_0dte = True
-
-            # Dynamic Greeks-Aware Decay Horizon
-            # On 0DTE after 13:30 IST, gamma flip and rapid theta acceleration demand an 8-minute exit window.
-            # On 0DTE morning/midday, compress to 10 minutes. Standard weekly/monthly is 15 minutes.
-            is_afternoon_0dte = is_0dte and (
-                now_dt.hour > 13 or (now_dt.hour == 13 and now_dt.minute >= 30)
-            )
-            if is_afternoon_0dte:
-                stagnation_threshold_secs = 480.0  # 8 minutes
-                decay_profile = "0DTE_AFTERNOON_THETA_CLIFF"
-            elif is_0dte:
-                stagnation_threshold_secs = 600.0  # 10 minutes
-                decay_profile = "0DTE_INTRADAY_DECAY"
-            else:
-                stagnation_threshold_secs = 900.0  # 15 minutes
-                decay_profile = "THETA_STAGNATION"
-
-            max_gain = float(getattr(alert, "max_potential_gain_pct", 0.0) or 0.0)
-            pnl_stagnant = (pnl_pct <= 0.0) if is_0dte else (pnl_pct <= -2.0)
-
-            if elapsed_secs >= stagnation_threshold_secs and pnl_stagnant and max_gain < 10.0:
-                elapsed_mins = int(elapsed_secs // 60)
-                extra_vwap = ""
-                if (
-                    current_vwap
-                    and getattr(alert, "underlying_spot", None)
-                    and alert.underlying_spot < current_vwap
-                ):
-                    extra_vwap = f" Spot ₹{alert.underlying_spot:,.1f} trapped below intraday VWAP ₹{current_vwap:,.1f}."
-
-                # Formulate In-Flight Defined-Risk Hedge Plan (Theta Freeze Defense)
-                hedge_plan = None
+        # Detect 0DTE (Same-Day Expiry) status
+        is_0dte = False
+        clean_sym = str(getattr(alert, "symbol", "")).upper()
+        exp_type = str(getattr(alert, "expiry_type", "")).upper()
+        exp_raw = getattr(alert, "expiry_date", None) or (
+            alert.metrics.get("expiry_date") if isinstance(alert.metrics, dict) else None
+        )
+        has_future_exp = False
+        if exp_raw:
+            for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d%b%Y"):
                 try:
-                    plan = getattr(alert, "actionable_plan", {}) or {}
-                    precomputed_spread = plan.get("hedged_spread")
-                    if precomputed_spread:
-                        hedge_plan = dict(precomputed_spread)
-                        hedge_plan["hedge_type"] = "IN_FLIGHT_THETA_FREEZE"
-                        hedge_plan["guidance"] = (
-                            f"Sell {hedge_plan.get('short_symbol')} @ ~₹{hedge_plan.get('short_premium_est', 0):,.1f} to "
-                            f"reduce theta decay by {hedge_plan.get('theta_reduction_pct', 75):.0f}% and freeze risk at ₹{hedge_plan.get('max_risk_pts', 0):,.1f}."
-                        )
-                    else:
-                        opt_type = (
-                            getattr(alert, "option_type", "") or ("CE" if is_bullish else "PE")
-                        ).upper()
-                        strike = getattr(alert, "strike", None)
-                        clean_sym = str(getattr(alert, "symbol", "")).upper()
-                        step = (
-                            50
-                            if ("NIFTY" in clean_sym and "BANK" not in clean_sym)
-                            else (100 if "BANK" in clean_sym else 50)
-                        )
-                        if strike and strike > 0:
-                            short_strike = (strike + step) if opt_type == "CE" else (strike - step)
-                            short_prem_est = round(max(1.0, current_ltp * 0.40), 1)
-                            net_debit = round(max(0.1, current_ltp - short_prem_est), 1)
-                            hedge_plan = {
-                                "hedge_type": "IN_FLIGHT_THETA_FREEZE",
-                                "action": "SELL_OTM_HEDGE",
-                                "short_strike": short_strike,
-                                "short_option_type": opt_type,
-                                "short_symbol": f"{clean_sym} {short_strike} {opt_type}",
-                                "short_premium_est": short_prem_est,
-                                "net_risk_pts": net_debit,
-                                "theta_reduction_pct": 75.0,
-                                "guidance": (
-                                    f"Sell {clean_sym} {short_strike} {opt_type} @ ~₹{short_prem_est:,.1f} to "
-                                    f"reduce theta decay by 75% and freeze risk at ₹{net_debit:,.1f}."
-                                ),
-                            }
-                except Exception as _e_hedge:
-                    logger.debug(
-                        f"[evaluate_alert_in_flight_decay] Hedge plan formulation error: {_e_hedge}"
-                    )
-                    hedge_plan = None
+                    exp_d = datetime.strptime(str(exp_raw).strip(), fmt).date()
+                    if exp_d == now_dt.date():
+                        is_0dte = True
+                    elif exp_d > now_dt.date():
+                        has_future_exp = True
+                    break
+                except ValueError:
+                    pass
 
-                if is_afternoon_0dte:
-                    headline = f"⏳ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (0DTE Theta Cliff: {elapsed_mins}m No Progress)"
-                    summary = (
-                        f"0DTE option position active for {elapsed_mins}m post-13:30 IST with zero momentum (P&L: {pnl_pct:+.1f}%).{extra_vwap} "
-                        f"Rapid afternoon pin-risk & gamma collapse underway. "
-                        f"DECISION: EXIT 0DTE OPTION IMMEDIATELY TO AVOID PIN-RISK PREMIUM EVAPORATION."
+        if not is_0dte and not has_future_exp and exp_type != "MONTHLY":
+            if (
+                clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY
+                and INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym] == now_dt.weekday()
+            ):
+                is_0dte = True
+            elif getattr(alert, "dte", None) == 0 or getattr(alert, "is_0dte", False):
+                is_0dte = True
+
+        # Dynamic Greeks-Aware Decay Horizon
+        # On 0DTE after 13:30 IST, gamma flip and rapid theta acceleration demand an 8-minute exit window.
+        # On 0DTE morning/midday, compress to 10 minutes. Standard weekly/monthly is 15 minutes.
+        is_afternoon_0dte = is_0dte and (
+            now_dt.hour > 13 or (now_dt.hour == 13 and now_dt.minute >= 30)
+        )
+        if is_afternoon_0dte:
+            stagnation_threshold_secs = 480.0  # 8 minutes
+            decay_profile = "0DTE_AFTERNOON_THETA_CLIFF"
+        elif is_0dte:
+            stagnation_threshold_secs = 600.0  # 10 minutes
+            decay_profile = "0DTE_INTRADAY_DECAY"
+        else:
+            stagnation_threshold_secs = 900.0  # 15 minutes
+            decay_profile = "THETA_STAGNATION"
+
+        max_gain = float(getattr(alert, "max_potential_gain_pct", 0.0) or 0.0)
+        pnl_stagnant = (pnl_pct <= 0.0) if is_0dte else (pnl_pct <= -2.0)
+
+        if elapsed_secs >= stagnation_threshold_secs and pnl_stagnant and max_gain < 10.0:
+            elapsed_mins = int(elapsed_secs // 60)
+            extra_vwap = ""
+            if (
+                current_vwap
+                and getattr(alert, "underlying_spot", None)
+                and alert.underlying_spot < current_vwap
+            ):
+                extra_vwap = f" Spot ₹{alert.underlying_spot:,.1f} trapped below intraday VWAP ₹{current_vwap:,.1f}."
+
+            # Formulate In-Flight Defined-Risk Hedge Plan (Theta Freeze Defense)
+            hedge_plan = None
+            try:
+                plan = getattr(alert, "actionable_plan", {}) or {}
+                precomputed_spread = plan.get("hedged_spread")
+                if precomputed_spread:
+                    hedge_plan = dict(precomputed_spread)
+                    hedge_plan["hedge_type"] = "IN_FLIGHT_THETA_FREEZE"
+                    hedge_plan["guidance"] = (
+                        f"Sell {hedge_plan.get('short_symbol')} @ ~₹{hedge_plan.get('short_premium_est', 0):,.1f} to "
+                        f"reduce theta decay by {hedge_plan.get('theta_reduction_pct', 75):.0f}% and freeze risk at ₹{hedge_plan.get('max_risk_pts', 0):,.1f}."
                     )
-                    decision_action = "EXIT_0DTE_OPTION_IMMEDIATELY"
-                elif is_0dte:
-                    headline = f"⏳ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (0DTE Decay: {elapsed_mins}m No Progress)"
-                    summary = (
-                        f"0DTE option position active for {elapsed_mins}m on expiry day with zero momentum (P&L: {pnl_pct:+.1f}%).{extra_vwap} "
-                        f"Intraday theta decay accelerating before afternoon session. "
-                        f"DECISION: SCRATCH / EXIT AT BREAKEVEN BEFORE AFTERNOON THETA ACCELERATION."
-                    )
-                    decision_action = "EXIT_0DTE_STAGNANT_OPTION"
                 else:
-                    headline = f"⏳ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (Theta Stagnation: {elapsed_mins}m No Progress)"
-                    summary = (
-                        f"Option position active for {elapsed_mins}m without upside momentum (P&L: {pnl_pct:+.1f}%).{extra_vwap} "
-                        f"Accelerating theta decay threatens capital. "
-                        f"DECISION: SCRATCH / EXIT AT MARKET BEFORE THETA EROSION REACHES STOP-LOSS."
+                    opt_type = (
+                        getattr(alert, "option_type", "") or ("CE" if is_bullish else "PE")
+                    ).upper()
+                    strike = getattr(alert, "strike", None)
+                    clean_sym = str(getattr(alert, "symbol", "")).upper()
+                    step = (
+                        50
+                        if ("NIFTY" in clean_sym and "BANK" not in clean_sym)
+                        else (100 if "BANK" in clean_sym else 50)
                     )
-                    decision_action = "EXIT_STAGNANT_OPTION"
-
-                if hedge_plan:
-                    summary += f" HEDGE DEFENSE: {hedge_plan['guidance']}"
-
-                return InFlightWarningEvaluation(
-                    triggered=True,
-                    warning_type=decay_profile,
-                    reason=f"{decay_profile}: {elapsed_mins}m elapsed without momentum (P&L: {pnl_pct:+.1f}%).",
-                    coaching_decision=decision_action,
-                    current_ltp=current_ltp,
-                    entry_price=entry,
-                    stop_loss=stop or 0.0,
-                    risk_consumed_pct=round(risk_consumed_pct, 1),
-                    pnl_pct=round(pnl_pct, 1),
-                    headline=headline,
-                    summary=summary,
-                    hedge_plan=hedge_plan,
+                    if strike and strike > 0:
+                        short_strike = (strike + step) if opt_type == "CE" else (strike - step)
+                        short_prem_est = round(max(1.0, current_ltp * 0.40), 1)
+                        net_debit = round(max(0.1, current_ltp - short_prem_est), 1)
+                        hedge_plan = {
+                            "hedge_type": "IN_FLIGHT_THETA_FREEZE",
+                            "action": "SELL_OTM_HEDGE",
+                            "short_strike": short_strike,
+                            "short_option_type": opt_type,
+                            "short_symbol": f"{clean_sym} {short_strike} {opt_type}",
+                            "short_premium_est": short_prem_est,
+                            "net_risk_pts": net_debit,
+                            "theta_reduction_pct": 75.0,
+                            "guidance": (
+                                f"Sell {clean_sym} {short_strike} {opt_type} @ ~₹{short_prem_est:,.1f} to "
+                                f"reduce theta decay by 75% and freeze risk at ₹{net_debit:,.1f}."
+                            ),
+                        }
+            except Exception as _e_hedge:
+                logger.debug(
+                    f"[evaluate_alert_in_flight_decay] Hedge plan formulation error: {_e_hedge}"
                 )
+                hedge_plan = None
+
+            if is_afternoon_0dte:
+                headline = f"⏳ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (0DTE Theta Cliff: {elapsed_mins}m No Progress)"
+                summary = (
+                    f"0DTE option position active for {elapsed_mins}m post-13:30 IST with zero momentum (P&L: {pnl_pct:+.1f}%).{extra_vwap} "
+                    f"Rapid afternoon pin-risk & gamma collapse underway. "
+                    f"DECISION: EXIT 0DTE OPTION IMMEDIATELY TO AVOID PIN-RISK PREMIUM EVAPORATION."
+                )
+                decision_action = "EXIT_0DTE_OPTION_IMMEDIATELY"
+            elif is_0dte:
+                headline = f"⏳ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (0DTE Decay: {elapsed_mins}m No Progress)"
+                summary = (
+                    f"0DTE option position active for {elapsed_mins}m on expiry day with zero momentum (P&L: {pnl_pct:+.1f}%).{extra_vwap} "
+                    f"Intraday theta decay accelerating before afternoon session. "
+                    f"DECISION: SCRATCH / EXIT AT BREAKEVEN BEFORE AFTERNOON THETA ACCELERATION."
+                )
+                decision_action = "EXIT_0DTE_STAGNANT_OPTION"
+            else:
+                headline = f"⏳ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (Theta Stagnation: {elapsed_mins}m No Progress)"
+                summary = (
+                    f"Option position active for {elapsed_mins}m without upside momentum (P&L: {pnl_pct:+.1f}%).{extra_vwap} "
+                    f"Accelerating theta decay threatens capital. "
+                    f"DECISION: SCRATCH / EXIT AT MARKET BEFORE THETA EROSION REACHES STOP-LOSS."
+                )
+                decision_action = "EXIT_STAGNANT_OPTION"
+
+            if hedge_plan:
+                summary += f" HEDGE DEFENSE: {hedge_plan['guidance']}"
+
+            return InFlightWarningEvaluation(
+                triggered=True,
+                warning_type=decay_profile,
+                reason=f"{decay_profile}: {elapsed_mins}m elapsed without momentum (P&L: {pnl_pct:+.1f}%).",
+                coaching_decision=decision_action,
+                current_ltp=current_ltp,
+                entry_price=entry,
+                stop_loss=stop or 0.0,
+                risk_consumed_pct=round(risk_consumed_pct, 1),
+                pnl_pct=round(pnl_pct, 1),
+                headline=headline,
+                summary=summary,
+                hedge_plan=hedge_plan,
+            )
 
     # 7. Trigger C: Institutional VWAP Band Reversion Alert (±1.0σ Band Breach)
     # Detects when underlying asset breaks below the intraday Volume-Weighted Standard Deviation floor,
@@ -2417,8 +2439,12 @@ def evaluate_alert_in_flight_decay(
                 from market.indices import INDEX_INSTRUMENTS
 
                 raw_sym = str(getattr(alert, "symbol", "")).upper()
-                clean_sym = raw_sym.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
-                lookup = INDEX_INSTRUMENTS.get(clean_sym, f"NSE:{raw_sym}" if ":" not in raw_sym else raw_sym)
+                clean_sym = (
+                    raw_sym.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
+                )
+                lookup = INDEX_INSTRUMENTS.get(
+                    clean_sym, f"NSE:{raw_sym}" if ":" not in raw_sym else raw_sym
+                )
                 spot_price = get_ltp(lookup)
             except Exception:
                 pass
@@ -2438,8 +2464,12 @@ def evaluate_alert_in_flight_decay(
                 from market.indices import INDEX_INSTRUMENTS
 
                 raw_sym = str(getattr(alert, "symbol", "")).upper()
-                clean_sym = raw_sym.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
-                lookup = INDEX_INSTRUMENTS.get(clean_sym, f"NSE:{raw_sym}" if ":" not in raw_sym else raw_sym)
+                clean_sym = (
+                    raw_sym.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
+                )
+                lookup = INDEX_INSTRUMENTS.get(
+                    clean_sym, f"NSE:{raw_sym}" if ":" not in raw_sym else raw_sym
+                )
                 q_res = get_quote([lookup])
                 if q_res and getattr(q_res.get(lookup), "vwap", 0):
                     effective_vwap = float(q_res[lookup].vwap)
@@ -2495,7 +2525,6 @@ def evaluate_alert_in_flight_decay(
                 (alert.metrics or {}).get("atr") or (alert.metrics or {}).get("atr_14d") or 0.0
             )
             vwap_std = (atr_val * 0.50) if atr_val > 0 else (effective_vwap * 0.006)
-
 
         if is_bullish:
             lower_band = round(effective_vwap - vwap_std, 2)

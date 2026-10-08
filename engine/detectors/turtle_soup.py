@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, date
-from typing import Any, Optional
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -107,9 +107,8 @@ def detect_turtle_soup_sweep(
 
     # Inspect the last 2 completed bars for a liquidity sweep rejection
     eval_bars = [len(df) - 1, len(df) - 2] if len(df) >= 2 else [len(df) - 1]
-    
+
     sweep_type: Optional[str] = None
-    sweep_bar_idx: int = -1
     sweep_level: float = 0.0
     sweep_wick_ext: float = 0.0
 
@@ -130,7 +129,6 @@ def detect_turtle_soup_sweep(
             upper_shadow = (b_h - max(b_o, b_c)) / b_range
             if sweep_depth <= 0.0075 and upper_shadow >= 0.35 and curr_ltp <= prior_high:
                 sweep_type = "BEARISH_UPTHRUST"
-                sweep_bar_idx = idx
                 sweep_level = prior_high
                 sweep_wick_ext = b_h
                 break
@@ -142,7 +140,6 @@ def detect_turtle_soup_sweep(
             lower_shadow = (min(b_o, b_c) - b_l) / b_range
             if sweep_depth <= 0.0075 and lower_shadow >= 0.35 and curr_ltp >= prior_low:
                 sweep_type = "BULLISH_SPRING"
-                sweep_bar_idx = idx
                 sweep_level = prior_low
                 sweep_wick_ext = b_l
                 break
@@ -154,7 +151,9 @@ def detect_turtle_soup_sweep(
     is_bullish = sweep_type == "BULLISH_SPRING"
     direction = "BULLISH" if is_bullish else "BEARISH"
     variant = "spring" if is_bullish else "upthrust"
-    alert_id = generate_alert_id(clean_sym, "TURTLE_SOUP_SWEEP", session_date=sess_date, variant=variant)
+    alert_id = generate_alert_id(
+        clean_sym, "TURTLE_SOUP_SWEEP", session_date=sess_date, variant=variant
+    )
 
     # Ballistic Level Calibration
     # Add 0.15*ATR buffer beyond sweep wick
@@ -168,7 +167,9 @@ def detect_turtle_soup_sweep(
         runner_target = round(entry_price + (5.5 * risk), 2)
         no_chase = round(entry_price + (0.35 * risk), 2)
         action_verb = "BUY"
-        headline = f"🐢 [TURTLE SOUP] Bullish Spring Reversal: {clean_sym} swept low ₹{sweep_level:,.2f}"
+        headline = (
+            f"🐢 [TURTLE SOUP] Bullish Spring Reversal: {clean_sym} swept low ₹{sweep_level:,.2f}"
+        )
         summary = (
             f"Bear Trap Neutralized! {clean_sym} swept swing low ₹{sweep_level:,.2f} down to ₹{sweep_wick_ext:,.2f} "
             f"before printing an aggressive rejection spring. Smart money absorbed selling. Enter Long near ₹{entry_price:,.2f}."

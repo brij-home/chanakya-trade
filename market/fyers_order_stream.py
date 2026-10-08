@@ -57,6 +57,7 @@ class FyersOrderStreamManager:
         self._ws = None
 
         if ws_to_close:
+
             def _close():
                 try:
                     setattr(ws_to_close, "restart_flag", False)
@@ -122,7 +123,9 @@ class FyersOrderStreamManager:
         try:
             if self._ws:
                 self._ws.subscribe(data_type="OnOrders,OnTrades,OnPositions,OnGeneral")
-                logger.info("Fyers Order WebSocket: subscribed to OnOrders, OnTrades, OnPositions, OnGeneral")
+                logger.info(
+                    "Fyers Order WebSocket: subscribed to OnOrders, OnTrades, OnPositions, OnGeneral"
+                )
         except Exception as e:
             logger.warning("Fyers Order WebSocket subscription failed: %s", e)
 

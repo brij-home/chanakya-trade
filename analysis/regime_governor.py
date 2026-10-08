@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta, time as dtime
+from datetime import datetime, time as dtime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -29,16 +29,22 @@ IST = ZoneInfo("Asia/Kolkata")
 
 @dataclass
 class MarketRegimeClassification:
-    regime: str  # "TREND_EXPANSION" | "BALANCED_CHOP" | "VOLATILITY_EXPANSION_EXPIRY" | "MACRO_SHOCK"
+    regime: (
+        str  # "TREND_EXPANSION" | "BALANCED_CHOP" | "VOLATILITY_EXPANSION_EXPIRY" | "MACRO_SHOCK"
+    )
     vix: float
     is_orb_trapped: bool
     is_expiry_session: bool
     min_scrutiny_score: int
-    dominant_bias: str  # "TREND_FRIENDLY" | "MEAN_REVERSION" | "GAMMA_DRIVEN" | "CAPITAL_PRESERVATION"
+    dominant_bias: (
+        str  # "TREND_FRIENDLY" | "MEAN_REVERSION" | "GAMMA_DRIVEN" | "CAPITAL_PRESERVATION"
+    )
     guidance: str
     active_detectors: list[str] = field(default_factory=list)
     suppressed_detectors: list[str] = field(default_factory=list)
-    classified_at: str = field(default_factory=lambda: datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"))
+    classified_at: str = field(
+        default_factory=lambda: datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +80,7 @@ def classify_market_regime(
         now_ist = now_ist.astimezone(IST)
 
     import os
+
     is_test_env = (
         os.environ.get("CHANAKYA_TESTING") == "1"
         or "PYTEST_CURRENT_TEST" in os.environ
@@ -95,7 +102,9 @@ def classify_market_regime(
                 for k in ("NSE:INDIA VIX", "INDIA VIX", "VIX", "INDIAVIX"):
                     if k in _QUOTE_CACHE:
                         _, q_obj = _QUOTE_CACHE[k]
-                        val = float(getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0)
+                        val = float(
+                            getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0
+                        )
                         if val > 0:
                             vix_val = val
                             break
@@ -120,7 +129,9 @@ def classify_market_regime(
         vix_val = 13.5  # Neutral institutional baseline
 
     # 2. Check Expiry Session (Post 13:15 IST on active index expiry days)
-    weekday = now_ist.weekday()  # 0=Mon (Midcap), 1=Tue (Finnifty), 2=Wed (BankNifty), 3=Thu (Nifty), 4=Fri (Sensex)
+    weekday = (
+        now_ist.weekday()
+    )  # 0=Mon (Midcap), 1=Tue (Finnifty), 2=Wed (BankNifty), 3=Thu (Nifty), 4=Fri (Sensex)
     is_expiry_day = weekday in (0, 1, 2, 3, 4)
     now_t = now_ist.time()
     is_afternoon_expiry = is_expiry_day and now_t >= dtime(13, 15) and now_t <= dtime(15, 30)
@@ -175,6 +186,7 @@ def classify_market_regime(
     if not is_benchmark_trending and not is_test_env:
         try:
             from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+
             with _quote_cache_lock:
                 for k in ("NSE:NIFTY 50", "NSE:NIFTY", "NIFTY", "NIFTY 50"):
                     if k in _QUOTE_CACHE:
@@ -186,8 +198,12 @@ def classify_market_regime(
         except Exception:
             pass
 
-    is_midday_lull = (dtime(11, 15) <= now_t <= dtime(13, 15)) and (vix_val < 16.0) and not is_benchmark_trending
-    if ((vix_val < 13.5 and not is_benchmark_trending) or is_orb_trapped or is_midday_lull) and not is_benchmark_trending:
+    is_midday_lull = (
+        (dtime(11, 15) <= now_t <= dtime(13, 15)) and (vix_val < 16.0) and not is_benchmark_trending
+    )
+    if (
+        (vix_val < 13.5 and not is_benchmark_trending) or is_orb_trapped or is_midday_lull
+    ) and not is_benchmark_trending:
         return MarketRegimeClassification(
             regime="BALANCED_CHOP",
             vix=vix_val,
@@ -196,7 +212,12 @@ def classify_market_regime(
             min_scrutiny_score=80,
             dominant_bias="MEAN_REVERSION",
             guidance="Compressed volatility and range-bound session. Prioritize SMC OB retests & Turtle Soup reversals. Breakouts require RVOL >= 2.0x.",
-            active_detectors=["SMC_OB_RETEST", "TURTLE_SOUP_SWEEP", "DEFINED_RISK_NEUTRAL", "PAIRS_ARBITRAGE"],
+            active_detectors=[
+                "SMC_OB_RETEST",
+                "TURTLE_SOUP_SWEEP",
+                "DEFINED_RISK_NEUTRAL",
+                "PAIRS_ARBITRAGE",
+            ],
             suppressed_detectors=[
                 "SQUEEZE_BREAKOUT",
                 "OPENING_RANGE_BREAKOUT",
@@ -241,7 +262,10 @@ def is_detector_eligible_for_regime(
     # In Macro Shock, suppress naked directional breakouts
     if regime.regime == "MACRO_SHOCK":
         if atype in ("SQUEEZE_BREAKOUT", "OPTIONS_MOMENTUM", "INTRADAY_SPARK", "INDEX_MICRO_SCALP"):
-            return False, "Suppressed by Regime Governor: MACRO_SHOCK regime prohibits naked breakouts. Use defined-risk spreads."
+            return (
+                False,
+                "Suppressed by Regime Governor: MACRO_SHOCK regime prohibits naked breakouts. Use defined-risk spreads.",
+            )
 
     # In Balanced Chop, suppress directional breakouts unless confirmed by heavy volume or SMC sweep
     if regime.regime == "BALANCED_CHOP":
@@ -249,7 +273,7 @@ def is_detector_eligible_for_regime(
             return (
                 False,
                 f"Suppressed by Regime Governor: BALANCED_CHOP regime prohibits 1-minute micro-scalps "
-                f"(VIX {regime.vix:.1f} / range containment). Micro-scalping in chop leads to severe theta bleed."
+                f"(VIX {regime.vix:.1f} / range containment). Micro-scalping in chop leads to severe theta bleed.",
             )
         if atype in (
             "SQUEEZE_BREAKOUT",
@@ -267,8 +291,7 @@ def is_detector_eligible_for_regime(
                 return (
                     False,
                     f"Suppressed by Regime Governor: BALANCED_CHOP regime (tight range / compressed VIX {regime.vix:.1f}). "
-                    f"Directional breakouts require RVOL >= 2.0x (current RVOL: {rvol:.2f}x) or verified SMC sweep to avoid false breakouts."
+                    f"Directional breakouts require RVOL >= 2.0x (current RVOL: {rvol:.2f}x) or verified SMC sweep to avoid false breakouts.",
                 )
 
     return True, ""
-

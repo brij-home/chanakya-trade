@@ -15,6 +15,7 @@ Main entry points:
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 import time
@@ -176,17 +177,42 @@ def _fetch_screener(symbol: str) -> dict:
     return r.json()
 
 
-def _safe_float(data: dict, *keys: str) -> Optional[float]:
-    """Try multiple keys, return first non-None float found."""
-    for key in keys:
-        val = data.get(key)
-        if val is not None:
-            try:
-                cleaned = re.sub(r"[^\d.\-]", "", str(val))
-                return float(cleaned) if cleaned else None
-            except (ValueError, TypeError):
-                continue
-    return None
+def _safe_float(target: Any, *keys: str) -> Optional[float]:
+    """Safely convert value or dictionary key lookup to a finite float.
+
+    If keys are provided (or target is a dict), extracts the first matching key.
+    If target is a scalar/value and no keys are given, converts target directly.
+    Returns None for None, missing keys, non-numeric strings, NaN, or Inf.
+    """
+    if target is None:
+        return None
+    val = target
+    if keys:
+        if not isinstance(target, dict):
+            return None
+        val = None
+        for key in keys:
+            if key in target and target[key] is not None:
+                val = target[key]
+                break
+        if val is None:
+            return None
+    elif isinstance(target, dict):
+        return None
+
+    try:
+        if isinstance(val, str):
+            cleaned = re.sub(r"[^\d.\-]", "", val)
+            if not cleaned or cleaned in ("-", ".", "-.", ".-"):
+                return None
+            f = float(cleaned)
+        else:
+            f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
+    except (ValueError, TypeError):
+        return None
 
 
 def _parse_screener(raw: dict) -> dict:
@@ -241,22 +267,6 @@ def _unavailable(symbol: str) -> dict:
 
 
 # ── Scoring logic ────────────────────────────────────────────
-
-
-import math
-
-
-def _safe_float(val: Any) -> Optional[float]:
-    """Converts value to finite float. Returns None for None, non-numeric strings, NaN, or Inf."""
-    if val is None:
-        return None
-    try:
-        f = float(val)
-        if math.isnan(f) or math.isinf(f):
-            return None
-        return f
-    except (ValueError, TypeError):
-        return None
 
 
 def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:

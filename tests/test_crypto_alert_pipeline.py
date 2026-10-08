@@ -185,6 +185,14 @@ def test_crypto_realtime_tick_target_achievement(tmp_path, monkeypatch):
         target_level=3000.0,
         stop_loss=2700.0,
         confidence=88,
+        actionable_plan={
+            "target": "$3,000.00",
+            "target_2": "$3,200.00",
+            "trade_plan": {
+                "target_1": 3000.0,
+                "target_2": 3200.0,
+            },
+        },
         created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         is_live=True,
         environment="LIVE",
@@ -431,7 +439,6 @@ def test_crypto_sniper_eagle_tiger_confluence_and_no_chase():
     from engine.detectors.crypto import (
         compute_crypto_rsi,
         derive_crypto_trade_plan,
-        detect_single_crypto_symbol,
     )
 
     dates = pd.date_range("2026-10-02 08:00", periods=50, freq="15min")
@@ -465,7 +472,9 @@ def test_crypto_sniper_eagle_tiger_confluence_and_no_chase():
     assert plan_retest.entry_max < plan_retest.no_chase  # Zero contradictive chasing!
     assert plan_retest.rr_1 >= 2.8  # Institutional minimum R:R standard
     # Entry range is tight (width < 1.0%), NOT 4% wide!
-    entry_width_pct = ((plan_retest.entry_max - plan_retest.entry_min) / plan_retest.entry_ref) * 100
+    entry_width_pct = (
+        (plan_retest.entry_max - plan_retest.entry_min) / plan_retest.entry_ref
+    ) * 100
     assert entry_width_pct < 1.5, f"Entry range is too wide: {entry_width_pct:.2f}%"
 
     # 3. Bullish Breakout Scenario: OB at 85000 - 85600, LTP at 85900 (Breakout)
@@ -496,4 +505,3 @@ def test_crypto_sniper_eagle_tiger_confluence_and_no_chase():
     assert plan_breakdown.sl_price <= 85600.0
     assert plan_breakdown.entry_min > plan_breakdown.no_chase
     assert plan_breakdown.rr_1 >= 2.8
-

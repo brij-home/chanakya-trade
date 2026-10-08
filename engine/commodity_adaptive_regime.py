@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, time as dtime
 from typing import Any, Optional
@@ -49,7 +48,6 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from market.instruments import COMMODITY_SYMBOLS
 
 logger = logging.getLogger("chanakya.commodity_adaptive_regime")
 IST = ZoneInfo("Asia/Kolkata")
@@ -92,7 +90,9 @@ class CommodityEagleRegime:
     cvd_ratio: float
     trap_detected: bool
     trap_reason: Optional[str]
-    overall_environment: str  # "OPTIMAL_TREND_EXPANSION" | "WHIPSAW_CHOP_TRAP" | "SELECTIVE_FADE" | "BALANCED_RANGE"
+    overall_environment: (
+        str  # "OPTIMAL_TREND_EXPANSION" | "WHIPSAW_CHOP_TRAP" | "SELECTIVE_FADE" | "BALANCED_RANGE"
+    )
     summary: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,7 +104,9 @@ class CommodityTigerMandate:
     """Pillar 2: 🐅 Tiger Stalking — Regime-adaptive strategy selection & trap filter."""
 
     mandate: str  # "MOMENTUM_EXPANSION" | "TIGER_STALKING_PRESERVE_CAPITAL" | "TURTLE_SOUP_FADE" | "DEFINED_RISK_SPREAD_MANDATORY"
-    allow_routine_breakouts: bool  # False during chop/midday lull unless institutional surge verified
+    allow_routine_breakouts: (
+        bool  # False during chop/midday lull unless institutional surge verified
+    )
     allow_thrust_only: bool  # True when in stalking mode
     suggested_strategy: str  # "BUY_MOMENTUM" | "WAIT_IN_CASH" | "FADE_BOUNDARY" | "HEDGED_SPREAD"
     reason: str
@@ -224,9 +226,7 @@ def compute_commodity_choppiness_index(
         return None
 
 
-def compute_commodity_adx(
-    df: Optional[pd.DataFrame], period: int = 14
-) -> Optional[float]:
+def compute_commodity_adx(df: Optional[pd.DataFrame], period: int = 14) -> Optional[float]:
     """
     Computes 14-period Wilder's Average Directional Index (ADX) on commodity bars.
 
@@ -366,7 +366,9 @@ def evaluate_commodity_eagle_regime(
                 dxy = snap.dxy_change
                 if dxy is not None and dxy >= 0.25:
                     macro_align = "HEADWIND_VETO"
-                    macro_detail = f"Surging DXY (+{dxy:.2f}%) creates strong headwind for bullion longs"
+                    macro_detail = (
+                        f"Surging DXY (+{dxy:.2f}%) creates strong headwind for bullion longs"
+                    )
                 elif dxy is not None and dxy <= -0.25:
                     macro_align = "TAILWIND"
                     macro_detail = f"Declining DXY ({dxy:.2f}%) provides bullish monetary tailwind"
@@ -377,23 +379,33 @@ def evaluate_commodity_eagle_regime(
                     macro_detail = f"Collapsing international Brent ({crude_chg:.2f}%) vetoes domestic crude longs"
                 elif crude_chg is not None and crude_chg >= 1.2:
                     macro_align = "TAILWIND"
-                    macro_detail = f"Surging Brent (+{crude_chg:.2f}%) confirms institutional energy demand"
+                    macro_detail = (
+                        f"Surging Brent (+{crude_chg:.2f}%) confirms institutional energy demand"
+                    )
     except Exception as e_mac:
         logger.debug("[CommodityAdaptiveRegime] Macro snapshot check error: %s", e_mac)
 
     # Environment Classification
     if trap_detected:
         env = "COUNTER_TREND_EXHAUSTION"
-        summary = f"Trap detected: {trap_reason or 'Delta absorption divergence'}. High failure risk."
+        summary = (
+            f"Trap detected: {trap_reason or 'Delta absorption divergence'}. High failure risk."
+        )
     elif is_lull and (chop_status == "SEVERE_CHOP" or adx_status == "NON_TRENDING"):
         env = "WHIPSAW_CHOP_TRAP"
         summary = "Midday Volume Lull (11:30–15:30) with non-trending chop. Routine breakouts strictly suppressed."
-    elif is_golden and chop_status == "TRENDING_EXPANSION" and adx_status in ("MODERATE_TREND", "STRONG_TREND"):
+    elif (
+        is_golden
+        and chop_status == "TRENDING_EXPANSION"
+        and adx_status in ("MODERATE_TREND", "STRONG_TREND")
+    ):
         env = "OPTIMAL_TREND_EXPANSION"
         summary = "US Golden Hours (17:30–22:30) active with strong directional trend expansion. High follow-through probability."
     elif is_golden:
         env = "BALANCED_RANGE"
-        summary = "US Active session active with moderate momentum. Selective sniper setups permitted."
+        summary = (
+            "US Active session active with moderate momentum. Selective sniper setups permitted."
+        )
     else:
         env = "BALANCED_RANGE"
         summary = f"Standard {phase_name.replace('_', ' ').title()} conditions with {chop_status.lower().replace('_', ' ')}."
@@ -452,7 +464,11 @@ def evaluate_commodity_tiger_mandate(
         )
 
     # 2. Midday Volume Lull (11:30 – 15:30 IST) or Severe Chop
-    if eagle.is_midday_lull or eagle.chop_status == "SEVERE_CHOP" or eagle.adx_status == "NON_TRENDING":
+    if (
+        eagle.is_midday_lull
+        or eagle.chop_status == "SEVERE_CHOP"
+        or eagle.adx_status == "NON_TRENDING"
+    ):
         # Exception: Only exceptional institutional expansion thrust (RVOL >= 1.8x and SMC confluence) can break out
         if is_institutional_thrust and rvol >= 1.8 and has_smc_confluence:
             return CommodityTigerMandate(
@@ -578,7 +594,9 @@ def compute_commodity_sniper_plan(
 
     if opt_recommendation and isinstance(opt_recommendation, dict):
         opt_prem = float(opt_recommendation.get("ltp", 0.0) or 0.0)
-        opt_contract = opt_recommendation.get("readable_contract") or opt_recommendation.get("contract")
+        opt_contract = opt_recommendation.get("readable_contract") or opt_recommendation.get(
+            "contract"
+        )
         if opt_prem > 0:
             opt_risk = round(max(1.0, min(opt_prem * 0.35, risk_pts * 0.52)), 1)
             opt_sl = round(max(0.05, opt_prem - opt_risk), 1)

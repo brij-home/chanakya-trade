@@ -23,7 +23,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlparse
 
 # Ensure repository root is on sys.path
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -59,7 +58,9 @@ def check_env_credentials() -> tuple[str, str, str, str, str, str, bool]:
     """Check .env credentials for Fyers."""
     app_id = os.environ.get("FYERS_APP_ID", "").strip()
     secret_key = os.environ.get("FYERS_SECRET_KEY", "").strip()
-    redirect_uri = os.environ.get("FYERS_REDIRECT_URL", "").strip() or "http://127.0.0.1:8765/fyers/callback"
+    redirect_uri = (
+        os.environ.get("FYERS_REDIRECT_URL", "").strip() or "http://127.0.0.1:8765/fyers/callback"
+    )
     fy_id = os.environ.get("FYERS_FY_ID", "").strip()
     totp_secret = os.environ.get("FYERS_TOTP_SECRET", "").strip()
     pin = os.environ.get("FYERS_PIN", "").strip()
@@ -73,7 +74,9 @@ def check_env_credentials() -> tuple[str, str, str, str, str, str, bool]:
 
     # 1. APP ID
     if not app_id:
-        table.add_row("FYERS_APP_ID", "[red]MISSING[/red]", "[red]Required: App ID from myapi.fyers.in[/red]")
+        table.add_row(
+            "FYERS_APP_ID", "[red]MISSING[/red]", "[red]Required: App ID from myapi.fyers.in[/red]"
+        )
         is_ready = False
     elif "-" not in app_id:
         normalized = f"{app_id}-100"
@@ -83,14 +86,24 @@ def check_env_credentials() -> tuple[str, str, str, str, str, str, bool]:
             f"[yellow]Omitted '-100'. Fyers API v3 requires '{normalized}'. (Auto-handled)[/yellow]",
         )
     else:
-        table.add_row("FYERS_APP_ID", f"[green]{app_id}[/green]", "[green]Valid format (<ID>-100)[/green]")
+        table.add_row(
+            "FYERS_APP_ID", f"[green]{app_id}[/green]", "[green]Valid format (<ID>-100)[/green]"
+        )
 
     # 2. SECRET KEY
     if not secret_key:
-        table.add_row("FYERS_SECRET_KEY", "[red]MISSING[/red]", "[red]Required: Secret Key from myapi.fyers.in[/red]")
+        table.add_row(
+            "FYERS_SECRET_KEY",
+            "[red]MISSING[/red]",
+            "[red]Required: Secret Key from myapi.fyers.in[/red]",
+        )
         is_ready = False
     else:
-        masked = secret_key[:4] + "*" * (len(secret_key) - 8) + secret_key[-4:] if len(secret_key) > 8 else "****"
+        masked = (
+            secret_key[:4] + "*" * (len(secret_key) - 8) + secret_key[-4:]
+            if len(secret_key) > 8
+            else "****"
+        )
         table.add_row("FYERS_SECRET_KEY", f"[green]{masked}[/green]", "[green]Configured[/green]")
 
     # 3. REDIRECT URI
@@ -107,12 +120,16 @@ def check_env_credentials() -> tuple[str, str, str, str, str, str, bool]:
     table.add_row(
         "FYERS_FY_ID",
         f"[green]{fy_id}[/green]" if fy_id else "[dim]Not set[/dim]",
-        "[green]Auto-login ready[/green]" if fy_id else "[dim]Optional — set for headless login[/dim]",
+        "[green]Auto-login ready[/green]"
+        if fy_id
+        else "[dim]Optional — set for headless login[/dim]",
     )
     table.add_row(
         "FYERS_TOTP_SECRET",
         "[green]****[/green]" if totp_secret else "[dim]Not set[/dim]",
-        "[green]Configured[/green]" if totp_secret else "[dim]Optional — set for headless login[/dim]",
+        "[green]Configured[/green]"
+        if totp_secret
+        else "[dim]Optional — set for headless login[/dim]",
     )
     table.add_row(
         "FYERS_PIN",
@@ -122,12 +139,15 @@ def check_env_credentials() -> tuple[str, str, str, str, str, str, bool]:
 
     console.print(table)
     if auto_login_ready:
-        console.print("  [bold green]✓ Auto-login mode: ENABLED[/bold green] — will login silently via TOTP + PIN (no browser)")
+        console.print(
+            "  [bold green]✓ Auto-login mode: ENABLED[/bold green] — will login silently via TOTP + PIN (no browser)"
+        )
     else:
-        console.print("  [dim]Auto-login mode: DISABLED — set FYERS_FY_ID + FYERS_TOTP_SECRET + FYERS_PIN to enable[/dim]")
+        console.print(
+            "  [dim]Auto-login mode: DISABLED — set FYERS_FY_ID + FYERS_TOTP_SECRET + FYERS_PIN to enable[/dim]"
+        )
     console.print()
     return app_id, secret_key, redirect_uri, fy_id, totp_secret, pin, is_ready
-
 
 
 def test_auth_endpoint(app_id: str, secret_key: str, redirect_uri: str) -> bool:
@@ -138,7 +158,9 @@ def test_auth_endpoint(app_id: str, secret_key: str, redirect_uri: str) -> bool:
     try:
         broker = FyersAPI(app_id=app_id, secret_key=secret_key, redirect_uri=redirect_uri)
         auth_url = broker.get_login_url()
-        console.print(f"  [dim]Generated Auth URL:[/dim] [link={auth_url}]{auth_url[:80]}...[/link]")
+        console.print(
+            f"  [dim]Generated Auth URL:[/dim] [link={auth_url}]{auth_url[:80]}...[/link]"
+        )
 
         with httpx.Client(timeout=10.0, follow_redirects=True) as client:
             resp = client.get(auth_url)
@@ -151,10 +173,14 @@ def test_auth_endpoint(app_id: str, secret_key: str, redirect_uri: str) -> bool:
                 )
                 return False
             elif resp.status_code == 200:
-                console.print("  [bold green]✓ Fyers Auth endpoint accepted credentials successfully (HTTP 200).[/bold green]")
+                console.print(
+                    "  [bold green]✓ Fyers Auth endpoint accepted credentials successfully (HTTP 200).[/bold green]"
+                )
                 return True
             else:
-                console.print(f"  [yellow]Warning: Fyers endpoint returned HTTP {resp.status_code}.[/yellow]")
+                console.print(
+                    f"  [yellow]Warning: Fyers endpoint returned HTTP {resp.status_code}.[/yellow]"
+                )
                 return True
     except Exception as exc:
         console.print(f"  [red]Failed to connect to Fyers: {exc}[/red]")
@@ -165,7 +191,9 @@ def check_existing_session() -> bool:
     """Check if token file exists and is still valid."""
     console.print("[bold cyan]Checking Active Fyers Session Token...[/bold cyan]")
     if not TOKEN_FILE.exists():
-        console.print("  [yellow]No existing token found (~/.trading_platform/fyers.json). Authentication required.[/yellow]")
+        console.print(
+            "  [yellow]No existing token found (~/.trading_platform/fyers.json). Authentication required.[/yellow]"
+        )
         return False
 
     try:
@@ -180,7 +208,9 @@ def check_existing_session() -> bool:
 
         hours = int(remaining // 3600)
         mins = int((remaining % 3600) // 60)
-        console.print(f"  [bold green]✓ Active token found (valid for another {hours}h {mins}m).[/bold green]")
+        console.print(
+            f"  [bold green]✓ Active token found (valid for another {hours}h {mins}m).[/bold green]"
+        )
         return True
     except Exception as exc:
         console.print(f"  [yellow]Error reading token file: {exc}[/yellow]")
@@ -200,11 +230,15 @@ def test_live_data(app_id: str, secret_key: str, redirect_uri: str) -> None:
 
         # Profile
         profile = broker.get_profile()
-        console.print(f"  [green]✓ Profile:[/green] {profile.user_id} ({profile.name}) | Email: {profile.email}")
+        console.print(
+            f"  [green]✓ Profile:[/green] {profile.user_id} ({profile.name}) | Email: {profile.email}"
+        )
 
         # Funds
         funds = broker.get_funds()
-        console.print(f"  [green]✓ Funds:[/green] Available Cash: ₹{funds.available_cash:,.2f} | Total: ₹{funds.total_balance:,.2f}")
+        console.print(
+            f"  [green]✓ Funds:[/green] Available Cash: ₹{funds.available_cash:,.2f} | Total: ₹{funds.total_balance:,.2f}"
+        )
 
         # Quotes
         symbols = ["NSE:NIFTY50-INDEX", "NSE:RELIANCE-EQ"]
@@ -212,16 +246,24 @@ def test_live_data(app_id: str, secret_key: str, redirect_uri: str) -> None:
         for sym, q in quotes.items():
             ch_color = "green" if q.change >= 0 else "red"
             sign = "+" if q.change >= 0 else ""
-            console.print(f"  [green]✓ Quote {sym}:[/green] ₹{q.last_price:,.2f} ([{ch_color}]{sign}{q.change:,.2f} / {sign}{q.change_pct:.2f}%[/{ch_color}])")
+            console.print(
+                f"  [green]✓ Quote {sym}:[/green] ₹{q.last_price:,.2f} ([{ch_color}]{sign}{q.change:,.2f} / {sign}{q.change_pct:.2f}%[/{ch_color}])"
+            )
 
-        console.print("\n[bold green]🎉 All Fyers checks passed! Connection is fully operational.[/bold green]")
+        console.print(
+            "\n[bold green]🎉 All Fyers checks passed! Connection is fully operational.[/bold green]"
+        )
     except Exception as exc:
         console.print(f"  [red]Failed to fetch live data: {exc}[/red]")
 
 
 def run_interactive_login(
-    app_id: str, secret_key: str, redirect_uri: str,
-    fy_id: str = "", totp_secret: str = "", pin: str = "",
+    app_id: str,
+    secret_key: str,
+    redirect_uri: str,
+    fy_id: str = "",
+    totp_secret: str = "",
+    pin: str = "",
 ) -> None:
     """Run Fyers login — headless auto-login if TOTP creds present, else browser OAuth."""
     from brokers.session import login
@@ -229,13 +271,20 @@ def run_interactive_login(
     if fy_id and totp_secret and pin:
         console.print("\n[bold cyan]Starting Headless Auto-Login (TOTP + PIN)...[/bold cyan]")
         from brokers.fyers import FyersAPI
+
         try:
             b = FyersAPI(
-                app_id=app_id, secret_key=secret_key, redirect_uri=redirect_uri,
-                fy_id=fy_id, totp_secret=totp_secret, pin=pin,
+                app_id=app_id,
+                secret_key=secret_key,
+                redirect_uri=redirect_uri,
+                fy_id=fy_id,
+                totp_secret=totp_secret,
+                pin=pin,
             )
             profile = b.complete_login()
-            console.print(f"  [bold green]✓ Logged in:[/bold green] {profile.user_id} ({profile.name})")
+            console.print(
+                f"  [bold green]✓ Logged in:[/bold green] {profile.user_id} ({profile.name})"
+            )
             test_live_data(app_id, secret_key, redirect_uri)
         except Exception as exc:
             console.print(f"[bold red]Auto-login failed: {exc}[/bold red]")
@@ -251,7 +300,11 @@ def run_interactive_login(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate Fyers API credentials and connection.")
-    parser.add_argument("--login", action="store_true", help="Authenticate Fyers (auto-login if TOTP creds set, else browser OAuth)")
+    parser.add_argument(
+        "--login",
+        action="store_true",
+        help="Authenticate Fyers (auto-login if TOTP creds set, else browser OAuth)",
+    )
     args = parser.parse_args()
 
     console.print(
@@ -285,16 +338,19 @@ def main() -> None:
         run_interactive_login(app_id, secret_key, redirect_uri, fy_id, totp_secret, pin)
     else:
         auto_hint = (
-            "\n[bold green]Auto-login credentials detected![/bold green] Run with --login to authenticate headlessly:"
-            "\n  [bold cyan]python scripts/validate_fyers.py --login[/bold cyan]"
-        ) if (fy_id and totp_secret and pin) else (
-            "\n[bold yellow]Next Step:[/bold yellow] To authenticate via browser, run:"
-            "\n  [bold cyan]python scripts/validate_fyers.py --login[/bold cyan]"
-            "\n\nOr add FYERS_FY_ID + FYERS_TOTP_SECRET + FYERS_PIN to .env for fully headless login."
+            (
+                "\n[bold green]Auto-login credentials detected![/bold green] Run with --login to authenticate headlessly:"
+                "\n  [bold cyan]python scripts/validate_fyers.py --login[/bold cyan]"
+            )
+            if (fy_id and totp_secret and pin)
+            else (
+                "\n[bold yellow]Next Step:[/bold yellow] To authenticate via browser, run:"
+                "\n  [bold cyan]python scripts/validate_fyers.py --login[/bold cyan]"
+                "\n\nOr add FYERS_FY_ID + FYERS_TOTP_SECRET + FYERS_PIN to .env for fully headless login."
+            )
         )
         console.print(
-            auto_hint +
-            "\n\nOr start ChanakyaTrade directly and select Fyers from the login menu:"
+            auto_hint + "\n\nOr start ChanakyaTrade directly and select Fyers from the login menu:"
             "\n  [bold cyan]python -m app.main[/bold cyan]\n"
         )
 

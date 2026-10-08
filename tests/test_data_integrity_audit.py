@@ -112,7 +112,7 @@ def test_universe_files_no_dummy_or_test_symbols():
                 if sym.startswith(("DUMMY", "TEST")) or "DUMMY" in sym:
                     violations.append(f"{json_file.name}: Found dummy symbol '{sym}'")
 
-    assert not violations, f"Found dummy symbols in universe files:\n" + "\n".join(violations)
+    assert not violations, "Found dummy symbols in universe files:\n" + "\n".join(violations)
 
 
 def test_eod_database_physical_envelope_sanity():
@@ -300,7 +300,7 @@ def test_static_code_audit_no_mojibake():
 
 def test_production_data_sanctity_firewall():
     """Verify DataSanctityGuard identifies and rejects mock and test data payloads."""
-    from engine.data_sanctity import is_test_or_mock_payload, assert_production_data_sanctity
+    from engine.data_sanctity import is_test_or_mock_payload
 
     # 1. Test environment tag
     is_t, reason = is_test_or_mock_payload({"environment": "TEST", "symbol": "RELIANCE"})
@@ -318,7 +318,9 @@ def test_production_data_sanctity_firewall():
     assert "Forbidden test ID" in reason
 
     # 4. Genuine production record
-    is_t, _ = is_test_or_mock_payload({"environment": "LIVE", "symbol": "TCS", "alert_id": "aa-breakout-tcs-20261004"})
+    is_t, _ = is_test_or_mock_payload(
+        {"environment": "LIVE", "symbol": "TCS", "alert_id": "aa-breakout-tcs-20261004"}
+    )
     assert is_t is False
 
 
@@ -327,7 +329,9 @@ def test_eod_l1_caches_registered_with_memory_guard():
     from engine.memory_guard import _trim_callbacks
     from engine.eod_store import clear_l1_caches
 
-    assert clear_l1_caches in _trim_callbacks, "clear_l1_caches must be registered with memory_guard"
+    assert clear_l1_caches in _trim_callbacks, (
+        "clear_l1_caches must be registered with memory_guard"
+    )
 
 
 def test_data_sync_scheduler_status():

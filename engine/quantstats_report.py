@@ -32,6 +32,7 @@ def _quantstats():
     """Lazily import quantstats with graceful fallback."""
     try:
         import quantstats as qs
+
         return qs
     except Exception:
         return None
@@ -41,6 +42,7 @@ def _use_headless_backend() -> None:
     """Ensure non-interactive Agg backend is used for matplotlib."""
     try:
         import matplotlib
+
         matplotlib.use("Agg", force=True)
     except Exception:
         pass
@@ -112,7 +114,9 @@ def calculate_robustness_score(returns: Any, oos_fraction: float = 0.3) -> float
     return round(min(1.0, max(0.0, ratio)), 3)
 
 
-def key_metrics(returns: Any, trades: Optional[list[dict[str, Any]]] = None, rf: float = 0.0) -> dict[str, Any]:
+def key_metrics(
+    returns: Any, trades: Optional[list[dict[str, Any]]] = None, rf: float = 0.0
+) -> dict[str, Any]:
     """
     Compute hedge-fund grade risk & return metrics from a returns series and closed trades.
     Strictly disambiguates Period Win Rate vs Trade Win Rate.
@@ -150,13 +154,19 @@ def key_metrics(returns: Any, trades: Optional[list[dict[str, Any]]] = None, rf:
         max_dd = float(dd.min() * 100.0)
         total_ret = float(cum.iloc[-1] - 1.0) if not cum.empty else 0.0
         years = max(1.0 / 252.0, len(s) / 252.0)
-        cagr = (float((1.0 + total_ret) ** (1.0 / years) - 1.0) * 100.0) if total_ret > -1.0 else -100.0
+        cagr = (
+            (float((1.0 + total_ret) ** (1.0 / years) - 1.0) * 100.0)
+            if total_ret > -1.0
+            else -100.0
+        )
         calmar = abs(cagr / max_dd) if abs(max_dd) > 1e-9 else 0.0
 
     # Period Win Rate (% profitable days)
     pos_periods = (s > 0.0).sum()
     total_periods = len(s)
-    positive_period_pct = round((pos_periods / total_periods * 100.0), 2) if total_periods > 0 else 0.0
+    positive_period_pct = (
+        round((pos_periods / total_periods * 100.0), 2) if total_periods > 0 else 0.0
+    )
 
     # Cumulative total return
     cum = (1.0 + s).cumprod()
@@ -178,7 +188,11 @@ def key_metrics(returns: Any, trades: Optional[list[dict[str, Any]]] = None, rf:
         trade_win_rate = round((len(wins) / len(pnls) * 100.0), 2) if pnls else 0.0
         sum_wins = sum(wins)
         sum_losses = abs(sum(losses))
-        profit_factor = round(sum_wins / sum_losses, 2) if sum_losses > 1e-9 else (float("inf") if sum_wins > 0 else 0.0)
+        profit_factor = (
+            round(sum_wins / sum_losses, 2)
+            if sum_losses > 1e-9
+            else (float("inf") if sum_wins > 0 else 0.0)
+        )
         avg_profit = round(sum_wins / len(wins), 2) if wins else 0.0
         avg_loss = round(sum_losses / len(losses), 2) if losses else 0.0
         largest_loss = round(min(pnls), 2) if pnls else 0.0
@@ -232,7 +246,12 @@ def generate_html_tear_sheet(
     if output_path:
         out_file = Path(output_path)
     else:
-        out_file = Path.home() / ".trading_platform" / "reports" / f"tear_sheet_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+        out_file = (
+            Path.home()
+            / ".trading_platform"
+            / "reports"
+            / f"tear_sheet_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+        )
 
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -279,41 +298,41 @@ def generate_html_tear_sheet(
   <div class="container">
     <div class="header">
       <h1>{title}</h1>
-      <span class="badge">PROVENANCE: REAL/QUANT</span> &bull; <span style="color:#64748B;font-size:12px">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}</span>
+      <span class="badge">PROVENANCE: REAL/QUANT</span> &bull; <span style="color:#64748B;font-size:12px">Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")}</span>
     </div>
 
     <div class="grid">
       <div class="card">
         <div class="card-title">Total Return</div>
-        <div class="card-value {'positive' if metrics.get('total_return_pct', 0) >= 0 else 'negative'}">{metrics.get('total_return_pct', 0.0):+.2f}%</div>
+        <div class="card-value {"positive" if metrics.get("total_return_pct", 0) >= 0 else "negative"}">{metrics.get("total_return_pct", 0.0):+.2f}%</div>
       </div>
       <div class="card">
         <div class="card-title">CAGR</div>
-        <div class="card-value">{metrics.get('cagr', 0.0):.2f}%</div>
+        <div class="card-value">{metrics.get("cagr", 0.0):.2f}%</div>
       </div>
       <div class="card">
         <div class="card-title">Sharpe Ratio</div>
-        <div class="card-value">{metrics.get('sharpe', 0.0):.2f}</div>
+        <div class="card-value">{metrics.get("sharpe", 0.0):.2f}</div>
       </div>
       <div class="card">
         <div class="card-title">Max Drawdown</div>
-        <div class="card-value negative">{metrics.get('max_drawdown', 0.0):.2f}%</div>
+        <div class="card-value negative">{metrics.get("max_drawdown", 0.0):.2f}%</div>
       </div>
       <div class="card">
         <div class="card-title">Robustness Score (OOS)</div>
-        <div class="card-value {'positive' if metrics.get('robustness_score', 0) >= 0.7 else 'negative'}">{metrics.get('robustness_score', 0.0):.2f} / 1.0</div>
+        <div class="card-value {"positive" if metrics.get("robustness_score", 0) >= 0.7 else "negative"}">{metrics.get("robustness_score", 0.0):.2f} / 1.0</div>
       </div>
       <div class="card">
         <div class="card-title">Trade Win Rate</div>
-        <div class="card-value">{metrics.get('trade_win_rate', 'N/A')}{'%' if metrics.get('trade_win_rate') is not None else ''}</div>
+        <div class="card-value">{metrics.get("trade_win_rate", "N/A")}{"%" if metrics.get("trade_win_rate") is not None else ""}</div>
       </div>
       <div class="card">
         <div class="card-title">Period Win Rate (% Days)</div>
-        <div class="card-value">{metrics.get('positive_period_pct', 0.0):.2f}%</div>
+        <div class="card-value">{metrics.get("positive_period_pct", 0.0):.2f}%</div>
       </div>
       <div class="card">
         <div class="card-title">Profit Factor</div>
-        <div class="card-value">{metrics.get('profit_factor', 'N/A')}</div>
+        <div class="card-value">{metrics.get("profit_factor", "N/A")}</div>
       </div>
     </div>
   </div>

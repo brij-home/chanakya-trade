@@ -25,9 +25,8 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
-from engine.quantstats_report import key_metrics, calculate_robustness_score
 from config.paths import app_data_path
 
 
@@ -148,7 +147,9 @@ class StrategyVariant:
     params: dict[str, Any]
     scorecard: dict[str, Any]
     rules_changed: list[str]
-    veto_status: dict[str, str] = field(default_factory=dict)  # seat -> "CLEARED" or "VETOED: reason"
+    veto_status: dict[str, str] = field(
+        default_factory=dict
+    )  # seat -> "CLEARED" or "VETOED: reason"
     is_accepted: bool = False
     rejection_reason: Optional[str] = None
 
@@ -201,14 +202,18 @@ def evaluate_variant_vetoes(
     base_dd = abs(baseline_scorecard.get("max_drawdown", 10.0))
     var_dd = abs(variant_scorecard.get("max_drawdown", 10.0))
     if var_dd > base_dd * 1.35 and var_dd > 15.0:
-        veto_status["Risk"] = f"VETOED: Max drawdown increased from {base_dd:.1f}% to {var_dd:.1f}% (ruin risk)."
+        veto_status["Risk"] = (
+            f"VETOED: Max drawdown increased from {base_dd:.1f}% to {var_dd:.1f}% (ruin risk)."
+        )
     else:
         veto_status["Risk"] = "CLEARED"
 
     # 2. Backtest Integrity Veto
     rob = variant_scorecard.get("robustness_score", 0.5)
     if rob < 0.35:
-        veto_status["Backtest Integrity"] = f"VETOED: Robustness score {rob:.2f} < 0.35 (out-of-sample edge collapse)."
+        veto_status["Backtest Integrity"] = (
+            f"VETOED: Robustness score {rob:.2f} < 0.35 (out-of-sample edge collapse)."
+        )
     else:
         veto_status["Backtest Integrity"] = "CLEARED"
 
@@ -223,7 +228,9 @@ def evaluate_variant_vetoes(
     base_sharpe = baseline_scorecard.get("sharpe", 1.0)
     var_sharpe = variant_scorecard.get("sharpe", 1.0)
     if len(params.get("added_rules", [])) > 2 and var_sharpe < base_sharpe * 1.10:
-        veto_status["Simplicity & Robustness"] = "VETOED: Added rule complexity without >= 10% Sharpe gain."
+        veto_status["Simplicity & Robustness"] = (
+            "VETOED: Added rule complexity without >= 10% Sharpe gain."
+        )
     else:
         veto_status["Simplicity & Robustness"] = "CLEARED"
 
@@ -315,4 +322,3 @@ def log_evolution_entry(
             "context": context or {},
         },
     )
-

@@ -85,7 +85,7 @@ class TestPrecisionOrderUtilities:
         """Validates that quantity is a multiple of lot size."""
         validate_lot_qty(50, 25)  # valid (2 lots of NIFTY)
         validate_lot_qty(30, 15)  # valid (2 lots of BANKNIFTY)
-        validate_lot_qty(1, 1)    # valid (equity)
+        validate_lot_qty(1, 1)  # valid (equity)
 
         with pytest.raises(ValueError, match="not a multiple of lot size"):
             validate_lot_qty(30, 25)
@@ -121,6 +121,7 @@ class TestFyersHistoricalChunking:
 
     def test_chunking_intraday_multi_chunk(self, monkeypatch):
         from brokers.fyers import FyersAPI
+
         api = FyersAPI(app_id="TEST-100", secret_key="test_secret")
         api._access_token = "mock_token"
 
@@ -145,7 +146,9 @@ class TestFyersHistoricalChunking:
         from_dt = datetime(2026, 1, 1)
         to_dt = from_dt + timedelta(days=200)
 
-        rows = api.get_historical_data("RELIANCE", interval="5minute", from_date=from_dt, to_date=to_dt)
+        rows = api.get_historical_data(
+            "RELIANCE", interval="5minute", from_date=from_dt, to_date=to_dt
+        )
         assert len(captured_payloads) >= 3
         assert len(rows) > 0
         # All chunk ranges should be <= 95 days

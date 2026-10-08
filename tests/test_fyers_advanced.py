@@ -169,9 +169,10 @@ def test_api_fyers_routes(mock_fyers):
     """Verify FastAPI routes delegate to Fyers broker methods."""
     client = TestClient(app)
 
-    with patch("brokers.session.get_execution_broker", return_value=mock_fyers), \
-         patch("brokers.session.get_data_broker", return_value=mock_fyers):
-
+    with (
+        patch("brokers.session.get_execution_broker", return_value=mock_fyers),
+        patch("brokers.session.get_data_broker", return_value=mock_fyers),
+    ):
         # GET /api/fyers/gtt
         mock_fyers._fyers.gtt_orderbook.return_value = {"s": "ok", "orderBook": []}
         resp = client.get("/api/fyers/gtt")
@@ -227,8 +228,20 @@ def test_api_fyers_routes(mock_fyers):
             json={
                 "order_type": "2L",
                 "legs": [
-                    {"symbol": "NSE:NIFTY26OCT25000CE", "qty": 50, "side": 1, "type": 1, "limit_price": 150.0},
-                    {"symbol": "NSE:NIFTY26OCT25500CE", "qty": 50, "side": -1, "type": 1, "limit_price": 50.0},
+                    {
+                        "symbol": "NSE:NIFTY26OCT25000CE",
+                        "qty": 50,
+                        "side": 1,
+                        "type": 1,
+                        "limit_price": 150.0,
+                    },
+                    {
+                        "symbol": "NSE:NIFTY26OCT25500CE",
+                        "qty": 50,
+                        "side": -1,
+                        "type": 1,
+                        "limit_price": 50.0,
+                    },
                 ],
             },
         )
@@ -239,7 +252,12 @@ def test_api_fyers_routes(mock_fyers):
         mock_fyers._fyers.create_alert.return_value = {"s": "ok", "id": "ALT-1"}
         resp = client.post(
             "/api/fyers/alerts",
-            json={"symbol": "RELIANCE", "name": "Rel Breakout", "target_price": 1250.0, "condition": "GT"},
+            json={
+                "symbol": "RELIANCE",
+                "name": "Rel Breakout",
+                "target_price": 1250.0,
+                "condition": "GT",
+            },
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
@@ -257,10 +275,16 @@ def test_api_fyers_routes(mock_fyers):
         assert resp.json()["deleted"] is True
 
         # GET /api/fyers/sector-heatmap
-        with patch.object(mock_fyers, "get_quote", return_value={
-            "NSE:NIFTYIT-INDEX": MagicMock(change_pct=1.5, last_price=28000.0, change=400.0),
-            "NSE:NIFTYBANK-INDEX": MagicMock(change_pct=-0.5, last_price=54000.0, change=-250.0),
-        }):
+        with patch.object(
+            mock_fyers,
+            "get_quote",
+            return_value={
+                "NSE:NIFTYIT-INDEX": MagicMock(change_pct=1.5, last_price=28000.0, change=400.0),
+                "NSE:NIFTYBANK-INDEX": MagicMock(
+                    change_pct=-0.5, last_price=54000.0, change=-250.0
+                ),
+            },
+        ):
             resp = client.get("/api/fyers/sector-heatmap")
             assert resp.status_code == 200
             data = resp.json()
@@ -329,4 +353,3 @@ def test_fyers_server_alerts(mock_fyers):
 
     del_ok = mock_fyers.delete_server_alert("ALT-9")
     assert del_ok is True
-

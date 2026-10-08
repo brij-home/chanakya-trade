@@ -12,7 +12,7 @@ import concurrent.futures
 import json
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Response
 
@@ -58,7 +58,9 @@ async def get_auto_alerts(
     )
 
     def _encode_payload(alts):
-        return json.dumps({"status": "ok", "data": [a.to_dict() for a in alts]}, default=str).encode("utf-8")
+        return json.dumps(
+            {"status": "ok", "data": [a.to_dict() for a in alts]}, default=str
+        ).encode("utf-8")
 
     loop = asyncio.get_running_loop()
     raw_bytes = await loop.run_in_executor(_alerts_router_serializer_pool, _encode_payload, alerts)
@@ -127,7 +129,9 @@ async def invalidate_auto_alert_endpoint(payload: dict):
     if not alert_id:
         raise HTTPException(status_code=400, detail="Missing alert_id")
 
-    alert = await asyncio.to_thread(auto_alert_engine.invalidate_alert_by_id, alert_id, reason=reason)
+    alert = await asyncio.to_thread(
+        auto_alert_engine.invalidate_alert_by_id, alert_id, reason=reason
+    )
     if not alert:
         raise HTTPException(
             status_code=404, detail=f"Alert {alert_id} not found or already invalidated"
@@ -335,9 +339,18 @@ async def send_alert_to_telegram(payload: dict):
     is_milestone = bool(
         getattr(target, "is_milestone", False)
         or getattr(target, "is_invalidated", False)
-        or getattr(target, "stage", "") in (
-            "TARGET_ACHIEVED", "COMPLETED", "T0_5_ACHIEVED", "T1_ACHIEVED", "T2_ACHIEVED",
-            "RUNNER_EXIT", "PROFIT_SECURED", "BREAKEVEN_EXIT", "TRAILING_UPDATE", "INVALIDATED"
+        or getattr(target, "stage", "")
+        in (
+            "TARGET_ACHIEVED",
+            "COMPLETED",
+            "T0_5_ACHIEVED",
+            "T1_ACHIEVED",
+            "T2_ACHIEVED",
+            "RUNNER_EXIT",
+            "PROFIT_SECURED",
+            "BREAKEVEN_EXIT",
+            "TRAILING_UPDATE",
+            "INVALIDATED",
         )
     )
     reply_to = getattr(target, "telegram_root_message_id", None) if is_milestone else None
@@ -490,5 +503,3 @@ async def get_eod_session_scorecard():
         generate_session_scorecard, today_alerts, session_date=today_date
     )
     return scorecard
-
-

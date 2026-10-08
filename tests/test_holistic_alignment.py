@@ -5,11 +5,10 @@ Verifies end-to-end holistic alignment across UI, Alerts, Telegram, Market Data 
 and Backtesting engine for Turtle Soup, Regime Governor, Symbol Master, and QuantStats.
 """
 
-import pytest
 import pandas as pd
 import numpy as np
-from engine.backtest import Backtester, TurtleSoupStrategy, STRATEGIES
-from bot.alert_templates import render_auto_alert, render_asymmetric_alert
+from engine.backtest import TurtleSoupStrategy, STRATEGIES
+from bot.alert_templates import render_auto_alert
 
 
 def test_turtle_soup_strategy_backtest():
@@ -50,7 +49,7 @@ def test_turtle_soup_strategy_backtest():
 
     signals = strat.generate_signals(df)
     assert signals.iloc[35] == -1  # Bearish upthrust signal
-    assert signals.iloc[50] == 1   # Bullish spring signal
+    assert signals.iloc[50] == 1  # Bullish spring signal
 
 
 def test_alert_templates_turtle_soup_sweep_alignment():
@@ -113,7 +112,9 @@ def test_alert_templates_turtle_soup_sweep_alignment():
         "volume": 30000.0,
     }
 
-    bear_alert = detect_turtle_soup_sweep("NSE:RELIANCE", df=df2, ltp=prior_high - 3.0, session_date=d)
+    bear_alert = detect_turtle_soup_sweep(
+        "NSE:RELIANCE", df=df2, ltp=prior_high - 3.0, session_date=d
+    )
     assert bear_alert is not None
 
     msg_bear = render_auto_alert(bear_alert, in_market=True)
@@ -156,4 +157,3 @@ def test_web_api_symbol_and_regime_endpoints():
             assert data_info["status"] == "ok"
 
     asyncio.run(_test())
-

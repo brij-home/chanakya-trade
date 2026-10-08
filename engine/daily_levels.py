@@ -24,14 +24,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-import numpy as np
 import pandas as pd
 
 from config.constants import IST
@@ -179,11 +177,7 @@ class DailyLevelsStore:
         """
         clean = canonical_alert_symbol(symbol)
         s_date = session_date or self._get_today_session_date()
-        exch = (
-            exchange
-            if exchange
-            else ("BSE" if clean in ("SENSEX", "BANKEX") else "NSE")
-        )
+        exch = exchange if exchange else ("BSE" if clean in ("SENSEX", "BANKEX") else "NSE")
 
         from market.history import get_ohlcv
         from market.quotes import get_quote
@@ -269,7 +263,9 @@ class DailyLevelsStore:
         cpr_width_pct = abs(cpr_tc - cpr_bc) / max(1.0, cpr_pivot) * 100.0
 
         is_index = clean in BENCHMARK_INDICES
-        is_narrow = cpr_width_pct <= (0.22 if clean in ("BANKNIFTY", "SENSEX", "BANKEX") else (0.15 if is_index else 0.25))
+        is_narrow = cpr_width_pct <= (
+            0.22 if clean in ("BANKNIFTY", "SENSEX", "BANKEX") else (0.15 if is_index else 0.25)
+        )
         is_wide = cpr_width_pct >= (0.35 if is_index else 0.60)
         cpr_regime = (
             "NARROW_CPR (Trend Day Expected)"
@@ -540,9 +536,7 @@ class DailyLevelsStore:
         prefix = f"{s_date}:"
         with self._lock:
             return {
-                k[len(prefix) :]: dl
-                for k, dl in self._memory_cache.items()
-                if k.startswith(prefix)
+                k[len(prefix) :]: dl for k, dl in self._memory_cache.items() if k.startswith(prefix)
             }
 
 

@@ -2089,14 +2089,20 @@ class EODReportGenerator:
                 )
             )
             is_untriggered = (
-                is_inv
-                and any(k in lower_inv for k in ("did not trigger", "not trigger", "untriggered"))
-            ) or (
-                stage == "EXPIRED"
-                and not a.get("triggered_at")
-                and not milestones
-                and target_status == "PENDING"
-            ) or is_superseded
+                (
+                    is_inv
+                    and any(
+                        k in lower_inv for k in ("did not trigger", "not trigger", "untriggered")
+                    )
+                )
+                or (
+                    stage == "EXPIRED"
+                    and not a.get("triggered_at")
+                    and not milestones
+                    and target_status == "PENDING"
+                )
+                or is_superseded
+            )
 
             # Compute theoretical points & risk
             risk = abs(entry - sl) if abs(entry - sl) > 0.001 else 1.0
@@ -2156,7 +2162,8 @@ class EODReportGenerator:
             # 3. Target / Milestone Achieved (Win)
             has_target_achieved = (
                 any(
-                    m in (
+                    m
+                    in (
                         "T1",
                         "T2",
                         "T3",
@@ -2168,7 +2175,8 @@ class EODReportGenerator:
                     )
                     for m in milestones
                 )
-                or target_status in (
+                or target_status
+                in (
                     "T1_ACHIEVED",
                     "T2_ACHIEVED",
                     "T3_ACHIEVED",
@@ -2176,7 +2184,8 @@ class EODReportGenerator:
                     "FINAL_TARGET",
                 )
                 or (
-                    stage in ("T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED", "RUNNER_EXIT", "COMPLETED")
+                    stage
+                    in ("T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED", "RUNNER_EXIT", "COMPLETED")
                     and any("T1" in m or "T2" in m or "TARGET" in m for m in milestones)
                 )
             )
@@ -2445,7 +2454,11 @@ class EODReportGenerator:
                 if realized_gain_pts <= 0 and float(a.get("pnl_pct") or 0.0) > 0:
                     realized_gain_pts = max(0.0, entry * (float(a.get("pnl_pct")) / 100.0))
 
-                r_achieved = max(0.5, round(realized_gain_pts / init_risk_pts, 2)) if init_risk_pts > 0 else 0.5
+                r_achieved = (
+                    max(0.5, round(realized_gain_pts / init_risk_pts, 2))
+                    if init_risk_pts > 0
+                    else 0.5
+                )
                 if a.get("r_multiple") and float(a.get("r_multiple")) > r_achieved:
                     r_achieved = round(float(a.get("r_multiple")), 2)
 

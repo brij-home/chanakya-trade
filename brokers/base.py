@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 
 # ── Shared dataclasses ────────────────────────────────────────────────────────
@@ -152,7 +152,6 @@ class OptionsContract:
     close: Optional[float] = None
 
 
-
 @dataclass
 class OrderRequest:
     """Parameters for placing an order."""
@@ -174,10 +173,26 @@ class OrderResponse:
     """Result of placing an order."""
 
     order_id: str
-    status: str  # OPEN | COMPLETE | REJECTED | CANCELLED
+    status: str  # OPEN | COMPLETE | REJECTED | CANCELLED | SUBMITTED
     message: str = ""
     average_price: Optional[float] = None
     filled_quantity: int = 0
+    raw: Optional[dict] = None
+
+    def __getitem__(self, item: str) -> Any:
+        if item in ("s",):
+            return "ok" if self.status in ("OPEN", "SUBMITTED", "COMPLETE") else "error"
+        if item in ("id", "order_id"):
+            return self.order_id
+        if item == "status":
+            return self.status
+        if item == "message":
+            return self.message
+        if self.raw and isinstance(self.raw, dict) and item in self.raw:
+            return self.raw[item]
+        if hasattr(self, item):
+            return getattr(self, item)
+        raise KeyError(item)
 
 
 @dataclass

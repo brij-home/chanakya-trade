@@ -19,8 +19,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
-from zoneinfo import ZoneInfo
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -109,8 +108,16 @@ def detect_defined_risk_neutral(
 
     if ctx.option_chain and len(ctx.option_chain) >= 4:
         try:
-            calls = [item for item in ctx.option_chain if item.get("option_type") == "CE" and item.get("strike", 0) > ltp]
-            puts = [item for item in ctx.option_chain if item.get("option_type") == "PE" and item.get("strike", 0) < ltp]
+            calls = [
+                item
+                for item in ctx.option_chain
+                if item.get("option_type") == "CE" and item.get("strike", 0) > ltp
+            ]
+            puts = [
+                item
+                for item in ctx.option_chain
+                if item.get("option_type") == "PE" and item.get("strike", 0) < ltp
+            ]
             if calls and puts:
                 best_call = max(calls, key=lambda x: x.get("oi", 0))
                 best_put = max(puts, key=lambda x: x.get("oi", 0))
@@ -167,8 +174,14 @@ def detect_defined_risk_neutral(
         return None
 
     net_credit_pts = abs(spread.net_debit_or_credit) / (lot_size if lot_size > 0 else 1)
-    lower_be = spread.breakeven_points[0] if spread.breakeven_points else short_put.strike - net_credit_pts
-    upper_be = spread.breakeven_points[1] if len(spread.breakeven_points) > 1 else short_call.strike + net_credit_pts
+    lower_be = (
+        spread.breakeven_points[0] if spread.breakeven_points else short_put.strike - net_credit_pts
+    )
+    upper_be = (
+        spread.breakeven_points[1]
+        if len(spread.breakeven_points) > 1
+        else short_call.strike + net_credit_pts
+    )
 
     # Conviction scoring (72 - 92)
     conviction = 74

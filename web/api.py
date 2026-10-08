@@ -490,33 +490,22 @@ app.include_router(market_router)
 
 # Re-exports for backward compatibility
 from web.routers.alerts_api import (
-    get_auto_alerts,
-    archive_auto_alert,
-    cleanup_auto_alerts,
-    invalidate_auto_alert_endpoint,
-    invalidate_manual_alert_endpoint,
-    rescrutinize_auto_alert,
-    trigger_multibagger_scan_api,
-    get_alerts_audit_trail_api,
-    get_alert_audit_detail_api,
-    get_telegram_destinations_api,
-    get_alert_preferences_api,
-    update_alert_preferences_api,
-    send_alert_to_telegram,
-)
-from web.routers.market_data import (
-    get_participant_oi_endpoint,
-    get_order_book_endpoint,
-    get_whale_deals_endpoint,
-    get_market_regime,
-    get_council_sotd,
-    get_mover_autopsy,
-    run_mover_autopsy,
-    get_mover_precursors,
-    get_asymmetric_opportunities,
-    run_asymmetric_opportunities_scan,
-    api_quotes_batch,
-    get_ticker_snapshot,
+    send_alert_to_telegram as send_alert_to_telegram,
+    get_auto_alerts as get_auto_alerts,
+    get_telegram_destinations_api as get_telegram_destinations_api,
+    get_alert_preferences_api as get_alert_preferences_api,
+    update_alert_preferences_api as update_alert_preferences_api,
+    archive_auto_alert as archive_auto_alert,
+    cleanup_auto_alerts as cleanup_auto_alerts,
+    invalidate_auto_alert_endpoint as invalidate_auto_alert_endpoint,
+    invalidate_manual_alert_endpoint as invalidate_manual_alert_endpoint,
+    rescrutinize_auto_alert as rescrutinize_auto_alert,
+    trigger_multibagger_scan_api as trigger_multibagger_scan_api,
+    get_alerts_audit_trail_api as get_alerts_audit_trail_api,
+    get_alert_audit_detail_api as get_alert_audit_detail_api,
+    scan_swing_trades as scan_swing_trades,
+    trigger_eod_session_review as trigger_eod_session_review,
+    get_eod_session_scorecard as get_eod_session_scorecard,
 )
 
 
@@ -559,7 +548,9 @@ async def _auto_restore_brokers() -> None:
                         _start_websocket(b)
                     except Exception:
                         pass
-                    logging.info("[startup] Fyers session restored as primary (role: both) & WebSocket started")
+                    logging.info(
+                        "[startup] Fyers session restored as primary (role: both) & WebSocket started"
+                    )
         except Exception as exc:
             logging.warning("[startup] Could not restore Fyers: %s", exc)
 
@@ -818,6 +809,7 @@ async def api_fyers_budget():
     Real-time Fyers API budget governor, rate gate telemetry, and circuit breaker status.
     Offloaded to thread pool to preserve async event loop responsiveness per AGENTS.md Rule 24.
     """
+
     def _collect():
         from datetime import datetime, timezone
         from market.fyers_rate_gate import get_fyers_rate_gate
@@ -1117,9 +1109,7 @@ async def trigger_full_system_resync(universe: str = "NIFTY500"):
     import asyncio
     from engine.data_sync_scheduler import data_sync_scheduler
 
-    result = await asyncio.to_thread(
-        data_sync_scheduler.run_full_system_resync, universe=universe
-    )
+    result = await asyncio.to_thread(data_sync_scheduler.run_full_system_resync, universe=universe)
     return JSONResponse(result)
 
 

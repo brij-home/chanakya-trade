@@ -7,7 +7,6 @@ Comprehensive tests for UnifiedFyersRateGate and prioritized rate limiting.
 import time
 import threading
 from unittest.mock import MagicMock
-import pytest
 
 from market.fyers_rate_gate import (
     FyersCallCategory,

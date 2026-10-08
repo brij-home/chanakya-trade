@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from config.constants import IST
 from engine.alert_identity import generate_alert_id, canonical_alert_symbol
@@ -153,7 +152,7 @@ def detect_pairs_arbitrage(
             "entry_condition": f"Current Spread Z-Score = {z:+.2f}σ",
             "target": "Take 50% profits at Z = 1.0σ (partial mean reversion)",
             "target_2": "Close remainder at Z = 0.0σ (historical equilibrium)",
-            "stop_loss": f"Hard invalidation if spread expands past |Z| >= 3.2σ",
+            "stop_loss": "Hard invalidation if spread expands past |Z| >= 3.2σ",
             "risk_reward": f"1:{max(1.8, rr_ratio):.1f}",
             "expected_horizon": f"~{int(hl)} trading days (historical half-life)",
         },

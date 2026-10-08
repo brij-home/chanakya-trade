@@ -18,8 +18,14 @@ def client():
 
 def test_fyers_gtt_endpoints(client):
     mock_broker = MagicMock()
-    mock_broker.get_gtt_orders.return_value = [{"id": "GTT-101", "symbol": "NSE:RELIANCE-EQ", "status": "ACTIVE"}]
-    mock_broker.place_gtt_order.return_value = {"s": "ok", "id": "GTT-102", "message": "GTT order placed"}
+    mock_broker.get_gtt_orders.return_value = [
+        {"id": "GTT-101", "symbol": "NSE:RELIANCE-EQ", "status": "ACTIVE"}
+    ]
+    mock_broker.place_gtt_order.return_value = {
+        "s": "ok",
+        "id": "GTT-102",
+        "message": "GTT order placed",
+    }
     mock_broker.cancel_gtt_order.return_value = True
 
     with patch("brokers.session.get_execution_broker", return_value=mock_broker):
@@ -32,13 +38,16 @@ def test_fyers_gtt_endpoints(client):
         assert data["orders"][0]["id"] == "GTT-101"
 
         # 2. POST GTT
-        res_post = client.post("/api/fyers/gtt", json={
-            "symbol": "RELIANCE",
-            "qty": 10,
-            "side": "BUY",
-            "trigger_price": 2500.0,
-            "limit_price": 2505.0,
-        })
+        res_post = client.post(
+            "/api/fyers/gtt",
+            json={
+                "symbol": "RELIANCE",
+                "qty": 10,
+                "side": "BUY",
+                "trigger_price": 2500.0,
+                "limit_price": 2505.0,
+            },
+        )
         assert res_post.status_code == 200
         assert res_post.json()["id"] == "GTT-102"
 
@@ -61,8 +70,16 @@ def test_fyers_exit_all_endpoint(client):
 
 def test_fyers_screeners_endpoints(client):
     mock_broker = MagicMock()
-    mock_broker.get_screener_technical.return_value = {"s": "ok", "screener": "cs004", "data": [{"symbol": "TCS"}]}
-    mock_broker.get_screener_candlestick.return_value = {"s": "ok", "pattern": "hammer", "data": [{"symbol": "INFY"}]}
+    mock_broker.get_screener_technical.return_value = {
+        "s": "ok",
+        "screener": "cs004",
+        "data": [{"symbol": "TCS"}],
+    }
+    mock_broker.get_screener_candlestick.return_value = {
+        "s": "ok",
+        "pattern": "hammer",
+        "data": [{"symbol": "INFY"}],
+    }
 
     with patch("brokers.session.get_data_broker", return_value=mock_broker):
         res_tech = client.get("/api/fyers/screeners/technical?screener=cs004")
@@ -78,7 +95,9 @@ def test_fyers_patch_order_endpoint(client):
     from brokers.base import OrderResponse
 
     mock_broker = MagicMock()
-    mock_broker.modify_order.return_value = OrderResponse(order_id="ORD-101", status="OPEN", message="Modified")
+    mock_broker.modify_order.return_value = OrderResponse(
+        order_id="ORD-101", status="OPEN", message="Modified"
+    )
 
     with patch("brokers.session.get_execution_broker", return_value=mock_broker):
         res = client.patch("/api/fyers/orders/ORD-101", json={"price": 2550.0, "qty": 50})

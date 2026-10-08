@@ -7,14 +7,16 @@ Unit tests for WsSubscriptionManager LRU capacity and disk restoration.
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-import pytest
 
 from market.ws_subscription_manager import WsSubscriptionManager, CORE_BASE_SYMBOLS
 
 
 def test_ws_subscription_manager_core_retention_and_lru():
     with tempfile.TemporaryDirectory() as tmp_dir:
-        with patch("market.ws_subscription_manager._get_cache_path", return_value=Path(tmp_dir) / "sub.json"):
+        with patch(
+            "market.ws_subscription_manager._get_cache_path",
+            return_value=Path(tmp_dir) / "sub.json",
+        ):
             # Set a low limit for easy testing: 45 symbols (core base has 40, leaving 5 dynamic slots)
             max_limit = len(CORE_BASE_SYMBOLS) + 5
             mgr = WsSubscriptionManager(max_subscriptions=max_limit)

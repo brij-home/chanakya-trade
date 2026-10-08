@@ -6,7 +6,6 @@ Tests for FyersCircuitBreaker trip logic, SSE/Telegram alerts, and fast-fail beh
 
 import time
 from unittest.mock import MagicMock, patch
-import pytest
 
 from market.fyers_circuit_breaker import FyersCircuitBreaker, CircuitState
 from brokers.fyers import FyersAPI

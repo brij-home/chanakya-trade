@@ -121,7 +121,10 @@ class WsSubscriptionManager:
                 f"[WsSubManager] Restored {len(self._dynamic_symbols)} dynamic subscriptions from disk"
             )
         except Exception as exc:
-            logger.warning(f"[WsSubManager] Failed loading disk subscriptions from {path}: {exc}", exc_info=True)
+            logger.warning(
+                f"[WsSubManager] Failed loading disk subscriptions from {path}: {exc}",
+                exc_info=True,
+            )
 
     def _save_to_disk(self) -> None:
         """Save active subscription list to disk."""
@@ -197,12 +200,16 @@ class WsSubscriptionManager:
                     ws_client.unsubscribe(to_evict)
                     logger.info(f"[WsSubManager] Evicted {len(to_evict)} LRU subscriptions")
                 except Exception as exc:
-                    logger.warning(f"[WsSubManager] Failed to unsubscribe evicted: {exc}", exc_info=True)
+                    logger.warning(
+                        f"[WsSubManager] Failed to unsubscribe evicted: {exc}", exc_info=True
+                    )
             if to_add:
                 try:
                     ws_client.subscribe(to_add)
                 except Exception as exc:
-                    logger.warning(f"[WsSubManager] Failed to subscribe new symbols: {exc}", exc_info=True)
+                    logger.warning(
+                        f"[WsSubManager] Failed to subscribe new symbols: {exc}", exc_info=True
+                    )
 
         return to_add
 

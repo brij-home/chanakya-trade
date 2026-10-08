@@ -10,7 +10,6 @@ Comprehensive test suite for the 4 Strategic Next-Level Terminal Modules:
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import MagicMock, patch
 
 from analysis.gex import get_gex_analysis, compute_gex_at_strike, find_gex_flip, classify_gex_regime
@@ -21,13 +20,18 @@ from brokers.fyers import FyersAPI
 
 # ── 1. Options GEX & Dealer Zero-Gamma Tests ─────────────────────────────────
 
+
 def test_gex_core_math():
     """Verify analytical Black-Scholes GEX formulas and regime classification."""
     # Positive gamma call: 100,000 contracts, gamma 0.0001, spot 22000, lot 65
-    call_gex = compute_gex_at_strike(oi=100000, gamma=0.0001, spot=22000.0, lot_size=65, is_call=True)
+    call_gex = compute_gex_at_strike(
+        oi=100000, gamma=0.0001, spot=22000.0, lot_size=65, is_call=True
+    )
     assert call_gex > 0
 
-    put_gex = compute_gex_at_strike(oi=100000, gamma=0.0001, spot=22000.0, lot_size=65, is_call=False)
+    put_gex = compute_gex_at_strike(
+        oi=100000, gamma=0.0001, spot=22000.0, lot_size=65, is_call=False
+    )
     assert put_gex < 0
     assert abs(put_gex + call_gex) < 0.01
 
@@ -60,6 +64,7 @@ def test_gex_full_analysis():
 
 # ── 2. Order Flow & CVD Divergence Tests ─────────────────────────────────────
 
+
 def test_order_flow_analysis():
     """Verify Order Flow Snapshot generation with Level 2 Depth and CVD."""
     snap = analyze_order_flow("SBIN")
@@ -83,6 +88,7 @@ def test_order_flow_analysis():
 
 
 # ── 3. Automated Volatility Risk-Parity Sizing Tests ─────────────────────────
+
 
 def test_volatility_risk_parity_sizing():
     """Verify 14-period ATR volatility risk-parity equalizes rupee risk."""
@@ -118,6 +124,7 @@ def test_volatility_risk_parity_sizing():
 
 # ── 4. Broker Margin Pre-Flight Estimator Tests ──────────────────────────────
 
+
 def test_fyers_margin_check_offline():
     """Verify statutory charge calculation and margin parsing in check_order_margin."""
     fyers = FyersAPI(app_id="TEST-100", secret_key="test_secret")
@@ -139,15 +146,17 @@ def test_fyers_margin_check_offline():
     }
 
     with patch("requests.post", return_value=mock_resp):
-        res = fyers.check_order_margin([
-            {
-                "symbol": "NSE:SBIN-EQ",
-                "qty": 50,
-                "side": "BUY",
-                "product_type": "INTRADAY",
-                "price": 800.0,
-            }
-        ])
+        res = fyers.check_order_margin(
+            [
+                {
+                    "symbol": "NSE:SBIN-EQ",
+                    "qty": 50,
+                    "side": "BUY",
+                    "product_type": "INTRADAY",
+                    "price": 800.0,
+                }
+            ]
+        )
 
         assert res["status"] == "ok"
         assert res["preflight_verdict"] == "CLEARED"

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import threading
 from datetime import datetime, timezone, timedelta
@@ -253,11 +252,27 @@ class SQLiteAlertStore:
 
             created_at = str(d.get("created_at") or d.get("timestamp") or now_str)
             payload_json = json.dumps(d)
-            rows_to_insert.append((
-                alert_id, symbol, exchange, segment, alert_type, stage, direction,
-                session_date, ltp, trigger_level, target_level, stop_loss, confidence,
-                status, created_at, now_str, payload_json
-            ))
+            rows_to_insert.append(
+                (
+                    alert_id,
+                    symbol,
+                    exchange,
+                    segment,
+                    alert_type,
+                    stage,
+                    direction,
+                    session_date,
+                    ltp,
+                    trigger_level,
+                    target_level,
+                    stop_loss,
+                    confidence,
+                    status,
+                    created_at,
+                    now_str,
+                    payload_json,
+                )
+            )
 
         if not rows_to_insert:
             return 0

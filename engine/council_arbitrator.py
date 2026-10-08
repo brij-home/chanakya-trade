@@ -195,8 +195,7 @@ def run_council_arbitration(engine: object) -> list:
             pass
         action_plan["council_note"] = (
             "🏆 APEX SOTD #%d: Selected by Institutional Council arbitration (score %.1f). "
-            "Benchmark: %s. Highest conviction setup in session."
-            % (rank, score, nifty_posture)
+            "Benchmark: %s. Highest conviction setup in session." % (rank, score, nifty_posture)
         )
         winner_ids.append(alert_id)
         logger.info(

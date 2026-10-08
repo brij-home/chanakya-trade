@@ -30,7 +30,7 @@ def remediate_alerts():
         milestones = a.get("achieved_milestones") or []
         stage = a.get("stage")
         target_status = a.get("target_status")
-        
+
         has_t1 = "T1_ACHIEVED" in milestones or stage == "T1_ACHIEVED" or target_status == "T1_HIT"
         if not has_t1:
             continue
@@ -89,20 +89,26 @@ def remediate_alerts():
         sl = float(a.get("trailing_stop") or a.get("stop_loss") or 0.0)
 
         if new_stage == "BREAKEVEN_LOCKED":
-            a["headline"] = f"🛡️ [REAL/LIVE] BREAKEVEN LOCKED (+0.8R FREE ROLL): {sym} SL → {cs}{sl:,.2f} (Downside Eliminated)"
+            a["headline"] = (
+                f"🛡️ [REAL/LIVE] BREAKEVEN LOCKED (+0.8R FREE ROLL): {sym} SL → {cs}{sl:,.2f} (Downside Eliminated)"
+            )
         elif new_stage == "DE_RISK_0_5R":
-            a["headline"] = f"🛡️ [REAL/LIVE] RISK COMPRESSED (+0.5R DE-RISK): {sym} SL → {cs}{sl:,.2f}"
+            a["headline"] = (
+                f"🛡️ [REAL/LIVE] RISK COMPRESSED (+0.5R DE-RISK): {sym} SL → {cs}{sl:,.2f}"
+            )
         else:
             a["headline"] = f"⚡ [REAL/LIVE] ACTIVE: {sym}"
 
         if "audit_trail" not in a or not isinstance(a["audit_trail"], list):
             a["audit_trail"] = []
 
-        a["audit_trail"].append({
-            "timestamp": now_iso,
-            "action": "INTEGRITY_REMEDIATION",
-            "details": f"Rectified false T1_ACHIEVED to {new_stage}. LTP ({cs}{ltp:,.2f}) did not reach physical Target 1 ({cs}{t1:,.2f}).",
-        })
+        a["audit_trail"].append(
+            {
+                "timestamp": now_iso,
+                "action": "INTEGRITY_REMEDIATION",
+                "details": f"Rectified false T1_ACHIEVED to {new_stage}. LTP ({cs}{ltp:,.2f}) did not reach physical Target 1 ({cs}{t1:,.2f}).",
+            }
+        )
 
         remediated += 1
 

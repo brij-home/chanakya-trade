@@ -91,6 +91,7 @@ def _to_ws_symbol(instrument: str) -> str:
     """Convert any instrument format (Equity, Index, MCX, Currency, Options) to Fyers WebSocket format."""
     try:
         from brokers.fyers import _to_fyers_symbol
+
         return _to_fyers_symbol(instrument)
     except Exception:
         pass
@@ -201,6 +202,7 @@ class WebSocketManager:
         self._ws = None
 
         if ws_to_close:
+
             def _close():
                 try:
                     setattr(ws_to_close, "restart_flag", False)
@@ -246,7 +248,11 @@ class WebSocketManager:
         filtered = []
         for s in symbols:
             s_up = str(s).strip().upper()
-            if s_up.startswith("CRYPTO:") or s_up.endswith("USDT") or s_up in ("BTC", "ETH", "SOL", "BNB", "DOGE"):
+            if (
+                s_up.startswith("CRYPTO:")
+                or s_up.endswith("USDT")
+                or s_up in ("BTC", "ETH", "SOL", "BNB", "DOGE")
+            ):
                 continue
             filtered.append(s)
 

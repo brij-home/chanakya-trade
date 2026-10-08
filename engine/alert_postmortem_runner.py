@@ -64,7 +64,9 @@ def generate_session_scorecard(
 
         is_inv = getattr(alert, "is_invalidated", False)
         milestones = getattr(alert, "achieved_milestones", []) or []
-        t1_reached = any("T1" in str(m) for m in milestones) or any("TARGET" in str(m) for m in milestones)
+        t1_reached = any("T1" in str(m) for m in milestones) or any(
+            "TARGET" in str(m) for m in milestones
+        )
 
         r_mult = getattr(alert, "r_multiple", None)
         if r_mult is None or r_mult == 0.0:

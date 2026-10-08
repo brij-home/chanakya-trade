@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 
@@ -143,7 +143,11 @@ def analyze_order_flow(symbol: str, timeframe: str = "5m") -> OrderFlowSnapshot:
                         spread = max(0.0, best_ask - best_bid)
                         spread_pct = (spread / best_bid) * 100.0 if best_bid > 0 else 0.0
                         tot_vol = bid_vol + ask_vol
-                        micro_price = (best_ask * bid_vol + best_bid * ask_vol) / tot_vol if tot_vol > 0 else ltp
+                        micro_price = (
+                            (best_ask * bid_vol + best_bid * ask_vol) / tot_vol
+                            if tot_vol > 0
+                            else ltp
+                        )
 
                 tot_depth = total_buy + total_sell
                 if tot_depth > 0:
@@ -179,7 +183,6 @@ def analyze_order_flow(symbol: str, timeframe: str = "5m") -> OrderFlowSnapshot:
             h = float(row.get("high", row.get("close", 0.0)))
             l = float(row.get("low", row.get("close", 0.0)))
             c = float(row.get("close", 0.0))
-            o = float(row.get("open", c))
             v = float(row.get("volume", 1.0))
 
             bar_range = max(0.01, h - l)
@@ -207,7 +210,9 @@ def analyze_order_flow(symbol: str, timeframe: str = "5m") -> OrderFlowSnapshot:
         # 4. Multi-bar CVD divergence analysis
         # Compare last 5 bars vs prior 10 bars
         if len(recent_df) >= 10:
-            price_recent_change = float(recent_df["close"].iloc[-1]) - float(recent_df["close"].iloc[-6])
+            price_recent_change = float(recent_df["close"].iloc[-1]) - float(
+                recent_df["close"].iloc[-6]
+            )
             cvd_recent_change = float(cum_deltas[-1]) - float(cum_deltas[-6])
             cvd_slope = cvd_recent_change / 5.0
 

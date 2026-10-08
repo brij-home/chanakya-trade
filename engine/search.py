@@ -22,6 +22,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 from config.paths import app_data_path
 
 

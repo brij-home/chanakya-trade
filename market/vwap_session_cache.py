@@ -80,7 +80,9 @@ class VwapSessionCache:
                 f"[VwapCache] Restored {len(self._memory_cache)} session VWAPs from {cache_file.name}"
             )
         except Exception as exc:
-            logger.warning(f"[VwapCache] Could not load disk cache {cache_file}: {exc}", exc_info=True)
+            logger.warning(
+                f"[VwapCache] Could not load disk cache {cache_file}: {exc}", exc_info=True
+            )
 
     def _save_to_disk(self) -> None:
         """Persist in-memory cache to disk with thread-safe atomic write and Windows retry."""
@@ -116,7 +118,9 @@ class VwapSessionCache:
                         except Exception:
                             pass
             except Exception as exc:
-                logger.warning(f"[VwapCache] Failed to save disk cache {cache_file}: {exc}", exc_info=True)
+                logger.warning(
+                    f"[VwapCache] Failed to save disk cache {cache_file}: {exc}", exc_info=True
+                )
 
     def _get_in_flight_lock(self, symbol: str) -> threading.Lock:
         with self._in_flight_master_lock:
@@ -183,7 +187,9 @@ class VwapSessionCache:
                     self.put(clean, computed_val)
                     return computed_val
             except Exception as exc:
-                logger.warning(f"[VwapCache] Error computing VWAP for {clean}: {exc}", exc_info=True)
+                logger.warning(
+                    f"[VwapCache] Error computing VWAP for {clean}: {exc}", exc_info=True
+                )
 
         return None
 

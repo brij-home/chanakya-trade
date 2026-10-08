@@ -9,7 +9,6 @@ Comprehensive invariant tests verifying:
 
 from __future__ import annotations
 
-import pytest
 from market.instruments import (
     STANDARD_LOT_SIZES,
     get_fno_lot_size,
@@ -19,7 +18,6 @@ from engine.position_sizer import _F_AND_O_LOT_SIZES
 from engine.options_backtest import LOT_SIZES as OB_LOT_SIZES
 from engine.greeks_manager import LOT_SIZES as GM_LOT_SIZES
 from engine.detection_context import (
-    DetectionContext,
     build_detection_context,
     detector_registry,
     register_default_detectors,
@@ -29,9 +27,15 @@ from engine.auto_alert_engine import AutoAlertEngine
 
 def test_lot_size_ssot_identity_invariants():
     """Verify that all engines and modules reference the exact same STANDARD_LOT_SIZES master."""
-    assert _F_AND_O_LOT_SIZES is STANDARD_LOT_SIZES, "_F_AND_O_LOT_SIZES must be STANDARD_LOT_SIZES identity"
-    assert OB_LOT_SIZES is STANDARD_LOT_SIZES, "OptionsBacktest LOT_SIZES must be STANDARD_LOT_SIZES identity"
-    assert GM_LOT_SIZES is STANDARD_LOT_SIZES, "GreeksManager LOT_SIZES must be STANDARD_LOT_SIZES identity"
+    assert _F_AND_O_LOT_SIZES is STANDARD_LOT_SIZES, (
+        "_F_AND_O_LOT_SIZES must be STANDARD_LOT_SIZES identity"
+    )
+    assert OB_LOT_SIZES is STANDARD_LOT_SIZES, (
+        "OptionsBacktest LOT_SIZES must be STANDARD_LOT_SIZES identity"
+    )
+    assert GM_LOT_SIZES is STANDARD_LOT_SIZES, (
+        "GreeksManager LOT_SIZES must be STANDARD_LOT_SIZES identity"
+    )
 
 
 def test_key_lot_size_specifications():

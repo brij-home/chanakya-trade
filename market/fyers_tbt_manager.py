@@ -168,12 +168,8 @@ class FyersTbtManager:
         avg_bid_q = (tot_bid_q / max(1, len(bids))) if bids else 0
         avg_ask_q = (tot_ask_q / max(1, len(asks))) if asks else 0
 
-        bid_walls = [
-            b for b in bids if b["qty"] >= max(2500, avg_bid_q * 3.0) and b["level"] > 2
-        ]
-        ask_walls = [
-            a for a in asks if a["qty"] >= max(2500, avg_ask_q * 3.0) and a["level"] > 2
-        ]
+        bid_walls = [b for b in bids if b["qty"] >= max(2500, avg_bid_q * 3.0) and b["level"] > 2]
+        ask_walls = [a for a in asks if a["qty"] >= max(2500, avg_ask_q * 3.0) and a["level"] > 2]
 
         ltp = bids[0]["price"] if bids else (asks[0]["price"] if asks else 0.0)
         spread = round(asks[0]["price"] - bids[0]["price"], 2) if bids and asks else 0.0
@@ -201,7 +197,8 @@ class FyersTbtManager:
     def subscribe(self, symbols: list[str]) -> None:
         # Filter out crypto symbols — Fyers TBT only handles Indian exchange instruments
         filtered = [
-            s for s in symbols
+            s
+            for s in symbols
             if not str(s).upper().startswith("CRYPTO:")
             and not str(s).upper().endswith("USDT")
             and str(s).upper() not in ("BTC", "ETH", "SOL", "BNB", "DOGE")
@@ -345,9 +342,7 @@ class FyersTbtManager:
             "has_ask_wall": False,
         }
 
-    def simulate_slippage(
-        self, symbol: str, quantity: int, side: str = "BUY"
-    ) -> dict[str, Any]:
+    def simulate_slippage(self, symbol: str, quantity: int, side: str = "BUY") -> dict[str, Any]:
         """
         Calculate volume-weighted fill price and slippage through the order book.
         """
@@ -442,9 +437,7 @@ class FyersTbtManager:
 
         if is_buy and ask_walls:
             # Check if wall is within 2.5% of LTP (immediate roadblock)
-            near_walls = [
-                w for w in ask_walls if ltp > 0 and w["price"] <= ltp * 1.025
-            ]
+            near_walls = [w for w in ask_walls if ltp > 0 and w["price"] <= ltp * 1.025]
             if near_walls:
                 penalties += 30
                 findings.append(
@@ -454,9 +447,7 @@ class FyersTbtManager:
                 bonuses += 5
                 findings.append("No immediate institutional ask walls within +2.5%")
         elif not is_buy and bid_walls:
-            near_bid_walls = [
-                w for w in bid_walls if ltp > 0 and w["price"] >= ltp * 0.975
-            ]
+            near_bid_walls = [w for w in bid_walls if ltp > 0 and w["price"] >= ltp * 0.975]
             if near_bid_walls:
                 penalties += 30
                 findings.append(
@@ -485,7 +476,11 @@ class FyersTbtManager:
         raw_score = 50 + bonuses - penalties
         final_conviction = max(0, min(100, raw_score))
 
-        verdict = "PASS" if final_conviction >= 65 else ("CAUTION" if final_conviction >= 45 else "REJECT")
+        verdict = (
+            "PASS"
+            if final_conviction >= 65
+            else ("CAUTION" if final_conviction >= 45 else "REJECT")
+        )
 
         return {
             "symbol": symbol,

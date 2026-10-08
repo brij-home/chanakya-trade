@@ -378,5 +378,3 @@ def test_secondary_index_call_suppressed_under_bearish_benchmark_without_reversa
     ):
         engine.scan_index_call_setups(quotes_map=q_map_reclaimed)
         assert mock_detect.called, "Reclaiming own VWAP must pass gate and evaluate detector"
-
-

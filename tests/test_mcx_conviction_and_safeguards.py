@@ -1520,7 +1520,9 @@ def test_crudeoil_golden_hours_trend_invariant_vetoes_counter_trend_pe(monkeypat
                 alerts = detect_commodity_breakouts(universe=["CRUDEOIL"])
                 # Any alert generated must NOT be BEARISH (no 8500 PE above VWAP)
                 for a in alerts:
-                    assert a.direction != "BEARISH", "Counter-trend short > VWAP during Golden Hours must be vetoed!"
+                    assert a.direction != "BEARISH", (
+                        "Counter-trend short > VWAP during Golden Hours must be vetoed!"
+                    )
 
 
 def test_crudeoil_golden_hours_thrust_detects_1837_rebound(monkeypatch):
@@ -1625,7 +1627,9 @@ def test_naturalgas_anti_fomo_overbought_rsi_guard(monkeypatch):
             with patch("market.quotes.get_ltp", return_value=301.5):
                 alerts = detect_commodity_breakouts(universe=["NATURALGAS"])
                 # Must be suppressed due to overbought RSI exhaustion (> 68.0)
-                assert len(alerts) == 0, "Overbought Natural Gas 300 CE FOMO chase must be suppressed!"
+                assert len(alerts) == 0, (
+                    "Overbought Natural Gas 300 CE FOMO chase must be suppressed!"
+                )
 
 
 def test_default_symbols_includes_sensex_and_midcap():
@@ -1806,6 +1810,7 @@ def test_commodity_adaptive_regime_tiger_stalking_suppresses_midday_lull():
     # 13:15 IST is during the dead midday volume lull
     ref_dt = datetime(2026, 10, 6, 13, 15, tzinfo=ist)
     from unittest.mock import patch
+
     with patch("market.macro.get_macro_snapshot", return_value=None):
         eagle = evaluate_commodity_eagle_regime(
             symbol="CRUDEOIL",
@@ -1935,10 +1940,9 @@ def test_wyckoff_utad_crudeoil_8800_pe_reversal(monkeypatch):
     bypass the rigid Golden Hours VWAP filter, select CRUDEOIL 8800 PE,
     and generate an institutional reversal alert.
     """
-    import os
     import pandas as pd
     from datetime import datetime
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
     from engine.detectors.commodity import detect_commodity_breakouts
     from brokers.base import OptionsContract, Quote
 
@@ -1947,23 +1951,35 @@ def test_wyckoff_utad_crudeoil_8800_pe_reversal(monkeypatch):
     # Construct 5m candles leading up to the 19:22 UTAD sweep
     records = []
     for i in range(21):
-        records.append({
-            "open": 8740.0 + (i % 5) * 5,
-            "high": 8760.0 + (i % 5) * 5,
-            "low": 8730.0 + (i % 5) * 5,
-            "close": 8750.0 + (i % 5) * 5,
-            "volume": 200.0,
-        })
+        records.append(
+            {
+                "open": 8740.0 + (i % 5) * 5,
+                "high": 8760.0 + (i % 5) * 5,
+                "low": 8730.0 + (i % 5) * 5,
+                "close": 8750.0 + (i % 5) * 5,
+                "volume": 200.0,
+            }
+        )
     # Bar 21 (19:00): Pre-breakout push
-    records.append({"open": 8760.0, "high": 8790.0, "low": 8755.0, "close": 8785.0, "volume": 350.0})
+    records.append(
+        {"open": 8760.0, "high": 8790.0, "low": 8755.0, "close": 8785.0, "volume": 350.0}
+    )
     # Bar 22 (19:05): Breakout push to 8805
-    records.append({"open": 8785.0, "high": 8815.0, "low": 8780.0, "close": 8805.0, "volume": 500.0})
+    records.append(
+        {"open": 8785.0, "high": 8815.0, "low": 8780.0, "close": 8805.0, "volume": 500.0}
+    )
     # Bar 23 (19:10): High momentum bar to 8818
-    records.append({"open": 8805.0, "high": 8820.0, "low": 8800.0, "close": 8815.0, "volume": 550.0})
+    records.append(
+        {"open": 8805.0, "high": 8820.0, "low": 8800.0, "close": 8815.0, "volume": 550.0}
+    )
     # Bar 24 (19:15): Spike poking up to 8824.0 (Liquidity sweep UTAD peak)
-    records.append({"open": 8815.0, "high": 8824.0, "low": 8795.0, "close": 8800.0, "volume": 750.0})
+    records.append(
+        {"open": 8815.0, "high": 8824.0, "low": 8795.0, "close": 8800.0, "volume": 750.0}
+    )
     # Bar 25 (19:20): Rejection bar failing back under 8800 to 8760
-    records.append({"open": 8800.0, "high": 8805.0, "low": 8755.0, "close": 8760.0, "volume": 850.0})
+    records.append(
+        {"open": 8800.0, "high": 8805.0, "low": 8755.0, "close": 8760.0, "volume": 850.0}
+    )
 
     df_5m = pd.DataFrame(records)
     now_t = pd.Timestamp.now()
@@ -2017,10 +2033,11 @@ def test_wyckoff_utad_crudeoil_8800_pe_reversal(monkeypatch):
     )
     mock_chain = [mock_pe_8750, mock_pe_8800, mock_pe_8850]
 
-    with patch("market.history.get_ohlcv", return_value=df_5m), \
-         patch("market.options.get_options_chain", return_value=mock_chain), \
-         patch("engine.detectors.commodity.datetime") as mock_dt:
-
+    with (
+        patch("market.history.get_ohlcv", return_value=df_5m),
+        patch("market.options.get_options_chain", return_value=mock_chain),
+        patch("engine.detectors.commodity.datetime") as mock_dt,
+    ):
         # Mock time to 19:22 IST on a Wednesday (2026-10-07)
         mock_now = datetime(2026, 10, 7, 19, 22, 0, tzinfo=IST)
         mock_dt.now.return_value = mock_now
@@ -2177,23 +2194,27 @@ def test_1m_micro_rejection_trigger_golden_hours():
     base_t = datetime(2026, 10, 7, 18, 0, 0)
     for i in range(25):
         t = base_t + timedelta(minutes=i * 5)
-        bars_5m.append({
-            "date": t,
-            "open": 8750.0 + i * 2,
-            "high": 8760.0 + i * 2,
-            "low": 8740.0 + i * 2,
-            "close": 8755.0 + i * 2,
-            "volume": 2000,
-        })
+        bars_5m.append(
+            {
+                "date": t,
+                "open": 8750.0 + i * 2,
+                "high": 8760.0 + i * 2,
+                "low": 8740.0 + i * 2,
+                "close": 8755.0 + i * 2,
+                "volume": 2000,
+            }
+        )
     # Last 5m bar peaked at 8824 but hasn't formed a big bearish close yet
-    bars_5m.append({
-        "date": base_t + timedelta(minutes=125),
-        "open": 8792.0,
-        "high": 8824.0,
-        "low": 8788.0,
-        "close": 8790.0,
-        "volume": 3500,
-    })
+    bars_5m.append(
+        {
+            "date": base_t + timedelta(minutes=125),
+            "open": 8792.0,
+            "high": 8824.0,
+            "low": 8788.0,
+            "close": 8790.0,
+            "volume": 3500,
+        }
+    )
     df_5m = pd.DataFrame(bars_5m).set_index("date")
 
     # 1m bars explicitly showing the micro-sweep and rejection at 19:21-19:22
@@ -2201,32 +2222,38 @@ def test_1m_micro_rejection_trigger_golden_hours():
     base_1m_t = datetime(2026, 10, 7, 19, 15, 0)
     for j in range(6):
         t = base_1m_t + timedelta(minutes=j)
-        bars_1m.append({
-            "date": t,
-            "open": 8790.0,
-            "high": 8805.0,
-            "low": 8788.0,
-            "close": 8800.0,
-            "volume": 500,
-        })
+        bars_1m.append(
+            {
+                "date": t,
+                "open": 8790.0,
+                "high": 8805.0,
+                "low": 8788.0,
+                "close": 8800.0,
+                "volume": 500,
+            }
+        )
     # 19:21: Poke to 8824 (sweep)
-    bars_1m.append({
-        "date": base_1m_t + timedelta(minutes=6),
-        "open": 8800.0,
-        "high": 8824.0,
-        "low": 8798.0,
-        "close": 8815.0,
-        "volume": 1200,
-    })
+    bars_1m.append(
+        {
+            "date": base_1m_t + timedelta(minutes=6),
+            "open": 8800.0,
+            "high": 8824.0,
+            "low": 8798.0,
+            "close": 8815.0,
+            "volume": 1200,
+        }
+    )
     # 19:22: Sharp rejection candle back down to 8795 with long upper wick
-    bars_1m.append({
-        "date": base_1m_t + timedelta(minutes=7),
-        "open": 8815.0,
-        "high": 8818.0,
-        "low": 8792.0,
-        "close": 8795.0,  # Closed well back under 8800 round level
-        "volume": 1500,
-    })
+    bars_1m.append(
+        {
+            "date": base_1m_t + timedelta(minutes=7),
+            "open": 8815.0,
+            "high": 8818.0,
+            "low": 8792.0,
+            "close": 8795.0,  # Closed well back under 8800 round level
+            "volume": 1500,
+        }
+    )
     df_1m = pd.DataFrame(bars_1m).set_index("date")
 
     fake_quote = MagicMock(
@@ -2255,10 +2282,11 @@ def test_1m_micro_rejection_trigger_golden_hours():
         volume=15000,
     )
 
-    with patch("market.history.get_ohlcv", return_value=df_5m), \
-         patch("market.options.get_options_chain", return_value=[mock_pe_8800]), \
-         patch("engine.detectors.commodity.datetime") as mock_dt:
-
+    with (
+        patch("market.history.get_ohlcv", return_value=df_5m),
+        patch("market.options.get_options_chain", return_value=[mock_pe_8800]),
+        patch("engine.detectors.commodity.datetime") as mock_dt,
+    ):
         mock_now = datetime(2026, 10, 7, 19, 22, 0, tzinfo=IST)
         mock_dt.now.return_value = mock_now
         mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
@@ -2291,18 +2319,30 @@ def test_cvd_absorption_confirms_utad_bull_trap():
 
     records = []
     for i in range(20):
-        records.append({
-            "open": 8740.0 + (i % 5) * 5,
-            "high": 8760.0 + (i % 5) * 5,
-            "low": 8730.0 + (i % 5) * 5,
-            "close": 8750.0 + (i % 5) * 5,
-            "volume": 200.0,
-        })
-    records.append({"open": 8760.0, "high": 8790.0, "low": 8755.0, "close": 8785.0, "volume": 350.0})
-    records.append({"open": 8785.0, "high": 8815.0, "low": 8780.0, "close": 8805.0, "volume": 500.0})
-    records.append({"open": 8805.0, "high": 8820.0, "low": 8800.0, "close": 8815.0, "volume": 550.0})
-    records.append({"open": 8815.0, "high": 8824.0, "low": 8795.0, "close": 8800.0, "volume": 750.0})
-    records.append({"open": 8800.0, "high": 8805.0, "low": 8755.0, "close": 8760.0, "volume": 850.0})
+        records.append(
+            {
+                "open": 8740.0 + (i % 5) * 5,
+                "high": 8760.0 + (i % 5) * 5,
+                "low": 8730.0 + (i % 5) * 5,
+                "close": 8750.0 + (i % 5) * 5,
+                "volume": 200.0,
+            }
+        )
+    records.append(
+        {"open": 8760.0, "high": 8790.0, "low": 8755.0, "close": 8785.0, "volume": 350.0}
+    )
+    records.append(
+        {"open": 8785.0, "high": 8815.0, "low": 8780.0, "close": 8805.0, "volume": 500.0}
+    )
+    records.append(
+        {"open": 8805.0, "high": 8820.0, "low": 8800.0, "close": 8815.0, "volume": 550.0}
+    )
+    records.append(
+        {"open": 8815.0, "high": 8824.0, "low": 8795.0, "close": 8800.0, "volume": 750.0}
+    )
+    records.append(
+        {"open": 8800.0, "high": 8805.0, "low": 8755.0, "close": 8760.0, "volume": 850.0}
+    )
 
     df_5m = pd.DataFrame(records)
     now_t = pd.Timestamp.now()
@@ -2333,11 +2373,15 @@ def test_cvd_absorption_confirms_utad_bull_trap():
     )
 
     # Force compute_bar_volume_delta to return heavy buyer volume (buyer delta absorption trap)
-    with patch("market.history.get_ohlcv", return_value=df_5m), \
-         patch("market.options.get_options_chain", return_value=[mock_pe_8800]), \
-         patch("engine.detectors.order_flow.compute_bar_volume_delta", return_value=(4500.0, 1500.0, 3000.0)), \
-         patch("engine.detectors.commodity.datetime") as mock_dt:
-
+    with (
+        patch("market.history.get_ohlcv", return_value=df_5m),
+        patch("market.options.get_options_chain", return_value=[mock_pe_8800]),
+        patch(
+            "engine.detectors.order_flow.compute_bar_volume_delta",
+            return_value=(4500.0, 1500.0, 3000.0),
+        ),
+        patch("engine.detectors.commodity.datetime") as mock_dt,
+    ):
         mock_now = datetime(2026, 10, 7, 19, 22, 0, tzinfo=IST)
         mock_dt.now.return_value = mock_now
         mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
@@ -2350,7 +2394,9 @@ def test_cvd_absorption_confirms_utad_bull_trap():
     assert len(alerts) == 1
     alert = alerts[0]
     assert alert.direction == "BEARISH"
-    assert "Institutional Absorption of Buyers (Bull Trap Confirmed)" in alert.metrics.get("confluence_factors", [])
+    assert "Institutional Absorption of Buyers (Bull Trap Confirmed)" in alert.metrics.get(
+        "confluence_factors", []
+    )
 
 
 def test_volume_profile_targets_aligned_to_poc_and_val():
@@ -2364,18 +2410,30 @@ def test_volume_profile_targets_aligned_to_poc_and_val():
 
     records = []
     for i in range(20):
-        records.append({
-            "open": 8740.0 + (i % 5) * 5,
-            "high": 8760.0 + (i % 5) * 5,
-            "low": 8730.0 + (i % 5) * 5,
-            "close": 8750.0 + (i % 5) * 5,
-            "volume": 200.0,
-        })
-    records.append({"open": 8760.0, "high": 8790.0, "low": 8755.0, "close": 8785.0, "volume": 350.0})
-    records.append({"open": 8785.0, "high": 8815.0, "low": 8780.0, "close": 8805.0, "volume": 500.0})
-    records.append({"open": 8805.0, "high": 8820.0, "low": 8800.0, "close": 8815.0, "volume": 550.0})
-    records.append({"open": 8815.0, "high": 8824.0, "low": 8795.0, "close": 8800.0, "volume": 750.0})
-    records.append({"open": 8800.0, "high": 8805.0, "low": 8755.0, "close": 8760.0, "volume": 850.0})
+        records.append(
+            {
+                "open": 8740.0 + (i % 5) * 5,
+                "high": 8760.0 + (i % 5) * 5,
+                "low": 8730.0 + (i % 5) * 5,
+                "close": 8750.0 + (i % 5) * 5,
+                "volume": 200.0,
+            }
+        )
+    records.append(
+        {"open": 8760.0, "high": 8790.0, "low": 8755.0, "close": 8785.0, "volume": 350.0}
+    )
+    records.append(
+        {"open": 8785.0, "high": 8815.0, "low": 8780.0, "close": 8805.0, "volume": 500.0}
+    )
+    records.append(
+        {"open": 8805.0, "high": 8820.0, "low": 8800.0, "close": 8815.0, "volume": 550.0}
+    )
+    records.append(
+        {"open": 8815.0, "high": 8824.0, "low": 8795.0, "close": 8800.0, "volume": 750.0}
+    )
+    records.append(
+        {"open": 8800.0, "high": 8805.0, "low": 8755.0, "close": 8760.0, "volume": 850.0}
+    )
 
     df_5m = pd.DataFrame(records)
     now_t = pd.Timestamp.now()
@@ -2406,11 +2464,15 @@ def test_volume_profile_targets_aligned_to_poc_and_val():
     )
 
     # Return POC=8600, VAH=8810, VAL=8480 (ltp is 8760, so ltp-poc = 160 >= 1.5*80=120, ltp-val = 280 >= 3*80=240)
-    with patch("market.history.get_ohlcv", return_value=df_5m), \
-         patch("market.options.get_options_chain", return_value=[mock_pe_8800]), \
-         patch("analysis.volume_profile.compute_volume_profile", return_value=(8600.0, 8810.0, 8480.0, [])), \
-         patch("engine.detectors.commodity.datetime") as mock_dt:
-
+    with (
+        patch("market.history.get_ohlcv", return_value=df_5m),
+        patch("market.options.get_options_chain", return_value=[mock_pe_8800]),
+        patch(
+            "analysis.volume_profile.compute_volume_profile",
+            return_value=(8600.0, 8810.0, 8480.0, []),
+        ),
+        patch("engine.detectors.commodity.datetime") as mock_dt,
+    ):
         mock_now = datetime(2026, 10, 7, 19, 22, 0, tzinfo=IST)
         mock_dt.now.return_value = mock_now
         mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
@@ -2436,13 +2498,8 @@ def test_scan_commodities_now_target_filtering():
     """
     engine = AutoAlertEngine()
 
-    with patch("engine.detectors.commodity.detect_commodity_breakouts", return_value=[]) as mock_detect:
+    with patch(
+        "engine.detectors.commodity.detect_commodity_breakouts", return_value=[]
+    ) as mock_detect:
         engine.scan_commodities_now(targets=["CRUDEOIL", "NATURALGAS", "GOLD"])
         mock_detect.assert_called_once_with(universe=["CRUDEOIL", "NATURALGAS", "GOLD"])
-
-
-
-
-
-
-

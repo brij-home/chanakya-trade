@@ -44,11 +44,11 @@ console = Console()
 
 def get_alerts_file() -> Path:
     """Returns canonical path to price/technical alerts JSON file."""
-    return app_data_path("alerts.json")
+    custom = globals().get("ALERTS_FILE")
+    return Path(custom) if custom is not None else app_data_path("alerts.json")
 
 
-ALERTS_FILE = get_alerts_file()
-
+ALERTS_FILE = app_data_path("alerts.json")
 
 
 def validate_webhook_url(url: str) -> str:
@@ -1010,12 +1010,13 @@ class AlertManager:
             from engine.data_sanctity import assert_production_data_sanctity
 
             clean_alerts = [
-                a for a in self._alerts
-                if assert_production_data_sanctity(a, "AlertManager")
+                a for a in self._alerts if assert_production_data_sanctity(a, "AlertManager")
             ]
             data = [asdict(a) for a in clean_alerts]
             payload = json.dumps(data, indent=2)
-            temp_path = target_path.with_name(f"{target_path.name}.tmp.{os.getpid()}_{time.time_ns()}")
+            temp_path = target_path.with_name(
+                f"{target_path.name}.tmp.{os.getpid()}_{time.time_ns()}"
+            )
             try:
                 temp_path.write_text(payload, encoding="utf-8")
                 os.replace(temp_path, target_path)

@@ -179,4 +179,3 @@ def test_scan_century_compounders_universe_scoping():
 
     for r in results:
         assert r.symbol in bse_syms, f"{r.symbol} leaked outside bse_high_growth"
-

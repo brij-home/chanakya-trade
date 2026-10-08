@@ -4,10 +4,7 @@ tests/test_symbol_master.py
 Deterministic unit tests for market/symbol_master.py.
 """
 
-import json
 import pytest
-from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import market.symbol_master as sm
 

@@ -7,7 +7,6 @@ Shared utilities and guards for FastAPI routers.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
 from fastapi import HTTPException, Request
 
 logger = logging.getLogger("chanakya.web.routers.common")

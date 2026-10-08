@@ -98,4 +98,3 @@ def test_compute_order_book_metrics_fyers_volume_keys():
     assert snap.liquidity_status == "NORMAL"
     assert snap.bids[0]["quantity"] == 10
     assert snap.bids[0]["orders"] == 4
-

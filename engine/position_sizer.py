@@ -396,6 +396,7 @@ def calculate_volatility_risk_parity_size(
     # 5. Auto-detect F&O eligibility (derivatives / indices default to lots, stocks default to cash equity)
     if is_fno is None:
         import re
+
         is_derivative_contract = bool(re.search(r"(?:FUT|\d+(?:CE|PE))$", clean_sym))
         is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
         is_fno = is_derivative_contract or is_index
@@ -722,4 +723,3 @@ def calibrate_off_number_stop(
                 return round(round(calibrated / tick_size) * tick_size, 2)
 
     return round(round(raw_stop / tick_size) * tick_size, 2)
-

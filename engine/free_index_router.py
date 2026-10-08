@@ -23,12 +23,10 @@ import os
 import re
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from bot.free_index_templates import (
     DEFAULT_FREE_INDEX_CHAT_ID,
-    FREE_INDEX_CHANNEL_NAME,
-    FREE_INDEX_CHANNEL_LINK,
     render_free_index_alert,
 )
 
@@ -101,7 +99,10 @@ class FreeIndexRouter:
 
         # Segment check
         try:
-            from engine.alert_preferences import classify_alert_segment, is_fno_index_channel_allowed
+            from engine.alert_preferences import (
+                classify_alert_segment,
+                is_fno_index_channel_allowed,
+            )
 
             seg = getattr(alert, "segment", None) or classify_alert_segment(alert)
             if seg not in ("FNO_INDEX", "INDEX_FNO", "FNO_INDICES"):
@@ -114,7 +115,9 @@ class FreeIndexRouter:
 
             # Explicit check to block FINNIFTY, BANKEX, etc.
             clean_sym = re.sub(r"[^A-Za-z0-9]", "", symbol).upper()
-            if any(b in clean_sym for b in ("FINNIFTY", "BANKEX", "NIFTYNXT50", "CNXIT", "NIFTYIT")):
+            if any(
+                b in clean_sym for b in ("FINNIFTY", "BANKEX", "NIFTYNXT50", "CNXIT", "NIFTYIT")
+            ):
                 return False
 
             # Confidence threshold check
@@ -126,11 +129,7 @@ class FreeIndexRouter:
             # Free Index Channel (t.me/IndiaIndexSignals) is strictly for Intraday & Scalping setups.
             # Multi-session/positional setups and wide stops (>28 pts on Nifty opt, >45 pts on spot)
             # are strictly prohibited to prevent insane unrealistic levels from leaking to subscribers.
-            timeframe = (
-                getattr(alert, "time_horizon", "")
-                or getattr(alert, "timeframe", "")
-                or ""
-            )
+            timeframe = getattr(alert, "time_horizon", "") or getattr(alert, "timeframe", "") or ""
             is_pos = getattr(alert, "is_positional", False)
             setup_tp = (
                 getattr(alert, "setup_type", "")
@@ -139,7 +138,16 @@ class FreeIndexRouter:
             )
             if (
                 is_pos
-                or str(timeframe).upper() in ("POSITIONAL", "SWING", "SWING_MID", "SWING_SHORT", "DAILY", "WEEKLY", "MULTIBAGGER")
+                or str(timeframe).upper()
+                in (
+                    "POSITIONAL",
+                    "SWING",
+                    "SWING_MID",
+                    "SWING_SHORT",
+                    "DAILY",
+                    "WEEKLY",
+                    "MULTIBAGGER",
+                )
                 or "200EMA" in str(setup_tp).upper()
                 or "RUBBER_BAND" in str(setup_tp).upper()
             ):
@@ -200,7 +208,9 @@ class FreeIndexRouter:
                     pass
 
             # 2. Spot Stop Loss distance check
-            spot_p = float(getattr(alert, "underlying_spot", 0.0) or getattr(alert, "ltp", 0.0) or 0.0)
+            spot_p = float(
+                getattr(alert, "underlying_spot", 0.0) or getattr(alert, "ltp", 0.0) or 0.0
+            )
             spot_sl_val = (
                 plan.get("spot_stop_loss")
                 or plan.get("underlying_sl")
@@ -222,7 +232,9 @@ class FreeIndexRouter:
 
             return True
         except Exception as e:
-            logger.warning(f"[FreeIndexRouter] Candidate validation failed for {getattr(alert, 'symbol', '')}: {e}")
+            logger.warning(
+                f"[FreeIndexRouter] Candidate validation failed for {getattr(alert, 'symbol', '')}: {e}"
+            )
             return False
 
     def dispatch(
@@ -243,7 +255,6 @@ class FreeIndexRouter:
         aid = str(getattr(alert, "alert_id", "") or getattr(alert, "id", "") or "")
         symbol = str(getattr(alert, "symbol", "") or "")
         stage = str(getattr(alert, "stage", "") or "")
-        c_tag = str(getattr(alert, "contract_symbol", "") or symbol)
 
         # Anti-flood & deduplication for the Free Channel
         now_ts = time.time()
@@ -251,7 +262,9 @@ class FreeIndexRouter:
             # Pacing check for free channel
             pacing_key = f"PACING:{symbol}"
             last_pacing = self._dispatch_cooldowns.get(pacing_key, 0.0)
-            if not is_milestone and (now_ts - last_pacing) < 300.0:  # 5 min cooldown per symbol for free channel
+            if (
+                not is_milestone and (now_ts - last_pacing) < 300.0
+            ):  # 5 min cooldown per symbol for free channel
                 logger.debug(f"[FreeIndexRouter] Suppressed free channel pacing for {symbol}")
                 return False
 
@@ -275,7 +288,10 @@ class FreeIndexRouter:
         try:
             free_msg = render_free_index_alert(alert, in_market=in_market)
         except Exception as e:
-            logger.error(f"[FreeIndexRouter] Failed to render free index message for {symbol}: {e}", exc_info=True)
+            logger.error(
+                f"[FreeIndexRouter] Failed to render free index message for {symbol}: {e}",
+                exc_info=True,
+            )
             return False
 
         # Resolve threading reply-to message ID in the Free Channel
@@ -331,9 +347,15 @@ class FreeIndexRouter:
                     "FREE_INDEX_TELEGRAM_SENT",
                     f"Dispatched SEBI-compliant signal to Free Index Channel ({chat_id})",
                     actor="FREE_INDEX_ROUTER",
-                    details={"chat_id": chat_id, "confidence": getattr(alert, "confidence", 0), "stage": stage},
+                    details={
+                        "chat_id": chat_id,
+                        "confidence": getattr(alert, "confidence", 0),
+                        "stage": stage,
+                    },
                 )
-            if hasattr(alert, "dispatched_channels") and isinstance(alert.dispatched_channels, list):
+            if hasattr(alert, "dispatched_channels") and isinstance(
+                alert.dispatched_channels, list
+            ):
                 if "free_telegram" not in alert.dispatched_channels:
                     alert.dispatched_channels.append("free_telegram")
 
@@ -343,7 +365,9 @@ class FreeIndexRouter:
             )
             return True
         except Exception as e:
-            logger.error(f"[FreeIndexRouter] Dispatch failed for {symbol} ({aid}): {e}", exc_info=True)
+            logger.error(
+                f"[FreeIndexRouter] Dispatch failed for {symbol} ({aid}): {e}", exc_info=True
+            )
             return False
 
 

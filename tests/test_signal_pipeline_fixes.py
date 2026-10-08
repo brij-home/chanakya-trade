@@ -128,6 +128,9 @@ def test_closed_loop_target_milestone_recorded_in_learning_engine(monkeypatch):
         "engine.auto_alert_engine.evaluate_alert_targets_and_trailing", lambda a, **kw: mock_eval
     )
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    monkeypatch.setattr(engine, "resolve_session_end_alerts", lambda **kw: None)
+    monkeypatch.setattr(engine, "check_session_closing_warning", lambda **kw: None)
+    monkeypatch.setattr(engine, "check_eod_session_review", lambda **kw: None)
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 7000.0)
 
     updated = engine.check_and_alert_targets_and_trailing(exchanges=["NSE"])

@@ -462,4 +462,3 @@ def test_bot_template_expired_untriggered_setup_rendering():
     rendered_free = render_free_index_alert(alert, in_market=True)
     assert "SETUP EXPIRED" in rendered_free
     assert "Cancel pending orders" in rendered_free
-

@@ -1,0 +1,19 @@
+#!/bin/sh
+# ChanakyaTrade Shift-Left Institutional Pre-Commit Gate
+echo "🛡️  Running ChanakyaTrade Shift-Left Pre-Commit Gate..."
+
+if [ -f ".venv/Scripts/python.exe" ]; then
+    PYTHON_BIN=".venv/Scripts/python.exe"
+elif [ -f ".venv/bin/python" ]; then
+    PYTHON_BIN=".venv/bin/python"
+else
+    PYTHON_BIN="python"
+fi
+
+"$PYTHON_BIN" scripts/shift_left_check.py
+if [ $? -ne 0 ]; then
+    echo "❌ Pre-commit check failed! Fix issues before committing or run: $PYTHON_BIN scripts/shift_left_check.py --fix"
+    exit 1
+fi
+echo "✅ Shift-Left validation passed!"
+exit 0

@@ -310,6 +310,7 @@ async def skill_quotes_batch(req: BatchQuotesRequest):
                 continue
             clean = s.strip().upper()
             inst = clean if ":" in clean else normalize_instrument(clean)
+            instruments.append(inst)
         # Cap instruments to 60 symbols to protect broker rate limit budget
         if len(instruments) > 60:
             instruments = instruments[:60]
@@ -1428,7 +1429,9 @@ async def skill_morning_brief():
                 pass
             return snap, fl, nw, br, ev, gift, battle_plan
 
-        snapshot, flows, news, breadth, events, gift, battle_plan = await asyncio.to_thread(_fetch_brief)
+        snapshot, flows, news, breadth, events, gift, battle_plan = await asyncio.to_thread(
+            _fetch_brief
+        )
 
         return {
             "status": "ok",
@@ -1771,7 +1774,9 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
             ).encode("utf-8")
 
         loop = asyncio.get_running_loop()
-        raw_bytes = await loop.run_in_executor(_alerts_serializer_pool, _encode_payload, alerts, counts)
+        raw_bytes = await loop.run_in_executor(
+            _alerts_serializer_pool, _encode_payload, alerts, counts
+        )
         return Response(content=raw_bytes, media_type="application/json")
     except Exception as e:
         raise _err(str(e))
@@ -5497,7 +5502,9 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             except Exception:
                 pass
 
-        effective_atr = atr_val if (atr_val is not None and atr_val > 0) else max(cur_ltp * 0.015, 1.0)
+        effective_atr = (
+            atr_val if (atr_val is not None and atr_val > 0) else max(cur_ltp * 0.015, 1.0)
+        )
 
         # 2. Rich AI Personas with dynamically calculated quant metrics for setup_sym
         rvol_val = vp_report.rvol_20d if vp_report else 1.0
@@ -8167,7 +8174,8 @@ async def skill_gex_snapshot(
                 "source": source_info.get("source", ""),
                 "is_broker": bool(
                     source_info.get("source") == "BROKER_REST"
-                    or source_info.get("provider") in ("fyers", "zerodha", "angelone", "shoonya", "mstock")
+                    or source_info.get("provider")
+                    in ("fyers", "zerodha", "angelone", "shoonya", "mstock")
                 ),
                 "source_label": source_info.get("source_label", "Unverified Feed"),
                 "is_realtime": source_info.get("is_realtime", False),

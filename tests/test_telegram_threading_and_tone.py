@@ -483,11 +483,7 @@ def test_same_day_distinct_calls_maintain_independent_threads():
 
     # Call #1 at 07:12 IST
     sig_1 = "SIG_BTCUSDT_02OCT_0712"
-    msg_1 = (
-        "🪙 <b>[CRYPTO 24x7] NEW CALL · ALPHA VORTEX</b>\n"
-        "🟢 BTCUSDT @ $85,000.00\n"
-        f"🏷️ #{sig_1}"
-    )
+    msg_1 = f"🪙 <b>[CRYPTO 24x7] NEW CALL · ALPHA VORTEX</b>\n🟢 BTCUSDT @ $85,000.00\n🏷️ #{sig_1}"
     p_1 = format_telegram_push_payload(msg_1, chat_id=chat_id, signal_id=sig_1, is_update=False)
     assert "reply_to_message_id" not in p_1
 
@@ -496,11 +492,7 @@ def test_same_day_distinct_calls_maintain_independent_threads():
 
     # Call #2 at 09:31 IST
     sig_2 = "SIG_BTCUSDT_02OCT_0931"
-    msg_2 = (
-        "🪙 <b>[CRYPTO 24x7] NEW CALL · ALPHA VORTEX</b>\n"
-        "🟢 BTCUSDT @ $85,600.00\n"
-        f"🏷️ #{sig_2}"
-    )
+    msg_2 = f"🪙 <b>[CRYPTO 24x7] NEW CALL · ALPHA VORTEX</b>\n🟢 BTCUSDT @ $85,600.00\n🏷️ #{sig_2}"
     p_2 = format_telegram_push_payload(msg_2, chat_id=chat_id, signal_id=sig_2, is_update=False)
     assert "reply_to_message_id" not in p_2, "Call #2 must NOT thread under Call #1!"
 
@@ -508,21 +500,11 @@ def test_same_day_distinct_calls_maintain_independent_threads():
     record_signal_message_id(sig_2, 221, chat_id=chat_id)
 
     # Milestone for Call #1 (e.g. Target 1 for Call #1) -> must thread to 216
-    up_1 = (
-        "🎯 [REAL/LIVE] UPDATE #1 · TARGET 1 HIT\n"
-        "🏆 BTCUSDT Target 1 Hit\n"
-        f"🏷️ Ref: #{sig_1}"
-    )
+    up_1 = f"🎯 [REAL/LIVE] UPDATE #1 · TARGET 1 HIT\n🏆 BTCUSDT Target 1 Hit\n🏷️ Ref: #{sig_1}"
     p_up_1 = format_telegram_push_payload(up_1, chat_id=chat_id, signal_id=sig_1, is_update=True)
     assert p_up_1["reply_to_message_id"] == 216
 
     # Milestone for Call #2 (e.g. Target 1 for Call #2) -> must thread to 221
-    up_2 = (
-        "🎯 [REAL/LIVE] UPDATE #1 · TARGET 1 HIT\n"
-        "🏆 BTCUSDT Target 1 Hit\n"
-        f"🏷️ Ref: #{sig_2}"
-    )
+    up_2 = f"🎯 [REAL/LIVE] UPDATE #1 · TARGET 1 HIT\n🏆 BTCUSDT Target 1 Hit\n🏷️ Ref: #{sig_2}"
     p_up_2 = format_telegram_push_payload(up_2, chat_id=chat_id, signal_id=sig_2, is_update=True)
     assert p_up_2["reply_to_message_id"] == 221
-
-

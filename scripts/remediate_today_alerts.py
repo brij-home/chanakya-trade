@@ -25,6 +25,7 @@ from datetime import datetime, timezone, timedelta
 if sys.platform == "win32":
     try:
         import ctypes
+
         ctypes.windll.kernel32.SetConsoleOutputCP(65001)
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
@@ -71,15 +72,16 @@ for a in alerts:
     plan = a.get("actionable_plan") or {}
     metrics = a.get("metrics") or {}
     opt_plan = plan.get("option_plan") if isinstance(plan.get("option_plan"), dict) else {}
-    
+
     # ── 1. Anchor Initial Entry Premium & Initial Stop Loss ──────
     is_opt = bool(
         a.get("strike")
         or a.get("option_type")
         or a.get("contract_symbol")
-        or a.get("alert_type") in ("GAMMA_BLAST", "OPTIONS_MOMENTUM", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+        or a.get("alert_type")
+        in ("GAMMA_BLAST", "OPTIONS_MOMENTUM", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
     )
-    
+
     if not a.get("initial_entry_premium"):
         cand_entry = None
         if opt_plan.get("entry_premium"):
@@ -95,13 +97,18 @@ for a in alerts:
             m = re.findall(r"[\d,]+(?:\.\d+)?", str(plan["entry_range"]))
             if m:
                 cand_entry = float(m[0].replace(",", ""))
-        if cand_entry is None and is_opt and a.get("option_premium") and a.get("option_premium") > 0:
+        if (
+            cand_entry is None
+            and is_opt
+            and a.get("option_premium")
+            and a.get("option_premium") > 0
+        ):
             cand_entry = float(a["option_premium"])
         if cand_entry is None and a.get("trigger_level") and a.get("trigger_level") > 0:
             cand_entry = float(a["trigger_level"])
         if cand_entry is None and a.get("ltp") and a.get("ltp") > 0:
             cand_entry = float(a["ltp"])
-            
+
         if cand_entry:
             a["initial_entry_premium"] = cand_entry
             entry_anchored += 1
@@ -136,7 +143,7 @@ for a in alerts:
         or "3:15" in inv_reason
         or "trading session" in inv_reason
     )
-    
+
     if a.get("is_invalidated") and is_session_expired:
         prev_reason = a.get("invalidation_reason")
         a["is_invalidated"] = False
@@ -149,9 +156,17 @@ for a in alerts:
         a["trailing_decision"] = "SESSION_CLOSE_EXIT"
 
         # Calculate genuine realized session PnL and R-multiple
-        risk = abs(entry_p - sl_p) if (entry_p > 0 and sl_p > 0 and entry_p != sl_p) else (entry_p * 0.015)
-        is_long = is_opt or str(a.get("direction", "BULLISH")).upper() not in ("BEARISH", "SELL", "SHORT")
-        
+        risk = (
+            abs(entry_p - sl_p)
+            if (entry_p > 0 and sl_p > 0 and entry_p != sl_p)
+            else (entry_p * 0.015)
+        )
+        is_long = is_opt or str(a.get("direction", "BULLISH")).upper() not in (
+            "BEARISH",
+            "SELL",
+            "SHORT",
+        )
+
         pts = round(curr_ltp - entry_p if is_long else entry_p - curr_ltp, 2)
         pct = round((pts / entry_p) * 100.0, 1) if entry_p > 0 else 0.0
         r_mult = round(pts / risk, 1) if risk > 0 else 0.0
@@ -170,22 +185,34 @@ for a in alerts:
         is_test = (a.get("environment") == "TEST") or (not a.get("is_live", True))
         tag = "[TEST]" if is_test else "[REAL/LIVE]"
         sym = a.get("symbol", "")
-        a["headline"] = f"🌙 {tag} SESSION CLOSE EXIT: {sym} ({pnl_sign}{pct:.1f}%, {r_sign}{r_mult:.1f}R)"
-        a["summary"] = f"Intraday session completed at 15:15 IST cutoff. Final LTP ₹{curr_ltp:,.2f} vs Entry ₹{entry_p:,.2f} ({pnl_sign}{pct:.1f}%, {r_sign}{r_mult:.1f}R). Thesis exited cleanly without stop-loss breach."
+        a["headline"] = (
+            f"🌙 {tag} SESSION CLOSE EXIT: {sym} ({pnl_sign}{pct:.1f}%, {r_sign}{r_mult:.1f}R)"
+        )
+        a["summary"] = (
+            f"Intraday session completed at 15:15 IST cutoff. Final LTP ₹{curr_ltp:,.2f} vs Entry ₹{entry_p:,.2f} ({pnl_sign}{pct:.1f}%, {r_sign}{r_mult:.1f}R). Thesis exited cleanly without stop-loss breach."
+        )
 
         trail = a.setdefault("audit_trail", [])
         if isinstance(trail, list):
-            trail.append({
-                "timestamp": now_iso,
-                "event_type": "SESSION_CLOSE_REMEDIATION",
-                "message": f"Remediated false invalidation -> SESSION_CLOSE_EXIT. Realized PnL: {pnl_sign}{pct:.1f}%, R: {r_sign}{r_mult:.1f}R.",
-                "actor": "OFFLINE_REMEDIATION_ENGINE",
-                "stage": "COMPLETED",
-                "ltp": curr_ltp,
-                "details": {"previous_reason": prev_reason, "pnl_pct": pct, "r_multiple": r_mult},
-            })
+            trail.append(
+                {
+                    "timestamp": now_iso,
+                    "event_type": "SESSION_CLOSE_REMEDIATION",
+                    "message": f"Remediated false invalidation -> SESSION_CLOSE_EXIT. Realized PnL: {pnl_sign}{pct:.1f}%, R: {r_sign}{r_mult:.1f}R.",
+                    "actor": "OFFLINE_REMEDIATION_ENGINE",
+                    "stage": "COMPLETED",
+                    "ltp": curr_ltp,
+                    "details": {
+                        "previous_reason": prev_reason,
+                        "pnl_pct": pct,
+                        "r_multiple": r_mult,
+                    },
+                }
+            )
         session_close_fixed += 1
-        print(f"  ✓ [SESSION CLOSE HEALED] {aid} ({sym}): {pnl_sign}{pct:.1f}% ({r_sign}{r_mult:.1f}R)")
+        print(
+            f"  ✓ [SESSION CLOSE HEALED] {aid} ({sym}): {pnl_sign}{pct:.1f}% ({r_sign}{r_mult:.1f}R)"
+        )
 
     # ── 3. Heal Superseded Index Signals ──────────────────────────
     is_superseded = "superseded" in inv_reason or "higher-conviction" in inv_reason
@@ -208,15 +235,17 @@ for a in alerts:
 
         trail = a.setdefault("audit_trail", [])
         if isinstance(trail, list):
-            trail.append({
-                "timestamp": now_iso,
-                "event_type": "SUPERSEDED_REMEDIATION",
-                "message": f"Remediated false invalidation -> SUPERSEDED (Retired gracefully in favor of higher conviction setup).",
-                "actor": "OFFLINE_REMEDIATION_ENGINE",
-                "stage": "COMPLETED",
-                "ltp": curr_ltp,
-                "details": {"reason": prev_reason},
-            })
+            trail.append(
+                {
+                    "timestamp": now_iso,
+                    "event_type": "SUPERSEDED_REMEDIATION",
+                    "message": "Remediated false invalidation -> SUPERSEDED (Retired gracefully in favor of higher conviction setup).",
+                    "actor": "OFFLINE_REMEDIATION_ENGINE",
+                    "stage": "COMPLETED",
+                    "ltp": curr_ltp,
+                    "details": {"reason": prev_reason},
+                }
+            )
         superseded_fixed += 1
         print(f"  ✓ [SUPERSEDED HEALED] {aid} ({sym}): stage=COMPLETED, target_status=SUPERSEDED")
 
@@ -230,7 +259,11 @@ for a in alerts:
             if m1 and m2:
                 t1_f = float(m1[0].replace(",", ""))
                 t2_f = float(m2[0].replace(",", ""))
-                is_buyer = is_opt or str(a.get("direction", "BULLISH")).upper() not in ("BEARISH", "SELL", "SHORT")
+                is_buyer = is_opt or str(a.get("direction", "BULLISH")).upper() not in (
+                    "BEARISH",
+                    "SELL",
+                    "SHORT",
+                )
                 if is_buyer and t2_f <= t1_f:
                     # Inverted! Recalculate T2 based on canonical +4R extension
                     risk = abs(entry_p - sl_p) if (entry_p > 0 and sl_p > 0) else (entry_p * 0.02)
@@ -239,7 +272,9 @@ for a in alerts:
                     if isinstance(opt_plan, dict) and opt_plan.get("t2_premium"):
                         opt_plan["t2_premium"] = new_t2
                     targets_repaired += 1
-                    print(f"  ✓ [TARGET INVERSION REPAIRED] {aid} ({a.get('symbol')}): T1=₹{t1_f:,.2f}, old T2=₹{t2_f:,.2f} -> new T2=₹{new_t2:,.2f}")
+                    print(
+                        f"  ✓ [TARGET INVERSION REPAIRED] {aid} ({a.get('symbol')}): T1=₹{t1_f:,.2f}, old T2=₹{t2_f:,.2f} -> new T2=₹{new_t2:,.2f}"
+                    )
         except Exception:
             pass
 

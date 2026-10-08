@@ -404,14 +404,22 @@ class AlertScrutinyAuditor:
                         or metrics_d.get("v_bottom")
                     )
                 )
-                if direction in ("BULLISH", "LONG", "BUY") and u_spot < (u_vwap * 0.998) and not is_rev:
+                if (
+                    direction in ("BULLISH", "LONG", "BUY")
+                    and u_spot < (u_vwap * 0.998)
+                    and not is_rev
+                ):
                     flags["level_coherence"] = False
                     return (
                         False,
                         f"Anti-Trend VWAP Trap: Bullish index signal while spot (Rs.{u_spot:,.1f}) is trapped below intraday VWAP (Rs.{u_vwap:,.1f}) without structural reversal.",
                         flags,
                     )
-                elif direction in ("BEARISH", "SHORT", "SELL") and u_spot > (u_vwap * 1.002) and not is_rev:
+                elif (
+                    direction in ("BEARISH", "SHORT", "SELL")
+                    and u_spot > (u_vwap * 1.002)
+                    and not is_rev
+                ):
                     flags["level_coherence"] = False
                     return (
                         False,
@@ -2018,7 +2026,9 @@ class AlertScrutinyAuditor:
                         is_thrust_or_momentum = bool(
                             (metrics_dict or {}).get("is_institutional_thrust")
                             or (metrics_dict or {}).get("is_explosive_momentum")
-                            or ((metrics_dict or {}).get("roc_momentum") or {}).get("is_accelerating")
+                            or ((metrics_dict or {}).get("roc_momentum") or {}).get(
+                                "is_accelerating"
+                            )
                         )
                         if is_thrust_or_momentum:
                             logger.info(
@@ -2040,10 +2050,14 @@ class AlertScrutinyAuditor:
                         _is_thrust = bool(
                             (metrics_dict or {}).get("is_institutional_thrust")
                             or (metrics_dict or {}).get("is_explosive_momentum")
-                            or ((metrics_dict or {}).get("roc_momentum") or {}).get("is_accelerating")
+                            or ((metrics_dict or {}).get("roc_momentum") or {}).get(
+                                "is_accelerating"
+                            )
                         )
                         target_dir = "BULLISH" if is_index_bullish else "BEARISH"
-                        hbcm_eval = evaluate_hbcm(clean_sym, target_dir, allow_weighted_fallback=_is_thrust)
+                        hbcm_eval = evaluate_hbcm(
+                            clean_sym, target_dir, allow_weighted_fallback=_is_thrust
+                        )
                         if hbcm_eval.total_heavyweights > 0 and not hbcm_eval.confluence_pass:
                             if _is_thrust:
                                 logger.info(
@@ -2478,7 +2492,12 @@ class AlertScrutinyAuditor:
 
                     _alert_hz = (getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY").upper()
                     is_multi_session = _alert_hz in (
-                        "SWING_SHORT", "SWING_MID", "SWING", "LONG_TERM", "POSITIONAL", "MULTIBAGGER"
+                        "SWING_SHORT",
+                        "SWING_MID",
+                        "SWING",
+                        "LONG_TERM",
+                        "POSITIONAL",
+                        "MULTIBAGGER",
                     )
 
                     # Broad market liquidation (declines heavily outnumber advances)
@@ -2829,10 +2848,13 @@ class AlertScrutinyAuditor:
             return 70  # Standard threshold for non-breakout types
 
         try:
-            from analysis.regime_governor import classify_market_regime
+            from market.indices import get_vix
 
-            regime = classify_market_regime()
-            return regime.min_scrutiny_score
+            v_raw = get_vix()
+            vix_val = float(v_raw.ltp if hasattr(v_raw, "ltp") else v_raw)
+            if vix_val < 12.5:
+                return 75
+            return 70
         except Exception:
             return 70
 
@@ -3033,7 +3055,6 @@ Respond STRICTLY in valid JSON:
 
         time_horizon = getattr(alert, "time_horizon", "INTRADAY")
         setup_style = getattr(alert, "setup_style", "CONTINUATION")
-        anchored = getattr(alert, "anchored_levels", {}) or {}
 
         # ── Unified Floor Council Deterministic Feature Extraction (0 Tokens) ──
         # 1. Macro & Regime Vector
@@ -3042,7 +3063,9 @@ Respond STRICTLY in valid JSON:
             from analysis.regime_governor import classify_market_regime
 
             r_obj = classify_market_regime()
-            regime_ctx = f"{r_obj.regime} (India VIX {r_obj.vix:.1f}, Trend {r_obj.trend_score:.1f})"
+            regime_ctx = (
+                f"{r_obj.regime} (India VIX {r_obj.vix:.1f}, Trend {r_obj.trend_score:.1f})"
+            )
         except Exception:
             pass
 

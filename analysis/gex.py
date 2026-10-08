@@ -34,7 +34,9 @@ console = Console()
 RISK_FREE_RATE = 0.065  # 6.5% RBI repo rate benchmark
 
 
-def _bs_gamma(spot: float, strike: float, dte_days: int, iv_pct: float, rate: float = RISK_FREE_RATE) -> float:
+def _bs_gamma(
+    spot: float, strike: float, dte_days: int, iv_pct: float, rate: float = RISK_FREE_RATE
+) -> float:
     """Analytical Black-Scholes gamma calculation (100% deterministic, zero C-dep failure)."""
     if spot <= 0 or strike <= 0:
         return 0.0
@@ -158,7 +160,10 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
             if strikes:
                 spot = sum(strikes) / len(strikes)
             else:
-                return {"status": "UNAVAILABLE", "error": "Could not determine spot price for GEX analysis"}
+                return {
+                    "status": "UNAVAILABLE",
+                    "error": "Could not determine spot price for GEX analysis",
+                }
 
         # 4. Resolve official contract lot size
         lot_size = STANDARD_LOT_SIZES.get(clean, getattr(chain[0], "lot_size", 25) or 25)
@@ -258,9 +263,15 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
 
         # Volatility acceleration zones
         volatility_zones = {
-            "dampening_zone": f"Between {put_wall:,.0f} and {call_wall:,.0f}" if (put_wall and call_wall) else "Pending",
-            "upside_acceleration": f"Above {call_wall:,.0f} (Dealers forced to cover shorts, explosive squeeze)" if call_wall else "Pending",
-            "downside_acceleration": f"Below {zero_gamma:,.0f} (Negative Gamma cascade, volatility expansion)" if zero_gamma else "Pending",
+            "dampening_zone": f"Between {put_wall:,.0f} and {call_wall:,.0f}"
+            if (put_wall and call_wall)
+            else "Pending",
+            "upside_acceleration": f"Above {call_wall:,.0f} (Dealers forced to cover shorts, explosive squeeze)"
+            if call_wall
+            else "Pending",
+            "downside_acceleration": f"Below {zero_gamma:,.0f} (Negative Gamma cascade, volatility expansion)"
+            if zero_gamma
+            else "Pending",
         }
 
         # Actionable Dealer Positioning Interpretation
@@ -300,19 +311,21 @@ def _interpret_institutional_gex(
 ) -> str:
     """Generate crisp, actionable dealer positioning blueprint."""
     if regime == "POSITIVE":
-        msg = f"POSITIVE DEALER GAMMA (Long Gamma Regime). Market makers dampen volatility by selling rallies and buying dips. Expect mean-reverting price action and pinning."
+        msg = "POSITIVE DEALER GAMMA (Long Gamma Regime). Market makers dampen volatility by selling rallies and buying dips. Expect mean-reverting price action and pinning."
         if put_wall and call_wall:
             msg += f" Institutional corridor: {put_wall:,.0f} (Put Wall Support) to {call_wall:,.0f} (Call Wall Resistance)."
         if zero_gamma and spot < zero_gamma:
             msg += f" Caution: Spot ({spot:,.0f}) is below Zero-Gamma ({zero_gamma:,.0f}) — dealer hedging could abruptly flip to volatility acceleration."
         return msg
     elif regime == "NEGATIVE":
-        msg = f"NEGATIVE DEALER GAMMA (Short Gamma Regime). Market makers accelerate volatility by chasing price directionally. High probability of trending expansion and violent breakout moves."
+        msg = "NEGATIVE DEALER GAMMA (Short Gamma Regime). Market makers accelerate volatility by chasing price directionally. High probability of trending expansion and violent breakout moves."
         if zero_gamma:
-            msg += f" Gamma Flip pivot is {zero_gamma:,.0f}. Stability requires reclaiming this level."
+            msg += (
+                f" Gamma Flip pivot is {zero_gamma:,.0f}. Stability requires reclaiming this level."
+            )
         return msg
 
-    return f"BALANCED DEALER GAMMA. Gamma profile is neutral across strikes. Directional follow-through will be dictated by cash delivery and macro flows rather than dealer rehedging."
+    return "BALANCED DEALER GAMMA. Gamma profile is neutral across strikes. Directional follow-through will be dictated by cash delivery and macro flows rather than dealer rehedging."
 
 
 def print_gex(underlying: str, expiry: Optional[str] = None) -> None:
@@ -328,7 +341,9 @@ def print_gex(underlying: str, expiry: Optional[str] = None) -> None:
         f"  Dealer Regime: [bold cyan]{data['regime']}[/bold cyan]",
     ]
     if data.get("zero_gamma_level"):
-        lines.append(f"  Zero-Gamma Level (Flip): [bold yellow]₹{data['zero_gamma_level']:,.1f}[/bold yellow]")
+        lines.append(
+            f"  Zero-Gamma Level (Flip): [bold yellow]₹{data['zero_gamma_level']:,.1f}[/bold yellow]"
+        )
     if data.get("call_wall"):
         lines.append(f"  Call Wall (Resistance): [bold red]₹{data['call_wall']:,.0f}[/bold red]")
     if data.get("put_wall"):

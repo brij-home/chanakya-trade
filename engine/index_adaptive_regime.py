@@ -33,10 +33,9 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, time as dtime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -75,13 +74,17 @@ class EagleRegime:
     adx_14: float  # < 20 = non-trending, >= 25 = trending
     adx_status: str  # "NON_TRENDING" | "MODERATE_TREND" | "STRONG_TREND"
     multi_tf: MultiTimeframeTrend
-    heavyweights_alignment: str  # "STRONG_BULLISH" | "STRONG_BEARISH" | "POLARIZED_DIVIDED" | "NEUTRAL"
+    heavyweights_alignment: (
+        str  # "STRONG_BULLISH" | "STRONG_BEARISH" | "POLARIZED_DIVIDED" | "NEUTRAL"
+    )
     heavyweights_detail: str
     market_phase: str  # "OPENING_AUCTION" | "MORNING_EXPANSION" | "MIDDAY_THETA_CHOP" | "AFTERNOON_EXPANSION" | "POWER_HOUR"
     is_midday_chop_window: bool
     vix_val: Optional[float]
     vix_regime: str  # "LOW_VIX_THETA_BURDEN" | "NORMAL_VIX" | "HIGH_VIX_CRUSH_RISK"
-    overall_environment: str  # "OPTIMAL_TREND_EXPANSION" | "WHIPSAW_CHOP_TRAP" | "SELECTIVE_FADE" | "BALANCED_RANGE"
+    overall_environment: (
+        str  # "OPTIMAL_TREND_EXPANSION" | "WHIPSAW_CHOP_TRAP" | "SELECTIVE_FADE" | "BALANCED_RANGE"
+    )
     summary: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -396,7 +399,9 @@ def evaluate_multi_timeframe_trend(
         summary = f"⚠️ Multi-TF Divergence: 15m {trend_15m} vs 5m {trend_5m} (Trap Risk)"
     else:
         bias = "RANGE_BOUND"
-        summary = "Neutral Multi-TF: Market consolidating inside range without clear higher-TF slope"
+        summary = (
+            "Neutral Multi-TF: Market consolidating inside range without clear higher-TF slope"
+        )
 
     return MultiTimeframeTrend(
         bias=bias,
@@ -603,18 +608,7 @@ def evaluate_tiger_mandate(
             action_guidance="Execute defined-risk vertical debit spread only (Bull Call / Bear Put Spread).",
         )
 
-    # Rule 4: Healthy Trending Phase (Overrides generic midday clock lull)
-    if eagle.chop_status == "TRENDING_EXPANSION" or eagle.adx_14 >= 24.0 or eagle.multi_tf.bias in ("BULLISH_ALIGNED", "BEARISH_ALIGNED"):
-        return TigerStrategyMandate(
-            mandate="MOMENTUM_EXPANSION",
-            allow_routine_breakouts=True,
-            allow_thrust_only=False,
-            suggested_strategy="BUY_MOMENTUM",
-            reason=f"Strong Trending Expansion (CHOP={eagle.chop_index:.1f}, ADX={eagle.adx_14:.1f}, Multi-TF={eagle.multi_tf.bias})",
-            action_guidance="Eagle Eye confirms directional impulse. Execute on OTE pullback with asymmetric targets.",
-        )
-
-    # Rule 5: Tiger Stalking & Capital Preservation Filter (Midday Lull or Severe Chop)
+    # Rule 4: Tiger Stalking & Capital Preservation Filter (Midday Lull or Severe Chop)
     is_severe_chop = eagle.chop_index >= 58.0 or eagle.adx_14 < 18.0
     if eagle.is_midday_chop_window or is_severe_chop:
         reason_parts = []
@@ -639,6 +633,21 @@ def evaluate_tiger_mandate(
                 "Routine breakout entries suspended to prevent whipsaw bleeding. "
                 "Wait patiently for verified institutional expansion thrust or range boundary sweep."
             ),
+        )
+
+    # Rule 5: Healthy Trending Phase
+    if (
+        eagle.chop_status == "TRENDING_EXPANSION"
+        or eagle.adx_14 >= 24.0
+        or eagle.multi_tf.bias in ("BULLISH_ALIGNED", "BEARISH_ALIGNED")
+    ):
+        return TigerStrategyMandate(
+            mandate="MOMENTUM_EXPANSION",
+            allow_routine_breakouts=True,
+            allow_thrust_only=False,
+            suggested_strategy="BUY_MOMENTUM",
+            reason=f"Strong Trending Expansion (CHOP={eagle.chop_index:.1f}, ADX={eagle.adx_14:.1f}, Multi-TF={eagle.multi_tf.bias})",
+            action_guidance="Eagle Eye confirms directional impulse. Execute on OTE pullback with asymmetric targets.",
         )
 
     # Rule 6: Normal Adaptive Mode
@@ -689,16 +698,8 @@ def compute_sniper_execution_plan(
     if is_bull:
         risk_pts = max(step_tolerance * 0.8, spot - invalidation_level)
         t1 = target_1 if target_1 > spot else round(spot + (risk_pts * 1.8), 1)
-        t2 = (
-            target_2
-            if (target_2 and target_2 > t1)
-            else round(spot + (risk_pts * 3.5), 1)
-        )
-        t3 = (
-            target_3
-            if (target_3 and target_3 > t2)
-            else round(spot + (risk_pts * 5.0), 1)
-        )
+        t2 = target_2 if (target_2 and target_2 > t1) else round(spot + (risk_pts * 3.5), 1)
+        t3 = target_3 if (target_3 and target_3 > t2) else round(spot + (risk_pts * 5.0), 1)
 
         # OTE Pullback Range (Buy limit zone near trigger / VWAP)
         entry_min = round(max(invalidation_level + 2.0, trigger_level - (step_tolerance * 0.4)), 1)
@@ -712,16 +713,8 @@ def compute_sniper_execution_plan(
     else:
         risk_pts = max(step_tolerance * 0.8, invalidation_level - spot)
         t1 = target_1 if target_1 < spot else round(spot - (risk_pts * 1.8), 1)
-        t2 = (
-            target_2
-            if (target_2 and target_2 < t1)
-            else round(spot - (risk_pts * 3.5), 1)
-        )
-        t3 = (
-            target_3
-            if (target_3 and target_3 < t2)
-            else round(spot - (risk_pts * 5.0), 1)
-        )
+        t2 = target_2 if (target_2 and target_2 < t1) else round(spot - (risk_pts * 3.5), 1)
+        t3 = target_3 if (target_3 and target_3 < t2) else round(spot - (risk_pts * 5.0), 1)
 
         # OTE Pullback Range (Sell/Put limit zone on retest of broken support)
         entry_max = round(min(invalidation_level - 2.0, trigger_level + (step_tolerance * 0.4)), 1)
@@ -773,7 +766,9 @@ def evaluate_index_adaptive_regime(
     Universal Single Source of Truth for Index Adaptive Trading.
     Returns cached decision if fresh (<15s) unless force_refresh=True.
     """
-    clean_sym = underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
+    clean_sym = (
+        underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
+    )
     now_ts = time.time()
 
     if not force_refresh:

@@ -5,15 +5,11 @@ Integration tests for Production Data Firewall, DataSyncScheduler,
 and maintenance sync API endpoints.
 """
 
-import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 from engine.data_sanctity import (
-    assert_production_data_sanctity,
     is_test_or_mock_payload,
 )
 from engine.data_sync_scheduler import data_sync_scheduler
@@ -111,6 +107,7 @@ def test_maintenance_purge_cleans_aged_temp_files(tmp_path, monkeypatch):
     old_file.write_text("old temp data", encoding="utf-8")
     old_mtime = (datetime.now(timezone.utc) - timedelta(hours=36)).timestamp()
     import os
+
     os.utime(old_file, (old_mtime, old_mtime))
 
     # Create dummy new temp file (<24h old)

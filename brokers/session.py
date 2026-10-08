@@ -194,7 +194,9 @@ def _try_auto_restore_sessions() -> None:
                 b = FyersAPI()
                 if b.is_authenticated():
                     is_first = not _brokers
-                    register_broker("fyers", b, primary=is_first, role="both" if is_first else "data")
+                    register_broker(
+                        "fyers", b, primary=is_first, role="both" if is_first else "data"
+                    )
                     try:
                         threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
                     except Exception:
@@ -209,7 +211,9 @@ def _try_auto_restore_sessions() -> None:
     try:
         from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
 
-        if os.path.exists(_MT) and (os.environ.get("MSTOCK_API_KEY") or os.environ.get("MSTOCK_CLIENT_CODE")):
+        if os.path.exists(_MT) and (
+            os.environ.get("MSTOCK_API_KEY") or os.environ.get("MSTOCK_CLIENT_CODE")
+        ):
             b = MStockAPI()
             if b.is_authenticated():
                 register_broker("mstock", b, role="both")
@@ -622,9 +626,30 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
         secret_key = get_credential("FYERS_SECRET_KEY", "Fyers Secret Key", secret=True)
         redirect_uri = get_broker_callback_url("fyers")
         # Auto-login credentials (optional — headless TOTP flow, no browser needed)
-        fy_id = get_credential("FYERS_FY_ID", "Fyers Client Login ID (for auto-login)", secret=False, required=False) or ""
-        totp_secret = get_credential("FYERS_TOTP_SECRET", "Fyers TOTP Secret (for auto-login)", secret=True, required=False) or ""
-        pin = get_credential("FYERS_PIN", "Fyers Trading PIN (for auto-login)", secret=True, required=False) or ""
+        fy_id = (
+            get_credential(
+                "FYERS_FY_ID",
+                "Fyers Client Login ID (for auto-login)",
+                secret=False,
+                required=False,
+            )
+            or ""
+        )
+        totp_secret = (
+            get_credential(
+                "FYERS_TOTP_SECRET",
+                "Fyers TOTP Secret (for auto-login)",
+                secret=True,
+                required=False,
+            )
+            or ""
+        )
+        pin = (
+            get_credential(
+                "FYERS_PIN", "Fyers Trading PIN (for auto-login)", secret=True, required=False
+            )
+            or ""
+        )
         return key, FyersAPI(
             app_id=app_id,
             secret_key=secret_key,

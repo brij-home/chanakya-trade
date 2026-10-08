@@ -5,16 +5,14 @@ Institutional regression test suite verifying swing trade discovery, lifecycle,
 Actionable Blueprint contracts, horizon filtering, and multi-session persistence.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import pytest
 
 from engine.alert_identity import validate_alert_id
 from engine.alert_model import AutoAlert
 from engine.auto_alert_engine import AutoAlertEngine
 from engine.detectors.swing_inflection import (
     _format_swing_inflection_alert,
-    _resolve_swing_horizon_and_eta,
 )
 from analysis.inflection_scanner import InflectionSetup
 from market.yfinance_provider import _to_yf_symbol
@@ -71,14 +69,16 @@ def _make_dummy_inflection_setup(
 def test_swing_inflection_blueprint_and_active_stages():
     """Verify swing inflection setup generates a complete institutional Actionable Blueprint and active stage."""
     setup = _make_dummy_inflection_setup(symbol="TRENT", timing_state="TRIGGER_NOW")
-    
+
     # 1. Off-market generation -> stage must be ACTIONABLE (never unignited EARLY_WARNING)
     alert = _format_swing_inflection_alert(setup, mkt_open=False)
-    assert alert.stage == "ACTIONABLE", f"Off-market swing setup stage should be ACTIONABLE, got {alert.stage}"
+    assert alert.stage == "ACTIONABLE", (
+        f"Off-market swing setup stage should be ACTIONABLE, got {alert.stage}"
+    )
     assert alert.is_active is True
     assert alert.time_horizon in ("SWING_SHORT", "SWING_MID")
     assert alert.ttl_seconds >= 86400 * 10
-    
+
     # 2. Market-open generation -> stage must be IGNITED
     alert_open = _format_swing_inflection_alert(setup, mkt_open=True)
     assert alert_open.stage == "IGNITED"
@@ -164,7 +164,9 @@ def test_resolve_session_end_preserves_swing_trades():
         engine._alerts = [swing_alert]
 
     resolved = engine.resolve_session_end_alerts()
-    assert len(resolved) == 0, "Multi-session swing trades must not be retired by resolve_session_end_alerts"
+    assert len(resolved) == 0, (
+        "Multi-session swing trades must not be retired by resolve_session_end_alerts"
+    )
     assert swing_alert.is_active is True
     assert swing_alert.is_archived is False
 
@@ -257,7 +259,9 @@ def test_eod_symbol_cleaning_and_bse_universe_broadening():
     assert _clean_eod_symbol("TCS.BO") == "TCS"
 
     all_symbols = THEMATIC_PRESETS["all_equities_nse_bse"]["symbols"]
-    assert len(all_symbols) >= 1000, f"all_equities_nse_bse must contain broad universe, got {len(all_symbols)}"
+    assert len(all_symbols) >= 1000, (
+        f"all_equities_nse_bse must contain broad universe, got {len(all_symbols)}"
+    )
     # Verify BSE 500 constituents are present
     assert "BSE" in all_symbols
     assert "ABB" in all_symbols

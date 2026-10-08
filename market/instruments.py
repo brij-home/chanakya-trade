@@ -44,7 +44,6 @@ STANDARD_LOT_SIZES: dict[str, int] = {
     "NIFTYFPI": 1100,
     "SENSEX": 20,
     "BANKEX": 30,
-
     # ── MCX Commodities ──────────────────────────────────────────────────────
     "CRUDEOIL": 100,
     "CRUDEOILM": 10,
@@ -61,13 +60,11 @@ STANDARD_LOT_SIZES: dict[str, int] = {
     "ALUMINIUM": 5000,
     "LEAD": 5000,
     "COTTON": 25,
-
     # ── Currency Derivatives ──────────────────────────────────────────────────
     "USDINR": 1000,
     "EURINR": 1000,
     "GBPINR": 1000,
     "JPYINR": 1000,
-
     # ── NSE Single-Stock F&O Equities ─────────────────────────────────────────
     "360ONE": 500,
     "ABB": 125,
@@ -484,6 +481,7 @@ def resolve_canonical_instrument(query: str) -> CanonicalInstrument:
 
     # Detect F&O Derivative vs Cash Equity
     import re
+
     is_option = bool(re.search(r"\d+(?:CE|PE)$", clean_sym))
     is_future = clean_sym.endswith("FUT") or clean_sym.endswith("FUTURES")
     is_fno = venue in ("NFO", "BFO") or is_option or is_future
@@ -525,7 +523,6 @@ def resolve_canonical_instrument(query: str) -> CanonicalInstrument:
         is_tradable=True,
         status="ACTIVE",
     )
-
 
 
 def get_market_session_state(
@@ -705,4 +702,3 @@ def get_fno_lot_size(symbol: str) -> int:
     }
     canonical = alias_map.get(clean, clean)
     return STANDARD_LOT_SIZES.get(canonical, STANDARD_LOT_SIZES.get(clean, 1))
-

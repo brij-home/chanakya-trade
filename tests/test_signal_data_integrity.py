@@ -302,7 +302,9 @@ def test_early_warning_ignition_suppressed_if_target1_already_surpassed(monkeypa
     engine._alerts.append(alert)
 
     # Price surged to 820.0 (past T1 of 815.0!)
-    monkeypatch.setattr(engine, "_batch_refresh_quotes", lambda alerts: {"NSE:SBIN": 820.0, "SBIN": 820.0})
+    monkeypatch.setattr(
+        engine, "_batch_refresh_quotes", lambda alerts: {"NSE:SBIN": 820.0, "SBIN": 820.0}
+    )
 
     ignited = engine.check_and_ignite_early_warnings()
     assert len(ignited) == 0, "Must NOT ignite when price already surpassed Target 1!"
@@ -690,7 +692,9 @@ def test_0dte_afternoon_option_target_calibration_and_diffusion():
     )
     # At 14:27 IST (~48m to close), T1 distance should be bounded by session budget / 1.2R floor (~40-95 pts, not 180+ pts)
     t1_spot_dist = tp.target_1 - tp.entry_price
-    assert 20.0 <= t1_spot_dist <= 105.0, f"Spot T1 distance {t1_spot_dist} violates 14:27 IST diffusion budget"
+    assert 20.0 <= t1_spot_dist <= 105.0, (
+        f"Spot T1 distance {t1_spot_dist} violates 14:27 IST diffusion budget"
+    )
 
     # 2. Option Execution Plan must provide realistic scale-out R-multiples
     opt_plan = calculate_option_execution_plan(
@@ -823,7 +827,3 @@ def test_mstock_quote_mapping_never_cross_contaminates_unmatched_tokens():
     quotes = api.get_quote(["NSE:NIFTY 50"])
     assert "NSE:NIFTY 50" not in quotes
     assert "NIFTY 50" not in quotes
-
-
-
-

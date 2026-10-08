@@ -2802,7 +2802,11 @@ def test_free_index_monotonic_target_sorting():
 def test_mcx_commodity_sector_and_prompt_expiry_resolution():
     """Verify that MCX Commodities do not collide with 'IT' in sector shortening,
     resolve mid-month prompt expiry (not last Thursday NSE expiry), and deduplicate action verbs."""
-    from bot.alert_templates import shorten_sector_name, resolve_expiry_cycle, format_auto_alert_telegram
+    from bot.alert_templates import (
+        shorten_sector_name,
+        resolve_expiry_cycle,
+        format_auto_alert_telegram,
+    )
     from engine.auto_alert_engine import AutoAlert
     from datetime import date
 
@@ -2864,6 +2868,3 @@ def test_mcx_commodity_sector_and_prompt_expiry_resolution():
     assert "Sec: <b>IT</b>" not in rendered
     # Signals line should not end with trailing colon or fragmented word
     assert "momentum: session" not in rendered
-
-
-

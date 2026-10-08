@@ -7,7 +7,7 @@ Deterministic unit tests for engine/quantstats_report.py.
 import pandas as pd
 import numpy as np
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from engine.quantstats_report import (

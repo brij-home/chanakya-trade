@@ -868,7 +868,14 @@ def detect_gamma_blast(
                         "contract": contract_sym,
                         "preferred_vehicle": (
                             "DEEP_ITM_OR_SPREAD"
-                            if (is_high_iv_risk or (exp_date and now_dt.hour >= 13 and str(exp_date)[:10] == now_dt.strftime("%Y-%m-%d")))
+                            if (
+                                is_high_iv_risk
+                                or (
+                                    exp_date
+                                    and now_dt.hour >= 13
+                                    and str(exp_date)[:10] == now_dt.strftime("%Y-%m-%d")
+                                )
+                            )
                             else "NAKED_OPTION_OR_SPREAD"
                         ),
                         "iv_crush_defense": (
@@ -888,7 +895,9 @@ def detect_gamma_blast(
                         else "Market",
                         "entry_range": entry_range_ce,
                         "no_chase": f"DO NOT CHASE above ₹{no_chase_ce}",
-                        "target_0_5": f"₹{opt_plan['t0_5_premium']:,.2f}" if (opt_plan and opt_plan.get("t0_5_premium")) else None,
+                        "target_0_5": f"₹{opt_plan['t0_5_premium']:,.2f}"
+                        if (opt_plan and opt_plan.get("t0_5_premium"))
+                        else None,
                         "target_1": f"₹{target_premium:,.2f}",
                         "target": f"₹{target_premium:,.2f} ({t1_pct_str})",
                         "target_2": f"₹{t2_premium:,.2f}"
@@ -1495,7 +1504,14 @@ def detect_gamma_blast(
                         "contract": contract_sym,
                         "preferred_vehicle": (
                             "DEEP_ITM_OR_SPREAD"
-                            if (is_high_iv_risk or (exp_date and now_dt.hour >= 13 and str(exp_date)[:10] == now_dt.strftime("%Y-%m-%d")))
+                            if (
+                                is_high_iv_risk
+                                or (
+                                    exp_date
+                                    and now_dt.hour >= 13
+                                    and str(exp_date)[:10] == now_dt.strftime("%Y-%m-%d")
+                                )
+                            )
                             else "NAKED_OPTION_OR_SPREAD"
                         ),
                         "iv_crush_defense": (
@@ -1515,7 +1531,9 @@ def detect_gamma_blast(
                         else "Market",
                         "entry_range": entry_range_pe,
                         "no_chase": f"DO NOT CHASE above ₹{no_chase_pe}",
-                        "target_0_5": f"₹{opt_plan['t0_5_premium']:,.2f}" if (opt_plan and opt_plan.get("t0_5_premium")) else None,
+                        "target_0_5": f"₹{opt_plan['t0_5_premium']:,.2f}"
+                        if (opt_plan and opt_plan.get("t0_5_premium"))
+                        else None,
                         "target_1": f"₹{target_premium:,.2f}",
                         "target": f"₹{target_premium:,.2f} ({t1_pct_str})",
                         "target_2": f"₹{t2_premium:,.2f}"

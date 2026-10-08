@@ -168,7 +168,11 @@ def _format_squeeze_alert(
     # Standard Cash Equity Alert
     risk_pts = abs(trigger_lvl - sl) if sl > 0 else (ltp * 0.015)
     chase_pts = max(0.5, round(risk_pts * 0.30, 2))
-    cash_no_chase = round(trigger_lvl + chase_pts, 2) if direction == "BULLISH" else round(trigger_lvl - chase_pts, 2)
+    cash_no_chase = (
+        round(trigger_lvl + chase_pts, 2)
+        if direction == "BULLISH"
+        else round(trigger_lvl - chase_pts, 2)
+    )
     metrics["no_chase_boundary"] = cash_no_chase
 
     # Ensure entry range respects no-chase boundary

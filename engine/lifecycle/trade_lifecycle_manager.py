@@ -92,7 +92,9 @@ class TradeLifecycleManager:
                 sl = float(alert.stop_loss or 0.0)
                 risk = abs(entry - sl) if entry > 0 and sl > 0 else 0.0
                 if risk > 0:
-                    t1_val = round(entry + (risk * 2.0) if is_payoff_upward else entry - (risk * 2.0), 2)
+                    t1_val = round(
+                        entry + (risk * 2.0) if is_payoff_upward else entry - (risk * 2.0), 2
+                    )
                     tgt_lvl = float(alert.target_level or 0.0)
                     if tgt_lvl > 0:
                         if is_payoff_upward and tgt_lvl > entry and t1_val >= tgt_lvl:
@@ -103,9 +105,15 @@ class TradeLifecycleManager:
                     t1_val = float(alert.target_level)
             if t1_val and t1_val > 0:
                 if is_payoff_upward and cur_ltp < t1_val * 0.998:
-                    return False, f"CMP {cur_ltp:,.2f} is below Target 1 {t1_val:,.2f} (deficit: {t1_val - cur_ltp:,.2f})"
+                    return (
+                        False,
+                        f"CMP {cur_ltp:,.2f} is below Target 1 {t1_val:,.2f} (deficit: {t1_val - cur_ltp:,.2f})",
+                    )
                 if not is_payoff_upward and cur_ltp > t1_val * 1.002:
-                    return False, f"CMP {cur_ltp:,.2f} is above Target 1 {t1_val:,.2f} (deficit: {cur_ltp - t1_val:,.2f})"
+                    return (
+                        False,
+                        f"CMP {cur_ltp:,.2f} is above Target 1 {t1_val:,.2f} (deficit: {cur_ltp - t1_val:,.2f})",
+                    )
 
         # 2. Target 2 Check
         if check_stage in ("T2_ACHIEVED", "TARGET_2", "TARGET_2_HIT") or "T2" in check_status:
@@ -120,7 +128,9 @@ class TradeLifecycleManager:
                 sl = float(alert.stop_loss or 0.0)
                 risk = abs(entry - sl) if entry > 0 and sl > 0 else 0.0
                 if risk > 0:
-                    t2_val = round(entry + (risk * 4.0) if is_payoff_upward else entry - (risk * 4.0), 2)
+                    t2_val = round(
+                        entry + (risk * 4.0) if is_payoff_upward else entry - (risk * 4.0), 2
+                    )
                     tgt_lvl = float(alert.target_level or 0.0)
                     if tgt_lvl > 0:
                         if is_payoff_upward and tgt_lvl > entry and t2_val >= tgt_lvl:
@@ -131,12 +141,21 @@ class TradeLifecycleManager:
                     t2_val = float(alert.target_level)
             if t2_val and t2_val > 0:
                 if is_payoff_upward and cur_ltp < t2_val * 0.998:
-                    return False, f"CMP {cur_ltp:,.2f} is below Target 2 {t2_val:,.2f} (deficit: {t2_val - cur_ltp:,.2f})"
+                    return (
+                        False,
+                        f"CMP {cur_ltp:,.2f} is below Target 2 {t2_val:,.2f} (deficit: {t2_val - cur_ltp:,.2f})",
+                    )
                 if not is_payoff_upward and cur_ltp > t2_val * 1.002:
-                    return False, f"CMP {cur_ltp:,.2f} is above Target 2 {t2_val:,.2f} (deficit: {cur_ltp - t2_val:,.2f})"
+                    return (
+                        False,
+                        f"CMP {cur_ltp:,.2f} is above Target 2 {t2_val:,.2f} (deficit: {cur_ltp - t2_val:,.2f})",
+                    )
 
         # 3. Final Target Check
-        if check_stage in ("TARGET_ACHIEVED", "COMPLETED", "FINAL_TARGET") or "FINAL" in check_status:
+        if (
+            check_stage in ("TARGET_ACHIEVED", "COMPLETED", "FINAL_TARGET")
+            or "FINAL" in check_status
+        ):
             tf_raw = (
                 (opt_plan.get("t3_premium") if is_opt else None)
                 or alert.target_level
@@ -147,9 +166,15 @@ class TradeLifecycleManager:
             tf_val = _extract_num(tf_raw)
             if tf_val and tf_val > 0:
                 if is_payoff_upward and cur_ltp < tf_val * 0.998:
-                    return False, f"CMP {cur_ltp:,.2f} is below Final Target {tf_val:,.2f} (deficit: {tf_val - cur_ltp:,.2f})"
+                    return (
+                        False,
+                        f"CMP {cur_ltp:,.2f} is below Final Target {tf_val:,.2f} (deficit: {tf_val - cur_ltp:,.2f})",
+                    )
                 if not is_payoff_upward and cur_ltp > tf_val * 1.002:
-                    return False, f"CMP {cur_ltp:,.2f} is above Final Target {tf_val:,.2f} (deficit: {cur_ltp - tf_val:,.2f})"
+                    return (
+                        False,
+                        f"CMP {cur_ltp:,.2f} is above Final Target {tf_val:,.2f} (deficit: {cur_ltp - tf_val:,.2f})",
+                    )
 
         # 4. Target 0.5 Check
         if check_stage in ("T0_5_ACHIEVED", "TARGET_0_5") or "T0_5" in check_status:
@@ -161,9 +186,15 @@ class TradeLifecycleManager:
             t0_5_val = _extract_num(t0_5_raw)
             if t0_5_val and t0_5_val > 0:
                 if is_payoff_upward and cur_ltp < t0_5_val * 0.998:
-                    return False, f"CMP {cur_ltp:,.2f} is below Target 0.5 {t0_5_val:,.2f} (deficit: {t0_5_val - cur_ltp:,.2f})"
+                    return (
+                        False,
+                        f"CMP {cur_ltp:,.2f} is below Target 0.5 {t0_5_val:,.2f} (deficit: {t0_5_val - cur_ltp:,.2f})",
+                    )
                 if not is_payoff_upward and cur_ltp > t0_5_val * 1.002:
-                    return False, f"CMP {cur_ltp:,.2f} is above Target 0.5 {t0_5_val:,.2f} (deficit: {cur_ltp - t0_5_val:,.2f})"
+                    return (
+                        False,
+                        f"CMP {cur_ltp:,.2f} is above Target 0.5 {t0_5_val:,.2f} (deficit: {cur_ltp - t0_5_val:,.2f})",
+                    )
 
         return True, "PASSED_MILESTONE_INTEGRITY_GATE"
 
@@ -237,7 +268,9 @@ class TradeLifecycleManager:
                 sl = float(alert.stop_loss or 0.0)
                 risk = abs(entry - sl) if entry > 0 and sl > 0 else 0.0
                 if risk > 0:
-                    val = round(entry + (risk * 2.0) if is_payoff_upward else entry - (risk * 2.0), 2)
+                    val = round(
+                        entry + (risk * 2.0) if is_payoff_upward else entry - (risk * 2.0), 2
+                    )
                     tgt_lvl = float(alert.target_level or 0.0)
                     if tgt_lvl > 0:
                         if is_payoff_upward and tgt_lvl > entry and val >= tgt_lvl:
@@ -265,7 +298,9 @@ class TradeLifecycleManager:
                 sl = float(alert.stop_loss or 0.0)
                 risk = abs(entry - sl) if entry > 0 and sl > 0 else 0.0
                 if risk > 0:
-                    val = round(entry + (risk * 4.0) if is_payoff_upward else entry - (risk * 4.0), 2)
+                    val = round(
+                        entry + (risk * 4.0) if is_payoff_upward else entry - (risk * 4.0), 2
+                    )
                     tgt_lvl = float(alert.target_level or 0.0)
                     if tgt_lvl > 0:
                         if is_payoff_upward and tgt_lvl > entry and val >= tgt_lvl:
@@ -332,9 +367,9 @@ class TradeLifecycleManager:
                     "initial_invalidation_stop" not in alert.actionable_plan
                     and alert.actionable_plan.get("invalidation_stop")
                 ):
-                    alert.actionable_plan["initial_invalidation_stop"] = (
-                        alert.actionable_plan["invalidation_stop"]
-                    )
+                    alert.actionable_plan["initial_invalidation_stop"] = alert.actionable_plan[
+                        "invalidation_stop"
+                    ]
                 alert.actionable_plan["invalidation_stop"] = eval_res.recommended_stop
                 if isinstance(alert.actionable_plan.get("option_plan"), dict):
                     if "initial_sl_premium" not in alert.actionable_plan[
@@ -343,9 +378,7 @@ class TradeLifecycleManager:
                         alert.actionable_plan["option_plan"]["initial_sl_premium"] = (
                             alert.actionable_plan["option_plan"]["sl_premium"]
                         )
-                    alert.actionable_plan["option_plan"]["sl_premium"] = (
-                        eval_res.recommended_stop
-                    )
+                    alert.actionable_plan["option_plan"]["sl_premium"] = eval_res.recommended_stop
 
         alert.trailing_rationale = eval_res.trailing_rationale
         alert.locked_profit_pts = eval_res.locked_profit_pts
@@ -356,11 +389,7 @@ class TradeLifecycleManager:
         if getattr(eval_res, "strike_roll_recommendation", None):
             alert.strike_roll_recommendation = eval_res.strike_roll_recommendation
 
-        env_tag = (
-            "[TEST]"
-            if (alert.environment == "TEST" or not alert.is_live)
-            else "[REAL/LIVE]"
-        )
+        env_tag = "[TEST]" if (alert.environment == "TEST" or not alert.is_live) else "[REAL/LIVE]"
         is_crypto = (
             getattr(alert, "exchange", "").upper() in ("BINANCE", "CRYPTO", "DERIBIT")
             or "CRYPTO" in getattr(alert, "alert_type", "").upper()
@@ -407,8 +436,7 @@ class TradeLifecycleManager:
                     )
                     is_opt_trade = (
                         is_alert_option_premium_level(alert)
-                        or (alert.actionable_plan or {}).get("instrument_type")
-                        == "OPTION"
+                        or (alert.actionable_plan or {}).get("instrument_type") == "OPTION"
                     )
                     if is_opt_trade:
                         trade_entry = float(
@@ -420,9 +448,7 @@ class TradeLifecycleManager:
                             or cur_disp_p
                         )
                     else:
-                        trade_entry = float(
-                            alert.trigger_level or alert.ltp or cur_disp_p
-                        )
+                        trade_entry = float(alert.trigger_level or alert.ltp or cur_disp_p)
 
                     m_factors = (
                         (alert.metrics or {}).get("matched_factors")
@@ -450,34 +476,34 @@ class TradeLifecycleManager:
 
             inst_label = format_contract_display(alert.contract_symbol)
         elif getattr(alert, "strike", None) and getattr(alert, "option_type", None):
-            inst_label = (
-                f"{alert.symbol} {int(alert.strike)} {alert.option_type}".strip()
-            )
+            inst_label = f"{alert.symbol} {int(alert.strike)} {alert.option_type}".strip()
 
         if eval_res.new_milestone == "TARGET_ACHIEVED":
             if not eval_res.should_trail:
                 alert.stage = "COMPLETED"
                 alert.is_active = False
-                alert.headline = f"🏁 {env_tag} FINAL TARGET ACHIEVED: {inst_label} ({cs}{cur_disp_p:,.2f})"
+                alert.headline = (
+                    f"🏁 {env_tag} FINAL TARGET ACHIEVED: {inst_label} ({cs}{cur_disp_p:,.2f})"
+                )
                 alert.is_archived = True
                 alert.archived_at = now_str
                 alert.archive_reason = "Final target achieved"
             else:
                 alert.stage = "TARGET_ACHIEVED"
-                alert.headline = f"🎯 {env_tag} FINAL TARGET ACHIEVED: {inst_label} ({cs}{cur_disp_p:,.2f})"
+                alert.headline = (
+                    f"🎯 {env_tag} FINAL TARGET ACHIEVED: {inst_label} ({cs}{cur_disp_p:,.2f})"
+                )
         elif eval_res.new_milestone == "T2_ACHIEVED":
             alert.stage = "T2_ACHIEVED"
-            alert.headline = (
-                f"🎯 {env_tag} TARGET 2 ACHIEVED: {inst_label} ({cs}{cur_disp_p:,.2f})"
-            )
+            alert.headline = f"🎯 {env_tag} TARGET 2 ACHIEVED: {inst_label} ({cs}{cur_disp_p:,.2f})"
         elif eval_res.new_milestone == "T1_ACHIEVED":
             alert.stage = "T1_ACHIEVED"
-            alert.headline = (
-                f"🎯 {env_tag} TARGET 1 ACHIEVED: {inst_label} ({cs}{cur_disp_p:,.2f})"
-            )
+            alert.headline = f"🎯 {env_tag} TARGET 1 ACHIEVED: {inst_label} ({cs}{cur_disp_p:,.2f})"
         elif eval_res.new_milestone == "T0_5_ACHIEVED":
             alert.stage = "T0_5_ACHIEVED"
-            alert.headline = f"🎯 {env_tag} TARGET 0.5 (SCALE 1) ACHIEVED: {inst_label} ({cs}{cur_disp_p:,.2f})"
+            alert.headline = (
+                f"🎯 {env_tag} TARGET 0.5 (SCALE 1) ACHIEVED: {inst_label} ({cs}{cur_disp_p:,.2f})"
+            )
         elif eval_res.new_milestone == "TRAILING_UPDATE":
             alert.last_trail_alert_time = now_ts
             alert.stage = "TRAILING_UPDATE"
@@ -510,11 +536,11 @@ class TradeLifecycleManager:
                 alert.invalidation_reason = None
                 alert.is_archived = True
                 alert.archived_at = now_str
-                alert.archive_reason = (
-                    "Velocity Time-Stop Reached (Profit Secured at CMP)"
-                )
+                alert.archive_reason = "Velocity Time-Stop Reached (Profit Secured at CMP)"
                 best_pnl = max(alert.pnl_pct or 0.0, eval_res.pnl_pct or 0.0)
-                alert.headline = f"🎯 {env_tag} TIME-STOP PROFIT SECURED (+{best_pnl:.1f}%): {inst_label}"
+                alert.headline = (
+                    f"🎯 {env_tag} TIME-STOP PROFIT SECURED (+{best_pnl:.1f}%): {inst_label}"
+                )
             else:
                 alert.stage = "TIME_STOP_EXIT"
                 alert.is_invalidated = True
@@ -522,12 +548,8 @@ class TradeLifecycleManager:
                 alert.invalidated_at = now_str
                 alert.is_archived = True
                 alert.archived_at = now_str
-                alert.archive_reason = (
-                    "Velocity Time-Stop Reached (Stagnation Scratch Exit)"
-                )
-                alert.headline = (
-                    f"⏱️ {env_tag} VELOCITY TIME-STOP EXIT: {inst_label} (Close at CMP)"
-                )
+                alert.archive_reason = "Velocity Time-Stop Reached (Stagnation Scratch Exit)"
+                alert.headline = f"⏱️ {env_tag} VELOCITY TIME-STOP EXIT: {inst_label} (Close at CMP)"
         alert.summary = eval_res.trailing_rationale
 
 

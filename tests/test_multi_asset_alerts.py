@@ -340,7 +340,9 @@ def test_commodity_alert_includes_defined_risk_option_alternative():
     mock_quote.change_pct = 2.1
     mock_quote.volume = 45000
 
-    with patch("market.options.get_data_broker", side_effect=Exception("No live broker in unit test")):
+    with patch(
+        "market.options.get_data_broker", side_effect=Exception("No live broker in unit test")
+    ):
         with patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}):
             with patch("market.history.get_ohlcv", return_value=None):
                 with patch("market.quotes.get_ltp", return_value=6500.0):

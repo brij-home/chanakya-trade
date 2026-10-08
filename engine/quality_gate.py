@@ -106,7 +106,6 @@ def is_mcx_midday_lull_window(dt: Optional[datetime] = None) -> bool:
     return dtime(11, 30) <= t < dtime(15, 30)
 
 
-
 def evaluate_institutional_quality_gate(
     alert: Any,
     quotes_map: Optional[dict[str, Any]] = None,

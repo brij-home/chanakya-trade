@@ -197,7 +197,7 @@ def detect_currency_breakouts(
                 "lot_size": curr_lot,
                 "when_to_buy": "Execute on order book spread with defined risk below SL.",
                 "when_to_wait": f"Do not chase if price moves beyond ₹{no_chase:.4f}.",
-                "profit_rule": f"Scale 50% at T1 (+2.5R), move SL to entry, scale 25% at T2 (+4.5R), runner to T3 (+6.5R).",
+                "profit_rule": "Scale 50% at T1 (+2.5R), move SL to entry, scale 25% at T2 (+4.5R), runner to T3 (+6.5R).",
                 "trade_plan": {
                     "symbol": clean_sym,
                     "direction": "LONG" if is_bullish else "SHORT",

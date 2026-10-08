@@ -1000,10 +1000,16 @@ class MStockAPI(BrokerAPI):
                         if not targets and len(inst_list) == 1:
                             clean = inst_list[0].replace("NSE:", "").replace("BSE:", "").strip()
                             exp_tok = str(self.get_symbol_token(clean, exch) or "")
-                            trading_sym = str(item.get("tradingSymbol") or item.get("symbol") or "").upper()
+                            trading_sym = str(
+                                item.get("tradingSymbol") or item.get("symbol") or ""
+                            ).upper()
                             # Reject alien quotes if token or tradingSymbol explicitly conflicts
                             token_mismatch = bool(tok and exp_tok and tok != exp_tok)
-                            symbol_mismatch = bool(trading_sym and clean.upper() not in trading_sym and trading_sym not in clean.upper())
+                            symbol_mismatch = bool(
+                                trading_sym
+                                and clean.upper() not in trading_sym
+                                and trading_sym not in clean.upper()
+                            )
                             if not token_mismatch and not symbol_mismatch:
                                 targets = [(inst_list[0], clean)]
                         for orig_inst, target_sym in targets:

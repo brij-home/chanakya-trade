@@ -209,7 +209,14 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
     """
     is_mcx = symbol.upper().startswith("MCX:")
     is_bse = symbol.upper().startswith("BSE:")
-    clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").replace("MCX:", "").strip().upper()
+    clean_sym = (
+        symbol.replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("NFO:", "")
+        .replace("MCX:", "")
+        .strip()
+        .upper()
+    )
     query_sym = symbol if is_mcx else clean_sym
 
     try:
@@ -238,7 +245,9 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
                     raw_depth,
                     depth_dict.get("ltp", 0.0),
                     live_broker_connected=True,
-                    provenance=f"LIVE_{brk.name.upper()}_L2" if hasattr(brk, "name") else "LIVE_BROKER_L2",
+                    provenance=f"LIVE_{brk.name.upper()}_L2"
+                    if hasattr(brk, "name")
+                    else "LIVE_BROKER_L2",
                 )
 
         if brk and hasattr(brk, "get_quote"):

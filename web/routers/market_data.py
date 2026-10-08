@@ -41,7 +41,9 @@ async def get_whale_deals_endpoint(min_deal_cr: float = 0.0, investor: Optional[
     """Returns marquee superstar investor and institutional bulk/block deals."""
     from analysis.whale_tracker import get_whale_flows
 
-    flows = await asyncio.to_thread(get_whale_flows, investor_filter=investor, min_deal_cr=min_deal_cr)
+    flows = await asyncio.to_thread(
+        get_whale_flows, investor_filter=investor, min_deal_cr=min_deal_cr
+    )
     return {"status": "ok", "data": flows}
 
 
@@ -432,7 +434,7 @@ async def place_fyers_gtt_order_endpoint(req: dict):
         limit_price=limit_price,
         product=product,
     )
-    return res
+    return {"status": "ok", "response": res}
 
 
 @router.delete("/api/fyers/gtt/{order_id}", tags=["Fyers Advanced"])
@@ -454,7 +456,10 @@ async def place_fyers_smart_trail_endpoint(req: dict):
 
     brk = get_execution_broker()
     if not brk or not hasattr(brk, "create_smart_trailing_order"):
-        return {"status": "error", "error": "Execution broker does not support smart trailing orders"}
+        return {
+            "status": "error",
+            "error": "Execution broker does not support smart trailing orders",
+        }
 
     symbol = req.get("symbol", "")
     qty = int(req.get("qty", 1))
@@ -475,7 +480,10 @@ async def place_fyers_smart_trail_endpoint(req: dict):
         limit_price=limit_price,
         product=product,
     )
-    return res
+    return {
+        "status": "ok" if (isinstance(res, dict) and res.get("s") == "ok") else "error",
+        "response": res,
+    }
 
 
 @router.post("/api/fyers/exit-all", tags=["Fyers Advanced"])
@@ -490,7 +498,10 @@ async def fyers_panic_exit_endpoint(req: Optional[dict] = None):
 
     segment = req.get("segment") if req else None
     res = await asyncio.to_thread(brk.exit_all_positions, segment=segment)
-    return res
+    return {
+        "status": "ok" if (isinstance(res, dict) and res.get("s") == "ok") else "error",
+        "response": res,
+    }
 
 
 @router.patch("/api/fyers/orders/{order_id}", tags=["Fyers Advanced"])
@@ -504,7 +515,11 @@ async def patch_fyers_order_endpoint(order_id: str, req: dict):
 
     price = float(req["price"]) if "price" in req and req["price"] is not None else None
     qty = int(req["qty"]) if "qty" in req and req["qty"] is not None else None
-    trigger_price = float(req["trigger_price"]) if "trigger_price" in req and req["trigger_price"] is not None else None
+    trigger_price = (
+        float(req["trigger_price"])
+        if "trigger_price" in req and req["trigger_price"] is not None
+        else None
+    )
     order_type = req.get("order_type")
 
     res = await asyncio.to_thread(
@@ -537,7 +552,9 @@ async def get_fyers_trades_endpoint():
 
 @router.get("/api/fyers/screener/{screener_id}", tags=["Fyers Advanced"])
 @router.get("/api/fyers/screeners/technical", tags=["Fyers Advanced"])
-async def get_fyers_screener_endpoint(screener_id: Optional[str] = None, screener: Optional[str] = None):
+async def get_fyers_screener_endpoint(
+    screener_id: Optional[str] = None, screener: Optional[str] = None
+):
     """Query Fyers native server-side screener (e.g. cs004 for F&O stocks)."""
     from brokers.session import get_data_broker
 
@@ -662,6 +679,7 @@ async def get_options_gex_endpoint(symbol: str, expiry: Optional[str] = None):
     Put Wall, and Volatility Breakout Zones across the strike strip.
     """
     from analysis.gex import get_gex_analysis
+
     res = await asyncio.to_thread(get_gex_analysis, symbol, expiry)
     return res
 
@@ -670,6 +688,7 @@ async def get_options_gex_endpoint(symbol: str, expiry: Optional[str] = None):
 async def post_options_gex_endpoint(req: dict[str, Any]):
     """Compute GEX analysis from POST payload with symbol and optional expiry."""
     from analysis.gex import get_gex_analysis
+
     symbol = req.get("symbol", "NIFTY")
     expiry = req.get("expiry")
     res = await asyncio.to_thread(get_gex_analysis, symbol, expiry)
@@ -684,6 +703,7 @@ async def get_order_flow_cvd_endpoint(symbol: str, timeframe: str = "5m"):
     Cumulative Volume Delta (CVD) to identify institutional absorption and exhaustion tops/bottoms.
     """
     from analysis.order_flow import analyze_order_flow
+
     snap = await asyncio.to_thread(analyze_order_flow, symbol, timeframe)
     return {"status": "ok", "data": snap.to_dict()}
 
@@ -692,6 +712,7 @@ async def get_order_flow_cvd_endpoint(symbol: str, timeframe: str = "5m"):
 async def post_order_flow_analyze_endpoint(req: dict[str, Any]):
     """Analyze order flow and CVD from POST payload."""
     from analysis.order_flow import analyze_order_flow
+
     symbol = req.get("symbol", "NIFTY")
     timeframe = req.get("timeframe", "5m")
     snap = await asyncio.to_thread(analyze_order_flow, symbol, timeframe)
@@ -715,6 +736,7 @@ async def get_volatility_risk_parity_size_endpoint(
     using 14-period ATR and margin utilization limits.
     """
     from engine.position_sizer import calculate_volatility_risk_parity_size
+
     res = await asyncio.to_thread(
         calculate_volatility_risk_parity_size,
         symbol=symbol,
@@ -733,6 +755,7 @@ async def get_volatility_risk_parity_size_endpoint(
 async def post_volatility_risk_parity_size_endpoint(req: dict[str, Any]):
     """Automated Volatility Risk-Parity sizing engine via POST."""
     from engine.position_sizer import calculate_volatility_risk_parity_size
+
     symbol = req.get("symbol", "NIFTY")
     capital = float(req["capital"]) if "capital" in req and req["capital"] else None
     risk_pct = float(req.get("risk_pct", 1.0))
@@ -770,17 +793,23 @@ async def get_fyers_margin_check_endpoint(
     Queries official Fyers Multi-Order Margin API and SEBI statutory rates.
     """
     from brokers.session import get_execution_broker
+
     brk = get_execution_broker()
     if not brk or not hasattr(brk, "check_order_margin"):
-        return {"status": "error", "error": "Execution broker does not support pre-flight margin checks"}
+        return {
+            "status": "error",
+            "error": "Execution broker does not support pre-flight margin checks",
+        }
 
-    order_payload = [{
-        "symbol": symbol,
-        "qty": qty,
-        "side": side,
-        "product_type": product_type,
-        "price": price or 0.0,
-    }]
+    order_payload = [
+        {
+            "symbol": symbol,
+            "qty": qty,
+            "side": side,
+            "product_type": product_type,
+            "price": price or 0.0,
+        }
+    ]
     res = await asyncio.to_thread(brk.check_order_margin, order_payload)
     return res
 
@@ -791,9 +820,13 @@ async def post_fyers_margin_check_endpoint(req: dict[str, Any]):
     Pre-flight multi-order margin calculation and net transaction charges estimation.
     """
     from brokers.session import get_execution_broker
+
     brk = get_execution_broker()
     if not brk or not hasattr(brk, "check_order_margin"):
-        return {"status": "error", "error": "Execution broker does not support pre-flight margin checks"}
+        return {
+            "status": "error",
+            "error": "Execution broker does not support pre-flight margin checks",
+        }
 
     orders = req.get("orders", [])
     if not orders and "symbol" in req:
@@ -804,6 +837,7 @@ async def post_fyers_margin_check_endpoint(req: dict[str, Any]):
 
 
 # ── Fyers Institutional 50-Level Depth (TBT) Endpoints ───────────
+
 
 @router.get("/api/fyers/tbt-depth/{symbol}", tags=["Fyers 50-Depth TBT"])
 async def get_fyers_50_depth_endpoint(symbol: str):
@@ -972,4 +1006,3 @@ async def prime_daily_levels_endpoint(payload: Optional[dict] = None):
         "primed_count": len(results),
         "symbols": list(results.keys()),
     }
-

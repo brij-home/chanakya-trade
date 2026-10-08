@@ -7,11 +7,10 @@ STALK (Radar Tracking) -> PRIMED (High-Priority Micro-Proximity) -> IGNITED (Sni
 
 from __future__ import annotations
 
-from datetime import datetime, date
+from datetime import date
 from zoneinfo import ZoneInfo
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 
 from engine.alert_identity import generate_alert_id
 from engine.alert_model import (
@@ -19,8 +18,6 @@ from engine.alert_model import (
     STAGE_STALK,
     STAGE_PRIMED,
     STAGE_IGNITED,
-    STAGE_EARLY_WARNING,
-    STAGE_INVALIDATED,
 )
 from engine.auto_alert_engine import AutoAlertEngine
 
@@ -160,4 +157,3 @@ def test_calibrate_off_number_stop():
         atr=25.0,
     )
     assert calibrated_clean == 2487.35
-
