@@ -82,7 +82,8 @@ def detect_pre_inflection_dryup(
             else:
                 fair_value = float(np.mean(closes[-20:]))
                 fv_name = "20-EMA Base"
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[pre_inflection_dryup] POC calculation failed for {symbol}: {e}")
             fair_value = float(np.mean(closes[-20:])) if n >= 20 else ltp
             fv_name = "20-EMA Base"
 

@@ -533,8 +533,8 @@ def test_target_1_breakeven_trailing_decision():
         stop_loss=2450.0,  # Risk = 50 pts, T1 = 2590.0 (or midpoint 2600.0)
     )
 
-    # Current price at 2595.0 reaches T1
-    res = evaluate_alert_targets_and_trailing(alert, current_ltp=2595.0)
+    # Current price at 2600.0 reaches T1
+    res = evaluate_alert_targets_and_trailing(alert, current_ltp=2600.0)
     assert res is not None
     assert res.new_milestone == "T1_ACHIEVED"
     assert res.target_status == "T1_ACHIEVED"
@@ -649,8 +649,8 @@ def test_bearish_target_and_trailing():
         stop_loss=51250.0,  # Risk = 250 pts, T1 = 51000 - 450 = 50550 (or midpoint 50600)
     )
 
-    # Price drops to 50540.0 reaching T1
-    res = evaluate_alert_targets_and_trailing(alert, current_ltp=50540.0)
+    # Price drops to 50500.0 reaching T1
+    res = evaluate_alert_targets_and_trailing(alert, current_ltp=50500.0)
     assert res is not None
     assert res.new_milestone == "T1_ACHIEVED"
     assert res.should_trail is True
@@ -691,8 +691,8 @@ def test_put_option_target_and_trailing():
     assert res_t0_5.should_trail is True
     assert res_t0_5.trailing_decision == "SCALE_35_TRAIL_BREAKEVEN"
 
-    # Option premium expands to 27.0 -> reaches T1
-    res_t1 = evaluate_alert_targets_and_trailing(alert, current_ltp=27.0)
+    # Option premium expands to 28.1 -> reaches T1
+    res_t1 = evaluate_alert_targets_and_trailing(alert, current_ltp=28.1)
     assert res_t1 is not None
     assert res_t1.new_milestone == "T1_ACHIEVED"
     assert res_t1.should_trail is True
@@ -768,8 +768,8 @@ def test_target_milestone_latching_and_ratchet_dedup(monkeypatch):
     )
     engine._alerts.append(alert)
 
-    # 1. Price hits T1 (3495.0)
-    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 3495.0)
+    # 1. Price hits T1 (3505.0)
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 3505.0)
     updated = engine.check_and_alert_targets_and_trailing()
     assert len(updated) == 1
     assert "T1_ACHIEVED" in alert.achieved_milestones
@@ -777,7 +777,7 @@ def test_target_milestone_latching_and_ratchet_dedup(monkeypatch):
     assert alert.should_trail is True
     assert alert.trailing_decision == "BOOK_50_TRAIL_BREAKEVEN"
 
-    # 2. Immediate next tick with same price 3495.0: Latched! Must NOT alert again!
+    # 2. Immediate next tick with same price 3505.0: Latched! Must NOT alert again!
     updated_again = engine.check_and_alert_targets_and_trailing()
     assert len(updated_again) == 0
 
@@ -915,7 +915,7 @@ def test_decisive_telegram_formatting_and_one_shot_dispatch(monkeypatch):
     engine._alerts.append(alert)
 
     # 1. T1 Hit
-    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 3495.0)
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 3505.0)
     engine.check_and_alert_targets_and_trailing()
     assert len(dispatched_messages) == 1
     t1_msg = dispatched_messages[0]
@@ -2254,6 +2254,7 @@ def test_auto_alert_invalidation_lockout_gate():
 
     # Clear lockout and verify it records successfully
     pattern_learning_engine.clear_symbol_lockout("MANKIND")
+    alert.alert_id = "lockout-test-2"
     recorded2 = engine.record_alert(alert)
     assert recorded2 is True
     assert len(engine._alerts) == 1

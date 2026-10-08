@@ -5,6 +5,7 @@ import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import { formatINR, formatPct } from '../../utils/formatINR'
 import UnavailableState from '../Common/UnavailableState'
 import Badge from '../Common/Badge'
+import Tooltip, { HelpHint } from '../UI/Tooltip'
 
 const ARCHETYPE_TABS = [
   { id: 'ALL', label: 'All Inflections', icon: '🌐' },
@@ -66,6 +67,15 @@ export default function InflectionScannerView({
   const [centuryUniverse, setCenturyUniverse] = useState('microcap250')
   const [isSyncingMarket, setIsSyncingMarket] = useState(false)
   const [syncMarketMsg, setSyncMarketMsg] = useState('')
+
+  // Century Compounder Search, Filter & Tabular Sorting State
+  const [centurySearchQuery, setCenturySearchQuery] = useState('')
+  const [centuryTierFilter, setCenturyTierFilter] = useState('ALL')
+  const [centuryDirectiveFilter, setCenturyDirectiveFilter] = useState('ALL')
+  const [centuryMinScore, setCenturyMinScore] = useState(0)
+  const [centurySortColumn, setCenturySortColumn] = useState('century_score')
+  const [centurySortDirection, setCenturySortDirection] = useState('desc')
+  const [centuryViewMode, setCenturyViewMode] = useState('table') // 'table' | 'cards'
 
   // Scan Data & Loading
   const [isScanning, setIsScanning] = useState(false)
@@ -211,7 +221,9 @@ export default function InflectionScannerView({
         // Auto precompute inflection setups and instant load
         try {
           await call('/skills/inflection_precompute', { universe: universe, min_turnover_cr: minTurnoverCr })
-        } catch {}
+        } catch (e) {
+          console.warn('[InflectionScanner] Auto precompute background warning:', e)
+        }
         await executeScan(universe, minTurnoverCr, capTierFilter, false)
       }
       loadStoreStats()
@@ -257,7 +269,7 @@ export default function InflectionScannerView({
     }
   }, [activeMainTab, horizonFilter])
 
-  const loadCenturyCompounders = async (universeToUse) => {
+  const loadCenturyCompounders = async (universeToUse, refresh = false) => {
     setIsLoadingCentury(true)
     try {
       const u = universeToUse || centuryUniverse
@@ -265,7 +277,8 @@ export default function InflectionScannerView({
         universe: u,
         min_score: 60,
         top_n: 25,
-        use_cache: true,
+        use_cache: !refresh,
+        refresh: refresh,
       })
       const cands = res?.data?.candidates || res?.candidates || []
       setCenturyCandidates(cands)
@@ -280,9 +293,13 @@ export default function InflectionScannerView({
     setIsSyncingMarket(true)
     setSyncMarketMsg(`Syncing entire ${centuryUniverse} market into persistent SQLite store...`)
     try {
-      const res = await call('/skills/century_sync_market', {
-        universe: centuryUniverse,
-      })
+      const res = await call(
+        '/skills/century_sync_market',
+        {
+          universe: centuryUniverse,
+        },
+        { timeoutMs: 120000 }
+      )
       const data = res?.data || res
       setSyncMarketMsg(`✓ Synced ${data.precomputed_count || 0} stocks into SQLite in ${data.duration_sec || 0}s!`)
       await loadCenturyCompounders(centuryUniverse)
@@ -471,6 +488,7 @@ export default function InflectionScannerView({
   const activeFilterCount = useMemo(() => {
     let count = 0
     if (searchQuery.trim()) count++
+    if (horizonFilter !== 'ALL') count++
     if (archetypeFilter !== 'ALL') count++
     if (timingFilter !== 'ALL') count++
     if (capTierFilter !== 'ALL') count++
@@ -484,6 +502,7 @@ export default function InflectionScannerView({
     return count
   }, [
     searchQuery,
+    horizonFilter,
     archetypeFilter,
     timingFilter,
     capTierFilter,
@@ -498,6 +517,7 @@ export default function InflectionScannerView({
 
   const resetAllFilters = () => {
     setSearchQuery('')
+    setHorizonFilter('ALL')
     setArchetypeFilter('ALL')
     setTimingFilter('ALL')
     setCapTierFilter('ALL')
@@ -607,6 +627,7 @@ export default function InflectionScannerView({
   }, [
     scanResult,
     searchQuery,
+    horizonFilter,
     archetypeFilter,
     timingFilter,
     capTierFilter,
@@ -639,10 +660,21 @@ export default function InflectionScannerView({
     }
   }
 
+  const SCANNER_HEADER_METRIC_MAP = {
+    inflection_score: 'century_score',
+    primary_archetype: 'vcp_pivot',
+    timing_state: 'timing_state',
+    rvol_20d: 'rvol',
+    trend_template_passed: 'minervini_trend_template',
+    entry_price: 'fair_value_zone',
+    risk_reward_ratio: 'risk_reward_ratio',
+  }
+
   // Interactive sortable header renderer
-  const renderHeader = (colKey, label, align = 'left', extraClass = '') => {
+  const renderHeader = (colKey, label, align = 'left', extraClass = '', metricKey = null) => {
     const isSorted = sortColumn === colKey
     const dir = sortDirection
+    const resolvedMetric = metricKey || SCANNER_HEADER_METRIC_MAP[colKey]
     return (
       <th
         key={colKey}
@@ -672,6 +704,11 @@ export default function InflectionScannerView({
           >
             {isSorted ? (dir === 'asc' ? '▲' : '▼') : '⇅'}
           </span>
+          {resolvedMetric && (
+            <span onClick={(e) => e.stopPropagation()} className="inline-flex">
+              <HelpHint metricKey={resolvedMetric} size="xs" />
+            </span>
+          )}
         </div>
       </th>
     )
@@ -959,91 +996,435 @@ export default function InflectionScannerView({
     )
   }
 
+  // ── Century Compounder Multi-Criteria Filtering and Column Sorting ──────
+  const filteredCenturyCandidates = useMemo(() => {
+    if (!Array.isArray(centuryCandidates)) return []
+    let list = [...centuryCandidates]
+
+    // 1. Text Search across Symbol, Badges, Summary, Tier, Directive
+    if (centurySearchQuery.trim()) {
+      const q = centurySearchQuery.toLowerCase().trim()
+      list = list.filter((c) => {
+        const sym = (c.symbol || '').toLowerCase()
+        const tier = (c.compounder_tier || '').toLowerCase()
+        const summary = (c.summary || '').toLowerCase()
+        const directive = (c.anti_fomo?.action_directive || '').toLowerCase()
+        const badges = Array.isArray(c.catalyst_badges)
+          ? c.catalyst_badges.join(' ').toLowerCase()
+          : ''
+        return (
+          sym.includes(q) ||
+          tier.includes(q) ||
+          summary.includes(q) ||
+          directive.includes(q) ||
+          badges.includes(q)
+        )
+      })
+    }
+
+    // 2. Compounder Tier Filter
+    if (centuryTierFilter && centuryTierFilter !== 'ALL') {
+      list = list.filter((c) => {
+        const t = c.compounder_tier || c.twin_engines?.compounder_tier || ''
+        return t === centuryTierFilter
+      })
+    }
+
+    // 3. Anti-FOMO Directive Filter
+    if (centuryDirectiveFilter && centuryDirectiveFilter !== 'ALL') {
+      list = list.filter((c) => {
+        const d = c.anti_fomo?.action_directive || ''
+        return d === centuryDirectiveFilter
+      })
+    }
+
+    // 4. Min Score Filter
+    if (centuryMinScore > 0) {
+      list = list.filter((c) => (c.century_score ?? 0) >= centuryMinScore)
+    }
+
+    // 5. Column Sorting
+    list.sort((a, b) => {
+      let aVal = a[centurySortColumn]
+      let bVal = b[centurySortColumn]
+
+      if (centurySortColumn === 'total_projected_multiple') {
+        aVal = a.twin_engines?.total_projected_multiple ?? 0
+        bVal = b.twin_engines?.total_projected_multiple ?? 0
+      } else if (centurySortColumn === 'current_market_cap_cr') {
+        aVal = a.twin_engines?.current_market_cap_cr ?? 0
+        bVal = b.twin_engines?.current_market_cap_cr ?? 0
+      } else if (centurySortColumn === 'forecast_pat_cagr_pct') {
+        aVal = a.twin_engines?.forecast_pat_cagr_pct ?? 0
+        bVal = b.twin_engines?.forecast_pat_cagr_pct ?? 0
+      } else if (centurySortColumn === 'current_pe') {
+        aVal = a.twin_engines?.current_pe ?? 0
+        bVal = b.twin_engines?.current_pe ?? 0
+      } else if (centurySortColumn === 'action_directive') {
+        aVal = a.anti_fomo?.action_directive ?? ''
+        bVal = b.anti_fomo?.action_directive ?? ''
+      }
+
+      if (aVal == null && bVal == null) return 0
+      if (aVal == null) return 1
+      if (bVal == null) return -1
+
+      if (typeof aVal === 'number' && typeof bVal === 'number') {
+        return centurySortDirection === 'asc' ? aVal - bVal : bVal - aVal
+      }
+
+      const aStr = String(aVal).toLowerCase()
+      const bStr = String(bVal).toLowerCase()
+      const cmp = aStr.localeCompare(bStr)
+      return centurySortDirection === 'asc' ? cmp : -cmp
+    })
+
+    return list
+  }, [
+    centuryCandidates,
+    centurySearchQuery,
+    centuryTierFilter,
+    centuryDirectiveFilter,
+    centuryMinScore,
+    centurySortColumn,
+    centurySortDirection,
+  ])
+
+  const handleCenturySort = (col) => {
+    if (centurySortColumn === col) {
+      setCenturySortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setCenturySortColumn(col)
+      const isNumeric = [
+        'century_score',
+        'total_projected_multiple',
+        'current_market_cap_cr',
+        'forecast_pat_cagr_pct',
+        'current_pe',
+        'ltp',
+      ].includes(col)
+      setCenturySortDirection(isNumeric ? 'desc' : 'asc')
+    }
+  }
+
+  const resetCenturyFilters = () => {
+    setCenturySearchQuery('')
+    setCenturyTierFilter('ALL')
+    setCenturyDirectiveFilter('ALL')
+    setCenturyMinScore(0)
+  }
+
+  const activeCenturyFilterCount = useMemo(() => {
+    let count = 0
+    if (centurySearchQuery.trim()) count++
+    if (centuryTierFilter !== 'ALL') count++
+    if (centuryDirectiveFilter !== 'ALL') count++
+    if (centuryMinScore > 0) count++
+    return count
+  }, [centurySearchQuery, centuryTierFilter, centuryDirectiveFilter, centuryMinScore])
+
+  const centurySummaryMetrics = useMemo(() => {
+    const total = centuryCandidates.length
+    const c100x = centuryCandidates.filter((c) => {
+      const t = c.compounder_tier || c.twin_engines?.compounder_tier || ''
+      return t === '100X_CENTURY' || t === '1000X_POTENTIAL'
+    }).length
+    const inAccumulate = centuryCandidates.filter(
+      (c) => c.anti_fomo?.action_directive === 'ACCUMULATE_FAIR_VALUE'
+    ).length
+    const multiples = centuryCandidates
+      .map((c) => c.twin_engines?.total_projected_multiple)
+      .filter((m) => typeof m === 'number' && m > 0)
+    const avgMultiple = multiples.length
+      ? Math.round(multiples.reduce((a, b) => a + b, 0) / multiples.length)
+      : 0
+    return { total, c100x, inAccumulate, avgMultiple }
+  }, [centuryCandidates])
+
+  const CENTURY_HEADER_METRIC_MAP = {
+    century_score: 'century_score',
+    total_projected_multiple: 'ten_year_multiple',
+    forecast_pat_cagr_pct: 'pat_expansion',
+    current_pe: 'pe_rerating',
+    ltp: 'fair_value_zone',
+    action_directive: 'anti_fomo',
+  }
+
+  const renderCenturyHeader = (colKey, label, align = 'left', extraClass = '', metricKey = null) => {
+    const isSorted = centurySortColumn === colKey
+    const dir = centurySortDirection
+    const resolvedMetric = metricKey || CENTURY_HEADER_METRIC_MAP[colKey]
+    return (
+      <th
+        key={colKey}
+        onClick={() => handleCenturySort(colKey)}
+        className={`py-2 px-2.5 cursor-pointer select-none transition-all group ${
+          align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'
+        } ${
+          isSorted
+            ? 'text-emerald-600 dark:text-emerald-400 font-bold bg-emerald-500/10 dark:bg-emerald-400/10 rounded-md'
+            : 'text-muted hover:text-text hover:bg-black/[0.04] dark:hover:bg-white/[0.05] rounded-md'
+        } ${extraClass}`}
+        aria-sort={isSorted ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+        title={`Sort by ${label} (${isSorted ? (dir === 'asc' ? 'Ascending' : 'Descending') : 'Click to sort'})`}
+      >
+        <div
+          className={`inline-flex items-center gap-1.5 ${
+            align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'
+          }`}
+        >
+          <span>{label}</span>
+          <span
+            className={`text-[9px] font-mono transition-all ${
+              isSorted
+                ? 'opacity-100 text-emerald-600 dark:text-emerald-400 font-bold'
+                : 'opacity-0 group-hover:opacity-60 text-muted'
+            }`}
+          >
+            {isSorted ? (dir === 'asc' ? '▲' : '▼') : '↕'}
+          </span>
+          {resolvedMetric && (
+            <span onClick={(e) => e.stopPropagation()} className="inline-flex">
+              <HelpHint metricKey={resolvedMetric} size="xs" />
+            </span>
+          )}
+        </div>
+      </th>
+    )
+  }
+
   // Render 100x & 1,000x Century Compounder Discovery Board
   const renderCenturyBoard = () => {
     return (
-      <div className="space-y-4">
-        {/* Banner with Twin Engine explanation & Market-Wide DB Control */}
-        <div className="p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 flex flex-col gap-3 font-ui shadow-xs">
-          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-xl">💎</span>
-                <h3 className="font-bold text-text text-sm">
-                  100x & 1,000x Century Compounder Discovery Terminal
-                </h3>
-                <span className="text-[10px] px-2 py-0.5 rounded-full font-mono bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-bold border border-emerald-500/30">
-                  Twin Engines: PAT Growth × P/E Re-rating
-                </span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full font-mono bg-panel text-muted border border-border">
-                  💾 SQLite Cached ({centuryCandidates.length} Active)
-                </span>
-              </div>
-              <p className="text-xs text-muted mt-1 max-w-3xl leading-relaxed">
-                Empirical Dalal Street compounding science (Titan, Bajaj Finance, Trent, Astral).
-                Evaluates Micro/Smallcap market cap headroom, operating leverage inflection, Buffett-Mauboussin reinvestment (ROCE &gt; 22%),
-                and forensic fortress integrity, with strict Anti-FOMO fair-value accumulation boundaries.
-              </p>
-            </div>
-
-            {/* Fast Trigger Actions */}
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => loadCenturyCompounders(centuryUniverse)}
-                disabled={isLoadingCentury || isSyncingMarket}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/20 text-xs font-bold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/30 transition-all cursor-pointer whitespace-nowrap shadow-xs"
-                title="Instant query cached compounders in under 50ms"
-              >
-                <span className={isLoadingCentury ? 'animate-spin' : ''}>⚡</span>
-                <span>{isLoadingCentury ? 'Querying...' : 'Instant Query (<50ms)'}</span>
-              </button>
-            </div>
+      <div className="space-y-3 font-ui">
+        {/* Banner with Twin Engine explanation & Market-Wide DB Control (Streamlined Compact 38px) */}
+        <div className="p-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-xs">
+          <div className="flex items-center gap-2 flex-wrap min-w-0">
+            <span className="text-lg">💎</span>
+            <h3 className="font-bold text-text text-sm whitespace-nowrap">
+              100x & 1,000x Century Compounder Terminal
+            </h3>
+            <span className="inline-flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-full font-mono bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-bold border border-emerald-500/30">
+              <span>Twin Engines: PAT Growth × P/E Re-rating</span>
+              <HelpHint metricKey="twin_engines" size="xs" />
+            </span>
+            <span className="text-[10px] px-2 py-0.5 rounded-full font-mono bg-panel text-muted border border-border">
+              💾 SQLite Cached ({centuryCandidates.length} Active)
+            </span>
           </div>
 
-          {/* Market-wide Controls Row */}
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-emerald-500/20 text-xs">
-            <div className="flex items-center gap-2">
-              <span className="text-muted font-mono text-[11px] uppercase tracking-wider">
-                Market Universe:
-              </span>
-              <select
-                value={centuryUniverse}
-                onChange={(e) => {
-                  setCenturyUniverse(e.target.value)
-                  loadCenturyCompounders(e.target.value)
-                }}
-                disabled={isSyncingMarket || isLoadingCentury}
-                className="select-input text-xs py-1 font-semibold"
-              >
-                <option value="microcap250">🌱 Nifty Microcap 250 (Emerging Champions)</option>
-                <option value="smallcap250">🚀 Nifty Smallcap 250 (Scale Compounders)</option>
-                <option value="nifty_total_market">🏛️ Nifty Total Market (750 Equities)</option>
-                <option value="all_nse_liquid">🇮🇳 All NSE Liquid (~2,100 Series EQ)</option>
-                <option value="bse_high_growth">💎 BSE High-Growth Micro & SME</option>
-              </select>
+          {/* Fast Trigger Actions */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => loadCenturyCompounders(centuryUniverse, false)}
+              disabled={isLoadingCentury || isSyncingMarket}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-emerald-500/40 bg-emerald-500/20 text-xs font-bold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/30 transition-all cursor-pointer whitespace-nowrap shadow-xs"
+              title="Instant query cached compounders in under 50ms"
+            >
+              <span className={isLoadingCentury ? 'animate-spin' : ''}>⚡</span>
+              <span>{isLoadingCentury ? 'Querying...' : 'Instant Query (<50ms)'}</span>
+            </button>
 
-              <button
-                type="button"
-                onClick={handleSyncEntireMarket}
-                disabled={isSyncingMarket || isLoadingCentury}
-                className="flex items-center gap-1.5 px-3 py-1 rounded-lg border border-purple-500/40 bg-purple-500/15 text-xs font-bold text-purple-600 dark:text-purple-400 hover:bg-purple-500/25 transition-all cursor-pointer whitespace-nowrap shadow-xs"
-                title="Batch-sync and precompute entire Indian market universe into local SQLite store"
-              >
-                <span className={isSyncingMarket ? 'animate-spin' : ''}>💾</span>
-                <span>{isSyncingMarket ? 'Syncing Market...' : 'Sync Market into DB'}</span>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => loadCenturyCompounders(centuryUniverse, true)}
+              disabled={isLoadingCentury || isSyncingMarket}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-sky-500/40 bg-sky-500/20 text-xs font-bold text-sky-600 dark:text-sky-400 hover:bg-sky-500/30 transition-all cursor-pointer whitespace-nowrap shadow-xs"
+              title="Perform fresh scan of this universe without cache"
+            >
+              <span className={isLoadingCentury ? 'animate-spin' : ''}>🔄</span>
+              <span>{isLoadingCentury ? 'Scanning...' : 'Rescan Market'}</span>
+            </button>
 
-            {syncMarketMsg && (
-              <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-0.5 rounded-lg animate-pulse font-mono">
-                {syncMarketMsg}
-              </span>
-            )}
+            <button
+              type="button"
+              onClick={handleSyncEntireMarket}
+              disabled={isSyncingMarket || isLoadingCentury}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-purple-500/40 bg-purple-500/15 text-xs font-bold text-purple-600 dark:text-purple-400 hover:bg-purple-500/25 transition-all cursor-pointer whitespace-nowrap shadow-xs"
+              title="Batch-sync and precompute entire Indian market universe into local SQLite store"
+            >
+              <span className={isSyncingMarket ? 'animate-spin' : ''}>💾</span>
+              <span>{isSyncingMarket ? 'Syncing Market...' : 'Sync Market into DB'}</span>
+            </button>
           </div>
         </div>
 
-        {/* Compounders Grid */}
+        {/* Market Sync Feedback Toast */}
+        {syncMarketMsg && (
+          <div className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-500/15 border border-emerald-500/30 px-3 py-1 rounded-lg animate-pulse font-mono">
+            {syncMarketMsg}
+          </div>
+        )}
+
+        {/* ── QUANTITATIVE FILTER TOOLBAR (Unified Dropdowns, Search & Telemetry) ── */}
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 rounded-lg border border-border bg-panel text-xs">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            {/* Market Universe Dropdown */}
+            <select
+              value={centuryUniverse}
+              onChange={(e) => {
+                const newUni = e.target.value
+                setCenturyUniverse(newUni)
+                loadCenturyCompounders(newUni, false)
+              }}
+              disabled={isSyncingMarket || isLoadingCentury}
+              className="text-xs py-1 px-2.5 rounded-lg bg-surface border border-border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer hover:border-gold/50"
+              title="Select target market universe"
+            >
+              <option value="microcap250">🌱 Microcap 250 (Emerging)</option>
+              <option value="smallcap250">🚀 Smallcap 250 (Scale)</option>
+              <option value="nifty_total_market">🏛️ Nifty Total Market (750)</option>
+              <option value="all_nse_liquid">🇮🇳 All NSE Liquid (~2,100)</option>
+              <option value="bse_high_growth">💎 BSE High-Growth</option>
+            </select>
+
+            {/* Compounder Tier Dropdown */}
+            <div className="flex items-center gap-1">
+              <select
+                value={centuryTierFilter}
+                onChange={(e) => setCenturyTierFilter(e.target.value)}
+                className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-emerald-500 transition-colors font-sans cursor-pointer ${
+                  centuryTierFilter !== 'ALL'
+                    ? 'border-emerald-400 text-emerald-400 font-bold bg-emerald-500/10'
+                    : 'border-border hover:border-emerald-500/50'
+                }`}
+                title="Filter by projected compounding multiple tier"
+              >
+                <option value="ALL">All Multiples</option>
+                <option value="1000X_POTENTIAL">🔥 1000x Potential (500x+)</option>
+                <option value="100X_CENTURY">💎 100x Century (75x+)</option>
+                <option value="25X_MULTIBAGGER">🚀 25x Multibagger (25x–75x)</option>
+                <option value="10X_QUALITY">⚡ 10x Quality (10x–25x)</option>
+              </select>
+              <HelpHint metricKey="ten_year_multiple" size="xs" />
+            </div>
+
+            {/* Anti-FOMO Directive Dropdown */}
+            <div className="flex items-center gap-1">
+              <select
+                value={centuryDirectiveFilter}
+                onChange={(e) => setCenturyDirectiveFilter(e.target.value)}
+                className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-emerald-500 transition-colors font-sans cursor-pointer ${
+                  centuryDirectiveFilter !== 'ALL'
+                    ? 'border-emerald-400 text-emerald-400 font-bold bg-emerald-500/10'
+                    : 'border-border hover:border-emerald-500/50'
+                }`}
+                title="Filter by Anti-FOMO execution boundary"
+              >
+                <option value="ALL">All Anti-FOMO Directives</option>
+                <option value="ACCUMULATE_FAIR_VALUE">🟢 Accumulate (Fair Value)</option>
+                <option value="WAIT_FOR_PULLBACK">🔴 Wait Pullback (No Chase)</option>
+                <option value="PROFIT_SCALING">🟡 Profit Scaling</option>
+                <option value="STALK_PIVOT">🟡 Stalk Pivot</option>
+              </select>
+              <HelpHint metricKey="anti_fomo" size="xs" />
+            </div>
+
+            {/* Min Score Dropdown */}
+            <div className="flex items-center gap-1">
+              <select
+                value={centuryMinScore}
+                onChange={(e) => setCenturyMinScore(Number(e.target.value))}
+                className={`text-xs py-1 px-2 rounded-lg bg-surface border text-text focus:outline-none focus:border-emerald-500 transition-colors font-mono cursor-pointer ${
+                  centuryMinScore > 0
+                    ? 'border-amber-400 text-amber-300 font-bold bg-amber-500/10'
+                    : 'border-border hover:border-emerald-500/50'
+                }`}
+                title="Filter by minimum Dalal Street compounder score"
+              >
+                <option value={0}>Score: All</option>
+                <option value={60}>Score: 60+</option>
+                <option value={70}>Score: 70+</option>
+                <option value={80}>Score: 80+ (Elite)</option>
+              </select>
+              <HelpHint metricKey="century_score" size="xs" />
+            </div>
+
+            {/* Search Input */}
+            <div className="relative flex items-center">
+              <input
+                type="text"
+                placeholder="🔍 Search..."
+                value={centurySearchQuery}
+                onChange={(e) => setCenturySearchQuery(e.target.value)}
+                className="w-28 sm:w-36 text-xs pl-2.5 pr-6 py-1 rounded-lg bg-surface border border-border text-text placeholder:text-muted focus:outline-none focus:border-emerald-500 transition-colors font-sans"
+                title="Search symbol, tier, or catalyst"
+              />
+              {centurySearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setCenturySearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text text-xs cursor-pointer"
+                  title="Clear search"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* Reset Filters */}
+            {activeCenturyFilterCount > 0 && (
+              <button
+                type="button"
+                onClick={resetCenturyFilters}
+                className="btn btn-sm btn-ghost text-xs text-rose-400 hover:text-rose-300 border border-rose-500/30 hover:bg-rose-500/10 flex items-center gap-1 font-bold px-2 py-0.5 cursor-pointer"
+                title="Reset all filters"
+              >
+                ✕ Reset Filters
+              </button>
+            )}
+
+            {/* View Mode Toggle: Table vs Cards */}
+            <div className="flex items-center rounded-lg border border-border p-0.5 bg-elevated">
+              <button
+                type="button"
+                onClick={() => setCenturyViewMode('table')}
+                className={`text-xs px-2 py-0.5 rounded transition-all cursor-pointer ${
+                  centuryViewMode === 'table'
+                    ? 'font-bold bg-panel text-emerald-600 dark:text-emerald-400 shadow-xs'
+                    : 'text-muted hover:text-text'
+                }`}
+                title="Century Compounders Table View"
+              >
+                ☰ Table
+              </button>
+              <button
+                type="button"
+                onClick={() => setCenturyViewMode('cards')}
+                className={`text-xs px-2 py-0.5 rounded transition-all cursor-pointer ${
+                  centuryViewMode === 'cards'
+                    ? 'font-bold bg-panel text-emerald-600 dark:text-emerald-400 shadow-xs'
+                    : 'text-muted hover:text-text'
+                }`}
+                title="Century Compounders Cards Matrix"
+              >
+                ☷ Cards
+              </button>
+            </div>
+          </div>
+
+          {/* Right: Inline Telemetry Metrics */}
+          <div className="flex items-center gap-2 font-mono text-[10px] text-muted flex-shrink-0 ml-auto">
+            <span>
+              Setups: <strong className="text-text">{filteredCenturyCandidates.length}</strong>/{centurySummaryMetrics.total}
+            </span>
+            <span>·</span>
+            <span>
+              100x+ Tier: <strong className="text-emerald-500">{centurySummaryMetrics.c100x}</strong>
+            </span>
+            <span>·</span>
+            <span>
+              In FV Zone: <strong className="text-cyan-500">{centurySummaryMetrics.inAccumulate}</strong>
+            </span>
+            <span>·</span>
+            <span>
+              Avg Multiple: <strong className="text-amber-500">{centurySummaryMetrics.avgMultiple}x</strong>
+            </span>
+          </div>
+        </div>
+
+        {/* ── MAIN CONTENT CONTAINER (Table vs Cards) ── */}
         {isLoadingCentury ? (
           <div className="flex flex-col items-center justify-center h-64 gap-3">
             <div className="w-8 h-8 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
@@ -1052,20 +1433,267 @@ export default function InflectionScannerView({
             </span>
           </div>
         ) : centuryCandidates.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-64 text-center">
-            <span className="text-3xl mb-2">💎</span>
-            <span className="text-sm font-bold text-text">No Candidates Meeting 100x Criteria</span>
-            <p className="text-xs text-muted mt-1">Try recalculating or scanning a wider universe.</p>
+          <div className="flex flex-col items-center justify-center h-64 text-center gap-2 rounded-xl border border-dashed border-border bg-surface/50 p-6">
+            <span className="text-3xl">💎</span>
+            <span className="text-sm font-bold text-text">No Candidates in Selected Universe Meeting 100x Criteria</span>
+            <p className="text-xs text-muted max-w-md">
+              No precomputed compounders meet the threshold for <strong>{centuryUniverse}</strong> yet. Click <strong>Sync Market into DB</strong> to analyze and persist this universe.
+            </p>
+            <button
+              type="button"
+              onClick={handleSyncEntireMarket}
+              disabled={isSyncingMarket || isLoadingCentury}
+              className="mt-2 px-3 py-1.5 rounded-lg border border-purple-500/40 bg-purple-500/20 text-xs font-bold text-purple-600 dark:text-purple-400 hover:bg-purple-500/30 transition-all cursor-pointer shadow-xs"
+            >
+              {isSyncingMarket ? 'Syncing...' : `💾 Sync ${centuryUniverse} into DB`}
+            </button>
+          </div>
+        ) : filteredCenturyCandidates.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-64 text-center gap-2 rounded-xl border border-dashed border-border bg-surface/50 p-6">
+            <span className="text-3xl">🔍</span>
+            <span className="text-sm font-bold text-text">No Compounders Matching Filter Criteria</span>
+            <p className="text-xs text-muted max-w-md">
+              None of the {centuryCandidates.length} setups in {centuryUniverse} match your {activeCenturyFilterCount} active filters.
+            </p>
+            <button
+              type="button"
+              onClick={resetCenturyFilters}
+              className="mt-2 text-xs font-semibold px-3 py-1.5 rounded-lg border border-border bg-elevated text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/15 transition-all cursor-pointer"
+            >
+              ✕ Clear All Filters ({centuryCandidates.length} Available)
+            </button>
+          </div>
+        ) : centuryViewMode === 'table' ? (
+          /* ── HIGH-DENSITY TABULAR VIEW ──────────────────────────────── */
+          <div className="rounded-xl border border-border bg-surface overflow-hidden shadow-card">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-border bg-panel text-[10px] font-mono text-muted uppercase tracking-wider">
+                    {renderCenturyHeader('symbol', 'Symbol / MCap', 'left', 'px-3')}
+                    {renderCenturyHeader('century_score', 'Score', 'center')}
+                    {renderCenturyHeader('total_projected_multiple', '10Y Multiple', 'center')}
+                    {renderCenturyHeader('forecast_pat_cagr_pct', 'Engine 1: PAT CAGR', 'left')}
+                    {renderCenturyHeader('current_pe', 'Engine 2: P/E Re-rating', 'left')}
+                    {renderCenturyHeader('ltp', 'LTP & Fair Value', 'left')}
+                    {renderCenturyHeader('action_directive', 'Anti-FOMO State', 'left')}
+                    <th className="py-2 px-2 text-left font-mono">Key Catalysts</th>
+                    <th className="py-2 px-3 text-right text-muted font-mono">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/60 font-mono">
+                  {filteredCenturyCandidates.map((c) => {
+                    const te = c.twin_engines || {}
+                    const af = c.anti_fomo || {}
+                    const is100x = (c.compounder_tier === '100X_CENTURY' || c.compounder_tier === '1000X_POTENTIAL')
+                    return (
+                      <tr
+                        key={c.symbol}
+                        className="hover:bg-emerald-500/[0.04] dark:hover:bg-white/[0.04] transition-all group cursor-pointer"
+                        onClick={() => openDecisionDrawer({
+                          symbol: c.symbol,
+                          name: c.symbol,
+                          sector: 'Century Compounder',
+                          ltp: c.ltp,
+                          inflection_score: c.century_score,
+                          primary_archetype: 'STAGE_1_TO_2_EXPANSION',
+                          entry_price: af.fair_value_anchor || c.ltp,
+                          stop_loss: af.invalidation_stop,
+                          target_1: (af.fair_value_anchor || c.ltp) * 2.0,
+                          target_2: (af.fair_value_anchor || c.ltp) * 4.0,
+                          target_moonshot: (af.fair_value_anchor || c.ltp) * 10.0,
+                          risk_reward_ratio: 4.5,
+                        })}
+                      >
+                        {/* Symbol / MCap */}
+                        <td className="py-2 px-3">
+                          <div className="flex items-center gap-2">
+                            <span className="text-base">{is100x ? '💎' : '🚀'}</span>
+                            <div>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-bold text-text text-xs group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors">
+                                  {c.symbol}
+                                </span>
+                                <span className={`text-[8.5px] font-bold px-1.5 py-0.2 rounded border uppercase font-mono ${
+                                  is100x
+                                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                                    : 'bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/30'
+                                }`}>
+                                  {c.compounder_tier || 'COMPOUNDER'}
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-muted font-sans mt-0.5">
+                                MCap: ₹{te.current_market_cap_cr ? te.current_market_cap_cr.toLocaleString() : '—'} Cr
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Score */}
+                        <td className="py-2 px-2 text-center">
+                          <span className={`inline-flex items-center justify-center font-bold px-2 py-0.5 rounded text-[11px] font-mono ${
+                            c.century_score >= 80
+                              ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                              : c.century_score >= 65
+                              ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400 border border-amber-500/30'
+                              : 'bg-panel text-text border border-border'
+                          }`}>
+                            {c.century_score}/100
+                          </span>
+                        </td>
+
+                        {/* 10Y Multiple */}
+                        <td className="py-2 px-2 text-center">
+                          <div className="font-black text-sm text-emerald-600 dark:text-emerald-400">
+                            {te.total_projected_multiple}x
+                          </div>
+                          <div className="text-[9px] text-muted font-mono">
+                            ➔ ₹{te.target_market_cap_cr ? (te.target_market_cap_cr / 1000).toFixed(1) + 'k' : '—'} Cr
+                          </div>
+                        </td>
+
+                        {/* Engine 1: PAT CAGR */}
+                        <td className="py-2 px-2">
+                          <div className="font-bold text-text text-xs">
+                            +{te.forecast_pat_cagr_pct}% <span className="text-[10px] font-normal text-muted">CAGR</span>
+                          </div>
+                          <div className="text-[10px] text-muted">
+                            {te.pat_expansion_multiple}x 10Y PAT
+                          </div>
+                        </td>
+
+                        {/* Engine 2: P/E Expansion */}
+                        <td className="py-2 px-2">
+                          <div className="font-bold text-amber-600 dark:text-amber-400 text-xs">
+                            {te.current_pe}x ➔ {te.projected_terminal_pe}x
+                          </div>
+                          <div className="text-[10px] text-muted">
+                            {te.pe_expansion_multiple}x Re-rating
+                          </div>
+                        </td>
+
+                        {/* LTP & Fair Value */}
+                        <td className="py-2 px-2">
+                          <div className="font-bold text-text text-xs">
+                            ₹{c.ltp?.toLocaleString() || '—'}
+                          </div>
+                          <div className="text-[10px] text-muted" title="Fair Value Accumulation Zone">
+                            FV: ₹{af.accumulate_low} – ₹{af.accumulate_high}
+                          </div>
+                        </td>
+
+                        {/* Anti-FOMO State */}
+                        <td className="py-2 px-2">
+                          <span className={`inline-block text-[9.5px] font-bold px-2 py-0.5 rounded font-mono ${
+                            af.action_directive === 'ACCUMULATE_FAIR_VALUE'
+                              ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                              : af.action_directive === 'WAIT_FOR_PULLBACK'
+                              ? 'bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/30'
+                              : 'bg-amber-500/20 text-amber-600 dark:text-amber-400 border border-amber-500/30'
+                          }`}>
+                            {af.action_directive === 'ACCUMULATE_FAIR_VALUE'
+                              ? '🟢 Accumulate FV'
+                              : af.action_directive === 'WAIT_FOR_PULLBACK'
+                              ? '🔴 Wait Pullback'
+                              : '🟡 Stalk Pivot'}
+                          </span>
+                          <div className="text-[9.5px] text-rose-500/90 mt-0.5">
+                            Ceiling: ₹{af.no_chase_boundary}
+                          </div>
+                        </td>
+
+                        {/* Key Catalysts */}
+                        <td className="py-2 px-2">
+                          <div className="flex flex-wrap gap-1 max-w-xs font-sans">
+                            {(c.catalyst_badges || []).slice(0, 2).map((b, i) => (
+                              <span
+                                key={i}
+                                className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-elevated border border-border text-text font-mono truncate max-w-[130px]"
+                                title={b}
+                              >
+                                {b}
+                              </span>
+                            ))}
+                            {(c.catalyst_badges || []).length > 2 && (
+                              <span className="text-[9px] text-muted font-mono self-center">
+                                +{c.catalyst_badges.length - 2}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+
+                        {/* Actions */}
+                        <td className="py-2 px-3 text-right" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleAddToIncubation({
+                                symbol: c.symbol,
+                                name: c.symbol,
+                                sector: 'Quality Microcap',
+                                horizon: 'LONG_TERM',
+                                cycle_state: 'STAGE_1_ACCUMULATION',
+                                eta_days: 15,
+                                eta_label: 'Stage 1 Base',
+                                entry_price: af.fair_value_anchor || c.ltp,
+                                ltp: c.ltp,
+                                stop_loss: af.invalidation_stop,
+                                target_1: (af.fair_value_anchor || c.ltp) * 2.0,
+                                target_2: (af.fair_value_anchor || c.ltp) * 4.0,
+                                target_moonshot: (af.fair_value_anchor || c.ltp) * 10.0,
+                                risk_reward_ratio: 4.5,
+                                inflection_score: c.century_score,
+                                primary_archetype: 'STAGE_1_TO_2_EXPANSION',
+                                catalyst_badges: c.catalyst_badges || [],
+                                catalyst_summary: c.summary,
+                              })}
+                              className="p-1 px-1.5 rounded-lg border border-purple-500/40 bg-purple-500/10 text-[10px] font-bold text-purple-600 dark:text-purple-400 hover:bg-purple-500/20 transition-all cursor-pointer"
+                              title="Retain in Incubation Pipeline"
+                            >
+                              📌
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (onOpenOrderTicket) {
+                                  onOpenOrderTicket({
+                                    symbol: c.symbol,
+                                    exchange: 'NSE',
+                                    price: af.accumulate_low || c.ltp,
+                                    stopLoss: af.invalidation_stop,
+                                    target: (af.fair_value_anchor || c.ltp) * 2.0,
+                                    target2: (af.fair_value_anchor || c.ltp) * 4.0,
+                                    targetMoonshot: (af.fair_value_anchor || c.ltp) * 10.0,
+                                    _priceSource: 'FAIR_VALUE_POC',
+                                  })
+                                }
+                              }}
+                              className="px-2.5 py-1 rounded-lg border border-emerald-500/40 bg-emerald-500/20 text-xs font-bold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/30 transition-all cursor-pointer whitespace-nowrap shadow-xs"
+                              title="Stage limit accumulation order at Fair Value"
+                            >
+                              ⚡ Buy
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {centuryCandidates.map((c) => {
+          /* ── CONDENSED CARDS MATRIX VIEW ────────────────────────────── */
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {filteredCenturyCandidates.map((c) => {
               const te = c.twin_engines || {}
               const af = c.anti_fomo || {}
+              const is100x = (c.compounder_tier === '100X_CENTURY' || c.compounder_tier === '1000X_POTENTIAL')
               return (
                 <div
                   key={c.symbol}
-                  className="rounded-xl border border-border bg-surface p-4 space-y-3.5 shadow-card hover:border-emerald-500/40 transition-all"
+                  className="rounded-xl border border-border bg-surface p-3.5 space-y-2.5 shadow-card hover:border-emerald-500/40 transition-all"
                 >
                   {/* Card Header */}
                   <div className="flex items-start justify-between">
@@ -1073,7 +1701,11 @@ export default function InflectionScannerView({
                       <div className="flex items-center gap-2">
                         <span className="font-bold text-base text-text">{c.symbol}</span>
                         <span className="text-xs font-mono text-muted">₹{c.ltp}</span>
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded border uppercase font-mono bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/30">
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded border uppercase font-mono ${
+                          is100x
+                            ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                            : 'bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/30'
+                        }`}>
                           {c.compounder_tier}
                         </span>
                       </div>
@@ -1095,7 +1727,7 @@ export default function InflectionScannerView({
                   </div>
 
                   {/* Twin Engines Breakdown */}
-                  <div className="grid grid-cols-2 gap-2 text-xs font-mono p-2.5 rounded-lg bg-panel border border-border">
+                  <div className="grid grid-cols-2 gap-2 text-xs font-mono p-2 rounded-lg bg-panel border border-border">
                     <div>
                       <span className="text-[9.5px] text-muted font-ui block">ENGINE 1: PAT EXPANSION</span>
                       <span className="font-bold text-text">
@@ -1111,11 +1743,11 @@ export default function InflectionScannerView({
                   </div>
 
                   {/* Badges */}
-                  <div className="flex flex-wrap gap-1.5 font-ui">
+                  <div className="flex flex-wrap gap-1 font-ui">
                     {c.catalyst_badges?.map((b, i) => (
                       <span
                         key={i}
-                        className="text-[9.5px] font-semibold px-2 py-0.5 rounded bg-elevated border border-border text-text font-mono"
+                        className="text-[9px] font-semibold px-2 py-0.5 rounded bg-elevated border border-border text-text font-mono"
                       >
                         {b}
                       </span>
@@ -1123,13 +1755,13 @@ export default function InflectionScannerView({
                   </div>
 
                   {/* Anti-FOMO Execution Box */}
-                  <div className="p-3 rounded-lg border border-border/80 bg-surface/80 space-y-2">
+                  <div className="p-2.5 rounded-lg border border-border/80 bg-surface/80 space-y-1.5">
                     <div className="flex items-center justify-between font-ui">
-                      <span className="text-[10.5px] font-bold text-text flex items-center gap-1">
+                      <span className="text-[10px] font-bold text-text flex items-center gap-1">
                         <span>🛡️</span>
                         <span>Anti-FOMO Accumulation Blueprint</span>
                       </span>
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded font-mono ${
+                      <span className={`text-[9.5px] font-bold px-2 py-0.5 rounded font-mono ${
                         af.action_directive === 'ACCUMULATE_FAIR_VALUE'
                           ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400'
                           : af.action_directive === 'WAIT_FOR_PULLBACK'
@@ -1184,9 +1816,9 @@ export default function InflectionScannerView({
                           entry_price: af.fair_value_anchor || c.ltp,
                           ltp: c.ltp,
                           stop_loss: af.invalidation_stop,
-                          target_1: af.fair_value_anchor * 2.0,
-                          target_2: af.fair_value_anchor * 4.0,
-                          target_moonshot: af.fair_value_anchor * 10.0,
+                          target_1: (af.fair_value_anchor || c.ltp) * 2.0,
+                          target_2: (af.fair_value_anchor || c.ltp) * 4.0,
+                          target_moonshot: (af.fair_value_anchor || c.ltp) * 10.0,
                           risk_reward_ratio: 4.5,
                           inflection_score: c.century_score,
                           primary_archetype: 'STAGE_1_TO_2_EXPANSION',
@@ -1209,9 +1841,9 @@ export default function InflectionScannerView({
                               exchange: 'NSE',
                               price: af.accumulate_low || c.ltp,
                               stopLoss: af.invalidation_stop,
-                              target: af.fair_value_anchor * 2.0,
-                              target2: af.fair_value_anchor * 4.0,
-                              targetMoonshot: af.fair_value_anchor * 10.0,
+                              target: (af.fair_value_anchor || c.ltp) * 2.0,
+                              target2: (af.fair_value_anchor || c.ltp) * 4.0,
+                              targetMoonshot: (af.fair_value_anchor || c.ltp) * 10.0,
                               _priceSource: 'FAIR_VALUE_POC',
                             })
                           }
@@ -1307,39 +1939,43 @@ export default function InflectionScannerView({
         </div>
 
         {/* Center/Right Controls */}
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Universe Selector */}
-          <select
-            value={universe}
-            onChange={(e) => setUniverse(e.target.value)}
-            className="select-input text-xs py-1"
-          >
-            {universesList.length > 0 ? (
-              universesList.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.name} ({u.count})
-                </option>
-              ))
-            ) : (
-              <>
-                <option value="multibagger_hunters">🚀 Multibagger Hunters (45)</option>
-                <option value="momentum_breakouts">⚡ Momentum & Squeeze (50)</option>
-                <option value="auto_market_aware">🌐 Market-Aware RRG (60)</option>
-                <option value="nifty50">🏛️ NIFTY 50 (50)</option>
-                <option value="nifty500">🏢 NIFTY 500 (501)</option>
-                <option value="smallcap_250">🚀 Smallcap 250 (251)</option>
-                <option value="microcap_250">🌱 Microcap 250 (254)</option>
-                <option value="all_nse_liquid">🌊 All Liquid NSE Series EQ (1,200+)</option>
-              </>
-            )}
-          </select>
+          <div className="flex items-center gap-1">
+            <span className="text-muted text-[11px] hidden lg:inline">Universe:</span>
+            <select
+              value={universe}
+              onChange={(e) => setUniverse(e.target.value)}
+              className="text-xs py-1 px-2.5 rounded-lg bg-panel border border-border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer hover:border-gold/50"
+              title="Target market universe to scan"
+            >
+              {universesList.length > 0 ? (
+                universesList.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.name} ({u.count})
+                  </option>
+                ))
+              ) : (
+                <>
+                  <option value="multibagger_hunters">🚀 Multibagger Hunters (45)</option>
+                  <option value="momentum_breakouts">⚡ Momentum & Squeeze (50)</option>
+                  <option value="auto_market_aware">🌐 Market-Aware RRG (60)</option>
+                  <option value="nifty50">🏛️ NIFTY 50 (50)</option>
+                  <option value="nifty500">🏢 NIFTY 500 (501)</option>
+                  <option value="smallcap_250">🚀 Smallcap 250 (251)</option>
+                  <option value="microcap_250">🌱 Microcap 250 (254)</option>
+                  <option value="all_nse_liquid">🌊 All Liquid NSE Series EQ (1,200+)</option>
+                </>
+              )}
+            </select>
+          </div>
 
           {/* Liquidity Floor */}
           <select
             value={minTurnoverCr}
             onChange={(e) => setMinTurnoverCr(Number(e.target.value))}
-            className="select-input font-mono text-xs py-1"
-            title="20-Day Median Turnover filter"
+            className="text-xs py-1 px-2.5 rounded-lg bg-panel border border-border text-text focus:outline-none focus:border-gold transition-colors font-mono cursor-pointer hover:border-gold/50"
+            title="20-Day Median Turnover floor"
           >
             <option value={0}>Liq: All</option>
             <option value={0.25}>Liq: ₹25 L</option>
@@ -1348,69 +1984,6 @@ export default function InflectionScannerView({
             <option value={2.0}>Liq: ₹2 Cr</option>
             <option value={5.0}>Liq: ₹5 Cr</option>
           </select>
-
-          {/* Cap Tier */}
-          <select
-            value={capTierFilter}
-            onChange={(e) => setCapTierFilter(e.target.value)}
-            className={`select-input text-xs py-1 ${capTierFilter !== 'ALL' ? 'active-filter' : ''}`}
-          >
-            <option value="ALL">All Caps</option>
-            <option value="LARGE">🏛️ Large</option>
-            <option value="MID">⚡ Mid</option>
-            <option value="SMALL">🚀 Small</option>
-            <option value="MICRO">🌱 Micro</option>
-          </select>
-
-          {/* Sector Filter */}
-          <select
-            value={sectorFilter}
-            onChange={(e) => setSectorFilter(e.target.value)}
-            className={`select-input text-xs py-1 max-w-[110px] truncate ${sectorFilter !== 'ALL' ? 'active-filter' : ''}`}
-            title="Filter by Sector"
-          >
-            <option value="ALL">All Sectors ({availableSectors.length})</option>
-            {availableSectors.map((sec) => (
-              <option key={sec.name} value={sec.name}>
-                {sec.name} ({sec.count})
-              </option>
-            ))}
-          </select>
-
-          {/* Score Selector */}
-          <select
-            value={minScoreFilter}
-            onChange={(e) => setMinScoreFilter(Number(e.target.value))}
-            className={`select-input font-mono text-xs py-1 ${minScoreFilter > 0 ? 'active-filter' : ''}`}
-            title="Filter by Min Inflection Score"
-          >
-            <option value={0}>Score: All</option>
-            <option value={75}>Score: 75+ (High)</option>
-            <option value={65}>Score: 65+ (Strong)</option>
-            <option value={50}>Score: 50+ (Base)</option>
-          </select>
-
-          {/* Search Input */}
-          <div className="relative flex items-center">
-            <input
-              type="text"
-              placeholder="Search..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className={`search-input w-28 sm:w-36 focus:w-44 text-xs py-1 ${searchQuery ? 'border-gold' : ''}`}
-            />
-            <span className="absolute left-2 text-xs text-muted pointer-events-none">🔍</span>
-            {searchQuery && (
-              <button
-                type="button"
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2 text-xs text-muted hover:text-text cursor-pointer"
-                title="Clear search"
-              >
-                ✕
-              </button>
-            )}
-          </div>
 
           {/* View Mode Toggle */}
           <div className="flex items-center rounded-lg border border-border p-0.5 bg-elevated">
@@ -1441,18 +2014,18 @@ export default function InflectionScannerView({
             type="button"
             onClick={executeEodSync}
             disabled={isSyncingEod || isScanning}
-            className={`flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-lg border transition-all cursor-pointer ${
+            className={`flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${
               isSyncingEod
                 ? 'bg-sapphire/20 border-sapphire text-blue-600 dark:text-blue-400'
                 : 'bg-elevated border-border text-text hover:border-subtle'
             }`}
             title="Bulk sync daily bars into local SQLite store"
           >
-            <span className={isSyncingEod ? 'animate-spin' : ''}>{isSyncingEod ? '⏳' : '⚡'}</span>
+            <span className={isSyncingEod ? 'animate-spin' : ''}>{isSyncingEod ? '⏳' : '🔄'}</span>
             <span>{isSyncingEod ? 'Syncing...' : 'Sync EOD'}</span>
           </button>
 
-          {/* Scan / Rescan Button */}
+          {/* Scan Market Button */}
           <button
             type="button"
             onClick={(e) => executeScan(universe, minTurnoverCr, capTierFilter, Boolean(e.shiftKey))}
@@ -1484,163 +2057,179 @@ export default function InflectionScannerView({
         </div>
       </div>
 
-      {/* ── ROW 2: ARCHETYPES, TIMING, CONDITIONS & LIVE METRICS (Streamlined 32px) ─────────────────────── */}
-      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1 border-b border-border bg-panel text-xs">
-        <div className="flex flex-wrap items-center gap-1.5 overflow-x-auto">
-          {/* Horizon Pills (Short, Mid, Long Multibagger) */}
-          <div className="flex items-center gap-1 border-r border-border/60 pr-2 mr-1">
-            {[
-              { id: 'ALL', label: 'All', icon: '🌐' },
-              { id: 'SHORT_TERM', label: 'Short (1–4W)', icon: '⚡' },
-              { id: 'MID_TERM', label: 'Mid (1–6M)', icon: '📈' },
-              { id: 'LONG_TERM', label: 'Multibagger (1–3Y)', icon: '💎' },
-            ].map((tab) => {
-              const active = horizonFilter === tab.id
-              const count = horizonCounts[tab.id] ?? 0
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setHorizonFilter(tab.id)}
-                  className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold transition-all cursor-pointer ${
-                    active
-                      ? 'bg-purple-500/20 border border-purple-500 text-purple-600 dark:text-purple-400 shadow-xs font-bold'
-                      : 'bg-elevated/70 border border-border/50 text-muted hover:text-text'
-                  }`}
-                >
-                  <span>{tab.icon}</span>
-                  <span>{tab.label}</span>
-                  {count > 0 && (
-                    <span className="text-[9px] px-1 rounded-full font-mono bg-surface text-text">
-                      {count}
-                    </span>
-                  )}
-                </button>
-              )
-            })}
-          </div>
+      {/* ── ROW 2: QUANTITATIVE FILTER TOOLBAR (Unified Dropdowns & Telemetry) ─────────────────────── */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 border-b border-border bg-panel text-xs">
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
+          {/* Horizon Dropdown */}
+          <select
+            value={horizonFilter}
+            onChange={(e) => setHorizonFilter(e.target.value)}
+            className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
+              horizonFilter !== 'ALL'
+                ? 'border-purple-400 text-purple-300 font-bold bg-purple-500/10'
+                : 'border-border hover:border-gold/50'
+            }`}
+            title="Filter by investment / holding horizon"
+          >
+            <option value="ALL">All Horizons {scanResult && horizonCounts.ALL ? `(${horizonCounts.ALL})` : ''}</option>
+            <option value="SHORT_TERM">⚡ Short (1–4W) {scanResult && horizonCounts.SHORT_TERM ? `(${horizonCounts.SHORT_TERM})` : ''}</option>
+            <option value="MID_TERM">📈 Mid (1–6M) {scanResult && horizonCounts.MID_TERM ? `(${horizonCounts.MID_TERM})` : ''}</option>
+            <option value="LONG_TERM">💎 Multibagger (1–3Y) {scanResult && horizonCounts.LONG_TERM ? `(${horizonCounts.LONG_TERM})` : ''}</option>
+          </select>
 
-          {/* Archetype Chips */}
+          {/* Archetype Dropdown */}
           <div className="flex items-center gap-1">
-            {ARCHETYPE_TABS.map((tab) => {
-              const active = archetypeFilter === tab.id
-              const count = archetypeCounts[tab.id] ?? 0
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setArchetypeFilter(tab.id)}
-                  className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold transition-all cursor-pointer ${
-                    active
-                      ? 'bg-gold/15 border border-gold text-amber-600 dark:text-amber-400 shadow-xs'
-                      : 'bg-elevated/70 border border-border/50 text-muted hover:text-text'
-                  }`}
-                >
-                  <span>{tab.icon}</span>
-                  <span>{tab.label}</span>
-                  <span className="text-[9px] px-1 rounded-full font-mono bg-surface text-text">
-                    {count}
-                  </span>
-                </button>
-              )
-            })}
+            <select
+              value={archetypeFilter}
+              onChange={(e) => setArchetypeFilter(e.target.value)}
+              className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
+                archetypeFilter !== 'ALL'
+                  ? 'border-gold text-gold font-bold bg-gold/10'
+                  : 'border-border hover:border-gold/50'
+              }`}
+              title="Filter by quantitative inflection archetype"
+            >
+              <option value="ALL">All Inflections {scanResult && archetypeCounts.ALL ? `(${archetypeCounts.ALL})` : ''}</option>
+              <option value="VCP_PIVOT_BREAKOUT">🎯 VCP Pivots {scanResult && archetypeCounts.VCP_PIVOT_BREAKOUT ? `(${archetypeCounts.VCP_PIVOT_BREAKOUT})` : ''}</option>
+              <option value="TTM_SQUEEZE_EXPLOSION">⚡ TTM Squeeze Breakouts {scanResult && archetypeCounts.TTM_SQUEEZE_EXPLOSION ? `(${archetypeCounts.TTM_SQUEEZE_EXPLOSION})` : ''}</option>
+              <option value="STAGE_1_TO_2_EXPANSION">🚀 Stage 1→2 Markup {scanResult && archetypeCounts.STAGE_1_TO_2_EXPANSION ? `(${archetypeCounts.STAGE_1_TO_2_EXPANSION})` : ''}</option>
+              <option value="SMC_SPRING_SWEEP">🎪 SMC Springs & Sweeps {scanResult && archetypeCounts.SMC_SPRING_SWEEP ? `(${archetypeCounts.SMC_SPRING_SWEEP})` : ''}</option>
+              <option value="RRG_SECTOR_ROTATION">🔄 Sector RRG Leaders {scanResult && archetypeCounts.RRG_SECTOR_ROTATION ? `(${archetypeCounts.RRG_SECTOR_ROTATION})` : ''}</option>
+            </select>
+            <HelpHint metricKey="vcp_pivot" size="xs" />
           </div>
 
-          <span className="text-border">|</span>
-
-          {/* Timing Filters */}
+          {/* Timing Dropdown */}
           <div className="flex items-center gap-1">
-            {TIMING_TABS.map((tab) => {
-              const active = timingFilter === tab.id
-              const count = timingCounts[tab.id] ?? 0
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setTimingFilter(tab.id)}
-                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${
-                    active
-                      ? 'bg-emerald/15 border border-emerald/40 text-emerald-700 dark:text-emerald-300 font-bold'
-                      : 'text-muted hover:text-text hover:bg-elevated border border-transparent'
-                  }`}
-                >
-                  <span>{tab.label}</span>
-                  {count > 0 && <span className="text-[9px] font-mono opacity-80">({count})</span>}
-                </button>
-              )
-            })}
+            <select
+              value={timingFilter}
+              onChange={(e) => setTimingFilter(e.target.value)}
+              className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
+                timingFilter !== 'ALL'
+                  ? 'border-emerald-400 text-emerald-300 font-bold bg-emerald-500/10'
+                  : 'border-border hover:border-gold/50'
+              }`}
+              title="Filter by entry timing urgency"
+            >
+              <option value="ALL">All Timing {scanResult && timingCounts.ALL ? `(${timingCounts.ALL})` : ''}</option>
+              <option value="TRIGGER_NOW">🔥 Trigger Now / Active {scanResult && timingCounts.TRIGGER_NOW ? `(${timingCounts.TRIGGER_NOW})` : ''}</option>
+              <option value="COILING_IMMINENT">⏳ Coiling (1–3d) {scanResult && timingCounts.COILING_IMMINENT ? `(${timingCounts.COILING_IMMINENT})` : ''}</option>
+              <option value="PULLBACK_RETEST">🎯 Retest Zone {scanResult && timingCounts.PULLBACK_RETEST ? `(${timingCounts.PULLBACK_RETEST})` : ''}</option>
+            </select>
+            <HelpHint metricKey="timing_state" size="xs" />
           </div>
 
-          <span className="text-border">|</span>
+          {/* Market Cap Tier */}
+          <select
+            value={capTierFilter}
+            onChange={(e) => setCapTierFilter(e.target.value)}
+            className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
+              capTierFilter !== 'ALL'
+                ? 'border-gold text-gold font-bold bg-gold/10'
+                : 'border-border hover:border-gold/50'
+            }`}
+            title="Filter by Market Cap Tier"
+          >
+            <option value="ALL">All Caps</option>
+            <option value="LARGE">🏛️ Large Cap</option>
+            <option value="MID">⚡ Mid Cap</option>
+            <option value="SMALL">🚀 Small Cap</option>
+            <option value="MICRO">🌱 Micro Cap</option>
+          </select>
 
-          {/* Condition Toggles */}
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setFilterCoilingOnly((p) => !p)}
-              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
-                filterCoilingOnly
-                  ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40 shadow-xs'
-                  : 'bg-elevated/60 text-muted border-border/60 hover:text-text'
-              }`}
-            >
-              ⚡ Squeeze Coiling
-            </button>
+          {/* Sector Filter */}
+          <select
+            value={sectorFilter}
+            onChange={(e) => setSectorFilter(e.target.value)}
+            className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer max-w-[130px] truncate ${
+              sectorFilter !== 'ALL'
+                ? 'border-gold text-gold font-bold bg-gold/10'
+                : 'border-border hover:border-gold/50'
+            }`}
+            title="Filter by Sector"
+          >
+            <option value="ALL">All Sectors {availableSectors.length > 0 ? `(${availableSectors.length})` : ''}</option>
+            {availableSectors.map((sec) => (
+              <option key={sec.name} value={sec.name}>
+                {sec.name} ({sec.count})
+              </option>
+            ))}
+          </select>
 
-            <button
-              type="button"
-              onClick={() => setFilterVolumeSurge((p) => !p)}
-              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
-                filterVolumeSurge
-                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40 shadow-xs'
-                  : 'bg-elevated/60 text-muted border-border/60 hover:text-text'
-              }`}
-            >
-              🔥 RVOL ≥ 1.5x
-            </button>
+          {/* Score Selector */}
+          <select
+            value={minScoreFilter}
+            onChange={(e) => setMinScoreFilter(Number(e.target.value))}
+            className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
+              minScoreFilter > 0
+                ? 'border-amber-400 text-amber-300 font-bold bg-amber-500/10'
+                : 'border-border hover:border-gold/50'
+            }`}
+            title="Filter by minimum quantitative conviction score"
+          >
+            <option value={0}>Score: All</option>
+            <option value={75}>Score: 75+ (High Conviction)</option>
+            <option value={65}>Score: 65+ (Strong Setup)</option>
+            <option value={50}>Score: 50+ (Base Filter)</option>
+          </select>
 
-            <button
-              type="button"
-              onClick={() => setFilterMinerviniOnly((p) => !p)}
-              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
-                filterMinerviniOnly
-                  ? 'bg-gold/15 text-amber-600 dark:text-amber-400 border-gold/40 shadow-xs'
-                  : 'bg-elevated/60 text-muted border-border/60 hover:text-text'
-              }`}
-            >
-              👑 Minervini Stage 2
-            </button>
+          {/* Quick Condition Chips (RVOL & Exclude UC) */}
+          <button
+            type="button"
+            onClick={() => setFilterVolumeSurge((p) => !p)}
+            className={`px-2 py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer flex items-center gap-1 ${
+              filterVolumeSurge
+                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40 shadow-xs'
+                : 'bg-surface text-muted border-border hover:text-text'
+            }`}
+            title="Filter for relative volume expansion (RVOL >= 1.5x)"
+          >
+            <span>🔥</span>
+            <span>RVOL ≥ 1.5x</span>
+          </button>
 
-            <button
-              type="button"
-              onClick={() => setFilterExcludeUCLocked((p) => !p)}
-              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
-                filterExcludeUCLocked
-                  ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/40 shadow-xs'
-                  : 'bg-elevated/60 text-muted border-border/60 hover:text-text'
-              }`}
-            >
-              🛡️ Exclude UC Locked
-            </button>
+          <button
+            type="button"
+            onClick={() => setFilterExcludeUCLocked((p) => !p)}
+            className={`px-2 py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer flex items-center gap-1 ${
+              filterExcludeUCLocked
+                ? 'bg-rose-500/15 text-rose-300 border-rose-500/40 shadow-xs'
+                : 'bg-surface text-muted border-border hover:text-text'
+            }`}
+            title="Exclude stocks currently locked in upper circuit (unactionable)"
+          >
+            <span>🛡️</span>
+            <span>Exclude UC Locked</span>
+          </button>
 
-            <button
-              type="button"
-              onClick={() => setFilterHighRR((p) => !p)}
-              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
-                filterHighRR
-                  ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-400 border-cyan-500/40 shadow-xs'
-                  : 'bg-elevated/60 text-muted border-border/60 hover:text-text'
-              }`}
-            >
-              🎯 R:R ≥ 2.5x
-            </button>
+          {/* Search Input */}
+          <div className="relative flex items-center">
+            <input
+              type="text"
+              placeholder="🔍 Search..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-28 sm:w-36 text-xs pl-2.5 pr-6 py-1 rounded-lg bg-surface border border-border text-text placeholder:text-muted focus:outline-none focus:border-gold transition-colors font-sans"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text text-xs cursor-pointer"
+                title="Clear search"
+              >
+                ✕
+              </button>
+            )}
           </div>
 
+          {/* Reset Filters Button */}
           {activeFilterCount > 0 && (
             <button
               type="button"
               onClick={resetAllFilters}
-              className="text-[10px] font-bold text-rose-700 dark:text-rose-400 hover:text-rose-800 dark:hover:text-rose-300 px-1.5 py-0.5 rounded bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 transition-all cursor-pointer"
+              className="btn btn-sm btn-ghost text-xs text-rose-400 hover:text-rose-300 border border-rose-500/30 hover:bg-rose-500/10 flex items-center gap-1 font-bold px-2 py-0.5 cursor-pointer"
+              title="Reset all filters"
             >
               ✕ Reset Filters
             </button>
@@ -1648,7 +2237,7 @@ export default function InflectionScannerView({
         </div>
 
         {/* Right: High-Density Inline Metrics Telemetry */}
-        <div className="flex items-center gap-2 font-mono text-[10px] text-muted flex-shrink-0">
+        <div className="flex items-center gap-2 font-mono text-[10px] text-muted flex-shrink-0 ml-auto">
           <span>
             Setups: <strong className="text-text">{summaryMetrics.total}</strong>
           </span>
@@ -2469,21 +3058,21 @@ export default function InflectionScannerView({
                         </span>
                       </div>
                       <div className="p-2 rounded bg-panel/70 border border-border/70">
-                        <span className="text-[9px] text-muted uppercase block font-ui">🔄 Sector Tailwind</span>
+                        <span className="text-[9px] text-muted uppercase block font-ui">🔄 Sector</span>
                         <span className="text-xs font-bold text-amber-700 dark:text-amber-400">
                           {activeCandidate?.sector_score != null ? `${activeCandidate.sector_score}/30` : '—'}
                         </span>
                       </div>
                       <div className="p-2 rounded bg-panel/70 border border-border/70">
-                        <span className="text-[9px] text-muted uppercase block font-ui">🛡️ Forensic Quality</span>
+                        <span className="text-[9px] text-muted uppercase block font-ui">🛡️ Forensic</span>
                         <span className="text-xs font-bold text-emerald-700 dark:text-emerald-400">
                           {activeCandidate?.quality_score != null ? `${activeCandidate.quality_score}/30` : '—'}
                         </span>
                       </div>
                       <div className="p-2 rounded bg-panel/70 border border-border/70">
-                        <span className="text-[9px] text-muted uppercase block font-ui">🎯 Risk : Reward</span>
+                        <span className="text-[9px] text-muted uppercase block font-ui">🎯 R:R</span>
                         <span className="text-xs font-bold text-text">
-                          {activeCandidate?.risk_reward_ratio != null ? `1:${activeCandidate.risk_reward_ratio} R` : '—'}
+                          {activeCandidate?.risk_reward_ratio != null ? `1:${activeCandidate.risk_reward_ratio}` : '—'}
                         </span>
                       </div>
                     </div>
@@ -2492,7 +3081,7 @@ export default function InflectionScannerView({
                   {/* Confluence Radar Ribbon */}
                   <div className="p-3 rounded-xl border border-border bg-surface grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-center font-mono">
                     <div>
-                      <span className="text-[10px] text-muted uppercase block">Minervini / Stage</span>
+                      <span className="text-[10px] text-muted uppercase block">Minervini</span>
                       <span className="text-xs font-bold text-text">
                         {activeCandidate?.trend_template_passed}/8 ({activeCandidate?.weinstein_stage?.replace('STAGE_', 'S')})
                       </span>
@@ -2508,25 +3097,25 @@ export default function InflectionScannerView({
                       </span>
                     </div>
                     <div>
-                      <span className="text-[10px] text-muted uppercase block">RVOL Expansion</span>
+                      <span className="text-[10px] text-muted uppercase block">RVOL (20D)</span>
                       <span className="text-xs font-bold text-emerald-700 dark:text-emerald-400">
-                        {activeCandidate?.rvol_20d}x (20D)
+                        {activeCandidate?.rvol_20d}x
                       </span>
                     </div>
                     <div>
-                      <span className="text-[10px] text-muted uppercase block">Sector Momentum</span>
+                      <span className="text-[10px] text-muted uppercase block">Sector RRG</span>
                       <span className="text-xs font-bold text-amber-700 dark:text-amber-400">
                         {activeCandidate?.rrg_quadrant} ({activeCandidate?.sector_tailwind_score}/100)
                       </span>
                     </div>
                     <div>
-                      <span className="text-[10px] text-muted uppercase block">20D Median Liq</span>
+                      <span className="text-[10px] text-muted uppercase block">20D Liq</span>
                       <span className="text-xs font-bold text-text">
                         ₹{activeCandidate?.turnover_20d_cr ? activeCandidate.turnover_20d_cr.toFixed(1) : '0.0'} Cr
                       </span>
                     </div>
                     <div>
-                      <span className="text-[10px] text-muted uppercase block">Weekly Trend</span>
+                      <span className="text-[10px] text-muted uppercase block">W-Trend</span>
                       <span className={`text-xs font-bold ${activeCandidate?.weekly_stage === 'STAGE_2_UPTREND' ? 'text-yellow-700 dark:text-yellow-400' : 'text-muted'}`}>
                         {activeCandidate?.weekly_stage === 'STAGE_2_UPTREND' ? '👑 W-Stage 2' : 'Neutral'}
                       </span>
@@ -2620,7 +3209,7 @@ export default function InflectionScannerView({
                             <div className="space-y-2">
                               <div className="p-2.5 rounded-lg bg-panel border border-border flex flex-wrap items-center justify-between gap-2">
                                 <div className="flex items-center gap-2">
-                                  <span className="text-muted font-ui text-[11px]">Current Market Price:</span>
+                                  <span className="text-muted font-ui text-[11px]">CMP:</span>
                                   <span className="text-base font-bold text-text">
                                     ₹{livePrice ? livePrice.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : activeCandidate?.ltp?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                                   </span>
@@ -2636,9 +3225,9 @@ export default function InflectionScannerView({
                                 </div>
                                 {distFromEntryPct != null && (
                                   <div className="flex items-center gap-1 font-ui text-[11px]">
-                                    <span className="text-muted">Distance to Entry:</span>
+                                    <span className="text-muted">Dist to Entry:</span>
                                     <span className={`font-bold font-mono ${Math.abs(distFromEntryPct) <= 1 ? 'text-emerald-600 dark:text-emerald-400' : distFromEntryPct > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'}`}>
-                                      {distFromEntryPct > 0 ? `+${distFromEntryPct.toFixed(2)}% above` : `${distFromEntryPct.toFixed(2)}% below`}
+                                      {distFromEntryPct > 0 ? `+${distFromEntryPct.toFixed(2)}%` : `${distFromEntryPct.toFixed(2)}%`}
                                     </span>
                                   </div>
                                 )}
@@ -2648,7 +3237,7 @@ export default function InflectionScannerView({
                                 <div className="p-2 rounded bg-rose-500/15 border border-rose-500/40 text-rose-700 dark:text-rose-300 text-xs font-ui flex items-center gap-2">
                                   <span>⚠️</span>
                                   <span>
-                                    <strong>STOP LOSS BREACHED:</strong> Live price (₹{livePrice}) is at or below stop loss (₹{stopPrice}). Setup invalidated.
+                                    <strong>SL BREACHED:</strong> Live price (₹{livePrice}) is at or below stop loss (₹{stopPrice}). Setup invalidated.
                                   </span>
                                 </div>
                               )}
@@ -2657,7 +3246,7 @@ export default function InflectionScannerView({
                                 <div className="p-2 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 text-xs font-ui flex items-center gap-2">
                                   <span>🎯</span>
                                   <span>
-                                    <strong>TARGET 1 REACHED:</strong> Live price (₹{livePrice}) has hit Target 1 (₹{t1Price}). Consider partial scale-out.
+                                    <strong>T1 REACHED:</strong> Live price (₹{livePrice}) has hit Target 1 (₹{t1Price}). Consider partial scale-out.
                                   </span>
                                 </div>
                               )}
@@ -2666,32 +3255,32 @@ export default function InflectionScannerView({
                         })()}
                         <div className="grid grid-cols-2 gap-3 text-xs">
                           <div className="p-2.5 rounded bg-panel border border-border">
-                            <span className="text-[10px] text-muted block font-ui">OPTIMAL ENTRY ZONE</span>
+                            <span className="text-[10px] text-muted block font-ui">ENTRY ZONE</span>
                             <span className="font-bold text-text text-sm">
                               {decisionMatrix?.where?.entry_zone}
                             </span>
                           </div>
                           <div className="p-2.5 rounded bg-panel border border-border">
-                            <span className="text-[10px] text-muted block font-ui">STRUCTURAL STOP LOSS</span>
+                            <span className="text-[10px] text-muted block font-ui">STRUCTURAL SL</span>
                             <span className="font-bold text-rose-600 dark:text-rose-400 text-sm">
                               {decisionMatrix?.where?.stop_loss}
                             </span>
                           </div>
                           <div className="p-2.5 rounded bg-panel border border-border">
-                            <span className="text-[10px] text-muted block font-ui">TARGET 1 (+2R BREAKEVEN)</span>
+                            <span className="text-[10px] text-muted block font-ui">T1 (+2R BE)</span>
                             <span className="font-bold text-emerald-600 dark:text-emerald-400 text-sm">
                               {decisionMatrix?.where?.target_1}
                             </span>
                           </div>
                           <div className="p-2.5 rounded bg-panel border border-border">
-                            <span className="text-[10px] text-muted block font-ui">TARGET 2 (+3.5R SWING)</span>
+                            <span className="text-[10px] text-muted block font-ui">T2 (+3.5R SWING)</span>
                             <span className="font-bold text-amber-600 dark:text-amber-400 text-sm">
                               {decisionMatrix?.where?.target_2}
                             </span>
                           </div>
                         </div>
                         <div className="p-2.5 rounded bg-panel border border-border flex items-center justify-between">
-                          <span className="text-muted font-ui">🚀 Moonshot Target (+6.5R):</span>
+                          <span className="text-muted font-ui">🚀 T3 / Moonshot (+6.5R):</span>
                           <span className="font-bold text-purple-600 dark:text-purple-400">
                             {decisionMatrix?.where?.target_moonshot}
                           </span>

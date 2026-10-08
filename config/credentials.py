@@ -68,8 +68,16 @@ KNOWN_CREDENTIALS: list[tuple[str, str, bool]] = [
     ("UPSTOX_API_KEY", "Upstox API Key", False),
     ("UPSTOX_API_SECRET", "Upstox API Secret", True),
     # ── Fyers ────────────────────────────────────────────────
-    ("FYERS_APP_ID", "Fyers App ID", False),
+    ("FYERS_APP_ID", "Fyers App ID (format: XXXX-100)", False),
     ("FYERS_SECRET_KEY", "Fyers Secret Key", True),
+    # Auto-login credentials (headless TOTP flow — no browser needed)
+    ("FYERS_FY_ID", "Fyers Client Login ID (e.g. XA12345) — for auto-login", False),
+    (
+        "FYERS_TOTP_SECRET",
+        "Fyers TOTP Secret (Base32, from security settings) — for auto-login",
+        True,
+    ),
+    ("FYERS_PIN", "Fyers Trading PIN (4/6 digits) — for auto-login", True),
     # ── Stoxkart (SMC) ───────────────────────────────────────
     ("STOXKART_API_KEY", "Stoxkart API Key", False),
     ("STOXKART_API_SECRET", "Stoxkart API Secret", True),

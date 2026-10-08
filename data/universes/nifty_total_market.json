@@ -1414,41 +1414,6 @@
     "isin": "INE089A01031"
   },
   {
-    "symbol": "DUMMYHEG",
-    "name": "Dummy HEG Ltd.",
-    "industry": "Metals & Mining",
-    "series": "EQ",
-    "isin": "DUM545A01024"
-  },
-  {
-    "symbol": "DUMMYINGL1",
-    "name": "Dummy India Glycols ltd. 1",
-    "industry": "Healthcare",
-    "series": "EQ",
-    "isin": "DU1560A01023"
-  },
-  {
-    "symbol": "DUMMYINGL2",
-    "name": "Dummy India Glycols ltd. 2",
-    "industry": "Fast Moving Consumer Goods",
-    "series": "EQ",
-    "isin": "DU2560A01023"
-  },
-  {
-    "symbol": "DUMMYINXGN",
-    "name": "Dummy Inox Green Ltd.",
-    "industry": "Construction",
-    "series": "EQ",
-    "isin": "DUM510W01014"
-  },
-  {
-    "symbol": "DUMMYTRVN",
-    "name": "Dummy Triveni Ltd.",
-    "industry": "Capital Goods",
-    "series": "EQ",
-    "isin": "DUM256C01024"
-  },
-  {
     "symbol": "DYNAMATECH",
     "name": "Dynamatic Technologies Ltd.",
     "industry": "Capital Goods",

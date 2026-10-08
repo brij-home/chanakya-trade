@@ -312,3 +312,69 @@ def test_friday_afternoon_intraday_scalp_passes_tier1_scrutiny():
             f"Expected Friday afternoon intraday scalp to pass Tier-1 sanity, but failed: {reason}"
         )
         assert flags.get("is_intraday_scalp_only") is True
+
+
+def test_secondary_index_call_suppressed_under_bearish_benchmark_without_reversal():
+    """
+    Verifies that when benchmark NIFTY is trending bearish (below VWAP & chg <= -0.05%),
+    secondary indices (MIDCPNIFTY, FINNIFTY, BANKNIFTY) are strictly suppressed if:
+      - Still below their own VWAP AND bounce from low is weak (< 2.5x base threshold).
+    Prevents dead-cat bounce call traps during institutional markdown sessions.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine
+
+    engine = AutoAlertEngine()
+
+    # Benchmark NIFTY is bearish
+    nifty_quote = {
+        "last_price": 25700.0,
+        "vwap": 25800.0,
+        "change_pct": -0.45,
+    }
+    # MIDCPNIFTY below its own VWAP with a minor 0.30% bounce (base threshold is 0.30%)
+    # Below VWAP requires 0.30% * 2.5 = 0.75%
+    midcp_quote_weak = {
+        "last_price": 13099.0,
+        "vwap": 13150.0,
+        "low": 13060.0,
+        "high": 13200.0,
+        "change_pct": -0.38,
+    }
+    q_map_weak = {
+        "NSE:NIFTY": nifty_quote,
+        "NIFTY": nifty_quote,
+        "NSE:MIDCPNIFTY": midcp_quote_weak,
+        "MIDCPNIFTY": midcp_quote_weak,
+    }
+
+    dummy_chain = [{"strike": 13100, "option_type": "CE", "last_price": 45.0}]
+
+    with (
+        patch.object(engine, "_watched_indices", {"MIDCPNIFTY"}),
+        patch.object(engine, "_get_prioritized_targets", return_value=["MIDCPNIFTY"]),
+        patch("market.history.get_ohlcv", return_value=None),
+        patch("market.options.get_options_chain", return_value=dummy_chain),
+        patch("engine.auto_alert_engine.detect_index_call_setup", return_value=[]),
+    ):
+        # Must be suppressed (bounce 0.30% < 0.75% threshold when below own VWAP)
+        res = engine.scan_index_call_setups(quotes_map=q_map_weak)
+        assert len(res) == 0, "Weak counter-trend bounce below VWAP must be suppressed"
+
+    # Now verify that when MIDCPNIFTY reclaims its own VWAP, it passes the gate
+    midcp_quote_reclaimed = dict(midcp_quote_weak)
+    midcp_quote_reclaimed["vwap"] = 13080.0  # spot 13099 > VWAP 13080
+    q_map_reclaimed = {
+        "NSE:NIFTY": nifty_quote,
+        "NIFTY": nifty_quote,
+        "NSE:MIDCPNIFTY": midcp_quote_reclaimed,
+        "MIDCPNIFTY": midcp_quote_reclaimed,
+    }
+    with (
+        patch.object(engine, "_watched_indices", {"MIDCPNIFTY"}),
+        patch.object(engine, "_get_prioritized_targets", return_value=["MIDCPNIFTY"]),
+        patch("market.history.get_ohlcv", return_value=None),
+        patch("market.options.get_options_chain", return_value=dummy_chain),
+        patch("engine.auto_alert_engine.detect_index_call_setup", return_value=[]) as mock_detect,
+    ):
+        engine.scan_index_call_setups(quotes_map=q_map_reclaimed)
+        assert mock_detect.called, "Reclaiming own VWAP must pass gate and evaluate detector"

@@ -327,6 +327,35 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           </span>
         )}
 
+        {/* Tiger Stalking / Eagle Adaptive Regime Badge */}
+        {alert.metrics?.tiger_mandate && (
+          <span
+            className={`text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap border hidden sm:inline ${
+              alert.metrics.tiger_mandate.mandate === 'MOMENTUM_EXPANSION'
+                ? 'bg-amber-500/25 text-amber-300 border-amber-500/50 animate-pulse'
+                : alert.metrics.tiger_mandate.mandate === 'TURTLE_SOUP_RANGE_FADE'
+                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                : alert.metrics.tiger_mandate.mandate === 'DEFINED_RISK_SPREAD_ONLY'
+                ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
+                : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+            }`}
+            title={`🐅 TIGER MANDATE: ${alert.metrics.tiger_mandate.mandate} — ${alert.metrics.tiger_mandate.reason || alert.metrics.tiger_mandate.action_guidance || ''}`}
+          >
+            {alert.metrics.tiger_mandate.mandate === 'MOMENTUM_EXPANSION' ? '🐅 TIGER POUNCE' :
+             alert.metrics.tiger_mandate.mandate === 'TURTLE_SOUP_RANGE_FADE' ? '⚡ TURTLE SOUP' :
+             alert.metrics.tiger_mandate.mandate === 'DEFINED_RISK_SPREAD_ONLY' ? '🛡️ SPREAD MANDATE' :
+             '🐅 TIGER STALKER'}
+          </span>
+        )}
+        {alert.metrics?.eagle_regime?.chop_status === 'SEVERE_CHOP' && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/20 text-rose-300 border border-rose-500/40 hidden sm:inline"
+            title={`🦅 EAGLE RADAR: Severe chop (CHOP=${alert.metrics.eagle_regime.chop_index?.toFixed(1) || ''}, ADX=${alert.metrics.eagle_regime.adx_14?.toFixed(1) || ''}). Preserving capital.`}
+          >
+            🦅 CHOP DEFENSE
+          </span>
+        )}
+
         {/* Multi-Horizon Confluence Alignment */}
         {confluenceAlignment === 'TRIPLE_HORIZON' && (
           <span
@@ -518,7 +547,34 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
             className="text-[8px] font-mono font-bold text-rose-700 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/15 px-1 py-px rounded border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap hidden sm:inline"
             title="No-Chase limit: Entries beyond this price are mathematically disqualified"
           >
-            Max {currSym}{fmtP(alert.no_chase_boundary)}
+            NoChase {currSym}{fmtP(alert.no_chase_boundary)}
+          </span>
+        )}
+
+        {(alert.actionable_plan?.sniper_plan || alert.metrics?.sniper_plan) && (
+          <span
+            className="text-[8px] font-mono font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 dark:bg-emerald-500/15 px-1 py-px rounded border border-emerald-300/60 dark:border-emerald-500/30 whitespace-nowrap hidden sm:inline"
+            title={`🎯 SNIPER PLAN: OTE ₹${(alert.actionable_plan?.sniper_plan || alert.metrics?.sniper_plan).optimal_entry_zone} | Time Stop: ${(alert.actionable_plan?.sniper_plan || alert.metrics?.sniper_plan).time_stop_minutes}m | SL Rule: ${(alert.actionable_plan?.sniper_plan || alert.metrics?.sniper_plan).stop_loss_rule}`}
+          >
+            🎯 SNIPER 1:{(alert.actionable_plan?.sniper_plan || alert.metrics?.sniper_plan).risk_reward_ratio || '3.0'}
+          </span>
+        )}
+
+        {(plan.max_loss_capped || alert.metrics?.max_loss_rupees) && (
+          <span
+            className="text-[8px] font-mono font-bold text-rose-300/90 bg-rose-500/15 px-1 py-px rounded border border-rose-500/30 whitespace-nowrap hidden lg:inline"
+            title="Monetary risk per lot based on Stop-Loss"
+          >
+            Risk {currSym}{Number(plan.max_loss_capped || alert.metrics?.max_loss_rupees).toLocaleString('en-IN')}
+          </span>
+        )}
+
+        {(plan.net_risk_reward || alert.metrics?.net_risk_reward) && (
+          <span
+            className="text-[8px] font-mono font-bold text-sky-300/90 bg-sky-500/15 px-1 py-px rounded border border-sky-500/30 whitespace-nowrap hidden xl:inline"
+            title="Net friction-adjusted R:R (accounting for STT and slippage)"
+          >
+            Net {plan.net_risk_reward || alert.metrics?.net_risk_reward}
           </span>
         )}
 

@@ -234,6 +234,10 @@ class DetectorRegistry:
         """Returns sorted list of all registered detector slugs."""
         return sorted(self._detectors.keys())
 
+    def list_slugs(self) -> list[str]:
+        """Alias for list_registered_slugs."""
+        return self.list_registered_slugs()
+
     def get_detectors(self, segment: Optional[str] = None) -> list[BaseDetector]:
         """Returns all detectors, optionally filtered by market segment."""
         if segment is None:
@@ -333,6 +337,7 @@ def register_default_detectors() -> None:
     from engine.detectors.currency import detect_currency_breakouts
     from engine.detectors.crypto import detect_single_crypto_symbol
     from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
+    from engine.detectors.turtle_soup import detect_turtle_soup_sweep
 
     def _circuit_adapter(ctx: DetectionContext):
         if ctx.ltp > 0 and ctx.prev_close and ctx.prev_close > 0:
@@ -470,7 +475,76 @@ def register_default_detectors() -> None:
         )
         return alerts if alerts else None
 
+    from engine.detectors.options_momentum import detect_options_momentum_breakouts
+    from engine.detectors.intraday_spark import detect_intraday_mover_sparks
+    from engine.detectors.multibagger import detect_multibagger_breakouts
+    from engine.detectors.preopen_bias import detect_preopen_bias
+    from engine.detectors.defined_risk_neutral import detect_defined_risk_neutral
+    from engine.detectors.pairs_arbitrage import detect_pairs_arbitrage
+
+    def _options_momentum_adapter(ctx: DetectionContext):
+        if ctx.segment in ("FNO_INDEX", "FNO_STOCK", "EQUITY") and (
+            ctx.is_index or ctx.option_chain
+        ):
+            return detect_options_momentum_breakouts(targets=[ctx.canonical_symbol])
+        return None
+
+    def _intraday_spark_adapter(ctx: DetectionContext):
+        if ctx.segment in ("EQUITY", "FNO_STOCK"):
+            return detect_intraday_mover_sparks(universe=[ctx.canonical_symbol])
+        return None
+
+    def _multibagger_adapter(ctx: DetectionContext):
+        if ctx.segment in ("EQUITY", "FNO_STOCK") and not ctx.is_index:
+            df = ctx.candles_daily
+            df_cache = {ctx.canonical_symbol: df} if df is not None else None
+            return detect_multibagger_breakouts(universe=[ctx.canonical_symbol], df_cache=df_cache)
+        return None
+
+    def _preopen_bias_adapter(ctx: DetectionContext):
+        if ctx.is_index and ctx.option_chain and ctx.prev_close:
+            gift_price = float(ctx.extra_metrics.get("gift_futures_price") or ctx.ltp or 0.0)
+            return detect_preopen_bias(
+                underlying=ctx.canonical_symbol,
+                gift_futures_price=gift_price,
+                prev_close=ctx.prev_close,
+                chain=ctx.option_chain,
+            )
+        return None
+
+    def _defined_risk_neutral_adapter(ctx: DetectionContext):
+        if ctx.segment in ("FNO_INDEX", "FNO_STOCK", "EQUITY"):
+            return detect_defined_risk_neutral(ctx)
+        return None
+
+    def _pairs_arbitrage_adapter(ctx: DetectionContext):
+        if ctx.segment in ("EQUITY", "FNO_STOCK"):
+            return detect_pairs_arbitrage(ctx)
+        return None
+
+    def _turtle_soup_adapter(ctx: DetectionContext):
+        df = ctx.candles_5m if ctx.candles_5m is not None else ctx.candles_15m
+        if df is None:
+            df = ctx.candles_daily
+        if df is not None and len(df) >= 15:
+            return detect_turtle_soup_sweep(
+                symbol=ctx.symbol,
+                df=df,
+                ltp=ctx.ltp,
+                vwap=ctx.vwap,
+                exchange=ctx.exchange,
+                rvol=ctx.rvol or 1.0,
+                session_date=ctx.timestamp.date() if ctx.timestamp else None,
+            )
+        return None
+
     adapters = [
+        FunctionalDetectorAdapter(
+            "turtle_soup_sweep",
+            "Turtle Soup Liquidity Sweep Reversal",
+            ("EQUITY", "FNO_STOCK", "FNO_INDEX", "COMMODITY"),
+            _turtle_soup_adapter,
+        ),
         FunctionalDetectorAdapter(
             "circuit_proximity", "Upper Circuit Proximity", ("EQUITY",), _circuit_adapter
         ),
@@ -524,6 +598,42 @@ def register_default_detectors() -> None:
             "SMC Order Block Re-Test",
             ("EQUITY", "FNO_STOCK"),
             _smc_ob_retest_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "options_momentum",
+            "Options Momentum Breakout",
+            ("FNO_INDEX", "FNO_STOCK", "EQUITY"),
+            _options_momentum_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "intraday_spark",
+            "Intraday Mover Spark",
+            ("EQUITY", "FNO_STOCK"),
+            _intraday_spark_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "multibagger",
+            "Multibagger Compounder",
+            ("EQUITY", "FNO_STOCK"),
+            _multibagger_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "preopen_bias",
+            "Pre-Open Gap Bias",
+            ("FNO_INDEX",),
+            _preopen_bias_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "defined_risk_neutral",
+            "Defined-Risk Neutral / Iron Condor",
+            ("FNO_INDEX", "FNO_STOCK", "EQUITY"),
+            _defined_risk_neutral_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "pairs_arbitrage",
+            "Statistical Arbitrage Pairs Trading",
+            ("EQUITY", "FNO_STOCK"),
+            _pairs_arbitrage_adapter,
         ),
     ]
 

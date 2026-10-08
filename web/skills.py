@@ -49,8 +49,17 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional, Union
 from uuid import uuid4
+import concurrent.futures
 
 logger = logging.getLogger("chanakya.web.skills")
+
+# Dedicated bounded thread pool for quote batch fetches to prevent starving general API endpoints
+_quotes_batch_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=3, thread_name_prefix="QuotesBatchWorker"
+)
+_alerts_serializer_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="AlertsSerializer"
+)
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
 if sys.platform == "win32":
@@ -65,7 +74,7 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from rich.console import Console
@@ -302,8 +311,12 @@ async def skill_quotes_batch(req: BatchQuotesRequest):
             clean = s.strip().upper()
             inst = clean if ":" in clean else normalize_instrument(clean)
             instruments.append(inst)
+        # Cap instruments to 60 symbols to protect broker rate limit budget
+        if len(instruments) > 60:
+            instruments = instruments[:60]
 
-        quotes_dict = await asyncio.to_thread(get_quote, instruments)
+        loop = asyncio.get_running_loop()
+        quotes_dict = await loop.run_in_executor(_quotes_batch_executor, get_quote, instruments)
         out = {}
         for k, q in quotes_dict.items():
             if q and getattr(q, "last_price", 0) > 0:
@@ -1407,9 +1420,18 @@ async def skill_morning_brief():
                 gift = get_gift_nifty()
             except Exception:
                 pass
-            return snap, fl, nw, br, ev, gift
+            battle_plan = None
+            try:
+                from market.indices import get_premarket_battle_plan
 
-        snapshot, flows, news, breadth, events, gift = await asyncio.to_thread(_fetch_brief)
+                battle_plan = get_premarket_battle_plan()
+            except Exception:
+                pass
+            return snap, fl, nw, br, ev, gift, battle_plan
+
+        snapshot, flows, news, breadth, events, gift, battle_plan = await asyncio.to_thread(
+            _fetch_brief
+        )
 
         return {
             "status": "ok",
@@ -1423,6 +1445,31 @@ async def skill_morning_brief():
                     "gift_nifty": _serialise(gift) if gift else None,
                     "implied_gap_pct": getattr(gift, "implied_gap_pct", 0.0) if gift else 0.0,
                 },
+                "battle_plan": battle_plan or {},
+            },
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/premarket_battle_plan")
+@router.post("/premarket_battle_plan")
+async def skill_premarket_battle_plan():
+    """
+    Computes institutional Pre-Market Battle Plan for benchmark and major indices.
+    Calculates Virgin CPR (Pivot, BC, TC, width %), Camarilla Pivots (H4, H3, L3, L4),
+    and Previous Day Levels (PDH, PDL, PDC) with actionable trade blueprints before 09:15.
+    """
+    try:
+        from config.constants import IST
+        from market.indices import get_premarket_battle_plan
+
+        plan = await asyncio.to_thread(get_premarket_battle_plan)
+        return {
+            "status": "ok",
+            "data": {
+                "battle_plan": plan,
+                "as_of_ist": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
             },
         }
     except Exception as e:
@@ -1644,7 +1691,8 @@ async def skill_alerts_list():
     try:
         from engine.alerts import alert_manager
 
-        alerts = await asyncio.to_thread(alert_manager.list_alerts)
+        # In-memory list (< 0.1ms). Avoid thread pool queue starvation.
+        alerts = alert_manager.list_alerts()
         return {"status": "ok", "data": alerts}
     except Exception as e:
         raise _err(str(e))
@@ -1703,8 +1751,8 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
         segment = req.segment if req else None
         horizon = req.horizon if req else None
 
-        alerts = await asyncio.to_thread(
-            auto_alert_engine.get_alerts,
+        # In-memory filtered slice (< 1ms). Avoid thread pool queue starvation.
+        alerts = auto_alert_engine.get_alerts(
             limit=limit,
             alert_type=alert_type,
             stage=stage,
@@ -1717,7 +1765,19 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
             horizon=horizon,
         )
         counts = auto_alert_engine.get_counts()
-        return {"status": "ok", "data": [a.to_dict() for a in alerts], "counts": counts}
+
+        # Serialize off-event-loop and return direct Response to bypass FastAPI's slow jsonable_encoder recursion
+        def _encode_payload(alts, cnts):
+            return json.dumps(
+                {"status": "ok", "data": [a.to_dict() for a in alts], "counts": cnts},
+                default=str,
+            ).encode("utf-8")
+
+        loop = asyncio.get_running_loop()
+        raw_bytes = await loop.run_in_executor(
+            _alerts_serializer_pool, _encode_payload, alerts, counts
+        )
+        return Response(content=raw_bytes, media_type="application/json")
     except Exception as e:
         raise _err(str(e))
 
@@ -1778,6 +1838,40 @@ async def skill_auto_alerts_scan_now():
                 "all_recent": [a.to_dict() for a in all_alerts],
                 "count": len(all_alerts),
             },
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/scan_swing")
+async def skill_auto_alerts_scan_swing(req: Optional[dict[str, Any]] = None):
+    """Trigger on-demand sweep for institutional Swing & Positional trades across NSE & BSE."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        d = req or {}
+        universe = d.get("universe", "nifty_total_market")
+        min_score = int(d.get("min_score", 60))
+        limit = int(d.get("limit", 40))
+        min_turnover_cr = float(d.get("min_turnover_cr", 0.5))
+        bypass_cache = bool(d.get("bypass_cache", False))
+        exchange = d.get("exchange", "NSE")
+
+        alerts = await asyncio.to_thread(
+            auto_alert_engine.scan_swing_inflections,
+            universe=universe,
+            min_score=min_score,
+            top_n=limit,
+            min_turnover_cr=min_turnover_cr,
+            use_local_cache=not bypass_cache,
+            bypass_inflection_cache=bypass_cache,
+            exchange=exchange,
+        )
+        return {
+            "status": "ok",
+            "universe": universe,
+            "count": len(alerts),
+            "data": [a.to_dict() for a in alerts],
         }
     except Exception as e:
         raise _err(str(e))
@@ -4115,6 +4209,7 @@ class CenturyCompounderSkillRequest(BaseModel):
     min_score: int = 65
     top_n: int = 20
     use_cache: bool = True
+    refresh: bool = False
 
 
 class CenturySyncMarketSkillRequest(BaseModel):
@@ -4122,7 +4217,7 @@ class CenturySyncMarketSkillRequest(BaseModel):
 
 
 class PreInflectionEarlyWarningRequest(BaseModel):
-    universe: Optional[list[str]] = None
+    universe: Optional[str | list[str]] = None
     top_n: int = 10
 
 
@@ -4134,6 +4229,7 @@ async def skill_century_compounders(req: Optional[CenturyCompounderSkillRequest]
     the empirical Twin Engines math (PAT Growth × PE Expansion) and the 7 Dalal Street pillars.
     """
     try:
+        import asyncio
         from analysis.century_compounder import (
             evaluate_century_compounder,
             scan_century_compounders,
@@ -4141,18 +4237,25 @@ async def skill_century_compounders(req: Optional[CenturyCompounderSkillRequest]
 
         target_sym = req.symbol if req and req.symbol else None
         if target_sym:
-            rep = evaluate_century_compounder(target_sym)
+            rep = await asyncio.to_thread(evaluate_century_compounder, target_sym)
             return _ok(rep.to_dict())
         else:
             universe = req.universe if req and req.universe else None
             min_score = req.min_score if req else 65
             top_n = req.top_n if req else 20
             use_cache = req.use_cache if req else True
-            reps = scan_century_compounders(
-                universe=universe, min_score=min_score, top_n=top_n, use_cache=use_cache
+            refresh = req.refresh if req else False
+            reps = await asyncio.to_thread(
+                scan_century_compounders,
+                universe=universe,
+                min_score=min_score,
+                top_n=top_n,
+                use_cache=use_cache,
+                refresh=refresh,
             )
             return _ok({"candidates": [r.to_dict() for r in reps], "count": len(reps)})
     except Exception as e:
+        logger.warning(f"[skills] century_compounders error: {e}")
         raise _err(str(e))
 
 
@@ -4163,10 +4266,11 @@ async def skill_century_sync_market(req: Optional[CenturySyncMarketSkillRequest]
     100x Century Compounder ratings into the persistent SQLite database.
     """
     try:
+        import asyncio
         from analysis.century_compounder import sync_and_precompute_market_compounders
 
         u_name = req.universe if req else "microcap250"
-        res = sync_and_precompute_market_compounders(universe_name=u_name)
+        res = await asyncio.to_thread(sync_and_precompute_market_compounders, universe_name=u_name)
         return _ok(res)
     except Exception as e:
         raise _err(str(e))
@@ -4182,40 +4286,54 @@ async def skill_pre_inflection_early_warning(
     generating actionable anti-FOMO entry brackets before the breakout candle detonates.
     """
     try:
+        import asyncio
         from engine.detectors.pre_inflection_dryup import detect_pre_inflection_dryup
         from market.history import get_ohlcv
 
-        universe = (req.universe if req and req.universe else None) or [
-            "TRENT",
-            "DIXON",
-            "KAYNES",
-            "PREMIERENE",
-            "WAAREEENER",
-            "INOXWIND",
-            "KPITTECH",
-            "ZENTEC",
-            "DATAPATTNS",
-            "ARE&M",
-            "NEWGEN",
-            "RATEGAIN",
-            "ASTRAL",
-            "POLYCAB",
-            "KALYANKJIL",
-            "CDSL",
-            "BSE",
-            "MCX",
-        ]
+        u_raw = req.universe if req and req.universe else None
+        if isinstance(u_raw, str):
+            from analysis.universe import resolve_dynamic_universe
+
+            universe, _ = resolve_dynamic_universe(u_raw, max_stocks=100)
+        elif isinstance(u_raw, list) and u_raw:
+            universe = u_raw
+        else:
+            universe = [
+                "TRENT",
+                "DIXON",
+                "KAYNES",
+                "PREMIERENE",
+                "WAAREEENER",
+                "INOXWIND",
+                "KPITTECH",
+                "ZENTEC",
+                "DATAPATTNS",
+                "ARE&M",
+                "NEWGEN",
+                "RATEGAIN",
+                "ASTRAL",
+                "POLYCAB",
+                "KALYANKJIL",
+                "CDSL",
+                "BSE",
+                "MCX",
+            ]
         top_n = req.top_n if req else 10
-        alerts = []
-        for sym in universe:
-            clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
-            df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
-            if df is not None and len(df) >= 25:
-                ltp = float(df["close"].iloc[-1])
-                alt = detect_pre_inflection_dryup(clean_sym, df, ltp)
-                if alt:
-                    alerts.append(alt.to_dict())
-        return _ok({"alerts": alerts[:top_n], "count": len(alerts[:top_n])})
+
+        def _do_early_warning_scan():
+            alerts = []
+            for sym in universe:
+                clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+                df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
+                if df is not None and len(df) >= 25:
+                    ltp = float(df["close"].iloc[-1])
+                    alt = detect_pre_inflection_dryup(clean_sym, df, ltp)
+                    if alt:
+                        alerts.append(alt.to_dict())
+            return alerts[:top_n]
+
+        alerts = await asyncio.to_thread(_do_early_warning_scan)
+        return _ok({"alerts": alerts, "count": len(alerts)})
     except Exception as e:
         raise _err(str(e))
 
@@ -5384,6 +5502,10 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             except Exception:
                 pass
 
+        effective_atr = (
+            atr_val if (atr_val is not None and atr_val > 0) else max(cur_ltp * 0.015, 1.0)
+        )
+
         # 2. Rich AI Personas with dynamically calculated quant metrics for setup_sym
         rvol_val = vp_report.rvol_20d if vp_report else 1.0
         structure_dir = ms_report.regime if ms_report else "NEUTRAL"
@@ -5469,8 +5591,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             kedia_metric = "SMILE: N/A"
 
         # 3. Taleb: Antifragile Convexity & Spreads
-        if atr_val is not None and cur_ltp > 0:
-            vol_pct = (atr_val / cur_ltp) * 100
+        vol_pct = (atr_val / cur_ltp) * 100 if (atr_val is not None and cur_ltp > 0) else None
+        if vol_pct is not None:
             taleb_conf = max(40, min(95, int(88 - (vol_pct * 8))))
             taleb_verdict = (
                 "POSITIVE CONVEXITY" if vol_pct <= 2.8 else "HIGH VOLATILITY (SPREADS ONLY)"
@@ -5800,13 +5922,13 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "confidence": taleb_conf,
                 "accent": "cyan",
                 "checklist": [
-                    f"Realized ATR Volatility: {vol_pct:.2f}%",
+                    f"Realized ATR Volatility: {f'{vol_pct:.2f}%' if vol_pct is not None else 'Pending'}",
                     "Defined-Risk Options Spread Mandate",
                     "Zero Unhedged Short Gamma Exposure",
                     "Positive Convexity Tail Skew Capture",
                 ],
                 "metrics": {
-                    "ATR Vol": f"{vol_pct:.2f}%",
+                    "ATR Vol": f"{vol_pct:.2f}%" if vol_pct is not None else "Pending",
                     "Max Loss": "Strictly Capped",
                     "Payoff": "Defined-Risk",
                     "Tail Hedge": "Active",
@@ -5882,13 +6004,13 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "accent": "purple",
                 "checklist": [
                     simons_metric,
-                    f"Realized ATR: Rs. {atr_val:.2f}",
+                    f"Realized ATR: {f'Rs. {atr_val:.2f}' if atr_val is not None else 'Pending'}",
                     f"Regime Direction: {structure_dir}",
                     "Kelly Risk-Parity Lot Quantization",
                 ],
                 "metrics": {
                     "Metric": simons_metric.split("|")[0].strip(),
-                    "ATR": f"Rs. {atr_val:.2f}",
+                    "ATR": f"Rs. {atr_val:.2f}" if atr_val is not None else "Pending",
                     "Regime": structure_dir,
                     "Edge": "Quantitative",
                 },
@@ -6263,10 +6385,10 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                     supports += [
                         float(l) for l in df["low"].tail(10).tolist() if float(l) < cur_ltp
                     ]
-                nearest_sup = max(supports) if supports else (cur_ltp - 1.5 * atr_val)
+                nearest_sup = max(supports) if supports else (cur_ltp - 1.5 * effective_atr)
 
-                min_risk = max(cur_ltp * 0.0035, atr_val * 0.8)
-                max_risk = max(cur_ltp * 0.025, atr_val * 2.5)
+                min_risk = max(cur_ltp * 0.0035, effective_atr * 0.8)
+                max_risk = max(cur_ltp * 0.025, effective_atr * 2.5)
                 raw_risk = max(cur_ltp - nearest_sup * 0.998, min_risk)
                 risk_unit = min(raw_risk, max_risk)
 
@@ -6299,10 +6421,10 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                     resistances += [
                         float(h) for h in df["high"].tail(10).tolist() if float(h) > cur_ltp
                     ]
-                nearest_res = min(resistances) if resistances else (cur_ltp + 1.5 * atr_val)
+                nearest_res = min(resistances) if resistances else (cur_ltp + 1.5 * effective_atr)
 
-                min_risk = max(cur_ltp * 0.0035, atr_val * 0.8)
-                max_risk = max(cur_ltp * 0.025, atr_val * 2.5)
+                min_risk = max(cur_ltp * 0.0035, effective_atr * 0.8)
+                max_risk = max(cur_ltp * 0.025, effective_atr * 2.5)
                 raw_risk = max(nearest_res * 1.002 - cur_ltp, min_risk)
                 risk_unit = min(raw_risk, max_risk)
 
@@ -8049,6 +8171,12 @@ async def skill_gex_snapshot(
                 "as_of_display": now_time,
                 "data_state": source_info.get("data_state", "UNVERIFIED"),
                 "data_source": source_info.get("provider", "unknown"),
+                "source": source_info.get("source", ""),
+                "is_broker": bool(
+                    source_info.get("source") == "BROKER_REST"
+                    or source_info.get("provider")
+                    in ("fyers", "zerodha", "angelone", "shoonya", "mstock")
+                ),
                 "source_label": source_info.get("source_label", "Unverified Feed"),
                 "is_realtime": source_info.get("is_realtime", False),
                 "is_market_open": source_info.get("is_market_open", False),

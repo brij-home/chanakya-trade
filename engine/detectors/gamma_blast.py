@@ -308,7 +308,7 @@ def detect_gamma_blast(
         strike_diff_pct = ((strike - spot) / spot) * 100.0
         # Delta-Gated Sweet-Spot Filter: Indices demand ATM/Near-ATM (<= 0.6%), equities allow up to 1.2%
         max_call_otm = 0.6 if is_index else 1.2
-        max_call_itm = 0.4 if is_index else 0.8
+        max_call_itm = 0.6 if is_index else 0.8
         if not (-max_call_itm <= strike_diff_pct <= max_call_otm):
             continue
 
@@ -666,6 +666,7 @@ def detect_gamma_blast(
                         expiry=exp_date or "",
                         option_ltp=opt_ltp,
                         lot_size=lot_sz,
+                        contract_symbol=contract_sym,
                     )
                     if opt_ltp > 0 and exp_date
                     else None
@@ -711,6 +712,17 @@ def detect_gamma_blast(
                 confidence = (
                     confidence if ("confidence" in locals() and confidence is not None) else 70
                 )
+
+            # Scalper Real-Money Friction & Risk Calibration (STT, exchange turnover, slippage)
+            friction_pts_ce = (
+                round(max(1.0, min(5.0, opt_ltp * 0.015 + 0.8)), 1)
+                if is_index
+                else round(max(0.5, opt_ltp * 0.025), 1)
+            )
+            risk_nom_ce = max(0.5, opt_ltp - sl_premium) if opt_ltp > 0 else 1.0
+            reward_nom_ce = max(0.5, target_premium - opt_ltp) if opt_ltp > 0 else 1.0
+            net_rr_ce = f"1:{round(max(0.1, reward_nom_ce - friction_pts_ce) / max(0.1, risk_nom_ce + friction_pts_ce), 2)}"
+            max_loss_ce_inr = round(risk_nom_ce * lot_sz, 0)
 
             headline = (
                 f"⚡ CALL GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} CE"
@@ -814,6 +826,7 @@ def detect_gamma_blast(
                         "oi_change_pct": oi_chg_pct,
                         "volume": volume,
                         "vol_oi_ratio": vol_oi_ratio,
+                        "rvol": max(float(vol_oi_ratio or 1.0), 1.0),
                         "liquidity": liq_audit,
                         "is_volume_expansion": is_high_volume_expansion,
                         "spot": spot,
@@ -846,13 +859,25 @@ def detect_gamma_blast(
                         ),
                         "india_vix": vix_val,
                         "is_high_iv_risk": is_high_iv_risk,
+                        "friction_pts": friction_pts_ce,
+                        "net_risk_reward": net_rr_ce,
+                        "max_loss_rupees": max_loss_ce_inr,
                     },
                     actionable_plan={
                         "action": "BUY CE",
                         "contract": contract_sym,
-                        "preferred_vehicle": "DEEP_ITM_OR_SPREAD"
-                        if is_high_iv_risk
-                        else "NAKED_OPTION_OR_SPREAD",
+                        "preferred_vehicle": (
+                            "DEEP_ITM_OR_SPREAD"
+                            if (
+                                is_high_iv_risk
+                                or (
+                                    exp_date
+                                    and now_dt.hour >= 13
+                                    and str(exp_date)[:10] == now_dt.strftime("%Y-%m-%d")
+                                )
+                            )
+                            else "NAKED_OPTION_OR_SPREAD"
+                        ),
                         "iv_crush_defense": (
                             f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65), Bull/Bear Vertical Spreads, or Futures."
                             if is_high_iv_risk
@@ -870,16 +895,27 @@ def detect_gamma_blast(
                         else "Market",
                         "entry_range": entry_range_ce,
                         "no_chase": f"DO NOT CHASE above ₹{no_chase_ce}",
+                        "target_0_5": f"₹{opt_plan['t0_5_premium']:,.2f}"
+                        if (opt_plan and opt_plan.get("t0_5_premium"))
+                        else None,
                         "target_1": f"₹{target_premium:,.2f}",
                         "target": f"₹{target_premium:,.2f} ({t1_pct_str})",
                         "target_2": f"₹{t2_premium:,.2f}"
                         if t2_premium
                         else f"₹{round(target_premium * 1.6, 2):,.2f}",
+                        "target_3": f"₹{t3_premium:,.2f}"
+                        if t3_premium
+                        else f"₹{round(target_premium * 2.5, 2):,.2f}",
+                        "runner_target": f"₹{t3_premium:,.2f}"
+                        if t3_premium
+                        else f"₹{round(target_premium * 2.5, 2):,.2f}",
                         "target_moonshot": f"₹{t3_premium:,.2f}"
                         if t3_premium
                         else f"₹{round(target_premium * 2.5, 2):,.2f}",
                         "stop_loss": f"₹{sl_premium:,.2f}",
                         "risk_reward": rr_str,
+                        "net_risk_reward": net_rr_ce,
+                        "max_loss_capped": max_loss_ce_inr,
                         "profit_rule": (
                             f"⚠️ INTRADAY SCALP ONLY (SEBI Physical Settlement Week - Mandatory square-off before 15:00 IST). {profit_rule_base}"
                             if is_phys_week
@@ -903,7 +939,7 @@ def detect_gamma_blast(
         strike_diff_pct = ((strike - spot) / spot) * 100.0
         # Delta-Gated Sweet-Spot Filter: Indices demand ATM/Near-ATM (<= 0.6%), equities allow up to 1.2%
         max_put_otm = 0.6 if is_index else 1.2
-        max_put_itm = 0.4 if is_index else 0.8
+        max_put_itm = 0.6 if is_index else 0.8
         if not (-max_put_otm <= strike_diff_pct <= max_put_itm):
             continue
 
@@ -1262,6 +1298,7 @@ def detect_gamma_blast(
                         expiry=exp_date or "",
                         option_ltp=opt_ltp,
                         lot_size=lot_sz,
+                        contract_symbol=contract_sym,
                     )
                     if opt_ltp > 0 and exp_date
                     else None
@@ -1307,6 +1344,17 @@ def detect_gamma_blast(
                 confidence = (
                     confidence if ("confidence" in locals() and confidence is not None) else 70
                 )
+
+            # Scalper Real-Money Friction & Risk Calibration (STT, exchange turnover, slippage)
+            friction_pts_pe = (
+                round(max(1.0, min(5.0, opt_ltp * 0.015 + 0.8)), 1)
+                if is_index
+                else round(max(0.5, opt_ltp * 0.025), 1)
+            )
+            risk_nom_pe = max(0.5, opt_ltp - sl_premium) if opt_ltp > 0 else 1.0
+            reward_nom_pe = max(0.5, target_premium - opt_ltp) if opt_ltp > 0 else 1.0
+            net_rr_pe = f"1:{round(max(0.1, reward_nom_pe - friction_pts_pe) / max(0.1, risk_nom_pe + friction_pts_pe), 2)}"
+            max_loss_pe_inr = round(risk_nom_pe * lot_sz, 0)
 
             headline = (
                 f"⚡ PUT GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} PE"
@@ -1412,6 +1460,7 @@ def detect_gamma_blast(
                         "oi_change_pct": oi_chg_pct,
                         "volume": volume,
                         "vol_oi_ratio": vol_oi_ratio,
+                        "rvol": max(float(vol_oi_ratio or 1.0), 1.0),
                         "liquidity": liq_audit,
                         "is_volume_expansion": is_high_volume_expansion,
                         "spot": spot,
@@ -1446,13 +1495,25 @@ def detect_gamma_blast(
                         ),
                         "india_vix": vix_val,
                         "is_high_iv_risk": is_high_iv_risk,
+                        "friction_pts": friction_pts_pe,
+                        "net_risk_reward": net_rr_pe,
+                        "max_loss_rupees": max_loss_pe_inr,
                     },
                     actionable_plan={
                         "action": "BUY PE",
                         "contract": contract_sym,
-                        "preferred_vehicle": "DEEP_ITM_OR_SPREAD"
-                        if is_high_iv_risk
-                        else "NAKED_OPTION_OR_SPREAD",
+                        "preferred_vehicle": (
+                            "DEEP_ITM_OR_SPREAD"
+                            if (
+                                is_high_iv_risk
+                                or (
+                                    exp_date
+                                    and now_dt.hour >= 13
+                                    and str(exp_date)[:10] == now_dt.strftime("%Y-%m-%d")
+                                )
+                            )
+                            else "NAKED_OPTION_OR_SPREAD"
+                        ),
                         "iv_crush_defense": (
                             f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65), Bull/Bear Vertical Spreads, or Futures."
                             if is_high_iv_risk
@@ -1470,16 +1531,27 @@ def detect_gamma_blast(
                         else "Market",
                         "entry_range": entry_range_pe,
                         "no_chase": f"DO NOT CHASE above ₹{no_chase_pe}",
+                        "target_0_5": f"₹{opt_plan['t0_5_premium']:,.2f}"
+                        if (opt_plan and opt_plan.get("t0_5_premium"))
+                        else None,
                         "target_1": f"₹{target_premium:,.2f}",
                         "target": f"₹{target_premium:,.2f} ({t1_pct_str})",
                         "target_2": f"₹{t2_premium:,.2f}"
                         if t2_premium
                         else f"₹{round(target_premium * 1.6, 2):,.2f}",
+                        "target_3": f"₹{t3_premium:,.2f}"
+                        if t3_premium
+                        else f"₹{round(target_premium * 2.5, 2):,.2f}",
+                        "runner_target": f"₹{t3_premium:,.2f}"
+                        if t3_premium
+                        else f"₹{round(target_premium * 2.5, 2):,.2f}",
                         "target_moonshot": f"₹{t3_premium:,.2f}"
                         if t3_premium
                         else f"₹{round(target_premium * 2.5, 2):,.2f}",
                         "stop_loss": f"₹{sl_premium:,.2f}",
                         "risk_reward": rr_str,
+                        "net_risk_reward": net_rr_pe,
+                        "max_loss_capped": max_loss_pe_inr,
                         "profit_rule": (
                             f"⚠️ INTRADAY SCALP ONLY (SEBI Physical Settlement Week - Mandatory square-off before 15:00 IST). {profit_rule_base}"
                             if is_phys_week

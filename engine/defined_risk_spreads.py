@@ -95,20 +95,13 @@ class DefinedRiskSpread:
 
 def _get_lot_size(symbol: str) -> int:
     try:
-        from engine.position_sizer import get_lot_size
+        from market.instruments import get_fno_lot_size
 
-        ls = get_lot_size(symbol)
+        ls = get_fno_lot_size(symbol)
         if ls and ls > 0:
             return ls
     except Exception:
         pass
-    sym = symbol.upper()
-    if sym == "NIFTY" or "NIFTY 50" in sym:
-        return 75  # Current revised NSE lot size
-    elif sym in ("BANKNIFTY", "NIFTY BANK"):
-        return 30  # NSE BankNifty revised lot
-    elif sym == "FINNIFTY":
-        return 65
     return 100
 
 
@@ -352,7 +345,7 @@ def print_defined_risk_spread(spread: DefinedRiskSpread) -> None:
         f"  [bold]Net Cashflow[/bold]      : [{flow_style}]{flow_label}[/{flow_style}]",
         f"  [bold]Max Profit[/bold]        : [bold green]₹{spread.max_profit:,.2f}[/bold green]",
         f"  [bold]Max Loss (Capped)[/bold] : [bold red]₹{spread.max_loss:,.2f}[/bold red]",
-        f"  [bold]Risk : Reward[/bold]     : [bold]1 : {spread.risk_reward_ratio:.2f}[/bold]",
+        f"  [bold]R:R Ratio[/bold]         : [bold]1 : {spread.risk_reward_ratio:.2f}[/bold]",
         f"  [bold]Breakeven(s)[/bold]      : {', '.join(f'₹{b:,.2f}' for b in spread.breakeven_points)}",
         f"  [bold]Capital / Margin[/bold]  : ₹{spread.capital_required:,.2f}",
     ]

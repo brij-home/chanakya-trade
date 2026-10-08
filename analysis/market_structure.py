@@ -1078,6 +1078,10 @@ def check_mtf_structural_alignment(
     Returns alignment_count (0–3): how many timeframes agree with `direction`.
     Callers should require alignment_count >= 2 for high-conviction trades.
     """
+    if df_5m is not None and not isinstance(df_5m.index, pd.DatetimeIndex):
+        df_5m = df_5m.copy()
+        df_5m.index = pd.date_range(end=pd.Timestamp.now(), periods=len(df_5m), freq="5min")
+
     df_hourly = df_1h
     if df_hourly is None or df_hourly.empty:
         if df_5m is not None and len(df_5m) >= 24:
@@ -1117,6 +1121,9 @@ def check_mtf_structural_alignment(
             "nearest_wall": 0.0,
             "distance_pct": 99.0,
             "reason": "Insufficient 1H data; defaulting to neutral",
+            "alignment_count": 1,
+            "tf_5m_trend": "NEUTRAL",
+            "tf_15m_trend": "NEUTRAL",
         }
 
     closes = df_hourly["close"] if "close" in df_hourly.columns else df_hourly["Close"]

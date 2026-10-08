@@ -369,7 +369,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
               className="text-[8px] font-mono font-bold text-rose-700 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/15 px-1 py-px rounded border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap"
               title="No-Chase limit: Entries beyond this price are disqualified"
             >
-              Max {currSym}{fmtP(alert.no_chase_boundary)}
+              NoChase {currSym}{fmtP(alert.no_chase_boundary)}
             </span>
           )}
           {slNum && (

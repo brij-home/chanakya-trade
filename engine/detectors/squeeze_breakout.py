@@ -104,16 +104,25 @@ def _format_squeeze_alert(
         icon = "🎯" if stage == "EARLY_WARNING" else "🚀"
         status_txt = "COILING" if stage == "EARLY_WARNING" else "IGNITED"
         opt_headline = f"{icon} SQUEEZE {status_txt}: {opt_plan.contract_symbol} @ ₹{opt_plan.entry_premium:,.1f} (Spot ₹{ltp:,.1f})"
+        opt_no_chase = round(opt_plan.entry_premium * 1.06, 1)
+        opt_entry_max = round(min(opt_no_chase - 0.5, opt_plan.entry_premium * 1.03), 1)
+        opt_entry_min = round(max(opt_plan.sl_premium + 0.5, opt_plan.entry_premium * 0.97), 1)
+        opt_entry_rg = f"₹{opt_entry_min:,.1f} – ₹{opt_entry_max:,.1f}"
+        metrics["no_chase_boundary"] = opt_no_chase
         act_plan = {
             "action": f"BUY {opt_plan.option_type}",
             "contract": opt_plan.contract_symbol,
             "instrument": opt_plan.contract_symbol,
             "instrument_type": "OPTION",
-            "recommended_entry": f"₹{opt_plan.entry_premium:,.2f}",
+            "recommended_entry": opt_entry_rg,
+            "entry_range": opt_entry_rg,
             "stop_loss": f"₹{opt_plan.sl_premium:,.1f}",
             "target": f"₹{opt_plan.t1_premium:,.1f}",
+            "target_0_5": f"₹{opt_plan.t0_5_premium:,.1f}" if opt_plan.t0_5_premium else None,
             "target_1": f"₹{opt_plan.t1_premium:,.1f}",
             "target_2": f"₹{opt_plan.t2_premium:,.1f}",
+            "target_3": f"₹{opt_plan.t3_premium:,.1f}" if opt_plan.t3_premium else None,
+            "runner_target": f"₹{opt_plan.t3_premium:,.1f}" if opt_plan.t3_premium else None,
             "risk_reward": rr_str,
             "underlying_spot": f"₹{ltp:,.1f}",
             "underlying_sl": f"₹{sl:,.1f}",
@@ -122,6 +131,7 @@ def _format_squeeze_alert(
             "strike": opt_plan.strike,
             "option_plan": opt_plan.as_dict(),
             "trade_plan": tp_dict,
+            "no_chase_boundary": f"₹{opt_no_chase:,.1f}",
         }
         return AutoAlert(
             alert_id=generate_alert_id(
@@ -140,6 +150,7 @@ def _format_squeeze_alert(
             trigger_level=opt_plan.entry_premium,
             target_level=opt_plan.t1_premium,
             stop_loss=opt_plan.sl_premium,
+            no_chase_boundary=opt_no_chase,
             strike=opt_plan.strike,
             option_type=opt_plan.option_type,
             contract_symbol=opt_plan.contract_symbol,
@@ -155,6 +166,29 @@ def _format_squeeze_alert(
         )
 
     # Standard Cash Equity Alert
+    risk_pts = abs(trigger_lvl - sl) if sl > 0 else (ltp * 0.015)
+    chase_pts = max(0.5, round(risk_pts * 0.30, 2))
+    cash_no_chase = (
+        round(trigger_lvl + chase_pts, 2)
+        if direction == "BULLISH"
+        else round(trigger_lvl - chase_pts, 2)
+    )
+    metrics["no_chase_boundary"] = cash_no_chase
+
+    # Ensure entry range respects no-chase boundary
+    if direction == "BULLISH":
+        e_min = round(max(sl + 0.1, ltp * 0.998), 1)
+        e_max = round(min(cash_no_chase - 0.1, ltp * 1.008), 1)
+        if e_min >= e_max:
+            e_min = round(cash_no_chase - 1.0, 1)
+        clean_entry_rg = f"₹{e_min:,.1f} – ₹{e_max:,.1f}"
+    else:
+        e_max = round(min(sl - 0.1, ltp * 1.002), 1)
+        e_min = round(max(cash_no_chase + 0.1, ltp * 0.992), 1)
+        if e_min >= e_max:
+            e_max = round(cash_no_chase + 1.0, 1)
+        clean_entry_rg = f"₹{e_min:,.1f} – ₹{e_max:,.1f}"
+
     return AutoAlert(
         alert_id=generate_alert_id(
             symbol,
@@ -172,15 +206,18 @@ def _format_squeeze_alert(
         trigger_level=trigger_lvl,
         target_level=target,
         stop_loss=sl,
+        no_chase_boundary=cash_no_chase,
         time_horizon=time_horizon,
         metrics=metrics,
         actionable_plan={
             "action": action,
-            "entry_range": entry_rg,
+            "entry_range": clean_entry_rg,
+            "recommended_entry": clean_entry_rg,
             "breakout_trigger": f"₹{trigger_lvl:.1f}",
             "target": f"₹{target:.1f}",
             "target_2": f"₹{target_2:.1f}",
             "stop_loss": f"₹{sl:.1f}",
+            "no_chase_boundary": f"₹{cash_no_chase:.1f}",
             "risk_reward": rr_str,
             "trade_plan": tp_dict,
         },

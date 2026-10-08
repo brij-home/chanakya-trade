@@ -40,6 +40,8 @@ class MacroSnapshot:
     us_10y_change: Optional[float] = None  # bps change (not %)
     dxy: Optional[float] = None  # Dollar index
     dxy_change: Optional[float] = None  # % change
+    natural_gas: Optional[float] = None  # Henry Hub USD/MMBtu
+    natural_gas_change: Optional[float] = None  # % change
 
 
 # Stock → macro factor sensitivity mapping
@@ -100,6 +102,8 @@ def get_macro_snapshot() -> MacroSnapshot:
                 us_10y_change=cached.get("us_10y_change"),
                 dxy=cached.get("dxy"),
                 dxy_change=cached.get("dxy_change"),
+                natural_gas=cached.get("natural_gas"),
+                natural_gas_change=cached.get("natural_gas_change"),
             )
     except Exception:
         pass
@@ -197,6 +201,17 @@ def get_macro_snapshot() -> MacroSnapshot:
         except Exception:
             pass
 
+        # Henry Hub Natural Gas
+        try:
+            t = yf.Ticker("NG=F")
+            info = t.fast_info
+            snap.natural_gas = float(info.get("lastPrice", 0) or info.get("last_price", 0) or 0)
+            prev = float(info.get("previousClose", 0) or info.get("previous_close", 0) or 0)
+            if snap.natural_gas and prev:
+                snap.natural_gas_change = round((snap.natural_gas - prev) / prev * 100, 2)
+        except Exception:
+            pass
+
         # Save to macro cache (15-min TTL)
         try:
             from engine.analysis_cache import analysis_cache
@@ -214,6 +229,8 @@ def get_macro_snapshot() -> MacroSnapshot:
                     "us_10y_change": snap.us_10y_change,
                     "dxy": snap.dxy,
                     "dxy_change": snap.dxy_change,
+                    "natural_gas": snap.natural_gas,
+                    "natural_gas_change": snap.natural_gas_change,
                 },
                 ttl_minutes=15,
             )

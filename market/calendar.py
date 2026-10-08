@@ -19,7 +19,6 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta
-from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -156,7 +155,9 @@ _HOLIDAYS_CATALOG: dict[date, HolidayRule] = {
 def _load_custom_holidays() -> dict[date, HolidayRule]:
     """Loads optional user custom holidays from ~/.trading_platform/holidays.json."""
     custom = {}
-    cfg_path = Path.home() / ".trading_platform" / "holidays.json"
+    from config.paths import app_data_path
+
+    cfg_path = app_data_path("holidays.json")
     if cfg_path.exists():
         try:
             data = json.loads(cfg_path.read_text(encoding="utf-8"))

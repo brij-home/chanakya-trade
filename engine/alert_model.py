@@ -19,6 +19,15 @@ from engine.alert_expiry import (
 
 IST = ZoneInfo("Asia/Kolkata")
 
+# ── Interception Pipeline Stages ───────────────────────────────────────────
+STAGE_STALK = "STALK"  # Radar tracking & coiling base identified
+STAGE_PRIMED = "PRIMED"  # High-frequency surveillance (within ±0.35% of trigger)
+STAGE_EARLY_WARNING = "EARLY_WARNING"  # Backward-compatible early warning
+STAGE_IGNITED = "IGNITED"  # Trigger level crossed with micro-confirmation
+STAGE_INVALIDATED = "INVALIDATED"  # Stop-loss breached or setup structure broken
+STAGE_EXPIRED = "EXPIRED"  # Session or TTL expired
+STAGE_COMPLETED = "COMPLETED"  # Final profit targets or runner exited
+
 INDEX_WEEKLY_EXPIRY_WEEKDAY = {
     "MIDCPNIFTY": 0,  # Monday
     "BANKEX": 0,  # Monday
@@ -101,7 +110,7 @@ class AutoAlert:
     alert_type: (
         str  # GAMMA_BLAST | SQUEEZE_BREAKOUT | CIRCUIT_WARNING | SMC_SWEEP | CONFLUENCE_INFLECTION
     )
-    stage: str  # "EARLY_WARNING" | "IGNITED" | "INVALIDATED" | "EXPIRED"
+    stage: str  # "STALK" | "PRIMED" | "EARLY_WARNING" | "IGNITED" | "INVALIDATED" | "EXPIRED"
     symbol: str
     exchange: str
     direction: str  # "BULLISH" | "BEARISH" | "NEUTRAL"
@@ -142,6 +151,9 @@ class AutoAlert:
     expiry_type: Optional[str] = None  # "WEEKLY" | "MONTHLY"
     underlying_spot: Optional[float] = None
     option_premium: Optional[float] = None
+    derivative_type: Optional[str] = None  # "OPT" | "FUT"
+    option_stop_loss: Optional[float] = None
+    option_target_level: Optional[float] = None
     market_status: str = "SESSION_CLOSED"  # "LIVE" | "PRE_MARKET" | "SESSION_CLOSED"
     lot_size: Optional[int] = None  # Contract market lot size (SEBI 2026 active)
     segment: str = ""  # "FNO" | "EQUITY" | "COMMODITY" | "CURRENCY"
@@ -158,7 +170,7 @@ class AutoAlert:
     in_flight_warning_at: Optional[str] = None
     mtf_confluence: Optional[str] = None
     vix_regime: Optional[str] = None
-    time_horizon: str = "INTRADAY"  # "INTRADAY" | "SWING_SHORT" | "SWING_MID" | "LONG_TERM" | "POSITIONAL" | "MULTIBAGGER"
+    time_horizon: str = "INTRADAY"  # "SCALP" | "INTRADAY" | "SWING_SHORT" | "SWING_MID" | "LONG_TERM" | "POSITIONAL" | "MULTIBAGGER" | "ROLLING_24H"
     eta_label: Optional[str] = None
     setup_style: str = "CONTINUATION"  # "CONTINUATION" | "REVERSAL"
     entry_type: str = "LIMIT_ON_PULLBACK"  # "LIMIT_ON_PULLBACK" | "BREAKOUT_STOP" | "MARKET_NOW"
@@ -179,6 +191,7 @@ class AutoAlert:
     bid_ask_spread_pct: Optional[float] = None
     strike_roll_recommendation: Optional[dict[str, Any]] = None
     initial_stop_loss: Optional[float] = None
+    initial_entry_premium: Optional[float] = None
     update_count: int = 0
     telegram_update_count: int = 0
     update_number: Optional[int] = None
@@ -234,6 +247,23 @@ class AutoAlert:
                     pass
             elif self.stop_loss is not None and self.stop_loss > 0:
                 self.initial_stop_loss = float(self.stop_loss)
+
+        if self.initial_entry_premium is None:
+            if (
+                self.actionable_plan
+                and isinstance(self.actionable_plan.get("option_plan"), dict)
+                and self.actionable_plan["option_plan"].get("entry_premium")
+            ):
+                try:
+                    self.initial_entry_premium = float(
+                        self.actionable_plan["option_plan"]["entry_premium"]
+                    )
+                except (ValueError, TypeError):
+                    pass
+            elif self.option_premium is not None and self.option_premium > 0:
+                self.initial_entry_premium = float(self.option_premium)
+            elif (self.strike or self.option_type) and self.trigger_level > 0:
+                self.initial_entry_premium = float(self.trigger_level)
 
         if not self.created_at:
             self.created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
@@ -397,6 +427,14 @@ class AutoAlert:
                 or (getattr(self, "segment", "") or "").upper() == "CRYPTO"
             ):
                 self.time_horizon = "ROLLING_24H"
+            elif atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST") and (
+                "SCALP" in (self.headline or "").upper()
+                or "SCALP" in (self.summary or "").upper()
+                or "0DTE" in (self.headline or "").upper()
+            ):
+                self.time_horizon = "SCALP"
+            elif atype in ("INTRADAY_SCALP_ONLY", "FAST_SCALP"):
+                self.time_horizon = "SCALP"
             elif atype in (
                 "GAMMA_BLAST",
                 "INTRADAY_SPARK",
@@ -421,7 +459,9 @@ class AutoAlert:
             self.eta_label = "24h Rolling"
         elif not self.eta_label:
             th = (self.time_horizon or "INTRADAY").upper()
-            if th == "INTRADAY":
+            if th in ("SCALP", "INTRADAY_SCALP_ONLY"):
+                self.eta_label = "15–45m Scalp"
+            elif th == "INTRADAY":
                 if exch == "MCX":
                     self.eta_label = "Today 23:15 IST"
                 else:
@@ -608,16 +648,170 @@ class AutoAlert:
                 except (ValueError, TypeError):
                     pass
 
-        if is_long:
-            if sl >= ltp:
-                return False, f"Inverted Stop-Loss: SL (₹{sl:,.2f}) >= LTP (₹{ltp:,.2f})"
-            if t1 <= ltp:
-                return False, f"Inverted Target: Target (₹{t1:,.2f}) <= LTP (₹{ltp:,.2f})"
-        elif is_short:
-            if sl <= ltp:
-                return False, f"Inverted Bearish Stop-Loss: SL (₹{sl:,.2f}) <= LTP (₹{ltp:,.2f})"
-            if t1 >= ltp:
-                return False, f"Inverted Bearish Target: Target (₹{t1:,.2f}) >= LTP (₹{ltp:,.2f})"
+        has_trailing_ratchet = bool(
+            getattr(self, "should_trail", False)
+            or (getattr(self, "achieved_milestones", None))
+            or (
+                self.stage
+                in (
+                    "RUNNER_EXIT",
+                    "COMPLETED",
+                    "INVALIDATED",
+                    "TARGET_ACHIEVED",
+                    "TRAILING_UPDATE",
+                    "T1_ACHIEVED",
+                    "T2_ACHIEVED",
+                    "DE_RISK_0_5R",
+                    "BREAKEVEN_LOCKED",
+                )
+            )
+            or (
+                getattr(self, "target_status", "")
+                in ("RUNNER_CLOSED", "T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED")
+            )
+        )
+
+        if not has_trailing_ratchet:
+            if is_long:
+                if sl >= ltp:
+                    return False, f"Inverted Stop-Loss: SL (₹{sl:,.2f}) >= LTP (₹{ltp:,.2f})"
+                if t1 <= ltp:
+                    return False, f"Inverted Target: Target (₹{t1:,.2f}) <= LTP (₹{ltp:,.2f})"
+            elif is_short:
+                if sl <= ltp:
+                    return (
+                        False,
+                        f"Inverted Bearish Stop-Loss: SL (₹{sl:,.2f}) <= LTP (₹{ltp:,.2f})",
+                    )
+                if t1 >= ltp:
+                    return (
+                        False,
+                        f"Inverted Bearish Target: Target (₹{t1:,.2f}) >= LTP (₹{ltp:,.2f})",
+                    )
+
+            # Multi-Target Monotonicity Guard
+            # Enforce that Target 2 and Target 3 extend strictly beyond preceding targets in the trade's direction
+            plan_dict = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
+            opt_plan_dict = (
+                plan_dict.get("option_plan", {})
+                if isinstance(plan_dict.get("option_plan"), dict)
+                else {}
+            )
+            raw_t1 = (
+                opt_plan_dict.get("t1_premium")
+                or opt_plan_dict.get("target_1")
+                or plan_dict.get("target_1")
+                or plan_dict.get("target")
+                or getattr(self, "target_1", None)
+                or self.target_level
+            )
+            raw_t2 = (
+                opt_plan_dict.get("t2_premium")
+                or opt_plan_dict.get("target_2")
+                or plan_dict.get("target_2")
+                or getattr(self, "target_2", None)
+            )
+            raw_t3 = (
+                opt_plan_dict.get("t3_premium")
+                or opt_plan_dict.get("target_3")
+                or plan_dict.get("target_3")
+                or plan_dict.get("runner_target")
+                or getattr(self, "target_3", None)
+            )
+            t1_f, t2_f, t3_f = None, None, None
+            if raw_t1:
+                try:
+                    t1_f = float(str(raw_t1).replace(",", "").replace("₹", "").replace("$", ""))
+                except Exception:
+                    pass
+            if raw_t2:
+                try:
+                    t2_f = float(str(raw_t2).replace(",", "").replace("₹", "").replace("$", ""))
+                except Exception:
+                    pass
+            if raw_t3:
+                try:
+                    t3_f = float(str(raw_t3).replace(",", "").replace("₹", "").replace("$", ""))
+                except Exception:
+                    pass
+
+            # Check if the trade plan itself is buying an option (even if direction is BEARISH)
+            is_buying_option = bool(
+                is_opt
+                or plan_dict.get("instrument_type") == "OPTION"
+                or str(plan_dict.get("action", "")).startswith("BUY")
+                or (
+                    getattr(self, "derivative_type", "") == "OPT"
+                    and str((self.actionable_plan or {}).get("action", "")).startswith("BUY")
+                )
+            )
+            if t1_f and t2_f:
+                if is_buying_option or is_long:
+                    if t2_f <= t1_f:
+                        return (
+                            False,
+                            f"Inverted Target Hierarchy: Target 2 (₹{t2_f:,.2f}) <= Target 1 (₹{t1_f:,.2f})",
+                        )
+                elif is_short:
+                    if t2_f >= t1_f:
+                        return (
+                            False,
+                            f"Inverted Bearish Target Hierarchy: Target 2 (₹{t2_f:,.2f}) >= Target 1 (₹{t1_f:,.2f})",
+                        )
+            if t2_f and t3_f:
+                if is_buying_option or is_long:
+                    if t3_f <= t2_f:
+                        return (
+                            False,
+                            f"Inverted Target Hierarchy: Target 3 (₹{t3_f:,.2f}) <= Target 2 (₹{t2_f:,.2f})",
+                        )
+                elif is_short:
+                    if t3_f >= t2_f:
+                        return (
+                            False,
+                            f"Inverted Bearish Target Hierarchy: Target 3 (₹{t3_f:,.2f}) >= Target 2 (₹{t2_f:,.2f})",
+                        )
+
+            # Zero / Micro Risk Guard:
+            entry_ref = float(self.trigger_level or getattr(self, "entry_price", 0.0) or ltp)
+            risk_dist = abs(entry_ref - sl)
+            if entry_ref > 0 and (risk_dist / entry_ref) < 0.0005:
+                return (
+                    False,
+                    f"Micro-Risk Noise Trap: Stop-loss distance (₹{risk_dist:,.2f}) is < 0.05% of entry (₹{entry_ref:,.2f})",
+                )
+
+            # Cash Equity Daily Circuit Limit Guard (NSE/BSE max 20% single-day bands)
+            exch_str = str(self.exchange or "NSE").upper()
+            is_cash_equity = (
+                not is_opt
+                and exch_str in ("NSE", "BSE")
+                and not str(self.symbol).endswith("FUT")
+                and getattr(self, "time_horizon", "INTRADAY") == "INTRADAY"
+            )
+            if is_cash_equity and entry_ref > 0 and not is_test:
+                move_pct = (abs(t1 - entry_ref) / entry_ref) * 100.0
+                if move_pct > 25.0:
+                    return (
+                        False,
+                        f"Circuit Limit Violation: Intraday cash equity target move ({move_pct:.1f}%) exceeds maximum daily circuit band (20%)",
+                    )
+
+        else:
+            # For trailing stops, validate that initial stop was geometrically sound
+            init_sl = float(getattr(self, "initial_stop_loss", 0.0) or 0.0)
+            entry_p = float(self.trigger_level or getattr(self, "entry_price", 0.0) or 0.0)
+            if init_sl > 0 and entry_p > 0:
+                if is_long and init_sl >= entry_p:
+                    return (
+                        False,
+                        f"Inverted Initial Stop-Loss: Initial SL (₹{init_sl:,.2f}) >= Entry (₹{entry_p:,.2f})",
+                    )
+                elif is_short and init_sl <= entry_p:
+                    return (
+                        False,
+                        f"Inverted Initial Bearish Stop-Loss: Initial SL (₹{init_sl:,.2f}) <= Entry (₹{entry_p:,.2f})",
+                    )
 
         # Contract vs Expiry Date Coherence
         if self.contract_symbol and self.expiry_date:
@@ -651,6 +845,167 @@ class AutoAlert:
                 pass
 
         return True, ""
+
+    def normalize_target_hierarchy(self) -> None:
+        """
+        Institutional self-healing target normalizer:
+        Ensures strict monotonic hierarchy across all internal and displayed target fields:
+        - For Long / Option Buying: SL < Entry < T1 < T2 < T3 (Runner)
+        - For Short: SL > Entry > T1 > T2 > T3 (Runner)
+        Synchronizes actionable_plan['target_1'], actionable_plan['target'],
+        actionable_plan['target_2'], actionable_plan['target_3'], and self.target_level
+        so that actionable_plan['target'] NEVER aliases T3, preventing T1 > T2 inversions.
+        """
+        if not isinstance(self.actionable_plan, dict):
+            return
+
+        try:
+            from engine.alert_expiry import is_alert_option_premium_level
+
+            is_opt = is_alert_option_premium_level(self)
+        except Exception:
+            is_opt = bool(
+                self.alert_type in ("OPTIONS_MOMENTUM", "OPTION_WRITE")
+                or (
+                    self.contract_symbol
+                    and (self.contract_symbol.endswith("CE") or self.contract_symbol.endswith("PE"))
+                )
+            )
+
+        act_str = str(self.actionable_plan.get("action", "")).upper()
+        plan_is_option = self.actionable_plan.get("instrument_type") == "OPTION"
+        is_buying_option = bool(
+            is_opt
+            or plan_is_option
+            or act_str.startswith("BUY")
+            or (getattr(self, "derivative_type", "") == "OPT" and act_str.startswith("BUY"))
+        )
+        is_short = not is_buying_option and (
+            act_str.startswith("SELL")
+            or act_str.startswith("SHORT")
+            or str(self.direction).upper() in ("BEARISH", "SHORT", "SELL")
+        )
+
+        plan_dict = self.actionable_plan
+        opt_plan = (
+            plan_dict.get("option_plan") if isinstance(plan_dict.get("option_plan"), dict) else {}
+        )
+
+        # If the actionable plan represents an option vehicle (option buying/selling):
+        if plan_is_option:
+            opt_entry = float(
+                getattr(self, "option_premium", 0.0)
+                or (plan_dict.get("trade_plan") or {}).get("entry_price", 0.0)
+                or (plan_dict.get("option_alternative") or {}).get("ltp", 0.0)
+                or 0.0
+            )
+            entry_ref = (
+                opt_entry
+                if opt_entry > 0
+                else float(
+                    self.trigger_level or getattr(self, "entry_price", 0.0) or self.ltp or 0.0
+                )
+            )
+            target_sources = [
+                plan_dict.get("target_1"),
+                plan_dict.get("target_2"),
+                plan_dict.get("target_3"),
+                plan_dict.get("runner_target"),
+                plan_dict.get("target"),
+                getattr(self, "option_target_level", None),
+                getattr(self, "option_target_1", None),
+                getattr(self, "option_target_2", None),
+                opt_plan.get("t1_premium"),
+                opt_plan.get("t2_premium"),
+                opt_plan.get("t3_premium"),
+                opt_plan.get("target_1"),
+                opt_plan.get("target_2"),
+            ]
+            # If this is a pure option alert, self.target_level also represents option premium target
+            if is_opt:
+                target_sources.append(self.target_level)
+        else:
+            entry_ref = float(
+                self.trigger_level or getattr(self, "entry_price", 0.0) or self.ltp or 0.0
+            )
+            target_sources = [
+                plan_dict.get("target_1"),
+                plan_dict.get("target_2"),
+                plan_dict.get("target_3"),
+                plan_dict.get("runner_target"),
+                plan_dict.get("target"),
+                self.target_level,
+            ]
+
+        # Collect raw target candidates from all plan keys
+        candidates: list[float] = []
+        for src in target_sources:
+            if src is None:
+                continue
+            try:
+                clean_num = float(
+                    str(src).replace(",", "").replace("₹", "").replace("$", "").strip()
+                )
+                if clean_num > 0 and clean_num not in candidates:
+                    # Avoid duplicates within 0.05
+                    if not any(abs(clean_num - c) < 0.05 for c in candidates):
+                        candidates.append(clean_num)
+            except Exception:
+                pass
+
+        if not candidates:
+            return
+
+        # Directional filter: profit targets must extend beyond entry
+        if entry_ref > 0:
+            if not is_short:
+                # Long / option buying: targets must be >= entry
+                valid_tgts = [c for c in candidates if c >= entry_ref * 0.999]
+            else:
+                # Short: targets must be <= entry
+                valid_tgts = [c for c in candidates if c <= entry_ref * 1.001]
+            if valid_tgts:
+                candidates = valid_tgts
+
+        # Sort monotonically
+        candidates.sort(reverse=is_short)
+
+        if not candidates:
+            return
+
+        curr = "$" if self.segment == "CRYPTO" else "₹"
+        dec = (
+            4
+            if self.segment == "CDS"
+            else (2 if self.ltp < 100 or (plan_is_option and entry_ref < 100) else 1)
+        )
+
+        t1 = candidates[0]
+        if not plan_is_option or is_opt:
+            self.target_level = t1
+        else:
+            self.option_target_level = t1
+            self.option_target_1 = t1
+
+        plan_dict["target"] = f"{curr}{t1:,.{dec}f}"
+        plan_dict["target_1"] = f"{curr}{t1:,.{dec}f}"
+
+        if len(candidates) >= 2:
+            t2 = candidates[1]
+            plan_dict["target_2"] = f"{curr}{t2:,.{dec}f}"
+            if plan_is_option and not is_opt:
+                self.option_target_2 = t2
+        if len(candidates) >= 3:
+            t3 = candidates[2]
+            plan_dict["target_3"] = f"{curr}{t3:,.{dec}f}"
+            plan_dict["runner_target"] = f"{curr}{t3:,.{dec}f}"
+
+        if opt_plan:
+            opt_plan["t1_premium"] = t1
+            if len(candidates) >= 2:
+                opt_plan["t2_premium"] = candidates[1]
+            if len(candidates) >= 3:
+                opt_plan["t3_premium"] = candidates[2]
 
     @property
     def is_expired(self) -> bool:
@@ -724,7 +1079,7 @@ class AutoAlert:
                 or ("PYTEST_CURRENT_TEST" in os.environ)
                 or (self.environment == "TEST")
             )
-            if th in ("INTRADAY", "ROLLING_24H") and (
+            if th in ("SCALP", "INTRADAY", "INTRADAY_SCALP_ONLY", "ROLLING_24H") and (
                 not is_test_env or getattr(self, "_force_test_expiry", False)
             ):
                 has_future_expiry = False
@@ -784,7 +1139,16 @@ class AutoAlert:
             # 2c. Unignited Early Warning Setup Time-Stop:
             # Pre-breakout early warnings expire if left unignited from a prior day,
             # or if 60 minutes have elapsed without triggering during an active session (4h for 24x7 crypto).
-            if self.stage == "EARLY_WARNING":
+            # Multi-session setups (SWING, POSITIONAL, MULTIBAGGER) are explicitly exempt from single-session cutoff.
+            is_multi_session = th in (
+                "SWING",
+                "SWING_SHORT",
+                "SWING_MID",
+                "LONG_TERM",
+                "POSITIONAL",
+                "MULTIBAGGER",
+            )
+            if self.stage in ("EARLY_WARNING", "STALK", "PRIMED") and not is_multi_session:
                 exch = (self.exchange or "NSE").upper()
                 seg = (getattr(self, "segment", "") or "").upper()
                 is_crypto = (
@@ -797,6 +1161,11 @@ class AutoAlert:
                     if (now - created_dt).total_seconds() >= 14400:
                         return True
                 elif created_dt.date() < now.date():
+                    return True
+                elif (
+                    th in ("SCALP", "INTRADAY_SCALP_ONLY")
+                    and (now - created_dt).total_seconds() >= 1800
+                ):
                     return True
                 elif th == "INTRADAY" and (now - created_dt).total_seconds() >= 3600:
                     return True
@@ -833,6 +1202,10 @@ class AutoAlert:
                 if not self.expiry_date and clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY:
                     target_weekday = INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym]
                     days_ahead = (target_weekday - created_dt.weekday()) % 7
+                    if days_ahead == 0 and (
+                        created_dt.hour > 15 or (created_dt.hour == 15 and created_dt.minute >= 30)
+                    ):
+                        days_ahead = 7
                     exp_dt = created_dt.replace(hour=15, minute=30, second=0) + timedelta(
                         days=days_ahead
                     )
@@ -877,30 +1250,100 @@ class AutoAlert:
         self.is_archived = not val
 
     @property
+    def is_stalk(self) -> bool:
+        """True if the alert is in radar stalking or precursor mode."""
+        return self.stage in ("STALK", "PRECURSOR")
+
+    @property
+    def is_primed(self) -> bool:
+        """True if the alert is in high-priority proximity surveillance (within ±0.35% of trigger)."""
+        return self.stage == "PRIMED"
+
+    @property
+    def is_ignited(self) -> bool:
+        """True if the alert has fired its execution trigger."""
+        return self.stage in ("IGNITED", "TRIGGERED")
+
+    def promote_stage(
+        self,
+        new_stage: str,
+        reason: str = "",
+        ltp: Optional[float] = None,
+        actor: str = "INTERCEPTION_ENGINE",
+    ) -> bool:
+        """
+        Transitions alert across the 3-stage interception pipeline:
+        STALK -> PRIMED -> IGNITED (or EARLY_WARNING -> PRIMED -> IGNITED).
+        Records an audit event and updates timestamps.
+        """
+        valid_stages = (
+            "STALK",
+            "PRIMED",
+            "EARLY_WARNING",
+            "IGNITED",
+            "INVALIDATED",
+            "EXPIRED",
+            "COMPLETED",
+        )
+        if new_stage not in valid_stages and not hasattr(self, "_custom_stages"):
+            return False
+        if self.stage == new_stage:
+            return False
+
+        old_stage = self.stage
+        self.stage = new_stage
+        if ltp is not None and ltp > 0:
+            self.ltp = float(ltp)
+        now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        self.updated_at = now_str
+
+        if new_stage == "IGNITED" and not self.triggered_at:
+            self.triggered_at = now_str
+
+        self.record_audit(
+            event_type="STAGE_PROMOTION",
+            message=f"Stage transitioned: {old_stage} -> {new_stage} ({reason})",
+            actor=actor,
+            details={
+                "old_stage": old_stage,
+                "new_stage": new_stage,
+                "reason": reason,
+                "ltp": self.ltp,
+            },
+        )
+        return True
+
+    @property
     def entry_price(self) -> float:
         """
         Canonical entry price coordinate.
-        For options, returns option_premium if available; otherwise trigger_level or ltp.
-        For equities/futures, returns trigger_level or ltp.
+        For options, returns initial_entry_premium if available; otherwise trigger_level,
+        option_premium, or ltp. For equities/futures, returns trigger_level or ltp.
+        Guarantees that live option quote refreshes do NOT mutate initial entry price.
         """
-        is_opt = bool(
-            self.strike
-            or self.option_type
-            or self.contract_symbol
-            or self.alert_type
-            in ("GAMMA_BLAST", "OPTIONS_MOMENTUM", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+        is_opt_primary = bool(
+            self.alert_type in ("OPTIONS_MOMENTUM", "OPTION_WRITE")
+            or (
+                (self.strike or self.option_type or self.contract_symbol)
+                and self.option_premium
+                and self.ltp
+                and abs(self.ltp - float(self.option_premium))
+                < max(1.0, float(self.option_premium) * 0.15)
+            )
         )
-        if is_opt and self.option_premium and self.option_premium > 0:
-            return float(self.option_premium)
+        if is_opt_primary and self.initial_entry_premium and self.initial_entry_premium > 0:
+            return float(self.initial_entry_premium)
         if self.trigger_level and self.trigger_level > 0:
             return float(self.trigger_level)
+        if is_opt_primary and self.option_premium and self.option_premium > 0:
+            return float(self.option_premium)
         return float(self.ltp or 0.0)
 
     @property
     def target_1(self) -> Optional[float]:
         """Canonical Target 1 price level."""
         plan = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
-        t1_val = plan.get("target_1") or plan.get("target")
+        t1_val = plan.get("target_1")
         if t1_val:
             try:
                 import re
@@ -910,7 +1353,57 @@ class AutoAlert:
                     return float(m[0])
             except Exception:
                 pass
-        return self.target_level if self.target_level > 0 else None
+
+        # If not explicitly defined as target_1, compute canonical +2R milestone if entry & SL exist
+        ep = self.entry_price
+        sl = getattr(self, "initial_stop_loss", None) or self.stop_loss
+        if ep and sl and ep != sl:
+            risk = abs(ep - sl)
+            tgt_lvl = float(self.target_level or 0.0)
+            if tgt_lvl > 0 and tgt_lvl != ep:
+                is_expanding_up = tgt_lvl > ep
+            else:
+                is_opt = bool(
+                    self.strike
+                    or self.option_type
+                    or self.contract_symbol
+                    or self.alert_type
+                    in ("GAMMA_BLAST", "OPTIONS_MOMENTUM", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+                )
+                is_opt_prem = bool(
+                    self.alert_type in ("OPTIONS_MOMENTUM", "OPTION_WRITE")
+                    or (
+                        is_opt
+                        and getattr(self, "option_premium", None)
+                        and abs(ep - float(self.option_premium))
+                        < max(1.0, float(self.option_premium) * 0.15)
+                    )
+                )
+                is_option_buyer = is_opt_prem and str(
+                    getattr(self, "option_write", False)
+                ).lower() not in ("true", "1")
+                dir_str = str(getattr(self, "direction", "BULLISH")).upper()
+                is_bullish = dir_str not in ("BEARISH", "SELL", "SHORT")
+                is_expanding_up = is_option_buyer or is_bullish
+            t1_calc = round(ep + (risk * 2.0) if is_expanding_up else ep - (risk * 2.0), 2)
+            if tgt_lvl > 0:
+                if is_expanding_up and tgt_lvl > ep and t1_calc >= tgt_lvl:
+                    return round(ep + (tgt_lvl - ep) * 0.5, 2)
+                elif not is_expanding_up and tgt_lvl < ep and t1_calc <= tgt_lvl:
+                    return round(ep - (ep - tgt_lvl) * 0.5, 2)
+            return t1_calc
+
+        fallback = plan.get("target") or self.target_level
+        if fallback:
+            try:
+                import re
+
+                m = re.findall(r"[\d.]+", str(fallback).replace(",", ""))
+                if m:
+                    return float(m[0])
+            except Exception:
+                pass
+        return self.target_level if (self.target_level and self.target_level > 0) else None
 
     @property
     def target_2(self) -> Optional[float]:
@@ -929,7 +1422,7 @@ class AutoAlert:
                 pass
         t1 = self.target_1
         ep = self.entry_price
-        sl = self.stop_loss
+        sl = getattr(self, "initial_stop_loss", None) or self.stop_loss
         if t1 and ep and sl and ep != sl:
             risk = abs(ep - sl)
             is_expanding_up = t1 > ep
@@ -975,6 +1468,10 @@ class AutoAlert:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
+        d["status"] = self.stage
+        d["scrutiny"] = (
+            (self.metrics or {}).get("scrutiny") if isinstance(self.metrics, dict) else None
+        )
         d["entry_price"] = self.entry_price
         d["target_1"] = self.target_1
         d["target_2"] = self.target_2

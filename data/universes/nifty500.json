@@ -1043,13 +1043,6 @@
     "isin": "INE089A01031"
   },
   {
-    "symbol": "DUMMYHEG",
-    "name": "Dummy HEG Ltd.",
-    "industry": "Metals & Mining",
-    "series": "EQ",
-    "isin": "DUM545A01024"
-  },
-  {
     "symbol": "EIDPARRY",
     "name": "E.I.D. Parry (India) Ltd.",
     "industry": "Fast Moving Consumer Goods",

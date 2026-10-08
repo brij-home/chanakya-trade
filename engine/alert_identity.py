@@ -37,6 +37,21 @@ _VOLATILE_ID_PATTERN = re.compile(
 )
 
 
+_INDEX_ALIAS_MAP = {
+    "NIFTY 50": "NIFTY",
+    "NIFTY50": "NIFTY",
+    "BANK NIFTY": "BANKNIFTY",
+    "BANKNIFTY": "BANKNIFTY",
+    "FIN NIFTY": "FINNIFTY",
+    "FINNIFTY": "FINNIFTY",
+    "MIDCAP NIFTY": "MIDCPNIFTY",
+    "MIDCP NIFTY": "MIDCPNIFTY",
+    "MIDCPNIFTY": "MIDCPNIFTY",
+    "NIFTY BANK": "BANKNIFTY",
+    "NIFTY IT": "NIFTYIT",
+}
+
+
 def canonical_alert_symbol(raw_sym: str) -> str:
     """
     Normalizes any asset symbol into its canonical clean uppercase identifier.
@@ -56,7 +71,8 @@ def canonical_alert_symbol(raw_sym: str) -> str:
         s = s[:-3]
     if s.startswith("^"):
         s = s[1:]
-    return s.strip()
+    s = s.strip()
+    return _INDEX_ALIAS_MAP.get(s, s)
 
 
 def generate_alert_id(

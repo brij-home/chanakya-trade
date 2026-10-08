@@ -31,10 +31,10 @@ logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 DEFAULT_WATCHED_INDICES = [
-    "MIDCPNIFTY",
-    "BANKNIFTY",
     "NIFTY",
+    "BANKNIFTY",
     "FINNIFTY",
+    "MIDCPNIFTY",
     "SENSEX",
     "BANKEX",
 ]

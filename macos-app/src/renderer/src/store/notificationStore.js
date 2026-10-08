@@ -398,14 +398,21 @@ export const useNotificationStore = create((set, get) => ({
       } catch (_callErr) {
         // Vite browser dev fallback — sidecar IPC unavailable
         try {
-          const directRes = await fetch('http://127.0.0.1:8765/skills/alerts/auto/list', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ view_mode: 'ALL', limit: 300 }),
-          })
-          if (directRes.ok) {
-            const data = await directRes.json()
-            list = data?.data ?? data ?? []
+          const controller = new AbortController()
+          const timer = setTimeout(() => controller.abort(), 8000)
+          try {
+            const directRes = await fetch('http://127.0.0.1:8765/skills/alerts/auto/list', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ view_mode: 'ALL', limit: 300 }),
+              signal: controller.signal,
+            })
+            if (directRes.ok) {
+              const data = await directRes.json()
+              list = data?.data ?? data ?? []
+            }
+          } finally {
+            clearTimeout(timer)
           }
         } catch (_netErr) {
           // Backend offline or reloading; fallback gracefully without logging uncaught error

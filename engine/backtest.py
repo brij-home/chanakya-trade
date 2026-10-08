@@ -88,6 +88,13 @@ class BacktestResult:
     # Comparison
     buy_hold_return: float = 0.0  # %
 
+    # Institutional & QuantStats Disambiguation
+    calmar_ratio: float = 0.0
+    sortino_ratio: float = 0.0
+    trade_win_rate: float = 0.0
+    positive_period_pct: float = 0.0
+    oos_robustness: float = 1.0
+
     trades: list[Trade] = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
 
@@ -322,6 +329,9 @@ STRATEGIES = {
         swing_lookback=int(args[0]) if args else 5,
     ),
     "market_structure": lambda args: SMCStrategy(),
+    "turtle_soup": lambda args: TurtleSoupStrategy(
+        period=int(args[0]) if args else 20,
+    ),
 }
 
 
@@ -444,6 +454,26 @@ class DonchianStrategy(Strategy):
         mid_filter = (filter_high + filter_low) / 2
         signals[(df["close"] > high_break) & (df["close"] > mid_filter)] = 1
         signals[(df["close"] < low_break) & (df["close"] < mid_filter)] = -1
+        return signals
+
+
+class TurtleSoupStrategy(Strategy):
+    """ICT / Linda Raschke Turtle Soup: fade 20-period high/low liquidity sweeps with instant candle rejection."""
+
+    def __init__(self, period: int = 20):
+        self.period = period
+        self.name = f"TurtleSoup({period})"
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        high_prev = df["high"].rolling(self.period).max().shift(1)
+        low_prev = df["low"].rolling(self.period).min().shift(1)
+
+        signals = pd.Series(0, index=df.index)
+        spring = (df["low"] < low_prev) & (df["close"] > low_prev)
+        upthrust = (df["high"] > high_prev) & (df["close"] < high_prev)
+
+        signals[spring] = 1
+        signals[upthrust] = -1
         return signals
 
 
@@ -861,6 +891,28 @@ class Backtester:
         )
         avg_hold = sum(t.hold_days for t in trades) / len(trades) if trades else 0
 
+        # Institutional metrics & Two Win Rates
+        trade_win_rate = round(win_rate, 1)
+        pos_periods = (daily_returns > 0).mean() * 100.0 if not daily_returns.empty else 0.0
+        positive_period_pct = round(float(pos_periods), 1)
+        calmar = round(abs(cagr / max_dd), 2) if abs(max_dd) > 0.01 else 0.0
+
+        neg_rets = daily_returns[daily_returns < 0]
+        downside_std = float(neg_rets.std()) if len(neg_rets) > 1 else 0.0
+        sortino = (
+            round((float(daily_returns.mean()) / downside_std) * math.sqrt(252), 2)
+            if downside_std > 0
+            else 0.0
+        )
+
+        oos_robustness = 1.0
+        try:
+            from engine.quantstats_report import calculate_robustness_score
+
+            oos_robustness = calculate_robustness_score(daily_returns)
+        except Exception:
+            pass
+
         return BacktestResult(
             symbol=self.symbol,
             strategy_name=strategy.name,
@@ -881,6 +933,11 @@ class Backtester:
             profit_factor=round(profit_factor, 2),
             avg_hold_days=round(avg_hold, 1),
             buy_hold_return=round(buy_hold, 2),
+            calmar_ratio=calmar,
+            sortino_ratio=sortino,
+            trade_win_rate=trade_win_rate,
+            positive_period_pct=positive_period_pct,
+            oos_robustness=oos_robustness,
             trades=trades,
             equity_curve=equity,
         )

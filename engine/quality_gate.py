@@ -78,6 +78,34 @@ def is_eod_close_window(dt: Optional[datetime] = None) -> bool:
     return now.time() >= dtime(15, 0)
 
 
+def is_mcx_golden_hours_window(dt: Optional[datetime] = None) -> bool:
+    """
+    Returns True during the US Pit & Global Active Session (17:30–22:30 IST).
+    Over 78% of all 3R+ multi-hour trend expansions in MCX Energy & Bullion occur in this window.
+    """
+    now = dt or datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return dtime(17, 30) <= t <= dtime(22, 30)
+
+
+def is_mcx_midday_lull_window(dt: Optional[datetime] = None) -> bool:
+    """
+    Returns True during the MCX European pre-market / Asian lull (11:30–15:30 IST).
+    Low volume, choppy sideways drift where naked directional bets suffer false breakouts.
+    """
+    now = dt or datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return dtime(11, 30) <= t < dtime(15, 30)
+
+
 def evaluate_institutional_quality_gate(
     alert: Any,
     quotes_map: Optional[dict[str, Any]] = None,
@@ -112,11 +140,12 @@ def evaluate_institutional_quality_gate(
     confidence = int(getattr(alert, "confidence", 75) or 75)
     direction = str(getattr(alert, "direction", "BULLISH") or "BULLISH").upper()
     is_bullish = direction not in ("BEARISH", "SHORT", "SELL")
+    c_sym = str(getattr(alert, "contract_symbol", "") or "").upper()
     is_opt = bool(
-        getattr(alert, "contract_symbol", None)
-        or getattr(alert, "option_type", None)
+        (getattr(alert, "option_type", None) in ("CE", "PE"))
         or getattr(alert, "strike", None)
         or (getattr(alert, "actionable_plan", {}) or {}).get("instrument_type") == "OPTION"
+        or (c_sym.endswith("CE") or c_sym.endswith("PE"))
     )
     act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
     is_opt_sell = is_opt and any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
@@ -133,21 +162,54 @@ def evaluate_institutional_quality_gate(
         "is_option": is_opt,
     }
 
-    # ── 1. Resolve Spot & Entry Levels ───────────────────────────────────────
-    entry = None
-    if is_opt:
-        entry = (
-            getattr(alert, "option_premium", None)
-            or getattr(alert, "trigger_level", None)
+    # ── 1. Resolve Spot & Entry Levels (Strict Coordinate Frame Matching) ────
+    # Coordinate sanctity: Never mix spot prices with option premiums!
+    opt_prem = getattr(alert, "option_premium", None)
+    opt_sl = getattr(alert, "option_stop_loss", None)
+    opt_t1 = getattr(alert, "option_target_level", None)
+
+    if is_opt and opt_prem and opt_sl and opt_t1:
+        # Full option coordinate frame
+        entry = float(opt_prem)
+        stop = float(opt_sl)
+        target1 = float(opt_t1)
+        plan_dict = getattr(alert, "actionable_plan", {}) or {}
+        raw_t2 = (
+            getattr(alert, "option_target_2", None)
+            or plan_dict.get("target_2")
+            or (plan_dict.get("option_alternative", {}) or {}).get("target_2")
+        )
+        if raw_t2:
+            try:
+                import re
+
+                m = re.findall(r"[\d.]+", str(raw_t2).replace(",", ""))
+                target2 = float(m[0]) if m else (entry + (abs(target1 - entry) * 1.8))
+            except Exception:
+                target2 = entry + (abs(target1 - entry) * 1.8)
+        else:
+            target2 = entry + (abs(target1 - entry) * 1.8)
+    else:
+        # Underlying spot coordinate frame
+        entry = float(
+            getattr(alert, "trigger_level", None)
             or getattr(alert, "ltp", None)
             or current_ltp
+            or 0.0
         )
-    else:
-        entry = getattr(alert, "trigger_level", None) or getattr(alert, "ltp", None) or current_ltp
+        stop = float(getattr(alert, "stop_loss", None) or 0.0)
+        target1 = float(
+            getattr(alert, "target_level", None) or getattr(alert, "target_1", None) or 0.0
+        )
+        target2 = getattr(alert, "target_2", None)
+        if target2:
+            try:
+                import re
 
-    stop = getattr(alert, "stop_loss", None)
-    target1 = getattr(alert, "target_level", None) or getattr(alert, "target_1", None)
-    target2 = getattr(alert, "target_2", None)
+                m = re.findall(r"[\d.]+", str(target2).replace(",", ""))
+                target2 = float(m[0]) if m else None
+            except Exception:
+                target2 = None
 
     # ── 2. Check 1: Headroom & Structural R:R Floor (R:R >= 1:2.0 Floor) ───────
     if entry and stop and target1 and entry > 0 and stop > 0 and target1 > 0:
@@ -182,27 +244,70 @@ def evaluate_institutional_quality_gate(
                 )
 
     # ── 3. Check 2: Time-of-Day Theta Trap & EOD Filters ─────────────────────
+    exch_str = str(getattr(alert, "exchange", "NSE") or "NSE").upper()
+    seg_str = str(
+        getattr(alert, "segment", "")
+        or (getattr(alert, "actionable_plan", {}) or {}).get("segment", "")
+    ).upper()
+    is_commodity_or_crypto = (
+        exch_str in ("MCX", "CRYPTO", "BINANCE", "DERIBIT")
+        or seg_str in ("COMMODITY", "CRYPTO")
+        or clean_sym
+        in (
+            "CRUDEOIL",
+            "CRUDEOILM",
+            "NATURALGAS",
+            "NATGASMINI",
+            "GOLD",
+            "GOLDM",
+            "SILVER",
+            "SILVERM",
+            "COPPER",
+            "ZINC",
+            "ALUMINIUM",
+        )
+    )
+
     eval_tod = (ref_dt is not None) or (not is_test)
     if is_opt and not is_opt_sell and eval_tod:
-        if is_eod_close_window(now_dt):
-            return VetoVerdict(
-                is_vetoed=True,
-                veto_reason="EOD Terminal Window (Post-15:00 IST): Intraday directional option buying prohibited due to pin-risk & MTM auction distortion.",
-                execution_mandate="VETOED",
-                conviction_tier="REJECTED",
-                metrics=verdict_metrics,
-                coaching_notes=[
-                    "Market squaring-off phase underway. High risk of premium evaporation.",
-                    "Wait for next session opening drive.",
-                ],
-            )
-
-        if is_lunchtime_theta_window(now_dt):
-            # Lunchtime Theta Trap: Mandate defined-risk spread unless exceptional conviction (>=92)
-            if confidence < 92:
-                notes.append(
-                    "Lunchtime Theta Trap (11:30–13:15 IST): Defined-risk vertical spread mandated to neutralize midday chop decay."
+        # On Indian MCX (09:00 - 23:30 IST) and 24x7 Crypto, the 15:00 IST equity cutoff DOES NOT APPLY!
+        if is_commodity_or_crypto:
+            # MCX terminal close is 23:15 IST (15m before 23:30 close)
+            if exch_str == "MCX" or seg_str == "COMMODITY":
+                if now_dt.time() >= dtime(23, 15):
+                    return VetoVerdict(
+                        is_vetoed=True,
+                        veto_reason="MCX Terminal Window (Post-23:15 IST): Intraday commodity option buying prohibited before 23:30 IST close.",
+                        execution_mandate="VETOED",
+                        conviction_tier="REJECTED",
+                        metrics=verdict_metrics,
+                    )
+                if is_mcx_midday_lull_window(now_dt) and confidence < 86:
+                    notes.append(
+                        "MCX Midday Volume Lull (11:30–15:30 IST): Low institutional participation; defined-risk spread mandated to protect against midday chop."
+                    )
+                elif is_mcx_golden_hours_window(now_dt):
+                    verdict_metrics["mcx_golden_hours"] = True
+        else:
+            if is_eod_close_window(now_dt):
+                return VetoVerdict(
+                    is_vetoed=True,
+                    veto_reason="EOD Terminal Window (Post-15:00 IST): Intraday directional option buying prohibited due to pin-risk & MTM auction distortion.",
+                    execution_mandate="VETOED",
+                    conviction_tier="REJECTED",
+                    metrics=verdict_metrics,
+                    coaching_notes=[
+                        "Market squaring-off phase underway. High risk of premium evaporation.",
+                        "Wait for next session opening drive.",
+                    ],
                 )
+
+            if is_lunchtime_theta_window(now_dt):
+                # Lunchtime Theta Trap: Mandate defined-risk spread unless exceptional conviction (>=92)
+                if confidence < 92:
+                    notes.append(
+                        "Lunchtime Theta Trap (11:30–13:15 IST): Defined-risk vertical spread mandated to neutralize midday chop decay."
+                    )
 
     # ── 3b. Check 2b: SEBI Physical Delivery Expiry Week Veto (Single-Stock F&O) ──
     # SEBI mandates physical delivery for all in-the-money (ITM) stock options during monthly
@@ -363,6 +468,46 @@ def evaluate_institutional_quality_gate(
                 )
         except Exception:
             pass
+
+    # ── 6b. Check 5b: Higher-Timeframe Structural Wall & MTF Alignment ────────
+    mtf_count = (getattr(alert, "metrics", {}) or {}).get("mtf_alignment_count")
+    wall_col = (getattr(alert, "metrics", {}) or {}).get("wall_collision")
+    if wall_col:
+        return VetoVerdict(
+            is_vetoed=True,
+            veto_reason="Overhead Higher-Timeframe Structural Wall: Immediate 1H swing barrier within 0.35% chokes upside headroom.",
+            execution_mandate="VETOED",
+            conviction_tier="REJECTED",
+            metrics=verdict_metrics,
+            coaching_notes=[
+                "Price is trading directly into higher-timeframe resistance/support.",
+                "Wait for clean structural breakout and acceptance beyond the wall.",
+            ],
+        )
+    if mtf_count is not None and mtf_count == 0 and confidence < 90:
+        notes.append(
+            "Contra-MTF Trend (0/3 timeframes aligned): Higher timeframe headwinds present; defined-risk spread mandated."
+        )
+
+    # ── 6c. Check 5c: High DTE / Monthly Contract Vehicle Risk ────────────────
+    dte = (getattr(alert, "metrics", {}) or {}).get("dte")
+    prem_val = (
+        getattr(alert, "option_premium", None)
+        or (getattr(alert, "metrics", {}) or {}).get("option_premium")
+        or getattr(alert, "ltp", 0.0)
+    )
+    is_index = any(
+        k in clean_sym for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+    )
+    if is_index and bool(alert.strike or alert.option_type or alert.contract_symbol):
+        if dte is not None and dte >= 8:
+            notes.append(
+                f"Monthly/Multi-Week Expiry ({dte} DTE >= 8): Naked long options carry severe theta decay; defined-risk spread mandated."
+            )
+        elif prem_val and prem_val >= 450.0:
+            notes.append(
+                f"High Outlay Premium (₹{prem_val:,.1f} >= ₹450): Elevated capital at risk; defined-risk spread mandated."
+            )
 
     # ── 7. Conviction Tier Classification & Execution Mandate ─────────────────
     execution_mandate = "STANDARD"

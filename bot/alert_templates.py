@@ -13,10 +13,13 @@ Designed for sub-3-second mobile readability:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta, date
 from typing import Any, Optional
+
+logger = logging.getLogger("bot.alert_templates")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -103,6 +106,35 @@ SHORT_SECTOR_MAP: dict[str, str] = {
     # Media
     "Media & Entertainment": "Media",
     "Media": "Media",
+    # NSE Sector Indices & Standard Index Symbols
+    "NIFTY BANK": "Banks",
+    "BANKNIFTY": "Banks",
+    "NIFTY FINANCIAL SERVICES": "Fin Services",
+    "FINNIFTY": "Fin Services",
+    "NIFTY AUTO": "Auto",
+    "NIFTY IT": "IT",
+    "NIFTY METAL": "Metals",
+    "NIFTY PHARMA": "Pharma",
+    "NIFTY FMCG": "FMCG",
+    "NIFTY REALTY": "Realty",
+    "NIFTY ENERGY": "Energy",
+    "NIFTY INFRA": "Infra",
+    "NIFTY COMMODITIES": "Commodities",
+    "Commodities": "Commodities",
+    "MCX Commodities": "Commodities",
+    "Energy Commodities": "Energy",
+    "Precious Metals": "Metals",
+    "Base Metals": "Metals",
+    "Industrial Base Metals": "Metals",
+    "Agricultural Contracts": "Agri",
+    "NIFTY PSE": "PSE",
+    "NIFTY MEDIA": "Media",
+    "NIFTY CONSUMPTION": "Consumer",
+    "NIFTY HEALTHCARE": "Pharma",
+    "NIFTY OIL & GAS": "Energy",
+    "NIFTY MIDCAP SELECT": "Midcap",
+    "MIDCPNIFTY": "Midcap",
+    "NIFTY NEXT 50": "Next 50",
 }
 
 
@@ -117,8 +149,11 @@ def shorten_sector_name(sec: Optional[str]) -> str:
     for full, short in SHORT_SECTOR_MAP.items():
         if full.lower() == clean_lower:
             return short
-    for full, short in SHORT_SECTOR_MAP.items():
-        if full.lower() in clean_lower:
+    # Match on whole words / word boundaries to prevent short tokens (e.g. 'IT') matching inside
+    # longer words like 'commodities' or 'utilities'. Prioritize longer key phrases first.
+    for full, short in sorted(SHORT_SECTOR_MAP.items(), key=lambda x: len(x[0]), reverse=True):
+        pattern = r"\b" + re.escape(full.lower()) + r"\b"
+        if re.search(pattern, clean_lower):
             return short
     if " & " in clean:
         parts = clean.split(" & ")
@@ -267,7 +302,7 @@ def resolve_expiry_cycle(
                     except ValueError:
                         dt = None
 
-        # Pattern C: NSE Monthly format e.g. RELIANCE26SEP3000PE
+        # Pattern C: NSE Monthly format e.g. RELIANCE26SEP3000PE or MCX CRUDEOIL26OCT8750CE
         if dt is None:
             m_monthly = re.search(r"[A-Z0-9_&]+(\d{2})([A-Z]{3})\d+(?:CE|PE)", c_upper)
             if m_monthly:
@@ -289,11 +324,40 @@ def resolve_expiry_cycle(
                 mon = month_map.get(mon_str)
                 if mon:
                     yr = int("20" + yy_str)
-                    dt = get_last_thursday_of_month(yr, mon)
+                    from market.instruments import COMMODITY_SYMBOLS
+
+                    is_comm = und in COMMODITY_SYMBOLS or "MCX" in c_upper
+                    if is_comm:
+                        try:
+                            from engine.greeks_manager import get_mcx_prompt_expiry_and_dte
+
+                            exp_date_str, c_dte = get_mcx_prompt_expiry_and_dte(
+                                und, as_of=date(yr, mon, 1)
+                            )
+                            dt = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+                            if dte is None:
+                                dte = max(0, (dt - today).days)
+                        except Exception:
+                            dt = None
+                    if dt is None:
+                        dt = get_last_thursday_of_month(yr, mon)
 
     # 3. Infer target expiry date if still None
     if dt is None:
-        if is_index:
+        from market.instruments import COMMODITY_SYMBOLS
+
+        is_comm = und in COMMODITY_SYMBOLS or "MCX" in (contract or "").upper()
+        if is_comm:
+            try:
+                from engine.greeks_manager import get_mcx_prompt_expiry_and_dte
+
+                exp_date_str, c_dte = get_mcx_prompt_expiry_and_dte(und, as_of=today)
+                dt = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+                if dte is None:
+                    dte = c_dte
+            except Exception:
+                dt = None
+        if dt is None and is_index:
             target_weekday = INDEX_EXPIRY_WEEKDAY.get(und, 3)
             days_ahead = (target_weekday - today.weekday()) % 7
             if days_ahead == 0:
@@ -301,7 +365,7 @@ def resolve_expiry_cycle(
                 if as_of_dt.hour > 15 or (as_of_dt.hour == 15 and as_of_dt.minute >= 30):
                     days_ahead = 7
             dt = today + timedelta(days=days_ahead)
-        else:
+        elif dt is None:
             # Single-stock derivatives are strictly monthly
             cur_last_thu = get_last_thursday_of_month(today.year, today.month)
             if today <= cur_last_thu:
@@ -1076,6 +1140,96 @@ def strip_provenance_and_icons(text: str) -> str:
     return s.strip()
 
 
+def _resolve_monotonic_display_targets(
+    actionable_plan: dict[str, Any],
+    alert: Any = None,
+    entry_val: Optional[float] = None,
+    is_short: bool = False,
+    currency_symbol: str = "₹",
+) -> tuple[str, str, str]:
+    """
+    Guarantees strictly monotonic target display formatting:
+      - Long / Option Buying: T1 < T2 < T3 (Runner)
+      - Short: T1 > T2 > T3 (Runner)
+    Pulls candidate targets from actionable_plan, alert, and option_plan,
+    deduplicates, sorts monotonically, and returns (t1_str, t2_str, t3_str).
+    Eliminates display inversions caused by key ambiguity or runner target aliases.
+    """
+    candidates: list[float] = []
+    ap = actionable_plan if isinstance(actionable_plan, dict) else {}
+    opt_p = ap.get("option_plan") if isinstance(ap.get("option_plan"), dict) else {}
+
+    # Target sources ordered by specificity
+    sources = [
+        opt_p.get("t1_premium"),
+        opt_p.get("target_1"),
+        ap.get("target_1"),
+        opt_p.get("t2_premium"),
+        opt_p.get("target_2"),
+        ap.get("target_2"),
+        opt_p.get("t3_premium"),
+        opt_p.get("target_3"),
+        ap.get("target_3"),
+        ap.get("runner_target"),
+        ap.get("target"),
+        getattr(alert, "target_level", None),
+    ]
+
+    for s in sources:
+        if s is None:
+            continue
+        try:
+            m = re.findall(r"[\d,]+(?:\.\d+)?", str(s))
+            if m:
+                val = float(m[0].replace(",", ""))
+                if val > 0 and not any(abs(val - c) < 0.05 for c in candidates):
+                    candidates.append(val)
+        except Exception:
+            pass
+
+    if not candidates:
+        return ("", "", "")
+
+    # Directional filtering: targets should be in profit territory relative to entry
+    if entry_val and entry_val > 0:
+        if not is_short:
+            filtered = [c for c in candidates if c >= entry_val * 0.999]
+        else:
+            filtered = [c for c in candidates if c <= entry_val * 1.001]
+        if filtered:
+            candidates = filtered
+
+    # Monotonic sort: ascending for longs / option buyers, descending for shorts
+    candidates.sort(reverse=is_short)
+
+    # Determine decimal places based on price magnitude or segment
+    seg = (getattr(alert, "segment", "") or ap.get("segment", "") or "").upper()
+    if currency_symbol == "$" or "CRYPTO" in seg:
+        dec = 2
+    elif seg == "CDS":
+        dec = 4
+    elif candidates[0] < 100 and seg in ("FNO_INDEX", "NFO", "BFO"):
+        dec = 2
+    else:
+        dec = 1
+
+    t1_str = f"{currency_symbol}{candidates[0]:,.{dec}f}"
+    # Preserve percentage suffix or raw display string if specified in trade plan
+    raw_t1_str = str(opt_p.get("target_1") or ap.get("target_1") or ap.get("target") or "")
+    if "(" in raw_t1_str and "%" in raw_t1_str:
+        m_suffix = re.search(r"(\s*\([+-]?\d+%\))", raw_t1_str)
+        if m_suffix:
+            m_num = re.findall(r"[\d,]+(?:\.\d+)?", raw_t1_str)
+            if m_num and abs(float(m_num[0].replace(",", "")) - candidates[0]) < 0.05:
+                prefix_clean = raw_t1_str.split("(")[0].strip()
+                t1_str = f"{prefix_clean} {m_suffix.group(1).strip()}"
+
+    t2_str = f"{currency_symbol}{candidates[1]:,.{dec}f}" if len(candidates) >= 2 else ""
+    t3_str = f"{currency_symbol}{candidates[2]:,.{dec}f}" if len(candidates) >= 3 else ""
+
+    return (t1_str, t2_str, t3_str)
+
+
 # ── Dataclasses for Dynamic Alert Ingestion ──────────────────────────────────
 
 
@@ -1583,9 +1737,14 @@ class MilestoneAlertData:
         )
 
         # Entry Price resolution (Actionable plan recommended_entry takes canonical precedence)
-        entry_price = None
+        entry_price = getattr(alert, "initial_entry_premium", None)
+        if not entry_price and is_opt_contract and getattr(alert, "entry_price", None):
+            try:
+                entry_price = float(alert.entry_price)
+            except (ValueError, TypeError):
+                entry_price = None
         opt_plan = act_plan.get("option_plan") if isinstance(act_plan, dict) else None
-        if is_opt_contract and isinstance(opt_plan, dict):
+        if not entry_price and is_opt_contract and isinstance(opt_plan, dict):
             if opt_plan.get("entry_premium"):
                 entry_price = float(opt_plan["entry_premium"])
 
@@ -1627,6 +1786,19 @@ class MilestoneAlertData:
             entry_price = getattr(alert, "option_premium", None) or getattr(
                 alert, "threshold", None
             )
+
+        # Strict Option LTP & Spot Contamination Interceptor
+        if is_opt_contract and entry_price and entry_price > 0:
+            spot_ref = getattr(alert, "underlying_spot", None)
+            is_spot_scale = (ltp > entry_price * 3.5) or (
+                spot_ref and abs(ltp - spot_ref) / max(1.0, spot_ref) < 0.15
+            )
+            if is_spot_scale:
+                opt_prem_saved = getattr(alert, "option_premium", None)
+                if opt_prem_saved and 0 < float(opt_prem_saved) <= (entry_price * 3.5):
+                    ltp = float(opt_prem_saved)
+                else:
+                    ltp = entry_price
 
         # Initial Stop Loss resolution
         initial_sl = None
@@ -1796,17 +1968,39 @@ class MilestoneAlertData:
                 else:
                     initial_sl = round(entry_price * 1.015, 2)
 
-        if not t0_5_val and milestone_type == "TARGET_0_5":
-            t0_5_val = ltp
-        if not t1_val and milestone_type == "TARGET_1":
-            t1_val = ltp
-        if not t2_val and milestone_type == "TARGET_2":
-            t2_val = ltp
+        # Strict Fallback Calculation for Unresolved Targets (Mathematically Grounded - Rule 10 & 11)
+        if entry_price and entry_price > 0 and initial_sl and entry_price != initial_sl:
+            r_calc = abs(entry_price - initial_sl)
+            if not t0_5_val and milestone_type == "TARGET_0_5":
+                t0_5_val = round(
+                    entry_price + (r_calc * 1.0)
+                    if is_payoff_bullish
+                    else max(0.05, entry_price - (r_calc * 1.0)),
+                    2,
+                )
+            if not t1_val and milestone_type == "TARGET_1":
+                t1_val = round(
+                    entry_price + (r_calc * 2.0)
+                    if is_payoff_bullish
+                    else max(0.05, entry_price - (r_calc * 2.0)),
+                    2,
+                )
+            if not t2_val and milestone_type == "TARGET_2":
+                t2_val = round(
+                    entry_price + (r_calc * 4.0)
+                    if is_payoff_bullish
+                    else max(0.05, entry_price - (r_calc * 4.0)),
+                    2,
+                )
 
         # Performance & Gain calculation
         # If pre-calculated on alert (e.g. spread evaluation or in-flight decay), prioritize it
         pnl_pts = getattr(alert, "pnl_pts", None)
         pnl_pct = getattr(alert, "pnl_pct", None)
+        # Intercept corrupted scale leak P&L values (e.g. +2848% from spot vs option mismatch)
+        if is_opt_contract and pnl_pct is not None and abs(float(pnl_pct)) > 500.0:
+            pnl_pts = None
+            pnl_pct = None
         if pnl_pts is None or pnl_pct is None:
             if entry_price and entry_price > 0 and ltp and ltp > 0:
                 pnl_pts = (
@@ -1900,6 +2094,8 @@ class MilestoneAlertData:
         elif milestone_type in (
             "TIME_STOP_SCRATCH",
             "TIME_STOP_EXIT",
+            "EXPIRED",
+            "TIME_EXPIRED",
         ):
             default_action = "EXIT AT MARKET / SCRATCH NOW (STAGNATION TIME-STOP)"
         elif milestone_type in (
@@ -2010,6 +2206,8 @@ class MilestoneAlertData:
                         "BREAKEVEN_EXIT": 2,
                         "TIME_STOP_SCRATCH": 1,
                         "TIME_STOP_EXIT": 1,
+                        "EXPIRED": 1,
+                        "TIME_EXPIRED": 1,
                         "INVALIDATED": 1,
                         "IN_FLIGHT_WARNING": 1,
                         "SPREAD_FREE_ROLL": 1,
@@ -2068,6 +2266,7 @@ class MilestoneAlertData:
             or getattr(alert, "trailing_rationale", None)
             or getattr(alert, "summary", ""),
             invalidation_reason=getattr(alert, "invalidation_reason", None)
+            or getattr(alert, "archive_reason", None)
             or getattr(alert, "summary", ""),
             should_trail=getattr(alert, "should_trail", True),
             environment=final_env,
@@ -2093,16 +2292,34 @@ class MilestoneAlertData:
             update_number=update_num,
             is_t1_achieved=is_t1_achieved,
             hedge_plan=(
-                (getattr(alert, "metrics", {}) or {}).get("in_flight_hedge_plan")
-                if isinstance(getattr(alert, "metrics", None), dict)
-                else None
-            )
-            or (act_plan.get("hedge_plan") if isinstance(act_plan, dict) else None)
-            or (act_plan.get("hedged_spread") if isinstance(act_plan, dict) else None)
-            or (
-                (getattr(alert, "metrics", {}) or {}).get("hedge_plan")
-                if isinstance(getattr(alert, "metrics", None), dict)
-                else None
+                (
+                    (getattr(alert, "metrics", {}) or {}).get("in_flight_hedge_plan")
+                    if isinstance(getattr(alert, "metrics", None), dict)
+                    else None
+                )
+                if milestone_type
+                in (
+                    "IN_FLIGHT_WARNING",
+                    "DANGER_ZONE",
+                    "THETA_STAGNATION",
+                    "0DTE_AFTERNOON_THETA_CLIFF",
+                    "0DTE_INTRADAY_DECAY",
+                    "VWAP_BAND_BREAKDOWN",
+                )
+                else (
+                    (
+                        (getattr(alert, "metrics", {}) or {}).get("in_flight_hedge_plan")
+                        if isinstance(getattr(alert, "metrics", None), dict)
+                        else None
+                    )
+                    or (act_plan.get("hedge_plan") if isinstance(act_plan, dict) else None)
+                    or (act_plan.get("hedged_spread") if isinstance(act_plan, dict) else None)
+                    or (
+                        (getattr(alert, "metrics", {}) or {}).get("hedge_plan")
+                        if isinstance(getattr(alert, "metrics", None), dict)
+                        else None
+                    )
+                )
             ),
             spread_entry_debit=(
                 (
@@ -2244,6 +2461,13 @@ def render_fno_alert(
     opt_cmp_entry = f" (Opt CMP: ₹{d.premium:,.2f})" if d.premium else ""
     lot_beside_p = f" (Lot: {d.lot_size})" if d.lot_size else ""
     lot_str = f" | <b>Lot:</b> {d.lot_size}" if d.lot_size else ""
+    lot_num = int(d.lot_size) if (d.lot_size and str(d.lot_size).isdigit()) else 0
+    opt_risk_pts = max(0.0, d.premium - d.stop_loss) if (d.premium and d.stop_loss) else 0.0
+    risk_inr_str = (
+        f" · [Risk: ₹{opt_risk_pts * lot_num:,.0f}/lot]"
+        if (opt_risk_pts > 0 and lot_num > 0)
+        else ""
+    )
 
     fno_hedge_line = ""
     if (
@@ -2288,10 +2512,10 @@ def render_fno_alert(
         f"{exp_line}"
         f"🎯 <b>Action:</b> <b>{action_label}</b>\n"
         f"• <b>Entry Zone:</b> <code>{d.entry_range}</code>{lot_beside_p}{opt_cmp_entry}\n"
-        f"• <b>SL:</b> <code>₹{d.stop_loss:,.2f}</code> ({d.stop_loss_pct})\n"
+        f"• <b>SL:</b> <code>₹{d.stop_loss:,.2f}</code> ({d.stop_loss_pct}){risk_inr_str}\n"
         f"• <b>T1 ({t1_r_label}):</b> <code>₹{d.target_1:,.2f}</code> ({d.target_1_pct}) — <i>Scale 50% & SL to Cost{be_str}</i>\n"
         f"• <b>T2 ({t2_r_label}):</b> <code>₹{d.target_2:,.2f}</code> ({d.target_2_pct}) — <i>Full Extension</i>\n"
-        f"• <b>Risk : Reward:</b> <b>{d.risk_reward} R:R</b>{lot_str}{no_chase_str}{fno_hedge_line}\n"
+        f"• <b>R:R:</b> <b>{d.risk_reward} R:R</b>{lot_str}{no_chase_str}{fno_hedge_line}\n"
         f"💡 <b>Reason:</b> {d.trigger_reason} · {d.vol_oi:.1f}x Vol/OI (Imbalance: {d.imbalance:.1f}x)\n"
         f"📋 <b>Playbook:</b> <i>{d.profit_rule}</i>"
         f"{conv_badge}\n"
@@ -2361,7 +2585,7 @@ def render_equity_alert(data: EquityAlertData | dict[str, Any], in_market: bool 
         f"• <b>SL:</b> <code>₹{d.stop_loss:,.2f}</code> (-{d.risk_pct:.1f}%)\n"
         f"• <b>T1 (2R):</b> <code>₹{d.target_1:,.2f}</code> (+{d.t1_pct:.1f}%) — <i>Scale 50% & SL to Breakeven</i>"
         f"{t2_str}{moon_str}\n"
-        f"• <b>Risk : Reward:</b> <b>1:{d.risk_reward:.1f} R:R</b>{no_chase_str}\n"
+        f"• <b>R:R:</b> <b>1:{d.risk_reward:.1f}</b>{no_chase_str}\n"
         f"📊 <b>Scores:</b> Strategic: <b>{d.strategic_score}/100</b> | Live Tactical: <b>{d.tactical_score}/100</b> · RVOL: <b>{d.rvol:.1f}x</b>\n"
         f"💡 <b>Reason:</b> {cat_str}\n"
         f"⚡ <b>Quick Size:</b> <code>{d.quick_command}</code>\n"
@@ -2440,7 +2664,7 @@ def render_precursor_alert(data: dict[str, Any], in_market: bool = True) -> str:
         f"• <b>SL:</b> <code>₹{sl:,.2f}</code>\n"
         f"• <b>T1 (1.5R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 50% & SL to Cost</i>\n"
         f"• <b>T2 (2.5R):</b> <code>₹{t2:,.2f}</code> — <i>Full Extension</i>\n"
-        f"• <b>Risk : Reward:</b> <b>{rr}</b>{lot_str}\n"
+        f"• <b>R:R:</b> <b>{rr}</b>{lot_str}\n"
         f"🚫 <b>{no_chase}</b>\n"
         f"💡 <b>Reason:</b> {factors_str}"
         f"{off_note}\n"
@@ -2562,7 +2786,9 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
     )
 
     direction = str(data.get("direction") or metrics.get("direction") or "BULLISH").upper()
-    setup_type = str(data.get("setup_type") or metrics.get("setup_type") or "").upper()
+    setup_type = str(
+        data.get("setup_type") or metrics.get("setup_type") or data.get("alert_type") or ""
+    ).upper()
     is_bearish = direction in ("BEARISH", "SHORT", "SELL") or "SHORT" in setup_type
     is_neutral = (
         direction in ("NEUTRAL", "DELTA_NEUTRAL")
@@ -2571,7 +2797,11 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
     )
 
     if "TURTLE_SOUP" in setup_type:
-        setup_title_tag = "TURTLE SOUP SHORT"
+        setup_title_tag = (
+            "TURTLE SOUP SHORT (BEARISH UPTHRUST)"
+            if is_bearish
+            else "TURTLE SOUP LONG (BULLISH SPRING)"
+        )
     elif "IRON_CONDOR" in setup_type:
         setup_title_tag = "IRON CONDOR PINNING (DELTA-NEUTRAL)"
     elif is_bearish:
@@ -2878,7 +3108,7 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
             f"{exp_line}"
             f"🎯 <b>Action: SELL IRON CONDOR (DELTA-NEUTRAL)</b> @ Spot ₹{spot_ltp:,.2f}{lot_beside_p}\n"
             f"• <b>Corridor Pin Zone:</b> <code>₹{corridor_low:,.2f} – ₹{corridor_high:,.2f}</code>{wings_block}\n"
-            f"• <b>Risk : Reward:</b> <b>{rr_display} R:R</b>{lot_str}{hedge_line}{fut_line}{opt_line}\n"
+            f"• <b>R:R:</b> <b>{rr_display}</b>{lot_str}{hedge_line}{fut_line}{opt_line}\n"
             f"💡 <b>Reason:</b> {conf_str}"
             f"{off_note}\n"
             f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
@@ -2893,7 +3123,7 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
             f"• <b>SL (Above High):</b> <code>₹{sl:,.2f}</code> (Risk: ₹{abs(sl - spot_ltp):,.2f})\n"
             f"• <b>T1 (Downside):</b> <code>₹{t1:,.2f}</code> — <i>Cover 40% & SL to Cost</i>\n"
             f"• <b>T2 (Downside):</b> <code>₹{t2:,.2f}</code> — <i>Cover 40% & Trail</i>{moon_line}\n"
-            f"• <b>Risk : Reward:</b> <b>{rr_display} R:R</b>{lot_str}{hedge_line}{fut_line}{opt_line}\n"
+            f"• <b>R:R:</b> <b>{rr_display}</b>{lot_str}{hedge_line}{fut_line}{opt_line}\n"
             f"💡 <b>Reason:</b> {conf_str}"
             f"{off_note}\n"
             f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
@@ -2908,7 +3138,7 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
             f"• <b>SL:</b> <code>₹{sl:,.2f}</code> (Risk: ₹{abs(spot_ltp - sl):,.2f})\n"
             f"• <b>T1 (+2R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 40% & SL to Cost</i>\n"
             f"• <b>T2 (+4R):</b> <code>₹{t2:,.2f}</code> — <i>Scale 40% & Trail</i>{moon_line}\n"
-            f"• <b>Risk : Reward:</b> <b>{rr_display} R:R</b>{lot_str}{hedge_line}{fut_line}{opt_line}\n"
+            f"• <b>R:R:</b> <b>{rr_display}</b>{lot_str}{hedge_line}{fut_line}{opt_line}\n"
             f"💡 <b>Reason:</b> {conf_str}"
             f"{off_note}\n"
             f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
@@ -2976,6 +3206,9 @@ def render_milestone_alert(
             "RUNNER_EXIT": 2,
             "PROFIT_SECURED": 2,
             "BREAKEVEN_EXIT": 2,
+            "SESSION_CLOSE_EXIT": 2,
+            "SESSION_EXPIRED": 2,
+            "SUPERSEDED": 2,
             "TIME_STOP_SCRATCH": 1,
             "TIME_STOP_EXIT": 1,
             "INVALIDATED": 1,
@@ -3100,7 +3333,7 @@ def render_milestone_alert(
         cur_disp = f"{int(cur_strike)}" if cur_strike else "current strike"
         return f"\n🔄 <b>STRIKE ROLL:</b> Book <code>{cur_disp}</code> &amp; {act_verb} to <code>{target_disp}</code> ({pnl_str}Reset Gamma Leverage)"
 
-    if d.milestone_type in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH"):
+    if d.milestone_type in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH", "EXPIRED", "TIME_EXPIRED"):
         orig_plan_line = _build_orig_plan(
             entry_p=d.entry_price,
             entry_r=d.entry_range,
@@ -3108,19 +3341,53 @@ def render_milestone_alert(
             lot=d.lot_size,
         )
         move_str = ""
-        if d.pnl_pts is not None and d.pnl_pct is not None:
+        if (
+            d.pnl_pts is not None
+            and d.pnl_pct is not None
+            and (d.pnl_pts != 0.0 or d.pnl_pct != 0.0)
+        ):
             sign = "+" if d.pnl_pts >= 0 else ""
             r_str = f" | {sign}{d.r_multiple}R" if d.r_multiple is not None else ""
             move_str = f" · ⏱️ <b>P&L:</b> <b>{sign}{cs}{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%{r_str})</b>"
 
+        inv_text = str(d.invalidation_reason or d.rationale or "").lower()
+        is_untriggered = (
+            "did not trigger" in inv_text
+            or "setup did not trigger" in inv_text
+            or d.milestone_type in ("EXPIRED", "TIME_EXPIRED")
+        )
+
+        if is_untriggered:
+            header_title = f"⏱️ <b>{env_tag} {update_prefix}SETUP EXPIRED (TIME-STOP)</b>"
+            sub_title = (
+                f"⏳ <b>{color_icon} {contract_title} ({d.alert_type}) — MOMENTUM WINDOW LAPSED</b>"
+            )
+            action_desc = "CANCEL ORDER / DO NOT ENTER (SETUP DID NOT TRIGGER)"
+            reason_text = (
+                d.invalidation_reason
+                or d.rationale
+                or "Setup did not trigger within momentum window."
+            )
+        else:
+            header_title = f"⏱️ <b>{env_tag} {update_prefix}VELOCITY TIME-STOP EXIT</b>"
+            sub_title = (
+                f"🚨 <b>{color_icon} {contract_title} ({d.alert_type}) — STAGNATION TIME-STOP</b>"
+            )
+            action_desc = "EXIT AT CMP / SCRATCH POSITION (HALT THETA DECAY)"
+            reason_text = (
+                d.invalidation_reason
+                or d.rationale
+                or "Trade stagnant for >=20m without momentum expansion"
+            )
+
         return (
-            f"⏱️ <b>{env_tag} {update_prefix}VELOCITY TIME-STOP EXIT</b>\n"
+            f"{header_title}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🚨 <b>{color_icon} {contract_title} ({d.alert_type}) — STAGNATION TIME-STOP</b>\n"
+            f"{sub_title}\n"
             f"{opt_spec_line}"
             f"💰 <b>{cmp_label}:</b> {cs}{d.ltp:,.2f}{move_str}\n"
-            f"⚡ <b>DECISIVE ACTION:</b> <code>EXIT AT CMP / SCRATCH POSITION (HALT THETA DECAY)</code>\n"
-            f"⏳ <b>Reason:</b> {d.invalidation_reason or d.rationale or 'Trade stagnant for >=20m without momentum expansion'}"
+            f"⚡ <b>DECISIVE ACTION:</b> <code>{action_desc}</code>\n"
+            f"⏳ <b>Reason:</b> {reason_text}"
             f"{orig_plan_line}"
             f"{footer_line}"
         )
@@ -3140,6 +3407,31 @@ def render_milestone_alert(
             f"{opt_spec_line}"
             f"⚡ <b>DECISIVE ACTION:</b> <code>CANCEL PENDING ORDERS & CLOSE POSITIONS</code>\n"
             f"🛑 <b>Reason:</b> {d.invalidation_reason or d.rationale or 'Stop-loss or invalidation floor breached'}"
+            f"{orig_plan_line}"
+            f"{footer_line}"
+        )
+
+    if d.milestone_type in ("SESSION_CLOSE_EXIT", "SESSION_EXPIRED", "SESSION_CLOSE"):
+        orig_plan_line = _build_orig_plan(
+            entry_p=d.entry_price,
+            entry_r=d.entry_range,
+            init_sl=d.initial_sl,
+            lot=d.lot_size,
+        )
+        move_str = ""
+        if d.pnl_pts is not None and d.pnl_pct is not None:
+            sign = "+" if d.pnl_pts >= 0 else ""
+            r_str = f" | {sign}{d.r_multiple}R" if d.r_multiple is not None else ""
+            move_str = f" · 🌙 <b>Session P&L:</b> <b>{sign}{cs}{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%{r_str})</b>"
+
+        return (
+            f"🌙 <b>{env_tag} {update_prefix}INTRADAY SESSION CLOSE EXIT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏁 <b>{color_icon} {contract_title} ({d.alert_type}) — EOD SQUARE-OFF</b>\n"
+            f"{opt_spec_line}"
+            f"💰 <b>{cmp_label}:</b> {cs}{d.ltp:,.2f}{move_str}\n"
+            f"⚡ <b>DECISIVE ACTION:</b> <code>INTRADAY SESSION CLOSED · SQUARE OFF ALL OPEN RUNNERS</code>\n"
+            f"⏳ <b>Reason:</b> {d.invalidation_reason or d.rationale or 'Intraday session expired (15:15 IST cutoff reached)'}"
             f"{orig_plan_line}"
             f"{footer_line}"
         )
@@ -3263,20 +3555,36 @@ def render_milestone_alert(
         decisive_act = d.decisive_action or default_act
 
         hedge_sec = ""
-        if d.hedge_plan and isinstance(d.hedge_plan, dict):
-            short_s = (
-                d.hedge_plan.get("short_symbol")
-                or f"{d.hedge_plan.get('short_strike', '')} {d.hedge_plan.get('short_option_type', '')}"
+        # In-flight hedge defense ONLY applies to theta-decay stagnation, NEVER to VWAP breakdowns or danger zones
+        if (
+            not is_vwap
+            and "VWAP" not in m_type_upper
+            and d.hedge_plan
+            and isinstance(d.hedge_plan, dict)
+        ):
+            prem_est = float(d.hedge_plan.get("short_premium_est", 0.0) or 0.0)
+            net_r = float(
+                d.hedge_plan.get("net_risk_pts", d.hedge_plan.get("max_risk_pts", 0.0)) or 0.0
             )
-            prem_est = d.hedge_plan.get("short_premium_est", 0.0)
-            net_r = d.hedge_plan.get("net_risk_pts", d.hedge_plan.get("max_risk_pts", 0.0))
-            theta_red = d.hedge_plan.get("theta_reduction_pct", 75.0)
-            hedge_sec = (
-                f"\n🛡️ <b>HEDGE DEFENSE (Shift to Spread):</b>\n"
-                f"• <b>Sell:</b> <code>{short_s}</code> @ ~{cs}{prem_est:,.1f}\n"
-                f"• <b>Theta Decay Reduced:</b> -{theta_red:.0f}% | <b>Risk Frozen:</b> {cs}{net_r:,.1f}\n"
-                f"• <b>Guidance:</b> Neutralizes decay & keeps trade alive for afternoon breakout."
-            )
+            # Strict Zero-Price & Integrity Guard: NEVER render bogus zero-rupee prices
+            if prem_est > 0.05 and net_r > 0.0:
+                raw_short = (
+                    d.hedge_plan.get("short_symbol")
+                    or f"{d.hedge_plan.get('short_strike', '')} {d.hedge_plan.get('short_option_type', '')}"
+                ).strip()
+                # Clean float formatting (e.g. 22750.0 -> 22750)
+                short_s = re.sub(r"\b(\d+)\.0\b", r"\1", raw_short)
+                theta_red = float(d.hedge_plan.get("theta_reduction_pct", 75.0) or 75.0)
+                guidance = (
+                    d.hedge_plan.get("guidance")
+                    or "Neutralizes decay & keeps trade alive for afternoon breakout."
+                )
+                hedge_sec = (
+                    f"\n🛡️ <b>HEDGE DEFENSE (Shift to Spread):</b>\n"
+                    f"• <b>Sell:</b> <code>{short_s}</code> @ ~{cs}{prem_est:,.1f}\n"
+                    f"• <b>Theta Decay Reduced:</b> -{theta_red:.0f}% | <b>Risk Frozen:</b> {cs}{net_r:,.1f}\n"
+                    f"• <b>Guidance:</b> {guidance}"
+                )
 
         return (
             f"{header_icon} <b>{env_tag} {update_prefix}{title_tag}</b>\n"
@@ -3290,6 +3598,47 @@ def render_milestone_alert(
             f"{orig_plan_line}"
             f"{footer_line}"
         )
+
+    # Determine if this trade's target is downward (short/sell)
+    # If target_1 and entry_price are available, check if target_1 < entry_price
+    # Otherwise check alert direction and instrument type
+    is_downward_target = False
+    if d.target_1 and d.entry_price:
+        is_downward_target = d.target_1 < d.entry_price
+    elif str(d.direction).upper() in ("BEARISH", "SHORT", "SELL"):
+        # Put buyers have target above entry price (buying premium), so only non-options are downward
+        is_downward_target = not getattr(d, "option_type", None) and not (
+            "PE" in str(d.contract or "") or "CE" in str(d.contract or "")
+        )
+
+    # Invariant Guard: Defense-in-depth physical price reach validation.
+    # Prevent rendering false target achievements if market price has not reached target level.
+    if (
+        d.milestone_type == "TARGET_1"
+        and d.target_1
+        and d.ltp > 0
+        and not getattr(d, "is_t1_achieved", False)
+    ):
+        if (not is_downward_target and d.ltp < d.target_1 * 0.998) or (
+            is_downward_target and d.ltp > d.target_1 * 1.002
+        ):
+            logger.warning(
+                f"[AlertTemplates] Defensively re-routing false TARGET_1 render to TARGET_0_5 for {d.symbol}: "
+                f"LTP={d.ltp} vs T1={d.target_1} (downward={is_downward_target})."
+            )
+            d.milestone_type = "TARGET_0_5"
+    elif d.milestone_type == "TARGET_2" and d.target_2 and d.ltp > 0:
+        is_t2_downward = (
+            (d.target_2 < d.entry_price) if (d.target_2 and d.entry_price) else is_downward_target
+        )
+        if (not is_t2_downward and d.ltp < d.target_2 * 0.998) or (
+            is_t2_downward and d.ltp > d.target_2 * 1.002
+        ):
+            logger.warning(
+                f"[AlertTemplates] Defensively re-routing false TARGET_2 render to TARGET_1 for {d.symbol}: "
+                f"LTP={d.ltp} vs T2={d.target_2} (downward={is_t2_downward})."
+            )
+            d.milestone_type = "TARGET_1"
 
     if d.milestone_type == "TARGET_0_5":
         if d.trailing_stop is not None:
@@ -3802,9 +4151,14 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             in_market=in_market,
         )
 
-    # 0b. Velocity Time-Stop Exit (prioritized over standard invalidation)
-    if getattr(alert, "stage", "") in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH") or (
-        getattr(alert, "target_status", "") in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH")
+    # 0b. Velocity Time-Stop Exit & Momentum Window Expiry (prioritized over standard invalidation)
+    if (
+        getattr(alert, "stage", "") in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH", "EXPIRED")
+        or getattr(alert, "target_status", "")
+        in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH", "TIME_EXPIRED")
+        or "time-stop expired" in str(getattr(alert, "archive_reason", "") or "").lower()
+        or "time-stop expired" in str(getattr(alert, "summary", "") or "").lower()
+        or "time-stop expired" in str(getattr(alert, "invalidation_reason", "") or "").lower()
     ):
         return render_milestone_alert(
             MilestoneAlertData.from_alert(alert, "TIME_STOP_EXIT", in_market=in_market),
@@ -3820,6 +4174,18 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     if is_runner_exit:
         return render_milestone_alert(
             MilestoneAlertData.from_alert(alert, "RUNNER_EXIT", in_market=in_market),
+            in_market=in_market,
+        )
+
+    # 0d. Intraday Session Close Exit / EOD Square-Off
+    is_session_close = (
+        getattr(alert, "stage", "") in ("SESSION_CLOSE_EXIT", "SESSION_EXPIRED")
+        or getattr(alert, "target_status", "") in ("SESSION_CLOSE_EXIT", "SESSION_EXPIRED")
+        or "SESSION CLOSE EXIT" in (getattr(alert, "headline", "") or "").upper()
+    )
+    if is_session_close:
+        return render_milestone_alert(
+            MilestoneAlertData.from_alert(alert, "SESSION_CLOSE_EXIT", in_market=in_market),
             in_market=in_market,
         )
 
@@ -3859,6 +4225,124 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         alert, "stage", ""
     ) in ("T1_ACHIEVED", "TARGET_1", "TARGET_1_HIT", "TARGET_1_ACHIEVED")
     if is_t1:
+        # Integrity validation: Ensure price physically reached Target 1
+        t1_raw = (
+            getattr(alert, "target_1", None)
+            or (getattr(alert, "actionable_plan", {}) or {}).get("target_1")
+            or getattr(alert, "target_level", None)
+        )
+        cur_p = getattr(alert, "ltp", 0.0) or getattr(alert, "current_ltp", 0.0)
+        entry_p = getattr(alert, "entry_price", None) or getattr(
+            alert, "initial_entry_premium", None
+        )
+        act_p = getattr(alert, "actionable_plan", {}) or {}
+        if not entry_p and isinstance(act_p, dict):
+            rec_e = act_p.get("recommended_entry")
+            if rec_e:
+                m_e = re.search(r"[\d,]+(?:\.\d+)?", str(rec_e))
+                if m_e:
+                    entry_p = float(m_e.group(0).replace(",", ""))
+        if entry_p:
+            try:
+                entry_p = float(entry_p)
+            except (ValueError, TypeError):
+                entry_p = None
+
+        t1_num = None
+        if t1_raw:
+            m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(t1_raw))
+            if m_t1:
+                try:
+                    t1_num = float(m_t1.group(0).replace(",", ""))
+                except ValueError:
+                    pass
+        if not t1_num and entry_p and getattr(alert, "stop_loss", None):
+            try:
+                sl_val = float(alert.stop_loss)
+                r_val = abs(entry_p - sl_val)
+                if r_val > 0:
+                    dir_chk = str(getattr(alert, "direction", "BULLISH")).upper()
+                    t1_num = round(
+                        entry_p + (r_val * 2.0)
+                        if dir_chk not in ("BEARISH", "SHORT", "SELL")
+                        else entry_p - (r_val * 2.0),
+                        2,
+                    )
+            except Exception:
+                pass
+
+        alert_type_raw = str(getattr(alert, "alert_type", "") or "").upper()
+        act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
+        is_opt = bool(
+            getattr(alert, "option_type", None)
+            or getattr(alert, "strike", None)
+            or "PE" in str(getattr(alert, "contract_symbol", "") or "")
+            or "CE" in str(getattr(alert, "contract_symbol", "") or "")
+            or alert_type_raw
+            in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+        )
+        if is_opt:
+            is_option_seller = (
+                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
+                or alert_type_raw == "OPTION_WRITE"
+                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
+            )
+            is_downward = is_option_seller
+        else:
+            if t1_num and entry_p and entry_p > 0:
+                is_downward = t1_num < entry_p
+            else:
+                is_downward = str(getattr(alert, "direction", "BULLISH")).upper() in (
+                    "BEARISH",
+                    "SHORT",
+                    "SELL",
+                )
+
+        has_hit_t1 = (
+            t1_num is not None
+            and t1_num > 0
+            and cur_p > 0
+            and (
+                (not is_downward and cur_p >= t1_num * 0.998)
+                or (is_downward and cur_p <= t1_num * 1.002)
+            )
+        )
+
+        if not has_hit_t1:
+            logger.warning(
+                f"[AlertTemplates] Vetoed false TARGET_1 render for {getattr(alert, 'symbol', '')}: "
+                f"LTP={cur_p} has not reached Target 1={t1_num} (downward={is_downward})."
+            )
+            # Check if Target 0.5 was physically reached before falling back to TARGET_0_5
+            t0_5_raw = getattr(alert, "target_0_5", None) or (
+                getattr(alert, "actionable_plan", {}) or {}
+            ).get("target_0_5")
+            t0_5_num = None
+            if t0_5_raw:
+                m_t05 = re.search(r"[\d,]+(?:\.\d+)?", str(t0_5_raw))
+                if m_t05:
+                    try:
+                        t0_5_num = float(m_t05.group(0).replace(",", ""))
+                    except ValueError:
+                        pass
+            has_hit_t0_5 = (
+                t0_5_num is not None
+                and t0_5_num > 0
+                and cur_p > 0
+                and (
+                    (not is_downward and cur_p >= t0_5_num * 0.998)
+                    or (is_downward and cur_p <= t0_5_num * 1.002)
+                )
+            )
+            if has_hit_t0_5:
+                return render_milestone_alert(
+                    MilestoneAlertData.from_alert(alert, "TARGET_0_5", in_market=in_market),
+                    in_market=in_market,
+                )
+            return render_milestone_alert(
+                MilestoneAlertData.from_alert(alert, "TRAIL_RATCHET", in_market=in_market),
+                in_market=in_market,
+            )
         return render_milestone_alert(
             MilestoneAlertData.from_alert(alert, "TARGET_1", in_market=in_market),
             in_market=in_market,
@@ -3869,6 +4353,106 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         alert, "stage", ""
     ) in ("T2_ACHIEVED", "TARGET_2", "TARGET_2_HIT", "TARGET_2_ACHIEVED")
     if is_t2:
+        t2_raw = getattr(alert, "target_2", None) or (
+            getattr(alert, "actionable_plan", {}) or {}
+        ).get("target_2")
+        cur_p = getattr(alert, "ltp", 0.0) or getattr(alert, "current_ltp", 0.0)
+        entry_p = getattr(alert, "entry_price", None) or getattr(
+            alert, "initial_entry_premium", None
+        )
+        act_p = getattr(alert, "actionable_plan", {}) or {}
+        if not entry_p and isinstance(act_p, dict):
+            rec_e = act_p.get("recommended_entry")
+            if rec_e:
+                m_e = re.search(r"[\d,]+(?:\.\d+)?", str(rec_e))
+                if m_e:
+                    entry_p = float(m_e.group(0).replace(",", ""))
+        if entry_p:
+            try:
+                entry_p = float(entry_p)
+            except (ValueError, TypeError):
+                entry_p = None
+
+        t2_num = None
+        if t2_raw:
+            m_t2 = re.search(r"[\d,]+(?:\.\d+)?", str(t2_raw))
+            if m_t2:
+                try:
+                    t2_num = float(m_t2.group(0).replace(",", ""))
+                except ValueError:
+                    pass
+
+        alert_type_raw = str(getattr(alert, "alert_type", "") or "").upper()
+        act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
+        is_opt = bool(
+            getattr(alert, "option_type", None)
+            or getattr(alert, "strike", None)
+            or "PE" in str(getattr(alert, "contract_symbol", "") or "")
+            or "CE" in str(getattr(alert, "contract_symbol", "") or "")
+            or alert_type_raw
+            in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+        )
+        if is_opt:
+            is_option_seller = (
+                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
+                or alert_type_raw == "OPTION_WRITE"
+                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
+            )
+            is_t2_downward = is_option_seller
+        else:
+            if t2_num and entry_p and entry_p > 0:
+                is_t2_downward = t2_num < entry_p
+            else:
+                is_t2_downward = str(getattr(alert, "direction", "BULLISH")).upper() in (
+                    "BEARISH",
+                    "SHORT",
+                    "SELL",
+                )
+
+        has_hit_t2 = (
+            t2_num is not None
+            and t2_num > 0
+            and cur_p > 0
+            and (
+                (not is_t2_downward and cur_p >= t2_num * 0.998)
+                or (is_t2_downward and cur_p <= t2_num * 1.002)
+            )
+        )
+
+        if not has_hit_t2:
+            logger.warning(
+                f"[AlertTemplates] Vetoed false TARGET_2 render for {getattr(alert, 'symbol', '')}: "
+                f"LTP={cur_p} has not reached Target 2={t2_num} (downward={is_t2_downward})."
+            )
+            t1_raw = getattr(alert, "target_1", None) or (
+                act_p.get("target_1") if isinstance(act_p, dict) else None
+            )
+            t1_num = None
+            if t1_raw:
+                m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(t1_raw))
+                if m_t1:
+                    try:
+                        t1_num = float(m_t1.group(0).replace(",", ""))
+                    except ValueError:
+                        pass
+            has_hit_t1 = (
+                t1_num is not None
+                and t1_num > 0
+                and cur_p > 0
+                and (
+                    (not is_t2_downward and cur_p >= t1_num * 0.998)
+                    or (is_t2_downward and cur_p <= t1_num * 1.002)
+                )
+            )
+            if has_hit_t1:
+                return render_milestone_alert(
+                    MilestoneAlertData.from_alert(alert, "TARGET_1", in_market=in_market),
+                    in_market=in_market,
+                )
+            return render_milestone_alert(
+                MilestoneAlertData.from_alert(alert, "TRAIL_RATCHET", in_market=in_market),
+                in_market=in_market,
+            )
         return render_milestone_alert(
             MilestoneAlertData.from_alert(alert, "TARGET_2", in_market=in_market),
             in_market=in_market,
@@ -3907,8 +4491,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         d = alert.to_dict() if hasattr(alert, "to_dict") else vars(alert)
         return render_precursor_alert(d, in_market=in_market)
 
-    # 6. Asymmetric Opportunity
-    if getattr(alert, "alert_type", "") == "ASYMMETRIC_OPPORTUNITY":
+    # 6. Asymmetric Opportunity & Opportunity Interception (Turtle Soup)
+    if getattr(alert, "alert_type", "") in ("ASYMMETRIC_OPPORTUNITY", "TURTLE_SOUP_SWEEP"):
         d = alert.to_dict() if hasattr(alert, "to_dict") else vars(alert)
         return render_asymmetric_alert(d, in_market=in_market)
 
@@ -4102,11 +4686,6 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             or actionable_plan.get("entry_range")
             or f"₹{alert.ltp:.1f}"
         )
-        tgt = (
-            actionable_plan.get("target")
-            or actionable_plan.get("target_1")
-            or f"₹{getattr(alert, 'target_level', 0):.1f}"
-        )
         sl = actionable_plan.get("stop_loss", f"₹{getattr(alert, 'stop_loss', 0):.1f}")
 
         # Spot-leakage defense: if entry or SL is in underlying spot units, rescue from option_plan
@@ -4124,9 +4703,31 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 sl_prem = opt_p.get("sl_premium") or opt_p.get("stop_loss")
                 if sl_prem and float(sl_prem) > 0:
                     sl = f"₹{float(sl_prem):,.1f}"
-                t1_prem = opt_p.get("t1_premium") or opt_p.get("target_1")
-                if t1_prem and float(t1_prem) > 0:
-                    tgt = f"₹{float(t1_prem):,.1f}"
+
+        # Resolve numerical entry value for monotonicity and R:R
+        entry_val = None
+        try:
+            m = re.search(r"₹?\s*([\d,]+(?:\.\d+)?)", str(entry))
+            if m:
+                entry_val = float(m.group(1).replace(",", ""))
+        except Exception:
+            entry_val = None
+
+        # Strictly Monotonic Target Resolution (Enforces T1 < T2 for option buys)
+        t1_disp, t2_disp, _ = _resolve_monotonic_display_targets(
+            actionable_plan=actionable_plan,
+            alert=alert,
+            entry_val=entry_val,
+            is_short=False,
+            currency_symbol="₹",
+        )
+        tgt = (
+            t1_disp
+            or actionable_plan.get("target_1")
+            or actionable_plan.get("target")
+            or f"₹{getattr(alert, 'target_level', 0):.1f}"
+        )
+        tgt2 = t2_disp
 
         # Dynamic mathematical R:R calculation from levels
         calc_rr = None
@@ -4147,14 +4748,6 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
         rr = calc_rr or actionable_plan.get("risk_reward", "1:3.0")
         opt_cmp = getattr(alert, "option_premium", None) or getattr(alert, "ltp", None)
-        # Suppress redundant Opt CMP tag if entry already contains or closely matches it
-        entry_val = None
-        try:
-            m = re.search(r"₹?\s*([\d,]+(?:\.\d+)?)", str(entry))
-            if m:
-                entry_val = float(m.group(1).replace(",", ""))
-        except Exception:
-            entry_val = None
 
         opt_cmp_match = (
             entry_val is not None and opt_cmp is not None and abs(opt_cmp - entry_val) <= 0.25
@@ -4191,8 +4784,6 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             underlying=getattr(alert, "symbol", "NIFTY"),
         )
         exp_line = f"• <b>Expiry:</b> ⏳ {exp_info['badge']}\n" if exp_info.get("badge") else ""
-
-        tgt2 = actionable_plan.get("target_2")
         tgt2_str = f" | <b>T2:</b> <code>{tgt2}</code>" if (tgt2 and tgt2 != tgt) else ""
         wait_rule = actionable_plan.get("when_to_wait")
         friday_warn = actionable_plan.get("friday_weekend_warning")
@@ -4268,11 +4859,23 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 lot_sz = None
         lot_beside_p = f" (Lot: {lot_sz})" if lot_sz else ""
         lot_str = f" | <b>Lot:</b> {lot_sz}" if lot_sz else ""
+        max_loss = (
+            actionable_plan.get("max_loss_capped")
+            or actionable_plan.get("max_loss_rupees")
+            or (
+                alert.metrics.get("max_loss_rupees")
+                if isinstance(getattr(alert, "metrics", None), dict)
+                else None
+            )
+        )
+        max_loss_str = (
+            f" · [Risk: ₹{float(max_loss):,.0f}/lot]" if max_loss and float(max_loss) > 0 else ""
+        )
 
         plan_str = (
             f"{exp_line}"
             f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>{lot_beside_p}{opt_cmp_str}{spot_ref}{spread_ref_inline}\n"
-            f"• <b>SL:</b> <code>{sl}</code>{spot_anchor_str}\n"
+            f"• <b>SL:</b> <code>{sl}</code>{spot_anchor_str}{max_loss_str}\n"
             f"• <b>T1:</b> <code>{tgt}</code>{tgt2_str}\n"
             f"• <b>R:R:</b> <b>{rr}</b>{lot_str}{no_chase_inline}"
             f"{rule_str}"
@@ -4294,21 +4897,53 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             or "PE" in actionable_plan.get("action", "")
         )
 
-        act = actionable_plan.get("action", "BUY_FUTURES")
+        act = str(actionable_plan.get("action", "BUY_FUTURES"))
         inst = actionable_plan.get("contract", f"MCX:{alert.symbol}")
         # Clean display name for contract if not already formatted
         if ("CE" in inst or "PE" in inst) and "(" not in inst:
             inst = format_readable_option_symbol(inst)
 
+        # Deduplicate option type from action verb if contract already specifies it
+        # e.g., act="BUY_CE", inst="CRUDEOIL 8750 CE (16 Oct)" -> act="BUY"
+        inst_u = inst.upper()
+        if any(tok in inst_u for tok in (" CE", " PE", "CE", "PE")) and any(
+            tok in act.upper() for tok in ("_CE", "_PE", " CE", " PE")
+        ):
+            act = re.sub(r"[_\s]*(?:CE|PE)\b", "", act, flags=re.IGNORECASE).strip()
+            act = re.sub(r"\s+", " ", act)
+
         entry = actionable_plan.get("entry_range", f"₹{alert.ltp:,.1f}")
-        tgt1 = actionable_plan.get("target", f"₹{getattr(alert, 'target_level', 0):,.1f}")
-        tgt2 = actionable_plan.get("target_2", "")
+        entry_mcx_num = None
+        m_mcx = re.search(r"₹?\s*([\d,]+(?:\.\d+)?)", str(entry))
+        if m_mcx:
+            try:
+                entry_mcx_num = float(m_mcx.group(1).replace(",", ""))
+            except Exception:
+                pass
+        is_short_mcx = not is_opt_first and (
+            str(act).startswith("SELL")
+            or str(getattr(alert, "direction", "")).upper() in ("BEARISH", "SHORT")
+        )
+        t1_disp, t2_disp, _ = _resolve_monotonic_display_targets(
+            actionable_plan=actionable_plan,
+            alert=alert,
+            entry_val=entry_mcx_num,
+            is_short=is_short_mcx,
+            currency_symbol="₹",
+        )
+        tgt1 = (
+            t1_disp
+            or actionable_plan.get("target_1")
+            or actionable_plan.get("target")
+            or f"₹{getattr(alert, 'target_level', 0):,.1f}"
+        )
+        tgt2 = t2_disp
         sl = actionable_plan.get("stop_loss", f"₹{getattr(alert, 'stop_loss', 0):,.1f}")
         rr = actionable_plan.get("risk_reward", "1:2.4")
         lot = actionable_plan.get("lot_size", "")
         lot_beside_p = f" (Lot: {lot})" if lot else ""
         lot_str = f" | Lot: {lot}" if lot else ""
-        tgt2_str = f" | <b>T2:</b> <code>{tgt2}</code>" if tgt2 else ""
+        tgt2_str = f" | <b>T2:</b> <code>{tgt2}</code>" if (tgt2 and tgt2 != tgt1) else ""
         rule = actionable_plan.get("profit_rule", "Book 50% at T1, trail stop to cost.")
         confluence = actionable_plan.get("setup_confluence")
         confluence_str = f"\n🔬 <b>Confluence:</b> <i>{confluence}</i>" if confluence else ""
@@ -4356,6 +4991,20 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             else:
                 wait_str = f"\n• <b>Discipline:</b> <i>{wait_rule}</i>"
 
+        sniper_plan = actionable_plan.get("sniper_plan") or (
+            alert.metrics.get("sniper_plan")
+            if isinstance(getattr(alert, "metrics", None), dict)
+            else None
+        )
+        sniper_str = ""
+        if sniper_plan and isinstance(sniper_plan, dict):
+            ote_z = (
+                sniper_plan.get("optimal_entry_zone")
+                or f"₹{sniper_plan.get('entry_zone_min', 0):,.1f} – ₹{sniper_plan.get('entry_zone_max', 0):,.1f}"
+            )
+            ts = sniper_plan.get("time_stop_minutes", 25)
+            sniper_str = f"\n🎯 <b>Sniper OTE Bracket:</b> <code>{ote_z}</code> (Time-Stop: {ts}m)"
+
         if is_opt_first:
             plan_str = (
                 f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>{lot_beside_p}\n"
@@ -4364,7 +5013,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 f"• <b>R:R:</b> <b>{rr}</b>{lot_str}{no_chase_inline}"
                 f"{capped_risk_str}"
                 f"{confluence_str}"
-                f"{fut_ref_str}\n"
+                f"{fut_ref_str}"
+                f"{sniper_str}\n"
                 f"• <b>Playbook:</b> <i>{rule}</i>"
                 f"{wait_str}"
             )
@@ -4387,7 +5037,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 f"• <b>SL:</b> <code>{sl}</code>\n"
                 f"• <b>T1:</b> <code>{tgt1}</code>{tgt2_str}\n"
                 f"• <b>R:R:</b> <b>{rr}</b>{lot_str}{no_chase_inline}"
-                f"{confluence_str}\n"
+                f"{confluence_str}"
+                f"{sniper_str}\n"
                 f"• <b>Playbook:</b> <i>{rule}</i>"
                 f"{wait_str}"
                 f"{opt_str}"
@@ -4399,13 +5050,35 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         act = actionable_plan.get("action", "BUY_FUTURES").replace("_", " ")
         inst = actionable_plan.get("contract", f"CDS:{alert.symbol}")
         entry = actionable_plan.get("entry_range", f"₹{alert.ltp:.4f}")
-        tgt1 = actionable_plan.get("target", f"₹{getattr(alert, 'target_level', 0):.4f}")
-        tgt2 = actionable_plan.get("target_2", "")
+        entry_cds_num = None
+        m_cds = re.search(r"₹?\s*([\d,]+(?:\.\d+)?)", str(entry))
+        if m_cds:
+            try:
+                entry_cds_num = float(m_cds.group(1).replace(",", ""))
+            except Exception:
+                pass
+        is_short_cds = str(act).startswith("SELL") or str(
+            getattr(alert, "direction", "")
+        ).upper() in ("BEARISH", "SHORT")
+        t1_disp, t2_disp, _ = _resolve_monotonic_display_targets(
+            actionable_plan=actionable_plan,
+            alert=alert,
+            entry_val=entry_cds_num,
+            is_short=is_short_cds,
+            currency_symbol="₹",
+        )
+        tgt1 = (
+            t1_disp
+            or actionable_plan.get("target_1")
+            or actionable_plan.get("target")
+            or f"₹{getattr(alert, 'target_level', 0):.4f}"
+        )
+        tgt2 = t2_disp
         sl = actionable_plan.get("stop_loss", f"₹{getattr(alert, 'stop_loss', 0):.4f}")
         rr = actionable_plan.get("risk_reward", "1:2.2")
         lot = actionable_plan.get("lot_size", 1000)
         lot_beside_p = f" (Lot: {lot})" if lot else ""
-        tgt2_str = f" | <b>T2:</b> <code>{tgt2}</code>" if tgt2 else ""
+        tgt2_str = f" | <b>T2:</b> <code>{tgt2}</code>" if (tgt2 and tgt2 != tgt1) else ""
         rule = actionable_plan.get("profit_rule", "Scale 50% at T1, move SL to entry.")
         no_chase_val = getattr(alert, "no_chase_boundary", None)
         no_chase_inline = ""
@@ -4444,17 +5117,25 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         inst = re.sub(r"^CRYPTO:", "", raw_inst, flags=re.IGNORECASE)
         ltp = float(getattr(alert, "ltp", 0.0) or 0.0)
         entry = actionable_plan.get("entry_range", f"${ltp:,.2f}")
-        tgt1 = actionable_plan.get(
-            "target", f"${float(getattr(alert, 'target_level', 0.0) or 0.0):,.2f}"
+        is_short_crypto = str(act).startswith("SHORT") or str(act).startswith("SELL")
+        t1_disp, t2_disp, t3_disp = _resolve_monotonic_display_targets(
+            actionable_plan=actionable_plan,
+            alert=alert,
+            entry_val=ltp,
+            is_short=is_short_crypto,
+            currency_symbol="$",
         )
-        tgt2 = actionable_plan.get("target_2", "")
-        tgt3 = actionable_plan.get("target_3") or actionable_plan.get("runner", "")
+        tgt1 = t1_disp or f"${float(getattr(alert, 'target_level', 0.0) or 0.0):,.2f}"
+        tgt2 = t2_disp
+        tgt3 = t3_disp or actionable_plan.get("target_3") or actionable_plan.get("runner", "")
         sl = actionable_plan.get(
             "stop_loss", f"${float(getattr(alert, 'stop_loss', 0.0) or 0.0):,.2f}"
         )
         rr = actionable_plan.get("risk_reward", "1:2.5")
-        tgt2_str = f" | <b>T2:</b> <code>{tgt2}</code>" if tgt2 else ""
-        tgt3_str = f" | <b>Runner:</b> <code>{tgt3}</code>" if tgt3 else ""
+        tgt2_str = f" | <b>T2:</b> <code>{tgt2}</code>" if (tgt2 and tgt2 != tgt1) else ""
+        tgt3_str = (
+            f" | <b>Runner:</b> <code>{tgt3}</code>" if (tgt3 and tgt3 not in (tgt1, tgt2)) else ""
+        )
         rule = actionable_plan.get("profit_rule", "Scale 50% at T1, trail stop on 20-EMA.")
         confluence = actionable_plan.get("setup_confluence") or "SMC Order Block + FVG Reclaim"
         no_chase_val = getattr(alert, "no_chase_boundary", None)
@@ -4500,7 +5181,41 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 try:
                     tp = TradePlan(**stored_tp)
                 except Exception:
-                    tp = None
+                    from types import SimpleNamespace
+
+                    d_tp = dict(stored_tp)
+                    entry_p = float(d_tp.get("entry_price", alert.ltp or 0.0))
+                    sl_p = float(
+                        d_tp.get("invalidation_stop", getattr(alert, "stop_loss", 0.0) or 0.0)
+                    )
+                    t1_p = float(d_tp.get("target_1", getattr(alert, "target_level", 0.0) or 0.0))
+                    t2_p = float(d_tp.get("target_2", t1_p))
+                    stop_dist = float(d_tp.get("stop_distance_pts", abs(entry_p - sl_p)))
+                    t1_dist = float(d_tp.get("t1_distance_pts", abs(t1_p - entry_p)))
+                    t2_dist = float(d_tp.get("t2_distance_pts", abs(t2_p - entry_p)))
+                    rr1 = float(d_tp.get("rr_t1", round(t1_dist / max(0.01, stop_dist), 2)))
+                    rr2 = float(d_tp.get("rr_t2", round(t2_dist / max(0.01, stop_dist), 2)))
+                    tp = SimpleNamespace(
+                        direction=(
+                            "LONG"
+                            if str(d_tp.get("direction", alert.direction)).upper()
+                            in ("LONG", "BULLISH", "BUY")
+                            else "SHORT"
+                        ),
+                        entry_price=entry_p,
+                        invalidation_stop=sl_p,
+                        stop_distance_pts=stop_dist,
+                        target_1=t1_p,
+                        t1_distance_pts=t1_dist,
+                        rr_t1=rr1,
+                        target_2=t2_p,
+                        t2_distance_pts=t2_dist,
+                        rr_t2=rr2,
+                        is_asymmetry_viable=bool(d_tp.get("is_asymmetry_viable", True)),
+                        asymmetry_verdict=str(d_tp.get("asymmetry_verdict", "ACCEPTABLE")),
+                        session_overrun_risk=bool(d_tp.get("session_overrun_risk", False)),
+                        session_clock_note=str(d_tp.get("session_clock_note", "")),
+                    )
 
             if not tp:
                 clean_spot = (
@@ -5116,11 +5831,17 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         def _clean_sig_phrase(text: str, max_len: int = 40) -> str:
             t = str(text or "").strip()
             if len(t) <= max_len:
-                return t
+                return t.rstrip(",;.:- /")
             clipped = t[:max_len]
             sp = clipped.rfind(" ")
             if sp > 15:
                 clipped = clipped[:sp]
+            clipped = clipped.rstrip(",;.:- /")
+            # If clipping left an awkward trailing label like ': session' or ': tag', strip back to pre-colon
+            if ":" in clipped:
+                post_colon = clipped.split(":")[-1].strip()
+                if len(post_colon.split()) <= 1 and len(post_colon) < 10:
+                    clipped = clipped.rsplit(":", 1)[0].strip()
             clipped = clipped.rstrip(",;.:- /")
             # Balance unclosed brackets/parentheses to prevent hanging artifacts like '($'
             for open_b, close_b in (("(", ")"), ("[", "]"), ("{", "}")):

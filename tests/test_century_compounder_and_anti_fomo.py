@@ -138,3 +138,44 @@ def test_scan_century_compounders_deterministic():
     top = results[0]
     assert top.century_score >= 50
     assert top.twin_engines.total_projected_multiple > 1.0
+
+
+def test_resolve_compounder_universe_distinct_presets():
+    """Verify presets resolve dynamically to their distinct equity universes."""
+    from analysis.century_compounder import resolve_compounder_universe
+    from analysis.universe import resolve_universe
+
+    # Canonical alias verification
+    assert callable(resolve_universe)
+
+    u_bse = resolve_compounder_universe("bse_high_growth")
+    assert len(u_bse) == 35
+    assert "SUZLON" in u_bse
+    assert "BDL" in u_bse
+
+    u_small = resolve_compounder_universe("smallcap250")
+    assert len(u_small) >= 250
+
+    u_micro = resolve_compounder_universe("microcap250")
+    assert len(u_micro) >= 250
+
+    u_all = resolve_compounder_universe("all_nse_liquid")
+    assert len(u_all) > 2000
+
+    u_tot = resolve_compounder_universe("nifty_total_market")
+    assert len(u_tot) >= 750
+
+    # Ensure universes are distinctly different, not identical hardcoded lists
+    assert set(u_bse) != set(u_micro)
+    assert set(u_small) != set(u_micro)
+
+
+def test_scan_century_compounders_universe_scoping():
+    """Verify scan_century_compounders strictly scopes results to the requested universe."""
+    from analysis.century_compounder import resolve_compounder_universe
+
+    bse_syms = set(resolve_compounder_universe("bse_high_growth"))
+    results = scan_century_compounders(universe="bse_high_growth", min_score=60, top_n=10)
+
+    for r in results:
+        assert r.symbol in bse_syms, f"{r.symbol} leaked outside bse_high_growth"

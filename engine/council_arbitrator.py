@@ -28,9 +28,9 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
-_ARBITRATION_INTERVAL: float = 600.0
+_ARBITRATION_INTERVAL: float = 60.0
 _SOTD_COUNT: int = 3
-_FRESH_WINDOW: float = 660.0
+_FRESH_WINDOW: float = 900.0
 
 _arb_lock = threading.Lock()
 _last_arb_at: float = 0.0
@@ -45,6 +45,7 @@ def _score_alert(alert: object, nifty_posture: str = "NEUTRAL") -> float:
         sl = float(getattr(alert, "stop_loss", 0) or 0)
         metrics = getattr(alert, "metrics", {}) or {}
         direction = str(getattr(alert, "direction", "") or "")
+        alert_type = str(getattr(alert, "alert_type", "") or "").upper()
 
         if ltp > 0 and target > 0 and sl > 0:
             risk = abs(ltp - sl)
@@ -74,14 +75,51 @@ def _score_alert(alert: object, nifty_posture: str = "NEUTRAL") -> float:
             except Exception:
                 pass
 
+        # ── Macro Direction & Anti-Whipsaw Alignment ─────────────────
         bench_bonus = 0.0
-        if nifty_posture == "BULLISH" and direction == "BULLISH":
-            bench_bonus = 4.0
-        elif nifty_posture == "BEARISH" and direction == "BEARISH":
-            bench_bonus = 4.0
+        if nifty_posture == "BULLISH":
+            if direction == "BULLISH":
+                bench_bonus = 6.0
+            elif direction == "BEARISH":
+                bench_bonus = -14.0  # Fighting macro trend
+        elif nifty_posture == "BEARISH":
+            if direction == "BEARISH":
+                bench_bonus = 6.0
+            elif direction == "BULLISH":
+                bench_bonus = -14.0  # Fighting macro liquidation
 
-        score = conf * 0.40 + rr * 10.0 * 0.25 + sms * 0.15 + vix_bonus + expiry_bonus + bench_bonus
-        return round(score, 2)
+        # ── Regime Filter: Suppress Stock Breakouts in Neutral/Choppy Markets ──
+        regime_penalty = 0.0
+        if "SQUEEZE" in alert_type and nifty_posture == "NEUTRAL":
+            regime_penalty = -12.0  # Stock breakouts fail heavily in neutral/range chop
+
+        # ── Asymmetric R:R & Limit Execution Reward ──────────────────
+        rr_bonus = 0.0
+        if rr >= 3.0:
+            rr_bonus = 8.0  # Asymmetric trade setup
+        elif rr < 1.8:
+            rr_bonus = -8.0  # Inadequate risk-reward
+
+        entry_bonus = 0.0
+        if (
+            action_plan.get("entry_type") == "LIMIT_ON_PULLBACK"
+            or "optimal_entry_limit" in action_plan
+            or "LIMIT" in str(action_plan.get("when_to_buy", "")).upper()
+        ):
+            entry_bonus = 5.0  # Non-FOMO limit pullback execution
+
+        score = (
+            conf * 0.35
+            + rr * 10.0 * 0.25
+            + sms * 0.15
+            + vix_bonus
+            + expiry_bonus
+            + bench_bonus
+            + regime_penalty
+            + rr_bonus
+            + entry_bonus
+        )
+        return round(max(10.0, min(100.0, score)), 2)
     except Exception:
         return 50.0
 
@@ -104,7 +142,7 @@ def run_council_arbitration(engine: object) -> list:
     for a in alerts:
         if getattr(a, "is_invalidated", False) or getattr(a, "is_archived", False):
             continue
-        if getattr(a, "stage", "") not in ("IGNITED", "EARLY_WARNING", "ACTIVE"):
+        if getattr(a, "stage", "") not in ("IGNITED", "EARLY_WARNING", "ACTIVE", "PRIMED"):
             continue
         created_at_str = getattr(a, "created_at", "") or ""
         try:
@@ -150,10 +188,14 @@ def run_council_arbitration(engine: object) -> list:
         action_plan["council_rank"] = rank
         action_plan["council_score"] = score
         action_plan["council_approved"] = True
+        action_plan["is_apex_sotd"] = True
+        try:
+            alert.is_apex_sotd = True
+        except Exception:
+            pass
         action_plan["council_note"] = (
-            "SOTD #%d: Selected by Multi-Agent Council arbitration (score %.1f). "
-            "Benchmark: %s. This is the highest-conviction setup in current cycle."
-            % (rank, score, nifty_posture)
+            "🏆 APEX SOTD #%d: Selected by Institutional Council arbitration (score %.1f). "
+            "Benchmark: %s. Highest conviction setup in session." % (rank, score, nifty_posture)
         )
         winner_ids.append(alert_id)
         logger.info(

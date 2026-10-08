@@ -18,8 +18,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -488,19 +491,21 @@ def _load_bundled_universe_symbols(filename: str, fallback_symbols: list[str]) -
                 syms = [
                     d["symbol"].strip().upper()
                     for d in data
-                    if isinstance(d, dict) and d.get("symbol")
+                    if isinstance(d, dict)
+                    and d.get("symbol")
+                    and not d["symbol"].strip().upper().startswith(("DUMMY", "TEST"))
                 ]
                 if syms:
                     return syms
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[universe] Failed loading bundled symbols from {filename}: {e}")
     return fallback_symbols
 
 
 def _load_bundled_company_names() -> dict[str, str]:
     """Loads comprehensive company names from bundled JSON files."""
     names = {}
-    for fn in ("nse_all_eq.json", "nifty_total_market.json", "nifty500.json"):
+    for fn in ("nse_all_eq.json", "nifty_total_market.json", "nifty500.json", "bse500.json"):
         p = _UNIVERSES_DATA_DIR / fn
         if not p.exists():
             p = Path("data/universes") / fn
@@ -510,10 +515,10 @@ def _load_bundled_company_names() -> dict[str, str]:
                 for d in data:
                     sym = d.get("symbol", "").strip().upper()
                     name = d.get("name", "").strip()
-                    if sym and name:
+                    if sym and name and not sym.startswith(("DUMMY", "TEST")):
                         names[sym] = name
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[universe] Failed loading bundled company names from {fn}: {e}")
     return names
 
 
@@ -1075,6 +1080,21 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
         "description": "Complete NSE actively listed Series EQ universe, dynamically turnover-filtered.",
         "symbols": _load_bundled_universe_symbols("nse_all_eq.json", []),
     },
+    "bse500": {
+        "name": "🏛️ S&P BSE 500 Equities",
+        "description": "Top 500 companies listed on Bombay Stock Exchange representing over 93% of Indian market cap.",
+        "symbols": _load_bundled_universe_symbols("bse500.json", []),
+    },
+    "all_equities_nse_bse": {
+        "name": "🇮🇳 All Indian Equities (NSE + BSE Broad Universe)",
+        "description": "Comprehensive universe of 2,300+ actively listed Indian equities across NSE and BSE.",
+        "symbols": list(
+            dict.fromkeys(
+                _load_bundled_universe_symbols("nse_all_eq.json", [])
+                + _load_bundled_universe_symbols("bse500.json", [])
+            )
+        ),
+    },
     "bse_high_growth": {
         "name": "🚀 BSE & Turnaround Super-Cycles",
         "description": "High-conviction capex, deleveraging turnarounds, and thematic super-cycles (Solar, EMS, Defence, Rail, CDMO).",
@@ -1280,7 +1300,7 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
     },
     "fno_universe": {
         "name": "⚡ Complete Liquid F&O Universe",
-        "description": "All 218 official NSE derivatives contracts (Sep-2026 Master).",
+        "description": "All 222 official NSE derivatives contracts (Oct-2026 Master).",
         "symbols": [
             "360ONE",
             "ABB",
@@ -1293,6 +1313,7 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "ALKEM",
             "AMBER",
             "AMBUJACEM",
+            "ANANDRATHI",
             "ANGELONE",
             "APLAPOLLO",
             "APOLLOHOSP",
@@ -1344,6 +1365,7 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "DMART",
             "DRREDDY",
             "EICHERMOT",
+            "ENRIN",
             "ETERNAL",
             "FEDERALBNK",
             "FINNIFTY",
@@ -1427,6 +1449,7 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "NESTLEIND",
             "NHPC",
             "NIFTY",
+            "NIFTYFPI",
             "NIFTYNXT50",
             "NMDC",
             "NTPC",
@@ -1476,6 +1499,7 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "SWIGGY",
             "TATACONSUM",
             "TATAELXSI",
+            "TATAMOTORS",
             "TATAPOWER",
             "TATASTEEL",
             "TCS",
@@ -1486,6 +1510,7 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "TORNTPHARM",
             "TRENT",
             "TVSMOTOR",
+            "UJJIVANSFB",
             "ULTRACEMCO",
             "UNIONBANK",
             "UNITDSPR",
@@ -1654,8 +1679,8 @@ def _load_bundled_index_sectors() -> None:
                             if mapped:
                                 _STOCK_TO_SECTOR[sym] = mapped
                                 _STOCK_SECTOR_SOURCE[sym] = "NIFTY_TOTAL_MARKET"
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[universe] Failed loading bundled index sectors: {e}")
 
 
 _load_bundled_index_sectors()
@@ -1727,8 +1752,8 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
                 if row["industry"]:
                     _STOCK_INDUSTRY[clean] = row["industry"]
                 return mapped
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[universe] Failed querying sqlite fundamentals sector for {clean}: {e}")
 
     # Dynamic fallback: query analysis.fundamental.analyse
     try:
@@ -1766,8 +1791,8 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
                 if getattr(fund, "industry", None):
                     _STOCK_INDUSTRY[clean] = fund.industry
                 return mapped
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[universe] Failed querying dynamic fundamentals sector for {clean}: {e}")
 
     # Default to broad market and memoize in _STOCK_TO_SECTOR.
     _STOCK_TO_SECTOR[clean] = ("broad_market", "Broad Market")
@@ -2244,6 +2269,7 @@ def resolve_dynamic_universe(
             return resolved, reason
 
         except Exception as e:
+            logger.warning(f"[universe] Failed resolving market-aware universe: {e}")
             return (
                 [],
                 f"Market-aware universe unavailable: sector rotation data could not be verified ({e}).",
@@ -2285,7 +2311,22 @@ def resolve_dynamic_universe(
         "all_nse": "all_nse_liquid",
         "all_nse_liquid": "all_nse_liquid",
         "nse_all": "all_nse_liquid",
-        "all_stocks": "all_nse_liquid",
+        "all_stocks": "all_equities_nse_bse",
+        "all_equities": "all_equities_nse_bse",
+        "all_nse_bse": "all_equities_nse_bse",
+        "nse_bse": "all_equities_nse_bse",
+        "bse": "bse500",
+        "bse500": "bse500",
+        "bse_500": "bse500",
+        "bse_all": "bse500",
+        "all_bse": "bse500",
+        "bse_high_growth": "bse_high_growth",
+        "bse_growth": "bse_high_growth",
+        "bse_micro": "bse_high_growth",
+        "bse_sme": "bse_high_growth",
+        "nifty_50": "nifty50",
+        "nifty50": "nifty50",
+        "nifty": "nifty50",
     }
     canon_preset = preset_alias.get(key, key)
     if canon_preset in THEMATIC_PRESETS:
@@ -2316,6 +2357,10 @@ def resolve_dynamic_universe(
 
     # Default fallback
     return THEMATIC_PRESETS["nifty50"]["symbols"][:max_stocks], "Default NIFTY 50 Universe"
+
+
+# Canonical SSOT alias ensuring backwards and forwards compatibility
+resolve_universe = resolve_dynamic_universe
 
 
 def normalize_symbol_exchange(symbol: str, exchange: str | None = None) -> tuple[str, str]:

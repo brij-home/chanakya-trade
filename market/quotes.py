@@ -55,33 +55,19 @@ except Exception:
     pass
 
 
-# ── Computed VWAP cache ────────────────────────────────────────────────────────
-# mStock REST API does not return VWAP in its quote response (mode=FULL or OHLC).
-# We compute it locally from today's 5-minute OHLCV bars using the standard
-# intraday TWAP formula: sum(typical_price × volume) / sum(volume)
-# where typical_price = (High + Low + Close) / 3.
-# Cache TTL: 30s — balances freshness vs repeated history fetches.
-_vwap_cache_lock = threading.Lock()
-_VWAP_CACHE: dict[str, tuple[float, float]] = {}  # symbol → (computed_at, vwap)
-_VWAP_CACHE_TTL = 30.0
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-def get_computed_vwap(symbol: str, exchange: str = "NSE") -> Optional[float]:
-    """
-    Compute session VWAP for a symbol from today's 5-minute bars.
+# ── Computed VWAP session cache ────────────────────────────────────────────────
+# Computes session VWAP for benchmark indices using 5-minute OHLCV bars.
+# Backed by persistent disk storage and 30-min TTL in VwapSessionCache to prevent
+# redundant Fyers history API calls and survive service restarts.
 
-    Returns None if: no 5m data available, all bars have zero volume (indices),
-    or the formula produces a degenerate result.
 
-    Cached for 30s per symbol to avoid repeated history fetches on every quote call.
-    """
-    clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
-    now_ts = time.monotonic()
-    with _vwap_cache_lock:
-        cached = _VWAP_CACHE.get(clean)
-        if cached and (now_ts - cached[0]) < _VWAP_CACHE_TTL:
-            return cached[1] if cached[1] > 0 else None
-
+def _compute_raw_vwap(clean_sym: str, exchange: str = "NSE") -> Optional[float]:
+    """Calculate session VWAP from today's 5-minute bars."""
     try:
         from market.history import get_ohlcv
         from zoneinfo import ZoneInfo
@@ -89,7 +75,7 @@ def get_computed_vwap(symbol: str, exchange: str = "NSE") -> Optional[float]:
         IST = ZoneInfo("Asia/Kolkata")
         today_str = datetime.now(IST).strftime("%Y-%m-%d")
 
-        df = get_ohlcv(clean, exchange=exchange, interval="5minute", days=1)
+        df = get_ohlcv(clean_sym, exchange=exchange, interval="5minute", days=1)
         if df is None or len(df) < 1:
             return None
 
@@ -119,13 +105,24 @@ def get_computed_vwap(symbol: str, exchange: str = "NSE") -> Optional[float]:
         else:
             vwap_val = float((typical * v).sum() / total_vol)
 
-        if vwap_val > 0:
-            with _vwap_cache_lock:
-                _VWAP_CACHE[clean] = (now_ts, vwap_val)
-            return vwap_val
-    except Exception:
-        pass
-    return None
+        return vwap_val if vwap_val > 0 else None
+    except Exception as exc:
+        logger.warning(
+            f"[Quotes] Failed computing raw VWAP for {clean_sym} ({exchange}): {exc}",
+            exc_info=True,
+        )
+        return None
+
+
+def get_computed_vwap(symbol: str, exchange: str = "NSE") -> Optional[float]:
+    """
+    Compute session VWAP for a symbol from today's 5-minute bars.
+    Cached with disk persistence and 30-min TTL via VwapSessionCache.
+    """
+    from market.vwap_session_cache import get_vwap_session_cache
+
+    clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    return get_vwap_session_cache().get_or_compute(clean, _compute_raw_vwap, exchange=exchange)
 
 
 def _enrich_quote(
@@ -152,13 +149,14 @@ def _enrich_quote(
     vwap_val = getattr(quote, "vwap", None)
     clean_sym = instrument.split(":")[-1].strip().upper()
     if (vwap_val is None or vwap_val <= 0) and not _OPTION_PATTERN.match(clean_sym):
-        # 1. Fast cache check
-        with _vwap_cache_lock:
-            cached_vwap = _VWAP_CACHE.get(clean_sym)
-            if cached_vwap and (time.monotonic() - cached_vwap[0]) < _VWAP_CACHE_TTL:
-                vwap_val = cached_vwap[1] if cached_vwap[1] > 0 else None
+        from market.vwap_session_cache import get_vwap_session_cache
+
+        # 1. Fast cache check (memory + disk)
+        cached_vwap = get_vwap_session_cache().get(clean_sym)
+        if cached_vwap and cached_vwap > 0:
+            vwap_val = cached_vwap
         # 2. If it's a primary benchmark index and still missing, compute on-demand
-        if (vwap_val is None or vwap_val <= 0) and clean_sym in {
+        elif clean_sym in {
             "NIFTY",
             "BANKNIFTY",
             "FINNIFTY",
@@ -648,18 +646,18 @@ def get_quote(
         try:
             provider = get_data_broker_key() or "broker"
             broker_quotes = get_data_broker().get_quote(missing)
-            result.update(
-                {
-                    instrument: _enrich_quote(
-                        quote,
-                        instrument=instrument,
-                        provider=provider,
-                        source="REST",
-                        correlation_id=correlation_id,
-                    )
-                    for instrument, quote in broker_quotes.items()
-                }
-            )
+            valid_broker_quotes = {
+                instrument: _enrich_quote(
+                    quote,
+                    instrument=instrument,
+                    provider=provider,
+                    source="REST",
+                    correlation_id=correlation_id,
+                )
+                for instrument, quote in broker_quotes.items()
+                if quote and getattr(quote, "last_price", 0.0) > 0
+            }
+            result.update(valid_broker_quotes)
             get_registry().record_provider_success(provider)
             missing = [i for i in canonical_instruments if i not in result]
         except Exception:

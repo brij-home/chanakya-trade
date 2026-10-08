@@ -29,21 +29,23 @@ description: >-
 
 ---
 
-## 1. Alert Lifecycle
+## 1. Alert Lifecycle & Predatory Interception Pipeline
 
 ```
-CREATED -> PENDING -> ACTIVE -> TRIGGERED -> [INVALIDATED or EXPIRED]
-                             -> CANCELLED (user dismiss)
+[STALK] (Radar Tracking) ──> [PRIMED] (Within ±0.35% Proximity) ──> [IGNITED] (Sniper Trigger)
+                              ──> [INVALIDATED / TARGET_ACHIEVED / EXPIRED]
 ```
 
 | State | Meaning |
 |-------|---------|
-| `CREATED` | Alert just written to storage |
-| `PENDING` | Waiting for trigger condition |
-| `ACTIVE` | Trigger condition partially met (precursor) |
-| `TRIGGERED` | Full condition met — dispatched to channels |
-| `INVALIDATED` | Stop-loss hit or setup structure broken |
-| `EXPIRED` | TTL exceeded or expiry date passed |
+| `STALK` | Candidate qualified (coiling base / VCP / Order block anchor identified) |
+| `PRIMED` | Spot entered high-frequency micro-proximity surveillance ($\pm 0.35\%$ of trigger) |
+| `EARLY_WARNING` | Precursor alert awaiting trigger breach (backward compatible) |
+| `IGNITED` | Trigger level crossed with micro-confirmation — immediate 1-click execution draft |
+| `T1_ACHIEVED` | Target 1 (+2R) hit: 50% profit booked, stop-loss shifted to Breakeven (+0.2%) |
+| `T2_ACHIEVED` | Target 2 (+4R) hit: 25% profit booked, trailing via Chandelier / structure |
+| `INVALIDATED` | Invalidation stop-loss breached or setup structure broken |
+| `EXPIRED` | TTL exceeded or session ended |
 | `CANCELLED` | User manually dismissed |
 
 ### Key Fields in `AutoAlert` (engine/alert_model.py)
@@ -352,4 +354,20 @@ When diagnosing alert storms, UI popup bursts, or unexpected state transitions:
 # Alert lifecycle and expiry
 & "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_alert_revamp.py tests/test_alert_horizon_and_liquidity.py -q
 ```
+
+---
+
+## 12. Data Reliability, Honest Provenance & Zero Silent Swallowing Standard
+
+1. **Zero Silent Swallowing (`except: pass` Banned)**:
+   - Every exception in detectors or evaluation loops MUST be logged with `logger.warning` or `logger.error` including `symbol`, `detector_name`, and exception details.
+   - Never use empty `pass` in `except` blocks. If an indicator calculation fails for an illiquid instrument, log the skip reason at `warning` or `debug` level with full context.
+2. **Signals ONLY on Real, Reliable Data**:
+   - Detectors MUST NEVER trigger on synthetic, placeholder, or zero quotes.
+   - If market data feed is unreachable, stale, or zero, return `None` or emit explicit `DATA_UNAVAILABLE` / `DATA_DEGRADED` status codes.
+   - Every alert carries unambiguous provenance metadata: `source` (`REAL/LIVE`, `EOD_VERIFIED`, `OFF_MARKET`, `DEGRADED`).
+3. **Zero Hardcoded Symbols or Multiples**:
+   - Never inject arbitrary hardcoded stock lists inside detector evaluation loops. Symbols must originate from canonical universe resolvers (`analysis.universe.resolve_dynamic_universe`).
+   - Sizing, targets, and invalidations must be derived dynamically from market structure (ATR, Swing Pivots, Order Blocks), never arbitrary multipliers.
+
 

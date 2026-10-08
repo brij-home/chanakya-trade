@@ -12,6 +12,7 @@ Evaluates top liquid crypto benchmarks (BTC, ETH, SOL, BNB) across:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -23,6 +24,7 @@ logger = logging.getLogger("chanakya.detectors.crypto")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 DEFAULT_CRYPTO = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"]
+_CRYPTO_VOL_ARB_COOLDOWN: dict[str, float] = {}
 
 
 @dataclass
@@ -63,6 +65,31 @@ def compute_crypto_atr(df: Optional[pd.DataFrame], period: int = 14) -> float:
         return 0.0
 
 
+def compute_crypto_rsi(df: Optional[pd.DataFrame], period: int = 14) -> float:
+    """Computes 14-period Wilder RSI from OHLCV candles."""
+    if df is None or len(df) < (period + 2):
+        return 50.0
+    try:
+        cols = {str(c).lower(): c for c in df.columns}
+        if "close" not in cols:
+            return 50.0
+        c = df[cols["close"]].astype(float)
+        delta = c.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        avg_gain = gain.rolling(window=period, min_periods=period).mean()
+        avg_loss = loss.rolling(window=period, min_periods=period).mean()
+        rs = avg_gain / avg_loss.replace(0, float("nan"))
+        rsi_series = 100.0 - (100.0 / (1.0 + rs))
+        clean_rsi = rsi_series.dropna()
+        if clean_rsi.empty:
+            return 50.0
+        val = float(clean_rsi.iloc[-1])
+        return round(val, 1) if (0.0 <= val <= 100.0) else 50.0
+    except Exception:
+        return 50.0
+
+
 def derive_crypto_trade_plan(
     symbol: str,
     direction: str,
@@ -77,48 +104,78 @@ def derive_crypto_trade_plan(
     wick_extreme: Optional[float] = None,
     anchor_target: Optional[float] = None,
     atr_val: Optional[float] = None,
+    is_breakout: bool = False,
+    ote_price: Optional[float] = None,
 ) -> CryptoTradeLevels:
     """
     Logically derives Entry range, Stop-Loss, Targets (T1, T2, T3/Runner),
     and mathematical R:R ratios from real market structure, ATR, and liquidity zones.
-    Eliminates all hardcoded R:R strings and arbitrary static multipliers.
+    Eliminates all hardcoded R:R strings, arbitrary static multipliers, and contradictory No-Chase bounds.
     """
     atr = atr_val if (atr_val and atr_val > 0) else compute_crypto_atr(df)
     is_bull = str(direction).upper() in ("BULLISH", "LONG", "BUY")
 
     if is_bull:
         # 1. Structural Stop-Loss (Inval)
-        if wick_extreme is not None and wick_extreme > 0:
-            sl_candidate = wick_extreme * 0.997
-        elif ob_bottom is not None and ob_bottom > 0:
-            if swing_low is not None and (ob_bottom * 0.985 <= swing_low <= ob_bottom):
-                sl_candidate = swing_low * 0.997
+        if is_breakout:
+            # Explicit Breakout Mode: invalidation is a failed breakout falling back below OB top / mid
+            if ob_top is not None:
+                sl_candidate = max(
+                    ob_top * 0.994, (ob_top + ob_bottom) / 2.0 if ob_bottom else ob_top * 0.994
+                )
+                if swing_low is not None and (ob_top * 0.988 <= swing_low <= ltp):
+                    sl_candidate = swing_low * 0.997
+            elif df is not None and len(df) >= 10:
+                recent_low = float(df["low"].iloc[-5:].min())
+                sl_candidate = min(recent_low * 0.998, ltp - 1.2 * max(atr, ltp * 0.008))
             else:
-                buf = max(ob_bottom * 0.005, 0.35 * atr) if atr > 0 else ob_bottom * 0.008
-                sl_candidate = ob_bottom - buf
-        elif df is not None and len(df) >= 10:
-            recent_low = float(df["low"].iloc[-15:].min())
-            sl_candidate = min(recent_low * 0.998, ltp - 1.5 * max(atr, ltp * 0.01))
+                sl_candidate = ltp - 1.2 * max(atr, ltp * 0.01)
         else:
-            sl_candidate = ltp - 1.5 * max(atr, ltp * 0.012)
+            # Retest / Reclaim inside or at OB: invalidation strictly below Demand OB bottom or sweep wick
+            if wick_extreme is not None and wick_extreme > 0:
+                sl_candidate = wick_extreme * 0.997
+            elif ob_bottom is not None and ob_bottom > 0:
+                if swing_low is not None and (ob_bottom * 0.985 <= swing_low <= ob_bottom):
+                    sl_candidate = swing_low * 0.997
+                else:
+                    buf = max(ob_bottom * 0.004, 0.35 * atr) if atr > 0 else ob_bottom * 0.005
+                    sl_candidate = ob_bottom - buf
+            elif df is not None and len(df) >= 10:
+                recent_low = float(df["low"].iloc[-15:].min())
+                sl_candidate = min(recent_low * 0.998, ltp - 1.5 * max(atr, ltp * 0.01))
+            else:
+                sl_candidate = ltp - 1.5 * max(atr, ltp * 0.012)
 
         sl_price = round(sl_candidate, 2)
         if sl_price >= ltp:
             sl_price = round(ltp * 0.985, 2)
         risk_usd = round(max(0.5, ltp - sl_price), 2)
 
-        # 2. Entry Range & No Chase
+        # 2. Precise Entry Range & Strict No-Chase Enforcement
         if ob_bottom is not None and ob_top is not None:
-            entry_min = round(ob_bottom, 2)
-            entry_max = round(max(ob_top, ltp) * 1.002, 2)
+            if is_breakout:
+                no_chase = round(min(ltp + 0.35 * risk_usd, ltp * 1.008, ob_top * 1.015), 2)
+                entry_min = round(max(ob_top * 0.998, ltp * 0.997), 2)
+                entry_max = round(min(no_chase - 0.01, ltp * 1.0015), 2)
+            else:
+                # Sniper Retest / Reclaim in Demand Zone:
+                no_chase = round(min(ltp + 0.35 * risk_usd, max(ltp, ob_top) * 1.008), 2)
+                sweet_spot = ote_price or (ob_bottom + 0.5 * (ob_top - ob_bottom))
+                entry_min = round(max(ob_bottom, sweet_spot * 0.998), 2)
+                entry_max = round(min(no_chase - 0.01, max(ltp, ob_top) * 1.001), 2)
         else:
-            entry_min = round(ltp - min(0.25 * risk_usd, ltp * 0.003), 2)
-            entry_max = round(ltp + min(0.25 * risk_usd, ltp * 0.003), 2)
+            no_chase = round(min(ltp + 0.35 * risk_usd, ltp * 1.008), 2)
+            entry_min = round(ltp - min(0.2 * risk_usd, ltp * 0.002), 2)
+            entry_max = round(min(no_chase - 0.01, ltp + min(0.2 * risk_usd, ltp * 0.002)), 2)
 
-        no_chase = round(min(ltp + 0.45 * risk_usd, ltp * 1.008), 2)
+        # Strict Invariant: entry_max < no_chase
+        if entry_max >= no_chase:
+            entry_max = round(no_chase - 0.01, 2)
+        if entry_min > entry_max:
+            entry_min = round(entry_max * 0.998, 2)
 
-        # 3. Targets (T1, T2, T3)
-        min_reward_t1 = 2.0 * risk_usd
+        # 3. Targets (T1, T2, T3) with Institutional >= 1:2.8 / 1:3.0 Standard
+        min_reward_t1 = 2.8 * risk_usd
         if anchor_target is not None and (anchor_target - ltp) >= min_reward_t1:
             t1_price = round(anchor_target, 2)
         elif opposing_zone is not None and (opposing_zone - ltp) >= min_reward_t1:
@@ -130,18 +187,16 @@ def derive_crypto_trade_plan(
             if (prior_high - ltp) >= min_reward_t1:
                 t1_price = round(prior_high, 2)
             else:
-                t1_price = round(
-                    ltp + max(2.3 * risk_usd, 2.5 * atr if atr > 0 else 2.5 * risk_usd), 2
-                )
+                t1_price = round(ltp + 3.0 * risk_usd, 2)
         else:
-            t1_price = round(ltp + max(2.3 * risk_usd, 2.5 * atr if atr > 0 else 2.5 * risk_usd), 2)
+            t1_price = round(ltp + 3.0 * risk_usd, 2)
 
         if t1_price <= ltp:
-            t1_price = round(ltp + 2.3 * risk_usd, 2)
+            t1_price = round(ltp + 3.0 * risk_usd, 2)
 
         t1_reward = t1_price - ltp
-        t2_price = round(t1_price + 1.4 * t1_reward, 2)
-        t3_price = round(ltp + max(2.6 * t1_reward, 5.8 * risk_usd), 2)
+        t2_price = round(t1_price + 1.2 * t1_reward, 2)
+        t3_price = round(ltp + max(2.5 * t1_reward, 8.0 * risk_usd), 2)
 
         rr_1 = round((t1_price - ltp) / max(0.01, risk_usd), 1)
         rr_2 = round((t2_price - ltp) / max(0.01, risk_usd), 1)
@@ -150,37 +205,63 @@ def derive_crypto_trade_plan(
     else:
         # BEARISH / SHORT
         # 1. Structural Stop-Loss (Inval)
-        if wick_extreme is not None and wick_extreme > 0:
-            sl_candidate = wick_extreme * 1.003
-        elif ob_top is not None and ob_top > 0:
-            if swing_high is not None and (ob_top <= swing_high <= ob_top * 1.015):
-                sl_candidate = swing_high * 1.003
+        if is_breakout:
+            if ob_bottom is not None:
+                sl_candidate = min(
+                    ob_bottom * 1.006, (ob_top + ob_bottom) / 2.0 if ob_top else ob_bottom * 1.006
+                )
+                if swing_high is not None and (ltp <= swing_high <= ob_bottom * 1.012):
+                    sl_candidate = swing_high * 1.003
+            elif df is not None and len(df) >= 10:
+                recent_high = float(df["high"].iloc[-5:].max())
+                sl_candidate = max(recent_high * 1.002, ltp + 1.2 * max(atr, ltp * 0.008))
             else:
-                buf = max(ob_top * 0.005, 0.35 * atr) if atr > 0 else ob_top * 0.008
-                sl_candidate = ob_top + buf
-        elif df is not None and len(df) >= 10:
-            recent_high = float(df["high"].iloc[-15:].max())
-            sl_candidate = max(recent_high * 1.002, ltp + 1.5 * max(atr, ltp * 0.01))
+                sl_candidate = ltp + 1.2 * max(atr, ltp * 0.01)
         else:
-            sl_candidate = ltp + 1.5 * max(atr, ltp * 0.012)
+            if wick_extreme is not None and wick_extreme > 0:
+                sl_candidate = wick_extreme * 1.003
+            elif ob_top is not None and ob_top > 0:
+                if swing_high is not None and (ob_top <= swing_high <= ob_top * 1.015):
+                    sl_candidate = swing_high * 1.003
+                else:
+                    buf = max(ob_top * 0.004, 0.35 * atr) if atr > 0 else ob_top * 0.005
+                    sl_candidate = ob_top + buf
+            elif df is not None and len(df) >= 10:
+                recent_high = float(df["high"].iloc[-15:].max())
+                sl_candidate = max(recent_high * 1.002, ltp + 1.5 * max(atr, ltp * 0.01))
+            else:
+                sl_candidate = ltp + 1.5 * max(atr, ltp * 0.012)
 
         sl_price = round(sl_candidate, 2)
         if sl_price <= ltp:
             sl_price = round(ltp * 1.015, 2)
         risk_usd = round(max(0.5, sl_price - ltp), 2)
 
-        # 2. Entry Range & No Chase
+        # 2. Precise Entry Range & Strict No-Chase Enforcement
         if ob_bottom is not None and ob_top is not None:
-            entry_min = round(min(ob_bottom, ltp) * 0.998, 2)
-            entry_max = round(ob_top, 2)
+            if is_breakout:
+                no_chase = round(max(ltp - 0.35 * risk_usd, ltp * 0.992, ob_bottom * 0.985), 2)
+                entry_max = round(min(ob_bottom * 1.002, ltp * 1.003), 2)
+                entry_min = round(max(no_chase + 0.01, ltp * 0.9985), 2)
+            else:
+                # Sniper Rejection inside Supply OB:
+                no_chase = round(max(ltp - 0.35 * risk_usd, min(ltp, ob_bottom) * 0.992), 2)
+                sweet_spot = ote_price or (ob_top - 0.5 * (ob_top - ob_bottom))
+                entry_max = round(min(ob_top, sweet_spot * 1.002), 2)
+                entry_min = round(max(no_chase + 0.01, min(ltp, ob_bottom) * 0.999), 2)
         else:
-            entry_min = round(ltp - min(0.25 * risk_usd, ltp * 0.003), 2)
-            entry_max = round(ltp + min(0.25 * risk_usd, ltp * 0.003), 2)
+            no_chase = round(max(ltp - 0.35 * risk_usd, ltp * 0.992), 2)
+            entry_max = round(ltp + min(0.2 * risk_usd, ltp * 0.002), 2)
+            entry_min = round(max(no_chase + 0.01, ltp - min(0.2 * risk_usd, ltp * 0.002)), 2)
 
-        no_chase = round(max(ltp - 0.45 * risk_usd, ltp * 0.992), 2)
+        # Strict Invariant: entry_min > no_chase
+        if entry_min <= no_chase:
+            entry_min = round(no_chase + 0.01, 2)
+        if entry_max < entry_min:
+            entry_max = round(entry_min * 1.002, 2)
 
-        # 3. Targets (T1, T2, T3)
-        min_reward_t1 = 2.0 * risk_usd
+        # 3. Targets (T1, T2, T3) with Institutional >= 1:2.8 / 1:3.0 Standard
+        min_reward_t1 = 2.8 * risk_usd
         if anchor_target is not None and (ltp - anchor_target) >= min_reward_t1:
             t1_price = round(anchor_target, 2)
         elif opposing_zone is not None and (ltp - opposing_zone) >= min_reward_t1:
@@ -192,18 +273,16 @@ def derive_crypto_trade_plan(
             if (ltp - prior_low) >= min_reward_t1:
                 t1_price = round(prior_low, 2)
             else:
-                t1_price = round(
-                    ltp - max(2.3 * risk_usd, 2.5 * atr if atr > 0 else 2.5 * risk_usd), 2
-                )
+                t1_price = round(ltp - 3.0 * risk_usd, 2)
         else:
-            t1_price = round(ltp - max(2.3 * risk_usd, 2.5 * atr if atr > 0 else 2.5 * risk_usd), 2)
+            t1_price = round(ltp - 3.0 * risk_usd, 2)
 
         if t1_price >= ltp:
-            t1_price = round(ltp - 2.3 * risk_usd, 2)
+            t1_price = round(ltp - 3.0 * risk_usd, 2)
 
         t1_reward = ltp - t1_price
-        t2_price = round(t1_price - 1.4 * t1_reward, 2)
-        t3_price = round(ltp - max(2.6 * t1_reward, 5.8 * risk_usd), 2)
+        t2_price = round(t1_price - 1.2 * t1_reward, 2)
+        t3_price = round(ltp - max(2.5 * t1_reward, 8.0 * risk_usd), 2)
 
         rr_1 = round((ltp - t1_price) / max(0.01, risk_usd), 1)
         rr_2 = round((ltp - t2_price) / max(0.01, risk_usd), 1)
@@ -316,6 +395,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                 target_level=t1_price,
                 stop_loss=sl_price,
                 confidence=squeeze_confidence,
+                no_chase_boundary=no_chase,
                 created_at=now_iso,
                 is_live=True,
                 environment="LIVE",
@@ -360,207 +440,362 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
     except Exception as e:
         logger.debug(f"[CryptoDetector] Squeeze check failed for {clean_sym}: {e}")
 
-    # ── 2. SMC MOMENTUM DETECTOR: Order Block Reclaim & CHoCH Reversal ──
+    # ── 2. SMC MOMENTUM DETECTOR: Institutional Sniper Retest & Eagle Breakout ──
     try:
         if df is not None and not df.empty and len(df) >= 30:
             smc = analyze_market_structure(
                 symbol=clean_sym, df=df, exchange="CRYPTO", timeframe="15m"
             )
             regime = (smc.regime or "").upper()
+            rsi = compute_crypto_rsi(df)
+            v20 = (
+                float(df["volume"].iloc[-21:-1].mean())
+                if len(df) >= 21
+                else float(df["volume"].mean())
+            )
+            cur_vol = float(df["volume"].iloc[-1])
+            rvol = round(cur_vol / max(v20, 1.0), 2)
+            ema20 = float(df["close"].ewm(span=20, adjust=False).mean().iloc[-1])
 
-            if regime == "BULLISH" and smc.active_demand_zones:
+            # ── A. BULLISH SMC: Demand OB Reclaim / Retest OR Confirmed Breakout ──
+            is_bull_struct = regime == "BULLISH" or (
+                smc.choch_detected and smc.choch_type == "BULLISH_CHOCH"
+            )
+            if is_bull_struct and smc.active_demand_zones:
                 ob = smc.active_demand_zones[0]
-                if ob.bottom <= ltp <= (ob.top * 1.025):
-                    supplies = [s for s in smc.active_supply_zones if s.bottom > ltp]
-                    opposing_target = (
-                        min(supplies, key=lambda s: s.bottom).bottom if supplies else None
-                    )
-                    plan = derive_crypto_trade_plan(
-                        clean_sym,
-                        direction="BULLISH",
-                        ltp=ltp,
-                        df=df,
-                        ob_bottom=ob.bottom,
-                        ob_top=ob.top,
-                        swing_high=smc.last_swing_high,
-                        swing_low=smc.last_swing_low,
-                        opposing_zone=opposing_target,
-                    )
-                    sl_price = plan.sl_price
-                    t1_price = plan.t1_price
-                    t2_price = plan.t2_price
-                    t3_price = plan.t3_price
-                    rr_str = plan.rr_str
-                    profit_rule = plan.profit_rule
-                    entry_range = f"${plan.entry_min:,.2f} – ${plan.entry_max:,.2f}"
-                    no_chase = plan.no_chase
-                    risk_usd = plan.risk_usd
+                is_in_retest = ob.bottom * 0.998 <= ltp <= ob.top * 1.004
+                is_breakout = ob.top * 1.004 < ltp <= ob.top * 1.018
 
-                    if 0 < risk_usd <= (ltp * 0.05):
-                        smc_stage = "IGNITED" if ltp > ob.top else "EARLY_WARNING"
-                        smc_confidence = 91 if smc_stage == "IGNITED" else 85
-                        alert_id = generate_alert_id(clean_sym, "CRYPTO_MOMENTUM", variant="demand")
-                        headline = f"⚡ CRYPTO SMC ALPHA: {clean_sym} Demand Order Block Reclaim @ ${ltp:,.2f}"
-                        summary = (
-                            f"Smart Money structural reclaim at 15m Demand OB (${ob.bottom:,.2f} - ${ob.top:,.2f}). "
-                            f"Bullish structure confirmed. Upside target: ${t1_price:,.2f}."
+                # Eagle / Tiger discipline: do not chase if price extended > 1.8% past OB top
+                if is_in_retest or is_breakout:
+                    cur_open = float(df["open"].iloc[-1])
+                    cur_close = float(df["close"].iloc[-1])
+                    is_bull_candle = cur_close >= cur_open or cur_close >= ltp * 0.999
+
+                    passes_breakout_vol = True
+                    if is_breakout:
+                        passes_breakout_vol = (
+                            rvol >= 1.15 or ob.volume_ratio >= 1.15
+                        ) and is_bull_candle
+
+                    # Momentum must-have: not overbought (RSI <= 74), bullish momentum floor (RSI >= 42)
+                    if (42.0 <= rsi <= 74.0) and passes_breakout_vol:
+                        supplies = [s for s in smc.active_supply_zones if s.bottom > ltp]
+                        opposing_target = (
+                            min(supplies, key=lambda s: s.bottom).bottom if supplies else None
                         )
-                        conf = f"15m Bullish Regime + Unmitigated Demand OB (${ob.bottom:,.1f} - ${ob.top:,.1f})"
-
-                        alert = AutoAlert(
-                            alert_id=alert_id,
-                            alert_type="CRYPTO_MOMENTUM",
-                            stage=smc_stage,
-                            symbol=clean_sym,
-                            exchange="CRYPTO",
-                            segment="CRYPTO",
-                            time_horizon="ROLLING_24H",
-                            eta_label="24h Rolling",
+                        plan = derive_crypto_trade_plan(
+                            clean_sym,
                             direction="BULLISH",
-                            headline=headline,
-                            summary=summary,
                             ltp=ltp,
-                            trigger_level=round(ob.top, 2),
-                            target_level=t1_price,
-                            stop_loss=sl_price,
-                            confidence=smc_confidence,
-                            created_at=now_iso,
-                            is_live=True,
-                            environment="LIVE",
-                            market_status="LIVE",
-                            metrics={
-                                "change_pct": chg_pct,
-                                "segment": "CRYPTO",
-                                "ob_bottom": ob.bottom,
-                                "ob_top": ob.top,
-                                "setup_confluence": conf,
-                            },
-                            actionable_plan={
-                                "action": "BUY_SPOT / LONG",
-                                "segment": "CRYPTO",
-                                "contract": f"CRYPTO:{clean_sym}",
-                                "entry_range": entry_range,
-                                "stop_loss": f"${sl_price:,.2f}",
-                                "target": f"${t1_price:,.2f}",
-                                "target_2": f"${t2_price:,.2f}",
-                                "target_3": f"${t3_price:,.2f}",
-                                "runner": f"${t3_price:,.2f}",
-                                "risk_reward": rr_str,
-                                "when_to_buy": "Enter on order block retest or momentum breakout above OB top.",
-                                "when_to_wait": f"Do not chase above ${no_chase:,.2f}.",
-                                "no_chase_boundary": no_chase,
-                                "setup_confluence": conf,
-                                "profit_rule": profit_rule,
-                                "trade_plan": {
-                                    "symbol": clean_sym,
-                                    "direction": "LONG",
-                                    "timeframe": "15M",
-                                    "entry_price": ltp,
-                                    "invalidation_stop": sl_price,
-                                    "target_1": t1_price,
-                                    "target_2": t2_price,
-                                    "target_3": t3_price,
-                                    "risk_reward": rr_str,
-                                },
-                            },
+                            df=df,
+                            ob_bottom=ob.bottom,
+                            ob_top=ob.top,
+                            swing_high=smc.last_swing_high,
+                            swing_low=smc.last_swing_low,
+                            opposing_zone=opposing_target,
+                            is_breakout=is_breakout,
+                            ote_price=getattr(ob, "ote_price", None),
                         )
-                        found.append(alert)
+                        sl_price = plan.sl_price
+                        t1_price = plan.t1_price
+                        t2_price = plan.t2_price
+                        t3_price = plan.t3_price
+                        rr_str = plan.rr_str
+                        profit_rule = plan.profit_rule
+                        entry_range = f"${plan.entry_min:,.2f} – ${plan.entry_max:,.2f}"
+                        no_chase = plan.no_chase
+                        risk_usd = plan.risk_usd
 
-            elif regime == "BEARISH" and smc.active_supply_zones:
+                        if 0 < risk_usd <= (ltp * 0.05):
+                            # Multi-Confluence Scoring (Institutional Conviction Matrix)
+                            conf_score = 75
+                            confluences = [
+                                "15m Bullish Regime"
+                                if regime == "BULLISH"
+                                else "15m Bullish CHoCH Reversal"
+                            ]
+                            if is_in_retest:
+                                confluences.append(
+                                    f"Unmitigated Demand OB (${ob.bottom:,.1f} - ${ob.top:,.1f}) OTE Retest"
+                                )
+                                conf_score += 10
+                            else:
+                                confluences.append(f"OB Top (${ob.top:,.1f}) Breakout Expansion")
+                                conf_score += 8
+
+                            if getattr(ob, "has_fvg_confluence", False) or smc.fair_value_gaps:
+                                confluences.append("FVG Imbalance Confluence")
+                                conf_score += 4
+                            if rvol >= 1.2:
+                                confluences.append(f"RVOL {rvol:.1f}x Expansion")
+                                conf_score += 4
+                            if 50.0 <= rsi <= 68.0:
+                                confluences.append(f"RSI {rsi:.0f} Bull Momentum")
+                                conf_score += 4
+                            if ltp >= ema20:
+                                confluences.append("Above 20-EMA")
+                                conf_score += 3
+
+                            smc_confidence = min(96, max(85, conf_score))
+                            conf = " + ".join(confluences)
+                            smc_stage = "IGNITED" if is_breakout else "EARLY_WARNING"
+
+                            if is_in_retest:
+                                headline = f"🦅 CRYPTO SMC ALPHA: {clean_sym} Demand Order Block Reclaim @ ${ltp:,.2f}"
+                                summary = (
+                                    f"Smart Money sniper retest at 15m Demand OB (${ob.bottom:,.2f} - ${ob.top:,.2f}). "
+                                    f"Bullish structure confirmed. Target: ${t1_price:,.2f}."
+                                )
+                                action = "BUY_SPOT / LONG (RETEST)"
+                                when_to_buy = f"Enter on limit retest at OB Mean Threshold (${plan.entry_min:,.2f} – ${plan.entry_max:,.2f})."
+                            else:
+                                headline = f"⚡ CRYPTO SMC BREAKOUT: {clean_sym} Demand OB Expansion Breakout @ ${ltp:,.2f}"
+                                summary = (
+                                    f"Smart Money volume expansion breakout above 15m Demand OB (${ob.top:,.2f}). "
+                                    f"Bullish momentum confirmed (RVOL {rvol:.1f}x). Target: ${t1_price:,.2f}."
+                                )
+                                action = "BUY_SPOT / LONG (BREAKOUT)"
+                                when_to_buy = f"Enter on momentum breakout candle above OB Top (${ob.top:,.2f})."
+
+                            alert_id = generate_alert_id(
+                                clean_sym, "CRYPTO_MOMENTUM", variant="demand"
+                            )
+                            alert = AutoAlert(
+                                alert_id=alert_id,
+                                alert_type="CRYPTO_MOMENTUM",
+                                stage=smc_stage,
+                                symbol=clean_sym,
+                                exchange="CRYPTO",
+                                segment="CRYPTO",
+                                time_horizon="ROLLING_24H",
+                                eta_label="24h Rolling",
+                                direction="BULLISH",
+                                headline=headline,
+                                summary=summary,
+                                ltp=ltp,
+                                trigger_level=round(
+                                    ob.top
+                                    if is_breakout
+                                    else (getattr(ob, "ote_price", 0.0) or ob.top),
+                                    2,
+                                ),
+                                target_level=t1_price,
+                                stop_loss=sl_price,
+                                confidence=smc_confidence,
+                                no_chase_boundary=no_chase,
+                                created_at=now_iso,
+                                is_live=True,
+                                environment="LIVE",
+                                market_status="LIVE",
+                                metrics={
+                                    "change_pct": chg_pct,
+                                    "segment": "CRYPTO",
+                                    "ob_bottom": ob.bottom,
+                                    "ob_top": ob.top,
+                                    "rvol": rvol,
+                                    "rsi_14": rsi,
+                                    "setup_confluence": conf,
+                                },
+                                actionable_plan={
+                                    "action": action,
+                                    "segment": "CRYPTO",
+                                    "contract": f"CRYPTO:{clean_sym}",
+                                    "entry_range": entry_range,
+                                    "stop_loss": f"${sl_price:,.2f}",
+                                    "target": f"${t1_price:,.2f}",
+                                    "target_2": f"${t2_price:,.2f}",
+                                    "target_3": f"${t3_price:,.2f}",
+                                    "runner": f"${t3_price:,.2f}",
+                                    "risk_reward": rr_str,
+                                    "when_to_buy": when_to_buy,
+                                    "when_to_wait": f"Do not chase above ${no_chase:,.2f}.",
+                                    "no_chase_boundary": no_chase,
+                                    "setup_confluence": conf,
+                                    "profit_rule": profit_rule,
+                                    "trade_plan": {
+                                        "symbol": clean_sym,
+                                        "direction": "LONG",
+                                        "timeframe": "15M",
+                                        "entry_price": ltp,
+                                        "invalidation_stop": sl_price,
+                                        "target_1": t1_price,
+                                        "target_2": t2_price,
+                                        "target_3": t3_price,
+                                        "risk_reward": rr_str,
+                                    },
+                                },
+                            )
+                            found.append(alert)
+
+            # ── B. BEARISH SMC: Supply OB Rejection OR Confirmed Breakdown ──
+            is_bear_struct = regime == "BEARISH" or (
+                smc.choch_detected and smc.choch_type == "BEARISH_CHOCH"
+            )
+            if is_bear_struct and smc.active_supply_zones:
                 ob = smc.active_supply_zones[0]
-                if (ob.bottom * 0.975) <= ltp <= ob.top:
-                    demands = [d for d in smc.active_demand_zones if d.top < ltp]
-                    opposing_target = max(demands, key=lambda d: d.top).top if demands else None
-                    plan = derive_crypto_trade_plan(
-                        clean_sym,
-                        direction="BEARISH",
-                        ltp=ltp,
-                        df=df,
-                        ob_bottom=ob.bottom,
-                        ob_top=ob.top,
-                        swing_high=smc.last_swing_high,
-                        swing_low=smc.last_swing_low,
-                        opposing_zone=opposing_target,
-                    )
-                    sl_price = plan.sl_price
-                    t1_price = plan.t1_price
-                    t2_price = plan.t2_price
-                    t3_price = plan.t3_price
-                    rr_str = plan.rr_str
-                    profit_rule = plan.profit_rule
-                    entry_range = f"${plan.entry_min:,.2f} – ${plan.entry_max:,.2f}"
-                    no_chase = plan.no_chase
-                    risk_usd = plan.risk_usd
+                is_in_rejection = ob.bottom * 0.996 <= ltp <= ob.top * 1.002
+                is_breakdown = ob.bottom * 0.982 <= ltp < ob.bottom * 0.996
 
-                    if 0 < risk_usd <= (ltp * 0.05):
-                        smc_stage = "IGNITED" if ltp < ob.bottom else "EARLY_WARNING"
-                        smc_confidence = 91 if smc_stage == "IGNITED" else 85
-                        alert_id = generate_alert_id(clean_sym, "CRYPTO_MOMENTUM", variant="supply")
-                        headline = f"⚡ CRYPTO SMC BREAKDOWN: {clean_sym} Supply OB Rejection @ ${ltp:,.2f}"
-                        summary = (
-                            f"Smart Money rejection at 15m Supply OB (${ob.bottom:,.2f} - ${ob.top:,.2f}). "
-                            f"Bearish structure confirmed. Downside target: ${t1_price:,.2f}."
-                        )
-                        conf = f"15m Bearish Regime + Active Supply OB (${ob.bottom:,.1f} - ${ob.top:,.1f})"
+                if is_in_rejection or is_breakdown:
+                    cur_open = float(df["open"].iloc[-1])
+                    cur_close = float(df["close"].iloc[-1])
+                    is_bear_candle = cur_close <= cur_open or cur_close <= ltp * 1.001
 
-                        alert = AutoAlert(
-                            alert_id=alert_id,
-                            alert_type="CRYPTO_MOMENTUM",
-                            stage=smc_stage,
-                            symbol=clean_sym,
-                            exchange="CRYPTO",
-                            segment="CRYPTO",
-                            time_horizon="ROLLING_24H",
-                            eta_label="24h Rolling",
+                    passes_breakdown_vol = True
+                    if is_breakdown:
+                        passes_breakdown_vol = (
+                            rvol >= 1.15 or ob.volume_ratio >= 1.15
+                        ) and is_bear_candle
+
+                    # Momentum must-have: not oversold (RSI >= 26), bearish momentum ceiling (RSI <= 58)
+                    if (26.0 <= rsi <= 58.0) and passes_breakdown_vol:
+                        demands = [d for d in smc.active_demand_zones if d.top < ltp]
+                        opposing_target = max(demands, key=lambda d: d.top).top if demands else None
+                        plan = derive_crypto_trade_plan(
+                            clean_sym,
                             direction="BEARISH",
-                            headline=headline,
-                            summary=summary,
                             ltp=ltp,
-                            trigger_level=round(ob.bottom, 2),
-                            target_level=t1_price,
-                            stop_loss=sl_price,
-                            confidence=smc_confidence,
-                            created_at=now_iso,
-                            is_live=True,
-                            environment="LIVE",
-                            market_status="LIVE",
-                            metrics={
-                                "change_pct": chg_pct,
-                                "segment": "CRYPTO",
-                                "ob_bottom": ob.bottom,
-                                "ob_top": ob.top,
-                                "setup_confluence": conf,
-                            },
-                            actionable_plan={
-                                "action": "SELL_SHORT_FUTURES / SHORT",
-                                "segment": "CRYPTO",
-                                "contract": f"CRYPTO:{clean_sym}",
-                                "entry_range": entry_range,
-                                "stop_loss": f"${sl_price:,.2f}",
-                                "target": f"${t1_price:,.2f}",
-                                "target_2": f"${t2_price:,.2f}",
-                                "target_3": f"${t3_price:,.2f}",
-                                "runner": f"${t3_price:,.2f}",
-                                "risk_reward": rr_str,
-                                "when_to_buy": "Short on rejection wick from supply OB.",
-                                "when_to_wait": f"Do not chase below ${no_chase:,.2f}.",
-                                "no_chase_boundary": no_chase,
-                                "setup_confluence": conf,
-                                "profit_rule": profit_rule,
-                                "trade_plan": {
-                                    "symbol": clean_sym,
-                                    "direction": "SHORT",
-                                    "timeframe": "15M",
-                                    "entry_price": ltp,
-                                    "invalidation_stop": sl_price,
-                                    "target_1": t1_price,
-                                    "target_2": t2_price,
-                                    "target_3": t3_price,
-                                    "risk_reward": rr_str,
-                                },
-                            },
+                            df=df,
+                            ob_bottom=ob.bottom,
+                            ob_top=ob.top,
+                            swing_high=smc.last_swing_high,
+                            swing_low=smc.last_swing_low,
+                            opposing_zone=opposing_target,
+                            is_breakout=is_breakdown,
+                            ote_price=getattr(ob, "ote_price", None),
                         )
-                        found.append(alert)
+                        sl_price = plan.sl_price
+                        t1_price = plan.t1_price
+                        t2_price = plan.t2_price
+                        t3_price = plan.t3_price
+                        rr_str = plan.rr_str
+                        profit_rule = plan.profit_rule
+                        entry_range = f"${plan.entry_min:,.2f} – ${plan.entry_max:,.2f}"
+                        no_chase = plan.no_chase
+                        risk_usd = plan.risk_usd
+
+                        if 0 < risk_usd <= (ltp * 0.05):
+                            conf_score = 75
+                            confluences = [
+                                "15m Bearish Regime"
+                                if regime == "BEARISH"
+                                else "15m Bearish CHoCH Reversal"
+                            ]
+                            if is_in_rejection:
+                                confluences.append(
+                                    f"Supply OB (${ob.bottom:,.1f} - ${ob.top:,.1f}) Rejection"
+                                )
+                                conf_score += 10
+                            else:
+                                confluences.append(
+                                    f"OB Bottom (${ob.bottom:,.1f}) Breakdown Expansion"
+                                )
+                                conf_score += 8
+
+                            if getattr(ob, "has_fvg_confluence", False) or smc.fair_value_gaps:
+                                confluences.append("FVG Imbalance Confluence")
+                                conf_score += 4
+                            if rvol >= 1.2:
+                                confluences.append(f"RVOL {rvol:.1f}x Expansion")
+                                conf_score += 4
+                            if 32.0 <= rsi <= 50.0:
+                                confluences.append(f"RSI {rsi:.0f} Bear Momentum")
+                                conf_score += 4
+                            if ltp <= ema20:
+                                confluences.append("Below 20-EMA")
+                                conf_score += 3
+
+                            smc_confidence = min(96, max(85, conf_score))
+                            conf = " + ".join(confluences)
+                            smc_stage = "IGNITED" if is_breakdown else "EARLY_WARNING"
+
+                            if is_in_rejection:
+                                headline = f"🦅 CRYPTO SMC ALPHA: {clean_sym} Supply Order Block Rejection @ ${ltp:,.2f}"
+                                summary = (
+                                    f"Smart Money rejection at 15m Supply OB (${ob.bottom:,.2f} - ${ob.top:,.2f}). "
+                                    f"Bearish structure confirmed. Downside target: ${t1_price:,.2f}."
+                                )
+                                action = "SELL_SHORT_FUTURES / SHORT (REJECTION)"
+                                when_to_buy = f"Short on rejection from Supply OB sweet spot (${plan.entry_min:,.2f} – ${plan.entry_max:,.2f})."
+                            else:
+                                headline = f"🔻 CRYPTO SMC BREAKDOWN: {clean_sym} Supply OB Breakdown Expansion @ ${ltp:,.2f}"
+                                summary = (
+                                    f"Smart Money volume expansion breakdown below 15m Supply OB (${ob.bottom:,.2f}). "
+                                    f"Bearish structure confirmed (RVOL {rvol:.1f}x). Downside target: ${t1_price:,.2f}."
+                                )
+                                action = "SELL_SHORT_FUTURES / SHORT (BREAKDOWN)"
+                                when_to_buy = f"Enter on momentum breakdown candle below OB Bottom (${ob.bottom:,.2f})."
+
+                            alert_id = generate_alert_id(
+                                clean_sym, "CRYPTO_MOMENTUM", variant="supply"
+                            )
+                            alert = AutoAlert(
+                                alert_id=alert_id,
+                                alert_type="CRYPTO_MOMENTUM",
+                                stage=smc_stage,
+                                symbol=clean_sym,
+                                exchange="CRYPTO",
+                                segment="CRYPTO",
+                                time_horizon="ROLLING_24H",
+                                eta_label="24h Rolling",
+                                direction="BEARISH",
+                                headline=headline,
+                                summary=summary,
+                                ltp=ltp,
+                                trigger_level=round(
+                                    ob.bottom
+                                    if is_breakdown
+                                    else (getattr(ob, "ote_price", 0.0) or ob.bottom),
+                                    2,
+                                ),
+                                target_level=t1_price,
+                                stop_loss=sl_price,
+                                confidence=smc_confidence,
+                                no_chase_boundary=no_chase,
+                                created_at=now_iso,
+                                is_live=True,
+                                environment="LIVE",
+                                market_status="LIVE",
+                                metrics={
+                                    "change_pct": chg_pct,
+                                    "segment": "CRYPTO",
+                                    "ob_bottom": ob.bottom,
+                                    "ob_top": ob.top,
+                                    "rvol": rvol,
+                                    "rsi_14": rsi,
+                                    "setup_confluence": conf,
+                                },
+                                actionable_plan={
+                                    "action": action,
+                                    "segment": "CRYPTO",
+                                    "contract": f"CRYPTO:{clean_sym}",
+                                    "entry_range": entry_range,
+                                    "stop_loss": f"${sl_price:,.2f}",
+                                    "target": f"${t1_price:,.2f}",
+                                    "target_2": f"${t2_price:,.2f}",
+                                    "target_3": f"${t3_price:,.2f}",
+                                    "runner": f"${t3_price:,.2f}",
+                                    "risk_reward": rr_str,
+                                    "when_to_buy": when_to_buy,
+                                    "when_to_wait": f"Do not chase below ${no_chase:,.2f}.",
+                                    "no_chase_boundary": no_chase,
+                                    "setup_confluence": conf,
+                                    "profit_rule": profit_rule,
+                                    "trade_plan": {
+                                        "symbol": clean_sym,
+                                        "direction": "SHORT",
+                                        "timeframe": "15M",
+                                        "entry_price": ltp,
+                                        "invalidation_stop": sl_price,
+                                        "target_1": t1_price,
+                                        "target_2": t2_price,
+                                        "target_3": t3_price,
+                                        "risk_reward": rr_str,
+                                    },
+                                },
+                            )
+                            found.append(alert)
     except Exception as e:
         logger.debug(f"[CryptoDetector] SMC check failed for {clean_sym}: {e}")
 
@@ -655,6 +890,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     target_level=t1_price,
                     stop_loss=sl_price,
                     confidence=92 if rvol >= 1.5 else 86,
+                    no_chase_boundary=no_chase,
                     created_at=now_iso,
                     is_live=True,
                     environment="LIVE",
@@ -899,6 +1135,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                 target_level=t1_price,
                 stop_loss=sl_price,
                 confidence=int(of_metrics.get("conviction", 88)),
+                no_chase_boundary=no_chase,
                 created_at=now_iso,
                 is_live=True,
                 environment="LIVE",
@@ -1011,6 +1248,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                 target_level=t1_price,
                 stop_loss=sl_price,
                 confidence=int(liq_metrics.get("conviction", 92)),
+                no_chase_boundary=no_chase,
                 created_at=now_iso,
                 is_live=True,
                 environment="LIVE",
@@ -1161,12 +1399,22 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
             rv_30d = float(opt_sum.get("realized_volatility_30d_pct", 50.0) or 50.0)
 
             if vol_regime in ("VOLATILITY_OVERPRICED_IV_RICH", "VOLATILITY_UNDERPRICED_IV_CHEAP"):
+                import time as _t
+
+                _cd_key = f"{clean_sym}:{vol_regime}"
+                if (
+                    not os.environ.get("CHANAKYA_TESTING")
+                    and (_t.time() - _CRYPTO_VOL_ARB_COOLDOWN.get(_cd_key, 0.0)) < 300.0
+                ):
+                    return found
+                _CRYPTO_VOL_ARB_COOLDOWN[_cd_key] = _t.time()
                 is_iv_rich = vol_regime == "VOLATILITY_OVERPRICED_IV_RICH"
                 alert_id = generate_alert_id(
                     clean_sym,
                     "CRYPTO_VOL_ARBITRAGE",
                     variant="iv-rich" if is_iv_rich else "iv-cheap",
                 )
+                weekly_vol_pct = max(0.025, (atm_iv / 100.0) * ((7.0 / 365.0) ** 0.5))
                 if is_iv_rich:
                     headline = f"🎯 DERIBIT VOL ARBITRAGE: {clean_sym} IV Overpriced (+{vol_spread:.1f}% vs 30d RV)"
                     summary = (
@@ -1175,6 +1423,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     )
                     action = "SELL_VOLATILITY / CREDIT_SPREADS"
                     conf = f"Deribit ATM IV ({atm_iv:.1f}%) vs 30d RV ({rv_30d:.1f}%) Rich Spread (+{vol_spread:.1f}%)"
+                    sl_val = round(ltp * (1.0 + weekly_vol_pct), 2)
+                    tgt_1 = round(ltp * (1.0 - weekly_vol_pct), 2)
+                    tgt_2 = round(ltp * (1.0 - 1.5 * weekly_vol_pct), 2)
                 else:
                     headline = f"🎯 DERIBIT VOL ARBITRAGE: {clean_sym} IV Underpriced ({vol_spread:.1f}% vs 30d RV)"
                     summary = (
@@ -1183,6 +1434,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     )
                     action = "BUY_VOLATILITY / STRADDLES"
                     conf = f"Deribit ATM IV ({atm_iv:.1f}%) vs 30d RV ({rv_30d:.1f}%) Cheap Spread ({vol_spread:.1f}%)"
+                    sl_val = round(ltp * (1.0 - weekly_vol_pct), 2)
+                    tgt_1 = round(ltp * (1.0 + weekly_vol_pct), 2)
+                    tgt_2 = round(ltp * (1.0 + 1.5 * weekly_vol_pct), 2)
 
                 alert = AutoAlert(
                     alert_id=alert_id,
@@ -1198,8 +1452,8 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     summary=summary,
                     ltp=ltp,
                     trigger_level=ltp,
-                    target_level=ltp,
-                    stop_loss=0.0,
+                    target_level=tgt_1,
+                    stop_loss=sl_val,
                     confidence=88,
                     created_at=now_iso,
                     is_live=True,
@@ -1219,9 +1473,11 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                         "segment": "CRYPTO",
                         "contract": f"CRYPTO:{clean_sym}",
                         "entry_range": f"${round(ltp * 0.995, 2):,.2f} – ${round(ltp * 1.005, 2):,.2f}",
-                        "stop_loss": "N/A (Options Volatility Spread)",
-                        "target": "Vega / Theta Convergence",
-                        "risk_reward": "Volatility Arbitrage",
+                        "stop_loss": f"${sl_val:,.2f}",
+                        "target": f"${tgt_1:,.2f}",
+                        "target_1": f"${tgt_1:,.2f}",
+                        "target_2": f"${tgt_2:,.2f}",
+                        "risk_reward": "1:2.0 Volatility Spread",
                         "when_to_buy": "Execute defined-risk options spreads on Deribit or Delta Exchange.",
                         "when_to_wait": "Do not trade unhedged naked short gamma.",
                         "no_chase_boundary": round(ltp * 1.01, 2),
@@ -1232,9 +1488,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                             "direction": "VOLATILITY",
                             "timeframe": "SWING_OPTIONS",
                             "entry_price": ltp,
-                            "invalidation_stop": 0.0,
-                            "target_1": ltp,
-                            "target_2": ltp,
+                            "invalidation_stop": sl_val,
+                            "target_1": tgt_1,
+                            "target_2": tgt_2,
                             "risk_reward": "Vol-Arbitrage",
                         },
                     },

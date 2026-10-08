@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import threading
 from datetime import datetime, timezone, timedelta
@@ -33,9 +32,11 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 def get_default_db_path() -> Path:
     """Returns canonical path to Chanakya ledger SQLite database."""
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "chanakya_ledger.db"
+    from config.paths import app_data_path
+
+    p = app_data_path("chanakya_ledger.db")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 class SQLiteAlertStore:
@@ -115,6 +116,11 @@ class SQLiteAlertStore:
             logger.warning("[SQLiteAlertStore] Skipped saving alert missing alert_id")
             return
 
+        from engine.data_sanctity import assert_production_data_sanctity
+
+        if not assert_production_data_sanctity(d, "SQLiteAlertStore"):
+            return
+
         symbol = str(d.get("symbol") or "")
         exchange = str(d.get("exchange") or "NSE")
         segment = str(d.get("segment") or "EQUITY")
@@ -186,6 +192,110 @@ class SQLiteAlertStore:
                 ),
             )
             conn.commit()
+
+    def save_alerts_batch(self, alerts: list[Any]) -> int:
+        """
+        Saves or updates a batch of alerts atomically within a single SQLite transaction.
+        """
+        if not alerts:
+            return 0
+
+        from engine.data_sanctity import assert_production_data_sanctity
+
+        alerts = [a for a in alerts if assert_production_data_sanctity(a, "SQLiteAlertStore")]
+        if not alerts:
+            return 0
+
+        now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        rows_to_insert = []
+        for alert_or_dict in alerts:
+            if hasattr(alert_or_dict, "to_dict"):
+                d = alert_or_dict.to_dict()
+            elif hasattr(alert_or_dict, "as_dict"):
+                d = alert_or_dict.as_dict()
+            elif isinstance(alert_or_dict, dict):
+                d = dict(alert_or_dict)
+            else:
+                continue
+
+            alert_id = d.get("alert_id") or ""
+            if not alert_id:
+                continue
+
+            symbol = str(d.get("symbol") or "")
+            exchange = str(d.get("exchange") or "NSE")
+            segment = str(d.get("segment") or "EQUITY")
+            alert_type = str(d.get("alert_type") or "UNKNOWN")
+            stage = str(d.get("stage") or "EARLY_WARNING")
+            direction = str(d.get("direction") or "BULLISH")
+
+            session_date = ""
+            parts = alert_id.split("-")
+            if parts and len(parts[-1]) == 8 and parts[-1].isdigit():
+                session_date = parts[-1]
+            if not session_date:
+                session_date = datetime.now(IST).strftime("%Y%m%d")
+
+            ltp = float(d.get("ltp") or 0.0)
+            trigger_level = float(d.get("trigger_level") or 0.0)
+            target_level = float(d.get("target_level") or 0.0)
+            stop_loss = float(d.get("stop_loss") or 0.0)
+            confidence = float(d.get("confidence") or 0.0)
+
+            status = "ACTIVE"
+            if d.get("is_invalidated"):
+                status = "INVALIDATED"
+            elif d.get("is_target_hit"):
+                status = "TARGET_HIT"
+            elif d.get("is_archived"):
+                status = "ARCHIVED"
+
+            created_at = str(d.get("created_at") or d.get("timestamp") or now_str)
+            payload_json = json.dumps(d)
+            rows_to_insert.append(
+                (
+                    alert_id,
+                    symbol,
+                    exchange,
+                    segment,
+                    alert_type,
+                    stage,
+                    direction,
+                    session_date,
+                    ltp,
+                    trigger_level,
+                    target_level,
+                    stop_loss,
+                    confidence,
+                    status,
+                    created_at,
+                    now_str,
+                    payload_json,
+                )
+            )
+
+        if not rows_to_insert:
+            return 0
+
+        with self._lock, self._get_connection() as conn:
+            conn.executemany(
+                """
+                INSERT INTO alerts (
+                    alert_id, symbol, exchange, segment, alert_type, stage, direction,
+                    session_date, ltp, trigger_level, target_level, stop_loss, confidence,
+                    status, created_at, updated_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(alert_id) DO UPDATE SET
+                    stage = excluded.stage,
+                    ltp = excluded.ltp,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at,
+                    payload_json = excluded.payload_json;
+                """,
+                rows_to_insert,
+            )
+            conn.commit()
+        return len(rows_to_insert)
 
     def get_alert(self, alert_id: str) -> Optional[dict[str, Any]]:
         """Retrieves single alert payload by alert_id."""

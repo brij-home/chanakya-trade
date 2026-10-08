@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import threading
 import webbrowser
 from typing import Optional
 
@@ -179,20 +180,45 @@ def unregister_broker(key: str) -> None:
 
 
 def _try_auto_restore_sessions() -> None:
-    """Attempt to restore persisted broker sessions (mStock, Shoonya, etc.) when _brokers is empty."""
+    """Attempt to restore persisted broker sessions (Fyers, mStock, Shoonya, etc.)."""
     global _brokers, _primary_key, _data_key, _exec_key
-    if _brokers or os.environ.get("CHANAKYA_TESTING") == "1":
+    if os.environ.get("CHANAKYA_TESTING") == "1":
         return
-    # 1. m.Stock
+
+    # 0. Fyers (Primary Institutional Data & Execution Broker)
+    if "fyers" not in _brokers:
+        try:
+            from brokers.fyers import FyersAPI, TOKEN_FILE as _FT
+
+            if os.path.exists(_FT) or os.environ.get("FYERS_APP_ID"):
+                b = FyersAPI()
+                if b.is_authenticated():
+                    is_first = not _brokers
+                    register_broker(
+                        "fyers", b, primary=is_first, role="both" if is_first else "data"
+                    )
+                    try:
+                        threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    if _brokers:
+        return
+
+    # 1. m.Stock (only if configured in environment)
     try:
         from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
 
-        if os.path.exists(_MT):
+        if os.path.exists(_MT) and (
+            os.environ.get("MSTOCK_API_KEY") or os.environ.get("MSTOCK_CLIENT_CODE")
+        ):
             b = MStockAPI()
             if b.is_authenticated():
                 register_broker("mstock", b, role="both")
                 try:
-                    _start_websocket(b)
+                    threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
                 except Exception:
                     pass
                 return
@@ -208,7 +234,7 @@ def _try_auto_restore_sessions() -> None:
             if b.is_authenticated():
                 register_broker("shoonya", b, role="both")
                 try:
-                    _start_websocket(b)
+                    threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
                 except Exception:
                     pass
                 return
@@ -224,7 +250,7 @@ def _try_auto_restore_sessions() -> None:
             if b.is_authenticated():
                 register_broker("kotak", b, role="both")
                 try:
-                    _start_websocket(b)
+                    threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
                 except Exception:
                     pass
                 return
@@ -320,6 +346,8 @@ def get_data_broker_key() -> str:
 
 def get_execution_broker() -> BrokerAPI:
     """Return the current execution broker. Falls back to primary if unset."""
+    if not _brokers:
+        _try_auto_restore_sessions()
     if _exec_key and _exec_key in _brokers:
         return _brokers[_exec_key]
     return get_broker()
@@ -327,6 +355,8 @@ def get_execution_broker() -> BrokerAPI:
 
 def get_execution_broker_key() -> str:
     """Return the selected execution-provider key without exposing mutable state."""
+    if not _brokers:
+        _try_auto_restore_sessions()
     if _exec_key and _exec_key in _brokers:
         return _exec_key
     return _primary_key
@@ -595,10 +625,38 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
         app_id = get_credential("FYERS_APP_ID", "Fyers App ID", secret=False)
         secret_key = get_credential("FYERS_SECRET_KEY", "Fyers Secret Key", secret=True)
         redirect_uri = get_broker_callback_url("fyers")
+        # Auto-login credentials (optional — headless TOTP flow, no browser needed)
+        fy_id = (
+            get_credential(
+                "FYERS_FY_ID",
+                "Fyers Client Login ID (for auto-login)",
+                secret=False,
+                required=False,
+            )
+            or ""
+        )
+        totp_secret = (
+            get_credential(
+                "FYERS_TOTP_SECRET",
+                "Fyers TOTP Secret (for auto-login)",
+                secret=True,
+                required=False,
+            )
+            or ""
+        )
+        pin = (
+            get_credential(
+                "FYERS_PIN", "Fyers Trading PIN (for auto-login)", secret=True, required=False
+            )
+            or ""
+        )
         return key, FyersAPI(
             app_id=app_id,
             secret_key=secret_key,
             redirect_uri=redirect_uri,
+            fy_id=fy_id,
+            totp_secret=totp_secret,
+            pin=pin,
         )
 
 
@@ -739,6 +797,10 @@ def _recreate_broker_from_token(key: str):
                 b = FyersAPI(
                     os.environ.get("FYERS_APP_ID", ""),
                     os.environ.get("FYERS_SECRET_KEY", ""),
+                    redirect_uri=os.environ.get("FYERS_REDIRECT_URL", ""),
+                    fy_id=os.environ.get("FYERS_FY_ID", ""),
+                    totp_secret=os.environ.get("FYERS_TOTP_SECRET", ""),
+                    pin=os.environ.get("FYERS_PIN", ""),
                 )
                 if b.is_authenticated():
                     return b
@@ -790,8 +852,15 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
     Returns the (possibly recreated) broker instance."""
     from urllib.parse import urlparse
 
-    # Angel One & Stoxkart: automated TOTP login — no browser redirect needed
-    if key in _TOTP_BROKERS:
+    # Automated TOTP login — no browser redirect needed
+    # (Angel One, Stoxkart, Shoonya, mStock, Kotak, and Fyers when TOTP+PIN are configured)
+    has_fyers_autologin = (
+        key == "fyers"
+        and bool(getattr(broker, "_fy_id", None))
+        and bool(getattr(broker, "_totp_secret", None))
+        and bool(getattr(broker, "_pin", None))
+    )
+    if key in _TOTP_BROKERS or has_fyers_autologin:
         console.print(
             f"\n[bold cyan]🔐 Logging in to {key.title()} via credentials/TOTP…[/bold cyan]"
         )
@@ -918,12 +987,16 @@ def _start_websocket(broker: BrokerAPI) -> None:
             return
 
         from market.websocket import ws_manager
+        from market.fyers_order_stream import fyers_order_stream
+        from market.fyers_tbt_manager import fyers_tbt_manager
 
         # Access Fyers internal token and app_id
         token = getattr(broker, "_access_token", "")
         app_id = getattr(broker, "_app_id", "")
         if token and app_id:
             ws_manager.start(access_token=token, app_id=app_id)
+            fyers_order_stream.start(access_token=token, app_id=app_id)
+            fyers_tbt_manager.start(access_token=token, app_id=app_id)
     except Exception:
         pass  # Status shown in REPL toolbar
 
@@ -1157,14 +1230,24 @@ def disconnect_broker(choice: Optional[str] = None) -> None:
 def close_all_brokers() -> None:
     """Gracefully close all active broker sessions, HTTP clients, and WebSockets."""
     global _brokers, _primary_key, _data_key, _exec_key
+    try:
+        from market.websocket import ws_manager
+
+        ws_manager.stop()
+    except Exception:
+        pass
+    try:
+        from market.fyers_order_stream import fyers_order_stream
+
+        fyers_order_stream.stop()
+    except Exception:
+        pass
     for key, broker in list(_brokers.items()):
         try:
             if hasattr(broker, "stop_websocket"):
                 broker.stop_websocket()
             if hasattr(broker, "close"):
                 broker.close()
-            elif hasattr(broker, "logout"):
-                broker.logout()
         except Exception:
             pass
     _brokers = {}

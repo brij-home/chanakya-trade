@@ -23,8 +23,14 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from config.paths import app_data_path
 
-SEARCH_DB = Path.home() / ".trading_platform" / "analysis_search.db"
+
+def get_search_db() -> Path:
+    return app_data_path("analysis_search.db")
+
+
+SEARCH_DB = get_search_db()
 
 
 @dataclass

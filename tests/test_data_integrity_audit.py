@@ -64,19 +64,55 @@ def test_static_code_audit_no_dummy_fallbacks():
     )
 
 
-def test_eod_database_no_test_symbols():
-    """Verify production SQLite database data/eod_bars.db has zero test symbols."""
+def test_eod_database_no_test_or_dummy_symbols():
+    """Verify production SQLite database data/eod_bars.db has zero test or dummy symbols across all tables."""
     db_path = DATA_DIR / "eod_bars.db"
     if not db_path.exists():
         pytest.skip("data/eod_bars.db does not exist on this test environment")
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT symbol FROM ohlcv_daily WHERE symbol LIKE 'TEST%'")
-    test_symbols = [row[0] for row in cursor.fetchall()]
+    tables = [
+        r[0]
+        for r in cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    ]
+    violations = []
+    for t in tables:
+        try:
+            cursor.execute(
+                f"SELECT DISTINCT symbol FROM {t} WHERE symbol LIKE '%DUMMY%' OR symbol LIKE 'TEST%'"
+            )
+            found = [row[0] for row in cursor.fetchall()]
+            if found:
+                violations.append(f"Table {t} contains dummy/test symbols: {found}")
+        except Exception:
+            pass
     conn.close()
 
-    assert len(test_symbols) == 0, f"Production database contains test symbols: {test_symbols}"
+    assert not violations, "\n".join(violations)
+
+
+def test_universe_files_no_dummy_or_test_symbols():
+    """Verify all bundled universe JSON files in data/universes contain zero dummy or test symbols."""
+    import json
+
+    universes_dir = DATA_DIR / "universes"
+    if not universes_dir.exists():
+        pytest.skip("data/universes does not exist on this test environment")
+
+    violations = []
+    for json_file in universes_dir.glob("*.json"):
+        with open(json_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for item in data:
+            if isinstance(item, dict):
+                sym = str(item.get("symbol", "")).upper()
+                if sym.startswith(("DUMMY", "TEST")) or "DUMMY" in sym:
+                    violations.append(f"{json_file.name}: Found dummy symbol '{sym}'")
+
+    assert not violations, "Found dummy symbols in universe files:\n" + "\n".join(violations)
 
 
 def test_eod_database_physical_envelope_sanity():
@@ -260,3 +296,51 @@ def test_static_code_audit_no_mojibake():
     assert not violations, "Mojibake encoding violations found in production code:\n" + "\n".join(
         violations
     )
+
+
+def test_production_data_sanctity_firewall():
+    """Verify DataSanctityGuard identifies and rejects mock and test data payloads."""
+    from engine.data_sanctity import is_test_or_mock_payload
+
+    # 1. Test environment tag
+    is_t, reason = is_test_or_mock_payload({"environment": "TEST", "symbol": "RELIANCE"})
+    assert is_t is True
+    assert "environment='TEST'" in reason
+
+    # 2. Test symbol prefix
+    is_t, reason = is_test_or_mock_payload({"symbol": "TEST_INFY"})
+    assert is_t is True
+    assert "Forbidden test symbol" in reason
+
+    # 3. Test alert ID prefix
+    is_t, reason = is_test_or_mock_payload({"alert_id": "test-abc12345"})
+    assert is_t is True
+    assert "Forbidden test ID" in reason
+
+    # 4. Genuine production record
+    is_t, _ = is_test_or_mock_payload(
+        {"environment": "LIVE", "symbol": "TCS", "alert_id": "aa-breakout-tcs-20261004"}
+    )
+    assert is_t is False
+
+
+def test_eod_l1_caches_registered_with_memory_guard():
+    """Verify EOD store process L1 cache is registered with institutional memory guard."""
+    from engine.memory_guard import _trim_callbacks
+    from engine.eod_store import clear_l1_caches
+
+    assert clear_l1_caches in _trim_callbacks, (
+        "clear_l1_caches must be registered with memory_guard"
+    )
+
+
+def test_data_sync_scheduler_status():
+    """Verify data sync scheduler returns valid operational status structure."""
+    from engine.data_sync_scheduler import data_sync_scheduler
+
+    status = data_sync_scheduler.get_sync_status()
+    assert "running" in status
+    assert "is_syncing" in status
+    assert "last_eod_sync_date" in status
+    assert "last_fundamentals_sync_date" in status
+    assert "last_master_sync_date" in status

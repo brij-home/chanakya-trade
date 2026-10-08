@@ -583,9 +583,9 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                           </p>
                         </div>
                         <div>
-                          <span className="text-[10px] text-muted uppercase font-ui">Risk : Reward</span>
+                          <span className="text-[10px] text-muted uppercase font-ui">R:R Ratio</span>
                           <p className="font-bold text-amber text-sm">
-                            {opp.risk_reward_ratio ? `1:${opp.risk_reward_ratio} R:R` : '—'}
+                            {opp.risk_reward_ratio ? `1:${opp.risk_reward_ratio}` : '—'}
                           </p>
                         </div>
                       </div>

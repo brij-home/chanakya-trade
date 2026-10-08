@@ -205,9 +205,24 @@ async def lifespan(app: FastAPI):
 
     warmer_task = asyncio.create_task(_background_cache_warmer())
     maintenance_task = asyncio.create_task(_background_maintenance_scheduler())
+
+    # Start the autonomous periodic data synchronization engine
+    try:
+        from engine.data_sync_scheduler import data_sync_scheduler
+
+        data_sync_scheduler.start()
+    except Exception as e_sync:
+        logger.warning(f"[lifespan] Failed starting data sync scheduler: {e_sync}")
+
     yield
     warmer_task.cancel()
     maintenance_task.cancel()
+    try:
+        from engine.data_sync_scheduler import data_sync_scheduler
+
+        data_sync_scheduler.stop()
+    except Exception:
+        pass
     try:
         from engine.auto_alert_engine import auto_alert_engine
 
@@ -468,6 +483,30 @@ def _require_localhost(request: _Request) -> None:
 
 
 app.include_router(_skills_router)
+from web.routers import alerts_router, market_router
+
+app.include_router(alerts_router)
+app.include_router(market_router)
+
+# Re-exports for backward compatibility
+from web.routers.alerts_api import (
+    send_alert_to_telegram as send_alert_to_telegram,
+    get_auto_alerts as get_auto_alerts,
+    get_telegram_destinations_api as get_telegram_destinations_api,
+    get_alert_preferences_api as get_alert_preferences_api,
+    update_alert_preferences_api as update_alert_preferences_api,
+    archive_auto_alert as archive_auto_alert,
+    cleanup_auto_alerts as cleanup_auto_alerts,
+    invalidate_auto_alert_endpoint as invalidate_auto_alert_endpoint,
+    invalidate_manual_alert_endpoint as invalidate_manual_alert_endpoint,
+    rescrutinize_auto_alert as rescrutinize_auto_alert,
+    trigger_multibagger_scan_api as trigger_multibagger_scan_api,
+    get_alerts_audit_trail_api as get_alerts_audit_trail_api,
+    get_alert_audit_detail_api as get_alert_audit_detail_api,
+    scan_swing_trades as scan_swing_trades,
+    trigger_eod_session_review as trigger_eod_session_review,
+    get_eod_session_scorecard as get_eod_session_scorecard,
+)
 
 
 # ── Startup: auto-restore broker sessions from disk ───────────
@@ -494,10 +533,24 @@ async def _auto_restore_brokers() -> None:
             from brokers.fyers import FyersAPI, TOKEN_FILE as _FT
 
             if _FT.exists():
-                b = FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY"))
+                b = FyersAPI(
+                    _env("FYERS_APP_ID"),
+                    _env("FYERS_SECRET_KEY"),
+                    fy_id=_env("FYERS_FY_ID"),
+                    totp_secret=_env("FYERS_TOTP_SECRET"),
+                    pin=_env("FYERS_PIN"),
+                )
                 if b.is_authenticated():
-                    register_broker("fyers", b)
-                    logging.info("[startup] Fyers session restored")
+                    register_broker("fyers", b, primary=True, role="both")
+                    try:
+                        from brokers.session import _start_websocket
+
+                        _start_websocket(b)
+                    except Exception:
+                        pass
+                    logging.info(
+                        "[startup] Fyers session restored as primary (role: both) & WebSocket started"
+                    )
         except Exception as exc:
             logging.warning("[startup] Could not restore Fyers: %s", exc)
 
@@ -713,6 +766,14 @@ async def telemetry_health():
     except Exception:
         pass
 
+    fyers_ws_connected = False
+    try:
+        from market.websocket import ws_manager
+
+        fyers_ws_connected = bool(ws_manager.connected)
+    except Exception:
+        pass
+
     mode_info = get_trading_mode()
 
     return JSONResponse(
@@ -727,6 +788,7 @@ async def telemetry_health():
             "streams": {
                 "binance_crypto_connected": crypto_connected,
                 "mstock_ws_connected": mstock_ws_connected,
+                "fyers_ws_connected": fyers_ws_connected,
             },
             "brokers": {
                 "data": get_data_broker_key(),
@@ -739,6 +801,48 @@ async def telemetry_health():
             },
         }
     )
+
+
+@app.get("/api/diagnostics/fyers-budget", tags=["System"])
+async def api_fyers_budget():
+    """
+    Real-time Fyers API budget governor, rate gate telemetry, and circuit breaker status.
+    Offloaded to thread pool to preserve async event loop responsiveness per AGENTS.md Rule 24.
+    """
+
+    def _collect():
+        from datetime import datetime, timezone
+        from market.fyers_rate_gate import get_fyers_rate_gate
+        from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+        from market.ws_subscription_manager import get_ws_subscription_manager
+        from market.vwap_session_cache import get_vwap_session_cache
+
+        rate_diag = get_fyers_rate_gate().get_diagnostics()
+        cb_diag = get_fyers_circuit_breaker().get_diagnostics()
+        ws_mgr = get_ws_subscription_manager()
+        all_subs = ws_mgr.get_all_desired_subscriptions()
+
+        vwap_cache = get_vwap_session_cache()
+        with vwap_cache._lock:
+            cached_vwap_count = len(vwap_cache._memory_cache)
+
+        return {
+            "status": "HEALTHY" if not cb_diag["is_tripped"] else "DEGRADED",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "rate_gate": rate_diag,
+            "circuit_breaker": cb_diag,
+            "websocket_subscriptions": {
+                "total_count": len(all_subs),
+                "max_limit": ws_mgr._max_subscriptions,
+                "symbols": all_subs,
+            },
+            "vwap_session_cache": {
+                "cached_symbols_count": cached_vwap_count,
+            },
+        }
+
+    data = await asyncio.to_thread(_collect)
+    return JSONResponse(data)
 
 
 # ── P0-B: Canonical Mode Endpoint ────────────────────────────────────────────
@@ -941,6 +1045,72 @@ async def get_storage_allocation():
     from engine.maintenance import get_storage_breakdown
 
     return JSONResponse(get_storage_breakdown().to_dict())
+
+
+@app.post("/api/maintenance/purge-poisoned-compounders", tags=["Maintenance"])
+async def purge_poisoned_century_compounders_endpoint():
+    """
+    Audit and purge century_compounder_cache records that were persisted with the
+    hardcoded sentinel fair_value_anchor=100.0 (Invariant 11 violation).
+
+    Safe to call at any time. After purging, trigger
+    POST /skills/century_sync_market to recompute with real EOD prices.
+    """
+    import asyncio
+    from engine.eod_store import purge_poisoned_century_compounders
+
+    result = await asyncio.to_thread(purge_poisoned_century_compounders)
+    return JSONResponse(result)
+
+
+@app.get("/api/maintenance/sync-status", tags=["Maintenance"])
+async def get_data_sync_status():
+    """Retrieve operational state and last run timestamps of periodic data synchronization."""
+    from engine.data_sync_scheduler import data_sync_scheduler
+
+    return JSONResponse(data_sync_scheduler.get_sync_status())
+
+
+@app.post("/api/maintenance/sync-eod", tags=["Maintenance"])
+async def trigger_eod_sync(universe: str = "NIFTY500", force: bool = False):
+    """
+    On-demand or scheduled post-market EOD bar synchronization.
+    Delta-syncs missing daily bars into data/eod_bars.db, verifies envelopes, and checkpoints WAL.
+    """
+    import asyncio
+    from engine.data_sync_scheduler import data_sync_scheduler
+
+    result = await asyncio.to_thread(
+        data_sync_scheduler.sync_daily_eod, force=force, universe=universe
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/maintenance/sync-fundamentals", tags=["Maintenance"])
+async def trigger_fundamentals_sync(limit: int = 500, force: bool = False):
+    """
+    Weekly or on-demand balance sheet fundamentals and forensic accounting audit synchronization.
+    """
+    import asyncio
+    from engine.data_sync_scheduler import data_sync_scheduler
+
+    result = await asyncio.to_thread(
+        data_sync_scheduler.sync_weekly_fundamentals, limit=limit, force=force
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/maintenance/sync-full", tags=["Maintenance"])
+async def trigger_full_system_resync(universe: str = "NIFTY500"):
+    """
+    Deep system recalibration: wipes split/bonus drifts, force re-downloads multi-year bars,
+    re-scores compounders & inflection archetypes, and executes SQLite VACUUM.
+    """
+    import asyncio
+    from engine.data_sync_scheduler import data_sync_scheduler
+
+    result = await asyncio.to_thread(data_sync_scheduler.run_full_system_resync, universe=universe)
+    return JSONResponse(result)
 
 
 @app.get("/api/provider_health", tags=["Observability"])
@@ -1792,7 +1962,13 @@ async def fyers_callback(auth_code: str = "", state: str = "", s: str = ""):
         )
         profile = b.complete_login(auth_code=code)
         funds = b.get_funds()
-        register_broker("fyers", b)
+        register_broker("fyers", b, primary=True, role="both")
+        try:
+            from brokers.session import _start_websocket
+
+            _start_websocket(b)
+        except Exception:
+            pass
         _invalidate_auth_cache("fyers")
     except Exception as e:
         body = f"""<div class="card"><div class="err-box">❌ {e}</div>
@@ -3213,642 +3389,7 @@ async def stream_alerts():
     )
 
 
-@app.get("/api/alerts/auto", tags=["Alerts"])
-async def get_auto_alerts(
-    limit: int = 300,
-    alert_type: Optional[str] = None,
-    stage: Optional[str] = None,
-    environment: Optional[str] = None,
-    is_invalidated: Optional[bool] = None,
-    target_status: Optional[str] = None,
-    view_mode: str = "ACTIVE",  # "ACTIVE" | "ARCHIVED" | "ALL"
-    is_archived: Optional[bool] = None,
-    horizon: Optional[str] = None,
-    segment: Optional[str] = None,
-):
-    """
-    Get real-time auto-detected alerts with active/archived partitioning and horizon differentiation.
-    """
-    from engine.auto_alert_engine import auto_alert_engine
-
-    alerts = auto_alert_engine.get_alerts(
-        limit=limit,
-        alert_type=alert_type,
-        stage=stage,
-        environment=environment,
-        is_invalidated=is_invalidated,
-        target_status=target_status,
-        view_mode=view_mode,
-        is_archived=is_archived,
-        horizon=horizon,
-        segment=segment,
-    )
-    return {"status": "ok", "data": [a.to_dict() for a in alerts]}
-
-
-@app.get("/api/market/participant-oi", tags=["Market Intelligence"])
-async def get_participant_oi_endpoint():
-    """Returns the latest official NSE Participant-wise Open Interest metrics."""
-    from market.participant_oi import get_latest_participant_oi
-
-    data = get_latest_participant_oi()
-    return {"status": "ok", "data": data.to_dict()}
-
-
-@app.get("/api/market/order-book/{symbol}", tags=["Market Intelligence"])
-async def get_order_book_endpoint(symbol: str):
-    """Returns real-time Order Book Imbalance (OBI) and depth analytics."""
-    from market.order_book import analyze_symbol_order_book
-
-    snapshot = analyze_symbol_order_book(symbol)
-    return {"status": "ok", "data": snapshot.to_dict()}
-
-
-@app.get("/api/market/whale-deals", tags=["Market Intelligence"])
-async def get_whale_deals_endpoint(min_deal_cr: float = 0.0, investor: Optional[str] = None):
-    """Returns marquee superstar investor and institutional bulk/block deals."""
-    from analysis.whale_tracker import get_whale_flows
-
-    flows = get_whale_flows(investor_filter=investor, min_deal_cr=min_deal_cr)
-    return {"status": "ok", "data": flows}
-
-
-@app.get("/api/market/regime", tags=["Market Intelligence"])
-async def get_market_regime():
-    """
-    Institutional Market Regime Gate.
-
-    Returns the current EDGELESS CHOP / LOW VIX state for UI banner display.
-    Frontend should prominently display banner when is_edgeless=True.
-
-    Response fields:
-      - is_edgeless (bool): EDGELESS CHOP — PRESERVE CAPITAL is active
-      - prefer_spreads (bool): VIX < 13.0 — mandate defined-risk spreads
-      - banner (str): Display-ready status message (empty string in normal conditions)
-      - vix (float|null): Current India VIX
-      - ad_ratio (float|null): Current Advance/Decline ratio
-      - vix_status, ad_status: Classification labels
-      - data_quality: "LIVE" | "DEGRADED" | "UNAVAILABLE"
-      - reason (str): Full explanation for Telegram / trader awareness
-    """
-    try:
-        from engine.market_regime_gate import evaluate_market_regime
-
-        snap = evaluate_market_regime()
-        return {
-            "status": "ok",
-            "is_edgeless": snap.is_edgeless,
-            "prefer_spreads": snap.prefer_spreads,
-            "banner": snap.banner,
-            "vix": snap.vix,
-            "ad_ratio": snap.ad_ratio,
-            "vix_status": snap.vix_status,
-            "ad_status": snap.ad_status,
-            "data_quality": snap.data_quality,
-            "reason": snap.reason,
-            "is_locomotive_polarized": getattr(snap, "is_locomotive_polarized", False),
-            "locomotive_detail": getattr(snap, "locomotive_detail", ""),
-        }
-    except Exception as exc:
-        return {
-            "status": "UNAVAILABLE",
-            "is_edgeless": False,
-            "prefer_spreads": False,
-            "banner": "",
-            "data_quality": "UNAVAILABLE",
-            "reason": f"Regime gate unavailable: {exc}",
-        }
-
-
-@app.get("/api/market/council-sotd", tags=["Market Intelligence"])
-async def get_council_sotd():
-    """
-    Multi-Agent Council Setup of the Day (SOTD) winners.
-
-    Returns the Top 2-3 setups selected by the 10-minute council arbitration cycle.
-    Each alert returned has council_rank, council_score, and council_note
-    injected into its actionable_plan.
-    """
-    try:
-        from engine.council_arbitrator import get_last_winners
-        from engine.auto_alert_engine import auto_alert_engine
-
-        winner_ids = get_last_winners()
-        winners = []
-        for a in auto_alert_engine.get_alerts():
-            if getattr(a, "alert_id", "") in winner_ids:
-                d = a.to_dict()
-                d["_is_council_winner"] = True
-                winners.append(d)
-
-        winners.sort(key=lambda x: (x.get("actionable_plan") or {}).get("council_rank", 99))
-        return {"status": "ok", "count": len(winners), "data": winners}
-    except Exception as exc:
-        return {"status": "UNAVAILABLE", "count": 0, "data": [], "error": str(exc)}
-
-
-@app.post("/api/alerts/auto/archive", tags=["Alerts"])
-async def archive_auto_alert(payload: dict):
-    """Archive or restore an alert by ID."""
-    from engine.auto_alert_engine import auto_alert_engine
-
-    alert_id = payload.get("alert_id")
-    archive = payload.get("archive", True)
-    reason = payload.get("reason")
-    if not alert_id:
-        raise HTTPException(status_code=400, detail="Missing alert_id")
-    alert = auto_alert_engine.archive_alert_by_id(alert_id, archive=archive, reason=reason)
-    if not alert:
-        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
-    try:
-        from web.sse import event_bus
-        from datetime import datetime, timezone
-
-        await event_bus.broadcast(
-            {
-                "type": "auto_alert_archived",
-                "alert_id": alert_id,
-                "is_archived": archive,
-                "reason": reason,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-    except Exception:
-        pass
-    return {"status": "ok", "data": alert.to_dict()}
-
-
-@app.post("/api/alerts/auto/cleanup", tags=["Alerts"])
-async def cleanup_auto_alerts(payload: Optional[dict] = None):
-    """Cleanup archived alerts older than max_age_days (default 3 days)."""
-    from engine.auto_alert_engine import auto_alert_engine
-
-    days = payload.get("max_age_days", 3) if payload else 3
-    purged = auto_alert_engine.cleanup_archived_records(max_age_days=days)
-    surviving = auto_alert_engine.get_alerts(limit=500)
-    return {
-        "status": "ok",
-        "data": {
-            "purged_count": purged,
-            "remaining_count": len(surviving),
-            "max_age_days": days,
-        },
-    }
-
-
-@app.post("/api/alerts/auto/invalidate", tags=["Alerts"])
-async def invalidate_auto_alert_endpoint(payload: dict):
-    """Explicitly invalidate an auto alert with a specific rationale."""
-    from engine.auto_alert_engine import auto_alert_engine
-
-    alert_id = payload.get("alert_id")
-    reason = payload.get("reason", "Manually invalidated by user")
-    if not alert_id:
-        raise HTTPException(status_code=400, detail="Missing alert_id")
-    alert = auto_alert_engine.invalidate_alert_by_id(alert_id, reason=reason)
-    if not alert:
-        raise HTTPException(
-            status_code=404, detail=f"Alert {alert_id} not found or already invalidated"
-        )
-    return {"status": "ok", "data": alert.to_dict()}
-
-
-@app.post("/api/alerts/manual/invalidate", tags=["Alerts"])
-async def invalidate_manual_alert_endpoint(payload: dict):
-    """Explicitly invalidate a manual alert with a specific rationale."""
-    from engine.alerts import alert_manager
-
-    alert_id = payload.get("alert_id")
-    reason = payload.get("reason", "Manually invalidated by user")
-    if not alert_id:
-        raise HTTPException(status_code=400, detail="Missing alert_id")
-    alert = alert_manager.invalidate_alert(alert_id, reason=reason)
-    if not alert:
-        raise HTTPException(
-            status_code=404, detail=f"Manual alert {alert_id} not found or already invalidated"
-        )
-    return {"status": "ok", "data": alert_manager.public_dict(alert)}
-
-
-@app.post("/api/alerts/auto/rescrutinize", tags=["Alerts"])
-async def rescrutinize_auto_alert(payload: dict):
-    """Re-scrutinize an active alert on demand with AI Chief Risk Officer Devil's Advocate."""
-    from engine.auto_alert_engine import auto_alert_engine
-    from engine.alert_scrutiny import alert_scrutiny_auditor
-
-    alert_id = payload.get("alert_id")
-    if not alert_id:
-        raise HTTPException(status_code=400, detail="Missing alert_id")
-    alerts = auto_alert_engine.get_alerts(limit=200, view_mode="ALL")
-    target = next((a for a in alerts if a.alert_id == alert_id), None)
-    if not target:
-        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
-
-    scrutiny = alert_scrutiny_auditor.scrutinize_alert(target, timeout=3.5)
-    if not isinstance(target.metrics, dict):
-        target.metrics = {}
-    target.metrics["scrutiny"] = scrutiny.to_dict()
-    target.confidence = max(target.confidence, scrutiny.score)
-    auto_alert_engine._save()
-    return {"status": "ok", "data": target.to_dict(), "scrutiny": scrutiny.to_dict()}
-
-
-@app.post("/api/alerts/auto/scan-multibaggers", tags=["Alerts"])
-async def trigger_multibagger_scan_api(top_n: int = 10, min_conviction: int = 65):
-    """
-    Triggers an institutional compounder & multibagger breakout scan across 40+ growth leaders.
-    Evaluates Minervini 8-point Trend Template, Stan Weinstein Stage 2 markup, and float absorption.
-    """
-    from engine.auto_alert_engine import auto_alert_engine
-    import asyncio
-
-    fresh = await asyncio.to_thread(
-        auto_alert_engine.scan_multibagger_compounders,
-        top_n=top_n,
-        min_conviction=min_conviction,
-    )
-    return {
-        "status": "ok",
-        "count": len(fresh),
-        "data": [a.to_dict() for a in fresh],
-    }
-
-
-@app.get("/api/alerts/auto/audit-trail", tags=["Alerts"])
-async def get_alerts_audit_trail_api(
-    alert_id: Optional[str] = None,
-    symbol: Optional[str] = None,
-    event_type: Optional[str] = None,
-    limit: int = 50,
-):
-    """
-    Query chronological audit trail events across one or all active/archived alerts.
-    Enables rapid operational troubleshooting and end-to-end delivery traceability.
-    """
-    from engine.auto_alert_engine import auto_alert_engine
-
-    events = auto_alert_engine.get_audit_trail(
-        alert_id=alert_id,
-        symbol=symbol,
-        event_type=event_type,
-        limit=min(limit, 200),
-    )
-    return {"status": "ok", "count": len(events), "data": events}
-
-
-@app.get("/api/alerts/auto/{alert_id}/audit", tags=["Alerts"])
-async def get_alert_audit_detail_api(alert_id: str):
-    """
-    Get complete audit lifecycle trail and delivery diagnostics for a specific alert.
-    """
-    from engine.auto_alert_engine import auto_alert_engine
-
-    alert = auto_alert_engine.get_alert_by_id(alert_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
-
-    return {
-        "status": "ok",
-        "data": {
-            "alert_id": alert.alert_id,
-            "trace_id": alert.trace_id,
-            "symbol": alert.symbol,
-            "exchange": alert.exchange,
-            "stage": alert.stage,
-            "created_at": alert.created_at,
-            "current_status": {
-                "ltp": alert.ltp,
-                "is_active": alert.is_active,
-                "is_invalidated": alert.is_invalidated,
-                "is_archived": alert.is_archived,
-                "telegram_dispatched": alert.telegram_dispatched,
-                "telegram_suppression_reason": alert.telegram_suppression_reason,
-                "achieved_milestones": alert.achieved_milestones or [],
-            },
-            "audit_trail": getattr(alert, "audit_trail", []) or [],
-        },
-    }
-
-
-@app.get("/api/alerts/auto/telegram-destinations", tags=["Alerts"])
-async def get_telegram_destinations_api():
-    """
-    Get available Telegram destinations (default private chat ID, channel ID if configured).
-    """
-    from bot.telegram_bot import get_telegram_destinations
-
-    return {"status": "ok", "data": get_telegram_destinations()}
-
-
-@app.get("/api/alerts/preferences", tags=["Alerts"])
-async def get_alert_preferences_api():
-    """
-    Get active alert routing and segment subscription matrix.
-    """
-    from engine.alert_preferences import alert_preferences
-
-    return {"status": "ok", "data": alert_preferences.get_preferences()}
-
-
-@app.post("/api/alerts/preferences", tags=["Alerts"])
-async def update_alert_preferences_api(payload: dict):
-    """
-    Update alert routing and segment subscription matrix. Emits SSE broadcast.
-    """
-    from engine.alert_preferences import alert_preferences
-
-    updated = alert_preferences.update_preferences(payload)
-
-    # Emit SSE broadcast
-    try:
-        from web.sse import event_bus
-
-        event_bus.publish_sync(
-            "system",
-            {
-                "type": "alert_preferences_updated",
-                "preferences": updated,
-            },
-        )
-    except Exception:
-        pass
-
-    return {"status": "ok", "data": updated}
-
-
-@app.post("/api/alerts/auto/send-telegram", tags=["Alerts"])
-async def send_alert_to_telegram(payload: dict):
-    """
-    Dispatch a specific alert to the configured Telegram chat, group, or channel.
-
-    Runs the canonical render_auto_alert() template to build the message,
-    then sends via send_push() (non-blocking, HTML parse mode).
-
-    Accepts optional `chat_id` in payload to route to channels/groups.
-    Returns the rendered message preview so the UI can show what was sent.
-    Fails gracefully with 503 if Telegram bot is not configured.
-    """
-    from engine.auto_alert_engine import auto_alert_engine
-    from bot.alert_templates import render_auto_alert
-    from datetime import datetime, timezone, timedelta
-
-    alert_id = payload.get("alert_id")
-    chat_id = payload.get("chat_id")
-    if chat_id is not None and isinstance(chat_id, str):
-        chat_id = chat_id.strip() or None
-    if not alert_id:
-        raise HTTPException(status_code=400, detail="Missing alert_id")
-
-    alerts = auto_alert_engine.get_alerts(limit=500, view_mode="ALL")
-    target = next((a for a in alerts if a.alert_id == alert_id), None)
-    if not target:
-        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
-
-    # Determine if market is live (09:15–15:30 IST weekdays, closed on holidays)
-    from market.calendar import is_market_open
-
-    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    in_market = is_market_open("NSE", ref_dt=now)
-
-    try:
-        rendered_msg = render_auto_alert(target, in_market=in_market)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to render alert message: {e}")
-
-    try:
-        from bot.telegram_bot import send_push
-
-        send_push(rendered_msg, parse_mode="HTML", bypass_dedup=True, chat_id=chat_id)
-    except RuntimeError as e:
-        # Telegram bot token not configured
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Telegram send failed: {e}")
-
-    # Mark alert as dispatched to Telegram and record audit trail to maintain Zero-Ghost lifecycle contract
-    try:
-        target.telegram_dispatched = True
-        target.telegram_suppression_reason = None
-        if not isinstance(getattr(target, "dispatched_channels", None), list):
-            target.dispatched_channels = []
-        if "telegram" not in target.dispatched_channels:
-            target.dispatched_channels.append("telegram")
-        if hasattr(target, "record_audit"):
-            target.record_audit(
-                "TELEGRAM_SENT",
-                f"Manually dispatched to Telegram channel via UI (confidence: {target.confidence}%)",
-                actor="MANUAL_UI",
-                details={
-                    "confidence": target.confidence,
-                    "stage": target.stage,
-                    "chat_id": chat_id or "DEFAULT_CHAT",
-                },
-            )
-        auto_alert_engine._save()
-    except Exception as e_audit:
-        logger.debug(f"[API] Failed to record manual Telegram dispatch state: {e_audit}")
-
-    # Truncate preview for the response
-    preview = rendered_msg[:800] if len(rendered_msg) > 800 else rendered_msg
-    return {
-        "status": "ok",
-        "alert_id": alert_id,
-        "chat_id": chat_id or "DEFAULT_CHAT",
-        "message_preview": preview,
-        "in_market": in_market,
-        "sent_at": now.strftime("%Y-%m-%d %H:%M:%S IST"),
-    }
-
-
-# ── Mover Autopsy & Precursor Radar Endpoints ────────────────
-
-
-@app.get("/api/movers/autopsy", tags=["Movers & Autopsy"])
-async def get_mover_autopsy(date: Optional[str] = None, segment: Optional[str] = None):
-    """
-    Get daily top gainers & losers forensic autopsy dossier.
-    Includes 5-dimensional causal factor decomposition and control cohort contrast.
-    Optionally filter by segment: 'ALL' | 'FNO' | 'NON_FNO' | 'INDEX'.
-    """
-    from engine.mover_autopsy import mover_autopsy_engine
-
-    if date:
-        autopsy = mover_autopsy_engine.get_autopsy_by_date(date)
-    else:
-        autopsy = mover_autopsy_engine.get_latest_autopsy()
-
-    if not autopsy:
-        # Run on-demand if no autopsy exists yet
-        autopsy = await asyncio.to_thread(mover_autopsy_engine.run_daily_autopsy, segment=segment)
-
-    # Filter gainers & losers by segment if specified
-    if autopsy and segment and segment.upper() not in ("ALL", ""):
-        seg_upper = segment.upper().replace("CASH", "NON_FNO")
-        autopsy_dict = autopsy.to_dict()
-        autopsy_dict["gainers"] = [
-            g
-            for g in autopsy_dict.get("gainers", [])
-            if g.get("segment") == seg_upper or (seg_upper == "FNO" and g.get("is_fo"))
-        ]
-        autopsy_dict["losers"] = [
-            l
-            for l in autopsy_dict.get("losers", [])
-            if l.get("segment") == seg_upper or (seg_upper == "FNO" and l.get("is_fo"))
-        ]
-        return {"status": "ok", "data": autopsy_dict}
-
-    return {"status": "ok", "data": autopsy.to_dict() if autopsy else None}
-
-
-@app.post("/api/movers/autopsy/run", tags=["Movers & Autopsy"])
-async def run_mover_autopsy(payload: Optional[dict] = None):
-    """
-    Trigger an on-demand forensic autopsy across top movers and control cohort.
-    Can specify segment: 'ALL' | 'FNO' | 'NON_FNO' | 'INDEX'.
-    """
-    from engine.mover_autopsy import mover_autopsy_engine
-
-    top_n = payload.get("top_n", 10) if payload else 10
-    target_date = payload.get("date") if payload else None
-    segment = payload.get("segment") if payload else None
-
-    autopsy = await asyncio.to_thread(
-        mover_autopsy_engine.run_daily_autopsy,
-        target_date=target_date,
-        segment=segment,
-        top_n=top_n,
-    )
-
-    # Publish SSE notification so UI toasts and card views update immediately
-    try:
-        from web.sse import event_bus
-
-        event_bus.publish_sync(
-            "system",
-            {
-                "type": "mover_autopsy_completed",
-                "date": autopsy.date,
-                "segment": segment or "ALL",
-                "market_regime": autopsy.market_regime,
-                "gainers_count": len(autopsy.gainers),
-                "losers_count": len(autopsy.losers),
-                "traps_filtered": autopsy.traps_filtered,
-            },
-        )
-    except Exception:
-        pass
-
-    return {"status": "ok", "data": autopsy.to_dict()}
-
-
-@app.get("/api/movers/precursors", tags=["Movers & Autopsy"])
-async def get_mover_precursors(limit: int = 5, segment: Optional[str] = None):
-    """
-    Scan liquid universe and return high-conviction pre-ignition candidates
-    matching the pre-move DNA of past winners.
-    Can be filtered by segment ('INDEX' | 'FNO' | 'NON_FNO' | 'ALL').
-    """
-    from engine.precursor_radar import precursor_radar
-
-    candidates = await asyncio.to_thread(
-        precursor_radar.scan_precursors, segment=segment, top_n=limit
-    )
-    return {"status": "ok", "data": [c.to_dict() for c in candidates]}
-
-
-# ── Asymmetric Opportunities (Low Risk : High Reward) Endpoints ────────
-
-
-@app.get("/api/opportunities/asymmetric", tags=["Asymmetric Opportunities"])
-async def get_asymmetric_opportunities(
-    limit: int = 8,
-    segment: Optional[str] = None,
-    setup_type: Optional[str] = None,
-):
-    """
-    Returns active high-asymmetry (low risk : high reward) trade setups.
-    Covers: Pocket Pivot, F&O Ban Squeeze, Rubber Band 200-EMA, 0DTE Gamma.
-    """
-    from engine.asymmetric_radar import asymmetric_radar
-
-    opps = await asyncio.to_thread(
-        asymmetric_radar.scan_asymmetric_opportunities,
-        segment=segment,
-        top_n=limit,
-    )
-    if setup_type and setup_type.upper() not in ("ALL", ""):
-        st_upper = setup_type.upper()
-        opps = [o for o in opps if o.setup_type == st_upper]
-
-    return {"status": "ok", "data": [o.to_dict() for o in opps]}
-
-
-@app.post("/api/opportunities/asymmetric/scan", tags=["Asymmetric Opportunities"])
-async def run_asymmetric_opportunities_scan(payload: Optional[dict] = None):
-    """
-    Trigger on-demand sweep across market universes for low-risk, high-reward setups.
-    """
-    from engine.asymmetric_radar import asymmetric_radar
-
-    top_n = payload.get("top_n", 8) if payload else 8
-    segment = payload.get("segment") if payload else None
-    setup_type = payload.get("setup_type") if payload else None
-
-    opps = await asyncio.to_thread(
-        asymmetric_radar.scan_asymmetric_opportunities,
-        segment=segment,
-        top_n=top_n,
-    )
-    if setup_type and setup_type.upper() not in ("ALL", ""):
-        st_upper = setup_type.upper()
-        opps = [o for o in opps if o.setup_type == st_upper]
-
-    # Publish SSE notification for UI toasts and instant reactive refresh
-    try:
-        from web.sse import event_bus
-
-        event_bus.publish_sync(
-            "system",
-            {
-                "type": "asymmetric_scan_completed",
-                "segment": segment or "ALL",
-                "count": len(opps),
-                "top_opportunity": opps[0].symbol if opps else None,
-            },
-        )
-    except Exception:
-        pass
-
-    return {"status": "ok", "data": [o.to_dict() for o in opps]}
-
-
-@app.post("/api/quotes/batch", tags=["Market Data"])
-async def api_quotes_batch(req: dict):
-    """Sidecar batch quote query endpoint."""
-    from web.skills import BatchQuotesRequest, skill_quotes_batch
-
-    symbols = req.get("symbols", []) if isinstance(req, dict) else []
-    exchange = req.get("exchange", "NSE") if isinstance(req, dict) else "NSE"
-    return await skill_quotes_batch(BatchQuotesRequest(symbols=symbols, exchange=exchange))
-
-
-# ── Real-Time Market Ticker Stream (Indian & Global) ───────────
-
-
-@app.get("/api/ticker/snapshot", tags=["Market Data"])
-async def get_ticker_snapshot():
-    """
-    Get current snapshot of major Indian (NIFTY, BANKNIFTY, SENSEX, VIX, FINNIFTY)
-    and Global indices (GIFT NIFTY, NASDAQ, S&P 500, DOW, DXY, US 10Y, Crude, Gold, Silver).
-    """
-    from market.ticker_stream import ticker_stream, compute_ribbon_tickers
-
-    snap = ticker_stream.get_snapshot()
-    if not snap.get("tickers"):
-        tickers = await asyncio.to_thread(compute_ribbon_tickers)
-        ticker_stream._cached_ribbon_tickers = tickers
-        snap["tickers"] = tickers
-    return snap
+# ── Alerts and Market Intelligence endpoints modularized into web.routers ──
 
 
 @app.get("/api/ticker/stream", tags=["SSE"])

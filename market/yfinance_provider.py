@@ -192,13 +192,19 @@ def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
 
     upper = symbol.upper().strip()
 
-    # Strip Fyers-specific suffixes before lookup
+    # Strip broker and exchange suffixes before lookup
     if upper.endswith("-EQ"):
         upper = upper[:-3]
         symbol = symbol[:-3]
     elif upper.endswith("-INDEX"):
         upper = upper[:-6]
         symbol = symbol[:-6]
+    elif upper.endswith(".NS"):
+        upper = upper[:-3]
+        symbol = symbol[:-3]
+    elif upper.endswith(".BO"):
+        upper = upper[:-3]
+        symbol = symbol[:-3]
     elif upper.endswith("-FUT") or upper.endswith("FUT"):
         # Match base commodity if derivative contract e.g. GOLD24NOVFUT
         for c in _COMMODITY_MAP:

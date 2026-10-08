@@ -55,248 +55,10 @@ class PositionSizeResult:
         }
 
 
-# Standard F&O Lot Sizes for Indian Instruments (Official NSE September 2026 Master: 216 Equity F&O + Commodities + Currencies)
-_F_AND_O_LOT_SIZES: dict[str, int] = {
-    "360ONE": 500,
-    "ABB": 125,
-    "ABCAPITAL": 3100,
-    "ADANIENSOL": 675,
-    "ADANIENT": 309,
-    "ADANIGREEN": 600,
-    "ADANIPORTS": 475,
-    "ADANIPOWER": 3550,
-    "ALKEM": 125,
-    "ALUMINIUM": 5000,
-    "AMBER": 100,
-    "AMBUJACEM": 1200,
-    "ANGELONE": 2500,
-    "APLAPOLLO": 350,
-    "APOLLOHOSP": 125,
-    "ASHOKLEY": 5000,
-    "ASIANPAINT": 250,
-    "ASTRAL": 425,
-    "ATHERENERG": 375,
-    "AUBANK": 1000,
-    "AUROPHARMA": 550,
-    "AXISBANK": 625,
-    "BAJAJ-AUTO": 75,
-    "BAJAJFINSV": 300,
-    "BAJAJHLDNG": 75,
-    "BAJFINANCE": 750,
-    "BANDHANBNK": 3600,
-    "BANKBARODA": 2925,
-    "BANKEX": 30,
-    "BANKINDIA": 5200,
-    "BANKNIFTY": 30,
-    "BDL": 425,
-    "BEL": 1425,
-    "BHARATFORG": 500,
-    "BHARTIARTL": 475,
-    "BHEL": 2625,
-    "BIOCON": 2500,
-    "BLUESTARCO": 325,
-    "BOSCHLTD": 25,
-    "BPCL": 1975,
-    "BRITANNIA": 125,
-    "BSE": 200,
-    "CAMS": 825,
-    "CANBK": 6750,
-    "CDSL": 475,
-    "CGPOWER": 850,
-    "CHOLAFIN": 625,
-    "CIPLA": 425,
-    "COALINDIA": 1350,
-    "COCHINSHIP": 400,
-    "COFORGE": 475,
-    "COLPAL": 275,
-    "CONCOR": 1250,
-    "COPPER": 2500,
-    "COTTON": 25,
-    "CROMPTON": 2150,
-    "CRUDEOIL": 100,
-    "CRUDEOILM": 10,
-    "CUMMINSIND": 200,
-    "DABUR": 1250,
-    "DELHIVERY": 2075,
-    "DIVISLAB": 100,
-    "DIXON": 50,
-    "DLF": 950,
-    "DMART": 150,
-    "DRREDDY": 625,
-    "EICHERMOT": 100,
-    "ETERNAL": 2425,
-    "EURINR": 1000,
-    "FEDERALBNK": 2500,
-    "FINNIFTY": 60,
-    "FORCEMOT": 25,
-    "FORTIS": 775,
-    "GAIL": 3550,
-    "GBPINR": 1000,
-    "GLENMARK": 375,
-    "GMRAIRPORT": 6975,
-    "GODFRYPHLP": 275,
-    "GODREJCP": 500,
-    "GODREJPROP": 325,
-    "GOLD": 100,
-    "GOLDM": 10,
-    "GOLDPETAL": 1,
-    "GRASIM": 250,
-    "GVT&D": 125,
-    "HAL": 150,
-    "HAVELLS": 500,
-    "HCLTECH": 400,
-    "HDFCAMC": 300,
-    "HDFCBANK": 650,
-    "HDFCLIFE": 1100,
-    "HEROMOTOCO": 150,
-    "HINDALCO": 700,
-    "HINDPETRO": 2025,
-    "HINDUNILVR": 300,
-    "HINDZINC": 1225,
-    "HYUNDAI": 275,
-    "ICICIBANK": 700,
-    "ICICIGI": 325,
-    "ICICIPRULI": 925,
-    "IDEA": 71475,
-    "IDFCFIRSTB": 9275,
-    "IEX": 4350,
-    "INDHOTEL": 1000,
-    "INDIANB": 1000,
-    "INDIGO": 150,
-    "INDUSINDBK": 700,
-    "INDUSTOWER": 1700,
-    "INFY": 400,
-    "INOXWIND": 6400,
-    "IOC": 4875,
-    "IREDA": 4525,
-    "IRFC": 5425,
-    "ITC": 1725,
-    "JINDALSTEL": 625,
-    "JIOFIN": 2350,
-    "JPYINR": 1000,
-    "JSWENERGY": 1075,
-    "JSWSTEEL": 675,
-    "JUBLFOOD": 1250,
-    "KALYANKJIL": 1350,
-    "KAYNES": 150,
-    "KEI": 175,
-    "KFINTECH": 575,
-    "KOTAKBANK": 2000,
-    "KPITTECH": 775,
-    "LAURUSLABS": 850,
-    "LEAD": 5000,
-    "LICHSGFIN": 1000,
-    "LICI": 1400,
-    "LODHA": 625,
-    "LT": 175,
-    "LTF": 2250,
-    "LTM": 150,
-    "LUPIN": 425,
-    "M&M": 200,
-    "MAHABANK": 6500,
-    "MANAPPURAM": 3000,
-    "MANKIND": 250,
-    "MARICO": 1200,
-    "MARUTI": 50,
-    "MAXHEALTH": 525,
-    "MAZDOCK": 225,
-    "MCX": 225,
-    "MFSL": 400,
-    "MIDCPNIFTY": 120,
-    "MOTHERSON": 6150,
-    "MOTILALOFS": 775,
-    "MPHASIS": 275,
-    "MUTHOOTFIN": 275,
-    "NAM-INDIA": 625,
-    "NATGASMINI": 250,
-    "NATIONALUM": 1875,
-    "NATURALGAS": 1250,
-    "NAUKRI": 550,
-    "NBCC": 6500,
-    "NESTLEIND": 500,
-    "NHPC": 6950,
-    "NIFTY": 65,
-    "NIFTY50": 65,
-    "NIFTYFPI": 1100,
-    "NIFTYNXT50": 25,
-    "NMDC": 6750,
-    "NTPC": 1500,
-    "NYKAA": 3125,
-    "OBEROIRLTY": 350,
-    "OFSS": 100,
-    "OIL": 1400,
-    "ONGC": 2250,
-    "PAGEIND": 20,
-    "PATANJALI": 1075,
-    "PAYTM": 725,
-    "PERSISTENT": 125,
-    "PETRONET": 1900,
-    "PFC": 1300,
-    "PGEL": 950,
-    "PHOENIXLTD": 350,
-    "PIDILITIND": 500,
-    "PIIND": 175,
-    "PNB": 8000,
-    "PNBHOUSING": 650,
-    "POLICYBZR": 350,
-    "POLYCAB": 125,
-    "POWERGRID": 1900,
-    "POWERINDIA": 25,
-    "PREMIERENE": 650,
-    "PRESTIGE": 450,
-    "RADICO": 150,
-    "RBLBANK": 3175,
-    "RECLTD": 1575,
-    "RELIANCE": 500,
-    "RVNL": 1925,
-    "SAGILITY": 12000,
-    "SAIL": 4700,
-    "SBICARD": 800,
-    "SBILIFE": 375,
-    "SBIN": 750,
-    "SENSEX": 20,
-    "SHREECEM": 25,
-    "SHRIRAMFIN": 825,
-    "SIEMENS": 175,
-    "SILVER": 30,
-    "SILVERM": 5,
-    "SILVERMIC": 1,
-    "SOLARINDS": 50,
-    "SONACOMS": 1225,
-    "SRF": 200,
-    "SUNPHARMA": 350,
-    "SUPREMEIND": 175,
-    "SUZLON": 12700,
-    "SWIGGY": 1825,
-    "TATACONSUM": 550,
-    "TATAELXSI": 125,
-    "TATAMOTORS": 575,
-    "TATAPOWER": 1450,
-    "TATASTEEL": 2750,
-    "TCS": 225,
-    "TECHM": 600,
-    "TIINDIA": 200,
-    "TITAN": 175,
-    "TMPV": 1600,
-    "TORNTPHARM": 125,
-    "TRENT": 225,
-    "TVSMOTOR": 175,
-    "ULTRACEMCO": 50,
-    "UNIONBANK": 4425,
-    "UNITDSPR": 400,
-    "UNOMINDA": 550,
-    "UPL": 1355,
-    "USDINR": 1000,
-    "VBL": 1275,
-    "VEDL": 1150,
-    "VMM": 4850,
-    "VOLTAS": 375,
-    "WAAREEENER": 175,
-    "WIPRO": 3000,
-    "YESBANK": 31100,
-    "ZINC": 5000,
-    "ZYDUSLIFE": 900,
-}
+# Standard F&O Lot Sizes for Indian Instruments (Imported from authoritative SSOT market.instruments)
+from market.instruments import STANDARD_LOT_SIZES
+
+_F_AND_O_LOT_SIZES: dict[str, int] = STANDARD_LOT_SIZES
 
 
 _SORTED_FNO_KEYS: list[str] = sorted(_F_AND_O_LOT_SIZES.keys(), key=len, reverse=True)
@@ -557,6 +319,131 @@ def calculate_position_size(
     )
 
 
+def calculate_volatility_risk_parity_size(
+    symbol: str,
+    entry_price: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+    capital: Optional[float] = None,
+    target_risk_pct: float = 1.0,
+    max_margin_pct: float = 25.0,
+    atr: Optional[float] = None,
+    is_fno: Optional[bool] = None,
+    alert_type: Optional[str] = None,
+) -> PositionSizeResult:
+    """
+    Automated Volatility Risk-Parity Position Sizing Engine.
+
+    Calculates lot sizing such that rupee risk contribution is equalized across all assets
+    regardless of whether the instrument is a volatile midcap or a low-beta heavyweight.
+    Automatically fetches 14-period daily ATR, live LTP, and available margin if omitted.
+    """
+    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+
+    # 1. Resolve Capital from Broker Funds if omitted
+    if capital is None or capital <= 0:
+        try:
+            from brokers.session import get_execution_broker
+
+            exec_broker = get_execution_broker()
+            if exec_broker:
+                funds = exec_broker.get_funds()
+                avail = float(
+                    getattr(funds, "available_cash", 0.0)
+                    or getattr(funds, "available_margin", 0.0)
+                    or getattr(funds, "total_balance", 0.0)
+                    or 0.0
+                )
+                if avail > 0:
+                    capital = avail
+        except Exception:
+            pass
+        if capital is None or capital <= 0:
+            capital = 100000.0
+
+    # 2. Resolve live entry price if omitted
+    if entry_price is None or entry_price <= 0:
+        try:
+            from market.quotes import get_ltp
+
+            entry_price = float(get_ltp(f"NSE:{clean_sym}") or get_ltp(clean_sym) or 0.0)
+        except Exception:
+            pass
+        if entry_price is None or entry_price <= 0:
+            entry_price = 100.0
+
+    # 3. Resolve 14-period ATR if omitted
+    if atr is None or atr <= 0:
+        try:
+            from market.history import get_historical_data
+            from analysis.technical import atr as calc_atr
+
+            df = get_historical_data(clean_sym, interval="1d", days=60)
+            if df is not None and len(df) >= 14:
+                atr_series = calc_atr(df, period=14).dropna()
+                if not atr_series.empty:
+                    val = float(atr_series.iloc[-1])
+                    if val > 0:
+                        atr = val
+        except Exception:
+            pass
+        if atr is None or atr <= 0:
+            atr = max(round(entry_price * 0.015, 2), 1.0)
+
+    # 4. Resolve stop-loss if omitted (1.5 x ATR structural trailing floor)
+    if stop_loss is None or stop_loss <= 0 or stop_loss >= entry_price:
+        stop_loss = round(max(0.05, entry_price - (atr * 1.5)), 2)
+
+    # 5. Auto-detect F&O eligibility (derivatives / indices default to lots, stocks default to cash equity)
+    if is_fno is None:
+        import re
+
+        is_derivative_contract = bool(re.search(r"(?:FUT|\d+(?:CE|PE))$", clean_sym))
+        is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+        is_fno = is_derivative_contract or is_index
+
+    # 6. Execute core ATR volatility parity calculation
+    result = calculate_position_size(
+        symbol=clean_sym,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        capital=capital,
+        max_risk_pct=target_risk_pct,
+        max_capital_pct=max_margin_pct,
+        atr=atr,
+        sizing_model="atr_volatility",
+        is_fno=is_fno,
+    )
+
+    # 7. Apply detector-specific conviction lot scaling if provided
+    if alert_type and result.lot_size > 1 and result.lots >= 1:
+        mult = get_detector_lot_multiplier(alert_type)
+        if mult != 1.0:
+            adj_lots = max(1, int(round(result.lots * mult)))
+            adj_shares = adj_lots * result.lot_size
+            adj_capital = adj_shares * result.entry_price
+            adj_risk = adj_shares * abs(result.entry_price - result.stop_loss)
+            result = PositionSizeResult(
+                symbol=result.symbol,
+                shares=adj_shares,
+                lots=adj_lots,
+                lot_size=result.lot_size,
+                capital_allocated=adj_capital,
+                capital_pct=(adj_capital / capital) * 100.0 if capital > 0 else 0.0,
+                risk_amount=adj_risk,
+                risk_pct=(adj_risk / capital) * 100.0 if capital > 0 else 0.0,
+                entry_price=result.entry_price,
+                stop_loss=result.stop_loss,
+                target_price=result.target_price,
+                r_multiple=result.r_multiple,
+                sizing_model="atr_volatility",
+                notes=f"{result.notes} [Detector '{alert_type}' {mult:.2f}x sizing applied: {adj_lots} lots]",
+            )
+
+    vol_pct = (atr / entry_price) * 100.0
+    result.notes = f"Volatility Risk-Parity (14-ATR: ₹{atr:.2f} [{vol_pct:.2f}%]) | Margin Cap: {max_margin_pct}% | {result.notes}"
+    return result
+
+
 # ── Detector-Specific Lot Quantization ───────────────────────────────────────
 # Derived from EOD session diagnostics (2026-09-24): empirically-proven high-conviction
 # detectors receive a 1.25x lot premium; low-conviction counter-trend detectors are
@@ -793,3 +680,46 @@ def generate_execution_ticket(
         "notes": res.notes,
         "conviction_tier": conviction_tier,
     }
+
+
+def calibrate_off_number_stop(
+    direction: str,
+    raw_stop: float,
+    atr: float,
+    tick_size: float = 0.05,
+) -> float:
+    """
+    Calibrates stop-loss placement away from psychological round numbers (magnets for stop-runs).
+    Institutional market makers run stops 2-5 ticks through major round numbers before reversing.
+    If the calculated raw stop is within 0.15% of a round number (e.g. 50, 100, 500, 1000, 2500),
+    this buffers the stop outside the liquidity hunting pool.
+    """
+    if raw_stop <= 0:
+        return raw_stop
+
+    is_bullish = direction.upper() in ("BULLISH", "BUY", "LONG")
+    buffer = max(0.15 * atr, 3 * tick_size, raw_stop * 0.0015)
+
+    # Determine relevant round intervals based on magnitude
+    if raw_stop >= 1000:
+        intervals = [500.0, 100.0, 50.0]
+    elif raw_stop >= 100:
+        intervals = [50.0, 10.0, 5.0]
+    else:
+        intervals = [5.0, 1.0, 0.5]
+
+    for interval in intervals:
+        nearest_round = round(raw_stop / interval) * interval
+        dist_to_round = abs(raw_stop - nearest_round)
+        # If raw_stop is within 0.15% of this psychological round level
+        if dist_to_round <= (raw_stop * 0.0015):
+            if is_bullish:
+                # For Long trades, stop must be placed BELOW the round level
+                calibrated = min(raw_stop, nearest_round - buffer)
+                return round(round(calibrated / tick_size) * tick_size, 2)
+            else:
+                # For Short trades, stop must be placed ABOVE the round level
+                calibrated = max(raw_stop, nearest_round + buffer)
+                return round(round(calibrated / tick_size) * tick_size, 2)
+
+    return round(round(raw_stop / tick_size) * tick_size, 2)

@@ -98,7 +98,7 @@ console = Console(legacy_windows=False)
 
 ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-7"
 OPENAI_DEFAULT_MODEL = "gpt-4o"
-GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
+GEMINI_DEFAULT_MODEL = "gemini-3.8-flash,gemini-3.7-flash"
 OLLAMA_DEFAULT_MODEL = "llama3.3"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
 GROQ_DEFAULT_MODEL = (
@@ -2081,7 +2081,7 @@ class GeminiProvider(LLMProvider):
       - Free / paid API key from Google AI Studio (aistudio.google.com)
       - GEMINI_API_KEY in .env
 
-    Models: gemini-3.7-flash, gemini-3.5-flash-lite, gemini-3.5-flash, etc.
+    Models: gemini-3.8-flash, gemini-3.7-flash
 
     Tool calling: uses Gemini's native function calling protocol.
 
@@ -2223,20 +2223,23 @@ class GeminiProvider(LLMProvider):
         gemini_history = self._to_gemini_history(messages[:-1]) if len(messages) > 1 else []
         last_msg = messages[-1]["content"] if messages else ""
 
-        active_model = self.model or GEMINI_DEFAULT_MODEL
+        active_model_str = self.model or GEMINI_DEFAULT_MODEL
         client_idx, active_client = self._get_active_client()
         chat_session = None
 
-        candidate_models = [active_model] + [
-            m
-            for m in [
-                "gemini-3.8-flash",
-                "gemini-3.7-flash",
-                "gemini-3.6-flash",
-                "gemini-3.5-flash-lite",
-            ]
-            if m != active_model
-        ]
+        configured_models = [m.strip() for m in active_model_str.split(",") if m.strip()]
+        candidate_models = []
+        for m in configured_models + ["gemini-3.8-flash", "gemini-3.7-flash"]:
+            if m not in candidate_models and m not in (
+                "gemini-2.5-flash",
+                "gemini-2.0-flash",
+                "gemini-1.5-flash",
+                "gemini-1.5-flash-latest",
+            ):
+                candidate_models.append(m)
+        if not candidate_models:
+            candidate_models = ["gemini-3.8-flash", "gemini-3.7-flash"]
+        active_model = candidate_models[0]
 
         def _create_session(client_obj, model_name):
             return client_obj.chats.create(
@@ -3207,10 +3210,10 @@ class TradingAgent:
                 f"### 🎯 Quant Trade Setup ({verdict}):\n"
                 f"- **Strategy**: `{strat}`\n"
                 f"- **Entry Level**: ₹{ltp:,.2f}\n"
-                f"- **Stop Loss**: ₹{sl:,.2f} (Risk $1R = ₹{risk:,.2f}$)\n"
-                f"- **Target 1 (2.0R)**: ₹{t1:,.2f} ({pct_1:+.2f}%)\n"
-                f"- **Target 2 (3.5R)**: ₹{t2:,.2f} ({pct_2:+.2f}%)\n"
-                f"- **Risk : Reward**: `1 : 2.0` (T1) / `1 : 3.5` (T2)\n\n"
+                f"- **SL**: ₹{sl:,.2f} (Risk $1R = ₹{risk:,.2f}$)\n"
+                f"- **T1 (2.0R)**: ₹{t1:,.2f} ({pct_1:+.2f}%)\n"
+                f"- **T2 (3.5R)**: ₹{t2:,.2f} ({pct_2:+.2f}%)\n"
+                f"- **R:R**: `1:2.0` (T1) / `1:3.5` (T2)\n\n"
                 f"**Key Levels & Structure**:\n"
                 f"- Major Structural Support: ₹{sup:,.2f}\n"
                 f"- Major Overhead Resistance: ₹{res:,.2f}\n"
@@ -3547,7 +3550,11 @@ def _build_fallback_fast_providers(
         _has("GEMINI_API_KEY") or _has("GEMINI_API_KEYS") or _has("GOOGLE_API_KEY")
     ):
         try:
-            gem_model = os.environ.get("GEMINI_FAST_MODEL") or "gemini-3.8-flash"
+            gem_model = (
+                os.environ.get("GEMINI_FAST_MODEL")
+                or os.environ.get("GEMINI_MODEL")
+                or "gemini-3.8-flash,gemini-3.7-flash"
+            )
             fallbacks.append(GeminiProvider(gem_model, registry, system))
         except Exception:
             pass

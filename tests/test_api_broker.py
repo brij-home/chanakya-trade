@@ -187,7 +187,9 @@ class TestStartupAutoRestore:
             from web.api import _auto_restore_brokers
 
             self._run(_auto_restore_brokers())
-            mock_register.assert_called_once_with("fyers", mock_fyers_instance)
+            mock_register.assert_called_once_with(
+                "fyers", mock_fyers_instance, primary=True, role="both"
+            )
 
     def test_fyers_not_restored_when_token_expired(self):
         """When Fyers token file exists but is_authenticated() is False, register_broker is NOT called."""

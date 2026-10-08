@@ -309,7 +309,10 @@ def evaluate_execution_gate(
             pass
 
     atr = atr_val if atr_val is not None else round(ltp * 0.015, 2)
-    stop_loss = round(max(ltp * 0.85, ltp - (1.5 * atr)), 2)
+    raw_stop = round(max(ltp * 0.85, ltp - (1.5 * atr)), 2)
+    from engine.position_sizer import calibrate_off_number_stop
+
+    stop_loss = calibrate_off_number_stop(direction="BULLISH", raw_stop=raw_stop, atr=atr)
     risk_pts = max(1.0, entry_price - stop_loss)
     target_1 = round(entry_price + (risk_pts * 2.0), 2)
     target_2 = round(entry_price + (risk_pts * 3.5), 2)

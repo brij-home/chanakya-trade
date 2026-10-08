@@ -13,12 +13,12 @@ from unittest.mock import patch
 
 from brokers.base import Quote
 from engine.detectors.index_call_setup import detect_index_call_setup
-from market.quotes import _VWAP_CACHE, _enrich_quote, _vwap_cache_lock
+from market.quotes import _enrich_quote
+from market.vwap_session_cache import get_vwap_session_cache
 
 
 def test_quote_enrichment_populates_vwap_for_index():
-    with _vwap_cache_lock:
-        _VWAP_CACHE.clear()
+    get_vwap_session_cache().clear()
     raw_q = Quote(
         symbol="NIFTY",
         last_price=22500.0,

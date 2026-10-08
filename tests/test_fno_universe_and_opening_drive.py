@@ -13,7 +13,7 @@ def engine():
 
 
 def test_watched_equities_includes_full_fno_universe(engine):
-    """Verifies that watched_equities includes all 218 F&O stocks including OFSS, MFSL, HDFCLIFE."""
+    """Verifies that watched_equities includes full F&O stocks including OFSS, MFSL, HDFCLIFE, ANANDRATHI, ENRIN, UJJIVANSFB."""
     equities = engine.watched_equities
     assert len(equities) >= 200
     assert "OFSS" in equities
@@ -23,6 +23,9 @@ def test_watched_equities_includes_full_fno_universe(engine):
     assert "OBEROIRLTY" in equities
     assert "KPITTECH" in equities
     assert "TATAELXSI" in equities
+    assert "ANANDRATHI" in equities
+    assert "ENRIN" in equities
+    assert "UJJIVANSFB" in equities
 
 
 def test_mstock_known_tokens():
@@ -33,6 +36,9 @@ def test_mstock_known_tokens():
     assert api.get_symbol_token("OFSS", "NSE") == "10738"
     assert api.get_symbol_token("MFSL", "NSE") == "2142"
     assert api.get_symbol_token("HDFCLIFE", "NSE") == "467"
+    assert api.get_symbol_token("ANANDRATHI", "NSE") == "7145"
+    assert api.get_symbol_token("ENRIN", "NSE") == "756871"
+    assert api.get_symbol_token("UJJIVANSFB", "NSE") == "15228"
     assert api.get_symbol_token("PATANJALI", "NSE") == "17029"
 
 

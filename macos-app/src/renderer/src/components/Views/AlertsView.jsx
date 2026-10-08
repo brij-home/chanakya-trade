@@ -449,7 +449,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
             )}
             {alert.no_chase_boundary && (
               <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-rose-500/10 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap" title="No-Chase Maximum Entry Limit">
-                🛑 Max ₹{Number(alert.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
+                🛑 NoChase ₹{Number(alert.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
               </span>
             )}
           </div>
@@ -1388,10 +1388,28 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const [purging, setPurging] = useState(false)
   const [cleanupNotice, setCleanupNotice] = useState(null)
   const [archiving, setArchiving] = useState(null)
-  const [autoAlerts, setAutoAlerts] = useState([])
+  const [autoAlerts, setAutoAlerts] = useState(() => {
+    try {
+      const storeItems = useNotificationStore.getState().notifications || []
+      const autoFromStore = storeItems.filter(
+        (n) => n.alert_type && !['PRICE', 'TECHNICAL', 'CONDITIONAL'].includes(n.alert_type) && !isTestOrSimAlert(n)
+      )
+      return autoFromStore
+    } catch (_) {
+      return []
+    }
+  })
   const [serverCounts, setServerCounts] = useState(null)
-  const [autoLoading, setAutoLoading] = useState(true)
+  const [autoLoading, setAutoLoading] = useState(() => {
+    try {
+      const storeItems = useNotificationStore.getState().notifications || []
+      return storeItems.length === 0
+    } catch (_) {
+      return true
+    }
+  })
   const [scanning, setScanning] = useState(false)
+  const [scanningSwing, setScanningSwing] = useState(false)
   const [testing, setTesting] = useState(false)
   const [showTools, setShowTools] = useState(false) // Unified maintenance + simulation dropdown
   const toolsMenuRef = useRef(null)
@@ -1839,7 +1857,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }, [loadAlerts, loadAutoAlerts, chimeEnabled])
 
-  // Extract all active / visible symbols to stream spot prices and option/future contract prices for
+  // Extract all active / visible symbols to stream spot prices and option/future contract prices for.
+  // Crucial: Only stream quotes for TRULY ACTIVE setups (filter out archived, invalidated, expired, or completed)
+  // to prevent saturating the broker rate limits and starving API requests.
   const activeSymbols = useMemo(() => {
     const syms = new Set()
     const addSym = (raw) => {
@@ -1849,36 +1869,43 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
 
     for (const alt of autoAlerts) {
+      if (!isAlertActive(alt)) continue
       addSym(alt.symbol)
       addSym(alt.contract_symbol)
       addSym(alt.actionable_plan?.option_plan?.contract_symbol)
       addSym(alt.actionable_plan?.option_contract)
       addSym(alt.metrics?.option_symbol)
-      const related = alt.related_strikes || alt.metrics?.related_strikes
-      if (Array.isArray(related)) {
-        related.forEach(addSym)
-      }
     }
     for (const a of alerts) {
+      if (a.triggered || a.is_invalidated || a.target_achieved) continue
       addSym(a.symbol)
       addSym(a.contract_symbol)
       addSym(a.actionable_plan?.option_plan?.contract_symbol)
       addSym(a.actionable_plan?.option_contract)
     }
-    return Array.from(syms)
+    // Cap to top 50 active symbols max per cycle to strictly preserve broker rate limit quotas
+    return Array.from(syms).slice(0, 50)
   }, [autoAlerts, alerts])
 
-  // Real-time batch quote streaming for all active alert symbols (2.0s interval)
-  // Real-time batch quote streaming — publishes to LiveSpotsContext.
-  // AlertsView itself does NOT re-render from price updates.
-  // Only the individual cards whose symbol changed re-render (via useLiveSpot hook).
+  // Real-time batch quote streaming for active alert symbols.
+  // Self-scheduling loop with in-flight guard and AbortSignal to prevent overlapping requests or thread pool congestion.
+  // Publishes to LiveSpotsContext — zero AlertsView re-renders.
   useEffect(() => {
     if (activeSymbols.length === 0 || !liveSpotsCtx) return
 
     let cancelled = false
+    let timerId = null
+    let inFlight = false
 
-    const fetchLiveSpots = async () => {
-      if (typeof document !== 'undefined' && document.hidden) return
+    const pollQuotes = async () => {
+      if (cancelled) return
+      if (typeof document !== 'undefined' && document.hidden) {
+        timerId = setTimeout(pollQuotes, 5000)
+        return
+      }
+      if (inFlight) return
+      inFlight = true
+
       try {
         const res = await callRef.current('/skills/quotes/batch', {
           symbols: activeSymbols,
@@ -1886,31 +1913,39 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         })
         if (cancelled) return
         const quotes = extractQuotes(res)
-        if (!quotes || Object.keys(quotes).length === 0) return
-        // Push into context — zero AlertsView re-renders
-        liveSpotsCtx.publish(quotes)
+        if (quotes && Object.keys(quotes).length > 0) {
+          liveSpotsCtx.publish(quotes)
+        }
       } catch (_) {
         // Silently tolerate temporary network blips
+      } finally {
+        inFlight = false
+        if (!cancelled) {
+          // Schedule NEXT request only AFTER current request completes
+          const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000
+          const istNow = new Date(Date.now() + new Date().getTimezoneOffset() * 60000 + IST_OFFSET_MS)
+          const hhmm = istNow.getHours() * 100 + istNow.getMinutes()
+          const day = istNow.getDay()
+          const isMarketOpen = day >= 1 && day <= 5 && hhmm >= 915 && hhmm < 1530
+          const delayMs = isMarketOpen ? 3000 : 7000
+          timerId = setTimeout(pollQuotes, delayMs)
+        }
       }
     }
 
-    fetchLiveSpots()
-    // Market-hours-aware interval: 2s during open hours, 5s when closed.
-    // This halves connection pressure outside trading hours (14:00–09:15 IST).
-    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000
-    const istNow = new Date(Date.now() + new Date().getTimezoneOffset() * 60000 + IST_OFFSET_MS)
-    const hhmm = istNow.getHours() * 100 + istNow.getMinutes()
-    const day = istNow.getDay()
-    const isMarketOpen = day >= 1 && day <= 5 && hhmm >= 915 && hhmm < 1530
-    const quoteIntervalMs = isMarketOpen ? 2000 : 5000
-    const quoteInterval = setInterval(fetchLiveSpots, quoteIntervalMs)
+    pollQuotes()
 
-    const handleVisibilityChange = () => { if (!document.hidden) fetchLiveSpots() }
+    const handleVisibilityChange = () => {
+      if (!document.hidden && !inFlight && !cancelled) {
+        if (timerId) clearTimeout(timerId)
+        pollQuotes()
+      }
+    }
     document.addEventListener('visibilitychange', handleVisibilityChange)
 
     return () => {
       cancelled = true
-      clearInterval(quoteInterval)
+      if (timerId) clearTimeout(timerId)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [activeSymbols, liveSpotsCtx])
@@ -1951,6 +1986,29 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     } catch (_) {
     } finally {
       setScanning(false)
+    }
+  }
+
+  // Dedicated Institutional Swing & Positional scan trigger across NSE & BSE
+  const handleScanSwing = async () => {
+    setScanningSwing(true)
+    try {
+      const res = await callRef.current('/skills/alerts/auto/scan_swing', {
+        universe: 'all_equities_nse_bse',
+        min_score: 60,
+        limit: 40,
+      })
+      const fresh = res?.data ?? []
+      if (Array.isArray(fresh) && fresh.length > 0) {
+        setAutoAlerts((prev) => mergeAlertsInPlace(prev, fresh))
+      } else {
+        await loadAutoAlerts(false)
+      }
+      setHorizonFilter('SWING_ALL')
+      setViewMode('ACTIVE')
+    } catch (_) {
+    } finally {
+      setScanningSwing(false)
     }
   }
 
@@ -2492,6 +2550,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       } else if (selectedFilter === 'MULTI_FLOW') {
         const rel = a.metrics?.related_strikes || a.related_strikes
         if (!Array.isArray(rel) || rel.length === 0) return false
+      } else if (selectedFilter === 'TURTLE_SOUP_SWEEP') {
+        const at = String(a.alert_type || a.event_type || '')
+        if (!at.includes('TURTLE_SOUP')) return false
       } else if (selectedFilter !== 'ALL' && a.alert_type !== selectedFilter && a.event_type !== selectedFilter) {
         return false
       }
@@ -2519,7 +2580,11 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       // 7b. Time Horizon Filter
       if (selectedHorizon !== 'ALL') {
         const hzInfo = resolveHorizonAndETA(a)
-        if (selectedHorizon === 'MULTIBAGGER') {
+        if (selectedHorizon === 'SCALP') {
+          if (hzInfo.key !== 'SCALP' && a.time_horizon !== 'SCALP' && a.time_horizon !== 'INTRADAY_SCALP_ONLY') return false
+        } else if (selectedHorizon === 'SWING_ALL' || selectedHorizon === 'SWING') {
+          if (!['SWING', 'SWING_SHORT', 'SWING_MID'].includes(hzInfo.key) && !['SWING', 'SWING_SHORT', 'SWING_MID'].includes(a.time_horizon)) return false
+        } else if (selectedHorizon === 'MULTIBAGGER') {
           if (hzInfo.key !== 'MULTIBAGGER') return false
         } else if (selectedHorizon === 'LONG_TERM' || selectedHorizon === 'POSITIONAL') {
           if (hzInfo.key !== 'LONG_TERM' && hzInfo.key !== 'POSITIONAL') return false
@@ -3015,11 +3080,20 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
               <div className="flex items-center gap-1.5">
                 <button
                   onClick={handleScanNow}
-                  disabled={scanning}
+                  disabled={scanning || scanningSwing}
                   className="btn btn-sm btn-gold text-xs flex items-center gap-1 font-bold shadow-sm py-1 px-3"
                   title="Scan live market feeds now"
                 >
                   {scanning ? '⚡ Scanning…' : '⚡ Scan Now'}
+                </button>
+
+                <button
+                  onClick={handleScanSwing}
+                  disabled={scanningSwing || scanning}
+                  className="btn btn-sm btn-ghost text-xs text-sky-400 border border-sky-500/30 hover:bg-sky-500/10 flex items-center gap-1 font-bold shadow-sm py-1 px-2.5 transition-all"
+                  title="Deep quantitative sweep across NSE & BSE for institutional swing, positional, and multibagger setups"
+                >
+                  {scanningSwing ? '🌊 Scanning Swings…' : '🌊 Scan Swings'}
                 </button>
 
                 <button
@@ -3267,9 +3341,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
               </button>
             </div>
 
-            {/* ROW 3: Search + Category chips (scrollable) + Dropdowns */}
+            {/* ROW 3: Search + Category chips + Dropdowns */}
             <div className="flex items-center justify-between flex-wrap gap-2 pt-1.5 border-t border-border/40 text-[11px]">
-              <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap min-w-0">
                 {/* Symbol / Contract Search Input */}
                 <div className="relative w-44 flex-shrink-0">
                   <input
@@ -3294,7 +3368,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 <select
                   value={selectedFilter}
                   onChange={(e) => setSelectedFilter(e.target.value)}
-                  className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer flex-shrink-0 ${
+                  className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer max-w-[210px] truncate ${
                     selectedFilter !== 'ALL'
                       ? 'border-gold text-gold font-bold bg-gold/10'
                       : 'border-border hover:border-gold/50'
@@ -3317,6 +3391,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   <option value="RRG_ORDERBOOK_CONVERGENCE">🔄 RRG × Order-Book Convergence</option>
                   <option value="PROMOTER_SKIN_IN_THE_GAME">💎 Promoter Skin-in-the-Game</option>
                   <option value="SMC_SWEEP">🌊 SMC Sweep</option>
+                  <option value="TURTLE_SOUP_SWEEP">🐢 Turtle Soup Sweep</option>
+                  <option value="TURTLE_SOUP_PLUS_ONE_LONG">🐢 Turtle Soup Bullish Inversion</option>
+                  <option value="TURTLE_SOUP_SHORT">🐢 Turtle Soup Bearish Upthrust</option>
                   <option value="PRECURSOR_RADAR">⚡ Precursor Radar</option>
                   <option value="ASYMMETRIC_OPPORTUNITY">🎯 Asymmetric R:R</option>
                   <option value="CIRCUIT_WARNING">🔒 Circuit Warning</option>
@@ -3334,7 +3411,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 <select
                   value={selectedHorizon}
                   onChange={(e) => setSelectedHorizon(e.target.value)}
-                  className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer flex-shrink-0 ${
+                  className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
                     selectedHorizon !== 'ALL'
                       ? 'border-sky-400 text-sky-300 font-bold bg-sky-500/10'
                       : 'border-border hover:border-gold/50'
@@ -3342,17 +3419,19 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   title="Filter by trade time horizon & ETA"
                 >
                   <option value="ALL">All Horizons</option>
-                  <option value="INTRADAY">⏱️ Intraday (Today)</option>
-                  <option value="ROLLING_24H">🪙 24H Rolling (Crypto)</option>
+                  <option value="SWING_ALL">🌊 All Swings (Short + Mid)</option>
                   <option value="SWING_SHORT">⚡ 2–5D Short Swing</option>
                   <option value="SWING_MID">📈 1–4W Mid Swing</option>
                   <option value="POSITIONAL">🏛️ 1–6M Long Positional</option>
                   <option value="MULTIBAGGER">🚀 6–24M Multibagger Alpha</option>
+                  <option value="INTRADAY">⏱️ Intraday (Today)</option>
+                  <option value="SCALP">⚡ Scalp (15–45 Min)</option>
+                  <option value="ROLLING_24H">🪙 24H Rolling (Crypto)</option>
                 </select>
               </div>
 
               {/* Right: compact inline dropdowns + density + sort + reset */}
-              <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 {/* Direction Filter */}
                 <select
                   value={selectedDirection}
@@ -3373,8 +3452,10 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   title="Filter by trade lifecycle stage"
                 >
                   <option value="ALL">All Stages</option>
+                  <option value="STALK">🦅 Stalk (Radar)</option>
+                  <option value="PRIMED">🎯 Primed (Proximity)</option>
+                  <option value="IGNITED">🔥 Ignited (In-Flight)</option>
                   <option value="EARLY_WARNING">⏳ Early Warning</option>
-                  <option value="IGNITED">🔥 Ignited</option>
                   <option value="T1_ACHIEVED">🎯 Target 1 Hit</option>
                   <option value="TARGET_ACHIEVED">🏁 Final Target</option>
                   <option value="INVALIDATED">❌ Invalidated</option>
@@ -3488,8 +3569,16 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 Try adjusting the segment rail or clearing the category filter.
               </p>
               <div className="flex items-center justify-center gap-2 pt-2 flex-wrap">
-                <button onClick={handleScanNow} disabled={scanning} className="btn btn-sm btn-gold">
+                <button onClick={handleScanNow} disabled={scanning || scanningSwing} className="btn btn-sm btn-gold">
                   ⚡ Scan Now
+                </button>
+                <button
+                  onClick={handleScanSwing}
+                  disabled={scanningSwing || scanning}
+                  className="btn btn-sm btn-ghost text-sky-400 border border-sky-500/30 hover:bg-sky-500/10 font-bold"
+                  title="Deep sweep across NSE & BSE for swing and positional trades"
+                >
+                  {scanningSwing ? '🌊 Scanning Swings…' : '🌊 Scan Swings (NSE+BSE)'}
                 </button>
                 {(selectedSegment !== 'ALL' || selectedFilter !== 'ALL' || selectedStage !== 'ALL' || searchQuery) && (
                   <button onClick={handleResetFilters} className="btn btn-sm btn-ghost text-gold border border-gold/30">

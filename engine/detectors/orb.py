@@ -221,7 +221,19 @@ def detect_opening_range_breakout(
         else:
             is_bearish = True
 
+    is_primed = False
+    primed_direction = None
     if not (is_bullish or is_bearish):
+        # 4.0 Pre-Breakout PRIMED Surveillance: Spot coiling within 0.35% of Range Boundary
+        primed_prox_pts = round(0.0035 * ltp, 2)
+        if (orb_high - primed_prox_pts) <= ltp < orb_high and ltp > orb_mid and rvol_val >= 1.15:
+            is_primed = True
+            primed_direction = "BULLISH"
+        elif orb_low < ltp <= (orb_low + primed_prox_pts) and ltp < orb_mid and rvol_val >= 1.15:
+            is_primed = True
+            primed_direction = "BEARISH"
+
+    if not (is_bullish or is_bearish or is_primed):
         return None
 
     # 4.1 Candlestick Pattern Confirmation & Divergence Trap Veto
@@ -266,15 +278,69 @@ def detect_opening_range_breakout(
         except Exception as _e_smc:
             logger.debug(f"[ORB] Candle/divergence check error: {_e_smc}")
 
+    # 4.2 Eagle & Tiger Adaptive Index Chop Gate
+    if is_index and not is_primed:
+        try:
+            from engine.index_adaptive_regime import evaluate_index_adaptive_regime
+
+            decision = evaluate_index_adaptive_regime(
+                underlying=symbol,
+                spot=ltp,
+                ohlcv_5m=df,
+                ref_time=now_dt,
+            )
+            if decision.tiger.mandate == "TIGER_STALKING_PRESERVE_CAPITAL" and rvol_val < 2.0:
+                logger.info(
+                    f"[ORB] Suppressed index ORB breakout on {symbol}: TIGER STALKING active "
+                    f"({decision.tiger.reason}). Rejecting breakout trap in chop."
+                )
+                return None
+        except Exception as _e_adapt:
+            logger.debug(f"[ORB] Index adaptive check error: {_e_adapt}")
+
     # 5. Build Asymmetric Trade Plan
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
-    direction = "BULLISH" if is_bullish else "BEARISH"
-    alert_type = "ORB_BREAKOUT" if is_bullish else "ORB_BREAKDOWN"
     from engine.alert_identity import generate_alert_id
 
-    alert_id = generate_alert_id(symbol, alert_type, variant=direction.lower()[:4])
-
-    if is_bullish:
+    stage_val = "PRIMED" if is_primed else "IGNITED"
+    if is_primed:
+        direction = primed_direction or "BULLISH"
+        alert_type = "ORB_PRIMED"
+        is_bull_setup = direction == "BULLISH"
+        trigger_level = orb_high if is_bull_setup else orb_low
+        stop_loss = orb_mid
+        target_1 = (
+            round(orb_high + (1.0 * orb_range), 2)
+            if is_bull_setup
+            else round(orb_low - (1.0 * orb_range), 2)
+        )
+        target_2 = (
+            round(orb_high + (2.0 * orb_range), 2)
+            if is_bull_setup
+            else round(orb_low - (2.0 * orb_range), 2)
+        )
+        target_3 = (
+            round(orb_high + (3.5 * orb_range), 2)
+            if is_bull_setup
+            else round(orb_low - (3.5 * orb_range), 2)
+        )
+        no_chase_lvl = max_bull_chase if is_bull_setup else max_bear_chase
+        entry_min = orb_high if is_bull_setup else max_bear_chase
+        entry_max = max_bull_chase if is_bull_setup else orb_low
+        risk_pts = max(1.0, round(abs(trigger_level - stop_loss), 2))
+        rr_ratio = round(abs(target_1 - trigger_level) / max(0.1, risk_pts), 1)
+        headline = f"🎯 [ORB PRIMED] {symbol} Coiling Near Range {'High ₹' + str(orb_high) if is_bull_setup else 'Low ₹' + str(orb_low)} (Spot ₹{ltp:,.1f})"
+        summary = (
+            f"Pre-breakout early warning: {symbol} is coiling within 0.35% of 15m Range {'High ₹' + str(orb_high) if is_bull_setup else 'Low ₹' + str(orb_low)}. "
+            f"Pre-stage order ticket now. DO NOT chase market orders when trigger breaches."
+        )
+        when_buy = f"Pre-stage order. Enter strictly on limit pullback to ₹{trigger_level:,.1f} after 5m confirmation."
+        when_wait = (
+            f"DO NOT CHASE beyond ₹{no_chase_lvl:,.1f}; wait for retest of ₹{trigger_level:,.1f}."
+        )
+    elif is_bullish:
+        direction = "BULLISH"
+        alert_type = "ORB_BREAKOUT"
         trigger_level = orb_high
         stop_loss = orb_mid
         risk_pts = max(1.0, round(ltp - stop_loss, 2))
@@ -297,6 +363,8 @@ def detect_opening_range_breakout(
             f"DO NOT CHASE above ₹{no_chase_lvl:,.1f}; wait for retest of Opening Range High."
         )
     else:
+        direction = "BEARISH"
+        alert_type = "ORB_BREAKDOWN"
         trigger_level = orb_low
         stop_loss = orb_mid
         risk_pts = max(1.0, round(stop_loss - ltp, 2))
@@ -316,6 +384,8 @@ def detect_opening_range_breakout(
         when_wait = (
             f"DO NOT CHASE below ₹{no_chase_lvl:,.1f}; wait for retest of Opening Range Low."
         )
+
+    alert_id = generate_alert_id(symbol, alert_type, variant=direction.lower()[:4])
 
     confidence = 82
     if rvol_val >= 2.0:
@@ -354,8 +424,11 @@ def detect_opening_range_breakout(
             "recommended_entry": f"₹{opt_plan.entry_premium:,.2f}",
             "stop_loss": f"₹{opt_plan.sl_premium:,.1f}",
             "target": f"₹{opt_plan.t1_premium:,.1f}",
+            "target_0_5": f"₹{opt_plan.t0_5_premium:,.1f}" if opt_plan.t0_5_premium else None,
             "target_1": f"₹{opt_plan.t1_premium:,.1f}",
             "target_2": f"₹{opt_plan.t2_premium:,.1f}",
+            "target_3": f"₹{opt_plan.t3_premium:,.1f}" if opt_plan.t3_premium else None,
+            "runner_target": f"₹{opt_plan.t3_premium:,.1f}" if opt_plan.t3_premium else None,
             "risk_reward": f"1:{rr_ratio:.1f}",
             "underlying_spot": f"₹{ltp:,.1f}",
             "underlying_sl": f"₹{stop_loss:,.1f}",
@@ -363,14 +436,23 @@ def detect_opening_range_breakout(
             "option_type": opt_plan.option_type,
             "strike": opt_plan.strike,
             "option_plan": opt_plan.as_dict(),
-            "when_to_buy": f"Buy {opt_plan.contract_symbol} while {clean_sym} spot holds {'above' if is_bullish else 'below'} ₹{trigger_level:,.1f}.",
+            "optimal_entry_limit": trigger_level,
+            "optimal_entry_range": f"₹{orb_high:,.1f} - ₹{round(orb_high + 0.10 * orb_range, 1):,.1f}"
+            if (is_bullish or (is_primed and direction == "BULLISH"))
+            else f"₹{round(orb_low - 0.10 * orb_range, 1):,.1f} - ₹{orb_low:,.1f}",
+            "retest_entry": trigger_level,
+            "retest_invalidation_sl": round(max(orb_mid, orb_high - 0.28 * orb_range), 1)
+            if (is_bullish or (is_primed and direction == "BULLISH"))
+            else round(min(orb_mid, orb_low + 0.28 * orb_range), 1),
+            "asymmetric_rr": f"1:{max(3.0, rr_ratio):.1f}",
+            "when_to_buy": f"Buy {opt_plan.contract_symbol} while {clean_sym} spot holds {'above' if direction == 'BULLISH' else 'below'} ₹{trigger_level:,.1f}.",
             "when_to_wait": when_wait,
-            "profit_rule": "Book 50% at T1, move Stop-Loss to Breakeven, trail runner on 5m 20-EMA.",
+            "profit_rule": "Scale Blueprint: Book 50% at T1 (+2.0R to +3.0R), move Stop-Loss to Breakeven (+0.2% fee cushion). Risk becomes ₹0.00 (Free-Roll). Hold 25% for T2, trail 25% runner on 5m 9-EMA.",
         }
         return AutoAlert(
             alert_id=alert_id,
             alert_type=alert_type,
-            stage="IGNITED",
+            stage=stage_val,
             symbol=clean_sym,
             exchange="NFO",
             direction=direction,
@@ -413,7 +495,7 @@ def detect_opening_range_breakout(
     return AutoAlert(
         alert_id=alert_id,
         alert_type=alert_type,
-        stage="IGNITED",
+        stage=stage_val,
         symbol=symbol,
         exchange=exchange,
         direction=direction,
@@ -444,9 +526,18 @@ def detect_opening_range_breakout(
             "divergence_type": div_type,
         },
         actionable_plan={
-            "action": f"BUY_{alert_type}" if is_bullish else f"SELL_{alert_type}",
+            "action": f"BUY_{alert_type}"
+            if (is_bullish or (is_primed and direction == "BULLISH"))
+            else f"SELL_{alert_type}",
             "entry_type": "LIMIT_ON_PULLBACK",
+            "optimal_entry_limit": trigger_level,
+            "optimal_entry_range": f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}",
             "entry_range": f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}",
+            "retest_entry": trigger_level,
+            "retest_invalidation_sl": round(max(orb_mid, orb_high - 0.28 * orb_range), 1)
+            if (is_bullish or (is_primed and direction == "BULLISH"))
+            else round(min(orb_mid, orb_low + 0.28 * orb_range), 1),
+            "asymmetric_rr": f"1:{max(3.0, rr_ratio):.1f}",
             "stop_loss": f"₹{stop_loss:,.1f}",
             "target": f"₹{target_1:,.1f}",
             "target_2": f"₹{target_2:,.1f}",

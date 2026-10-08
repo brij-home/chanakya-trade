@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 
 # ── Shared dataclasses ────────────────────────────────────────────────────────
@@ -132,6 +132,10 @@ class OptionsContract:
     oi_change: int  # OI change vs prev day
     volume: int
     iv: Optional[float] = None  # Implied Volatility (%)
+    delta: Optional[float] = None  # Option Delta
+    gamma: Optional[float] = None  # Option Gamma
+    theta: Optional[float] = None  # Option Theta
+    vega: Optional[float] = None  # Option Vega
     bid: Optional[float] = None
     ask: Optional[float] = None
     bid_qty: int = 0
@@ -169,10 +173,26 @@ class OrderResponse:
     """Result of placing an order."""
 
     order_id: str
-    status: str  # OPEN | COMPLETE | REJECTED | CANCELLED
+    status: str  # OPEN | COMPLETE | REJECTED | CANCELLED | SUBMITTED
     message: str = ""
     average_price: Optional[float] = None
     filled_quantity: int = 0
+    raw: Optional[dict] = None
+
+    def __getitem__(self, item: str) -> Any:
+        if item in ("s",):
+            return "ok" if self.status in ("OPEN", "SUBMITTED", "COMPLETE") else "error"
+        if item in ("id", "order_id"):
+            return self.order_id
+        if item == "status":
+            return self.status
+        if item == "message":
+            return self.message
+        if self.raw and isinstance(self.raw, dict) and item in self.raw:
+            return self.raw[item]
+        if hasattr(self, item):
+            return getattr(self, item)
+        raise KeyError(item)
 
 
 @dataclass

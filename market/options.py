@@ -35,11 +35,11 @@ _EXPIRIES_CACHE_TTL = 300.0  # 5 minutes cache for expiry dates
 
 
 def get_chain_cache_ttl(is_broker: bool = True) -> float:
-    """Returns dynamic cache TTL: 15s live broker / 30s scraper during market hours, 180s when closed."""
+    """Returns dynamic cache TTL: 15s live broker / 30s scraper during market hours (NSE, NFO, MCX), 180s when closed."""
     try:
         from market.calendar import is_market_open
 
-        if is_market_open("NFO") or is_market_open("NSE"):
+        if is_market_open("NFO") or is_market_open("NSE") or is_market_open("MCX"):
             return _CHAIN_CACHE_TTL_LIVE if is_broker else _CHAIN_CACHE_TTL_SCRAPER
     except Exception:
         pass
@@ -389,10 +389,11 @@ def build_index_synthetic_option_chain(
     return contracts
 
 
-def get_expiries(underlying: str) -> list[str]:
+def get_expiries(underlying: str, allow_chain_fallback: bool = False) -> list[str]:
     """
     All available expiry dates for an underlying (sorted ascending).
     Returns dates as "YYYY-MM-DD" strings.
+    allow_chain_fallback is False by default to prevent mutual recursion loops with get_options_chain.
     """
     clean_u = (
         underlying.replace("NSE:", "")
@@ -419,6 +420,19 @@ def get_expiries(underlying: str) -> list[str]:
     except Exception:
         pass
 
+    from market.instruments import COMMODITY_SYMBOLS
+
+    if clean_u in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:"):
+        try:
+            from engine.greeks_manager import get_mcx_prompt_expiry_and_dte
+
+            exp_date, _ = get_mcx_prompt_expiry_and_dte(clean_u)
+            if exp_date:
+                _EXPIRIES_CACHE[clean_u] = (now, [exp_date])
+                return [exp_date]
+        except Exception:
+            pass
+
     try:
         from market.nse_scraper import nse_get_expiries
 
@@ -429,10 +443,18 @@ def get_expiries(underlying: str) -> list[str]:
     except Exception:
         pass
 
-    chain = get_options_chain(underlying)
-    dates = sorted({c.expiry for c in chain if c.expiry})
-    _EXPIRIES_CACHE[clean_u] = (now, dates)
-    return dates
+    if allow_chain_fallback:
+        try:
+            chain = get_options_chain(underlying)
+            dates = sorted({c.expiry for c in chain if c.expiry})
+            _EXPIRIES_CACHE[clean_u] = (now, dates)
+            return dates
+        except Exception:
+            pass
+
+    # Negative caching to prevent hot rate-limit retry loops
+    _EXPIRIES_CACHE[clean_u] = (now, [])
+    return []
 
 
 def get_options_snapshot(

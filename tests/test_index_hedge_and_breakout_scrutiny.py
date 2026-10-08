@@ -553,8 +553,20 @@ def test_market_regime_posture_stand_aside_discipline(monkeypatch):
     assert "STAND ASIDE & PRESERVE CAPITAL" in posture.verdict_message
 
 
-def test_nifty_call_setup_spread_width_at_least_100_pts():
+def test_nifty_call_setup_spread_width_at_least_100_pts(monkeypatch):
     """NIFTY Bull Call Spread width must be at least 100 points, never cramped 50 points."""
+    monkeypatch.setattr(
+        "market.indices.get_heavyweights_posture",
+        lambda sym: {
+            "underlying": sym,
+            "all_bearish": False,
+            "all_bullish": True,
+            "bull_count": 5,
+            "bear_count": 0,
+            "heavyweights": [],
+            "summary": "ALL_BULLISH",
+        },
+    )
     spot = 22725.0
     chain = [
         DummyContract(22700.0, "CE", 175.0),

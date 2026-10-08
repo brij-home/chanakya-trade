@@ -270,7 +270,7 @@ class CompounderScanner:
             try:
                 from market.history import get_ohlcv
 
-                df = get_ohlcv(sym, interval="day", days=300)
+                df = get_ohlcv(sym, interval="day", days=730)
                 if df is None or len(df) < 50:
                     continue
 

@@ -415,7 +415,7 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
                         <span className="text-xs font-bold text-emerald-400">₹{cand.target_1}</span>
                       </div>
                       <div>
-                        <span className="text-[10px] text-muted block uppercase">Risk : Reward</span>
+                        <span className="text-[10px] text-muted block uppercase">R:R Ratio</span>
                         <span className="text-xs font-black text-amber-400">{cand.risk_reward}</span>
                       </div>
                     </div>

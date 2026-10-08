@@ -38,8 +38,15 @@ from brokers.base import (
     OrderResponse,
     Order,
 )
+from config.paths import app_data_path
 
-PAPER_FILE = Path.home() / ".trading_platform" / "paper_portfolio.json"
+
+def get_paper_file() -> Path:
+    """Returns canonical path to paper portfolio JSON store."""
+    return app_data_path("paper_portfolio.json")
+
+
+PAPER_FILE = get_paper_file()
 
 MIS_MARGIN = 0.20  # 20% margin for intraday
 NRML_MARGIN = 0.12  # 12% margin for F&O NRML
@@ -71,13 +78,12 @@ class PaperBroker(BrokerAPI):
             broker="Paper",
         )
 
-    # ── Persistence ───────────────────────────────────────────
-
     def _load_or_init(self, capital: float) -> dict:
-        PAPER_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if PAPER_FILE.exists():
+        target_path = get_paper_file()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if target_path.exists():
             try:
-                data = json.loads(PAPER_FILE.read_text())
+                data = json.loads(target_path.read_text(encoding="utf-8"))
                 # Ensure all expected keys exist (forward-compat)
                 for k, v in DEFAULT_STATE.items():
                     data.setdefault(k, deepcopy(v))
@@ -86,11 +92,23 @@ class PaperBroker(BrokerAPI):
                 pass
         state = deepcopy(DEFAULT_STATE)
         state["cash"] = capital
-        PAPER_FILE.write_text(json.dumps(state, indent=2))
+        target_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
         return state
 
     def _save(self) -> None:
-        PAPER_FILE.write_text(json.dumps(self._state, indent=2, default=str))
+        target_path = get_paper_file()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(self._state, indent=2, default=str)
+        import os
+        import time
+
+        temp_path = target_path.with_name(f"{target_path.name}.tmp.{os.getpid()}_{time.time_ns()}")
+        try:
+            temp_path.write_text(payload, encoding="utf-8")
+            os.replace(temp_path, target_path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
 
     def reset(self, capital: float | None = None) -> None:
         """Wipe portfolio and start fresh with given capital."""

@@ -41,10 +41,12 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 logger = logging.getLogger("chanakya.trade_plan")
+IST = ZoneInfo("Asia/Kolkata")
 
 
 @dataclass
@@ -121,6 +123,9 @@ class TradePlan:
 
     # Optimal Trade Entry (OTE) & Pullback Boundaries
     optimal_entry_range: str = ""
+
+    # Reference Datetime
+    ref_dt: Optional[datetime] = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -366,12 +371,69 @@ def calculate_trade_plan(
     raw_tf = (timeframe or "INTRADAY").strip().upper()
     if raw_tf in ("5M", "15M", "60M", "HOUR", "SESSION", "SCALP", "INTRADAY"):
         tf = "INTRADAY"
-        effective_atr = 0.35 * atr
-        min_stop_mult = 0.25
-        max_stop_mult = 1.00
-        max_t1_atr = 0.50 * atr
-        max_t2_atr = 0.85 * atr
-        max_t3_atr = 1.25 * atr
+        # ── Temporal Volatility Diffusion Budget (Brownian Square-Root-of-Time Law) ──
+        # Indian market session runs 09:15–15:30 IST (375 mins).
+        # Intraday square-off window enforces completion by 15:15 IST (360 mins).
+        # Cumulative volatility expansion potential scales with sqrt(mins_remaining / session_mins).
+        session_decay_factor = 1.0
+        try:
+            curr_ist = (
+                now.astimezone(IST) if getattr(now, "tzinfo", None) else now.replace(tzinfo=IST)
+            )
+            is_mcx = (exchange or "").upper() == "MCX" or clean_sym in (
+                "CRUDEOIL",
+                "CRUDEOILM",
+                "GOLD",
+                "GOLDM",
+                "SILVER",
+                "SILVERM",
+                "NATURALGAS",
+                "NATGASMINI",
+            )
+            market_open_mins = (
+                9 * 60 + 0 if is_mcx else (9 * 60 + 15)
+            )  # 09:00 for MCX, 09:15 for NSE
+            market_close_mins = (
+                23 * 60 + 15 if is_mcx else (15 * 60 + 15)
+            )  # 23:15 for MCX, 15:15 for NSE
+            total_session_mins = 855.0 if is_mcx else 360.0
+            now_mins = curr_ist.hour * 60 + curr_ist.minute
+            if market_open_mins <= now_mins < market_close_mins:
+                mins_remaining = max(15, market_close_mins - now_mins)
+                session_decay_factor = min(
+                    1.0, max(0.25, (mins_remaining / total_session_mins) ** 0.5)
+                )
+            else:
+                session_decay_factor = (
+                    1.0  # Outside active intraday session, use full standard baseline
+                )
+        except Exception:
+            session_decay_factor = 1.0
+
+        is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+        if is_index:
+            effective_atr = 0.20 * atr
+            min_stop_mult = 0.20
+            max_stop_mult = 0.65
+            # Target ceilings scale dynamically with remaining session volatility diffusion
+            max_t1_atr = 0.25 * atr * session_decay_factor
+            max_t2_atr = 0.45 * atr * session_decay_factor
+            max_t3_atr = 0.70 * atr * session_decay_factor
+        elif is_mcx:
+            effective_atr = 0.25 * atr
+            min_stop_mult = 0.20
+            max_stop_mult = 0.75
+            max_t1_atr = 0.40 * atr * session_decay_factor
+            max_t2_atr = 0.70 * atr * session_decay_factor
+            max_t3_atr = 1.10 * atr * session_decay_factor
+        else:
+            effective_atr = 0.35 * atr
+            min_stop_mult = 0.25
+            max_stop_mult = 1.00
+            # Target ceilings scale dynamically with remaining session volatility diffusion
+            max_t1_atr = 0.50 * atr * session_decay_factor
+            max_t2_atr = 0.85 * atr * session_decay_factor
+            max_t3_atr = 1.25 * atr * session_decay_factor
     elif raw_tf in ("DAY", "DAILY", "SWING_SHORT", "SHORT_TERM"):
         tf = "SWING_SHORT"
         effective_atr = 0.85 * atr
@@ -595,19 +657,30 @@ def calculate_trade_plan(
             t3_rationale = t2_rationale
             target_2 = target_1
             t2_rationale = t1_rationale
-            target_1 = ltp + min(max(stop_distance_pts * 1.6, 0.35 * effective_atr), max_t1_atr)
+            target_1 = ltp + max(
+                stop_distance_pts * 1.2,
+                min(max(stop_distance_pts * 1.6, 0.35 * effective_atr), max_t1_atr),
+            )
             t1_rationale = f"{tf} Scale-Out Target (1.6× R / {max_t1_atr / atr:.2f}× Daily ATR)"
             if target_2 <= target_1 + (stop_distance_pts * 0.8):
-                target_2 = min(
-                    ltp + max_t2_atr, target_1 + max(stop_distance_pts * 1.2, 0.35 * effective_atr)
+                target_2 = max(
+                    ltp + (stop_distance_pts * 1.8),
+                    min(
+                        ltp + max_t2_atr,
+                        target_1 + max(stop_distance_pts * 1.2, 0.35 * effective_atr),
+                    ),
                 )
                 t2_rationale = f"{tf} Session Expansion Target ({max_t2_atr / atr:.2f}× Daily ATR)"
 
         if (target_2 - ltp) > max_t2_atr:
             target_3 = target_2
             t3_rationale = t2_rationale
-            target_2 = ltp + min(
-                max((target_1 - ltp) + (stop_distance_pts * 1.2), 0.65 * effective_atr), max_t2_atr
+            target_2 = ltp + max(
+                stop_distance_pts * 1.8,
+                min(
+                    max((target_1 - ltp) + (stop_distance_pts * 1.2), 0.65 * effective_atr),
+                    max_t2_atr,
+                ),
             )
             t2_rationale = f"{tf} Session Expansion Target ({max_t2_atr / atr:.2f}× Daily ATR)"
 
@@ -700,16 +773,22 @@ def calculate_trade_plan(
             t3_rationale = t2_rationale
             target_2 = target_1
             t2_rationale = t1_rationale
-            target_1 = ltp - min(max(stop_distance_pts * 1.6, 0.35 * effective_atr), max_t1_atr)
+            target_1 = ltp - max(
+                stop_distance_pts * 1.2,
+                min(max(stop_distance_pts * 1.6, 0.35 * effective_atr), max_t1_atr),
+            )
             t1_rationale = (
                 f"{tf} Breakdown Scale-Out Target (1.6× R / {max_t1_atr / atr:.2f}× Daily ATR)"
             )
             if target_2 >= target_1 - (stop_distance_pts * 0.8):
                 target_2 = max(
                     0.05,
-                    max(
-                        ltp - max_t2_atr,
-                        target_1 - max(stop_distance_pts * 1.2, 0.35 * effective_atr),
+                    min(
+                        ltp - (stop_distance_pts * 1.8),
+                        max(
+                            ltp - max_t2_atr,
+                            target_1 - max(stop_distance_pts * 1.2, 0.35 * effective_atr),
+                        ),
                     ),
                 )
                 t2_rationale = (
@@ -719,8 +798,16 @@ def calculate_trade_plan(
         if (ltp - target_2) > max_t2_atr:
             target_3 = target_2
             t3_rationale = t2_rationale
-            target_2 = ltp - min(
-                max((ltp - target_1) + (stop_distance_pts * 1.2), 0.65 * effective_atr), max_t2_atr
+            target_2 = max(
+                0.05,
+                ltp
+                - max(
+                    stop_distance_pts * 1.8,
+                    min(
+                        max((ltp - target_1) + (stop_distance_pts * 1.2), 0.65 * effective_atr),
+                        max_t2_atr,
+                    ),
+                ),
             )
             t2_rationale = (
                 f"{tf} Breakdown Session Expansion Target ({max_t2_atr / atr:.2f}× Daily ATR)"
@@ -1057,6 +1144,7 @@ def calculate_trade_plan(
         stagnation_timeout_mins=stagnation_timeout_mins,
         stagnation_advice=stagnation_advice,
         optimal_entry_range=optimal_entry_range,
+        ref_dt=ref_dt,
     )
 
     if df is None and ltp > 0:
@@ -1092,13 +1180,16 @@ def get_market_status(exchange: str = "NSE") -> dict[str, Any]:
 
 
 def calculate_option_execution_plan(
-    trade_plan: "TradePlan",
-    option_type: str,  # "CE" | "PE"
-    strike: float,
-    expiry: str,  # ISO date "YYYY-MM-DD"
-    option_ltp: float,  # Current option premium (LTP)
+    trade_plan: Optional["TradePlan"] = None,
+    option_type: str = "CE",  # "CE" | "PE"
+    strike: float = 0.0,
+    expiry: str = "",  # ISO date "YYYY-MM-DD"
+    option_ltp: float = 0.0,  # Current option premium (LTP)
     lot_size: int = 25,
     expiry_type: str = "WEEKLY",  # "WEEKLY" | "MONTHLY" | "DAILY" | "QUARTERLY"
+    spot: Optional[float] = None,
+    contract_symbol: Optional[str] = None,
+    ref_dt: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """
     Maps Spot-level trade plan milestones to option contract premiums using
@@ -1114,13 +1205,19 @@ def calculate_option_execution_plan(
         Θ   = Daily Theta (in option points per trading day)
 
     Returns a dict with option price estimates at SL, T1, T2, T3, plus
-    Rupee P&L per lot at each milestone.
+    Rupee P&L per lot at each milestone and institutional statutory friction.
     """
+    entry_spot = (
+        spot
+        if (spot is not None and spot > 0)
+        else (getattr(trade_plan, "entry_price", None) or strike or option_ltp)
+    )
+
     try:
         from analysis.options import compute_greeks
 
         greeks = compute_greeks(
-            spot=trade_plan.entry_price,
+            spot=entry_spot,
             strike=strike,
             expiry=expiry,
             option_type=option_type,
@@ -1138,16 +1235,17 @@ def calculate_option_execution_plan(
         theta_per_bar = 0.0
         iv_pct = None
 
-    spot = trade_plan.entry_price
-
     def _option_price_at_spot(target_spot: float, bars_elapsed: int) -> float:
         """Estimate option price at a given spot using Delta/Gamma/Theta."""
-        ds = target_spot - spot  # positive = up
+        ds = target_spot - entry_spot  # positive = up
         theta_drag = theta_per_bar * bars_elapsed
         estimated = option_ltp + (delta * ds) + (0.5 * gamma * ds * ds) - theta_drag
         return max(0.05, round(estimated, 2))
 
-    raw_sl_prem = _option_price_at_spot(trade_plan.invalidation_stop, bars_elapsed=1)
+    if trade_plan and hasattr(trade_plan, "invalidation_stop") and trade_plan.invalidation_stop:
+        raw_sl_prem = _option_price_at_spot(trade_plan.invalidation_stop, bars_elapsed=1)
+    else:
+        raw_sl_prem = round(max(0.05, option_ltp * 0.75), 2)
 
     # ── Timeframe-Calibrated Options Risk & Targets ──────────────────────────
     tf = (getattr(trade_plan, "timeframe", "") or "INTRADAY").upper()
@@ -1160,10 +1258,19 @@ def calculate_option_execution_plan(
     elif tf in ("POSITIONAL", "MONTH", "MONTHLY"):
         tf = "POSITIONAL"
 
+    clean_contract = (contract_symbol or getattr(trade_plan, "symbol", "") or "").upper()
+    is_index_contract = any(
+        idx in clean_contract
+        for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+    )
+
     if option_ltp > 0:
         if tf == "INTRADAY":
-            # Cap maximum intraday option drawdown at -28.0% (Greeks-anchored floor, preventing spread/whipsaw stops)
-            disciplined_sl_floor = round(max(0.05, option_ltp * 0.72), 2)
+            # Cap maximum intraday option drawdown:
+            # Indices: disciplined -18% floor (prevents massive Rupee drawdown on ₹500–₹1200 index premiums)
+            # Stocks: -22% floor (disciplined risk on F&O stock options)
+            max_dd = 0.82 if is_index_contract else 0.78
+            disciplined_sl_floor = round(max(0.05, option_ltp * max_dd), 2)
             sl_prem = max(raw_sl_prem, disciplined_sl_floor)
         elif tf == "SWING_SHORT":
             # Cap swing short (2-5 days) option drawdown at -28.0%
@@ -1178,14 +1285,14 @@ def calculate_option_execution_plan(
             sl_prem = max(raw_sl_prem, disciplined_sl_floor)
 
         # Strict Invariant: For any long option, SL premium MUST be strictly lower than entry premium.
-        # It must never exceed 88% of option_ltp (ensuring at least 12% risk cushion) and never be >= option_ltp.
-        max_allowed_sl = round(max(0.05, option_ltp * 0.88), 2)
+        max_sl_pct = 0.92 if (is_index_contract and tf == "INTRADAY") else 0.88
+        max_allowed_sl = round(max(0.05, option_ltp * max_sl_pct), 2)
         sl_prem = min(sl_prem, max_allowed_sl)
         # Re-apply disciplined floor if valid
         if sl_prem < disciplined_sl_floor:
             sl_prem = min(disciplined_sl_floor, max_allowed_sl)
         if sl_prem >= option_ltp:
-            sl_prem = round(max(0.05, option_ltp * 0.75), 2)
+            sl_prem = round(max(0.05, option_ltp * (0.85 if is_index_contract else 0.78)), 2)
     else:
         sl_prem = raw_sl_prem
 
@@ -1200,75 +1307,216 @@ def calculate_option_execution_plan(
             import datetime as _dt
 
             expiry_d = _dt.date.fromisoformat(str(expiry)[:10])
-            today = _dt.date.today()
-            is_expiry_day = expiry_d == today
+            ref_dt_val = ref_dt or getattr(trade_plan, "ref_dt", None)
+            ref_d = ref_dt_val.date() if hasattr(ref_dt_val, "date") else None
+            today = ref_d or _dt.date.today()
+            is_expiry_day = expiry_d <= today
     except Exception:
         is_expiry_day = False
 
     opt_risk = max(0.20, option_ltp - sl_prem)
-    t0_5_prem = round(max(option_ltp + opt_risk, option_ltp * 1.16), 2) if option_ltp > 0 else None
-    raw_t1_prem = _option_price_at_spot(
-        trade_plan.target_1, bars_elapsed=trade_plan.expected_bars_t1
-    )
-    raw_t2_prem = _option_price_at_spot(
-        trade_plan.target_2, bars_elapsed=trade_plan.expected_bars_t2
-    )
-    raw_t3_prem = (
-        _option_price_at_spot(trade_plan.target_3, bars_elapsed=trade_plan.expected_bars_t3)
-        if trade_plan.target_3 > 0
-        else None
-    )
+    if is_index_contract and tf == "INTRADAY":
+        # Index intraday Target 0.5: Quick de-risk milestone at +8% to +10% (+0.8R)
+        t0_5_prem = (
+            round(option_ltp + min(opt_risk, max(0.5 * opt_risk, option_ltp * 0.10)), 2)
+            if option_ltp > 0
+            else None
+        )
+    elif tf == "INTRADAY":
+        # Stock intraday Target 0.5: Quick de-risk milestone at +10% to +14% (+1.0R)
+        t0_5_prem = (
+            round(option_ltp + min(opt_risk, max(0.6 * opt_risk, option_ltp * 0.12)), 2)
+            if option_ltp > 0
+            else None
+        )
+    else:
+        t0_5_prem = (
+            round(max(option_ltp + opt_risk, option_ltp * 1.16), 2) if option_ltp > 0 else None
+        )
+
+    if trade_plan and hasattr(trade_plan, "target_1") and trade_plan.target_1:
+        raw_t1_prem = _option_price_at_spot(
+            trade_plan.target_1, bars_elapsed=getattr(trade_plan, "expected_bars_t1", 3)
+        )
+        raw_t2_prem = _option_price_at_spot(
+            trade_plan.target_2, bars_elapsed=getattr(trade_plan, "expected_bars_t2", 6)
+        )
+        raw_t3_prem = (
+            _option_price_at_spot(
+                trade_plan.target_3, bars_elapsed=getattr(trade_plan, "expected_bars_t3", 10)
+            )
+            if getattr(trade_plan, "target_3", 0) > 0
+            else None
+        )
+    else:
+        raw_t1_prem = round(option_ltp + (1.6 * opt_risk), 2) if option_ltp > 0 else 0.0
+        raw_t2_prem = round(raw_t1_prem + (1.2 * opt_risk), 2) if option_ltp > 0 else 0.0
+        raw_t3_prem = round(raw_t2_prem + (1.5 * opt_risk), 2) if option_ltp > 0 else None
 
     if option_ltp > 0:
+        # ── Institutional Target Hierarchy & Risk:Reward Alignment ───────────
+        # Target 1 (Scale-Out & Free-Roll): Must be achievable initial de-risking milestone (+1.5R to +2.0R).
+        # Target 2 (Structural Impulse / Session Expansion): Primary swing wave (+2.8R to +3.8R).
+        # Target 3 (Moonshot Runner / High-Gamma Tail): Uncapped Greek expansion (+4.5R+).
+        raw_rr_1 = max(0.0, (raw_t1_prem - option_ltp) / opt_risk) if opt_risk > 0 else 1.6
+        raw_rr_2 = (
+            max(0.0, (raw_t2_prem - option_ltp) / opt_risk)
+            if (opt_risk > 0 and raw_t2_prem)
+            else 2.8
+        )
+
         if tf == "INTRADAY":
             if is_expiry_day:
-                # Expiry-day: Greeks dominate. Remove multiplier ceilings — use raw Greek estimates.
-                # A 50-pt NIFTY move = 150-300% on a weekly ATM CE. Hardcoded 28% caps are wrong.
-                t1_prem = raw_t1_prem
-                t2_prem = raw_t2_prem
-                t3_prem = raw_t3_prem if raw_t3_prem else round(option_ltp + (4.0 * opt_risk), 2)
+                # On 0-DTE expiry day, verify if Greek projection fits initial scale-out window:
+                if raw_rr_1 <= 2.25:
+                    # Greek T1 naturally sits near the scale-out window (+1.5R to +2.05R)
+                    t1_prem = min(
+                        round(option_ltp + (2.05 * opt_risk), 2),
+                        max(round(option_ltp + (1.5 * opt_risk), 2), raw_t1_prem),
+                    )
+                    if 2.40 <= raw_rr_2 <= 4.00:
+                        t2_prem = raw_t2_prem
+                    else:
+                        t2_prem = round(option_ltp + (3.2 * opt_risk), 2)
+                    t3_prem = max(
+                        raw_t3_prem or 0.0,
+                        round(max(t2_prem + (1.5 * opt_risk), option_ltp + (6.0 * opt_risk)), 2),
+                    )
+                elif raw_rr_1 <= 3.8:
+                    # Raw Greek T1 is already an extended target.
+                    # Calibrate T1 (+1.75R) for disciplined scale-out and use raw T1 as T2 if valid!
+                    t1_prem = round(option_ltp + (1.75 * opt_risk), 2)
+                    t2_prem = max(
+                        round(option_ltp + (2.6 * opt_risk), 2),
+                        min(round(option_ltp + (3.8 * opt_risk), 2), raw_t1_prem),
+                    )
+                    t3_prem = max(
+                        raw_t2_prem or 0.0,
+                        round(max(t2_prem + (1.5 * opt_risk), option_ltp + (6.0 * opt_risk)), 2),
+                    )
+                else:
+                    # Raw Greek T1 is a macro moonshot (> +3.8R, e.g. 4.5R+ on deep ITM or distant resistance).
+                    # Calibrate T1 (+1.75R) and T2 (+3.2R), and preserve the raw Greek target as T3 (Moonshot Runner)!
+                    t1_prem = round(option_ltp + (1.75 * opt_risk), 2)
+                    t2_prem = round(option_ltp + (3.20 * opt_risk), 2)
+                    t3_prem = max(raw_t1_prem, round(option_ltp + (6.0 * opt_risk), 2))
             else:
-                # Non-expiry intraday: calibrated ceilings to prevent wildly optimistic targets
-                t1_prem = max(
-                    round(option_ltp + (1.6 * opt_risk), 2),
-                    min(raw_t1_prem, round(option_ltp * 1.28, 2)),
-                )
-                if round(option_ltp * 1.15, 2) <= raw_t1_prem <= round(option_ltp * 1.30, 2):
-                    t1_prem = raw_t1_prem
-                t1_prem = min(t1_prem, round(option_ltp * 1.35, 2))
+                # Non-expiry intraday: calibrated ceilings with Greek alignment
+                if is_index_contract:
+                    # Intraday Index Options (NIFTY / BANKNIFTY / SENSEX):
+                    # For expensive options (LTP >= 350, like Bank Nifty monthly ₹600-₹1200):
+                    # Percentage move must be capped to feasible intraday points (+18% to +22% for T1).
+                    # For lower-premium options (LTP < 350, like Nifty weekly/ATM ₹80-₹200):
+                    # A standard 1.5R scale-out (+25% to +45%) represents just 25-50 points!
+                    if option_ltp >= 350:
+                        t1_max_prem = round(option_ltp * 1.22, 2)
+                        t2_max_prem = round(option_ltp * 1.38, 2)
+                        t3_max_prem = round(option_ltp * 1.60, 2)
+                    else:
+                        t1_max_prem = round(
+                            max(option_ltp + (2.1 * opt_risk), option_ltp * 1.60), 2
+                        )
+                        t2_max_prem = round(
+                            max(t1_max_prem + (1.8 * opt_risk), option_ltp * 2.20), 2
+                        )
+                        t3_max_prem = round(
+                            max(t2_max_prem + (2.5 * opt_risk), option_ltp * 3.00), 2
+                        )
 
-                t2_prem = max(
-                    round(t1_prem + (1.2 * opt_risk), 2),
-                    min(raw_t2_prem, round(option_ltp * 1.50, 2)),
-                )
-                if round(option_ltp * 1.30, 2) <= raw_t2_prem <= round(option_ltp * 1.55, 2):
-                    t2_prem = raw_t2_prem
-                t2_prem = min(t2_prem, round(option_ltp * 1.55, 2))
+                    if raw_t1_prem > t1_max_prem:
+                        t1_prem = round(
+                            option_ltp
+                            + min(t1_max_prem - option_ltp, max(1.5 * opt_risk, option_ltp * 0.15)),
+                            2,
+                        )
+                        t2_prem = round(
+                            min(t2_max_prem, max(t1_prem + (1.0 * opt_risk), raw_t1_prem)), 2
+                        )
+                        t3_prem = round(
+                            min(
+                                t3_max_prem,
+                                max(
+                                    t2_prem + (1.5 * opt_risk),
+                                    raw_t2_prem or 0.0,
+                                    round(option_ltp + (6.0 * opt_risk), 2)
+                                    if option_ltp < 350
+                                    else 0.0,
+                                ),
+                            ),
+                            2,
+                        )
+                    else:
+                        t1_prem = max(round(option_ltp + (1.5 * opt_risk), 2), raw_t1_prem)
+                        t2_prem = min(
+                            t2_max_prem, max(round(t1_prem + (1.1 * opt_risk), 2), raw_t2_prem)
+                        )
+                        t3_prem = round(
+                            min(
+                                t3_max_prem,
+                                max(
+                                    raw_t3_prem or 0.0,
+                                    round(option_ltp + (6.0 * opt_risk), 2)
+                                    if option_ltp < 350
+                                    else 0.0,
+                                    round(t2_prem + (1.5 * opt_risk), 2),
+                                ),
+                            ),
+                            2,
+                        )
+                else:
+                    # Intraday Single-Stock Options (RELIANCE, INFY, SBIN, etc.):
+                    # T1 (Scale-Out & Free-Roll): +18% to +24% (+1.2R to +1.6R) — achievable on 1.0%–1.5% spot impulse
+                    # T2 (Session Wave): +32% to +42% (+2.2R to +2.8R)
+                    # T3 (Trend Day Runner): +55% to +70% (+3.5R to +4.5R)
+                    t1_max_prem = round(option_ltp * 1.24, 2)
+                    t2_max_prem = round(option_ltp * 1.42, 2)
+                    t3_max_prem = round(option_ltp * 1.70, 2)
 
-                t3_prem = max(round(t2_prem + (1.5 * opt_risk), 2), round(option_ltp * 1.75, 2))
-                if raw_t3_prem and raw_t3_prem > t2_prem:
-                    t3_prem = min(raw_t3_prem, round(option_ltp * 1.90, 2))
+                    if raw_t1_prem > t1_max_prem:
+                        t1_prem = round(
+                            option_ltp
+                            + min(t1_max_prem - option_ltp, max(1.2 * opt_risk, option_ltp * 0.18)),
+                            2,
+                        )
+                        t2_prem = round(
+                            min(t2_max_prem, max(t1_prem + (0.9 * opt_risk), raw_t1_prem)), 2
+                        )
+                        t3_prem = round(
+                            min(
+                                t3_max_prem,
+                                max(t2_prem + (1.1 * opt_risk), raw_t2_prem or (option_ltp * 1.60)),
+                            ),
+                            2,
+                        )
+                    else:
+                        t1_prem = max(round(option_ltp + (1.2 * opt_risk), 2), raw_t1_prem)
+                        t2_prem = min(
+                            t2_max_prem, max(round(t1_prem + (1.0 * opt_risk), 2), raw_t2_prem)
+                        )
+                        t3_prem = min(
+                            t3_max_prem, raw_t3_prem or round(option_ltp + (3.8 * opt_risk), 2)
+                        )
         elif tf == "SWING_SHORT":
-            # For SWING_SHORT (2-5 days):
-            # T1: +35% to +50%
-            # T2: +70% to +100%
-            # T3: +150%+
-            t1_prem = max(
-                round(option_ltp + (1.5 * opt_risk), 2),
-                min(raw_t1_prem, round(option_ltp * 1.50, 2)),
-            )
-            t2_prem = max(
-                round(t1_prem + (1.8 * opt_risk), 2), min(raw_t2_prem, round(option_ltp * 2.00, 2))
-            )
-            t3_prem = max(round(t2_prem + (2.5 * opt_risk), 2), round(option_ltp * 2.80, 2))
-        else:
+            if raw_rr_1 <= 2.5:
+                t1_prem = max(round(option_ltp + (1.6 * opt_risk), 2), raw_t1_prem)
+                t2_prem = max(round(t1_prem + (1.2 * opt_risk), 2), raw_t2_prem)
+                t3_prem = raw_t3_prem or round(option_ltp + (5.0 * opt_risk), 2)
+            else:
+                t1_prem = round(option_ltp + (1.8 * opt_risk), 2)
+                t2_prem = (
+                    raw_t1_prem if raw_rr_1 <= 4.2 else round(option_ltp + (3.5 * opt_risk), 2)
+                )
+                t3_prem = raw_t2_prem if raw_rr_1 <= 4.2 else raw_t1_prem
+        else:  # SWING_MID / POSITIONAL
             t1_prem = raw_t1_prem
             t2_prem = raw_t2_prem
             t3_prem = raw_t3_prem
-    else:
-        t1_prem = raw_t1_prem
-        t2_prem = raw_t2_prem
-        t3_prem = raw_t3_prem
+
+        # Strict Monotonic Invariants: T1 < T2 < T3
+        if t2_prem <= t1_prem:
+            t2_prem = round(t1_prem + max(0.5, 0.8 * opt_risk), 2)
+        if t3_prem is not None and t3_prem <= t2_prem:
+            t3_prem = round(t2_prem + max(0.5, 1.0 * opt_risk), 2)
 
     def _pnl(prem: float) -> float:
         return round((prem - option_ltp) * lot_size, 2)
@@ -1286,11 +1534,38 @@ def calculate_option_execution_plan(
     option_rr = f"1:{round(opt_t1_gain / opt_risk, 2)}" if option_ltp > 0 else "1:2"
     option_rr_t2 = f"1:{round(opt_t2_gain / opt_risk, 2)}" if option_ltp > 0 else "1:3"
 
+    # Realistic Institutional Round-Trip Friction (STT 0.1%, Brokerage, Exchange Turnover, GST, Bid-Ask Slippage)
+    friction_pts = max(0.40, round(option_ltp * 0.012 + 0.35, 2)) if option_ltp > 0 else 0.50
+    net_t1_gain = max(0.05, opt_t1_gain - friction_pts)
+    net_t2_gain = max(0.05, opt_t2_gain - friction_pts)
+    net_opt_risk = max(0.1, opt_risk + friction_pts)
+    net_option_rr = f"1:{round(net_t1_gain / net_opt_risk, 2)}" if option_ltp > 0 else "1:1.8"
+    net_option_rr_t2 = f"1:{round(net_t2_gain / net_opt_risk, 2)}" if option_ltp > 0 else "1:2.6"
+    max_loss_per_lot = round(net_opt_risk * lot_size, 0)
+    risk_per_lot = round(opt_risk * lot_size, 0)
+
     # Spot reference level at each milestone
-    spot_t1 = round(trade_plan.target_1, 2)
-    spot_t2 = round(trade_plan.target_2, 2)
-    spot_t3 = round(trade_plan.target_3, 2) if trade_plan.target_3 > 0 else None
-    spot_sl = round(trade_plan.invalidation_stop, 2)
+    is_ce = option_type.upper() == "CE"
+    spot_t1 = (
+        round(trade_plan.target_1, 2)
+        if (trade_plan and getattr(trade_plan, "target_1", None))
+        else round(entry_spot * (1.008 if is_ce else 0.992), 2)
+    )
+    spot_t2 = (
+        round(trade_plan.target_2, 2)
+        if (trade_plan and getattr(trade_plan, "target_2", None))
+        else round(entry_spot * (1.015 if is_ce else 0.985), 2)
+    )
+    spot_t3 = (
+        round(trade_plan.target_3, 2)
+        if (trade_plan and getattr(trade_plan, "target_3", 0) > 0)
+        else round(entry_spot * (1.025 if is_ce else 0.975), 2)
+    )
+    spot_sl = (
+        round(trade_plan.invalidation_stop, 2)
+        if (trade_plan and getattr(trade_plan, "invalidation_stop", None))
+        else round(entry_spot * (0.995 if is_ce else 1.005), 2)
+    )
 
     # Dynamic Risk Compression (DRC) Ladder (Pillars 1 & 2)
     de_risk_0_5r_prem = round(option_ltp + (0.5 * opt_risk), 2)
@@ -1333,7 +1608,7 @@ def calculate_option_execution_plan(
     elif sym_u == "FINNIFTY":
         step = 50.0
     else:
-        step = 50.0 if spot >= 2500 else (20.0 if spot >= 1000 else 10.0)
+        step = 50.0 if entry_spot >= 2500 else (20.0 if entry_spot >= 1000 else 10.0)
 
     is_long_opt = option_type.upper() == "CE"
     if is_long_opt:
@@ -1347,7 +1622,8 @@ def calculate_option_execution_plan(
 
     dist_short = abs(short_strike - strike)
     short_prem_est = max(
-        0.50, round(option_ltp * max(0.20, 1.0 - (dist_short / (spot * 0.015 + dist_short))), 2)
+        0.50,
+        round(option_ltp * max(0.20, 1.0 - (dist_short / (entry_spot * 0.015 + dist_short))), 2),
     )
     net_debit = max(0.10, round(option_ltp - short_prem_est, 2))
     spread_width = abs(short_strike - strike)
@@ -1412,6 +1688,7 @@ def calculate_option_execution_plan(
     }
 
     return {
+        "contract_symbol": contract_symbol,
         "option_type": option_type.upper(),
         "strike": strike,
         "expiry": expiry,
@@ -1423,6 +1700,11 @@ def calculate_option_execution_plan(
         "theta_drag_per_bar": round(theta_per_bar, 4),
         "option_rr": option_rr,
         "option_rr_t2": option_rr_t2,
+        "net_option_rr": net_option_rr,
+        "net_option_rr_t2": net_option_rr_t2,
+        "friction_pts": friction_pts,
+        "max_loss_per_lot": max_loss_per_lot,
+        "risk_per_lot": risk_per_lot,
         # SL
         "sl_spot": spot_sl,
         "sl_premium": sl_prem,
@@ -1449,13 +1731,13 @@ def calculate_option_execution_plan(
         "t1_premium": t1_prem,
         "t1_pnl_per_lot": t1_pnl,
         "t1_pct": round(((t1_prem - option_ltp) / option_ltp) * 100, 1) if option_ltp > 0 else None,
-        "t1_eta": trade_plan.eta_t1_str,
+        "t1_eta": getattr(trade_plan, "eta_t1_str", "~25 mins"),
         # T2
         "t2_spot": spot_t2,
         "t2_premium": t2_prem,
         "t2_pnl_per_lot": t2_pnl,
         "t2_pct": round(((t2_prem - option_ltp) / option_ltp) * 100, 1) if option_ltp > 0 else None,
-        "t2_eta": trade_plan.eta_t2_str,
+        "t2_eta": getattr(trade_plan, "eta_t2_str", "~50 mins"),
         # T3
         "t3_spot": spot_t3,
         "t3_premium": t3_prem,
@@ -1463,7 +1745,7 @@ def calculate_option_execution_plan(
         "t3_pct": round(((t3_prem - option_ltp) / option_ltp) * 100, 1)
         if (t3_prem and option_ltp > 0)
         else None,
-        "t3_eta": trade_plan.eta_t3_str,
+        "t3_eta": getattr(trade_plan, "eta_t3_str", "~80 mins"),
         # Hedged Defined-Risk Spread Blueprint (Theta Neutralization & Wall Monetization)
         "hedged_spread": hedged_spread_plan,
         # Free-Roll Execution Protocol (+2R Scale 50% & Zero-Risk Runner)

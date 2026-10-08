@@ -899,6 +899,13 @@ async def cmd_filter(update, context) -> None:
                 dest_lines.append(
                     f"• <b>F&O Index:</b> <code>Premium_Alpha_Vortex_FnO_Index</code> (<code>{fno_idx_cid}</code>)"
                 )
+            free_idx_cid = prefs.get("free_index_chat_id") or os.environ.get(
+                "TELEGRAM_FREE_INDEX_CHAT_ID", "-1004298387260"
+            )
+            if free_idx_cid:
+                dest_lines.append(
+                    f"• <b>Free Index Signals:</b> <code>Nifty BankNifty Free Signals</code> (<code>{free_idx_cid}</code>)"
+                )
             fno_cid = prefs.get("fno_chat_id") or os.environ.get("TELEGRAM_FNO_CHAT_ID", "")
             if fno_cid:
                 dest_lines.append(f"• <b>F&O Stock:</b> <code>{fno_cid}</code>")
@@ -1388,6 +1395,8 @@ async def cmd_asymmetric(update, context) -> None:
                 "RUBBER_BAND_200EMA": "🧲",
                 "EXPIRY_0DTE_GAMMA": "⚡",
                 "TURTLE_SOUP_SHORT": "🐢",
+                "TURTLE_SOUP_SWEEP": "🐢",
+                "TURTLE_SOUP_PLUS_ONE_LONG": "🐢",
                 "IRON_CONDOR_PINNING": "🦅",
                 "COMMODITY": "⛏️",
             }.get(o.setup_type, "🎯")
@@ -1750,6 +1759,24 @@ def get_telegram_destinations() -> dict[str, Any]:
     else:
         equity_name = ""
 
+    free_index_chat_id = os.environ.get("TELEGRAM_FREE_INDEX_CHAT_ID", "").strip()
+    if not free_index_chat_id:
+        try:
+            from engine.alert_preferences import alert_preferences
+
+            free_index_chat_id = alert_preferences._preferences.free_index_chat_id or ""
+        except Exception:
+            pass
+    if not free_index_chat_id:
+        free_index_chat_id = "-1004298387260"
+
+    if "-1004298387260" in free_index_chat_id:
+        free_index_name = "Nifty BankNifty Free Signals"
+    elif free_index_chat_id:
+        free_index_name = "Free Index Signals Channel"
+    else:
+        free_index_name = ""
+
     return {
         "default_chat_id": str(default_chat) if default_chat else "",
         "channel_id": channel_id.strip(),
@@ -1757,12 +1784,20 @@ def get_telegram_destinations() -> dict[str, Any]:
         "fno_chat_name": fno_name,
         "fno_index_chat_id": fno_index_chat_id.strip(),
         "fno_index_chat_name": fno_index_name,
+        "free_index_chat_id": free_index_chat_id.strip(),
+        "free_index_chat_name": free_index_name,
+        "free_index_link": "https://t.me/IndiaIndexSignals",
         "mcx_chat_id": mcx_chat_id.strip(),
         "mcx_chat_name": mcx_name,
         "equity_chat_id": equity_chat_id.strip(),
         "equity_chat_name": equity_name,
         "is_configured": bool(
-            default_chat or fno_chat_id or fno_index_chat_id or mcx_chat_id or equity_chat_id
+            default_chat
+            or fno_chat_id
+            or fno_index_chat_id
+            or free_index_chat_id
+            or mcx_chat_id
+            or equity_chat_id
         ),
     }
 
@@ -1826,9 +1861,6 @@ def get_signal_message_id(
         base_sig = re.sub(r"_\d{4}$", "", sig)
         if base_sig not in candidates:
             candidates.append(base_sig)
-        contract_sig = re.sub(r"_\d{1,2}[A-Z]{3}(?:_\d{4})?$", "", sig)
-        if contract_sig not in candidates:
-            candidates.append(contract_sig)
 
     with _signal_map_lock:
         if chat_id:
@@ -1864,9 +1896,6 @@ def record_signal_message_id(
         base_sig = re.sub(r"_\d{4}$", "", sig)
         if base_sig not in keys_to_index:
             keys_to_index.append(base_sig)
-        contract_sig = re.sub(r"_\d{1,2}[A-Z]{3}(?:_\d{4})?$", "", sig)
-        if contract_sig not in keys_to_index:
-            keys_to_index.append(contract_sig)
     if alert_id:
         aid = alert_id.strip()
         if aid and aid not in keys_to_index:
@@ -1912,6 +1941,7 @@ def format_telegram_push_payload(
     message_thread_id: Optional[int] = None,
     parse_mode: str = "HTML",
     alert_id: Optional[str] = None,
+    is_update: Optional[bool] = None,
 ) -> dict[str, Any]:
     """
     Construct the canonical Telegram sendMessage payload.
@@ -1919,6 +1949,7 @@ def format_telegram_push_payload(
       1. Topic/Thread Partitioning: extracts topic ID from 'chat_id:topic_id' or TELEGRAM_TOPIC_ID.
       2. Thread Partitioning via reply_to_message_id: links updates/milestones back to the original call.
       3. Audio / Tone Differentiator: sets disable_notification=True for minor trailing ratchets or silent alerts.
+      4. Explicit Lifecycle State: enforces top-level delivery when is_update is False.
     """
     target_chat_id = (chat_id or "").strip() or _load_chat_id()
 
@@ -1937,9 +1968,10 @@ def format_telegram_push_payload(
         if env_tid and env_tid.strip().isdigit():
             message_thread_id = int(env_tid.strip())
 
-    # Guard: FNO_INDEX channel (-1004380788314) strictly restricted to Nifty, Banknifty, Midcp, and Sensex
+    # Guard: FNO_INDEX channels (-1004380788314 and Free -1004298387260) strictly restricted to Nifty, Banknifty, Midcp, and Sensex
     fno_idx_env_id = os.environ.get("TELEGRAM_FNO_INDEX_CHAT_ID", "-1004380788314").strip()
-    if target_chat_id and str(target_chat_id) == fno_idx_env_id:
+    free_idx_env_id = os.environ.get("TELEGRAM_FREE_INDEX_CHAT_ID", "-1004298387260").strip()
+    if target_chat_id and str(target_chat_id) in (fno_idx_env_id, free_idx_env_id):
         m_blocked = re.search(
             r"\b(FINNIFTY|BANKEX|NIFTYNXT50|CNXIT|NIFTYIT|NIFTYAUTO|NIFTYPHARMA|NIFTYMETAL|NIFTYENERGY)\b",
             message,
@@ -1962,18 +1994,34 @@ def format_telegram_push_payload(
             resolved_sig = m.group(1).lstrip("#").strip()
 
     # Thread Partitioning via reply_to_message_id:
-    # If not explicitly specified, auto-lookup root message ID for updates/milestones
-    if reply_to_message_id is None and (
+    # 1. Explicit False: Initial trade calls NEVER thread under prior messages
+    if is_update is False:
+        reply_to_message_id = None
+    elif reply_to_message_id is None and (
         resolved_sig or alert_id or re.search(r"#(SIG_[a-zA-Z0-9_]+)", message)
     ):
-        is_update = bool(
-            re.search(r"\bUPDATE\s*#?\d*\b", message, re.IGNORECASE)
-            or re.search(
-                r"\b(?:TARGET|TRAIL|STOP|INVALIDAT|EXIT|SCALE|WARNING|HIT|BREACH|FREE-ROLL|RATCHET|PROFIT|COMPRESS|STAGNATION)\b",
-                message,
-                re.IGNORECASE,
+        # 2. Defensive heuristic when caller did not pass is_update explicitly
+        if is_update is None:
+            is_new_call = bool(
+                re.search(
+                    r"\b(?:NEW\s+CALL|NEW\s+TRADE\s+SETUP|NEW\s+RADAR|PRECURSOR\s+RADAR|EOD\s+WATCHLIST|WATCHLIST|ALPHA\s+VORTEX)\b",
+                    message,
+                    re.IGNORECASE,
+                )
             )
-        )
+            if is_new_call:
+                is_update = False
+            else:
+                # Genuine update must carry an explicit UPDATE marker or milestone event header
+                is_update = bool(
+                    re.search(r"\bUPDATE\s*(?:#?\d+|·|:|-)\b", message, re.IGNORECASE)
+                    or re.search(
+                        r"\b(?:TARGET\s+\d+|FINAL\s+TARGET|TRAILING\s+STOP|VIEW\s+INVALIDATED|STOP\s+LOSS\s+HIT|RUNNER\s+EXIT|PROFIT\s+SECURED|BREAKEVEN\s+LOCKED|SPREAD\s+FREE-ROLL\s+UNLOCKED)\b",
+                        message,
+                        re.IGNORECASE,
+                    )
+                )
+
         if is_update:
             if resolved_sig or alert_id:
                 reply_to_message_id = get_signal_message_id(
@@ -1989,6 +2037,10 @@ def format_telegram_push_payload(
     if reply_to_message_id:
         payload["reply_to_message_id"] = int(reply_to_message_id)
         payload["allow_sending_without_reply"] = True
+        payload["reply_parameters"] = {
+            "message_id": int(reply_to_message_id),
+            "allow_sending_without_reply": True,
+        }
         payload["reply_parameters"] = {
             "message_id": int(reply_to_message_id),
             "allow_sending_without_reply": True,
@@ -2028,6 +2080,7 @@ def send_push(
     message_thread_id: Optional[int] = None,
     on_success: Optional[Callable[[int], None]] = None,
     alert_id: Optional[str] = None,
+    is_update: Optional[bool] = None,
 ) -> None:
     """
     Send a push notification to the configured Telegram chat, group, or channel.
@@ -2035,7 +2088,8 @@ def send_push(
     Non-blocking — runs in a background thread.
     Includes a 5-minute anti-flood message deduplication guard.
     Supports in-thread replies (reply_to_message_id), topic routing (message_thread_id),
-    audible vs silent notification delivery (disable_notification), and on_success callbacks.
+    audible vs silent notification delivery (disable_notification), explicit lifecycle typing (is_update),
+    and on_success callbacks.
     """
     import hashlib
     import time
@@ -2081,6 +2135,7 @@ def send_push(
         message_thread_id=message_thread_id,
         parse_mode=parse_mode,
         alert_id=alert_id,
+        is_update=is_update,
     )
     if not payload or not payload.get("text"):
         return
@@ -2154,6 +2209,10 @@ def send_push(
             pass
 
     _get_push_executor().submit(_send)
+
+
+# Canonical alias for sending messages / broadcasts
+send_message = send_push
 
 
 def push_alert(alert_desc: str) -> None:

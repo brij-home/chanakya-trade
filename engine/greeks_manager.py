@@ -41,9 +41,9 @@ class _PortfolioGreeksLike:
     by_underlying: dict = field(default_factory=dict)
 
 
-from engine.position_sizer import _F_AND_O_LOT_SIZES
+from market.instruments import STANDARD_LOT_SIZES
 
-LOT_SIZES: dict[str, int] = _F_AND_O_LOT_SIZES
+LOT_SIZES: dict[str, int] = STANDARD_LOT_SIZES
 
 
 # ── Delta Hedge ──────────────────────────────────────────────
@@ -88,7 +88,7 @@ def compute_delta_hedge(
         DeltaHedgeSuggestion with concrete trade suggestions and why/when/how rationale.
     """
     sym = underlying.upper().replace("NSE:", "").replace("NFO:", "")
-    actual_lot_size = lot_size if lot_size is not None else LOT_SIZES.get(sym, 75)
+    actual_lot_size = lot_size if lot_size is not None else LOT_SIZES.get(sym, 1)
 
     gap = target_delta - net_delta  # positive = need to buy, negative = need to sell
     suggestions = []

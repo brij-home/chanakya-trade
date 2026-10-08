@@ -278,6 +278,7 @@ class EODReport:
                     "SESSION_EOD_SQUAREOFF": "⏰ EOD_SQUAREOFF",
                     "VELOCITY_TIME_STOP": "⏱️ TIME_STOP",
                     "UNTRIGGERED_EXPIRED": "🚫 UNTRIGGERED",
+                    "SUPERSEDED_UNSEATED": "👑 SUPERSEDED",
                     "IN_FLIGHT": "⏳ IN_FLIGHT",
                 }.get(j.outcome, j.outcome)
 
@@ -1222,6 +1223,7 @@ class EODReport:
                 "SESSION_EOD_SQUAREOFF",
                 "VELOCITY_TIME_STOP",
                 "UNTRIGGERED_EXPIRED",
+                "SUPERSEDED_UNSEATED",
             ):
                 badge_fill = FILL_AMBER
                 badge_font = FONT_AMBER
@@ -1333,6 +1335,7 @@ class EODReport:
                 "SESSION_EOD_SQUAREOFF",
                 "VELOCITY_TIME_STOP",
                 "UNTRIGGERED_EXPIRED",
+                "SUPERSEDED_UNSEATED",
             ):
                 badge_fill = FILL_AMBER
                 badge_font = FONT_AMBER
@@ -2074,15 +2077,31 @@ class EODReportGenerator:
             if is_corrupt:
                 continue
 
-            # 2. Check if setup was untriggered / expired before crossing entry
+            # 2. Check if setup was untriggered / expired before crossing entry or superseded by higher-ranking setup
+            is_superseded = is_inv and any(
+                k in lower_inv
+                for k in (
+                    "superseded",
+                    "premier winnable",
+                    "unseated",
+                    "retiring weaker",
+                    "retired to maintain",
+                )
+            )
             is_untriggered = (
-                is_inv
-                and any(k in lower_inv for k in ("did not trigger", "not trigger", "untriggered"))
-            ) or (
-                stage == "EXPIRED"
-                and not a.get("triggered_at")
-                and not milestones
-                and target_status == "PENDING"
+                (
+                    is_inv
+                    and any(
+                        k in lower_inv for k in ("did not trigger", "not trigger", "untriggered")
+                    )
+                )
+                or (
+                    stage == "EXPIRED"
+                    and not a.get("triggered_at")
+                    and not milestones
+                    and target_status == "PENDING"
+                )
+                or is_superseded
             )
 
             # Compute theoretical points & risk
@@ -2095,13 +2114,17 @@ class EODReportGenerator:
             r_mult = gain_pts / risk if risk > 0 else 0.0
 
             if is_untriggered:
-                outcome = "UNTRIGGERED_EXPIRED"
+                outcome = "SUPERSEDED_UNSEATED" if is_superseded else "UNTRIGGERED_EXPIRED"
                 untriggered_count += 1
                 if is_tg:
                     tg_untriggered_count += 1
                 else:
                     ui_untriggered_count += 1
-                verdict_note = "Radar expired without entry trigger (0 capital risked)."
+                verdict_note = (
+                    "Administrative upgrade: Superseded by higher-conviction setup."
+                    if is_superseded
+                    else "Radar expired without entry trigger (0 capital risked)."
+                )
                 journal_entries.append(
                     TradeOutcomeSummary(
                         alert_id=a.get("alert_id", ""),
@@ -2137,14 +2160,36 @@ class EODReportGenerator:
                 ui_ignited_count += 1
 
             # 3. Target / Milestone Achieved (Win)
-            if any(
-                m in ("T1", "T2", "T3", "TARGET_ACHIEVED") for m in milestones
-            ) or target_status in (
-                "T1_ACHIEVED",
-                "T2_ACHIEVED",
-                "T3_ACHIEVED",
-                "TARGET_ACHIEVED",
-            ):
+            has_target_achieved = (
+                any(
+                    m
+                    in (
+                        "T1",
+                        "T2",
+                        "T3",
+                        "TARGET_ACHIEVED",
+                        "T1_ACHIEVED",
+                        "T2_ACHIEVED",
+                        "T3_ACHIEVED",
+                        "FINAL_TARGET",
+                    )
+                    for m in milestones
+                )
+                or target_status
+                in (
+                    "T1_ACHIEVED",
+                    "T2_ACHIEVED",
+                    "T3_ACHIEVED",
+                    "TARGET_ACHIEVED",
+                    "FINAL_TARGET",
+                )
+                or (
+                    stage
+                    in ("T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED", "RUNNER_EXIT", "COMPLETED")
+                    and any("T1" in m or "T2" in m or "TARGET" in m for m in milestones)
+                )
+            )
+            if has_target_achieved:
                 outcome = "WIN_TARGET"
                 win_count += 1
                 win_target_count += 1
@@ -2362,12 +2407,15 @@ class EODReportGenerator:
                 )
 
             # 6.5 Profitable Trailing Stop / Ratchet Exit (Ratcheted SL triggered with locked profit)
-            elif is_inv and (
-                (float(a.get("locked_profit_pts") or 0.0) > 0)
+            elif (
+                (is_inv and float(a.get("locked_profit_pts") or 0.0) > 0)
                 or ("RATCHET TRAILING STOP" in str(a.get("trailing_rationale", "")).upper())
                 or ("TRAIL STOP-LOSS TO LOCK" in str(a.get("trailing_rationale", "")).upper())
+                or stage in ("RUNNER_EXIT", "COMPLETED")
+                or target_status == "RUNNER_CLOSED"
                 or (
-                    bool(
+                    is_inv
+                    and bool(
                         a.get("option_type")
                         or " CE" in symbol
                         or " PE" in symbol
@@ -2401,8 +2449,19 @@ class EODReportGenerator:
                         if (sl < entry and sl > 0)
                         else float(a.get("locked_profit_pts") or 0.0)
                     )
+                if realized_gain_pts <= 0 and gain_pct > 0:
+                    realized_gain_pts = max(0.0, abs(gain_pts))
+                if realized_gain_pts <= 0 and float(a.get("pnl_pct") or 0.0) > 0:
+                    realized_gain_pts = max(0.0, entry * (float(a.get("pnl_pct")) / 100.0))
 
-                r_achieved = max(0.5, round(realized_gain_pts / init_risk_pts, 2))
+                r_achieved = (
+                    max(0.5, round(realized_gain_pts / init_risk_pts, 2))
+                    if init_risk_pts > 0
+                    else 0.5
+                )
+                if a.get("r_multiple") and float(a.get("r_multiple")) > r_achieved:
+                    r_achieved = round(float(a.get("r_multiple")), 2)
+
                 total_realized_r += r_achieved
                 detector_stats[det]["net_r"] += r_achieved
                 if is_tg:
@@ -2418,7 +2477,17 @@ class EODReportGenerator:
                     detector_stats[det]["ui_wins"] += 1
                     detector_stats[det]["ui_net_r"] += r_achieved
 
-                verdict_note = f"Trailing stop locked profit at ₹{sl:.1f} (+{realized_gain_pts:.1f} pts / +{r_achieved:.1f}R)."
+                exit_price = ltp if ltp > 0 else (sl if sl > 0 else entry)
+                calc_pnl = (
+                    gain_pct
+                    if gain_pct > 0
+                    else (
+                        float(a.get("pnl_pct") or 0.0)
+                        if float(a.get("pnl_pct") or 0.0) > 0
+                        else (realized_gain_pts / entry * 100.0 if entry > 0 else 15.0)
+                    )
+                )
+                verdict_note = f"Trailing stop locked profit at ₹{exit_price:.1f} (+{realized_gain_pts:.1f} pts / +{r_achieved:.1f}R)."
 
                 summary = TradeOutcomeSummary(
                     alert_id=a.get("alert_id", ""),
@@ -2428,18 +2497,14 @@ class EODReportGenerator:
                     entry_level=entry,
                     stop_loss=sl,
                     target_level=target,
-                    peak_gain_pct=gain_pct
-                    if gain_pct > 0
-                    else (realized_gain_pts / entry * 100.0 if entry > 0 else 15.0),
+                    peak_gain_pct=calc_pnl,
                     realized_r=r_achieved,
                     milestones=milestones or ["TRAIL_PROFIT"],
                     outcome=outcome,
                     headline=a.get("headline", ""),
                     strategy=det,
-                    exit_level=sl,
-                    pnl_pct=gain_pct
-                    if gain_pct > 0
-                    else (realized_gain_pts / entry * 100.0 if entry > 0 else 15.0),
+                    exit_level=exit_price,
+                    pnl_pct=calc_pnl,
                     time_str=time_part,
                     verdict_note=verdict_note,
                     telegram_dispatched=is_tg,

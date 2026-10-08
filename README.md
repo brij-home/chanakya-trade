@@ -1,5 +1,7 @@
 # chanakya-trade
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/brij-home/chanakya-trade)
+
 Personal data analysis workspace and backtesting scripts for Indian market feeds.
 
 ## Requirements

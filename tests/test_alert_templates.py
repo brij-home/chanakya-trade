@@ -2342,7 +2342,7 @@ def test_crypto_milestone_update_numbering_and_currency():
         direction="BEARISH",
         headline="🏆 🔴 CRYPTO:SOLUSDT (CRYPTO MOMENTUM) — TARGET 1 ACHIEVED",
         summary="Target 1 hit at $120.07",
-        ltp=123.86,
+        ltp=120.00,
         trigger_level=124.12,
         target_level=120.07,
         stop_loss=125.65,
@@ -2381,7 +2381,7 @@ def test_crypto_milestone_update_numbering_and_currency():
 
     # 3. Currency symbol must be $ throughout, zero ₹
     assert "₹" not in rendered
-    assert "$123.86" in rendered
+    assert "$120.00" in rendered
     assert "T1:</b> $120.07" in rendered
     assert "Trail Stop:</b> <code>$123.87</code>" in rendered
     assert "Entry: $124.12 | SL: $125.65 | T1: $120.07 | T2: $117.12" in rendered
@@ -2723,3 +2723,148 @@ def test_option_alert_action_line_clarity_with_hedged_spread():
     # The shield box must still be rendered below
     assert "🛡️ <b>DEFINED-RISK HEDGE SPREAD" in rendered
     assert "Net Debit / Max Loss:</b> <code>₹23.8/sh (₹1,547 total)</code>" in rendered
+
+
+def test_monotonic_target_resolution_prevents_t2_less_than_t1():
+    """Verify that inverted targets in actionable_plan (e.g. target=198.8, target_2=168.1)
+    are strictly sorted so T1 < T2 in rendered alert output."""
+    from bot.alert_templates import format_auto_alert_telegram
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-monotonic-tgt-001",
+        alert_type="INDEX_MICRO_SCALP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="⚡ NIFTY 22550 CE 1m Micro Breakout",
+        summary="NIFTY 22550 CE micro breakout ignited at ₹113.6",
+        ltp=113.60,
+        trigger_level=113.60,
+        target_level=198.80,
+        stop_loss=96.60,
+        strike=22550.0,
+        option_type="CE",
+        contract_symbol="NIFTY2026100622550CE",
+        confidence=95,
+        actionable_plan={
+            "action": "BUY NIFTY 22550 CE",
+            "entry_range": "₹113.6 – ₹117.2",
+            "recommended_entry": "₹113.6 – ₹117.2",
+            "stop_loss": "₹96.6",
+            "target": "₹198.8",
+            "target_2": "₹168.1",
+            "lot_size": 65,
+        },
+    )
+
+    rendered = format_auto_alert_telegram(alert)
+    assert "• <b>T1:</b> <code>₹168.1</code> | <b>T2:</b> <code>₹198.8</code>" in rendered
+    assert "• <b>T1:</b> <code>₹198.8</code> | <b>T2:</b> <code>₹168.1</code>" not in rendered
+
+
+def test_free_index_monotonic_target_sorting():
+    """Verify that free index channel templates sort inverted targets monotonically."""
+    from bot.free_index_templates import render_free_index_alert
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-free-index-monotonic-001",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="🟢 NIFTY 22600 CE Call Setup",
+        summary="NIFTY 22600 CE call setup ignited",
+        ltp=150.0,
+        trigger_level=150.0,
+        target_level=220.0,
+        stop_loss=120.0,
+        strike=22600.0,
+        option_type="CE",
+        contract_symbol="NIFTY2026100622600CE",
+        actionable_plan={
+            "action": "BUY CE",
+            "recommended_entry": "₹150.0",
+            "stop_loss": "₹120.0",
+            "target_1": "₹220.0",
+            "target_2": "₹180.0",  # Inverted: T2 < T1!
+            "lot_size": 65,
+        },
+    )
+
+    rendered = render_free_index_alert(alert, in_market=True)
+    assert "• <b>T1:</b> <code>₹180.0</code> | <b>T2:</b> <code>₹220.0</code>" in rendered
+
+
+def test_mcx_commodity_sector_and_prompt_expiry_resolution():
+    """Verify that MCX Commodities do not collide with 'IT' in sector shortening,
+    resolve mid-month prompt expiry (not last Thursday NSE expiry), and deduplicate action verbs."""
+    from bot.alert_templates import (
+        shorten_sector_name,
+        resolve_expiry_cycle,
+        format_auto_alert_telegram,
+    )
+    from engine.auto_alert_engine import AutoAlert
+    from datetime import date
+
+    # 1. Sector abbreviation word boundary isolation
+    assert shorten_sector_name("MCX Commodities") == "Commodities"
+    assert shorten_sector_name("Energy Commodities") == "Energy"
+    assert shorten_sector_name("Commodities") == "Commodities"
+    assert shorten_sector_name("IT") == "IT"
+    assert shorten_sector_name("Information Technology") == "IT"
+
+    # 2. MCX option expiry resolution
+    exp_info = resolve_expiry_cycle(
+        contract="MCX:CRUDEOIL26OCT8750CE",
+        underlying="CRUDEOIL",
+        as_of=date(2026, 10, 7),
+    )
+    assert exp_info["expiry_date"] == "16-Oct-2026"
+    assert exp_info["dte"] == 9
+    assert "16-Oct-2026" in exp_info["badge"]
+
+    # 3. MCX option action verb deduplication
+    alert = AutoAlert(
+        alert_id="test-mcx-dedup-001",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="🛢️ MCX OPTION: CRUDEOIL 8750 CE @ ₹276.1",
+        summary="MCX CRUDEOIL momentum test",
+        ltp=276.1,
+        trigger_level=276.1,
+        target_level=436.8,
+        stop_loss=218.7,
+        confidence=94,
+        metrics={
+            "sector_name": "Energy Commodities",
+            "matched_factors": ["AI: Quant-validated MCX CRUDEOIL momentum: session gain of +1.4%"],
+        },
+        actionable_plan={
+            "action": "BUY_CE",
+            "contract": "CRUDEOIL 8750 CE (16 Oct)",
+            "entry_range": "₹267.5 – ₹281.8",
+            "stop_loss": "₹218.7",
+            "target_1": "₹436.8",
+            "target_2": "₹563.1",
+            "lot_size": 100,
+            "risk_reward": "1:2.8",
+            "preferred_vehicle": "DEFINED_RISK_OPTION",
+            "setup_confluence": "SMC Bullish BOS + Demand Block",
+        },
+    )
+
+    rendered = format_auto_alert_telegram(alert)
+    # Action line should read 'BUY CRUDEOIL 8750 CE', not 'BUY_CE CRUDEOIL 8750 CE'
+    assert "• <b>Action:</b> BUY <b>CRUDEOIL 8750 CE (16 Oct)</b>" in rendered
+    # Sector must be Energy, not IT
+    assert "Sec: <b>Energy</b>" in rendered
+    assert "Sec: <b>IT</b>" not in rendered
+    # Signals line should not end with trailing colon or fragmented word
+    assert "momentum: session" not in rendered

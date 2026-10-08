@@ -23,6 +23,7 @@ from __future__ import annotations
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -35,12 +36,17 @@ import pandas as pd
 
 from config.paths import app_data_path
 
+logger = logging.getLogger(__name__)
+
 # SQLite Store Location
 DEFAULT_EOD_DB_PATH = Path("data/eod_bars.db")
 if not DEFAULT_EOD_DB_PATH.parent.exists():
     try:
         DEFAULT_EOD_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            f"[eod_store] Failed creating {DEFAULT_EOD_DB_PATH.parent}, falling back to app_data_path: {e}"
+        )
         DEFAULT_EOD_DB_PATH = app_data_path("eod_bars.db")
 
 _store_lock = threading.Lock()
@@ -88,14 +94,34 @@ def _get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _clean_eod_symbol(symbol: str) -> str:
+    """
+    Canonical symbol normalizer for SQLite EOD store.
+    Uniformly strips broker/exchange prefixes (NSE:, BSE:, MCX:, NFO:, BFO:, CDS:, CRYPTO:)
+    and data provider suffixes (.NS, .BO, .EX) while preserving alphanumeric uppercase ticker.
+    """
+    if not symbol:
+        return ""
+    s = str(symbol).strip().upper()
+    for pfx in ("NSE:", "BSE:", "MCX:", "NFO:", "BFO:", "CDS:", "CRYPTO:"):
+        if s.startswith(pfx):
+            s = s[len(pfx) :]
+            break
+    if s.endswith(".NS") or s.endswith(".BO"):
+        s = s[:-3]
+    if s.startswith("^"):
+        s = s[1:]
+    return s.strip()
+
+
 def reset_store_connections() -> None:
     """Closes all cached connections and clears L1 caches (useful for testing or connection refresh)."""
     with _store_lock:
         for tid, conn in list(_local_connections.items()):
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[eod_store] Error closing connection for thread {tid}: {e}")
         _local_connections.clear()
     clear_l1_caches()
 
@@ -268,12 +294,23 @@ def init_eod_store() -> None:
 init_eod_store()
 
 
-def clear_l1_caches() -> None:
-    """Flushes process L1 caches (useful for testing or manual refresh)."""
+def clear_l1_caches() -> int:
+    """Flushes process L1 caches (useful for testing, memory trimming, or manual refresh)."""
     with _l1_lock:
+        cnt = len(_l1_ohlcv_cache) + len(_l1_fundamentals_cache) + len(_l1_forensics_cache)
         _l1_ohlcv_cache.clear()
         _l1_fundamentals_cache.clear()
         _l1_forensics_cache.clear()
+        return cnt
+
+
+# Register with institutional memory guard sentinel
+try:
+    from engine.memory_guard import register_trim_callback
+
+    register_trim_callback(clear_l1_caches)
+except Exception as e:
+    logger.debug(f"[eod_store] Memory guard registration skipped: {e}")
 
 
 # ── Market Hours & Trading Calendar Helpers ─────────────────────────
@@ -308,11 +345,12 @@ def get_latest_expected_trading_date() -> str:
 # ── Reading & Writing OHLCV (Multi-Tier Caching) ──────────────────────
 
 
-def get_cached_ohlcv(symbol: str, days: int = 300) -> Optional[pd.DataFrame]:
+def get_cached_ohlcv(symbol: str, days: int = 504) -> Optional[pd.DataFrame]:
     """
     Loads daily OHLCV dataframe from L1 process memory (0.001ms) or local SQLite (<1 ms).
+    Defaults to 504 trading days (2 full years) for Minervini SEPA, Weinstein Stage, and Base Counting.
     """
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = _clean_eod_symbol(symbol)
     now_ts = time.time()
 
     # Tier 1: Check L1 In-Memory Cache
@@ -365,16 +403,17 @@ def get_cached_ohlcv(symbol: str, days: int = 300) -> Optional[pd.DataFrame]:
 
 
 def get_cached_ohlcv_batch(
-    symbols: list[str], days: int = 300, copy: bool = False
+    symbols: list[str], days: int = 504, copy: bool = False
 ) -> dict[str, pd.DataFrame]:
     """
     Loads daily OHLCV dataframes for a batch of symbols with L1 cache bypass and single SQL batch query.
+    Defaults to 504 trading days (2 full years) for Minervini SEPA, Weinstein Stage, and Base Counting.
     Extremely fast: 0.01ms if L1 hit, ~200ms for 500 stocks from SQLite.
     """
     if not symbols:
         return {}
 
-    clean_map = {s.upper().replace(".NS", "").replace("NSE:", "").strip(): s for s in symbols}
+    clean_map = {_clean_eod_symbol(s): s for s in symbols}
     now_ts = time.time()
     results: dict[str, pd.DataFrame] = {}
     missing_syms: list[str] = []
@@ -463,7 +502,7 @@ def get_cached_ohlcv_batch(
 
 def get_symbol_meta(symbol: str) -> Optional[dict[str, Any]]:
     """Returns cached metadata for a symbol (turnover, 52w high/low, last close)."""
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = _clean_eod_symbol(symbol)
     conn = _get_connection()
     row = conn.execute(
         "SELECT * FROM symbol_meta WHERE symbol = ?",
@@ -485,7 +524,7 @@ def get_symbol_meta_batch(symbols: list[str]) -> dict[str, dict[str, Any]]:
     """Returns metadata for a batch of symbols in a single query."""
     if not symbols:
         return {}
-    clean_map = {s.upper().replace(".NS", "").replace("NSE:", "").strip(): s for s in symbols}
+    clean_map = {_clean_eod_symbol(s): s for s in symbols}
     clean_syms = list(clean_map.keys())
     conn = _get_connection()
     results: dict[str, dict[str, Any]] = {}
@@ -703,8 +742,8 @@ def repair_eod_store_anomalies(db_path: Optional[Path] = None) -> dict[str, Any]
             conn.commit()
             try:
                 conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[eod_store] Error executing wal_checkpoint: {e}")
         finally:
             conn.close()
 
@@ -735,7 +774,7 @@ def save_ohlcv_batch(data: dict[str, pd.DataFrame]) -> int:
         if df is None or len(df) == 0:
             continue
 
-        clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+        clean_sym = _clean_eod_symbol(symbol)
         # Guard: In production store, never save test symbols
         if _get_db_path() == DEFAULT_EOD_DB_PATH and (
             clean_sym.startswith("TEST") or clean_sym.startswith("DUMMY")
@@ -848,6 +887,7 @@ def save_ohlcv_batch(data: dict[str, pd.DataFrame]) -> int:
             conn.commit()
             total_bars = len(ohlcv_rows)
         except Exception as e:
+            logger.error(f"[eod_store] Failed committing batch bars: {e}", exc_info=True)
             conn.rollback()
             raise e
 
@@ -879,7 +919,14 @@ def save_fundamentals_batch(data_dict: dict[str, dict[str, Any]]) -> int:
     for sym, d in data_dict.items():
         if not d:
             continue
-        clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+        clean_sym = _clean_eod_symbol(sym)
+        # Guard: In production store, never save test symbols
+        if _get_db_path() == DEFAULT_EOD_DB_PATH and (
+            clean_sym.startswith("TEST")
+            or clean_sym.startswith("DUMMY")
+            or clean_sym.startswith("MOCK")
+        ):
+            continue
         rows.append(
             (
                 clean_sym,
@@ -925,7 +972,7 @@ def save_fundamentals_batch(data_dict: dict[str, dict[str, Any]]) -> int:
 
     with _l1_lock:
         for sym, d in data_dict.items():
-            clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+            clean_sym = _clean_eod_symbol(sym)
             _l1_fundamentals_cache[clean_sym] = (now_ts, d)
 
     return len(rows)
@@ -934,7 +981,7 @@ def save_fundamentals_batch(data_dict: dict[str, dict[str, Any]]) -> int:
 def get_cached_fundamentals(symbol: str, max_age_days: int = 30) -> Optional[dict[str, Any]]:
     """Loads fundamentals for symbol if updated within max_age_days (default 30 days)."""
     batch = get_cached_fundamentals_batch([symbol], max_age_days=max_age_days)
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = _clean_eod_symbol(symbol)
     return batch.get(clean_sym)
 
 
@@ -945,7 +992,7 @@ def get_cached_fundamentals_batch(
     if not symbols:
         return {}
 
-    clean_map = {s.upper().replace(".NS", "").replace("NSE:", "").strip(): s for s in symbols}
+    clean_map = {_clean_eod_symbol(s): s for s in symbols}
     now_ts = time.time()
     results: dict[str, dict[str, Any]] = {}
     missing_syms = []
@@ -989,8 +1036,10 @@ def get_cached_fundamentals_batch(
                     with _l1_lock:
                         _l1_fundamentals_cache[sym] = (now_ts, raw)
                     continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(
+                        f"[eod_store] Failed parsing raw_json fundamentals for {sym}: {e}"
+                    )
             results[sym] = d
             with _l1_lock:
                 _l1_fundamentals_cache[sym] = (now_ts, d)
@@ -1015,7 +1064,14 @@ def save_forensics_batch(data_dict: dict[str, dict[str, Any]]) -> int:
     for sym, d in data_dict.items():
         if not d:
             continue
-        clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+        clean_sym = _clean_eod_symbol(sym)
+        # Guard: In production store, never save test symbols
+        if _get_db_path() == DEFAULT_EOD_DB_PATH and (
+            clean_sym.startswith("TEST")
+            or clean_sym.startswith("DUMMY")
+            or clean_sym.startswith("MOCK")
+        ):
+            continue
         rows.append(
             (
                 clean_sym,
@@ -1050,7 +1106,7 @@ def save_forensics_batch(data_dict: dict[str, dict[str, Any]]) -> int:
 
     with _l1_lock:
         for sym, d in data_dict.items():
-            clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+            clean_sym = _clean_eod_symbol(sym)
             _l1_forensics_cache[clean_sym] = (now_ts, d)
 
     return len(rows)
@@ -1059,7 +1115,7 @@ def save_forensics_batch(data_dict: dict[str, dict[str, Any]]) -> int:
 def get_cached_forensics(symbol: str, max_age_days: int = 30) -> Optional[dict[str, Any]]:
     """Loads forensic audit for symbol if updated within max_age_days."""
     batch = get_cached_forensics_batch([symbol], max_age_days=max_age_days)
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = _clean_eod_symbol(symbol)
     return batch.get(clean_sym)
 
 
@@ -1070,7 +1126,7 @@ def get_cached_forensics_batch(
     if not symbols:
         return {}
 
-    clean_map = {s.upper().replace(".NS", "").replace("NSE:", "").strip(): s for s in symbols}
+    clean_map = {_clean_eod_symbol(s): s for s in symbols}
     now_ts = time.time()
     results: dict[str, dict[str, Any]] = {}
     missing_syms = []
@@ -1114,8 +1170,8 @@ def get_cached_forensics_batch(
                     with _l1_lock:
                         _l1_forensics_cache[sym] = (now_ts, raw)
                     continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"[eod_store] Failed parsing raw_json forensics for {sym}: {e}")
             results[sym] = d
             with _l1_lock:
                 _l1_forensics_cache[sym] = (now_ts, d)
@@ -1133,7 +1189,7 @@ def save_century_compounders_batch(records: list[dict[str, Any]]) -> int:
     now_iso = datetime.now(timezone.utc).isoformat()
     rows = []
     for r in records:
-        sym = r.get("symbol", "").upper().replace(".NS", "").replace("NSE:", "").strip()
+        sym = _clean_eod_symbol(r.get("symbol", ""))
         if not sym:
             continue
         te = r.get("twin_engines") or {}
@@ -1192,7 +1248,7 @@ def get_cached_century_compounders_batch(
     """Loads cached compounder evaluations for a batch of symbols if updated within max_age_days."""
     if not symbols:
         return {}
-    clean_map = {s.upper().replace(".NS", "").replace("NSE:", "").strip(): s for s in symbols}
+    clean_map = {_clean_eod_symbol(s): s for s in symbols}
     clean_syms = list(clean_map.keys())
     conn = _get_connection()
     cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
@@ -1215,36 +1271,69 @@ def get_cached_century_compounders_batch(
                 try:
                     results[sym] = json.loads(d["raw_json"])
                     continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(
+                        f"[eod_store] Failed parsing raw_json century compounder for {sym}: {e}"
+                    )
             results[sym] = d
     return results
 
 
 def get_top_cached_century_compounders(
-    min_score: int = 60, limit: int = 50, max_age_days: int = 7
+    min_score: int = 60,
+    limit: int = 50,
+    max_age_days: int = 7,
+    symbols: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
-    """Returns top ranked century compounders directly from SQLite in < 5ms."""
+    """Returns top ranked century compounders directly from SQLite in < 5ms, optionally scoped to symbols."""
     conn = _get_connection()
     cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
-    rows = conn.execute(
-        """
-        SELECT * FROM century_compounder_cache 
-        WHERE century_score >= ? AND updated_at >= ?
-        ORDER BY century_score DESC, total_projected_multiple DESC
-        LIMIT ?
-        """,
-        (min_score, cutoff_iso, limit),
-    ).fetchall()
     results = []
-    for r in rows:
+
+    if symbols is not None:
+        clean_syms = [_clean_eod_symbol(s) for s in symbols if s]
+        if not clean_syms:
+            return []
+        chunk_size = 400
+        raw_rows = []
+        for i in range(0, len(clean_syms), chunk_size):
+            chunk = clean_syms[i : i + chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            rows = conn.execute(
+                f"""
+                SELECT * FROM century_compounder_cache 
+                WHERE symbol IN ({placeholders}) AND century_score >= ? AND updated_at >= ?
+                ORDER BY century_score DESC, total_projected_multiple DESC
+                """,
+                [*chunk, min_score, cutoff_iso],
+            ).fetchall()
+            raw_rows.extend(rows)
+        raw_rows.sort(
+            key=lambda r: (r["century_score"], r["total_projected_multiple"]),
+            reverse=True,
+        )
+        rows_to_use = raw_rows[:limit]
+    else:
+        rows_to_use = conn.execute(
+            """
+            SELECT * FROM century_compounder_cache 
+            WHERE century_score >= ? AND updated_at >= ?
+            ORDER BY century_score DESC, total_projected_multiple DESC
+            LIMIT ?
+            """,
+            (min_score, cutoff_iso, limit),
+        ).fetchall()
+
+    for r in rows_to_use:
         d = dict(r)
         if d.get("raw_json"):
             try:
                 results.append(json.loads(d["raw_json"]))
                 continue
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    f"[eod_store] Failed parsing raw_json top cached century compounder for {d.get('symbol')}: {e}"
+                )
         results.append(d)
     return results
 
@@ -1263,7 +1352,7 @@ def save_cached_inflections_batch(candidates: list[dict[str, Any]]) -> int:
     now_iso = datetime.now(timezone.utc).isoformat()
     rows = []
     for c in candidates:
-        sym = c.get("symbol", "").upper().replace(".NS", "").replace("NSE:", "").strip()
+        sym = _clean_eod_symbol(c.get("symbol", ""))
         if not sym:
             continue
         rows.append(
@@ -1367,7 +1456,7 @@ def get_cached_inflections_batch(
         params.append(cap_tier.upper().strip())
 
     if symbols:
-        clean_syms = [s.upper().replace(".NS", "").replace("NSE:", "").strip() for s in symbols]
+        clean_syms = [_clean_eod_symbol(s) for s in symbols]
         placeholders = ",".join(["?"] * len(clean_syms))
         clauses.append(f"symbol IN ({placeholders})")
         params.extend(clean_syms)
@@ -1387,8 +1476,8 @@ def get_cached_inflections_batch(
         if raw:
             try:
                 results.append(json.loads(raw))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[eod_store] Failed parsing raw_json inflection for row: {e}")
     return results
 
 
@@ -1411,6 +1500,63 @@ def clear_cached_inflections() -> None:
         conn.commit()
 
 
+def purge_poisoned_century_compounders(
+    sentinel_fv: float = 100.0,
+    tolerance: float = 0.01,
+) -> dict[str, Any]:
+    """
+    Audit and purge century_compounder_cache records that were persisted with
+    the hardcoded sentinel fair_value_anchor=100.0 (Invariant 11 violation).
+
+    Such records were written when evaluate_century_compounder() could not resolve
+    a real price and fell back to the placeholder. These records contain corrupted
+    accumulate_low (~98.0) and accumulate_high (~102.5) zones that are meaningless.
+
+    This is an administrative remediation function. Safe to call on startup or after
+    deploying the price-fallback fix to century_compounder.py.
+
+    Returns:
+        dict with keys: poisoned_found, deleted, status
+    """
+    conn = _get_connection()
+    with _store_lock:
+        # Count affected records
+        row = conn.execute(
+            "SELECT COUNT(*) FROM century_compounder_cache WHERE ABS(fair_value_anchor - ?) < ?",
+            (sentinel_fv, tolerance),
+        ).fetchone()
+        poisoned_count = int(row[0]) if row else 0
+
+        if poisoned_count == 0:
+            logger.info("[eod_store] century_compounder_cache: No poisoned records found.")
+            return {"status": "CLEAN", "poisoned_found": 0, "deleted": 0}
+
+        # Sample symbols for logging before deletion
+        sample_rows = conn.execute(
+            "SELECT symbol FROM century_compounder_cache WHERE ABS(fair_value_anchor - ?) < ? LIMIT 10",
+            (sentinel_fv, tolerance),
+        ).fetchall()
+        sample_syms = [r["symbol"] for r in sample_rows]
+
+        logger.warning(
+            f"[eod_store] Purging {poisoned_count} poisoned century_compounder_cache records "
+            f"(fair_value_anchor≈{sentinel_fv}). Sample: {sample_syms[:5]}..."
+        )
+
+        conn.execute(
+            "DELETE FROM century_compounder_cache WHERE ABS(fair_value_anchor - ?) < ?",
+            (sentinel_fv, tolerance),
+        )
+        conn.commit()
+
+    clear_l1_caches()
+    logger.info(
+        f"[eod_store] Purged {poisoned_count} poisoned century compounder records. "
+        "Run sync_and_precompute_market_compounders() to regenerate with real prices."
+    )
+    return {"status": "PURGED", "poisoned_found": poisoned_count, "deleted": poisoned_count}
+
+
 # ── Bulk Ingestion & Delta Synchronizer ──────────────────────────────
 
 
@@ -1422,11 +1568,7 @@ def get_stale_symbols_detailed(
       1. new_symbols: never downloaded / missing from SQLite store (needs full 1y history).
       2. delta_symbols: present in SQLite store, but last_date < latest expected trading date.
     """
-    clean_syms = [
-        s.upper().replace(".NS", "").replace("NSE:", "").strip()
-        for s in symbols
-        if not s.upper().startswith("DUMMY")
-    ]
+    clean_syms = [_clean_eod_symbol(s) for s in symbols if not s.upper().startswith("DUMMY")]
     latest_expected = get_latest_expected_trading_date()
 
     conn = _get_connection()
@@ -1471,23 +1613,26 @@ def _download_chunk_yfinance(
         return {}
     try:
         import yfinance as yf
-    except ImportError:
+    except ImportError as e:
+        logger.warning(f"[eod_store] yfinance not installed: {e}")
         return {}
 
     try:
         from market.yfinance_provider import _to_yf_symbol
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[eod_store] Could not import _to_yf_symbol: {e}")
         _to_yf_symbol = None
 
     try:
         from analysis.universe import CORPORATE_ALIASES
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[eod_store] Could not import CORPORATE_ALIASES: {e}")
         CORPORATE_ALIASES = {}
 
     ticker_to_syms: dict[str, list[str]] = {}
     sym_alias_map: dict[str, str] = {}
     for s in chunk_symbols:
-        clean_s = s.upper().replace(".NS", "").replace("NSE:", "").strip()
+        clean_s = _clean_eod_symbol(s)
         canon_s = CORPORATE_ALIASES.get(clean_s, clean_s)
         if _to_yf_symbol:
             yf_ticker = _to_yf_symbol(clean_s, exchange=exchange)
@@ -1509,7 +1654,8 @@ def _download_chunk_yfinance(
             auto_adjust=True,
             threads=True,
         )
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[eod_store] yfinance download failed for chunk: {e}")
         return {}
 
     if data is None or data.empty:
@@ -1546,8 +1692,10 @@ def _download_chunk_yfinance(
                             results[s] = sub_df.copy()
                             if s in sym_alias_map:
                                 results[sym_alias_map[s]] = sub_df.copy()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    f"[eod_store] Failed extracting ticker {ticker} from yfinance batch: {e}"
+                )
 
     return results
 
@@ -1560,22 +1708,16 @@ def sync_universe_eod(
     exchange: str = "NSE",
     delta_period: str = "1mo",
     initial_period: str = "2y",
-    backfill_min_bars: Optional[int] = None,
+    backfill_min_bars: Optional[int] = 500,
 ) -> dict[str, Any]:
     """
     High-efficiency multi-threaded bulk synchronizer with delta-only ingestion.
-    - If stocks are new (or bar_count < backfill_min_bars): downloads initial_period (default 2y / ~500 bars).
+    - If stocks are new (or bar_count < backfill_min_bars, default 500 bars / 2y): downloads initial_period (default 2y / ~504 bars).
     - If stocks are delta (missing only recent bars): downloads delta_period='1mo' and appends.
     - If stocks are already up-to-date: returns in 0.001s without touching the network!
     """
     clean_syms = list(
-        dict.fromkeys(
-            [
-                s.upper().replace(".NS", "").replace("NSE:", "").strip()
-                for s in symbols
-                if not s.upper().startswith("DUMMY")
-            ]
-        )
+        dict.fromkeys([_clean_eod_symbol(s) for s in symbols if not s.upper().startswith("DUMMY")])
     )
 
     if force:

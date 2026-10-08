@@ -11,6 +11,7 @@ from engine.detectors.currency import detect_currency_breakouts
 from engine.detectors.gamma_blast import detect_gamma_blast
 from engine.detectors.index_call_setup import detect_index_call_setup
 from engine.detectors.index_put_setup import detect_index_put_setup
+from engine.detectors.index_micro_scalp import detect_index_micro_scalp
 from engine.detectors.intraday_spark import detect_intraday_mover_sparks
 from engine.detectors.multibagger import detect_multibagger_breakouts, get_multibagger_universe
 from engine.detectors.opening_drive import detect_opening_drive
@@ -22,6 +23,10 @@ from engine.detectors.pre_inflection_dryup import detect_pre_inflection_dryup
 from engine.detectors.preopen_bias import detect_preopen_bias
 from engine.detectors.squeeze_breakout import detect_squeeze_breakout
 from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
+from engine.detectors.defined_risk_neutral import detect_defined_risk_neutral
+from engine.detectors.pairs_arbitrage import detect_pairs_arbitrage
+from engine.detectors.turtle_soup import detect_turtle_soup_sweep
+from engine.detectors.swing_inflection import detect_swing_inflection_setups
 
 from engine.detection_context import (
     BaseDetector,
@@ -42,6 +47,7 @@ __all__ = [
     "detect_gamma_blast",
     "detect_index_call_setup",
     "detect_index_put_setup",
+    "detect_index_micro_scalp",
     "detect_opening_drive",
     "detect_preopen_bias",
     "detect_squeeze_breakout",
@@ -60,4 +66,8 @@ __all__ = [
     "detect_order_flow_divergence",
     "OrderFlowDivergenceDetector",
     "detect_smc_orderblock_retest",
+    "detect_defined_risk_neutral",
+    "detect_pairs_arbitrage",
+    "detect_turtle_soup_sweep",
+    "detect_swing_inflection_setups",
 ]

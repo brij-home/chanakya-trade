@@ -125,7 +125,18 @@ class HBCMResult:
 def get_hbcm_constituents(underlying: str) -> list[dict[str, Any]]:
     """Return top 5 constituents configuration for the given index."""
     clean = underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
-    return HBCM_CONSTITUENTS.get(clean, HBCM_CONSTITUENTS.get("NIFTY", []))
+    clean_key = clean.replace("_", "").replace(" ", "")
+    if clean_key in ("NIFTY", "NIFTY50"):
+        return HBCM_CONSTITUENTS["NIFTY"]
+    elif clean_key in ("BANKNIFTY", "NIFTYBANK"):
+        return HBCM_CONSTITUENTS["BANKNIFTY"]
+    elif clean_key in ("FINNIFTY", "NIFTYFINSERVICE"):
+        return HBCM_CONSTITUENTS["FINNIFTY"]
+    elif clean_key in ("SENSEX", "BSESENSEX"):
+        return HBCM_CONSTITUENTS["SENSEX"]
+    elif clean_key in ("BANKEX", "BSEBANKEX"):
+        return HBCM_CONSTITUENTS["BANKEX"]
+    return HBCM_CONSTITUENTS.get(clean, [])
 
 
 def evaluate_hbcm(
@@ -195,7 +206,7 @@ def evaluate_hbcm(
     quotes_map: dict[str, Any] = {}
     if mock_quotes:
         quotes_map = mock_quotes
-    else:
+    elif not is_testing:
         try:
             from market.quotes import _QUOTE_CACHE, _quote_cache_lock, get_quote
 
@@ -211,7 +222,7 @@ def evaluate_hbcm(
                         needed_symbols.append(f"NSE:{s}")
 
             # If any missing from cache, fetch quote
-            if needed_symbols and not is_testing:
+            if needed_symbols:
                 live_q = get_quote(needed_symbols)
                 for s in symbols:
                     for k in (f"NSE:{s}", s):

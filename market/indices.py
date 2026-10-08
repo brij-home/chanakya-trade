@@ -130,6 +130,8 @@ class MarketSnapshot:
     posture_reason: str
     gift_nifty: Optional[object] = None  # GiftNiftySnapshot | None (#106)
     polarization: Optional[IndexPolarization] = None
+    finnifty: Optional[IndexSnapshot] = None
+    midcpnifty: Optional[IndexSnapshot] = None
 
 
 def get_index(name: str) -> IndexSnapshot:
@@ -172,6 +174,8 @@ def get_market_snapshot() -> MarketSnapshot:
         INDEX_INSTRUMENTS["BANKNIFTY"],
         INDEX_INSTRUMENTS["VIX"],
         INDEX_INSTRUMENTS["SENSEX"],
+        INDEX_INSTRUMENTS["FINNIFTY"],
+        INDEX_INSTRUMENTS["MIDCPNIFTY"],
     ]
     from market.quotes import get_quote
 
@@ -197,6 +201,8 @@ def get_market_snapshot() -> MarketSnapshot:
     banknifty = snap("BANKNIFTY")
     vix = snap("VIX")
     sensex = snap("SENSEX")
+    finnifty = snap("FINNIFTY")
+    midcpnifty = snap("MIDCPNIFTY")
 
     posture, reason = _market_posture(nifty, vix)
 
@@ -229,6 +235,8 @@ def get_market_snapshot() -> MarketSnapshot:
         posture_reason=reason,
         gift_nifty=gift_nifty,
         polarization=polarization,
+        finnifty=finnifty,
+        midcpnifty=midcpnifty,
     )
 
 
@@ -602,3 +610,121 @@ def get_heavyweights_posture(underlying: str) -> dict[str, Any]:
             "total_heavyweights": 0,
             "summary": "UNAVAILABLE",
         }
+
+
+def get_premarket_battle_plan(
+    indices: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """
+    Computes institutional Pre-Market Battle Plan for benchmark and major indices.
+    Calculates Virgin CPR (Pivot, BC, TC, width %), Camarilla Pivots (H4, H3, L3, L4),
+    and Previous Day Levels (PDH, PDL, PDC) with actionable trade blueprints.
+    Leverages centralized DailyLevelsStore for sub-millisecond in-memory retrieval and daily persistence.
+    """
+    from engine.daily_levels import get_daily_levels
+    from market.quotes import get_quote
+
+    target_indices = indices or ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
+    results: dict[str, Any] = {}
+
+    for name in target_indices:
+        clean_name = name.upper()
+        inst = INDEX_INSTRUMENTS.get(clean_name, f"NSE:{clean_name}")
+        dl = get_daily_levels(clean_name)
+
+        if dl:
+            quotes = get_quote([inst])
+            q = quotes.get(inst)
+            ltp = (
+                float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or dl.spot)
+                if q
+                else dl.spot
+            )
+
+            results[clean_name] = {
+                "symbol": clean_name,
+                "instrument": inst,
+                "spot": round(ltp, 1),
+                "pdh": dl.pdh,
+                "pdl": dl.pdl,
+                "pdc": dl.pdc,
+                "pdo": dl.pdo,
+                "atr_14": dl.atr_14,
+                "cpr": dl.cpr,
+                "camarilla": dl.camarilla,
+                "classic_pivots": dl.classic_pivots,
+                "weekly": dl.weekly,
+                "pre_open": dl.pre_open,
+                "blueprint": dl.blueprint,
+            }
+            continue
+
+        # Fallback if daily levels engine could not resolve
+        quotes = get_quote([inst])
+        q = quotes.get(inst)
+        ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0) if q else 0.0
+        prev_close = float(getattr(q, "close", 0.0) or 0.0) if q else 0.0
+        if ltp <= 0 and prev_close <= 0:
+            continue
+
+        pdh = round((getattr(q, "high", None) or ltp * 1.006), 1)
+        pdl = round((getattr(q, "low", None) or ltp * 0.994), 1)
+        pdc = round(prev_close or ltp, 1)
+
+        cpr_pivot = (pdh + pdl + pdc) / 3.0
+        cpr_bc = (pdh + pdl) / 2.0
+        cpr_tc = (cpr_pivot - cpr_bc) + cpr_pivot
+        cpr_top = max(cpr_tc, cpr_bc)
+        cpr_bottom = min(cpr_tc, cpr_bc)
+        cpr_width_pct = abs(cpr_tc - cpr_bc) / max(1.0, cpr_pivot) * 100.0
+
+        is_narrow = cpr_width_pct <= (
+            0.22 if clean_name in ("BANKNIFTY", "SENSEX", "BANKEX") else 0.15
+        )
+        is_wide = cpr_width_pct >= 0.35
+        regime = (
+            "NARROW_CPR (Trend Day Expected)"
+            if is_narrow
+            else ("WIDE_CPR (Range/Chop Expected)" if is_wide else "AVERAGE_CPR")
+        )
+
+        cam_range = pdh - pdl
+        cam_h4 = pdc + (cam_range * 1.1 / 2.0)
+        cam_h3 = pdc + (cam_range * 1.1 / 4.0)
+        cam_l3 = pdc - (cam_range * 1.1 / 4.0)
+        cam_l4 = pdc - (cam_range * 1.1 / 2.0)
+
+        results[clean_name] = {
+            "symbol": clean_name,
+            "instrument": inst,
+            "spot": round(ltp, 1),
+            "pdh": round(pdh, 1),
+            "pdl": round(pdl, 1),
+            "pdc": round(pdc, 1),
+            "cpr": {
+                "tc": round(cpr_tc, 1),
+                "pivot": round(cpr_pivot, 1),
+                "bc": round(cpr_bc, 1),
+                "cpr_top": round(cpr_top, 1),
+                "cpr_bottom": round(cpr_bottom, 1),
+                "cpr_width_pct": round(cpr_width_pct, 3),
+                "regime": regime,
+                "is_narrow": is_narrow,
+                "is_wide": is_wide,
+            },
+            "camarilla": {
+                "h4": round(cam_h4, 1),
+                "h3": round(cam_h3, 1),
+                "l3": round(cam_l3, 1),
+                "l4": round(cam_l4, 1),
+            },
+            "blueprint": {
+                "trend_long": f"Buy CE on 5m close above H4 (₹{cam_h4:,.1f})",
+                "trend_short": f"Buy PE on 5m close below L4 (₹{cam_l4:,.1f})",
+                "reversal_long": f"Buy CE on bullish rejection wick at L3/PDL (₹{cam_l3:,.1f} - ₹{pdl:,.1f}) with tight SL",
+                "reversal_short": f"Buy PE on bearish rejection wick at H3/PDH (₹{cam_h3:,.1f} - ₹{pdh:,.1f}) with tight SL",
+                "action_guidance": "Wait for spot to reach key boundary. Never chase in the middle between L3 and H3.",
+            },
+        }
+
+    return results
