@@ -45,11 +45,12 @@ _INDEX_UNDERLYINGS = {
     "NIFTYNXT50",
 }
 
-# Session state with thread lock and TTL
+# Session state with thread lock, TTL, and circuit breaker
 _session = None
 _session_created_at = 0.0
 _SESSION_TTL = 300.0  # 5 minutes
 _session_lock = threading.Lock()
+_circuit_broken_until = 0.0
 
 # Short in-memory cache for raw responses to prevent duplicate bursts
 _CACHE: dict[str, tuple[float, list[OptionsContract], Optional[float], list[str]]] = {}
@@ -69,8 +70,11 @@ def _get_session():
     if os.environ.get("CHANAKYA_TESTING") == "1" and os.environ.get("ALLOW_TEST_NETWORK") != "1":
         return None
 
-    global _session, _session_created_at
+    global _session, _session_created_at, _circuit_broken_until
     now = time.time()
+    if now < _circuit_broken_until:
+        return None
+
     with _session_lock:
         if _session is not None and (now - _session_created_at) < _SESSION_TTL:
             return _session
@@ -81,8 +85,8 @@ def _get_session():
 
             sess = c_requests.Session(impersonate="chrome124")
             sess.headers.update(_NSE_HEADERS)
-            # Warm up session with cookies from option-chain page
-            r = sess.get(f"{_NSE_BASE}/option-chain", timeout=10)
+            # Warm up session with cookies from option-chain page (fast 3.5s timeout)
+            r = sess.get(f"{_NSE_BASE}/option-chain", timeout=3.5)
             if r.status_code == 200:
                 sess.headers.update(
                     {
@@ -93,6 +97,10 @@ def _get_session():
                 _session = sess
                 _session_created_at = now
                 return _session
+            elif r.status_code in (403, 429):
+                _circuit_broken_until = now + 120.0
+                log.debug(f"[NseScraper] WAF status {r.status_code}. Circuit broken for 120s.")
+                return None
         except Exception as e:
             log.debug(f"curl_cffi session init failed, trying requests: {e}")
 
@@ -102,7 +110,7 @@ def _get_session():
         sess = requests.Session()
         sess.headers.update(_NSE_HEADERS)
         try:
-            r = sess.get(f"{_NSE_BASE}/option-chain", timeout=10)
+            r = sess.get(f"{_NSE_BASE}/option-chain", timeout=3.5)
             if r.status_code == 200:
                 sess.headers.update(
                     {
@@ -110,8 +118,15 @@ def _get_session():
                         "Accept": "application/json, text/plain, */*",
                     }
                 )
+                _session = sess
+                _session_created_at = now
+                return _session
+            elif r.status_code in (403, 429):
+                _circuit_broken_until = now + 120.0
+                return None
         except Exception:
-            pass
+            _circuit_broken_until = now + 60.0
+            return None
         _session = sess
         _session_created_at = now
         return _session
@@ -159,7 +174,7 @@ def nse_get_contract_info(underlying: str) -> dict:
         return {}
     url = f"{_NSE_BASE}/api/option-chain-contract-info?symbol={clean_sym}"
     try:
-        resp = session.get(url, timeout=10)
+        resp = session.get(url, timeout=3.5)
         if resp.status_code == 200:
             return resp.json()
     except Exception as e:
@@ -184,7 +199,7 @@ def _fetch_nse_chain(underlying: str, is_index: bool) -> dict:
     clean_sym = underlying.upper().replace("NSE:", "").replace("NFO:", "").strip()
     endpoint = "indices" if is_index else "equities"
     url = f"{_NSE_BASE}/api/option-chain-{endpoint}?symbol={clean_sym}"
-    resp = session.get(url, timeout=10)
+    resp = session.get(url, timeout=3.5)
     resp.raise_for_status()
     return resp.json()
 
@@ -330,7 +345,7 @@ def nse_fetch_full_snapshot(
             f"{_NSE_BASE}/api/option-chain-v3?"
             f"type={endpoint_type}&symbol={clean_sym}&expiry={selected_nse_exp}"
         )
-        resp = session.get(url, timeout=12)
+        resp = session.get(url, timeout=3.5)
         if resp.status_code != 200:
             _CACHE[cache_key] = (now, [], None, iso_expiries)
             return [], None, iso_expiries

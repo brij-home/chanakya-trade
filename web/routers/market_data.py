@@ -925,3 +925,51 @@ async def get_index_adaptive_regime_endpoint(symbol: Optional[str] = "NIFTY"):
         return {"status": "ok", "symbol": symbols[0], "regime": results[symbols[0]]}
     return {"status": "ok", "regimes": results}
 
+
+@router.get("/api/levels/daily", tags=["Market Levels"])
+async def get_daily_levels_all_endpoint(session_date: Optional[str] = None):
+    """
+    Returns all pre-computed and persisted daily reference levels (CPR, Camarilla, Classical, Weekly, Gap %)
+    for today's session. Sub-millisecond in-memory response.
+    """
+    from engine.daily_levels import daily_levels_store
+
+    levels_map = await asyncio.to_thread(daily_levels_store.get_all_for_today, session_date)
+    return {
+        "status": "ok",
+        "count": len(levels_map),
+        "levels": {sym: dl.to_dict() for sym, dl in levels_map.items()},
+    }
+
+
+@router.get("/api/levels/daily/{symbol}", tags=["Market Levels"])
+async def get_daily_levels_symbol_endpoint(symbol: str, session_date: Optional[str] = None):
+    """
+    Returns institutional daily reference levels for a specific symbol.
+    Includes CPR, Camarilla Pivots, Classical Pivots, Weekly High/Low, Pre-Market Gap %,
+    and Actionable Execution Blueprint.
+    """
+    from engine.daily_levels import daily_levels_store
+
+    clean = symbol.upper().strip()
+    dl = await asyncio.to_thread(daily_levels_store.get_levels, clean, session_date)
+    if not dl:
+        raise HTTPException(status_code=404, detail=f"Daily levels not found for {clean}")
+    return {"status": "ok", "symbol": clean, "levels": dl.to_dict()}
+
+
+@router.post("/api/levels/prime", tags=["Market Levels"])
+async def prime_daily_levels_endpoint(payload: Optional[dict] = None):
+    """
+    Primes and persists daily levels on demand for benchmark indices and watchlist symbols.
+    """
+    from engine.daily_levels import daily_levels_store
+
+    symbols = payload.get("symbols") if isinstance(payload, dict) else None
+    results = await asyncio.to_thread(daily_levels_store.prime_universe, symbols)
+    return {
+        "status": "ok",
+        "primed_count": len(results),
+        "symbols": list(results.keys()),
+    }
+

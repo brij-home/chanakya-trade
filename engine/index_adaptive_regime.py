@@ -603,7 +603,18 @@ def evaluate_tiger_mandate(
             action_guidance="Execute defined-risk vertical debit spread only (Bull Call / Bear Put Spread).",
         )
 
-    # Rule 4: Tiger Stalking & Capital Preservation Filter (Midday Lull or Severe Chop)
+    # Rule 4: Healthy Trending Phase (Overrides generic midday clock lull)
+    if eagle.chop_status == "TRENDING_EXPANSION" or eagle.adx_14 >= 24.0 or eagle.multi_tf.bias in ("BULLISH_ALIGNED", "BEARISH_ALIGNED"):
+        return TigerStrategyMandate(
+            mandate="MOMENTUM_EXPANSION",
+            allow_routine_breakouts=True,
+            allow_thrust_only=False,
+            suggested_strategy="BUY_MOMENTUM",
+            reason=f"Strong Trending Expansion (CHOP={eagle.chop_index:.1f}, ADX={eagle.adx_14:.1f}, Multi-TF={eagle.multi_tf.bias})",
+            action_guidance="Eagle Eye confirms directional impulse. Execute on OTE pullback with asymmetric targets.",
+        )
+
+    # Rule 5: Tiger Stalking & Capital Preservation Filter (Midday Lull or Severe Chop)
     is_severe_chop = eagle.chop_index >= 58.0 or eagle.adx_14 < 18.0
     if eagle.is_midday_chop_window or is_severe_chop:
         reason_parts = []
@@ -628,17 +639,6 @@ def evaluate_tiger_mandate(
                 "Routine breakout entries suspended to prevent whipsaw bleeding. "
                 "Wait patiently for verified institutional expansion thrust or range boundary sweep."
             ),
-        )
-
-    # Rule 5: Healthy Trending Phase
-    if eagle.chop_status == "TRENDING_EXPANSION" or eagle.adx_14 >= 24.0:
-        return TigerStrategyMandate(
-            mandate="MOMENTUM_EXPANSION",
-            allow_routine_breakouts=True,
-            allow_thrust_only=False,
-            suggested_strategy="BUY_MOMENTUM",
-            reason=f"Strong Trending Expansion (CHOP={eagle.chop_index:.1f}, ADX={eagle.adx_14:.1f})",
-            action_guidance="Eagle Eye confirms directional impulse. Execute on OTE pullback with asymmetric targets.",
         )
 
     # Rule 6: Normal Adaptive Mode

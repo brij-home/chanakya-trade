@@ -80,6 +80,14 @@ def detect_index_micro_scalp(
     if not is_test_runner and not ignore_time_gate:
         if curr_time < dtime(9, 18) or curr_time > dtime(15, 15):
             return []
+        # Midday Chop Gate (11:15 - 13:15 IST):
+        # 1-minute and 3-minute option breakouts during midday consolidation suffer high failure rates and theta bleed.
+        if dtime(11, 15) <= curr_time <= dtime(13, 15):
+            logger.debug(
+                f"[IndexMicroScalp] Midday chop window active (11:15-13:15 IST) for {clean_sym}. "
+                f"1m micro-scalps prohibited to avoid theta bleed."
+            )
+            return []
 
     is_bse = clean_sym in ("SENSEX", "BANKEX")
     opt_exchange = "BFO" if is_bse else "NFO"

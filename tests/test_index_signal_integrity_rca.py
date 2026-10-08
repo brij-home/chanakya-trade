@@ -340,13 +340,22 @@ def test_spot_coordinate_not_overwritten_by_contract_quote():
     assert alert.underlying_spot == 22650.0, "underlying_spot must NOT be corrupted by option premium quote"
 
 
-# ── 7. Winnability Upgrade Stability Window ───────────────────────────────────
-def test_winnability_upgrade_stability_window():
-    """An active premier index trade cannot be unseated within 15 minutes by an incremental 2-point score difference."""
+# ── 7. Zero Superseding & High-Quality Concurrent Sharing ─────────────────────
+def test_zero_superseding_and_high_quality_concurrent_sharing():
+    """
+    Institutional Invariant:
+    1. ZERO SUPERSEDING: Active index trades run their full lifecycle and are never
+       marked SUPERSEDED or prematurely killed by incoming alerts.
+    2. HIGH QUALITY SHARING: Additional forming index setups meeting high institutional standards
+       (confidence >= 80%, R:R >= 2.0, coherent direction) are shared with traders alongside active trades.
+    3. LOW QUALITY SUPPRESSION: Weaker secondary setups (<80% conf or <2.0 R:R) are suppressed.
+    4. MULTI-INDEX COHERENCE: Opposing directional setups across correlated benchmarks (Nifty vs BankNifty vs FinNifty)
+       are strictly suppressed to avoid whipsaw traps unless a structural reversal (CHoCH) is confirmed.
+    """
     engine = AutoAlertEngine()
     engine._alerts.clear()
 
-    # Active NIFTY trade with winnability score ~80 created 5 minutes ago
+    # Active NIFTY trade running in IGNITED stage
     active_nifty = AutoAlert(
         alert_id="aa-index-put-setup-nifty-pe-22650-20261007",
         alert_type="INDEX_PUT_SETUP",
@@ -366,7 +375,7 @@ def test_winnability_upgrade_stability_window():
     )
     engine._alerts.append(active_nifty)
 
-    # Incoming BANKNIFTY alert with marginally higher score (84 vs 82)
+    # 1. Incoming high-quality BANKNIFTY alert (confidence=84 >= 80%, R:R = (950-730)/(730-620) = 2.0 >= 2.0)
     incoming_bn = AutoAlert(
         alert_id="aa-index-put-setup-banknifty-pe-54800-20261007",
         alert_type="INDEX_PUT_SETUP",
@@ -384,8 +393,49 @@ def test_winnability_upgrade_stability_window():
         metrics={"vol_oi_ratio": 1.6, "delta": -0.55},
     )
 
-    accepted = engine.record_alert(incoming_bn)
-    # The active trade is within its 15-minute stability window (5m old).
-    # Incoming score is only marginally higher, so it must NOT unseat the active Nifty trade!
-    assert active_nifty.stage == "IGNITED", "Active trade must remain IGNITED and not superseded"
-    assert accepted is False, "Incremental trade within 15m stability window must be suppressed"
+    accepted_bn = engine.record_alert(incoming_bn)
+    # ZERO SUPERSEDING: Active NIFTY trade must NOT be killed or marked SUPERSEDED!
+    assert active_nifty.stage == "IGNITED", "Active trade must remain IGNITED and never superseded"
+    assert getattr(active_nifty, "target_status", "") != "SUPERSEDED", "Active trade must NOT be SUPERSEDED"
+    # HIGH QUALITY SHARING: High-quality concurrent signal is approved and shared with traders!
+    assert accepted_bn is True, "High-quality concurrent index signal must be shared with traders"
+
+    # 2. Secondary weak setup (confidence=72% < 80%, R:R=1.5 < 2.0) must be suppressed
+    weak_bn = AutoAlert(
+        alert_id="aa-index-put-setup-midcpnifty-pe-13100-20261007",
+        alert_type="INDEX_PUT_SETUP",
+        stage="IGNITED",
+        symbol="MIDCPNIFTY",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="MidcpNifty Trade",
+        summary="Weak secondary PE",
+        ltp=80.0,
+        trigger_level=80.0,
+        target_level=95.0,  # reward = 15
+        stop_loss=70.0,     # risk = 10 -> R:R = 1.5 < 2.0
+        confidence=72,      # conf < 80
+        metrics={"vol_oi_ratio": 1.1},
+    )
+    assert engine.record_alert(weak_bn) is False, "Substandard secondary signal (<80% conf, <2.0 R:R) must be suppressed"
+
+    # 3. Inter-Index Directional Whipsaw (FINNIFTY CALL while NIFTY PE is active) must be suppressed
+    conflicting_finnifty = AutoAlert(
+        alert_id="aa-index-call-setup-finnifty-ce-24400-20261007",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="FINNIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="FinNifty Call",
+        summary="Conflicting CE signal",
+        ltp=110.0,
+        trigger_level=110.0,
+        target_level=180.0,
+        stop_loss=75.0,
+        confidence=85,
+        metrics={"vol_oi_ratio": 2.1},  # No CHoCH / reversal metric!
+    )
+    assert engine.record_alert(conflicting_finnifty) is False, (
+        "Multi-Index Coherence Guard must suppress conflicting BULLISH call while benchmark PE is active without reversal"
+    )

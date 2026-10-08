@@ -23,6 +23,7 @@ logger = logging.getLogger("chanakya.detectors.crypto")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 DEFAULT_CRYPTO = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"]
+_CRYPTO_VOL_ARB_COOLDOWN: dict[str, float] = {}
 
 
 @dataclass
@@ -1354,6 +1355,11 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
             rv_30d = float(opt_sum.get("realized_volatility_30d_pct", 50.0) or 50.0)
 
             if vol_regime in ("VOLATILITY_OVERPRICED_IV_RICH", "VOLATILITY_UNDERPRICED_IV_CHEAP"):
+                import time as _t
+                _cd_key = f"{clean_sym}:{vol_regime}"
+                if (_t.time() - _CRYPTO_VOL_ARB_COOLDOWN.get(_cd_key, 0.0)) < 300.0:
+                    return found
+                _CRYPTO_VOL_ARB_COOLDOWN[_cd_key] = _t.time()
                 is_iv_rich = vol_regime == "VOLATILITY_OVERPRICED_IV_RICH"
                 alert_id = generate_alert_id(
                     clean_sym,
@@ -1368,6 +1374,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     )
                     action = "SELL_VOLATILITY / CREDIT_SPREADS"
                     conf = f"Deribit ATM IV ({atm_iv:.1f}%) vs 30d RV ({rv_30d:.1f}%) Rich Spread (+{vol_spread:.1f}%)"
+                    sl_val = round(ltp * 1.045, 2)
+                    tgt_1 = round(ltp * 0.96, 2)
+                    tgt_2 = round(ltp * 0.93, 2)
                 else:
                     headline = f"🎯 DERIBIT VOL ARBITRAGE: {clean_sym} IV Underpriced ({vol_spread:.1f}% vs 30d RV)"
                     summary = (
@@ -1376,6 +1385,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     )
                     action = "BUY_VOLATILITY / STRADDLES"
                     conf = f"Deribit ATM IV ({atm_iv:.1f}%) vs 30d RV ({rv_30d:.1f}%) Cheap Spread ({vol_spread:.1f}%)"
+                    sl_val = round(ltp * 0.955, 2)
+                    tgt_1 = round(ltp * 1.06, 2)
+                    tgt_2 = round(ltp * 1.12, 2)
 
                 alert = AutoAlert(
                     alert_id=alert_id,
@@ -1391,8 +1403,8 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     summary=summary,
                     ltp=ltp,
                     trigger_level=ltp,
-                    target_level=ltp,
-                    stop_loss=0.0,
+                    target_level=tgt_1,
+                    stop_loss=sl_val,
                     confidence=88,
                     created_at=now_iso,
                     is_live=True,
@@ -1412,9 +1424,11 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                         "segment": "CRYPTO",
                         "contract": f"CRYPTO:{clean_sym}",
                         "entry_range": f"${round(ltp * 0.995, 2):,.2f} – ${round(ltp * 1.005, 2):,.2f}",
-                        "stop_loss": "N/A (Options Volatility Spread)",
-                        "target": "Vega / Theta Convergence",
-                        "risk_reward": "Volatility Arbitrage",
+                        "stop_loss": f"${sl_val:,.2f}",
+                        "target": f"${tgt_1:,.2f}",
+                        "target_1": f"${tgt_1:,.2f}",
+                        "target_2": f"${tgt_2:,.2f}",
+                        "risk_reward": "1:2.0 Volatility Spread",
                         "when_to_buy": "Execute defined-risk options spreads on Deribit or Delta Exchange.",
                         "when_to_wait": "Do not trade unhedged naked short gamma.",
                         "no_chase_boundary": round(ltp * 1.01, 2),
@@ -1425,9 +1439,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                             "direction": "VOLATILITY",
                             "timeframe": "SWING_OPTIONS",
                             "entry_price": ltp,
-                            "invalidation_stop": 0.0,
-                            "target_1": ltp,
-                            "target_2": ltp,
+                            "invalidation_stop": sl_val,
+                            "target_1": tgt_1,
+                            "target_2": tgt_2,
                             "risk_reward": "Vol-Arbitrage",
                         },
                     },

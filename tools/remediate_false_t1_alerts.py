@@ -39,13 +39,23 @@ def remediate_alerts():
         is_long = direction in ("BULLISH", "LONG", "BUY")
         ltp = float(a.get("ltp") or a.get("current_ltp") or 0.0)
         t1 = float(a.get("target_1") or (a.get("actionable_plan") or {}).get("target_1") or 0.0)
+        entry_p = float(a.get("entry_price") or 0.0)
 
         # Check physical reach
+        is_downward = (t1 < entry_p) if (entry_p > 0 and t1 > 0) else False
+        if not entry_p and not is_long:
+            is_opt = bool(
+                a.get("option_type")
+                or "PE" in str(a.get("contract_symbol") or "")
+                or "CE" in str(a.get("contract_symbol") or "")
+            )
+            is_downward = not is_opt
+
         hit_t1 = False
         if t1 > 0 and ltp > 0:
-            if is_long and ltp >= t1:
+            if not is_downward and ltp >= t1 * 0.998:
                 hit_t1 = True
-            elif not is_long and ltp <= t1:
+            elif is_downward and ltp <= t1 * 1.002:
                 hit_t1 = True
 
         if hit_t1:

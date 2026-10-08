@@ -1444,6 +1444,10 @@ def detect_index_put_setup(
                 is_institutional_thrust
                 or is_liq_sweep
                 or "LONG_UNWINDING_FLUSH" in signals
+                or "DAY_LOW_BREAKDOWN" in signals
+                or "INTRADAY_CAPITULATION_TOP" in signals
+                or "DOUBLE_TOP_BREAKDOWN" in signals
+                or "VWAP_BREAKDOWN" in signals
             )
             if not has_qualifying_setup and all(s in routine_setups for s in signals):
                 logger.info(
@@ -2178,6 +2182,7 @@ def detect_index_put_setup(
             "oi_change": oi_change,
             "volume": volume,
             "vol_oi_ratio": vol_oi_ratio,
+            "rvol": max(float(vol_oi_ratio or 1.0), 1.0),
             "spot": spot,
             "vwap": effective_vwap,
             "spot_to_vwap_pct": round(

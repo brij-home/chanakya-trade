@@ -4,7 +4,6 @@ Verifies that no target milestone (T0.5, T1, T2, Final Target) can EVER be decla
 unless the current market price (LTP) has physically crossed the target price level.
 """
 
-import pytest
 from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 from engine.alert_evaluator import (
     TargetTrailingEvaluation,
@@ -191,3 +190,80 @@ def test_dispatch_gate_rectifies_corrupted_alert():
     assert corrupted_alert.stage != "T1_ACHIEVED", "Corrupted stage was not rectified by _dispatch!"
     assert corrupted_alert.stage == "T0_5_ACHIEVED"
     assert "T1_ACHIEVED" not in corrupted_alert.achieved_milestones
+
+
+def test_option_put_buyer_milestone_integrity_payoff_direction():
+    """
+    RCA Regression Test: Verify Put Option Buyer setup requires price expansion (upward payoff)
+    to achieve T1, even though market direction is BEARISH.
+    Prevents false T1 achievements when LTP is below T1.
+    """
+    engine = AutoAlertEngine()
+    put_alert = AutoAlert(
+        alert_id="aa-gamma-blast-nifty-pe-22250-20261008",
+        alert_type="GAMMA_BLAST",
+        stage="DE_RISK_0_5R",
+        target_status="PENDING",
+        symbol="NIFTY",
+        contract_symbol="NSE:NIFTY26OCT22250PE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 22250 PE Gamma Blast",
+        summary="Put setup activated",
+        ltp=96.55,
+        trigger_level=90.45,
+        stop_loss=79.76,
+        target_level=121.50,
+        confidence=98,
+        segment="FNO_INDEX",
+        strike=22250.0,
+        option_type="PE",
+        actionable_plan={
+            "action": "BUY",
+            "strike": 22250.0,
+            "option_type": "PE",
+            "recommended_entry": "₹90.45",
+            "target_1": "₹106.94",
+            "target_2": "₹121.50",
+            "target_0_5": "₹99.50",
+            "initial_invalidation_stop": "₹79.76",
+        },
+    )
+
+    # 1. At CMP ₹96.55 (+0.57R, deficit ₹10.39 to T1), T1 MUST FAIL CLOSED!
+    is_valid, veto_reason = engine.validate_milestone_integrity(put_alert, cur_quote_ltp=96.55, milestone="T1_ACHIEVED")
+    assert is_valid is False
+    assert "below Target 1" in veto_reason
+
+    is_t1_sat, _ = engine.validate_milestone_integrity_for_target(put_alert, "T1")
+    assert is_t1_sat is False
+
+    # 2. Template renderers MUST NOT render T1 HIT at ₹96.55
+    from bot.free_index_templates import render_free_index_alert
+    from bot.alert_templates import render_auto_alert
+
+    free_msg = render_free_index_alert(put_alert, in_market=True)
+    assert "T1 HIT" not in free_msg
+    assert "hit T1" not in free_msg
+    assert "96.55" in free_msg
+
+    # Even if stage was falsely set to T1_ACHIEVED:
+    put_alert.stage = "T1_ACHIEVED"
+    put_alert.target_status = "T1"
+    free_msg_vetoed = render_free_index_alert(put_alert, in_market=True)
+    assert "T1 HIT" not in free_msg_vetoed
+    assert "hit T1" not in free_msg_vetoed
+
+    main_msg_vetoed = render_auto_alert(put_alert, in_market=True)
+    assert "TARGET 1 ACHIEVED" not in main_msg_vetoed
+    assert "TARGET 1 HIT" not in main_msg_vetoed
+
+    # 3. When price physically reaches or crosses Target 1 (e.g. ₹107.00 >= ₹106.94), T1 MUST pass!
+    put_alert.ltp = 107.00
+    is_valid_t1, _ = engine.validate_milestone_integrity(put_alert, cur_quote_ltp=107.00, milestone="T1_ACHIEVED")
+    assert is_valid_t1 is True
+
+    free_msg_passed = render_free_index_alert(put_alert, in_market=True)
+    assert "T1 HIT" in free_msg_passed
+    assert "hit T1" in free_msg_passed
+

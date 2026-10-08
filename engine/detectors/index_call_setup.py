@@ -1421,6 +1421,10 @@ def detect_index_call_setup(
                 is_institutional_thrust
                 or is_liq_sweep
                 or "SHORT_SQUEEZE_UNWIND" in signals
+                or "DAY_HIGH_BREAKOUT" in signals
+                or "INTRADAY_CAPITULATION_BOTTOM" in signals
+                or "DOUBLE_BOTTOM_BREAKOUT" in signals
+                or "VWAP_RECLAIM" in signals
             )
             # If signals only contain routine setups and no qualifying setup exists:
             if not has_qualifying_setup and all(s in routine_setups for s in signals):
@@ -2148,6 +2152,7 @@ def detect_index_call_setup(
             "oi_change": oi_change,
             "volume": volume,
             "vol_oi_ratio": vol_oi_ratio,
+            "rvol": max(float(vol_oi_ratio or 1.0), 1.0),
             "spot": spot,
             "vwap": effective_vwap,
             "spot_to_vwap_pct": round(

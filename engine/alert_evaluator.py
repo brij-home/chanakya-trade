@@ -75,27 +75,6 @@ def evaluate_alert_invalidation(
                 cutoff_time = "23:15" if exch == "MCX" else "15:15"
                 return f"Intraday session expired ({cutoff_time} IST cutoff reached). Trade closed."
 
-        # 0b. Time-Stop for unignited EARLY_WARNING setups
-        if getattr(alert, "stage", "") == "EARLY_WARNING":
-            elapsed_sec = (now_ist - created_dt).total_seconds()
-            if th == "INTRADAY":
-                default_ttl = 3600
-            elif th == "SWING_SHORT":
-                default_ttl = 86400 * 10
-            elif th in ("SWING_MID", "SWING"):
-                default_ttl = 86400 * 25
-            elif th == "POSITIONAL":
-                default_ttl = 86400 * 60
-            elif th in ("MULTIBAGGER", "LONG_TERM"):
-                default_ttl = 86400 * 180
-            else:
-                default_ttl = 86400 * 14
-            ttl_sec = getattr(alert, "ttl_seconds", None) or default_ttl
-            if elapsed_sec >= ttl_sec:
-                days = int(ttl_sec / 86400)
-                mins = int(ttl_sec / 60)
-                dur_str = f"{days}-day" if days >= 1 else f"{mins}-minute"
-                return f"Time-Stop expired: Setup did not trigger within {dur_str} momentum window."
 
     is_option = is_alert_option_premium_level(alert)
 
@@ -144,6 +123,69 @@ def evaluate_alert_invalidation(
                 return None
         except Exception:
             pass
+
+    # 0b. Time-Stop for unignited EARLY_WARNING setups (Requires live market quote due diligence)
+    if (
+        (not is_test_runner or getattr(alert, "_force_test_expiry", False))
+        and created_dt
+        and getattr(alert, "stage", "") in ("EARLY_WARNING", "STALK", "PRIMED")
+    ):
+        now_ist = datetime.now(IST)
+        elapsed_sec = (now_ist - created_dt).total_seconds()
+        th = (getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY").upper()
+        if th == "INTRADAY":
+            default_ttl = 3600
+        elif th == "SWING_SHORT":
+            default_ttl = 86400 * 10
+        elif th in ("SWING_MID", "SWING"):
+            default_ttl = 86400 * 25
+        elif th == "POSITIONAL":
+            default_ttl = 86400 * 60
+        elif th in ("MULTIBAGGER", "LONG_TERM"):
+            default_ttl = 86400 * 180
+        else:
+            default_ttl = 86400 * 14
+        ttl_sec = getattr(alert, "ttl_seconds", None) or default_ttl
+
+        if elapsed_sec >= ttl_sec:
+            # Due Diligence: Verify whether the setup actually triggered or hit targets during the session
+            trigger_p = float(getattr(alert, "trigger_level", 0.0) or getattr(alert, "entry_price", 0.0) or 0.0)
+            target_1_p = float(getattr(alert, "target_1", 0.0) or getattr(alert, "target_level", 0.0) or 0.0)
+
+            act = str((getattr(alert, "actionable_plan", None) or {}).get("action", "")).upper()
+            is_opt_sell = act in ("SELL", "WRITE", "SHORT")
+            if is_option:
+                is_payoff_up = not is_opt_sell
+            else:
+                is_payoff_up = (alert.direction or "BULLISH").upper() == "BULLISH"
+
+            # Check if setup triggered or hit targets
+            triggered = False
+            if trigger_p > 0:
+                if is_payoff_up:
+                    triggered = (current_ltp >= trigger_p) or (session_high is not None and session_high >= trigger_p)
+                else:
+                    triggered = (current_ltp <= trigger_p) or (session_low is not None and session_low <= trigger_p)
+
+            target_hit = False
+            if target_1_p > 0:
+                if is_payoff_up:
+                    target_hit = (current_ltp >= target_1_p) or (session_high is not None and session_high >= target_1_p)
+                else:
+                    target_hit = (current_ltp <= target_1_p) or (session_low is not None and session_low <= target_1_p)
+
+            if triggered or target_hit:
+                logger.info(
+                    f"[AlertEvaluator] Prevented false Time-Stop expiry for {alert.symbol} ({alert.alert_id}): "
+                    f"Setup triggered (LTP={current_ltp}, High={session_high}, Low={session_low}, Trigger={trigger_p}, T1={target_1_p}). "
+                    f"Allowing tracking engine to advance stage."
+                )
+                return None
+
+            days = int(ttl_sec / 86400)
+            mins = int(ttl_sec / 60)
+            dur_str = f"{days}-day" if days >= 1 else f"{mins}-minute"
+            return f"Time-Stop expired: Setup did not trigger within {dur_str} momentum window."
 
     # 1. Stop-Loss Invalidation
     if alert.stop_loss and alert.stop_loss > 0:
@@ -343,8 +385,10 @@ def evaluate_alert_invalidation(
                                 else "Profit secured."
                             )
                         elif has_hit_target:
+                            has_t1 = "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or []) or getattr(alert, "target_status", "") in ("T1_ACHIEVED", "TARGET_1")
+                            t_prefix = "T1 profit" if has_t1 else "Profit"
                             tgt_note = (
-                                "Profit banked earlier; runner stopped at scratch/breakeven."
+                                f"{t_prefix} banked earlier; runner stopped at scratch/breakeven."
                             )
                         else:
                             tgt_note = "Runner stopped out at breakeven (capital protected)."
@@ -1756,9 +1800,12 @@ def evaluate_alert_targets_and_trailing(
         and not is_spread
         and "TIME_STOP_SCRATCH" not in achieved
         and "T0_5_ACHIEVED" not in achieved
+        and "DE_RISK_0_5R" not in achieved
+        and "BREAKEVEN_LOCKED" not in achieved
         and "T1_ACHIEVED" not in achieved
         and "T2_ACHIEVED" not in achieved
         and "TARGET_ACHIEVED" not in achieved
+        and getattr(alert, "stage", "") not in ("DE_RISK_0_5R", "BREAKEVEN_LOCKED", "T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED")
         and r_multiple < 0.40
         and pnl_pct < 5.0
     ):

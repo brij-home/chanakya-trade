@@ -738,6 +738,8 @@ class MarketTickerStream:
                         self.refresh_indices_sync(force_ribbon=need_ribbon)
                 except Exception as e:
                     logger.warning(f"[TickerStream] Refresh worker error: {e}", exc_info=True)
+                    if "interpreter shutdown" in str(e).lower() or "cannot schedule new futures" in str(e).lower():
+                        break
                 for _ in range(max(1, int(poll_interval_seconds * 10))):
                     if not self._running:
                         break

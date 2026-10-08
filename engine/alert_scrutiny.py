@@ -334,14 +334,90 @@ class AlertScrutinyAuditor:
             regime = classify_market_regime()
             rvol_val = 1.0
             metrics_d = getattr(alert, "metrics", {}) or {}
+            has_sweep = False
             if isinstance(metrics_d, dict):
                 rvol_val = float(metrics_d.get("rvol") or metrics_d.get("rvol_val") or 1.0)
-            is_elig, supp_reason = is_detector_eligible_for_regime(atype, regime, rvol=rvol_val)
+                signals = metrics_d.get("signals") or []
+                _SMC_STRUCTURAL_SIGNALS = {
+                    "PDL_DEMAND_REJECTION",
+                    "PDH_SUPPLY_REJECTION",
+                    "DAY_HIGH_SUPPLY_REJECTION",
+                    "DAY_LOW_DEMAND_BOUNCE",
+                    "INTRADAY_CAPITULATION_TOP",
+                    "INTRADAY_CAPITULATION_BOTTOM",
+                    "DOUBLE_TOP_BREAKDOWN",
+                    "DOUBLE_BOTTOM_BREAKOUT",
+                    "VWAP_BREAKDOWN",
+                    "VWAP_RECLAIM",
+                    "VWAP_REJECTION",
+                    "VWAP_BOUNCE",
+                    "DAY_LOW_BREAKDOWN",
+                    "DAY_HIGH_BREAKOUT",
+                    "INSTITUTIONAL_EXPANSION_BREAKDOWN",
+                    "INSTITUTIONAL_EXPANSION_BREAKOUT",
+                    "TREND_PULLBACK_REJECTION",
+                    "TREND_PULLBACK_BOUNCE",
+                    "BEARISH_OB_CONFLUENCE",
+                    "BULLISH_OB_CONFLUENCE",
+                    "SUPPLY_ZONE_SWEEP",
+                    "DEMAND_ZONE_SWEEP",
+                    "TURTLE_SOUP_SWEEP",
+                    "SMC_SWEEP",
+                    "SMC_OB_RETEST",
+                }
+                has_sweep = bool(
+                    metrics_d.get("pdl_sweep")
+                    or metrics_d.get("pdh_sweep")
+                    or metrics_d.get("is_institutional_thrust")
+                    or any(s in _SMC_STRUCTURAL_SIGNALS for s in signals)
+                )
+            is_elig, supp_reason = is_detector_eligible_for_regime(
+                atype, regime, rvol=rvol_val, has_structural_sweep=has_sweep
+            )
             if not is_elig:
                 flags["risk_within_bounds"] = False
                 return False, supp_reason, flags
-        except Exception:
-            pass
+        except Exception as e_rg:
+            logger.debug(f"[AlertScrutiny] Regime check error: {e_rg}")
+
+        # 3d. Index Benchmark Intraday VWAP Direction Sanity Gate
+        # Prevent taking Bullish setups when spot is trapped below VWAP, or Bearish setups when spot is riding above VWAP
+        if clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
+            metrics_d = getattr(alert, "metrics", {}) or {}
+            u_spot = float(
+                getattr(alert, "underlying_spot", 0.0)
+                or (metrics_d.get("spot") if isinstance(metrics_d, dict) else 0.0)
+                or 0.0
+            )
+            u_vwap = float(
+                (metrics_d.get("vwap") if isinstance(metrics_d, dict) else 0.0)
+                or (getattr(alert, "vwap", 0.0) or 0.0)
+            )
+            if u_spot > 0 and u_vwap > 0:
+                is_rev = bool(
+                    isinstance(metrics_d, dict)
+                    and (
+                        metrics_d.get("pdl_sweep")
+                        or metrics_d.get("pdh_sweep")
+                        or metrics_d.get("choch")
+                        or metrics_d.get("mss")
+                        or metrics_d.get("v_bottom")
+                    )
+                )
+                if direction in ("BULLISH", "LONG", "BUY") and u_spot < (u_vwap * 0.998) and not is_rev:
+                    flags["level_coherence"] = False
+                    return (
+                        False,
+                        f"Anti-Trend VWAP Trap: Bullish index signal while spot (Rs.{u_spot:,.1f}) is trapped below intraday VWAP (Rs.{u_vwap:,.1f}) without structural reversal.",
+                        flags,
+                    )
+                elif direction in ("BEARISH", "SHORT", "SELL") and u_spot > (u_vwap * 1.002) and not is_rev:
+                    flags["level_coherence"] = False
+                    return (
+                        False,
+                        f"Anti-Trend VWAP Trap: Bearish index signal while spot (Rs.{u_spot:,.1f}) is trading above intraday VWAP (Rs.{u_vwap:,.1f}) without structural rejection.",
+                        flags,
+                    )
 
         flags["risk_within_bounds"] = True
 
@@ -2959,8 +3035,58 @@ Respond STRICTLY in valid JSON:
         setup_style = getattr(alert, "setup_style", "CONTINUATION")
         anchored = getattr(alert, "anchored_levels", {}) or {}
 
-        # ── Standard Equity / Derivative Prompt ───────────────────────────────
-        return f"""You are the Chief Risk Officer and Devil's Advocate for an institutional quant trading desk.
+        # ── Unified Floor Council Deterministic Feature Extraction (0 Tokens) ──
+        # 1. Macro & Regime Vector
+        regime_ctx = "NORMAL"
+        try:
+            from analysis.regime_governor import classify_market_regime
+
+            r_obj = classify_market_regime()
+            regime_ctx = f"{r_obj.regime} (India VIX {r_obj.vix:.1f}, Trend {r_obj.trend_score:.1f})"
+        except Exception:
+            pass
+
+        # 2. SMC & Market Structure Vector
+        smc_features = []
+        if isinstance(metrics, dict):
+            if metrics.get("pdh_sweep"):
+                smc_features.append("PDH_LIQUIDITY_SWEEP")
+            if metrics.get("pdl_sweep"):
+                smc_features.append("PDL_LIQUIDITY_SWEEP")
+            if metrics.get("choch"):
+                smc_features.append("CHOCH_REVERSAL")
+            if metrics.get("mss"):
+                smc_features.append("MSS_STRUCTURE_SHIFT")
+            if metrics.get("order_block"):
+                smc_features.append(f"OB: {metrics['order_block']}")
+            if metrics.get("fvg"):
+                smc_features.append("FAIR_VALUE_GAP")
+        smc_summary = (
+            ", ".join(smc_features) if smc_features else "Standard Price Action / VWAP Expansion"
+        )
+
+        # 3. Derivatives & Volatility Architecture Vector
+        is_opt = bool(opt_type or contract or "OPTION" in alert_type or "GAMMA" in alert_type)
+        if is_opt:
+            mandate = (
+                "DEFINED_RISK_SPREAD_MANDATED"
+                if (
+                    "SPREAD" in str(act_plan.get("preferred_vehicle", "")).upper()
+                    or "CHOP" in regime_ctx
+                )
+                else "NAKED_OPTION_PERMITTED"
+            )
+            ivp = metrics.get("iv_percentile") or metrics.get("iv") or "N/A"
+            delta = metrics.get("delta") or "N/A"
+            deriv_summary = f"Structure: {mandate} | Delta: {delta} | IV: {ivp}"
+        else:
+            deriv_summary = "Cash Equity / Futures Order Flow"
+
+        # 4. Floor Risk & Asymmetry Vector
+        risk_summary = f"Payoff R:R {rr_str} | Invalidation Distance: ₹{risk_pts:,.2f} ({((risk_pts / ltp) * 100.0) if ltp > 0 else 0.0:.2f}%)"
+
+        # ── Unified Floor Council Scrutiny Prompt ─────────────────────────────
+        return f"""You are the Unified Floor Council (Chief Risk Officer, SMC Liquidity Hunter, and Derivatives Architect) at an institutional quant trading desk.
 Perform a strict pre-dispatch scrutiny of this real-time Indian market trade setup:
 
 SYMBOL: {sym} | CONTRACT: {contract or sym} | ACTION: {trade_desc} | DIRECTION: {direction} | TYPE: {alert_type}
@@ -2968,21 +3094,25 @@ HORIZON: {time_horizon} | SETUP STYLE: {setup_style}
 LTP / PREMIUM: ₹{ltp:,.2f} | STOP LOSS: ₹{sl:,.2f} | TARGET 1: ₹{t1:,.2f} | R:R: {rr_str}
 HEADLINE: {headline}
 SUMMARY: {summary}
-KEY ANCHORS: {json.dumps(anchored, default=str) if anchored else "Standard Pivots"}
-METRICS: {json.dumps(metrics, default=str)[:300]}
 
-Perform 3 Institutional Scrutiny Tests:
-1. SANCTITY & LOGIC: Does the technical/derivative trigger represent genuine institutional order flow rather than retail noise?
-2. DEVIL'S ADVOCATE: What is the #1 structural trap or failure mode? (e.g., immediate 200-EMA, heavy Call wall, post-spike exhaustion).
+PRE-COMPUTED FLOOR DOSSIER:
+• REGIME CONTEXT: {regime_ctx}
+• SMC LIQUIDITY & STRUCTURE: {smc_summary}
+• DERIVATIVES ARCHITECTURE: {deriv_summary}
+• RISK ASYMMETRY: {risk_summary}
+
+Perform 3 Institutional Council Tests:
+1. ORDER FLOW & TRAP CHECK: Does this setup represent genuine institutional expansion, or a retail trap into supply/demand?
+2. DEVIL'S ADVOCATE & VEHICLE: Identify the #1 failure mode (e.g. overhead supply, midday theta bleed). Specify whether execution should be naked or defined-risk spread.
 3. VERDICT: "APPROVED" (Score >= 75), "CONDITIONAL" (Score 70-74), or "REJECTED" (Score < 70).
 
 Respond STRICTLY in valid JSON matching this schema:
 {{
   "verdict": "APPROVED" | "CONDITIONAL" | "REJECTED",
   "score": <integer 40-95>,
-  "logic_confirmation": "<one crisp institutional sentence explaining why the setup has statistical edge>",
-  "trap_risk_warning": "<one crisp sentence highlighting the #1 Devil's Advocate trap to watch>",
-  "actionable_guidance": "<one crisp sentence on precise execution and trailing stop discipline>"
+  "logic_confirmation": "<one crisp institutional sentence explaining why the setup has statistical and order-flow edge>",
+  "trap_risk_warning": "<one crisp sentence highlighting the #1 Devil's Advocate trap or failure mode to watch>",
+  "actionable_guidance": "<one crisp sentence on precise execution vehicle, scale 50% at T1, and trailing stop discipline>"
 }}"""
 
     def _generate_quantitative_fallback(self, alert: Any, flags: dict[str, bool]) -> ScrutinyResult:

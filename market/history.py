@@ -356,9 +356,20 @@ def get_ohlcv(
     df = pd.DataFrame(raw)
     df.rename(columns={"date": "date"}, inplace=True)
     if exchange.upper() in ("NSE", "BSE", "NFO", "MCX", "CDS"):
-        dt_col = (
-            pd.to_datetime(df["date"], utc=True).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
-        )
+        raw_dt = pd.to_datetime(df["date"])
+        if raw_dt.dt.tz is not None:
+            dt_col = raw_dt.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+        else:
+            candidate_col = (
+                pd.to_datetime(df["date"], utc=True)
+                .dt.tz_convert("Asia/Kolkata")
+                .dt.tz_localize(None)
+            )
+            now_local = datetime.now()
+            if not candidate_col.empty and candidate_col.max() > (now_local + timedelta(hours=2)):
+                dt_col = raw_dt
+            else:
+                dt_col = candidate_col
         if kite_interval == "day":
             dt_col = dt_col.dt.normalize()
         df["date"] = dt_col

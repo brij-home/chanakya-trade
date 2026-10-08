@@ -437,3 +437,201 @@ def test_free_index_router_rejects_positional_and_wide_sl_setups(monkeypatch):
     )
     assert free_index_router.is_candidate(scalp_alert) is True
 
+
+def test_free_index_de_risk_0_5r_renders_as_t0_5_and_never_t1():
+    """Regression: DE_RISK_0_5R must render as T0.5 DE-RISK, NEVER as false T1 HIT."""
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-index-put-setup-midcpnifty-pe-13600-20261008",
+        alert_type="INDEX_PUT_SETUP",
+        stage="DE_RISK_0_5R",
+        symbol="MIDCPNIFTY",
+        contract_symbol="NSE:MIDCPNIFTY26OCT13600PE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="MIDCPNIFTY 13600 PE Put Setup",
+        summary="Put setup activated",
+        ltp=212.0,
+        trigger_level=202.7,
+        target_level=257.4,
+        stop_loss=184.7,
+        confidence=98,
+        segment="FNO_INDEX",
+        actionable_plan={
+            "action": "BUY PE",
+            "strike": 13600.0,
+            "option_type": "PE",
+            "contract": "MIDCPNIFTY 13600 PE",
+            "recommended_entry": "₹202.70",
+            "target_1": "₹257.4",
+            "target_2": "₹300.0",
+        },
+    )
+    alert.initial_sl = 184.7
+    alert.pnl_pts = 9.3
+    alert.pnl_pct = 4.6
+    alert.r_multiple = 0.52
+
+    rendered = render_free_index_alert(alert, in_market=True)
+    assert "T0.5 DE-RISK" in rendered
+    assert "T1 HIT" not in rendered
+    assert "hit T1" not in rendered
+    assert "Tighten SL to reduce risk" in rendered
+    assert "₹212.00" in rendered
+    assert "+0.52R" in rendered
+
+
+def test_free_index_physical_reach_guard_prevents_false_t1():
+    """Invariant Guard: Even if stage or target_status claims T1, physical price reach guard vetoes it if LTP < T1."""
+    from engine.alert_model import AutoAlert
+
+    # Alert falsely tagged with stage=T1_ACHIEVED, but LTP (212.0) has not reached T1 (257.4)
+    alert = AutoAlert(
+        alert_id="aa-index-put-setup-midcpnifty-pe-13600-20261008",
+        alert_type="INDEX_PUT_SETUP",
+        stage="T1_ACHIEVED",
+        target_status="T1",
+        symbol="MIDCPNIFTY",
+        contract_symbol="NSE:MIDCPNIFTY26OCT13600PE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="MIDCPNIFTY 13600 PE Put Setup",
+        summary="Put setup activated",
+        ltp=212.0,
+        trigger_level=202.7,
+        target_level=257.4,
+        stop_loss=184.7,
+        confidence=98,
+        segment="FNO_INDEX",
+        actionable_plan={
+            "action": "BUY PE",
+            "strike": 13600.0,
+            "option_type": "PE",
+            "recommended_entry": "₹202.70",
+            "target_1": "₹257.4",
+        },
+    )
+    alert.initial_sl = 184.7
+
+    rendered_vetoed = render_free_index_alert(alert, in_market=True)
+    assert "T1 HIT" not in rendered_vetoed
+    assert "hit T1" not in rendered_vetoed
+    assert "T0.5 DE-RISK" in rendered_vetoed
+
+    # When LTP physically crosses Target 1 (e.g. 260.0 >= 257.4), T1 HIT MUST render properly
+    alert.ltp = 260.0
+    rendered_allowed = render_free_index_alert(alert, in_market=True)
+    assert "T1 HIT" in rendered_allowed
+    assert "hit T1" in rendered_allowed
+
+
+def test_alert_templates_option_put_physical_reach_guard():
+    """Verify render_auto_alert correctly handles option put payoff (expansion required) and prevents false T1."""
+    from engine.alert_model import AutoAlert
+    from bot.alert_templates import render_auto_alert
+
+    alert = AutoAlert(
+        alert_id="aa-index-put-setup-midcpnifty-pe-13600-20261008",
+        alert_type="INDEX_PUT_SETUP",
+        stage="T1_ACHIEVED",
+        target_status="T1",
+        symbol="MIDCPNIFTY",
+        contract_symbol="NSE:MIDCPNIFTY26OCT13600PE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="MIDCPNIFTY 13600 PE",
+        summary="Put setup",
+        ltp=212.0,
+        trigger_level=202.7,
+        target_level=257.4,
+        stop_loss=184.7,
+        confidence=98,
+        segment="FNO_INDEX",
+        actionable_plan={
+            "action": "BUY PE",
+            "strike": 13600.0,
+            "option_type": "PE",
+            "recommended_entry": "₹202.70",
+            "target_1": "₹257.4",
+        },
+    )
+    alert.initial_sl = 184.7
+
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "T1 HIT" not in rendered
+    assert "TARGET 1" not in rendered
+
+
+def test_free_index_new_call_vs_update_number_header_disambiguation():
+    """Verify that every new free index setup clearly states NEW CALL in its header,
+    while updates state UPDATE #1, UPDATE #2, etc., eliminating any ambiguity."""
+    from engine.alert_model import AutoAlert
+
+    # 1. New Call - Nifty Put setup (matching real production alert)
+    put_alert = AutoAlert(
+        alert_id="aa-index-micro-scalp-nifty-pe-22350-20261008",
+        alert_type="INDEX_PUT_SETUP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        contract_symbol="NSE:NIFTY26O1322350PE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 22350 PE Put Setup",
+        summary="NIFTY 22350 PE micro breakout ignited at ₹181.0.",
+        ltp=181.0,
+        trigger_level=181.0,
+        target_level=197.0,
+        stop_loss=165.0,
+        strike=22350.0,
+        option_type="PE",
+        confidence=95,
+        segment="FNO_INDEX",
+        is_live=True,
+        environment="LIVE",
+        actionable_plan={
+            "action": "BUY PE",
+            "entry_range": "₹181.0 – ₹186.6",
+            "stop_loss": "₹165.00",
+            "target_1": "₹197.0",
+            "target_2": "₹213.0",
+            "risk_reward": "1:2.0",
+            "no_chase_boundary": 186.6,
+            "lot_size": 65,
+            "setup_confluence": "NIFTY 22350 PE micro breakout ignited at ₹181.0. High-Delta torque",
+        },
+    )
+
+    rendered_new = render_free_index_alert(put_alert, in_market=True)
+    # Must clearly declare NEW CALL in header
+    assert "NEW CALL · INDEX PUT SETUP" in rendered_new
+    assert "🔴 <b>[REAL/LIVE] NEW CALL · INDEX PUT SETUP · OPTIONS MOMENTUM</b>" in rendered_new
+    assert "UPDATE #" not in rendered_new
+
+    # 2. Subsequent Update - Milestone T1 HIT with update_number=1
+    put_alert.stage = "T1_ACHIEVED"
+    put_alert.target_status = "T1"
+    put_alert.ltp = 201.40
+    put_alert.update_number = 1
+    put_alert.initial_sl = 165.0
+    put_alert.pnl_pts = 20.4
+    put_alert.pnl_pct = 11.3
+    put_alert.r_multiple = 1.28
+
+    rendered_update = render_free_index_alert(put_alert, in_market=True)
+    # Must declare UPDATE #1 and NOT NEW CALL
+    assert "UPDATE #1 · T1 HIT" in rendered_update
+    assert "NEW CALL" not in rendered_update
+
+    # 3. Subsequent Update - Trailing SL with update_number=2
+    put_alert.stage = "TRAIL_RATCHET"
+    put_alert.target_status = "TRAIL"
+    put_alert.trailing_stop = 184.17
+    put_alert.update_number = 2
+
+    rendered_trail = render_free_index_alert(put_alert, in_market=True)
+    assert "UPDATE #2 · TRAIL SL" in rendered_trail
+    assert "NEW CALL" not in rendered_trail
+
+
+

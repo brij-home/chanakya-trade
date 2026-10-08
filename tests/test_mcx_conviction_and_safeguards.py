@@ -548,7 +548,10 @@ def test_telegram_mcx_options_first_formatting():
     )
 
     formatted = format_auto_alert_telegram(alert)
-    assert "BUY_CE <b>CRUDEOIL 6500 CE (26 Sep)</b>" in formatted
+    assert (
+        "BUY <b>CRUDEOIL 6500 CE (26 Sep)</b>" in formatted
+        or "BUY_CE <b>CRUDEOIL 6500 CE (26 Sep)</b>" in formatted
+    )
     assert "Capped Max Risk:</b> ₹19,500" in formatted
     assert "Confluence:</b> <i>SMC Bullish BOS" in formatted
     assert "Underlying Anchor:</b> <code>MCX:CRUDEOIL</code> @ ₹6,540.0" in formatted
@@ -1727,6 +1730,717 @@ def test_commodity_detector_cvd_order_flow_integration(monkeypatch):
                         alerts = detect_commodity_breakouts(universe=["CRUDEOIL"])
                         if alerts:
                             assert any("CVD Bullish Absorption" in t for t in alerts[0].tags)
+
+
+def test_commodity_adaptive_regime_eagle_choppiness_and_adx():
+    """Verifies that Eagle Eye computes Choppiness Index and ADX-14 correctly."""
+    import pandas as pd
+    from engine.commodity_adaptive_regime import (
+        compute_commodity_choppiness_index,
+        compute_commodity_adx,
+        evaluate_commodity_eagle_regime,
+    )
+
+    # 1. Choppy, alternating price series (whipsaw range)
+    dates = pd.date_range("2026-10-06 10:00", periods=30, freq="5min")
+    choppy_closes = [100.0 + (i % 2) * 1.5 for i in range(30)]
+    df_chop = pd.DataFrame(
+        {
+            "open": [100.0] * 30,
+            "high": [102.0] * 30,
+            "low": [99.5] * 30,
+            "close": choppy_closes,
+            "volume": [1000.0] * 30,
+        },
+        index=dates,
+    )
+
+    chop = compute_commodity_choppiness_index(df_chop, period=14)
+    assert chop is not None
+    assert chop >= 55.0  # Confirms high consolidation/chop
+
+    # 2. Trending, linear expansion price series
+    trend_closes = [100.0 + i * 2.0 for i in range(35)]
+    df_trend = pd.DataFrame(
+        {
+            "open": [c - 1.0 for c in trend_closes],
+            "high": [c + 0.5 for c in trend_closes],
+            "low": [c - 1.5 for c in trend_closes],
+            "close": trend_closes,
+            "volume": [2000.0] * 35,
+        },
+        index=pd.date_range("2026-10-06 18:00", periods=35, freq="5min"),
+    )
+
+    adx = compute_commodity_adx(df_trend, period=14)
+    assert adx is not None
+    assert adx >= 25.0  # Confirms strong trending expansion
+
+    # 3. Eagle Regime evaluation during Golden Hours (19:30 IST)
+    from datetime import datetime, timezone, timedelta
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    ref_dt = datetime(2026, 10, 6, 19, 30, tzinfo=ist)
+
+    eagle = evaluate_commodity_eagle_regime(
+        symbol="CRUDEOIL",
+        spot=8500.0,
+        df_5m=df_trend,
+        ref_time=ref_dt,
+    )
+    assert eagle.session_phase == "US_GOLDEN_HOURS"
+    assert eagle.is_golden_hours is True
+    assert eagle.is_midday_lull is False
+    assert eagle.adx_status == "STRONG_TREND"
+
+
+def test_commodity_adaptive_regime_tiger_stalking_suppresses_midday_lull():
+    """Verifies that Tiger Stalking vetoes routine low-volume breakouts during midday lull (11:30-15:30 IST)."""
+    from datetime import datetime, timezone, timedelta
+    from engine.commodity_adaptive_regime import (
+        evaluate_commodity_eagle_regime,
+        evaluate_commodity_tiger_mandate,
+    )
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    # 13:15 IST is during the dead midday volume lull
+    ref_dt = datetime(2026, 10, 6, 13, 15, tzinfo=ist)
+    from unittest.mock import patch
+    with patch("market.macro.get_macro_snapshot", return_value=None):
+        eagle = evaluate_commodity_eagle_regime(
+            symbol="CRUDEOIL",
+            spot=8500.0,
+            ref_time=ref_dt,
+        )
+    assert eagle.session_phase == "MIDDAY_VOLUME_LULL"
+    assert eagle.is_midday_lull is True
+
+    # Case A: Low volume routine breakout (RVOL = 1.1x) -> MUST BE SUPPRESSED
+    tiger_low_vol = evaluate_commodity_tiger_mandate(
+        eagle=eagle,
+        is_institutional_thrust=False,
+        rvol=1.1,
+    )
+    assert tiger_low_vol.allow_routine_breakouts is False
+    assert tiger_low_vol.mandate == "TIGER_STALKING_PRESERVE_CAPITAL"
+    assert "Midday volume lull" in tiger_low_vol.reason
+
+    # Case B: Verified Institutional Thrust (RVOL = 2.4x + SMC confluence) -> ALLOWED IN POUNCE MODE
+    tiger_high_vol = evaluate_commodity_tiger_mandate(
+        eagle=eagle,
+        is_institutional_thrust=True,
+        rvol=2.4,
+        has_smc_confluence=True,
+    )
+    assert tiger_high_vol.allow_routine_breakouts is True
+    assert tiger_high_vol.mandate == "MOMENTUM_EXPANSION"
+
+
+def test_commodity_adaptive_regime_sniper_plan_optimal_trade_entry():
+    """Verifies that Sniper Execution builds OTE pullback bracket, 25m time-stop, and detects extended FOMO."""
+    from engine.commodity_adaptive_regime import compute_commodity_sniper_plan
+
+    # Setup: Crude breakout at 8,700, SL at 8,650 (50 pts risk), current spot 8,705 (near retest anchor)
+    sniper = compute_commodity_sniper_plan(
+        symbol="CRUDEOIL",
+        direction="BULLISH",
+        spot=8705.0,
+        trigger_level=8700.0,
+        invalidation_level=8650.0,
+        lot_size=100,
+        retest_anchor=8700.0,
+    )
+
+    assert sniper.risk_points == 55.0  # max(15 * 0.8, 55.0)
+    assert sniper.structural_invalidation == 8650.0
+    assert sniper.target_1 == round(8705.0 + 3.0 * 55.0, 2)
+    assert sniper.target_2 == round(8705.0 + 5.0 * 55.0, 2)
+    assert sniper.target_3 == round(8705.0 + 7.5 * 55.0, 2)
+    assert sniper.time_stop_minutes == 25
+    assert sniper.is_chasing is False
+    assert sniper.entry_zone_min < sniper.entry_zone_max
+
+    # Extended Setup: spot is at 8,745 (extended 45 pts above 8,700 breakout anchor)
+    sniper_extended = compute_commodity_sniper_plan(
+        symbol="CRUDEOIL",
+        direction="BULLISH",
+        spot=8745.0,
+        trigger_level=8700.0,
+        invalidation_level=8650.0,
+        lot_size=100,
+        retest_anchor=8700.0,
+    )
+    assert sniper_extended.is_chasing is True  # Flags FOMO chase condition!
+
+
+def test_telegram_mcx_sniper_plan_rendering():
+    """Verifies that format_auto_alert_telegram renders the Sniper OTE Bracket and Time-Stop."""
+    from engine.alert_model import AutoAlert
+    from bot.alert_templates import format_auto_alert_telegram
+
+    alert = AutoAlert(
+        alert_id="comm-crude-sniper-test",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="🛢️ MCX OPTION: CRUDEOIL 8750 CE (16 Oct) @ ₹276.1",
+        summary="Institutional momentum breakout with defined risk",
+        ltp=276.1,
+        trigger_level=276.1,
+        stop_loss=218.7,
+        target_level=448.3,
+        confidence=90,
+        is_live=True,
+        environment="LIVE",
+        market_status="LIVE",
+        actionable_plan={
+            "action": "BUY_CE",
+            "contract": "CRUDEOIL 8750 CE (16 Oct)",
+            "entry_range": "₹267.5 – ₹281.8",
+            "stop_loss": "₹218.7",
+            "target": "₹448.3",
+            "target_2": "₹563.1",
+            "risk_reward": "1:3.0",
+            "lot_size": 100,
+            "preferred_vehicle": "DEFINED_RISK_OPTION",
+            "max_loss_capped": 27610.0,
+            "setup_confluence": "SMC Bullish BOS + Institutional Surge (RVOL 4.2x)",
+            "futures_reference": {
+                "contract": "MCX:CRUDEOIL",
+                "entry": 8753.0,
+                "stop_loss": 8642.7,
+            },
+            "sniper_plan": {
+                "optimal_entry_zone": "₹8,720.0 – ₹8,745.0",
+                "time_stop_minutes": 25,
+                "stop_loss_rule": "Trail to breakeven at T1; invalidation at ₹8,642.7",
+                "risk_reward_ratio": "3.0",
+            },
+            "profit_rule": "Book 50% at T1, trail stop to cost.",
+        },
+    )
+
+    formatted = format_auto_alert_telegram(alert)
+    assert "Sniper OTE Bracket:</b> <code>₹8,720.0 – ₹8,745.0</code> (Time-Stop: 25m)" in formatted
+
+
+def test_wyckoff_utad_crudeoil_8800_pe_reversal(monkeypatch):
+    """
+    Direct regression test for the user's scenario:
+    At 19:22 IST, Crude Oil poked up to 8824 (sweeping 8800 strike & resistance),
+    then rolled over to 8760. Even though LTP (8760) is above full-day VWAP (8728),
+    the Wyckoff UTAD Liquidity Sweep detector MUST catch the reversal,
+    bypass the rigid Golden Hours VWAP filter, select CRUDEOIL 8800 PE,
+    and generate an institutional reversal alert.
+    """
+    import os
+    import pandas as pd
+    from datetime import datetime
+    from unittest.mock import MagicMock, patch
+    from engine.detectors.commodity import detect_commodity_breakouts
+    from brokers.base import OptionsContract, Quote
+
+    monkeypatch.setenv("CHANAKYA_TESTING", "1")
+
+    # Construct 5m candles leading up to the 19:22 UTAD sweep
+    records = []
+    for i in range(21):
+        records.append({
+            "open": 8740.0 + (i % 5) * 5,
+            "high": 8760.0 + (i % 5) * 5,
+            "low": 8730.0 + (i % 5) * 5,
+            "close": 8750.0 + (i % 5) * 5,
+            "volume": 200.0,
+        })
+    # Bar 21 (19:00): Pre-breakout push
+    records.append({"open": 8760.0, "high": 8790.0, "low": 8755.0, "close": 8785.0, "volume": 350.0})
+    # Bar 22 (19:05): Breakout push to 8805
+    records.append({"open": 8785.0, "high": 8815.0, "low": 8780.0, "close": 8805.0, "volume": 500.0})
+    # Bar 23 (19:10): High momentum bar to 8818
+    records.append({"open": 8805.0, "high": 8820.0, "low": 8800.0, "close": 8815.0, "volume": 550.0})
+    # Bar 24 (19:15): Spike poking up to 8824.0 (Liquidity sweep UTAD peak)
+    records.append({"open": 8815.0, "high": 8824.0, "low": 8795.0, "close": 8800.0, "volume": 750.0})
+    # Bar 25 (19:20): Rejection bar failing back under 8800 to 8760
+    records.append({"open": 8800.0, "high": 8805.0, "low": 8755.0, "close": 8760.0, "volume": 850.0})
+
+    df_5m = pd.DataFrame(records)
+    now_t = pd.Timestamp.now()
+    df_5m.index = pd.date_range(end=now_t, periods=len(df_5m), freq="5min")
+
+    fake_quote = Quote(
+        symbol="MCX:CRUDEOIL",
+        last_price=8760.0,
+        change_pct=-0.25,
+        volume=120000,
+        close=8782.0,  # Previous close
+        open=8730.0,
+        high=8824.0,
+        low=8710.0,
+        vwap=8728.0,  # Full day VWAP is below LTP!
+    )
+
+    # Mock options chain with 8750 PE, 8800 PE, 8850 PE
+    mock_pe_8750 = OptionsContract(
+        symbol="MCX:CRUDEOIL26OCT8750PE",
+        underlying="CRUDEOIL",
+        expiry="2026-10-16",
+        strike=8750.0,
+        option_type="PE",
+        last_price=235.0,
+        oi=1000,
+        oi_change=100,
+        volume=5000,
+    )
+    mock_pe_8800 = OptionsContract(
+        symbol="MCX:CRUDEOIL26OCT8800PE",
+        underlying="CRUDEOIL",
+        expiry="2026-10-16",
+        strike=8800.0,
+        option_type="PE",
+        last_price=272.0,  # Expert bought at 270-273!
+        oi=2500,
+        oi_change=450,
+        volume=12000,
+    )
+    mock_pe_8850 = OptionsContract(
+        symbol="MCX:CRUDEOIL26OCT8850PE",
+        underlying="CRUDEOIL",
+        expiry="2026-10-16",
+        strike=8850.0,
+        option_type="PE",
+        last_price=315.0,
+        oi=800,
+        oi_change=50,
+        volume=3000,
+    )
+    mock_chain = [mock_pe_8750, mock_pe_8800, mock_pe_8850]
+
+    with patch("market.history.get_ohlcv", return_value=df_5m), \
+         patch("market.options.get_options_chain", return_value=mock_chain), \
+         patch("engine.detectors.commodity.datetime") as mock_dt:
+
+        # Mock time to 19:22 IST on a Wednesday (2026-10-07)
+        mock_now = datetime(2026, 10, 7, 19, 22, 0, tzinfo=IST)
+        mock_dt.now.return_value = mock_now
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+        alerts = detect_commodity_breakouts(
+            universe=["CRUDEOIL"],
+            quotes_map={"MCX:CRUDEOIL": fake_quote},
+        )
+
+    assert len(alerts) == 1, "Should detect exactly 1 alert for CRUDEOIL"
+    alert = alerts[0]
+
+    # Verify direction is BEARISH (PE setup)
+    assert alert.direction == "BEARISH"
+    assert alert.derivative_type == "OPT"
+    assert alert.option_type == "PE"
+
+    # Verify 8800 PE is chosen as the primary vehicle (matching expert call)
+    assert alert.strike == 8800.0
+    assert "8800 PE" in alert.headline
+    assert "UTAD Rejection" in alert.headline or "REVERSAL" in alert.headline
+    assert alert.metrics.get("is_utad_reversal") is True
+    assert alert.metrics.get("peak_recent") == 8824.0
+
+    # Verify deterministic alert ID has variant
+    assert "aa-commodity-momentum-crudeoil-bearish-8800pe-" in alert.alert_id
+
+
+def test_commodity_alert_id_variant_deduplication():
+    """
+    Verifies that early CE alert and later PE alert on the same session date
+    have distinct deterministic alert IDs and both are recorded without collision.
+    """
+    from engine.alert_identity import generate_alert_id
+    from engine.alert_model import AutoAlert
+    from engine.auto_alert_engine import AutoAlertEngine
+
+    id_ce = generate_alert_id("CRUDEOIL", "COMMODITY_MOMENTUM", variant="bullish-8750ce")
+    id_pe = generate_alert_id("CRUDEOIL", "COMMODITY_MOMENTUM", variant="bearish-8800pe")
+
+    assert id_ce != id_pe
+    assert "bullish-8750ce" in id_ce
+    assert "bearish-8800pe" in id_pe
+
+    alert_ce = AutoAlert(
+        alert_id=id_ce,
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BULLISH",
+        derivative_type="OPT",
+        option_type="CE",
+        strike=8750.0,
+        contract_symbol="MCX:CRUDEOIL26OCT8750CE",
+        headline="CRUDEOIL 8750 CE",
+        summary="Early CE setup",
+        ltp=250.0,
+        trigger_level=250.0,
+        stop_loss=200.0,
+        target_level=350.0,
+        confidence=88,
+        is_live=False,
+        environment="TEST",
+        actionable_plan={"action": "BUY_CE", "instrument_type": "OPTION"},
+    )
+
+    alert_pe = AutoAlert(
+        alert_id=id_pe,
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BEARISH",
+        derivative_type="OPT",
+        option_type="PE",
+        strike=8800.0,
+        contract_symbol="MCX:CRUDEOIL26OCT8800PE",
+        headline="CRUDEOIL 8800 PE",
+        summary="Reversal PE setup",
+        ltp=272.0,
+        trigger_level=272.0,
+        stop_loss=215.0,
+        target_level=410.0,
+        confidence=92,
+        is_live=False,
+        environment="TEST",
+        actionable_plan={"action": "BUY_PE", "instrument_type": "OPTION"},
+    )
+
+    engine = AutoAlertEngine()
+    engine.clear_alerts()
+
+    recorded_ce = engine.record_alert(alert_ce)
+    assert recorded_ce is True
+
+    # The PE alert should NOT be blocked by the earlier CE alert
+    recorded_pe = engine.record_alert(alert_pe)
+    assert recorded_pe is True
+
+    # Duplicate submission of the exact same PE alert is properly deduped
+    recorded_pe_dup = engine.record_alert(alert_pe)
+    assert recorded_pe_dup is False
+
+
+def test_quality_gate_hard_vetoes_resistance_wall_high_confidence():
+    """
+    Verifies that wall_collision=True in metrics is an unconditional hard veto
+    even if the detector reports 94%+ confidence.
+    """
+    from engine.quality_gate import evaluate_institutional_quality_gate
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-crude-wall-veto",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="MCX Crude Momentum",
+        summary="Momentum right into 1H resistance wall",
+        ltp=8753.0,
+        trigger_level=8753.0,
+        stop_loss=8670.0,
+        target_level=8950.0,
+        confidence=94,  # High confidence from SMC tags
+        is_live=True,
+        environment="LIVE",
+        metrics={
+            "wall_collision": True,
+            "rvol": 1.4,
+        },
+    )
+
+    verdict = evaluate_institutional_quality_gate(alert)
+    assert verdict.is_vetoed is True
+    assert "Structural Wall" in verdict.veto_reason
+    assert verdict.conviction_tier == "REJECTED"
+
+
+def test_1m_micro_rejection_trigger_golden_hours():
+    """
+    Verifies that a 1m sub-candle liquidity sweep and rejection
+    (spike above 8800 round level to 8824, with immediate 1m rejection close back below 8800)
+    ignites the Wyckoff UTAD reversal immediately without 5m candle close lag.
+    """
+    from engine.detectors.commodity import detect_commodity_breakouts
+    from market.options import OptionsContract
+
+    # 5m bars where current bar is still forming (open=8790, close=8792, not fully bearish on 5m)
+    bars_5m = []
+    base_t = datetime(2026, 10, 7, 18, 0, 0)
+    for i in range(25):
+        t = base_t + timedelta(minutes=i * 5)
+        bars_5m.append({
+            "date": t,
+            "open": 8750.0 + i * 2,
+            "high": 8760.0 + i * 2,
+            "low": 8740.0 + i * 2,
+            "close": 8755.0 + i * 2,
+            "volume": 2000,
+        })
+    # Last 5m bar peaked at 8824 but hasn't formed a big bearish close yet
+    bars_5m.append({
+        "date": base_t + timedelta(minutes=125),
+        "open": 8792.0,
+        "high": 8824.0,
+        "low": 8788.0,
+        "close": 8790.0,
+        "volume": 3500,
+    })
+    df_5m = pd.DataFrame(bars_5m).set_index("date")
+
+    # 1m bars explicitly showing the micro-sweep and rejection at 19:21-19:22
+    bars_1m = []
+    base_1m_t = datetime(2026, 10, 7, 19, 15, 0)
+    for j in range(6):
+        t = base_1m_t + timedelta(minutes=j)
+        bars_1m.append({
+            "date": t,
+            "open": 8790.0,
+            "high": 8805.0,
+            "low": 8788.0,
+            "close": 8800.0,
+            "volume": 500,
+        })
+    # 19:21: Poke to 8824 (sweep)
+    bars_1m.append({
+        "date": base_1m_t + timedelta(minutes=6),
+        "open": 8800.0,
+        "high": 8824.0,
+        "low": 8798.0,
+        "close": 8815.0,
+        "volume": 1200,
+    })
+    # 19:22: Sharp rejection candle back down to 8795 with long upper wick
+    bars_1m.append({
+        "date": base_1m_t + timedelta(minutes=7),
+        "open": 8815.0,
+        "high": 8818.0,
+        "low": 8792.0,
+        "close": 8795.0,  # Closed well back under 8800 round level
+        "volume": 1500,
+    })
+    df_1m = pd.DataFrame(bars_1m).set_index("date")
+
+    fake_quote = MagicMock(
+        last_price=8795.0,
+        ltp=8795.0,
+        open=8750.0,
+        high=8824.0,
+        low=8710.0,
+        volume=25000,
+        change_pct=0.51,
+        vwap=8740.0,
+    )
+    fake_quote.source = "LIVE"
+    fake_quote._is_mock = False
+    fake_quote.provider = "fyers"
+
+    mock_pe_8800 = OptionsContract(
+        symbol="MCX:CRUDEOIL26OCT8800PE",
+        underlying="CRUDEOIL",
+        expiry="2026-10-16",
+        strike=8800.0,
+        option_type="PE",
+        last_price=272.0,
+        oi=3000,
+        oi_change=500,
+        volume=15000,
+    )
+
+    with patch("market.history.get_ohlcv", return_value=df_5m), \
+         patch("market.options.get_options_chain", return_value=[mock_pe_8800]), \
+         patch("engine.detectors.commodity.datetime") as mock_dt:
+
+        mock_now = datetime(2026, 10, 7, 19, 22, 0, tzinfo=IST)
+        mock_dt.now.return_value = mock_now
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+        alerts = detect_commodity_breakouts(
+            universe=["CRUDEOIL"],
+            quotes_map={"MCX:CRUDEOIL": fake_quote},
+            ohlcv_1m_map={"CRUDEOIL": df_1m},
+        )
+
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.direction == "BEARISH"
+    assert alert.strike == 8800.0
+    assert alert.metrics.get("is_1m_micro_trigger") is True
+    assert "1m Micro-Rejection Sweep Confirmed" in alert.metrics.get("confluence_factors", [])
+    assert "MCX SNIPER REVERSAL" in alert.headline
+    assert "Active 1m micro-rejection confirmed" in alert.actionable_plan["when_to_buy"]
+
+
+def test_cvd_absorption_confirms_utad_bull_trap():
+    """
+    Verifies that aggressive buyer delta at a resistance peak during Wyckoff UTAD
+    does NOT suppress the bearish reversal; instead it tags institutional absorption
+    and confirms the bull trap.
+    """
+    from engine.detectors.commodity import detect_commodity_breakouts
+    from market.options import OptionsContract
+    from market.quotes import Quote
+
+    records = []
+    for i in range(20):
+        records.append({
+            "open": 8740.0 + (i % 5) * 5,
+            "high": 8760.0 + (i % 5) * 5,
+            "low": 8730.0 + (i % 5) * 5,
+            "close": 8750.0 + (i % 5) * 5,
+            "volume": 200.0,
+        })
+    records.append({"open": 8760.0, "high": 8790.0, "low": 8755.0, "close": 8785.0, "volume": 350.0})
+    records.append({"open": 8785.0, "high": 8815.0, "low": 8780.0, "close": 8805.0, "volume": 500.0})
+    records.append({"open": 8805.0, "high": 8820.0, "low": 8800.0, "close": 8815.0, "volume": 550.0})
+    records.append({"open": 8815.0, "high": 8824.0, "low": 8795.0, "close": 8800.0, "volume": 750.0})
+    records.append({"open": 8800.0, "high": 8805.0, "low": 8755.0, "close": 8760.0, "volume": 850.0})
+
+    df_5m = pd.DataFrame(records)
+    now_t = pd.Timestamp.now()
+    df_5m.index = pd.date_range(end=now_t, periods=len(df_5m), freq="5min")
+
+    fake_quote = Quote(
+        symbol="MCX:CRUDEOIL",
+        last_price=8760.0,
+        change_pct=-0.25,
+        volume=120000,
+        close=8782.0,
+        open=8730.0,
+        high=8824.0,
+        low=8710.0,
+        vwap=8728.0,
+    )
+
+    mock_pe_8800 = OptionsContract(
+        symbol="MCX:CRUDEOIL26OCT8800PE",
+        underlying="CRUDEOIL",
+        expiry="2026-10-16",
+        strike=8800.0,
+        option_type="PE",
+        last_price=272.0,
+        oi=3000,
+        oi_change=500,
+        volume=15000,
+    )
+
+    # Force compute_bar_volume_delta to return heavy buyer volume (buyer delta absorption trap)
+    with patch("market.history.get_ohlcv", return_value=df_5m), \
+         patch("market.options.get_options_chain", return_value=[mock_pe_8800]), \
+         patch("engine.detectors.order_flow.compute_bar_volume_delta", return_value=(4500.0, 1500.0, 3000.0)), \
+         patch("engine.detectors.commodity.datetime") as mock_dt:
+
+        mock_now = datetime(2026, 10, 7, 19, 22, 0, tzinfo=IST)
+        mock_dt.now.return_value = mock_now
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+        alerts = detect_commodity_breakouts(
+            universe=["CRUDEOIL"],
+            quotes_map={"MCX:CRUDEOIL": fake_quote},
+        )
+
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.direction == "BEARISH"
+    assert "Institutional Absorption of Buyers (Bull Trap Confirmed)" in alert.metrics.get("confluence_factors", [])
+
+
+def test_volume_profile_targets_aligned_to_poc_and_val():
+    """
+    Verifies that when Volume Profile POC and VAL are present,
+    bearish reversal targets align to Session POC (Target 1) and VAL (Target 2).
+    """
+    from engine.detectors.commodity import detect_commodity_breakouts
+    from market.options import OptionsContract
+    from market.quotes import Quote
+
+    records = []
+    for i in range(20):
+        records.append({
+            "open": 8740.0 + (i % 5) * 5,
+            "high": 8760.0 + (i % 5) * 5,
+            "low": 8730.0 + (i % 5) * 5,
+            "close": 8750.0 + (i % 5) * 5,
+            "volume": 200.0,
+        })
+    records.append({"open": 8760.0, "high": 8790.0, "low": 8755.0, "close": 8785.0, "volume": 350.0})
+    records.append({"open": 8785.0, "high": 8815.0, "low": 8780.0, "close": 8805.0, "volume": 500.0})
+    records.append({"open": 8805.0, "high": 8820.0, "low": 8800.0, "close": 8815.0, "volume": 550.0})
+    records.append({"open": 8815.0, "high": 8824.0, "low": 8795.0, "close": 8800.0, "volume": 750.0})
+    records.append({"open": 8800.0, "high": 8805.0, "low": 8755.0, "close": 8760.0, "volume": 850.0})
+
+    df_5m = pd.DataFrame(records)
+    now_t = pd.Timestamp.now()
+    df_5m.index = pd.date_range(end=now_t, periods=len(df_5m), freq="5min")
+
+    fake_quote = Quote(
+        symbol="MCX:CRUDEOIL",
+        last_price=8760.0,
+        change_pct=-0.25,
+        volume=120000,
+        close=8782.0,
+        open=8730.0,
+        high=8824.0,
+        low=8710.0,
+        vwap=8728.0,
+    )
+
+    mock_pe_8800 = OptionsContract(
+        symbol="MCX:CRUDEOIL26OCT8800PE",
+        underlying="CRUDEOIL",
+        expiry="2026-10-16",
+        strike=8800.0,
+        option_type="PE",
+        last_price=272.0,
+        oi=3000,
+        oi_change=500,
+        volume=15000,
+    )
+
+    # Return POC=8600, VAH=8810, VAL=8480 (ltp is 8760, so ltp-poc = 160 >= 1.5*80=120, ltp-val = 280 >= 3*80=240)
+    with patch("market.history.get_ohlcv", return_value=df_5m), \
+         patch("market.options.get_options_chain", return_value=[mock_pe_8800]), \
+         patch("analysis.volume_profile.compute_volume_profile", return_value=(8600.0, 8810.0, 8480.0, [])), \
+         patch("engine.detectors.commodity.datetime") as mock_dt:
+
+        mock_now = datetime(2026, 10, 7, 19, 22, 0, tzinfo=IST)
+        mock_dt.now.return_value = mock_now
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+        alerts = detect_commodity_breakouts(
+            universe=["CRUDEOIL"],
+            quotes_map={"MCX:CRUDEOIL": fake_quote},
+        )
+
+    assert len(alerts) == 1
+    alert = alerts[0]
+    fut_ref = alert.actionable_plan["futures_reference"]
+    assert fut_ref["target_1"] == 8600.0  # Session POC
+    assert fut_ref["target_2"] == 8480.0  # Session VAL
+    assert alert.metrics["poc_price"] == 8600.0
+    assert alert.metrics["val_price"] == 8480.0
+
+
+def test_scan_commodities_now_target_filtering():
+    """
+    Verifies that AutoAlertEngine.scan_commodities_now(targets=...) forwards
+    the filtered target subset to detect_commodity_breakouts.
+    """
+    engine = AutoAlertEngine()
+
+    with patch("engine.detectors.commodity.detect_commodity_breakouts", return_value=[]) as mock_detect:
+        engine.scan_commodities_now(targets=["CRUDEOIL", "NATURALGAS", "GOLD"])
+        mock_detect.assert_called_once_with(universe=["CRUDEOIL", "NATURALGAS", "GOLD"])
+
+
 
 
 

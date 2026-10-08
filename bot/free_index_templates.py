@@ -26,15 +26,12 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone, timedelta
-from typing import Any, Optional
+from typing import Any
 
 from bot.alert_templates import (
-    escape_tg,
     format_contract_display,
-    parse_contract_components,
     build_signal_ref,
     normalize_env_tag,
-    shorten_sector_name,
     _format_call_time_and_elapsed,
     _resolve_monotonic_display_targets,
     MilestoneAlertData,
@@ -90,7 +87,7 @@ def render_free_index_milestone(
     """
     if isinstance(data, dict):
         d = MilestoneAlertData(
-            milestone_type=data.get("milestone_type", "TARGET_1"),
+            milestone_type=data.get("milestone_type", "TRAIL_RATCHET"),
             symbol=data.get("symbol", "INDEX"),
             alert_type=data.get("alert_type", "SETUP").replace("_", " "),
             ltp=float(data.get("ltp", 0.0)),
@@ -174,6 +171,74 @@ def render_free_index_milestone(
         r_str = f" | {sign}{d.r_multiple}R" if d.r_multiple is not None else ""
         move_str = f" · 🚀 <b>{sign}₹{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%{r_str})</b>"
 
+    # Determine if this trade's payoff direction is downward (short/sell)
+    # Option contracts: Buyers (both Call CE and Put PE) profit on premium expansion (UPWARD); Writers profit on decay (DOWNWARD).
+    # Cash/Futures: Short positions profit on price decline (DOWNWARD).
+    is_opt = bool(
+        getattr(d, "option_type", None)
+        or "PE" in str(d.contract or "").upper()
+        or "CE" in str(d.contract or "").upper()
+        or getattr(d, "alert_type", "") in ("OPTIONS MOMENTUM", "GAMMA BLAST", "INDEX CALL SETUP", "INDEX PUT SETUP")
+    )
+    if is_opt:
+        act_str = str(getattr(d, "decisive_action", "") or "").upper()
+        is_option_seller = any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
+        is_downward_target = is_option_seller
+    else:
+        if d.target_1 and d.entry_price and d.entry_price > 0:
+            is_downward_target = d.target_1 < d.entry_price
+        else:
+            is_downward_target = str(d.direction).upper() in ("BEARISH", "SHORT", "SELL")
+
+    # Invariant Guard: Defense-in-depth physical price reach validation (Rules 6, 10, & 23).
+    # Prevent rendering false target achievements if market price has not physically reached target level.
+    if d.milestone_type in ("TARGET_2", "TARGET_2_HIT", "T2_ACHIEVED"):
+        is_t2_downward = is_downward_target
+        has_hit_t2 = (
+            d.target_2 is not None
+            and d.target_2 > 0
+            and d.ltp > 0
+            and (
+                (not is_t2_downward and d.ltp >= d.target_2 * 0.998)
+                or (is_t2_downward and d.ltp <= d.target_2 * 1.002)
+            )
+        )
+        if not has_hit_t2:
+            logger.warning(
+                f"[FreeIndexTemplates] Defensively vetoed false TARGET_2 render for {d.symbol}: "
+                f"LTP={d.ltp} vs T2={d.target_2} (downward={is_t2_downward}). Checking T1 reach."
+            )
+            has_hit_t1 = (
+                d.target_1 is not None
+                and d.target_1 > 0
+                and d.ltp > 0
+                and (
+                    (not is_downward_target and d.ltp >= d.target_1 * 0.998)
+                    or (is_downward_target and d.ltp <= d.target_1 * 1.002)
+                )
+            )
+            if has_hit_t1:
+                d.milestone_type = "TARGET_1"
+            else:
+                d.milestone_type = "TARGET_0_5"
+
+    if d.milestone_type in ("TARGET_1", "TARGET_1_HIT", "T1_ACHIEVED"):
+        has_hit_t1 = (
+            d.target_1 is not None
+            and d.target_1 > 0
+            and d.ltp > 0
+            and (
+                (not is_downward_target and d.ltp >= d.target_1 * 0.998)
+                or (is_downward_target and d.ltp <= d.target_1 * 1.002)
+            )
+        )
+        if not has_hit_t1:
+            logger.warning(
+                f"[FreeIndexTemplates] Defensively vetoed false TARGET_1 render for {d.symbol}: "
+                f"LTP={d.ltp} vs T1={d.target_1} (downward={is_downward_target}). Re-routing to TARGET_0_5."
+            )
+            d.milestone_type = "TARGET_0_5"
+
     # 1. Target 1 Achieved
     if d.milestone_type in ("TARGET_1", "TARGET_1_HIT", "T1_ACHIEVED"):
         return (
@@ -199,7 +264,7 @@ def render_free_index_milestone(
         )
 
     # 3. Target 0.5 (De-Risking)
-    if d.milestone_type in ("TARGET_0_5", "T0_5_ACHIEVED"):
+    if d.milestone_type in ("TARGET_0_5", "T0_5_ACHIEVED", "DE_RISK_0_5R", "TARGET_0_5_HIT", "SCALE_1_ACHIEVED", "T0.5_ACHIEVED"):
         return (
             f"⚡ <b>{update_prefix}T0.5 DE-RISK</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -209,14 +274,28 @@ def render_free_index_milestone(
             f"{footer_line}"
         )
 
+    # 3c. Breakeven Locked (Free Roll)
+    if d.milestone_type == "BREAKEVEN_LOCKED":
+        trail_sl = d.trailing_stop or "COST / BREAKEVEN"
+        trail_val_str = f"₹{trail_sl:,.2f}" if isinstance(trail_sl, (int, float)) else str(trail_sl)
+        return (
+            f"🛡️ <b>{update_prefix}BREAKEVEN LOCKED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🚨 <b>{color_icon} {contract_title}</b> (CMP: <code>₹{d.ltp:,.2f}</code>){move_str}\n"
+            f"• <b>Action:</b> Move SL to <code>{trail_val_str}</code> (Downside Eliminated · Free Roll).\n"
+            f"• <b>Next:</b> Holding runner for T1 / T2.\n\n"
+            f"{SEBI_COMPACT_DISCLAIMER}"
+            f"{footer_line}"
+        )
+
     # 4. Trailing Stop Ratchet
-    if d.milestone_type in ("TRAIL_RATCHET", "TRAILING_UPDATE", "BREAKEVEN_LOCKED"):
+    if d.milestone_type in ("TRAIL_RATCHET", "TRAILING_UPDATE", "TRAIL_POST_SWEEP", "COMPRESS_STALL_RISK"):
         trail_sl = d.trailing_stop or "COST / BREAKEVEN"
         trail_val_str = f"₹{trail_sl:,.2f}" if isinstance(trail_sl, (int, float)) else str(trail_sl)
         return (
             f"⚡ <b>{update_prefix}TRAIL SL</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🚨 <b>{color_icon} {contract_title}</b> (CMP: <code>₹{d.ltp:,.2f}</code>)\n"
+            f"🚨 <b>{color_icon} {contract_title}</b> (CMP: <code>₹{d.ltp:,.2f}</code>){move_str}\n"
             f"• <b>Action:</b> Move SL to <code>{trail_val_str}</code> to lock profit.\n\n"
             f"{SEBI_COMPACT_DISCLAIMER}"
             f"{footer_line}"
@@ -308,12 +387,17 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
         from engine.alert_model import AutoAlert
         alert = AutoAlert.from_dict(alert)
 
+    symbol = getattr(alert, "symbol", "INDEX").upper()
+
     # 1. Check for milestone / lifecycle state first
     stage_str = str(getattr(alert, "stage", "")).upper()
     target_status = str(getattr(alert, "target_status", "")).upper()
+    up_num = getattr(alert, "update_number", None)
+    is_update_flag = bool(getattr(alert, "is_update", False) or (up_num is not None and up_num > 0))
 
     is_milestone = (
-        getattr(alert, "is_invalidated", False)
+        is_update_flag
+        or getattr(alert, "is_invalidated", False)
         or stage_str in (
             "INVALIDATED", "STOPPED_OUT", "CANCELLED",
             "T0_5_ACHIEVED", "TARGET_0_5", "TARGET_0_5_HIT", "SCALE_1_ACHIEVED",
@@ -337,8 +421,10 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
     )
 
     if is_milestone:
-        m_type = "TARGET_1"
-        if getattr(alert, "is_invalidated", False) or stage_str in ("INVALIDATED", "STOPPED_OUT", "CANCELLED"):
+        m_type = "TRAIL_RATCHET"
+        if getattr(alert, "milestone_type", None):
+            m_type = str(alert.milestone_type).upper()
+        elif getattr(alert, "is_invalidated", False) or stage_str in ("INVALIDATED", "STOPPED_OUT", "CANCELLED"):
             m_type = "INVALIDATED"
         elif stage_str == "IN_FLIGHT_WARNING":
             m_type = "IN_FLIGHT_WARNING"
@@ -358,10 +444,152 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
             m_type = "TARGET_2"
         elif stage_str in ("T1_ACHIEVED", "TARGET_1", "TARGET_1_HIT") or target_status == "T1":
             m_type = "TARGET_1"
-        elif stage_str in ("T0_5_ACHIEVED", "TARGET_0_5", "SCALE_1_ACHIEVED") or target_status in ("T0_5", "T0.5"):
+        elif (
+            stage_str in ("T0_5_ACHIEVED", "TARGET_0_5", "TARGET_0_5_HIT", "SCALE_1_ACHIEVED", "DE_RISK_0_5R", "T0.5_ACHIEVED")
+            or target_status in ("T0_5", "T0.5")
+            or "TARGET 0.5" in str(getattr(alert, "headline", "") or "").upper()
+            or "T0.5" in str(getattr(alert, "headline", "") or "").upper()
+        ):
             m_type = "TARGET_0_5"
-        elif stage_str in ("TRAILING_UPDATE", "BREAKEVEN_LOCKED", "TRAIL_RATCHET"):
+        elif stage_str == "BREAKEVEN_LOCKED":
+            m_type = "BREAKEVEN_LOCKED"
+        elif stage_str in ("TRAILING_UPDATE", "TRAIL_RATCHET", "TRAIL_POST_SWEEP", "COMPRESS_STALL_RISK"):
             m_type = "TRAIL_RATCHET"
+
+        # Physical reach validation guard for TARGET_1 and TARGET_2
+        if m_type in ("TARGET_1", "TARGET_2"):
+            cur_p = float(getattr(alert, "ltp", 0.0) or getattr(alert, "current_ltp", 0.0) or 0.0)
+            entry_p = getattr(alert, "entry_price", None) or getattr(alert, "initial_entry_premium", None)
+            act_p = getattr(alert, "actionable_plan", {}) or {}
+            if not entry_p and isinstance(act_p, dict):
+                rec_e = act_p.get("recommended_entry")
+                if rec_e:
+                    m_e = re.search(r"[\d,]+(?:\.\d+)?", str(rec_e))
+                    if m_e:
+                        entry_p = float(m_e.group(0).replace(",", ""))
+            if entry_p:
+                try:
+                    entry_p = float(entry_p)
+                except (ValueError, TypeError):
+                    entry_p = None
+
+            # Determine downward target payoff accurately
+            alert_type_raw = str(getattr(alert, "alert_type", "") or "").upper()
+            act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
+            is_opt = bool(
+                getattr(alert, "option_type", None)
+                or getattr(alert, "strike", None)
+                or "PE" in str(getattr(alert, "contract_symbol", "") or "")
+                or "CE" in str(getattr(alert, "contract_symbol", "") or "")
+                or alert_type_raw in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+            )
+            if is_opt:
+                is_option_seller = (
+                    any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
+                    or alert_type_raw == "OPTION_WRITE"
+                    or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
+                )
+                is_downward = is_option_seller
+            else:
+                if entry_p and entry_p > 0 and getattr(alert, "target_1", None):
+                    t1_cand = None
+                    try:
+                        t1_cand = float(alert.target_1)
+                    except Exception:
+                        pass
+                    if t1_cand:
+                        is_downward = t1_cand < entry_p
+                    else:
+                        is_downward = str(getattr(alert, "direction", "BULLISH")).upper() in ("BEARISH", "SHORT", "SELL")
+                else:
+                    is_downward = str(getattr(alert, "direction", "BULLISH")).upper() in ("BEARISH", "SHORT", "SELL")
+
+            if m_type == "TARGET_1":
+                t1_raw = (
+                    getattr(alert, "target_1", None)
+                    or (act_p.get("target_1") if isinstance(act_p, dict) else None)
+                    or getattr(alert, "target_level", None)
+                )
+                t1_num = None
+                if t1_raw:
+                    m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(t1_raw))
+                    if m_t1:
+                        try:
+                            t1_num = float(m_t1.group(0).replace(",", ""))
+                        except ValueError:
+                            pass
+                if not t1_num and entry_p and getattr(alert, "stop_loss", None):
+                    try:
+                        sl_val = float(alert.stop_loss)
+                        r_val = abs(entry_p - sl_val)
+                        if r_val > 0:
+                            t1_num = round(entry_p + (r_val * 2.0) if not is_downward else entry_p - (r_val * 2.0), 2)
+                    except Exception:
+                        pass
+
+                has_hit_t1 = (
+                    t1_num is not None
+                    and t1_num > 0
+                    and cur_p > 0
+                    and (
+                        (not is_downward and cur_p >= t1_num * 0.998)
+                        or (is_downward and cur_p <= t1_num * 1.002)
+                    )
+                )
+
+                if not has_hit_t1:
+                    logger.warning(
+                        f"[FreeIndexTemplates] Defensively vetoed false TARGET_1 in render_free_index_alert for {symbol}: "
+                        f"LTP={cur_p} vs T1={t1_num} (downward={is_downward})."
+                    )
+                    m_type = "TARGET_0_5"
+
+            elif m_type == "TARGET_2":
+                t2_raw = getattr(alert, "target_2", None) or (act_p.get("target_2") if isinstance(act_p, dict) else None)
+                t2_num = None
+                if t2_raw:
+                    m_t2 = re.search(r"[\d,]+(?:\.\d+)?", str(t2_raw))
+                    if m_t2:
+                        try:
+                            t2_num = float(m_t2.group(0).replace(",", ""))
+                        except ValueError:
+                            pass
+                has_hit_t2 = (
+                    t2_num is not None
+                    and t2_num > 0
+                    and cur_p > 0
+                    and (
+                        (not is_downward and cur_p >= t2_num * 0.998)
+                        or (is_downward and cur_p <= t2_num * 1.002)
+                    )
+                )
+                if not has_hit_t2:
+                    logger.warning(
+                        f"[FreeIndexTemplates] Defensively vetoed false TARGET_2 in render_free_index_alert for {symbol}: "
+                        f"LTP={cur_p} vs T2={t2_num} (downward={is_downward})."
+                    )
+                    t1_raw = getattr(alert, "target_1", None) or (act_p.get("target_1") if isinstance(act_p, dict) else None)
+                    t1_num = None
+                    if t1_raw:
+                        m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(t1_raw))
+                        if m_t1:
+                            try:
+                                t1_num = float(m_t1.group(0).replace(",", ""))
+                            except ValueError:
+                                pass
+                    has_hit_t1 = (
+                        t1_num is not None
+                        and t1_num > 0
+                        and cur_p > 0
+                        and (
+                            (not is_downward and cur_p >= t1_num * 0.998)
+                            or (is_downward and cur_p <= t1_num * 1.002)
+                        )
+                    )
+                    if has_hit_t1:
+                        m_type = "TARGET_1"
+                    else:
+                        m_type = "TARGET_0_5"
 
         data = MilestoneAlertData.from_alert(alert, m_type, in_market=in_market)
         return render_free_index_milestone(data, in_market=in_market)
@@ -513,7 +741,7 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
         alert_tag = "GAMMA BLAST"
 
     lines = [
-        f"{icon} <b>{env_tag} {setup_label} · {alert_tag}</b>",
+        f"{icon} <b>{env_tag} NEW CALL · {setup_label} · {alert_tag}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
         f"🎯 <b>{display_contract}</b>{price_meta}",
         f"• <b>Entry:</b> <code>{entry_range}</code>",

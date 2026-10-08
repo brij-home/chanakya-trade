@@ -1458,6 +1458,7 @@ async def skill_premarket_battle_plan():
     and Previous Day Levels (PDH, PDL, PDC) with actionable trade blueprints before 09:15.
     """
     try:
+        from config.constants import IST
         from market.indices import get_premarket_battle_plan
 
         plan = await asyncio.to_thread(get_premarket_battle_plan)
@@ -1465,7 +1466,7 @@ async def skill_premarket_battle_plan():
             "status": "ok",
             "data": {
                 "battle_plan": plan,
-                "as_of_ist": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S IST"),
+                "as_of_ist": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
             },
         }
     except Exception as e:

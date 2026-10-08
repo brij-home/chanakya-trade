@@ -400,10 +400,14 @@ def _to_fyers_symbol(instrument: str) -> str:
             return f"NSE:{sym_upper}"
         return _resolve_currency_contract(sym_upper)
 
-    # F&O derivative contract on NSE/NFO (e.g. NIFTY26OCT25000CE, NIFTY26O0622300PE, RELIANCE26OCTFUT)
+    # F&O derivative contract on NSE/NFO or BSE/BFO (e.g. NIFTY26OCT25000CE, SENSEX26O0872000PE, RELIANCE26OCTFUT)
     if any(sym_upper.endswith(suffix) for suffix in ("FUT", "CE", "PE")) and any(
         c.isdigit() for c in sym_upper
     ):
+        if exch_upper in ("BSE", "BFO") or any(sym_upper.startswith(x) for x in ("SENSEX", "BANKEX")):
+            return f"BSE:{sym_upper}"
+        if exch_upper == "MCX":
+            return f"MCX:{sym_upper}"
         return f"NSE:{sym_upper}"
 
     # Check if index by explicit prefixes (only if not an option/futures contract)
@@ -955,8 +959,17 @@ class FyersAPI(BrokerAPI):
                     get_fyers_circuit_breaker().record_success()
                 for item in data.get("d", []):
                     raw = item.get("n", "")
+                    if item.get("s") == "error":
+                        logger.warning(
+                            f"[FyersAPI] Quotes error for {raw or item.get('n')}: {item.get('errmsg', 'Unknown')}"
+                        )
+                        continue
                     v = item.get("v", {})
+                    if not v or v.get("s") == "error":
+                        continue
                     last_price = float(v.get("lp", 0.0) or 0.0)
+                    if last_price <= 0.0:
+                        continue
                     open_price = float(v.get("open_price", 0.0) or 0.0)
                     high_price = float(v.get("high_price", 0.0) or 0.0)
                     low_price = float(v.get("low_price", 0.0) or 0.0)
@@ -1648,10 +1661,12 @@ class FyersAPI(BrokerAPI):
                 unique_candles.append(c)
         unique_candles.sort(key=lambda c: c[0])
 
+        from datetime import timezone
+
         rows = []
         for c in unique_candles:
             epoch = c[0]
-            dt = datetime.fromtimestamp(epoch)
+            dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
             rows.append(
                 {
                     "date": dt,

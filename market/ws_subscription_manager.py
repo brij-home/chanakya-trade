@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
@@ -131,10 +132,18 @@ class WsSubscriptionManager:
                     "core": list(self._core_symbols),
                     "dynamic": list(self._dynamic_symbols.keys()),
                 }
-            temp = path.with_suffix(".tmp")
+            temp = path.with_name(f"{path.stem}_{os.getpid()}_{time.time_ns()}.tmp")
             with open(temp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
-            temp.replace(path)
+            try:
+                temp.replace(path)
+            except Exception:
+                # Fallback for Windows file locks
+                if temp.exists():
+                    try:
+                        temp.unlink()
+                    except Exception:
+                        pass
         except Exception as exc:
             logger.warning(f"[WsSubManager] Failed saving disk subscriptions: {exc}", exc_info=True)
 

@@ -120,6 +120,13 @@ SHORT_SECTOR_MAP: dict[str, str] = {
     "NIFTY ENERGY": "Energy",
     "NIFTY INFRA": "Infra",
     "NIFTY COMMODITIES": "Commodities",
+    "Commodities": "Commodities",
+    "MCX Commodities": "Commodities",
+    "Energy Commodities": "Energy",
+    "Precious Metals": "Metals",
+    "Base Metals": "Metals",
+    "Industrial Base Metals": "Metals",
+    "Agricultural Contracts": "Agri",
     "NIFTY PSE": "PSE",
     "NIFTY MEDIA": "Media",
     "NIFTY CONSUMPTION": "Consumer",
@@ -142,8 +149,11 @@ def shorten_sector_name(sec: Optional[str]) -> str:
     for full, short in SHORT_SECTOR_MAP.items():
         if full.lower() == clean_lower:
             return short
-    for full, short in SHORT_SECTOR_MAP.items():
-        if full.lower() in clean_lower:
+    # Match on whole words / word boundaries to prevent short tokens (e.g. 'IT') matching inside
+    # longer words like 'commodities' or 'utilities'. Prioritize longer key phrases first.
+    for full, short in sorted(SHORT_SECTOR_MAP.items(), key=lambda x: len(x[0]), reverse=True):
+        pattern = r"\b" + re.escape(full.lower()) + r"\b"
+        if re.search(pattern, clean_lower):
             return short
     if " & " in clean:
         parts = clean.split(" & ")
@@ -292,7 +302,7 @@ def resolve_expiry_cycle(
                     except ValueError:
                         dt = None
 
-        # Pattern C: NSE Monthly format e.g. RELIANCE26SEP3000PE
+        # Pattern C: NSE Monthly format e.g. RELIANCE26SEP3000PE or MCX CRUDEOIL26OCT8750CE
         if dt is None:
             m_monthly = re.search(r"[A-Z0-9_&]+(\d{2})([A-Z]{3})\d+(?:CE|PE)", c_upper)
             if m_monthly:
@@ -314,11 +324,40 @@ def resolve_expiry_cycle(
                 mon = month_map.get(mon_str)
                 if mon:
                     yr = int("20" + yy_str)
-                    dt = get_last_thursday_of_month(yr, mon)
+                    from market.instruments import COMMODITY_SYMBOLS
+
+                    is_comm = und in COMMODITY_SYMBOLS or "MCX" in c_upper
+                    if is_comm:
+                        try:
+                            from engine.greeks_manager import get_mcx_prompt_expiry_and_dte
+
+                            exp_date_str, c_dte = get_mcx_prompt_expiry_and_dte(
+                                und, as_of=date(yr, mon, 1)
+                            )
+                            dt = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+                            if dte is None:
+                                dte = max(0, (dt - today).days)
+                        except Exception:
+                            dt = None
+                    if dt is None:
+                        dt = get_last_thursday_of_month(yr, mon)
 
     # 3. Infer target expiry date if still None
     if dt is None:
-        if is_index:
+        from market.instruments import COMMODITY_SYMBOLS
+
+        is_comm = und in COMMODITY_SYMBOLS or "MCX" in (contract or "").upper()
+        if is_comm:
+            try:
+                from engine.greeks_manager import get_mcx_prompt_expiry_and_dte
+
+                exp_date_str, c_dte = get_mcx_prompt_expiry_and_dte(und, as_of=today)
+                dt = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+                if dte is None:
+                    dte = c_dte
+            except Exception:
+                dt = None
+        if dt is None and is_index:
             target_weekday = INDEX_EXPIRY_WEEKDAY.get(und, 3)
             days_ahead = (target_weekday - today.weekday()) % 7
             if days_ahead == 0:
@@ -326,7 +365,7 @@ def resolve_expiry_cycle(
                 if as_of_dt.hour > 15 or (as_of_dt.hour == 15 and as_of_dt.minute >= 30):
                     days_ahead = 7
             dt = today + timedelta(days=days_ahead)
-        else:
+        elif dt is None:
             # Single-stock derivatives are strictly monthly
             cur_last_thu = get_last_thursday_of_month(today.year, today.month)
             if today <= cur_last_thu:
@@ -1929,12 +1968,15 @@ class MilestoneAlertData:
                 else:
                     initial_sl = round(entry_price * 1.015, 2)
 
-        if not t0_5_val and milestone_type == "TARGET_0_5":
-            t0_5_val = ltp
-        if not t1_val and milestone_type == "TARGET_1":
-            t1_val = ltp
-        if not t2_val and milestone_type == "TARGET_2":
-            t2_val = ltp
+        # Strict Fallback Calculation for Unresolved Targets (Mathematically Grounded - Rule 10 & 11)
+        if entry_price and entry_price > 0 and initial_sl and entry_price != initial_sl:
+            r_calc = abs(entry_price - initial_sl)
+            if not t0_5_val and milestone_type == "TARGET_0_5":
+                t0_5_val = round(entry_price + (r_calc * 1.0) if is_payoff_bullish else max(0.05, entry_price - (r_calc * 1.0)), 2)
+            if not t1_val and milestone_type == "TARGET_1":
+                t1_val = round(entry_price + (r_calc * 2.0) if is_payoff_bullish else max(0.05, entry_price - (r_calc * 2.0)), 2)
+            if not t2_val and milestone_type == "TARGET_2":
+                t2_val = round(entry_price + (r_calc * 4.0) if is_payoff_bullish else max(0.05, entry_price - (r_calc * 4.0)), 2)
 
         # Performance & Gain calculation
         # If pre-calculated on alert (e.g. spread evaluation or in-flight decay), prioritize it
@@ -3476,7 +3518,7 @@ def render_milestone_alert(
 
         hedge_sec = ""
         # In-flight hedge defense ONLY applies to theta-decay stagnation, NEVER to VWAP breakdowns or danger zones
-        if not is_vwap and not ("VWAP" in m_type_upper) and d.hedge_plan and isinstance(d.hedge_plan, dict):
+        if not is_vwap and "VWAP" not in m_type_upper and d.hedge_plan and isinstance(d.hedge_plan, dict):
             prem_est = float(d.hedge_plan.get("short_premium_est", 0.0) or 0.0)
             net_r = float(d.hedge_plan.get("net_risk_pts", d.hedge_plan.get("max_risk_pts", 0.0)) or 0.0)
             # Strict Zero-Price & Integrity Guard: NEVER render bogus zero-rupee prices
@@ -4131,7 +4173,20 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             or getattr(alert, "target_level", None)
         )
         cur_p = getattr(alert, "ltp", 0.0) or getattr(alert, "current_ltp", 0.0)
-        is_bull = getattr(alert, "direction", "BULLISH").upper() not in ("BEARISH", "SELL", "SHORT")
+        entry_p = getattr(alert, "entry_price", None) or getattr(alert, "initial_entry_premium", None)
+        act_p = getattr(alert, "actionable_plan", {}) or {}
+        if not entry_p and isinstance(act_p, dict):
+            rec_e = act_p.get("recommended_entry")
+            if rec_e:
+                m_e = re.search(r"[\d,]+(?:\.\d+)?", str(rec_e))
+                if m_e:
+                    entry_p = float(m_e.group(0).replace(",", ""))
+        if entry_p:
+            try:
+                entry_p = float(entry_p)
+            except (ValueError, TypeError):
+                entry_p = None
+
         t1_num = None
         if t1_raw:
             m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(t1_raw))
@@ -4140,16 +4195,81 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                     t1_num = float(m_t1.group(0).replace(",", ""))
                 except ValueError:
                     pass
-        if t1_num and cur_p > 0:
-            if (is_bull and cur_p < t1_num * 0.998) or (not is_bull and cur_p > t1_num * 1.002):
-                logger.warning(
-                    f"[AlertTemplates] Vetoed false TARGET_1 render for {getattr(alert, 'symbol', '')}: "
-                    f"LTP={cur_p} has not reached Target 1={t1_num}. Re-routing to TARGET_0_5."
+        if not t1_num and entry_p and getattr(alert, "stop_loss", None):
+            try:
+                sl_val = float(alert.stop_loss)
+                r_val = abs(entry_p - sl_val)
+                if r_val > 0:
+                    dir_chk = str(getattr(alert, "direction", "BULLISH")).upper()
+                    t1_num = round(entry_p + (r_val * 2.0) if dir_chk not in ("BEARISH", "SHORT", "SELL") else entry_p - (r_val * 2.0), 2)
+            except Exception:
+                pass
+
+        alert_type_raw = str(getattr(alert, "alert_type", "") or "").upper()
+        act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
+        is_opt = bool(
+            getattr(alert, "option_type", None)
+            or getattr(alert, "strike", None)
+            or "PE" in str(getattr(alert, "contract_symbol", "") or "")
+            or "CE" in str(getattr(alert, "contract_symbol", "") or "")
+            or alert_type_raw in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+        )
+        if is_opt:
+            is_option_seller = (
+                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
+                or alert_type_raw == "OPTION_WRITE"
+                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
+            )
+            is_downward = is_option_seller
+        else:
+            if t1_num and entry_p and entry_p > 0:
+                is_downward = t1_num < entry_p
+            else:
+                is_downward = str(getattr(alert, "direction", "BULLISH")).upper() in ("BEARISH", "SHORT", "SELL")
+
+        has_hit_t1 = (
+            t1_num is not None
+            and t1_num > 0
+            and cur_p > 0
+            and (
+                (not is_downward and cur_p >= t1_num * 0.998)
+                or (is_downward and cur_p <= t1_num * 1.002)
+            )
+        )
+
+        if not has_hit_t1:
+            logger.warning(
+                f"[AlertTemplates] Vetoed false TARGET_1 render for {getattr(alert, 'symbol', '')}: "
+                f"LTP={cur_p} has not reached Target 1={t1_num} (downward={is_downward})."
+            )
+            # Check if Target 0.5 was physically reached before falling back to TARGET_0_5
+            t0_5_raw = (getattr(alert, "target_0_5", None) or (getattr(alert, "actionable_plan", {}) or {}).get("target_0_5"))
+            t0_5_num = None
+            if t0_5_raw:
+                m_t05 = re.search(r"[\d,]+(?:\.\d+)?", str(t0_5_raw))
+                if m_t05:
+                    try:
+                        t0_5_num = float(m_t05.group(0).replace(",", ""))
+                    except ValueError:
+                        pass
+            has_hit_t0_5 = (
+                t0_5_num is not None
+                and t0_5_num > 0
+                and cur_p > 0
+                and (
+                    (not is_downward and cur_p >= t0_5_num * 0.998)
+                    or (is_downward and cur_p <= t0_5_num * 1.002)
                 )
+            )
+            if has_hit_t0_5:
                 return render_milestone_alert(
                     MilestoneAlertData.from_alert(alert, "TARGET_0_5", in_market=in_market),
                     in_market=in_market,
                 )
+            return render_milestone_alert(
+                MilestoneAlertData.from_alert(alert, "TRAIL_RATCHET", in_market=in_market),
+                in_market=in_market,
+            )
         return render_milestone_alert(
             MilestoneAlertData.from_alert(alert, "TARGET_1", in_market=in_market),
             in_market=in_market,
@@ -4165,7 +4285,20 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             or (getattr(alert, "actionable_plan", {}) or {}).get("target_2")
         )
         cur_p = getattr(alert, "ltp", 0.0) or getattr(alert, "current_ltp", 0.0)
-        is_bull = getattr(alert, "direction", "BULLISH").upper() not in ("BEARISH", "SELL", "SHORT")
+        entry_p = getattr(alert, "entry_price", None) or getattr(alert, "initial_entry_premium", None)
+        act_p = getattr(alert, "actionable_plan", {}) or {}
+        if not entry_p and isinstance(act_p, dict):
+            rec_e = act_p.get("recommended_entry")
+            if rec_e:
+                m_e = re.search(r"[\d,]+(?:\.\d+)?", str(rec_e))
+                if m_e:
+                    entry_p = float(m_e.group(0).replace(",", ""))
+        if entry_p:
+            try:
+                entry_p = float(entry_p)
+            except (ValueError, TypeError):
+                entry_p = None
+
         t2_num = None
         if t2_raw:
             m_t2 = re.search(r"[\d,]+(?:\.\d+)?", str(t2_raw))
@@ -4174,16 +4307,71 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                     t2_num = float(m_t2.group(0).replace(",", ""))
                 except ValueError:
                     pass
-        if t2_num and cur_p > 0:
-            if (is_bull and cur_p < t2_num * 0.998) or (not is_bull and cur_p > t2_num * 1.002):
-                logger.warning(
-                    f"[AlertTemplates] Vetoed false TARGET_2 render for {getattr(alert, 'symbol', '')}: "
-                    f"LTP={cur_p} has not reached Target 2={t2_num}. Re-routing to TARGET_1."
+
+        alert_type_raw = str(getattr(alert, "alert_type", "") or "").upper()
+        act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
+        is_opt = bool(
+            getattr(alert, "option_type", None)
+            or getattr(alert, "strike", None)
+            or "PE" in str(getattr(alert, "contract_symbol", "") or "")
+            or "CE" in str(getattr(alert, "contract_symbol", "") or "")
+            or alert_type_raw in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
+        )
+        if is_opt:
+            is_option_seller = (
+                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
+                or alert_type_raw == "OPTION_WRITE"
+                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
+            )
+            is_t2_downward = is_option_seller
+        else:
+            if t2_num and entry_p and entry_p > 0:
+                is_t2_downward = t2_num < entry_p
+            else:
+                is_t2_downward = str(getattr(alert, "direction", "BULLISH")).upper() in ("BEARISH", "SHORT", "SELL")
+
+        has_hit_t2 = (
+            t2_num is not None
+            and t2_num > 0
+            and cur_p > 0
+            and (
+                (not is_t2_downward and cur_p >= t2_num * 0.998)
+                or (is_t2_downward and cur_p <= t2_num * 1.002)
+            )
+        )
+
+        if not has_hit_t2:
+            logger.warning(
+                f"[AlertTemplates] Vetoed false TARGET_2 render for {getattr(alert, 'symbol', '')}: "
+                f"LTP={cur_p} has not reached Target 2={t2_num} (downward={is_t2_downward})."
+            )
+            t1_raw = getattr(alert, "target_1", None) or (act_p.get("target_1") if isinstance(act_p, dict) else None)
+            t1_num = None
+            if t1_raw:
+                m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(t1_raw))
+                if m_t1:
+                    try:
+                        t1_num = float(m_t1.group(0).replace(",", ""))
+                    except ValueError:
+                        pass
+            has_hit_t1 = (
+                t1_num is not None
+                and t1_num > 0
+                and cur_p > 0
+                and (
+                    (not is_t2_downward and cur_p >= t1_num * 0.998)
+                    or (is_t2_downward and cur_p <= t1_num * 1.002)
                 )
+            )
+            if has_hit_t1:
                 return render_milestone_alert(
                     MilestoneAlertData.from_alert(alert, "TARGET_1", in_market=in_market),
                     in_market=in_market,
                 )
+            return render_milestone_alert(
+                MilestoneAlertData.from_alert(alert, "TRAIL_RATCHET", in_market=in_market),
+                in_market=in_market,
+            )
         return render_milestone_alert(
             MilestoneAlertData.from_alert(alert, "TARGET_2", in_market=in_market),
             in_market=in_market,
@@ -4617,11 +4805,20 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             or "PE" in actionable_plan.get("action", "")
         )
 
-        act = actionable_plan.get("action", "BUY_FUTURES")
+        act = str(actionable_plan.get("action", "BUY_FUTURES"))
         inst = actionable_plan.get("contract", f"MCX:{alert.symbol}")
         # Clean display name for contract if not already formatted
         if ("CE" in inst or "PE" in inst) and "(" not in inst:
             inst = format_readable_option_symbol(inst)
+
+        # Deduplicate option type from action verb if contract already specifies it
+        # e.g., act="BUY_CE", inst="CRUDEOIL 8750 CE (16 Oct)" -> act="BUY"
+        inst_u = inst.upper()
+        if any(tok in inst_u for tok in (" CE", " PE", "CE", "PE")) and any(
+            tok in act.upper() for tok in ("_CE", "_PE", " CE", " PE")
+        ):
+            act = re.sub(r"[_\s]*(?:CE|PE)\b", "", act, flags=re.IGNORECASE).strip()
+            act = re.sub(r"\s+", " ", act)
 
         entry = actionable_plan.get("entry_range", f"₹{alert.ltp:,.1f}")
         entry_mcx_num = None
@@ -4697,6 +4894,17 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             else:
                 wait_str = f"\n• <b>Discipline:</b> <i>{wait_rule}</i>"
 
+        sniper_plan = actionable_plan.get("sniper_plan") or (
+            alert.metrics.get("sniper_plan")
+            if isinstance(getattr(alert, "metrics", None), dict)
+            else None
+        )
+        sniper_str = ""
+        if sniper_plan and isinstance(sniper_plan, dict):
+            ote_z = sniper_plan.get("optimal_entry_zone") or f"₹{sniper_plan.get('entry_zone_min', 0):,.1f} – ₹{sniper_plan.get('entry_zone_max', 0):,.1f}"
+            ts = sniper_plan.get("time_stop_minutes", 25)
+            sniper_str = f"\n🎯 <b>Sniper OTE Bracket:</b> <code>{ote_z}</code> (Time-Stop: {ts}m)"
+
         if is_opt_first:
             plan_str = (
                 f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>{lot_beside_p}\n"
@@ -4705,7 +4913,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 f"• <b>R:R:</b> <b>{rr}</b>{lot_str}{no_chase_inline}"
                 f"{capped_risk_str}"
                 f"{confluence_str}"
-                f"{fut_ref_str}\n"
+                f"{fut_ref_str}"
+                f"{sniper_str}\n"
                 f"• <b>Playbook:</b> <i>{rule}</i>"
                 f"{wait_str}"
             )
@@ -4728,7 +4937,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 f"• <b>SL:</b> <code>{sl}</code>\n"
                 f"• <b>T1:</b> <code>{tgt1}</code>{tgt2_str}\n"
                 f"• <b>R:R:</b> <b>{rr}</b>{lot_str}{no_chase_inline}"
-                f"{confluence_str}\n"
+                f"{confluence_str}"
+                f"{sniper_str}\n"
                 f"• <b>Playbook:</b> <i>{rule}</i>"
                 f"{wait_str}"
                 f"{opt_str}"
@@ -5510,11 +5720,17 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         def _clean_sig_phrase(text: str, max_len: int = 40) -> str:
             t = str(text or "").strip()
             if len(t) <= max_len:
-                return t
+                return t.rstrip(",;.:- /")
             clipped = t[:max_len]
             sp = clipped.rfind(" ")
             if sp > 15:
                 clipped = clipped[:sp]
+            clipped = clipped.rstrip(",;.:- /")
+            # If clipping left an awkward trailing label like ': session' or ': tag', strip back to pre-colon
+            if ":" in clipped:
+                post_colon = clipped.split(":")[-1].strip()
+                if len(post_colon.split()) <= 1 and len(post_colon) < 10:
+                    clipped = clipped.rsplit(":", 1)[0].strip()
             clipped = clipped.rstrip(",;.:- /")
             # Balance unclosed brackets/parentheses to prevent hanging artifacts like '($'
             for open_b, close_b in (("(", ")"), ("[", "]"), ("{", "}")):

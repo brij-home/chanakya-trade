@@ -473,7 +473,7 @@ def evaluate_institutional_quality_gate(
     # ── 6b. Check 5b: Higher-Timeframe Structural Wall & MTF Alignment ────────
     mtf_count = (getattr(alert, "metrics", {}) or {}).get("mtf_alignment_count")
     wall_col = (getattr(alert, "metrics", {}) or {}).get("wall_collision")
-    if wall_col and confidence < 92:
+    if wall_col:
         return VetoVerdict(
             is_vetoed=True,
             veto_reason="Overhead Higher-Timeframe Structural Wall: Immediate 1H swing barrier within 0.35% chokes upside headroom.",

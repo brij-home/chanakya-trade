@@ -175,10 +175,10 @@
 
 | Provider | Env Var | Use Case |
 | :--- | :--- | :--- |
-| **Gemini** | `GEMINI_API_KEY` | Fast-LLM & Deep (`gemini-2.5-flash`, `gemini-2.0-flash`, `gemini-1.5-flash-latest`) |
-| **NVIDIA NIM** | `NVIDIA_API_KEY` | Deep reasoning (`meta/llama-3.3-70b-instruct`) |
+| **Gemini** | `GEMINI_API_KEY` | Fast-LLM & Deep (`gemini-3.8-flash`, `gemini-3.7-flash`) |
+| **NVIDIA NIM** | `NVIDIA_API_KEY` | Deep reasoning (`qwen/qwen3.8-27b`) |
 | **OpenRouter** | `OPENROUTER_API_KEY` | Multi-model gateway fallback |
-| **Anthropic** | `ANTHROPIC_API_KEY` | Deep reasoning (`claude-sonnet-4-7`) |
+| **Anthropic** | `ANTHROPIC_API_KEY` | Deep reasoning (`claude-5-sonnet`) |
 | **OpenAI** | `OPENAI_API_KEY` | Deep reasoning (`gpt-4o`, `o3-mini`) |
 
 ### Dual-LLM Routing & Calibrated Token Budgets

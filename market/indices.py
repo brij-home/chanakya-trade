@@ -619,9 +619,10 @@ def get_premarket_battle_plan(
     Computes institutional Pre-Market Battle Plan for benchmark and major indices.
     Calculates Virgin CPR (Pivot, BC, TC, width %), Camarilla Pivots (H4, H3, L3, L4),
     and Previous Day Levels (PDH, PDL, PDC) with actionable trade blueprints.
+    Leverages centralized DailyLevelsStore for sub-millisecond in-memory retrieval and daily persistence.
     """
+    from engine.daily_levels import get_daily_levels
     from market.quotes import get_quote
-    from market.history import get_ohlcv
 
     target_indices = indices or ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
     results: dict[str, Any] = {}
@@ -629,39 +630,43 @@ def get_premarket_battle_plan(
     for name in target_indices:
         clean_name = name.upper()
         inst = INDEX_INSTRUMENTS.get(clean_name, f"NSE:{clean_name}")
-        exch = "BSE" if "BSE:" in inst or clean_name in ("SENSEX", "BANKEX") else "NSE"
+        dl = get_daily_levels(clean_name)
 
+        if dl:
+            quotes = get_quote([inst])
+            q = quotes.get(inst)
+            ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or dl.spot) if q else dl.spot
+
+            results[clean_name] = {
+                "symbol": clean_name,
+                "instrument": inst,
+                "spot": round(ltp, 1),
+                "pdh": dl.pdh,
+                "pdl": dl.pdl,
+                "pdc": dl.pdc,
+                "pdo": dl.pdo,
+                "atr_14": dl.atr_14,
+                "cpr": dl.cpr,
+                "camarilla": dl.camarilla,
+                "classic_pivots": dl.classic_pivots,
+                "weekly": dl.weekly,
+                "pre_open": dl.pre_open,
+                "blueprint": dl.blueprint,
+            }
+            continue
+
+        # Fallback if daily levels engine could not resolve
+        exch = "BSE" if "BSE:" in inst or clean_name in ("SENSEX", "BANKEX") else "NSE"
         quotes = get_quote([inst])
         q = quotes.get(inst)
         ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0) if q else 0.0
         prev_close = float(getattr(q, "close", 0.0) or 0.0) if q else 0.0
+        if ltp <= 0 and prev_close <= 0:
+            continue
 
-        # Attempt to get historical daily bar for true PDH / PDL / PDC
-        pdh, pdl, pdc = 0.0, 0.0, prev_close
-        try:
-            df_day = get_ohlcv(clean_name, exchange=exch, interval="day", days=5)
-            if df_day is not None and len(df_day) >= 2:
-                col_h = "high" if "high" in df_day.columns else "High"
-                col_l = "low" if "low" in df_day.columns else "Low"
-                col_c = "close" if "close" in df_day.columns else "Close"
-                pdh = float(df_day[col_h].iloc[-2])
-                pdl = float(df_day[col_l].iloc[-2])
-                pdc = float(df_day[col_c].iloc[-2])
-        except Exception:
-            pass
-
-        # Fallback if historical bar is unavailable
-        if pdh <= 0 or pdl <= 0 or pdc <= 0:
-            if q and q.high and q.low and q.close:
-                pdh = float(q.high)
-                pdl = float(q.low)
-                pdc = float(q.close)
-            elif ltp > 0:
-                pdh = round(ltp * 1.006, 1)
-                pdl = round(ltp * 0.994, 1)
-                pdc = round(ltp, 1)
-            else:
-                continue
+        pdh = round((getattr(q, "high", None) or ltp * 1.006), 1)
+        pdl = round((getattr(q, "low", None) or ltp * 0.994), 1)
+        pdc = round(prev_close or ltp, 1)
 
         cpr_pivot = (pdh + pdl + pdc) / 3.0
         cpr_bc = (pdh + pdl) / 2.0

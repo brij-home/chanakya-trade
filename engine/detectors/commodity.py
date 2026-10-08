@@ -151,6 +151,7 @@ def detect_commodity_volatility_squeeze(df: Optional[pd.DataFrame]) -> dict[str,
 def detect_commodity_breakouts(
     universe: Optional[list[str]] = None,
     quotes_map: Optional[dict[str, Any]] = None,
+    ohlcv_1m_map: Optional[dict[str, Any]] = None,
 ) -> list[AutoAlert]:
     """
     Scans liquid MCX commodities for high-asymmetry breakouts and options-first setups.
@@ -301,6 +302,17 @@ def detect_commodity_breakouts(
         is_bullish = False
         is_bearish = False
         is_donchian_breakout = False
+        is_utad_bear = False
+        is_spring_bull = False
+        is_1m_micro_bear = False
+        is_1m_micro_bull = False
+        poc_price = 0.0
+        vah_price = 0.0
+        val_price = 0.0
+        peak_recent = 0.0
+        trough_recent = 0.0
+        nearest_round_high = 0.0
+        nearest_round_low = 0.0
         rvol = 1.0
 
         roc_15m = 0.0
@@ -494,6 +506,120 @@ def detect_commodity_breakouts(
                 and lower_wick_ratio <= max_wick
             )
 
+            # 5. Wyckoff UTAD (Upthrust After Distribution) & Spring Structural Reversals
+            # Catches false breakouts piercing resistance / round strikes that violently fail back inside.
+            lookback_bars = df_5m.iloc[-6:] if len(df_5m) >= 6 else df_5m
+            peak_recent = float(lookback_bars["high"].max())
+            trough_recent = float(lookback_bars["low"].min())
+
+            # Round number strike inflection levels (e.g. 8800 on Crude, 250 on Natgas)
+            strike_step = 50.0 if clean_sym in ("CRUDEOIL", "CRUDEOILM") else (
+                100.0 if "GOLD" in clean_sym else (500.0 if "SILVER" in clean_sym else 1.0)
+            )
+            nearest_round_high = round(peak_recent / strike_step) * strike_step if peak_recent > 0 else 0.0
+            nearest_round_low = round(trough_recent / strike_step) * strike_step if trough_recent > 0 else 0.0
+
+            # Sub-Candle 1m Micro-Rejection Trigger:
+            # Eliminates the 2-5 min 5m-candle close lag during fast institutional liquidity sweeps.
+            df_1m = ohlcv_1m_map.get(clean_sym) if ohlcv_1m_map else None
+            if (
+                df_1m is None
+                and is_authentic_live
+                and is_golden_hours
+                and clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI", "GOLD", "GOLDM")
+            ):
+                near_high_probe = (
+                    (nearest_round_high > 0 and abs(ltp - nearest_round_high) <= (ltp * 0.004))
+                    or (peak_recent > 0 and abs(ltp - peak_recent) <= (ltp * 0.004))
+                )
+                near_low_probe = (
+                    (nearest_round_low > 0 and abs(ltp - nearest_round_low) <= (ltp * 0.004))
+                    or (trough_recent > 0 and abs(ltp - trough_recent) <= (ltp * 0.004))
+                )
+                if near_high_probe or near_low_probe:
+                    try:
+                        from market.history import get_ohlcv
+
+                        df_1m = get_ohlcv(clean_sym, exchange="MCX", interval="1m", days=1)
+                    except Exception as e_1m:
+                        logger.debug(f"[CommodityDetector] Error fetching 1m OHLCV for {clean_sym}: {e_1m}")
+
+            if df_1m is not None and len(df_1m) >= 2:
+                try:
+                    recent_1m = df_1m.iloc[-5:] if len(df_1m) >= 5 else df_1m
+                    high_1m_max = float(recent_1m["high"].max())
+                    low_1m_min = float(recent_1m["low"].min())
+                    last_1m = df_1m.iloc[-1]
+                    m_open = float(last_1m.get("open", ltp))
+                    m_high = max(float(last_1m.get("high", ltp)), ltp)
+                    m_low = min(float(last_1m.get("low", ltp)), ltp)
+                    m_close = float(last_1m.get("close", ltp))
+                    m_range = max(0.5, m_high - m_low)
+                    m_uwick = (m_high - max(m_open, m_close)) / m_range
+                    m_lwick = (min(m_open, m_close) - m_low) / m_range
+
+                    # Micro Bearish Rejection (UTAD):
+                    poked_high_1m = (
+                        high_1m_max >= prior_high * 0.9995
+                        or (nearest_round_high > 0 and high_1m_max >= nearest_round_high)
+                        or (peak_recent > 0 and high_1m_max >= peak_recent * 0.9995)
+                    )
+                    if (
+                        poked_high_1m
+                        and (ltp <= nearest_round_high or (prior_high > 0 and ltp <= prior_high * 0.999) or ltp < high_1m_max)
+                        and (m_close <= m_open or ltp <= m_open or m_uwick >= 0.30)
+                        and ltp < high_1m_max
+                    ):
+                        is_1m_micro_bear = True
+
+                    # Micro Bullish Reclaim (Spring):
+                    poked_low_1m = (
+                        low_1m_min <= prior_low * 1.0005
+                        or (nearest_round_low > 0 and low_1m_min <= nearest_round_low)
+                        or (trough_recent > 0 and low_1m_min <= trough_recent * 1.0005)
+                    )
+                    if (
+                        poked_low_1m
+                        and (ltp >= nearest_round_low or (prior_low > 0 and ltp >= prior_low * 1.001) or ltp > low_1m_min)
+                        and (m_close >= m_open or ltp >= m_open or m_lwick >= 0.30)
+                        and ltp > low_1m_min
+                    ):
+                        is_1m_micro_bull = True
+                except Exception as e_1m_calc:
+                    logger.debug(f"[CommodityDetector] 1m micro-rejection calc error: {e_1m_calc}")
+
+            # UTAD: Poked above prior_high or round strike (e.g. 8824 >= 8800), then failed back below on volume
+            has_utad_poke = (
+                (peak_recent >= prior_high * 0.9995 or peak_recent >= nearest_round_high or is_1m_micro_bear)
+                and (peak_recent > ltp or is_1m_micro_bear)
+            )
+            if (
+                not is_locked_bear
+                and has_utad_poke
+                and (ltp <= nearest_round_high or ltp <= prior_high * 0.998 or is_1m_micro_bear)
+                and (cur_close <= cur_open or ltp <= cur_open or is_1m_micro_bear)
+                and (bear_close_ratio >= 0.45 or upper_wick_ratio >= 0.35 or is_1m_micro_bear)
+                and (roc_15m <= -0.15 or is_1m_micro_bear)
+                and (rvol >= 1.10 or is_1m_micro_bear)
+            ):
+                is_utad_bear = True
+
+            # Spring: Poked below prior_low or round strike, then reclaimed above on volume
+            has_spring_poke = (
+                (trough_recent <= prior_low * 1.0005 or trough_recent <= nearest_round_low or is_1m_micro_bull)
+                and (trough_recent < ltp or is_1m_micro_bull)
+            )
+            if (
+                not is_locked_bull
+                and has_spring_poke
+                and (ltp >= nearest_round_low or ltp >= prior_low * 1.002 or is_1m_micro_bull)
+                and (cur_close >= cur_open or ltp >= cur_open or is_1m_micro_bull)
+                and (bull_close_ratio >= 0.45 or lower_wick_ratio >= 0.35 or is_1m_micro_bull)
+                and (roc_15m >= 0.15 or is_1m_micro_bull)
+                and (rvol >= 1.10 or is_1m_micro_bull)
+            ):
+                is_spring_bull = True
+
             # US Open Transition Gate (18:15 to 19:15 IST):
             transition_gate_passed = (
                 (not is_us_open_transition)
@@ -502,22 +628,25 @@ def detect_commodity_breakouts(
                 or is_donchian_bear
                 or is_smc_bull
                 or is_smc_bear
+                or is_utad_bear
+                or is_spring_bull
             )
 
             if transition_gate_passed:
-                if is_donchian_bull or is_vwap_trend_bull or is_smc_bull or is_thrust_bull:
+                if is_donchian_bull or is_vwap_trend_bull or is_smc_bull or is_thrust_bull or is_spring_bull:
                     is_bullish = True
                     is_donchian_breakout = is_donchian_bull
-                elif is_donchian_bear or is_vwap_trend_bear or is_smc_bear or is_thrust_bear:
+                elif is_donchian_bear or is_vwap_trend_bear or is_smc_bear or is_thrust_bear or is_utad_bear:
                     is_bearish = True
                     is_donchian_breakout = is_donchian_bear
 
             # Golden Hours (17:30 - 22:30 IST) Trend-Following Invariant:
-            # During the US active pit session, strictly veto counter-trend bets against VWAP.
+            # During the US active pit session, strictly veto counter-trend bets against VWAP,
+            # UNLESS a confirmed Wyckoff UTAD or Spring structural reversal is triggered.
             if is_golden_hours and has_real_vwap:
-                if ltp >= vwap * 1.001:
+                if ltp >= vwap * 1.001 and not is_utad_bear:
                     is_bearish = False  # Strictly ban counter-trend shorts / PE buys above VWAP
-                elif ltp <= vwap * 0.999:
+                elif ltp <= vwap * 0.999 and not is_spring_bull:
                     is_bullish = False  # Strictly ban counter-trend longs / CE buys below VWAP
         else:
             strict_min_chg = max(min_chg * 1.2, 0.9)
@@ -541,9 +670,9 @@ def detect_commodity_breakouts(
 
             # Golden Hours Trend Invariant for fallback branch as well
             if is_golden_hours and has_real_vwap_diff:
-                if ltp >= vwap * 1.001:
+                if ltp >= vwap * 1.001 and not is_utad_bear:
                     is_bearish = False
-                elif ltp <= vwap * 0.999:
+                elif ltp <= vwap * 0.999 and not is_spring_bull:
                     is_bullish = False
 
         if not (is_bullish or is_bearish):
@@ -767,20 +896,26 @@ def detect_commodity_breakouts(
                     cvd_ratio = round(b_vol / max(1.0, s_vol), 2)
                     if cvd_ratio >= 2.0:
                         smc_tags.append(f"Buyer CVD Aggression ({cvd_ratio:.1f}x)")
-                    elif s_vol > (b_vol * 2.0) and is_authentic_live and rvol < 2.0:
-                        logger.info(
-                            f"[CommodityDetector] 🛑 Trap candle detected on {clean_sym}: Seller Delta {s_vol:.0f} > 2x Buyer {b_vol:.0f} (Exhaustion Trap); suppressing."
-                        )
-                        is_bullish = False
+                    elif s_vol > (b_vol * 2.0):
+                        if is_spring_bull:
+                            smc_tags.append("Institutional Absorption of Sellers (Bear Trap Confirmed)")
+                        elif is_authentic_live and rvol < 2.0:
+                            logger.info(
+                                f"[CommodityDetector] 🛑 Trap candle detected on {clean_sym}: Seller Delta {s_vol:.0f} > 2x Buyer {b_vol:.0f} (Exhaustion Trap); suppressing."
+                            )
+                            is_bullish = False
                 elif is_bearish:
                     cvd_ratio = round(s_vol / max(1.0, b_vol), 2)
                     if cvd_ratio >= 2.0:
                         smc_tags.append(f"Seller CVD Aggression ({cvd_ratio:.1f}x)")
-                    elif b_vol > (s_vol * 2.0) and is_authentic_live and rvol < 2.0:
-                        logger.info(
-                            f"[CommodityDetector] 🛑 Trap candle detected on {clean_sym}: Buyer Delta {b_vol:.0f} > 2x Seller {s_vol:.0f} (Absorption Trap); suppressing."
-                        )
-                        is_bearish = False
+                    elif b_vol > (s_vol * 2.0):
+                        if is_utad_bear:
+                            smc_tags.append("Institutional Absorption of Buyers (Bull Trap Confirmed)")
+                        elif is_authentic_live and rvol < 2.0:
+                            logger.info(
+                                f"[CommodityDetector] 🛑 Trap candle detected on {clean_sym}: Buyer Delta {b_vol:.0f} > 2x Seller {s_vol:.0f} (Absorption Trap); suppressing."
+                            )
+                            is_bearish = False
             except Exception as e_cvd:
                 logger.debug(f"[CommodityDetector] CVD evaluation error for {clean_sym}: {e_cvd}")
 
@@ -812,6 +947,24 @@ def detect_commodity_breakouts(
         if rsi_5m is not None:
             smc_tags.append(f"RSI {rsi_5m:.1f}")
 
+        from engine.commodity_adaptive_regime import (
+            evaluate_commodity_adaptive_regime,
+            compute_commodity_choppiness_index,
+            compute_commodity_adx,
+        )
+
+        chop_idx = compute_commodity_choppiness_index(df_5m, period=14)
+        adx_14 = compute_commodity_adx(df_5m, period=14)
+
+        if chop_idx is not None:
+            if chop_idx <= 38.2:
+                smc_tags.append(f"Trending Expansion (CHOP {chop_idx:.1f})")
+            elif chop_idx >= 61.8:
+                smc_tags.append(f"Consolidation / Chop ({chop_idx:.1f})")
+
+        if adx_14 is not None and adx_14 >= 25.0:
+            smc_tags.append(f"Strong Trend (ADX {adx_14:.1f})")
+
         if rvol >= 1.5:
             smc_tags.append(f"Institutional Surge (RVOL {rvol:.1f}x)")
         elif rvol >= 1.2:
@@ -825,6 +978,15 @@ def detect_commodity_breakouts(
         )
         if is_sq_fired:
             smc_tags.append(f"TTM Squeeze Expansion Fire ({sq_info.get('squeeze_bars', 0)} bars coiling)")
+
+        if is_utad_bear:
+            smc_tags.append(f"Wyckoff UTAD Sweep (₹{peak_recent:,.1f} ➔ Rejection)")
+            if is_1m_micro_bear:
+                smc_tags.append("1m Micro-Rejection Sweep Confirmed")
+        elif is_spring_bull:
+            smc_tags.append(f"Wyckoff Spring Reclaim (₹{trough_recent:,.1f} ➔ Absorption)")
+            if is_1m_micro_bull:
+                smc_tags.append("1m Micro-Reclaim Sweep Confirmed")
 
         # Multi-Timeframe (MTF) Alignment & HTF Resistance Wall Check
         mtf_data = None
@@ -864,7 +1026,7 @@ def detect_commodity_breakouts(
         alert_type = "COMMODITY_MOMENTUM"
         from engine.alert_identity import generate_alert_id
 
-        alert_id = generate_alert_id(clean_sym, alert_type)
+        alert_id = generate_alert_id(clean_sym, alert_type, variant=direction.lower())
 
         from engine.position_sizer import get_lot_size
 
@@ -874,9 +1036,19 @@ def detect_commodity_breakouts(
 
         if is_bullish:
             sl_price = round(ltp - risk_pts, 2)
-            t1_price = round(ltp + 2.8 * risk_pts, 2)
-            t2_price = round(ltp + 5.0 * risk_pts, 2)
-            t3_price = round(ltp + 8.0 * risk_pts, 2)
+            default_t1 = round(ltp + 2.8 * risk_pts, 2)
+            default_t2 = round(ltp + 5.0 * risk_pts, 2)
+            default_t3 = round(ltp + 8.0 * risk_pts, 2)
+
+            # Volume Profile rotation: Target 1 = Session POC, Target 2 = VAH
+            if (is_spring_bull or is_donchian_breakout) and poc_price > 0 and (poc_price - ltp) >= (1.0 * risk_pts):
+                t1_price = round(poc_price, 2)
+                t2_price = round(vah_price, 2) if (vah_price > 0 and vah_price > poc_price and (vah_price - ltp) >= (2.0 * risk_pts)) else default_t2
+                t3_price = round(max(default_t3, t2_price + 2.0 * risk_pts), 2)
+            else:
+                t1_price = default_t1
+                t2_price = default_t2
+                t3_price = default_t3
             no_chase = round(ltp + chase_pts, 2)
 
             retest_anchor = prior_high if (is_donchian_breakout and "prior_high" in locals()) else vwap
@@ -918,9 +1090,19 @@ def detect_commodity_breakouts(
             action = "BUY_FUTURES"
         else:
             sl_price = round(ltp + risk_pts, 2)
-            t1_price = round(ltp - 2.8 * risk_pts, 2)
-            t2_price = round(ltp - 5.0 * risk_pts, 2)
-            t3_price = round(ltp - 8.0 * risk_pts, 2)
+            default_t1 = round(ltp - 2.8 * risk_pts, 2)
+            default_t2 = round(ltp - 5.0 * risk_pts, 2)
+            default_t3 = round(ltp - 8.0 * risk_pts, 2)
+
+            # Volume Profile rotation: Target 1 = Session POC, Target 2 = VAL
+            if (is_utad_bear or is_donchian_breakout) and poc_price > 0 and (ltp - poc_price) >= (1.0 * risk_pts):
+                t1_price = round(poc_price, 2)
+                t2_price = round(val_price, 2) if (val_price > 0 and poc_price > val_price and (ltp - val_price) >= (2.0 * risk_pts)) else default_t2
+                t3_price = round(min(default_t3, t2_price - 2.0 * risk_pts), 2)
+            else:
+                t1_price = default_t1
+                t2_price = default_t2
+                t3_price = default_t3
             no_chase = round(ltp - chase_pts, 2)
 
             retest_anchor = prior_low if (is_donchian_breakout and "prior_low" in locals()) else vwap
@@ -1013,7 +1195,16 @@ def detect_commodity_breakouts(
                         and float(getattr(c, "last_price", 0.0)) >= 1.0
                     ]
                     candidates = atm_candidates if atm_candidates else filtered
-                    candidates.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - ltp))
+                    target_strike = (
+                        nearest_round_high
+                        if (is_utad_bear and nearest_round_high > 0)
+                        else (
+                            nearest_round_low
+                            if (is_spring_bull and nearest_round_low > 0)
+                            else ltp
+                        )
+                    )
+                    candidates.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - target_strike))
                     closest_opt = candidates[0]
 
                     strike_val = float(getattr(closest_opt, "strike", 0.0))
@@ -1049,7 +1240,7 @@ def detect_commodity_breakouts(
                     opt_prem = float(getattr(closest_opt, "last_price", 0.0))
                     opt_risk = round(max(1.0, min(opt_prem * 0.35, risk_pts * 0.52)), 1)
                     opt_sl = round(max(0.05, opt_prem - opt_risk), 1)
-                    opt_t1 = round(opt_prem + 2.8 * opt_risk, 1)
+                    opt_t1 = round(opt_prem + 3.0 * opt_risk, 1)
                     opt_t2 = round(opt_prem + 5.0 * opt_risk, 1)
                     opt_runner = round(opt_prem + 7.5 * opt_risk, 1)
                     opt_no_chase = round(opt_prem + 0.15 * opt_risk, 1)
@@ -1086,6 +1277,54 @@ def detect_commodity_breakouts(
             except Exception as e:
                 logger.debug(f"[CommodityDetector] Options chain resolution error: {e}")
                 opt_recommendation = None
+
+        is_institutional_thrust = bool(
+            (rvol >= 1.75 and (roc_15m >= 0.35 if is_bullish else roc_15m <= -0.35))
+            or (cvd_ratio >= 2.0 and rvol >= 1.4)
+            or is_sq_fired
+        )
+
+        adaptive_decision = evaluate_commodity_adaptive_regime(
+            symbol=clean_sym,
+            spot=ltp,
+            df_5m=df_5m,
+            ref_time=now_ist,
+            trigger_level=ltp,
+            invalidation_level=sl_price,
+            direction=direction,
+            is_institutional_thrust=is_institutional_thrust,
+            rvol=rvol,
+            has_smc_confluence=bool(smc_tags),
+            cvd_ratio=cvd_ratio,
+            trap_detected=False,
+            trap_reason=None,
+            opt_recommendation=opt_recommendation,
+            lot_size=lot_sz,
+            retest_anchor=retest_anchor if "retest_anchor" in locals() else None,
+        )
+
+        # 🐅 Pillar 2: Tiger Stalking Gate — Suppress routine breakouts during midday lull or severe chop
+        if is_authentic_live and not adaptive_decision.tiger.allow_routine_breakouts:
+            logger.info(
+                f"[CommodityDetector] 🐅 Tiger Stalking VETO on {clean_sym}: {adaptive_decision.tiger.reason}. Routine breakout suppressed."
+            )
+            continue
+
+        # 🎯 Pillar 3: Anti-FOMO No-Chase Sniper Gate — Suppress entries if spot is already past No-Chase ceiling
+        if is_authentic_live and adaptive_decision.sniper and adaptive_decision.sniper.is_chasing and rvol < 2.5:
+            logger.info(
+                f"[CommodityDetector] 🛑 FOMO Chase Suppressed on {clean_sym}: Spot ₹{ltp:,.1f} is beyond No-Chase boundary ₹{no_chase:,.1f} with RVOL {rvol:.1f}x < 2.5x."
+            )
+            continue
+
+        if adaptive_decision.eagle.overall_environment == "OPTIMAL_TREND_EXPANSION":
+            smc_tags.append("Eagle: Trend Expansion")
+        if adaptive_decision.tiger.mandate == "MOMENTUM_EXPANSION":
+            smc_tags.append("Tiger: Institutional Thrust")
+        if adaptive_decision.sniper:
+            smc_tags.append(
+                f"Sniper OTE ₹{adaptive_decision.sniper.entry_zone_min:,.1f}–₹{adaptive_decision.sniper.entry_zone_max:,.1f}"
+            )
 
         confluence_str = (
             " + ".join(smc_tags) if smc_tags else "Donchian Breakout + VWAP Confirmation"
@@ -1135,7 +1374,17 @@ def detect_commodity_breakouts(
                 "max_loss_capped": opt_max_outlay,
                 "setup_confluence": confluence_str,
                 "when_to_buy": (
-                    f"Enter {_delta_tier} {opt_contract_name} on 5m candle closing in breakout direction above/below VWAP ₹{vwap:,.1f}."
+                    (
+                        f"Active 1m micro-rejection confirmed after liquidity sweep at ₹{peak_recent:,.1f}. "
+                        f"Immediate limit entry in ₹{opt_entry_low:,.1f} – ₹{opt_entry_high:,.1f}."
+                        if (is_utad_bear and is_1m_micro_bear)
+                        else (
+                            f"Active 1m micro-reclaim confirmed after liquidity sweep at ₹{trough_recent:,.1f}. "
+                            f"Immediate limit entry in ₹{opt_entry_low:,.1f} – ₹{opt_entry_high:,.1f}."
+                            if (is_spring_bull and is_1m_micro_bull)
+                            else f"Enter {_delta_tier} {opt_contract_name} on 5m candle closing in breakout direction above/below VWAP ₹{vwap:,.1f}."
+                        )
+                    )
                     + (f" {_dte_warn}" if _dte_warn else "")
                 ),
                 "when_to_wait": f"Do not chase if option premium moves beyond ₹{opt_no_chase:,.1f} (Spot above/below ₹{no_chase:,.1f}).",
@@ -1173,12 +1422,31 @@ def detect_commodity_breakouts(
                 },
                 "option_alternative": opt_recommendation,
             }
-            headline = f"🛢️ MCX OPTION: {opt_contract_name} @ ₹{opt_recommendation['ltp']:,.1f} ({'Breakout' if is_bullish else 'Breakdown'} @ ₹{ltp:,.1f})"
-            summary = (
-                f"Institutional {'breakout' if is_bullish else 'breakdown'} in {clean_sym} ({chg:+.1f}%). "
-                f"Preferred Vehicle: {opt_contract_name} @ ₹{opt_recommendation['ltp']:,.1f} with capped risk ₹{opt_max_outlay:,.0f}. "
-                f"Confluence: {confluence_str}."
-            )
+            if is_utad_bear:
+                headline_prefix = "🎯 MCX SNIPER REVERSAL" if is_1m_micro_bear else "🎯 MCX REVERSAL"
+                headline = f"{headline_prefix}: {opt_contract_name} @ ₹{opt_recommendation['ltp']:,.1f} (UTAD Rejection from ₹{peak_recent:,.1f})"
+                summary = (
+                    f"Wyckoff Liquidity Sweep & UTAD Rejection in {clean_sym} after testing high ₹{peak_recent:,.1f}. "
+                    f"Price failed back under ₹{nearest_round_high:,.1f} on heavy institutional selling volume (RVOL {rvol:.1f}x). "
+                    f"Preferred Vehicle: {opt_contract_name} @ ₹{opt_recommendation['ltp']:,.1f} with capped risk ₹{opt_max_outlay:,.0f}. "
+                    f"Confluence: {confluence_str}."
+                )
+            elif is_spring_bull:
+                headline_prefix = "🎯 MCX SNIPER REVERSAL" if is_1m_micro_bull else "🎯 MCX REVERSAL"
+                headline = f"{headline_prefix}: {opt_contract_name} @ ₹{opt_recommendation['ltp']:,.1f} (Spring Reclaim from ₹{trough_recent:,.1f})"
+                summary = (
+                    f"Wyckoff Spring & Bear Trap Reclaim in {clean_sym} after undercutting low ₹{trough_recent:,.1f}. "
+                    f"Price reclaimed ₹{nearest_round_low:,.1f} on high buying volume (RVOL {rvol:.1f}x). "
+                    f"Preferred Vehicle: {opt_contract_name} @ ₹{opt_recommendation['ltp']:,.1f} with capped risk ₹{opt_max_outlay:,.0f}. "
+                    f"Confluence: {confluence_str}."
+                )
+            else:
+                headline = f"🛢️ MCX OPTION: {opt_contract_name} @ ₹{opt_recommendation['ltp']:,.1f} ({'Breakout' if is_bullish else 'Breakdown'} @ ₹{ltp:,.1f})"
+                summary = (
+                    f"Institutional {'breakout' if is_bullish else 'breakdown'} in {clean_sym} ({chg:+.1f}%). "
+                    f"Preferred Vehicle: {opt_contract_name} @ ₹{opt_recommendation['ltp']:,.1f} with capped risk ₹{opt_max_outlay:,.0f}. "
+                    f"Confluence: {confluence_str}."
+                )
         else:
             fut_risk = round(risk_pts * lot_sz, 0)
             plan_dict = {
@@ -1218,6 +1486,23 @@ def detect_commodity_breakouts(
             if opt_recommendation:
                 plan_dict["option_alternative"] = opt_recommendation
 
+        sniper = adaptive_decision.sniper
+        sniper_dict = None
+        if sniper:
+            sniper_dict = {
+                "optimal_entry_zone": f"₹{sniper.entry_zone_min:,.1f} – ₹{sniper.entry_zone_max:,.1f}",
+                "time_stop_minutes": 25,
+                "stop_loss_rule": f"Trail to breakeven at T1; invalidation at ₹{sniper.structural_invalidation:,.1f}",
+                "risk_reward_ratio": f"{sniper.risk_reward_t1:.1f}",
+                "setup_name": sniper.setup_name,
+                "session_phase": adaptive_decision.eagle.session_phase,
+                "is_chasing": sniper.is_chasing,
+                "entry_instruction": sniper.entry_instruction,
+                "no_chase_boundary": sniper.no_chase_boundary,
+            }
+            plan_dict["sniper_plan"] = sniper_dict
+            plan_dict["time_stop_minutes"] = 25
+
         from engine.trade_plan import get_market_status
 
         mcx_status_dict = get_market_status("MCX")
@@ -1230,6 +1515,8 @@ def detect_commodity_breakouts(
             conf_boost = min(18, conf_boost + 3)
         if is_donchian_breakout:
             conf_boost = min(18, conf_boost + 4)
+        if is_utad_bear or is_spring_bull:
+            conf_boost = min(22, conf_boost + 5)
         if is_sq_fired:
             conf_boost = min(22, conf_boost + 5)
         if mtf_data and mtf_data.get("alignment_count", 0) >= 2:
@@ -1240,6 +1527,8 @@ def detect_commodity_breakouts(
             ):
                 conf_boost = min(22, conf_boost + 5)
 
+        if is_1m_micro_bear or is_1m_micro_bull:
+            conf_boost = min(22, conf_boost + 5)
         if cvd_ratio >= 2.0:
             conf_boost = min(22, conf_boost + 3)
 
@@ -1307,9 +1596,14 @@ def detect_commodity_breakouts(
                             div_label = of_snap.cvd_divergence.replace("_", " ").title()
                             smc_tags.append(f"CVD {div_label}")
                         elif of_snap.cvd_divergence in ("BULLISH_ABSORPTION", "AGGRESSIVE_BUYING"):
-                            # Institutional absorption/buying into bearish breakdown = bear trap!
-                            conf_boost = max(0, conf_boost - 8)
-                            smc_tags.append(f"⚠️ CVD Divergence Warning ({of_snap.cvd_divergence})")
+                            # Institutional absorption/buying into bearish breakdown:
+                            # Confirms UTAD bull trap reversal!
+                            if is_utad_bear:
+                                conf_boost = min(22, conf_boost + 5)
+                                smc_tags.append("Institutional CVD Absorption (Bull Trap Confirmed)")
+                            else:
+                                conf_boost = max(0, conf_boost - 8)
+                                smc_tags.append(f"⚠️ CVD Divergence Warning ({of_snap.cvd_divergence})")
             except Exception as e_of:
                 logger.debug(f"[CommodityDetector] Order flow divergence evaluation error for {clean_sym}: {e_of}")
 
@@ -1328,6 +1622,8 @@ def detect_commodity_breakouts(
             opt_p = opt_recommendation["ltp"]
             opt_stop = opt_sl
             opt_tgt = opt_t1
+            opt_s_int = int(opt_s) if isinstance(opt_s, (int, float)) and opt_s == int(opt_s) else opt_s
+            variant_slug = f"{direction.lower()}-{opt_s_int}{str(opt_t).lower()}"
         else:
             primary_ltp = ltp
             primary_trigger = ltp
@@ -1341,6 +1637,9 @@ def detect_commodity_breakouts(
             opt_p = None
             opt_stop = None
             opt_tgt = None
+            variant_slug = f"{direction.lower()}-fut"
+
+        alert_id = generate_alert_id(clean_sym, alert_type, variant=variant_slug)
 
         alert = AutoAlert(
             alert_id=alert_id,
@@ -1376,8 +1675,16 @@ def detect_commodity_breakouts(
                 "spot_vwap": vwap,
                 "spot_ltp": ltp,
                 "spot_stop_loss": sl_price,
+                "is_utad_reversal": is_utad_bear,
+                "is_spring_reversal": is_spring_bull,
+                "peak_recent": peak_recent,
+                "trough_recent": trough_recent,
                 "spot_target": t1_price,
                 "spot_no_chase": round(no_chase, 2),
+                "is_1m_micro_trigger": bool(is_1m_micro_bear or is_1m_micro_bull),
+                "poc_price": poc_price,
+                "vah_price": vah_price,
+                "val_price": val_price,
                 "atr": atr,
                 "atr_14d": atr,
                 "rvol": rvol,
@@ -1401,6 +1708,12 @@ def detect_commodity_breakouts(
                 "iceberg_detected": iceberg_detected if "iceberg_detected" in locals() else False,
                 "divergence_type": smc_report.divergence_type if smc_report else None,
                 "divergence_bias": smc_report.divergence_bias if smc_report else None,
+                "eagle_regime": adaptive_decision.eagle.to_dict(),
+                "tiger_mandate": adaptive_decision.tiger.to_dict(),
+                "sniper_plan": sniper_dict if sniper else None,
+                "chop_index": chop_idx if "chop_idx" in locals() else None,
+                "adx_14": adx_14 if "adx_14" in locals() else None,
+                "session_phase": adaptive_decision.eagle.session_phase,
                 "confluence_factors": smc_tags,
             },
             actionable_plan=plan_dict,

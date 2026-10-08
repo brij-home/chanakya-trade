@@ -420,6 +420,19 @@ def get_expiries(underlying: str, allow_chain_fallback: bool = False) -> list[st
     except Exception:
         pass
 
+    from market.instruments import COMMODITY_SYMBOLS
+
+    if clean_u in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:"):
+        try:
+            from engine.greeks_manager import get_mcx_prompt_expiry_and_dte
+
+            exp_date, _ = get_mcx_prompt_expiry_and_dte(clean_u)
+            if exp_date:
+                _EXPIRIES_CACHE[clean_u] = (now, [exp_date])
+                return [exp_date]
+        except Exception:
+            pass
+
     try:
         from market.nse_scraper import nse_get_expiries
 

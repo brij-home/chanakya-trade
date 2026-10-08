@@ -645,18 +645,18 @@ def get_quote(
         try:
             provider = get_data_broker_key() or "broker"
             broker_quotes = get_data_broker().get_quote(missing)
-            result.update(
-                {
-                    instrument: _enrich_quote(
-                        quote,
-                        instrument=instrument,
-                        provider=provider,
-                        source="REST",
-                        correlation_id=correlation_id,
-                    )
-                    for instrument, quote in broker_quotes.items()
-                }
-            )
+            valid_broker_quotes = {
+                instrument: _enrich_quote(
+                    quote,
+                    instrument=instrument,
+                    provider=provider,
+                    source="REST",
+                    correlation_id=correlation_id,
+                )
+                for instrument, quote in broker_quotes.items()
+                if quote and getattr(quote, "last_price", 0.0) > 0
+            }
+            result.update(valid_broker_quotes)
             get_registry().record_provider_success(provider)
             missing = [i for i in canonical_instruments if i not in result]
         except Exception:

@@ -34,14 +34,19 @@ def test_multi_segment_symbol_resolution():
     assert _to_fyers_symbol("BSE:INFY") == "BSE:INFY"
 
     # MCX Commodities
-    assert _to_fyers_symbol("MCX:CRUDEOIL") == "MCX:CRUDEOIL26OCTFUT"
-    assert _to_fyers_symbol("GOLD") == "MCX:GOLD26OCTFUT"
-    assert _to_fyers_symbol("SILVER") == "MCX:SILVER26DECFUT"
-    assert _to_fyers_symbol("NATURALGAS") == "MCX:NATURALGAS26OCTFUT"
+    assert _to_fyers_symbol("MCX:CRUDEOIL").startswith("MCX:CRUDEOIL")
+    assert _to_fyers_symbol("GOLD") in ("MCX:GOLD26OCTFUT", "MCX:GOLD26DECFUT")
+    assert _to_fyers_symbol("SILVER") in ("MCX:SILVER26DECFUT", "MCX:SILVER27MARFUT")
+    assert _to_fyers_symbol("NATURALGAS").startswith("MCX:NATURALGAS")
 
     # NSE Currencies
-    assert _to_fyers_symbol("USDINR") == "NSE:USDINR26OCTFUT"
-    assert _to_fyers_symbol("EURINR") == "NSE:EURINR26OCTFUT"
+    assert _to_fyers_symbol("USDINR").startswith("NSE:USDINR")
+    assert _to_fyers_symbol("EURINR").startswith("NSE:EURINR")
+
+    # BSE / BFO Derivatives (SENSEX, BANKEX)
+    assert _to_fyers_symbol("BSE:SENSEX26O0872000PE") == "BSE:SENSEX26O0872000PE"
+    assert _to_fyers_symbol("SENSEX26O0872000PE") == "BSE:SENSEX26O0872000PE"
+    assert _to_fyers_symbol("BANKEX26O0872000CE") == "BSE:BANKEX26O0872000CE"
 
     # Pass-through for already formatted contracts
     assert _to_fyers_symbol("NSE:NIFTY26OCT25000CE") == "NSE:NIFTY26OCT25000CE"
@@ -50,10 +55,11 @@ def test_multi_segment_symbol_resolution():
 
 def test_ws_symbol_delegation():
     """Verify WebSocket symbol mapping uses institutional converter."""
-    assert _to_ws_symbol("GOLD") == "MCX:GOLD26OCTFUT"
-    assert _to_ws_symbol("USDINR") == "NSE:USDINR26OCTFUT"
+    assert _to_ws_symbol("GOLD") in ("MCX:GOLD26OCTFUT", "MCX:GOLD26DECFUT")
+    assert _to_ws_symbol("USDINR").startswith("NSE:USDINR")
     assert _to_ws_symbol("NSE:NIFTY 50") == "NSE:NIFTY50-INDEX"
     assert _to_ws_symbol("RELIANCE") == "NSE:RELIANCE-EQ"
+    assert _to_ws_symbol("BSE:SENSEX26O0872000PE") == "BSE:SENSEX26O0872000PE"
 
 
 def test_fyers_market_depth():

@@ -2799,3 +2799,71 @@ def test_free_index_monotonic_target_sorting():
     assert "• <b>T1:</b> <code>₹180.0</code> | <b>T2:</b> <code>₹220.0</code>" in rendered
 
 
+def test_mcx_commodity_sector_and_prompt_expiry_resolution():
+    """Verify that MCX Commodities do not collide with 'IT' in sector shortening,
+    resolve mid-month prompt expiry (not last Thursday NSE expiry), and deduplicate action verbs."""
+    from bot.alert_templates import shorten_sector_name, resolve_expiry_cycle, format_auto_alert_telegram
+    from engine.auto_alert_engine import AutoAlert
+    from datetime import date
+
+    # 1. Sector abbreviation word boundary isolation
+    assert shorten_sector_name("MCX Commodities") == "Commodities"
+    assert shorten_sector_name("Energy Commodities") == "Energy"
+    assert shorten_sector_name("Commodities") == "Commodities"
+    assert shorten_sector_name("IT") == "IT"
+    assert shorten_sector_name("Information Technology") == "IT"
+
+    # 2. MCX option expiry resolution
+    exp_info = resolve_expiry_cycle(
+        contract="MCX:CRUDEOIL26OCT8750CE",
+        underlying="CRUDEOIL",
+        as_of=date(2026, 10, 7),
+    )
+    assert exp_info["expiry_date"] == "16-Oct-2026"
+    assert exp_info["dte"] == 9
+    assert "16-Oct-2026" in exp_info["badge"]
+
+    # 3. MCX option action verb deduplication
+    alert = AutoAlert(
+        alert_id="test-mcx-dedup-001",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="🛢️ MCX OPTION: CRUDEOIL 8750 CE @ ₹276.1",
+        summary="MCX CRUDEOIL momentum test",
+        ltp=276.1,
+        trigger_level=276.1,
+        target_level=436.8,
+        stop_loss=218.7,
+        confidence=94,
+        metrics={
+            "sector_name": "Energy Commodities",
+            "matched_factors": ["AI: Quant-validated MCX CRUDEOIL momentum: session gain of +1.4%"],
+        },
+        actionable_plan={
+            "action": "BUY_CE",
+            "contract": "CRUDEOIL 8750 CE (16 Oct)",
+            "entry_range": "₹267.5 – ₹281.8",
+            "stop_loss": "₹218.7",
+            "target_1": "₹436.8",
+            "target_2": "₹563.1",
+            "lot_size": 100,
+            "risk_reward": "1:2.8",
+            "preferred_vehicle": "DEFINED_RISK_OPTION",
+            "setup_confluence": "SMC Bullish BOS + Demand Block",
+        },
+    )
+
+    rendered = format_auto_alert_telegram(alert)
+    # Action line should read 'BUY CRUDEOIL 8750 CE', not 'BUY_CE CRUDEOIL 8750 CE'
+    assert "• <b>Action:</b> BUY <b>CRUDEOIL 8750 CE (16 Oct)</b>" in rendered
+    # Sector must be Energy, not IT
+    assert "Sec: <b>Energy</b>" in rendered
+    assert "Sec: <b>IT</b>" not in rendered
+    # Signals line should not end with trailing colon or fragmented word
+    assert "momentum: session" not in rendered
+
+
+
