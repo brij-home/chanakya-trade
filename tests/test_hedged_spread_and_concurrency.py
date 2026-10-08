@@ -171,6 +171,9 @@ class TestSectorConcurrencyAndTelegramCard:
 
     def test_sector_concurrency_cap_attaches_hedged_spread_mandate(self):
         """Verify that when 2 active trades exist in IT sector, 3rd trade gets tagged with hedged spread mandate."""
+        from engine.learning_engine import pattern_learning_engine
+
+        pattern_learning_engine.clear_symbol_lockout("WIPRO")
         engine = AutoAlertEngine()
         # Seed 2 active IT alerts
         a1 = AutoAlert(

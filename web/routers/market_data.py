@@ -434,7 +434,12 @@ async def place_fyers_gtt_order_endpoint(req: dict):
         limit_price=limit_price,
         product=product,
     )
-    return {"status": "ok", "response": res}
+    resp_dict = res if isinstance(res, dict) else {}
+    return {
+        **resp_dict,
+        "status": "ok" if (not isinstance(res, dict) or res.get("s", "ok") == "ok") else "error",
+        "response": res,
+    }
 
 
 @router.delete("/api/fyers/gtt/{order_id}", tags=["Fyers Advanced"])
@@ -498,8 +503,10 @@ async def fyers_panic_exit_endpoint(req: Optional[dict] = None):
 
     segment = req.get("segment") if req else None
     res = await asyncio.to_thread(brk.exit_all_positions, segment=segment)
+    resp_dict = res if isinstance(res, dict) else {}
     return {
-        "status": "ok" if (isinstance(res, dict) and res.get("s") == "ok") else "error",
+        **resp_dict,
+        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
         "response": res,
     }
 

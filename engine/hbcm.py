@@ -206,7 +206,7 @@ def evaluate_hbcm(
     quotes_map: dict[str, Any] = {}
     if mock_quotes:
         quotes_map = mock_quotes
-    else:
+    elif not is_testing:
         try:
             from market.quotes import _QUOTE_CACHE, _quote_cache_lock, get_quote
 
@@ -222,7 +222,7 @@ def evaluate_hbcm(
                         needed_symbols.append(f"NSE:{s}")
 
             # If any missing from cache, fetch quote
-            if needed_symbols and not is_testing:
+            if needed_symbols:
                 live_q = get_quote(needed_symbols)
                 for s in symbols:
                     for k in (f"NSE:{s}", s):

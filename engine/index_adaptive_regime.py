@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -770,8 +771,13 @@ def evaluate_index_adaptive_regime(
         underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
     )
     now_ts = time.time()
+    is_testing = bool(
+        os.environ.get("CHANAKYA_TESTING")
+        or os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("DEPLOY_MODE") == "test"
+    )
 
-    if not force_refresh:
+    if not force_refresh and not is_testing:
         with _REGIME_CACHE_LOCK:
             cached = _REGIME_CACHE.get(clean_sym)
             if cached and (now_ts - cached[0]) < _REGIME_CACHE_TTL:
