@@ -139,6 +139,82 @@ MANIFEST: dict = {
             "output_description": "List of Deal with symbol, client, quantity, price, deal_type (BULK/BLOCK), entity_type.",
         },
         {
+            "name": "fyers_technical_screener",
+            "path": "/skills/fyers_technical_screener",
+            "method": "POST",
+            "description": "Fyers native server-side technical screener for momentum, breakouts, and overbought/oversold setups.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "screener": {
+                        "type": "string",
+                        "description": "Screener identifier (default 'cs004')",
+                        "default": "cs004",
+                    },
+                },
+                "required": [],
+            },
+            "output_description": "List of stocks matching Fyers server technical screener criteria.",
+        },
+        {
+            "name": "fyers_candlestick_screener",
+            "path": "/skills/fyers_candlestick_screener",
+            "method": "POST",
+            "description": "Fyers native server-side candlestick pattern recognizer (hammer, doji, morning star, engulfing).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Candlestick pattern name (default 'hammer')",
+                        "default": "hammer",
+                    },
+                },
+                "required": [],
+            },
+            "output_description": "List of stocks with detected candlestick patterns.",
+        },
+        {
+            "name": "fyers_market_status",
+            "path": "/skills/fyers_market_status",
+            "method": "POST",
+            "description": "Real-time exchange status across Indian markets (NSE, BSE, MCX, CDS) from Fyers exchange gateway.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            "output_description": "Market status with exchange, segment, and status (OPEN/CLOSED/HOLIDAY).",
+        },
+        {
+            "name": "simulate_order_book_sweep",
+            "path": "/skills/simulate_order_book_sweep",
+            "method": "POST",
+            "description": "Pre-trade market sweep simulation across depth: computes exact sweep VWAP, slippage in bps, and consumed levels.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Stock symbol, e.g. RELIANCE, NIFTY",
+                    },
+                    "side": {
+                        "type": "string",
+                        "enum": ["BUY", "SELL"],
+                        "default": "BUY",
+                        "description": "Order side",
+                    },
+                    "quantity": {
+                        "type": "integer",
+                        "default": 100,
+                        "description": "Number of shares/units to sweep",
+                    },
+                },
+                "required": ["symbol"],
+            },
+            "output_description": "Sweep simulation with sweep_vwap, slippage_bps, levels_swept, and is_fully_fillable.",
+        },
+        {
             "name": "backtest",
             "path": "/skills/backtest",
             "method": "POST",

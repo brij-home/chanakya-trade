@@ -538,3 +538,11 @@ def get_trading_days_elapsed(
         cur += timedelta(days=1)
 
     return trading_days
+
+
+def is_trading_day(target_date: date, exchange: str = "NSE") -> bool:
+    """
+    Returns True if target_date is an official exchange trading day.
+    Excludes weekends (Saturday & Sunday) and exchange trading holidays.
+    """
+    return target_date.weekday() < 5 and not is_trading_holiday(target_date, exchange)

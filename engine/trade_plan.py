@@ -1349,9 +1349,21 @@ def calculate_option_execution_plan(
             else None
         )
     else:
-        raw_t1_prem = round(option_ltp + (1.6 * opt_risk), 2) if option_ltp > 0 else 0.0
-        raw_t2_prem = round(raw_t1_prem + (1.2 * opt_risk), 2) if option_ltp > 0 else 0.0
-        raw_t3_prem = round(raw_t2_prem + (1.5 * opt_risk), 2) if option_ltp > 0 else None
+        raw_t1_prem = (
+            round(option_ltp + ((2.0 if is_index_contract else 1.8) * opt_risk), 2)
+            if option_ltp > 0
+            else 0.0
+        )
+        raw_t2_prem = (
+            round(raw_t1_prem + ((1.5 if is_index_contract else 1.2) * opt_risk), 2)
+            if option_ltp > 0
+            else 0.0
+        )
+        raw_t3_prem = (
+            round(raw_t2_prem + ((2.0 if is_index_contract else 1.5) * opt_risk), 2)
+            if option_ltp > 0
+            else None
+        )
 
     if option_ltp > 0:
         # ── Institutional Target Hierarchy & Risk:Reward Alignment ───────────
@@ -1397,46 +1409,46 @@ def calculate_option_execution_plan(
                 else:
                     # Raw Greek T1 is a macro moonshot (> +3.8R, e.g. 4.5R+ on deep ITM or distant resistance).
                     # Calibrate T1 (+1.75R) and T2 (+3.2R), and preserve the raw Greek target as T3 (Moonshot Runner)!
-                    t1_prem = round(option_ltp + (1.75 * opt_risk), 2)
-                    t2_prem = round(option_ltp + (3.20 * opt_risk), 2)
+                    t1_prem = round(option_ltp + (2.0 * opt_risk), 2)
+                    t2_prem = round(option_ltp + (3.5 * opt_risk), 2)
                     t3_prem = max(raw_t1_prem, round(option_ltp + (6.0 * opt_risk), 2))
             else:
                 # Non-expiry intraday: calibrated ceilings with Greek alignment
                 if is_index_contract:
                     # Intraday Index Options (NIFTY / BANKNIFTY / SENSEX):
                     # For expensive options (LTP >= 350, like Bank Nifty monthly ₹600-₹1200):
-                    # Percentage move must be capped to feasible intraday points (+18% to +22% for T1).
+                    # Percentage move must be capped to feasible intraday points (+20% to +30% for T1).
                     # For lower-premium options (LTP < 350, like Nifty weekly/ATM ₹80-₹200):
-                    # A standard 1.5R scale-out (+25% to +45%) represents just 25-50 points!
+                    # A standard 2.0R scale-out (+30% to +50%) represents 30-60 points.
                     if option_ltp >= 350:
-                        t1_max_prem = round(option_ltp * 1.22, 2)
-                        t2_max_prem = round(option_ltp * 1.38, 2)
-                        t3_max_prem = round(option_ltp * 1.60, 2)
+                        t1_max_prem = round(option_ltp * 1.30, 2)
+                        t2_max_prem = round(option_ltp * 1.50, 2)
+                        t3_max_prem = round(option_ltp * 1.80, 2)
                     else:
                         t1_max_prem = round(
-                            max(option_ltp + (2.1 * opt_risk), option_ltp * 1.60), 2
+                            max(option_ltp + (2.5 * opt_risk), option_ltp * 1.60), 2
                         )
                         t2_max_prem = round(
-                            max(t1_max_prem + (1.8 * opt_risk), option_ltp * 2.20), 2
+                            max(t1_max_prem + (2.0 * opt_risk), option_ltp * 2.20), 2
                         )
                         t3_max_prem = round(
-                            max(t2_max_prem + (2.5 * opt_risk), option_ltp * 3.00), 2
+                            max(t2_max_prem + (3.0 * opt_risk), option_ltp * 3.00), 2
                         )
 
                     if raw_t1_prem > t1_max_prem:
                         t1_prem = round(
                             option_ltp
-                            + min(t1_max_prem - option_ltp, max(1.5 * opt_risk, option_ltp * 0.15)),
+                            + min(t1_max_prem - option_ltp, max(2.0 * opt_risk, option_ltp * 0.20)),
                             2,
                         )
                         t2_prem = round(
-                            min(t2_max_prem, max(t1_prem + (1.0 * opt_risk), raw_t1_prem)), 2
+                            min(t2_max_prem, max(t1_prem + (1.5 * opt_risk), raw_t1_prem)), 2
                         )
                         t3_prem = round(
                             min(
                                 t3_max_prem,
                                 max(
-                                    t2_prem + (1.5 * opt_risk),
+                                    t2_prem + (2.0 * opt_risk),
                                     raw_t2_prem or 0.0,
                                     round(option_ltp + (6.0 * opt_risk), 2)
                                     if option_ltp < 350
@@ -1446,9 +1458,9 @@ def calculate_option_execution_plan(
                             2,
                         )
                     else:
-                        t1_prem = max(round(option_ltp + (1.5 * opt_risk), 2), raw_t1_prem)
+                        t1_prem = max(round(option_ltp + (2.0 * opt_risk), 2), raw_t1_prem)
                         t2_prem = min(
-                            t2_max_prem, max(round(t1_prem + (1.1 * opt_risk), 2), raw_t2_prem)
+                            t2_max_prem, max(round(t1_prem + (1.5 * opt_risk), 2), raw_t2_prem)
                         )
                         t3_prem = round(
                             min(
@@ -1458,43 +1470,43 @@ def calculate_option_execution_plan(
                                     round(option_ltp + (6.0 * opt_risk), 2)
                                     if option_ltp < 350
                                     else 0.0,
-                                    round(t2_prem + (1.5 * opt_risk), 2),
+                                    round(t2_prem + (2.0 * opt_risk), 2),
                                 ),
                             ),
                             2,
                         )
                 else:
                     # Intraday Single-Stock Options (RELIANCE, INFY, SBIN, etc.):
-                    # T1 (Scale-Out & Free-Roll): +18% to +24% (+1.2R to +1.6R) — achievable on 1.0%–1.5% spot impulse
-                    # T2 (Session Wave): +32% to +42% (+2.2R to +2.8R)
-                    # T3 (Trend Day Runner): +55% to +70% (+3.5R to +4.5R)
-                    t1_max_prem = round(option_ltp * 1.24, 2)
-                    t2_max_prem = round(option_ltp * 1.42, 2)
-                    t3_max_prem = round(option_ltp * 1.70, 2)
+                    # T1 (Scale-Out & Free-Roll): +20% to +30% (+1.8R) — achievable on 1.2%–1.8% spot impulse
+                    # T2 (Session Wave): +35% to +50% (+2.8R to +3.2R)
+                    # T3 (Trend Day Runner): +60% to +80% (+4.0R to +5.0R)
+                    t1_max_prem = round(max(option_ltp + (2.2 * opt_risk), option_ltp * 1.45), 2)
+                    t2_max_prem = round(max(t1_max_prem + (1.5 * opt_risk), option_ltp * 1.70), 2)
+                    t3_max_prem = round(max(t2_max_prem + (2.0 * opt_risk), option_ltp * 2.10), 2)
 
                     if raw_t1_prem > t1_max_prem:
                         t1_prem = round(
                             option_ltp
-                            + min(t1_max_prem - option_ltp, max(1.2 * opt_risk, option_ltp * 0.18)),
+                            + min(t1_max_prem - option_ltp, max(1.8 * opt_risk, option_ltp * 0.20)),
                             2,
                         )
                         t2_prem = round(
-                            min(t2_max_prem, max(t1_prem + (0.9 * opt_risk), raw_t1_prem)), 2
+                            min(t2_max_prem, max(t1_prem + (1.2 * opt_risk), raw_t1_prem)), 2
                         )
                         t3_prem = round(
                             min(
                                 t3_max_prem,
-                                max(t2_prem + (1.1 * opt_risk), raw_t2_prem or (option_ltp * 1.60)),
+                                max(t2_prem + (1.5 * opt_risk), raw_t2_prem or (option_ltp * 1.60)),
                             ),
                             2,
                         )
                     else:
-                        t1_prem = max(round(option_ltp + (1.2 * opt_risk), 2), raw_t1_prem)
+                        t1_prem = max(round(option_ltp + (1.8 * opt_risk), 2), raw_t1_prem)
                         t2_prem = min(
-                            t2_max_prem, max(round(t1_prem + (1.0 * opt_risk), 2), raw_t2_prem)
+                            t2_max_prem, max(round(t1_prem + (1.2 * opt_risk), 2), raw_t2_prem)
                         )
                         t3_prem = min(
-                            t3_max_prem, raw_t3_prem or round(option_ltp + (3.8 * opt_risk), 2)
+                            t3_max_prem, raw_t3_prem or round(option_ltp + (4.0 * opt_risk), 2)
                         )
         elif tf == "SWING_SHORT":
             if raw_rr_1 <= 2.5:

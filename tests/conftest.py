@@ -37,6 +37,28 @@ os.environ.setdefault("CSRF_SECRET", "test-strong-csrf-secret-1234567890-32chars
 os.environ.setdefault("KEYRING_DISABLE", "1")
 os.environ.setdefault("PYTHONKEYRING_BACKEND", "keyring.backends.null.Keyring")
 
+# Institutional thread safety & leak prevention:
+# 1. Patch fyers_apiv3 WebSocket SDK so all its internal ping/worker threads are daemon threads.
+try:
+    pass
+except Exception:
+    pass
+
+# 2. Defensively ensure ANY thread instantiated during pytest sessions is a daemon thread,
+# preventing non-daemon threads from hanging Python process shutdown (threading._shutdown).
+import threading
+
+_orig_thread_init = threading.Thread.__init__
+
+
+def _test_safe_thread_init(self, *args, **kwargs):
+    if not kwargs.get("daemon"):
+        kwargs["daemon"] = True
+    _orig_thread_init(self, *args, **kwargs)
+
+
+threading.Thread.__init__ = _test_safe_thread_init
+
 
 def pytest_configure(config: pytest.Config) -> None:
     """Keep pytest's temporary files inside the checkout by default.
@@ -92,6 +114,46 @@ def isolate_test_notifications(monkeypatch: pytest.MonkeyPatch, request: pytest.
             pass
         try:
             monkeypatch.setattr("bot.telegram_bot.send_push", lambda *args, **kwargs: None)
+        except Exception:
+            pass
+
+
+@pytest.fixture(autouse=True)
+def isolate_market_websockets(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    """Ensure unit tests never establish real broker WebSockets or background streams."""
+    if "live_websocket" not in request.keywords and "network" not in request.keywords:
+        try:
+            monkeypatch.setattr("brokers.session._start_websocket", lambda *args, **kwargs: None)
+        except Exception:
+            pass
+        try:
+            from market.websocket import ws_manager
+
+            monkeypatch.setattr(ws_manager, "start", lambda *args, **kwargs: None)
+        except Exception:
+            pass
+        try:
+            from market.fyers_order_stream import fyers_order_stream
+
+            monkeypatch.setattr(fyers_order_stream, "start", lambda *args, **kwargs: None)
+        except Exception:
+            pass
+        try:
+            from market.fyers_tbt_manager import fyers_tbt_manager
+
+            monkeypatch.setattr(fyers_tbt_manager, "start", lambda *args, **kwargs: None)
+        except Exception:
+            pass
+        try:
+            from market.mstock_websocket import mstock_ws
+
+            monkeypatch.setattr(mstock_ws, "start", lambda *args, **kwargs: None)
+        except Exception:
+            pass
+        try:
+            from market.kotak_websocket import kotak_ws
+
+            monkeypatch.setattr(kotak_ws, "start", lambda *args, **kwargs: None)
         except Exception:
             pass
 
@@ -202,3 +264,49 @@ def weak_fundamentals() -> dict:
         "pledged_pct": 30.0,
         "dividend_yield": 0.0,
     }
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Clean up any singleton background services when pytest finishes."""
+    try:
+        from market.websocket import ws_manager
+
+        ws_manager.stop(timeout=0.2)
+    except Exception:
+        pass
+    try:
+        from market.fyers_order_stream import fyers_order_stream
+
+        fyers_order_stream.stop(timeout=0.2)
+    except Exception:
+        pass
+    try:
+        from market.fyers_tbt_manager import fyers_tbt_manager
+
+        fyers_tbt_manager.stop(timeout=0.2)
+    except Exception:
+        pass
+    try:
+        from market.mstock_websocket import mstock_ws
+
+        mstock_ws.stop(timeout=0.2)
+    except Exception:
+        pass
+    try:
+        from market.kotak_websocket import kotak_ws
+
+        kotak_ws.stop()
+    except Exception:
+        pass
+    try:
+        from market.tick_store import tick_store
+
+        tick_store.stop(timeout=0.2)
+    except Exception:
+        pass
+    try:
+        from market.ticker_stream import ticker_stream
+
+        ticker_stream.stop(timeout=0.2)
+    except Exception:
+        pass

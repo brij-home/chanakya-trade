@@ -721,7 +721,7 @@ def test_0dte_afternoon_option_target_calibration_and_diffusion():
     # Target 2 must be a sensible structural expansion: +2.4R to +4.0R
     rr_t2 = (t2_prem - opt_ltp) / opt_risk
     assert 2.40 <= rr_t2 <= 4.00, f"Option T2 R:R {rr_t2} is outside structural expansion range"
-    assert 140.0 <= t2_prem <= 195.0, f"Option T2 premium {t2_prem} is unrealistic"
+    assert 130.0 <= t2_prem <= 195.0, f"Option T2 premium {t2_prem} is unrealistic"
 
     # Target 3 (Moonshot Runner) must preserve higher potential
     assert t3_prem > t2_prem

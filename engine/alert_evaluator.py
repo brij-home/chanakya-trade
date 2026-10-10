@@ -1852,19 +1852,55 @@ def evaluate_alert_targets_and_trailing(
                         vwap = float(
                             getattr(alert, "vwap", 0.0) or metrics_d.get("vwap", 0.0) or 0.0
                         )
+                        opt_t = str(getattr(alert, "option_type", "") or "").upper()
+                        is_spot_bullish = (
+                            False
+                            if opt_t == "PE"
+                            else (True if opt_t == "CE" else (alert.direction.upper() != "BEARISH"))
+                        )
+
                         is_struct_intact = True
                         if spot > 0 and vwap > 0:
-                            if is_bullish and spot < (vwap * 0.997):
+                            if is_spot_bullish and spot < (vwap * 0.997):
                                 is_struct_intact = False
-                            elif not is_bullish and spot > (vwap * 1.003):
+                            elif not is_spot_bullish and spot > (vwap * 1.003):
                                 is_struct_intact = False
                         elif pnl_pct < -4.0:
                             is_struct_intact = False
 
+                        # Institutional Regime-Adaptive Time-Stop Guardrail:
+                        # On confirmed Trend Days (Narrow CPR, CHOP <= 38.2, ADX >= 25, or directional impulse),
+                        # if the underlying is holding structural alignment (Spot < VWAP for Put / Spot > VWAP for Call),
+                        # do NOT scratch early via time stop. Extend runway to allow secondary expansions!
+                        is_trend_day = bool(
+                            metrics_d.get("is_narrow_cpr")
+                            or "NARROW_CPR" in str(metrics_d.get("cpr_regime", "")).upper()
+                            or float(metrics_d.get("chop_index") or 100.0) <= 38.2
+                            or str(metrics_d.get("chop_status", "")).upper() == "TRENDING_EXPANSION"
+                            or float(metrics_d.get("adx") or 0.0) >= 25.0
+                            or metrics_d.get("is_trend_day") is True
+                            or metrics_d.get("trend_day") is True
+                            or str(metrics_d.get("market_regime", "")).upper()
+                            in ("TRENDING_EXPANSION", "STRONG_TREND", "SUPER_TREND")
+                        )
+                        is_dir_aligned = False
+                        if spot > 0 and vwap > 0:
+                            if is_spot_bullish and spot >= (vwap * 0.999):
+                                is_dir_aligned = True
+                            elif not is_spot_bullish and spot <= (vwap * 1.001):
+                                is_dir_aligned = True
+
+                        effective_time_limit = time_stop_limit
+                        if (
+                            (is_trend_day or is_dir_aligned)
+                            and is_struct_intact
+                            and pnl_pct >= -3.5
+                        ):
+                            effective_time_limit = max(60.0, time_stop_limit * 2.5)
+
                         # Tier 1: Coiling Base Risk Compression (20m - 44m) for structurally healthy setups
                         if (
-                            not is_explicit_scalp
-                            and 20.0 <= elapsed_mins < time_stop_limit
+                            20.0 <= elapsed_mins < effective_time_limit
                             and is_struct_intact
                             and "COMPRESS_STALL_RISK" not in achieved
                             and "DE_RISK_0_5R" not in achieved
@@ -1908,7 +1944,7 @@ def evaluate_alert_targets_and_trailing(
                                 rationale = (
                                     f"⏱️ 20M CONSOLIDATION COIL: Underlying holding structure ({'above' if is_bullish else 'below'} VWAP). "
                                     f"DECISION: COMPRESS RISK & HOLD BASE. Tighten SL from ₹{stop:,.2f} to ₹{stall_stop:,.2f} "
-                                    f"(-{risk_reduction:.0f}% risk). Extending runway to 45m for breakout expansion{hedge_advice}."
+                                    f"(-{risk_reduction:.0f}% risk). Extending runway to {int(effective_time_limit)}m for breakout expansion{hedge_advice}."
                                 )
                                 return TargetTrailingEvaluation(
                                     new_milestone="COMPRESS_STALL_RISK",
@@ -1928,7 +1964,7 @@ def evaluate_alert_targets_and_trailing(
                                 )
 
                         # Tier 2: Final Time-Stop Exit (if time limit reached OR structure broke after 25m)
-                        if elapsed_mins >= time_stop_limit or (
+                        if elapsed_mins >= effective_time_limit or (
                             not is_explicit_scalp and elapsed_mins >= 25.0 and not is_struct_intact
                         ):
                             if pnl_pct > 0.0:

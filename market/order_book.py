@@ -19,10 +19,13 @@ Computes:
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 import logging
 from typing import Any, Optional
+
+from engine.ring_buffer import RollingTickBuffer
 
 logger = logging.getLogger("market.order_book")
 
@@ -34,6 +37,271 @@ class DepthLevel:
     price: float
     quantity: int
     orders: int = 1
+
+
+class BisectDepthBook:
+    """
+    High-frequency L3 (up to 50 levels) depth book utilizing binary search insertion.
+
+    Invariants:
+      1. Bids maintained in strictly descending price order (index 0 = best bid).
+      2. Asks maintained in strictly ascending price order (index 0 = best ask).
+      3. Quantity <= 0 deletes the level in O(log K).
+      4. Incremental running totals for total_bid_qty and total_ask_qty in O(1).
+      5. Bounded capacity: keeps at most max_depth (e.g. 50) levels per side.
+      6. Integrated RollingTickBuffer for O(1) online rolling VWAP & tick volatility.
+    """
+
+    def __init__(self, max_depth: int = 50, tick_buffer_capacity: int = 100) -> None:
+        self.max_depth = int(max_depth)
+        # Bids stored as (-price, price, quantity, orders) so bisect_left sorts highest price first
+        self._bids: list[tuple[float, float, int, int]] = []
+        # Asks stored as (price, quantity, orders) so bisect_left sorts lowest price first
+        self._asks: list[tuple[float, int, int]] = []
+        self._total_bid_qty = 0
+        self._total_ask_qty = 0
+        self._tick_buffer = RollingTickBuffer(capacity=tick_buffer_capacity)
+
+    def update_level(self, side: str, price: float, quantity: int, orders: int = 1) -> None:
+        """Update or remove a price level in O(log K) + bounded O(K) where K <= 50."""
+        p = float(price)
+        q = int(quantity)
+        o = int(orders)
+        if p <= 0:
+            return
+
+        is_bid = str(side).upper() in ("BUY", "BID", "1")
+
+        if is_bid:
+            key = -p
+            idx = bisect.bisect_left(self._bids, (key, p, -1, -1))
+            if idx < len(self._bids) and self._bids[idx][1] == p:
+                old_q = self._bids[idx][2]
+                self._total_bid_qty -= old_q
+                if q <= 0:
+                    del self._bids[idx]
+                else:
+                    self._bids[idx] = (key, p, q, o)
+                    self._total_bid_qty += q
+            elif q > 0:
+                self._bids.insert(idx, (key, p, q, o))
+                self._total_bid_qty += q
+                if len(self._bids) > self.max_depth:
+                    evicted = self._bids.pop()
+                    self._total_bid_qty -= evicted[2]
+        else:
+            idx = bisect.bisect_left(self._asks, (p, -1, -1))
+            if idx < len(self._asks) and self._asks[idx][0] == p:
+                old_q = self._asks[idx][1]
+                self._total_ask_qty -= old_q
+                if q <= 0:
+                    del self._asks[idx]
+                else:
+                    self._asks[idx] = (p, q, o)
+                    self._total_ask_qty += q
+            elif q > 0:
+                self._asks.insert(idx, (p, q, o))
+                self._total_ask_qty += q
+                if len(self._asks) > self.max_depth:
+                    evicted = self._asks.pop()
+                    self._total_ask_qty -= evicted[1]
+
+    def batch_update(self, bids: list[dict[str, Any]], asks: list[dict[str, Any]]) -> None:
+        """Batch update depth levels."""
+        self.clear()
+        for b in bids:
+            p = float(b.get("price") or b.get("bp") or 0.0)
+            q = int(b.get("quantity") or b.get("qty") or b.get("bq") or b.get("volume") or 0)
+            o = int(b.get("orders") or b.get("ord") or b.get("bno") or 1)
+            if p > 0 and q > 0:
+                self.update_level("BUY", p, q, o)
+        for a in asks:
+            p = float(a.get("price") or a.get("sp") or 0.0)
+            q = int(a.get("quantity") or a.get("qty") or a.get("sq") or a.get("volume") or 0)
+            o = int(a.get("orders") or a.get("ord") or a.get("sno") or 1)
+            if p > 0 and q > 0:
+                self.update_level("SELL", p, q, o)
+
+    @property
+    def best_bid(self) -> float:
+        return self._bids[0][1] if self._bids else 0.0
+
+    @property
+    def best_ask(self) -> float:
+        return self._asks[0][0] if self._asks else 0.0
+
+    @property
+    def spread(self) -> float:
+        if self._bids and self._asks:
+            return max(0.0, self.best_ask - self.best_bid)
+        return 0.0
+
+    @property
+    def micro_price(self) -> float:
+        """Volume-weighted micro-price based on top of book."""
+        if not self._bids or not self._asks:
+            return self.best_bid or self.best_ask or 0.0
+        bb = self.best_bid
+        ba = self.best_ask
+        bq = self._bids[0][2]
+        aq = self._asks[0][1]
+        denom = bq + aq
+        if denom <= 0:
+            return (bb + ba) / 2.0
+        return (bb * aq + ba * bq) / denom
+
+    @property
+    def total_bid_qty(self) -> int:
+        return self._total_bid_qty
+
+    @property
+    def total_ask_qty(self) -> int:
+        return self._total_ask_qty
+
+    def obi(self, n: int = 5) -> float:
+        """Calculate Order Book Imbalance across top N levels."""
+        top_bids = self._bids[:n]
+        top_asks = self._asks[:n]
+        b_vol = sum(b[2] for b in top_bids)
+        a_vol = sum(a[1] for a in top_asks)
+        tot = b_vol + a_vol
+        if tot <= 0:
+            return 0.0
+        return round((b_vol - a_vol) / tot, 4)
+
+    def get_bids(self, n: int = 50) -> list[dict[str, Any]]:
+        return [
+            {"level": i + 1, "price": b[1], "quantity": b[2], "orders": b[3]}
+            for i, b in enumerate(self._bids[:n])
+        ]
+
+    def get_asks(self, n: int = 50) -> list[dict[str, Any]]:
+        return [
+            {"level": i + 1, "price": a[0], "quantity": a[1], "orders": a[2]}
+            for i, a in enumerate(self._asks[:n])
+        ]
+
+    def simulate_sweep(self, side: str, quantity: int) -> dict[str, Any]:
+        """
+        Simulate an aggressive market order sweeping the depth book up to 50 levels.
+
+        Args:
+            side: "BUY" (sweeps ask levels starting from lowest ask)
+                  or "SELL" (sweeps bid levels starting from highest bid).
+            quantity: Number of units/shares to execute.
+
+        Returns:
+            Dict containing:
+              - requested_qty: original target quantity
+              - filled_qty: total quantity filled by depth
+              - unfilled_qty: shortfall if quantity exceeds available depth
+              - sweep_vwap: volume-weighted average execution price
+              - benchmark_price: best inside price (best ask for BUY, best bid for SELL)
+              - slippage_abs: absolute difference between sweep_vwap and benchmark_price
+              - slippage_bps: slippage in basis points (1 bps = 0.01%)
+              - levels_swept: count of price tiers consumed
+              - is_fully_fillable: True if filled_qty == requested_qty
+              - price_impact: worst price level touched vs benchmark price
+        """
+        target_qty = int(quantity)
+        if target_qty <= 0:
+            return {
+                "requested_qty": 0,
+                "filled_qty": 0,
+                "unfilled_qty": 0,
+                "sweep_vwap": 0.0,
+                "benchmark_price": 0.0,
+                "slippage_abs": 0.0,
+                "slippage_bps": 0.0,
+                "levels_swept": 0,
+                "is_fully_fillable": True,
+                "price_impact": 0.0,
+            }
+
+        is_buy = str(side).upper() in ("BUY", "B", "1")
+        levels = self._asks if is_buy else [(b[0], b[1], b[2], b[3]) for b in self._bids]
+
+        if not levels:
+            return {
+                "requested_qty": target_qty,
+                "filled_qty": 0,
+                "unfilled_qty": target_qty,
+                "sweep_vwap": 0.0,
+                "benchmark_price": 0.0,
+                "slippage_abs": 0.0,
+                "slippage_bps": 0.0,
+                "levels_swept": 0,
+                "is_fully_fillable": False,
+                "price_impact": 0.0,
+            }
+
+        benchmark_p = self.best_ask if is_buy else self.best_bid
+        remaining = target_qty
+        accum_cost = 0.0
+        filled = 0
+        levels_swept = 0
+        worst_p = benchmark_p
+
+        for lvl in levels:
+            p = lvl[0] if is_buy else lvl[1]
+            q = lvl[1] if is_buy else lvl[2]
+            if q <= 0:
+                continue
+
+            levels_swept += 1
+            worst_p = p
+            take = min(remaining, q)
+            accum_cost += p * take
+            filled += take
+            remaining -= take
+            if remaining <= 0:
+                break
+
+        sweep_vwap = round(accum_cost / filled, 4) if filled > 0 else 0.0
+        slippage_abs = round(abs(sweep_vwap - benchmark_p), 4) if filled > 0 else 0.0
+        slippage_bps = (
+            round((slippage_abs / benchmark_p) * 10000.0, 2)
+            if benchmark_p > 0 and filled > 0
+            else 0.0
+        )
+        price_impact = round(abs(worst_p - benchmark_p), 4)
+
+        return {
+            "side": "BUY" if is_buy else "SELL",
+            "requested_qty": target_qty,
+            "filled_qty": filled,
+            "unfilled_qty": remaining,
+            "sweep_vwap": sweep_vwap,
+            "benchmark_price": benchmark_p,
+            "slippage_abs": slippage_abs,
+            "slippage_bps": slippage_bps,
+            "levels_swept": levels_swept,
+            "is_fully_fillable": remaining == 0,
+            "price_impact": price_impact,
+            "worst_price": worst_p,
+        }
+
+    def record_tick(self, price: float, volume: int = 1, timestamp: Optional[float] = None) -> None:
+        """Record a price/volume tick into the internal circular ring buffer in O(1)."""
+        if price > 0:
+            self._tick_buffer.append(price, volume, timestamp)
+
+    @property
+    def rolling_tick_vwap(self) -> float:
+        """O(1) online rolling VWAP of recent ticks."""
+        return self._tick_buffer.vwap
+
+    @property
+    def rolling_tick_volatility(self) -> float:
+        """O(1) online standard deviation of recent ticks via Welford algorithm."""
+        return self._tick_buffer.std_dev
+
+    def clear(self) -> None:
+        self._bids.clear()
+        self._asks.clear()
+        self._total_bid_qty = 0
+        self._total_ask_qty = 0
+        self._tick_buffer.clear()
 
 
 @dataclass
@@ -57,6 +325,14 @@ class OrderBookSnapshot:
     bids: list[dict[str, Any]] = field(default_factory=list)
     asks: list[dict[str, Any]] = field(default_factory=list)
     captured_at: str = ""
+    rolling_tick_vwap: Optional[float] = None
+    rolling_tick_volatility: Optional[float] = None
+
+    def simulate_sweep(self, side: str, quantity: int) -> dict[str, Any]:
+        """Simulate pre-trade slippage and market sweep across snapshot depth."""
+        book = BisectDepthBook(max_depth=50)
+        book.batch_update(self.bids, self.asks)
+        return book.simulate_sweep(side, quantity)
 
     def __post_init__(self) -> None:
         if not self.captured_at:
@@ -85,38 +361,39 @@ def compute_order_book_metrics(
     bids_raw = raw_depth.get("buy", []) or raw_depth.get("bids", [])
     asks_raw = raw_depth.get("sell", []) or raw_depth.get("asks", [])
 
+    book = BisectDepthBook(max_depth=50)
+    book.batch_update(bids_raw, asks_raw)
+
     bids = [
         DepthLevel(
-            price=float(b.get("price", 0.0) or b.get("bp", 0.0) or 0.0),
-            quantity=int(b.get("quantity") or b.get("volume") or b.get("qty") or b.get("bq") or 0),
-            orders=int(b.get("orders") or b.get("ord") or b.get("bno") or 1),
+            price=b["price"],
+            quantity=b["quantity"],
+            orders=b["orders"],
         )
-        for b in bids_raw
-        if float(b.get("price", 0.0) or b.get("bp", 0.0) or 0.0) > 0
+        for b in book.get_bids(50)
     ]
 
     asks = [
         DepthLevel(
-            price=float(a.get("price", 0.0) or a.get("sp", 0.0) or 0.0),
-            quantity=int(a.get("quantity") or a.get("volume") or a.get("qty") or a.get("sq") or 0),
-            orders=int(a.get("orders") or a.get("ord") or a.get("sno") or 1),
+            price=a["price"],
+            quantity=a["quantity"],
+            orders=a["orders"],
         )
-        for a in asks_raw
-        if float(a.get("price", 0.0) or a.get("sp", 0.0) or 0.0) > 0
+        for a in book.get_asks(50)
     ]
 
     # Best bid & best ask
-    best_bid = bids[0].price if bids else ltp
-    best_ask = asks[0].price if asks else ltp
+    best_bid = book.best_bid if book.best_bid > 0 else ltp
+    best_ask = book.best_ask if book.best_ask > 0 else ltp
     calc_ltp = (
         ltp if ltp > 0 else ((best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0)
     )
 
-    spread = max(0.0, best_ask - best_bid) if best_ask > 0 and best_bid > 0 else 0.0
+    spread = book.spread if best_ask > 0 and best_bid > 0 else 0.0
     spread_pct = round((spread / calc_ltp * 100), 3) if calc_ltp > 0 else 0.0
 
-    tot_bid_qty = sum(b.quantity for b in bids)
-    tot_ask_qty = sum(a.quantity for a in asks)
+    tot_bid_qty = book.total_bid_qty
+    tot_ask_qty = book.total_ask_qty
     tot_depth = tot_bid_qty + tot_ask_qty
 
     # 1. Simple OBI across available levels (typically 5 levels)
@@ -180,6 +457,16 @@ def compute_order_book_metrics(
     else:
         liq_status = "NORMAL"
 
+    # Record micro-price tick into book's RollingTickBuffer
+    tick_p = book.micro_price if book.micro_price > 0 else calc_ltp
+    if tick_p > 0:
+        book.record_tick(tick_p, max(1, int(recent_trades_volume or 1)))
+
+    rolling_vwap = round(book.rolling_tick_vwap, 4) if book.rolling_tick_vwap > 0 else None
+    rolling_vol = (
+        round(book.rolling_tick_volatility, 4) if book.rolling_tick_volatility > 0 else 0.0
+    )
+
     return OrderBookSnapshot(
         symbol=symbol,
         ltp=calc_ltp,
@@ -199,6 +486,8 @@ def compute_order_book_metrics(
         provenance=provenance,
         bids=[asdict(b) for b in bids],
         asks=[asdict(a) for a in asks],
+        rolling_tick_vwap=rolling_vwap,
+        rolling_tick_volatility=rolling_vol,
     )
 
 

@@ -1997,6 +1997,116 @@ def build_registry() -> ToolRegistry:
         ),
     )
 
+    # ── Fyers Native Algorithmic & Candlestick Screeners ────────
+    import brokers.session as _bs
+
+    reg.register(
+        name="fyers_technical_screener",
+        description=(
+            "Query Fyers native server-side technical screener (e.g. 'cs004' for momentum, "
+            "breakouts, oversold/overbought). Returns qualifying NSE/BSE symbols instantly "
+            "without scanning historical candles. Bounded TTL deduplicated."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "screener": {
+                    "type": "string",
+                    "default": "cs004",
+                    "description": "Screener code (e.g. 'cs004' for breakout/momentum)",
+                },
+            },
+            "required": [],
+        },
+        fn=lambda screener="cs004": (
+            _bs.get_data_broker().get_screener_technical(screener)
+            if _bs.get_data_broker() and hasattr(_bs.get_data_broker(), "get_screener_technical")
+            else {"status": "error", "error": "Data broker does not support technical screeners"}
+        ),
+    )
+
+    reg.register(
+        name="fyers_candlestick_screener",
+        description=(
+            "Query Fyers native server-side candlestick pattern recognizer. "
+            "Detects patterns like 'hammer', 'doji', 'bullish_engulfing', 'morning_star' "
+            "across the market today. Bounded TTL deduplicated."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "default": "hammer",
+                    "description": "Candlestick pattern name (e.g. 'hammer', 'doji', 'bullish_engulfing')",
+                },
+            },
+            "required": [],
+        },
+        fn=lambda pattern="hammer": (
+            _bs.get_data_broker().get_screener_candlestick(pattern)
+            if _bs.get_data_broker() and hasattr(_bs.get_data_broker(), "get_screener_candlestick")
+            else {"status": "error", "error": "Data broker does not support candlestick screeners"}
+        ),
+    )
+
+    reg.register(
+        name="fyers_market_status",
+        description=(
+            "Query real-time market open/close status across Indian exchanges "
+            "(NSE, BSE, MCX, CDS) directly from Fyers exchange gateway."
+        ),
+        parameters={"type": "object", "properties": {}},
+        fn=lambda: (
+            _bs.get_data_broker().get_market_status()
+            if _bs.get_data_broker() and hasattr(_bs.get_data_broker(), "get_market_status")
+            else {"status": "error", "error": "Data broker does not support market status"}
+        ),
+    )
+
+    def _simulate_order_book_sweep(symbol: str, side: str = "BUY", quantity: int = 100) -> dict:
+        from market.order_book import analyze_symbol_order_book
+
+        snap = analyze_symbol_order_book(symbol)
+        sweep = snap.simulate_sweep(side, quantity)
+        return {
+            "symbol": snap.symbol,
+            "ltp": snap.ltp,
+            "provenance": snap.provenance,
+            "sweep": sweep,
+        }
+
+    reg.register(
+        name="simulate_order_book_sweep",
+        description=(
+            "Simulate an aggressive market order sweeping the depth book up to 50 levels. "
+            "Returns exact volume-weighted average execution price (sweep VWAP), "
+            "slippage in basis points (bps), levels consumed, and fillability."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Stock or derivative symbol, e.g. RELIANCE, NIFTY",
+                },
+                "side": {
+                    "type": "string",
+                    "enum": ["BUY", "SELL"],
+                    "default": "BUY",
+                    "description": "Order side (BUY sweeps asks, SELL sweeps bids)",
+                },
+                "quantity": {
+                    "type": "integer",
+                    "default": 100,
+                    "description": "Target quantity to simulate sweeping through the book",
+                },
+            },
+            "required": ["symbol"],
+        },
+        fn=_simulate_order_book_sweep,
+    )
+
     # ── Tag all registered tools as read-only + concurrency-safe ──
     # Every tool in the base registry is a read/analyse tool — none place orders.
     # Destructive tools (execute_trade) are added separately by the harness.

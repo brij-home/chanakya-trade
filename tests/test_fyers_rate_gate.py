@@ -62,12 +62,12 @@ def test_rate_gate_priority_ordering():
         acquisition_order.append("ORDER")
 
     # Start historical first
-    t_hist = threading.Thread(target=worker_historical)
+    t_hist = threading.Thread(target=worker_historical, daemon=True)
     t_hist.start()
     time.sleep(0.05)  # Ensure historical enters wait queue first
 
     # Start order next
-    t_order = threading.Thread(target=worker_order)
+    t_order = threading.Thread(target=worker_order, daemon=True)
     t_order.start()
 
     t_order.join(timeout=3.0)

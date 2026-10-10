@@ -22,6 +22,8 @@ import threading
 import time
 from typing import Any, Callable, Optional, Set
 
+from engine.ring_buffer import RollingTickBuffer
+
 logger = logging.getLogger("market.fyers_tbt")
 
 
@@ -49,6 +51,7 @@ class FyersTbtManager:
         self._subscribed: Set[str] = set()
         self._depth_cache: dict[str, dict[str, Any]] = {}
         self._depth_lock = threading.Lock()
+        self._tick_buffers: dict[str, RollingTickBuffer] = {}
         self._callbacks: list[Callable[[str, dict[str, Any]], None]] = []
         self._initialized = True
 
@@ -67,6 +70,34 @@ class FyersTbtManager:
         self._thread = threading.Thread(target=self._connect, daemon=True)
         self._thread.start()
         logger.info("Fyers 50-Depth TBT Socket background thread started")
+
+    def stop(self, timeout: float = 1.0) -> None:
+        """Gracefully disconnect the TBT WebSocket without blocking."""
+        ws_to_close = self._ws
+        self._connected = False
+        self._ws = None
+
+        if ws_to_close:
+
+            def _close():
+                try:
+                    setattr(ws_to_close, "restart_flag", False)
+                    ws_obj = getattr(ws_to_close, "_FyersTbtSocket__ws_object", None)
+                    if ws_obj and hasattr(ws_obj, "close"):
+                        try:
+                            ws_obj.close()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=_close, daemon=True)
+            t.start()
+            t.join(timeout=timeout)
+
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+        self._thread = None
 
     def _connect(self) -> None:
         try:
@@ -173,12 +204,32 @@ class FyersTbtManager:
 
         ltp = bids[0]["price"] if bids else (asks[0]["price"] if asks else 0.0)
         spread = round(asks[0]["price"] - bids[0]["price"], 2) if bids and asks else 0.0
+        micro_price = (
+            round(
+                (bids[0]["price"] * asks[0]["qty"] + asks[0]["price"] * bids[0]["qty"])
+                / max(1, bids[0]["qty"] + asks[0]["qty"]),
+                4,
+            )
+            if bids and asks
+            else ltp
+        )
+
+        # Update O(1) rolling tick buffer for micro-price tracking
+        buf = self._tick_buffers.setdefault(symbol, RollingTickBuffer(capacity=100))
+        if micro_price > 0:
+            buf.append(micro_price, max(1, tbq + tsq))
+
+        rolling_vwap = round(buf.vwap, 4) if buf.count > 0 else micro_price
+        rolling_vol = round(buf.std_dev, 4) if buf.count > 1 else 0.0
 
         return {
             "symbol": symbol,
             "status": "LIVE",
             "timestamp": getattr(depth, "timestamp", int(time.time())),
             "ltp": ltp,
+            "micro_price": micro_price,
+            "rolling_tick_vwap": rolling_vwap,
+            "rolling_tick_volatility": rolling_vol,
             "spread": spread,
             "tbq": tbq,
             "tsq": tsq,

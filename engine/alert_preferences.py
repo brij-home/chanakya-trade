@@ -342,7 +342,7 @@ class ChannelPreferences:
             "CRYPTO",
         ]
     )
-    min_confidence: int = 75
+    min_confidence: int = 80
     allow_early_warnings: bool = False
     allow_milestones: bool = True
     allow_intermediate_trails: bool = False
@@ -561,7 +561,7 @@ class AlertPreferences:
 
         return cls(
             allowed_segments=list(allowed),
-            telegram=_make_channel(data.get("telegram"), default_min_conf=90, default_trails=False),
+            telegram=_make_channel(data.get("telegram"), default_min_conf=85, default_trails=False),
             ui=_make_channel(data.get("ui"), default_min_conf=75, default_trails=True),
             desktop=_make_channel(data.get("desktop"), default_min_conf=80, default_trails=False),
             sound=_make_channel(data.get("sound"), default_min_conf=80, default_trails=False),
@@ -610,6 +610,8 @@ class AlertPreferencesManager:
                     data = json.loads(text)
                     if isinstance(data, dict):
                         self._preferences = AlertPreferences.from_dict(data)
+                        if self._preferences.telegram.min_confidence > 85:
+                            self._preferences.telegram.min_confidence = 85
                         return
             except Exception as e:
                 logger.warning(f"Error loading alert preferences from {self._pref_file}: {e}")
@@ -783,17 +785,17 @@ class AlertPreferencesManager:
             # Default UI channel
             return self._preferences.ui.is_segment_allowed(seg_upper)
 
-    def is_alert_allowed(self, alert: Any, channel: str = "ui") -> bool:
+    def explain_alert_allowed(self, alert: Any, channel: str = "ui") -> tuple[bool, str]:
         """
         Evaluates whether an alert is permitted to be dispatched/displayed on a given channel.
-        Checks segment membership, confidence threshold, and lifecycle stage rules.
+        Returns (is_allowed: bool, explanation: str).
         """
         with self._lock:
             seg = classify_alert_segment(alert)
             ch_pref = getattr(self._preferences, channel, self._preferences.ui)
 
             if not ch_pref.enabled:
-                return False
+                return False, f"Channel '{channel}' is disabled in preferences"
 
             # F&O Index Telegram Whitelist:
             # Telegram FNO_INDEX channel is strictly restricted to Nifty, Banknifty, Midcp, and Sensex.
@@ -803,7 +805,7 @@ class AlertPreferencesManager:
                     alert.get("symbol") if isinstance(alert, dict) else getattr(alert, "symbol", "")
                 )
                 if not self.is_fno_index_symbol_allowed(sym):
-                    return False
+                    return False, f"Symbol '{sym}' not in Telegram F&O Index whitelist"
 
             if not ch_pref.is_segment_allowed(seg):
                 # Hedging Exemption on FNO_INDEX:
@@ -826,9 +828,12 @@ class AlertPreferencesManager:
                             or (getattr(alert, "metrics", {}) or {}).get("is_hedge")
                         )
                     if not is_hedge:
-                        return False
+                        return (
+                            False,
+                            f"Segment '{seg}' is disabled for {channel} (non-hedging signal)",
+                        )
                 else:
-                    return False
+                    return False, f"Segment '{seg}' is disabled for {channel}"
 
             # Strict Directional Index Futures Gate:
             # Directional futures signals on indices are prohibited unless explicitly flagged as a hedge.
@@ -874,7 +879,10 @@ class AlertPreferencesManager:
                         f"[AlertPreferences] Suppressed directional index futures for {contract_val or deriv_val}: "
                         f"Only index options and index hedging permitted."
                     )
-                    return False
+                    return (
+                        False,
+                        "Directional index futures prohibited; only index options or hedges allowed",
+                    )
 
             # Extract confidence and stage
             if isinstance(alert, dict):
@@ -896,20 +904,29 @@ class AlertPreferencesManager:
                 is_invalidated
                 or stage
                 in (
+                    "T0_5_ACHIEVED",
                     "T1_ACHIEVED",
+                    "T2_ACHIEVED",
                     "TARGET_ACHIEVED",
                     "TRAILING_UPDATE",
                     "INVALIDATED",
                     "IN_FLIGHT_WARNING",
+                    "BREAKEVEN_EXIT",
+                    "PROFIT_SECURED",
+                    "RUNNER_EXIT",
+                    "TIME_STOP_EXIT",
                 )
+                or "T0_5" in target_status
+                or "T0.5" in target_status
                 or "T1" in target_status
+                or "T2" in target_status
                 or "TARGET" in target_status
             )
 
             # Milestones check
             if is_milestone:
                 if not ch_pref.allow_milestones:
-                    return False
+                    return False, "Milestone updates disabled in preferences"
                 # Zero-Ghost Lifecycle Invariant: Suppress downstream milestones on Telegram
                 # if the original trade signal was never dispatched to Telegram!
                 if channel == "telegram":
@@ -919,8 +936,11 @@ class AlertPreferencesManager:
                         else getattr(alert, "telegram_dispatched", False)
                     )
                     if not tg_disp:
-                        return False
-                return True
+                        return (
+                            False,
+                            "Zero-Ghost invariant: initial trade setup was not dispatched to Telegram",
+                        )
+                return True, "Allowed milestone"
 
             # Early warning check — threshold mirrors _dispatch() gate:
             # 82% for high-conviction positional and crypto types, 90% for all others.
@@ -944,11 +964,19 @@ class AlertPreferencesManager:
                 )
                 if alt_type in _early_warn_whitelisted_types:
                     # Special class: 82% bar. If passed, allow — do NOT re-block with general min_confidence.
-                    return conf >= 82
+                    if conf < 82:
+                        return (
+                            False,
+                            f"Early warning confidence {conf}% below required 82% threshold",
+                        )
+                    return True, "Allowed whitelisted early warning"
                 else:
                     # General early-warning: require 90%
                     if conf < 90:
-                        return False
+                        return (
+                            False,
+                            f"Early warning confidence {conf}% below required 90% threshold",
+                        )
 
             # General confidence threshold (applies to IGNITED, IN_FLIGHT, etc. — not whitelisted EARLY_WARNING)
             if isinstance(alert, dict):
@@ -970,9 +998,17 @@ class AlertPreferencesManager:
                 effective_min_conf = min(ch_pref.min_confidence, 82)
 
             if conf < effective_min_conf:
-                return False
+                return False, f"Confidence {conf}% below {channel} threshold {effective_min_conf}%"
 
-            return True
+            return True, "Allowed"
+
+    def is_alert_allowed(self, alert: Any, channel: str = "ui") -> bool:
+        """
+        Evaluates whether an alert is permitted to be dispatched/displayed on a given channel.
+        Checks segment membership, confidence threshold, and lifecycle stage rules.
+        """
+        allowed, _ = self.explain_alert_allowed(alert, channel=channel)
+        return allowed
 
     def is_segment_globally_disabled(self, segment: str) -> bool:
         """

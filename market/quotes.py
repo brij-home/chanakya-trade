@@ -14,7 +14,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from brokers.base import Quote
 from brokers.session import get_data_broker, get_data_broker_key
@@ -36,6 +36,10 @@ _quote_cache_lock = threading.Lock()
 _QUOTE_CACHE: OrderedDict[str, tuple[float, Quote]] = OrderedDict()
 _QUOTE_TTL_SECONDS = 3.0  # 3.0-second coalescing cache window
 _MAX_QUOTE_CACHE_ITEMS = 1000
+
+# In-flight request coalescing for missing instruments (prevents duplicate REST calls)
+_in_flight_quote_lock = threading.Lock()
+_in_flight_quote_events: dict[str, tuple[threading.Event, list[Any]]] = {}
 
 
 def clear_quote_cache() -> int:
@@ -641,51 +645,86 @@ def get_quote(
             except Exception:
                 pass
 
-    # 3. Try broker REST API
+    # 3. Coalesced external fetch (Broker REST -> Options -> yfinance -> Futures)
     if missing:
-        try:
-            provider = get_data_broker_key() or "broker"
-            broker_quotes = get_data_broker().get_quote(missing)
-            valid_broker_quotes = {
-                instrument: _enrich_quote(
-                    quote,
-                    instrument=instrument,
-                    provider=provider,
-                    source="REST",
-                    correlation_id=correlation_id,
-                )
-                for instrument, quote in broker_quotes.items()
-                if quote and getattr(quote, "last_price", 0.0) > 0
-            }
-            result.update(valid_broker_quotes)
-            get_registry().record_provider_success(provider)
-            missing = [i for i in canonical_instruments if i not in result]
-        except Exception:
-            get_registry().record_provider_error(get_data_broker_key() or "broker")
+        leaders: list[str] = []
+        followers: list[tuple[str, threading.Event, list[Any]]] = []
 
-    # 3.5. Try derivative options snapshot (mStock / NSE options scraper) for any missing options
-    if missing:
-        opt_quotes = _options_quotes(missing, correlation_id=correlation_id)
-        if opt_quotes:
-            result.update(opt_quotes)
-            missing = [i for i in canonical_instruments if i not in result]
+        with _in_flight_quote_lock:
+            for inst in missing:
+                if inst in _in_flight_quote_events:
+                    evt, box = _in_flight_quote_events[inst]
+                    followers.append((inst, evt, box))
+                else:
+                    evt = threading.Event()
+                    box = [None]
+                    _in_flight_quote_events[inst] = (evt, box)
+                    leaders.append(inst)
 
-    # 4. yfinance fallback
-    if missing:
-        yf_quotes = _yf_fallback_quotes(missing, correlation_id=correlation_id)
-        result.update(yf_quotes)
-        if yf_quotes:
-            get_registry().record_provider_success("yfinance")
-        else:
-            get_registry().record_provider_error("yfinance", is_stale=True)
+        fetched_external: dict[str, Quote] = {}
+        if leaders:
+            try:
+                # 3a. Try broker REST API
+                try:
+                    provider = get_data_broker_key() or "broker"
+                    broker_quotes = get_data_broker().get_quote(leaders)
+                    valid_broker_quotes = {
+                        instrument: _enrich_quote(
+                            quote,
+                            instrument=instrument,
+                            provider=provider,
+                            source="REST",
+                            correlation_id=correlation_id,
+                        )
+                        for instrument, quote in broker_quotes.items()
+                        if quote and getattr(quote, "last_price", 0.0) > 0
+                    }
+                    fetched_external.update(valid_broker_quotes)
+                    get_registry().record_provider_success(provider)
+                except Exception:
+                    get_registry().record_provider_error(get_data_broker_key() or "broker")
+
+                rem_leaders = [i for i in leaders if i not in fetched_external]
+
+                # 3b. Try derivative options snapshot
+                if rem_leaders:
+                    opt_quotes = _options_quotes(rem_leaders, correlation_id=correlation_id)
+                    if opt_quotes:
+                        fetched_external.update(opt_quotes)
+                        rem_leaders = [i for i in leaders if i not in fetched_external]
+
+                # 3c. yfinance fallback
+                if rem_leaders:
+                    yf_quotes = _yf_fallback_quotes(rem_leaders, correlation_id=correlation_id)
+                    fetched_external.update(yf_quotes)
+                    if yf_quotes:
+                        get_registry().record_provider_success("yfinance")
+                    else:
+                        get_registry().record_provider_error("yfinance", is_stale=True)
+                    rem_leaders = [i for i in leaders if i not in fetched_external]
+
+                # 3d. Futures fallback
+                if rem_leaders:
+                    fut_quotes = _futures_quotes(rem_leaders, correlation_id=correlation_id)
+                    if fut_quotes:
+                        fetched_external.update(fut_quotes)
+            finally:
+                with _in_flight_quote_lock:
+                    for inst in leaders:
+                        q_val = fetched_external.get(inst)
+                        if inst in _in_flight_quote_events:
+                            evt, box = _in_flight_quote_events.pop(inst)
+                            box[0] = q_val
+                            evt.set()
+
+        # Follower threads await the leader result instead of dispatching duplicate HTTP requests
+        for inst, evt, box in followers:
+            evt.wait(timeout=5.0)
+            if box[0] is not None:
+                fetched_external[inst] = box[0]
+
+        result.update(fetched_external)
         missing = [i for i in canonical_instruments if i not in result]
-
-    # 4.5. Futures fallback for remaining missing futures
-    if missing:
-        fut_quotes = _futures_quotes(missing, correlation_id=correlation_id)
-        if fut_quotes:
-            result.update(fut_quotes)
-            missing = [i for i in canonical_instruments if i not in result]
 
     # 5. Populate cache with newly fetched quotes
     if result:

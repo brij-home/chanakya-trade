@@ -484,9 +484,11 @@ def _require_localhost(request: _Request) -> None:
 
 app.include_router(_skills_router)
 from web.routers import alerts_router, market_router
+from web.mcp import mcp_router
 
 app.include_router(alerts_router)
 app.include_router(market_router)
+app.include_router(mcp_router)
 
 # Re-exports for backward compatibility
 from web.routers.alerts_api import (
@@ -4037,6 +4039,41 @@ async def api_order_execute(req: OrderExecuteRequest, request: _Request):
             },
         )
         return JSONResponse(order.to_dict())
+    except PermissionError as exc:
+        raise _HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 409
+        raise _HTTPException(status_code, str(exc)) from exc
+
+
+class OrderBatchExecuteRequest(BaseModel):
+    order_ids: list[str]
+
+
+@app.post("/api/orders/batch/execute")
+async def api_order_batch_execute(req: OrderBatchExecuteRequest, request: _Request):
+    """Execute micro-batch of order intents atomically with mode gate and double-confirmation validation."""
+    from engine.order_lifecycle import execute_order_batch
+    from engine.security_audit import record_audit_event
+
+    actor = "LOCAL"
+    if hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
+
+    try:
+        orders = execute_order_batch(order_ids=req.order_ids)
+        for order in orders:
+            record_audit_event(
+                event_type="ORDER_BATCH_EXECUTE_REQUESTED",
+                mode=order.mode,
+                actor=actor,
+                details={
+                    "order_id": order.order_id,
+                    "status": order.status,
+                    "broker_order_id": order.broker_order_id,
+                },
+            )
+        return JSONResponse([o.to_dict() for o in orders])
     except PermissionError as exc:
         raise _HTTPException(403, str(exc)) from exc
     except ValueError as exc:

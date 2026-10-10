@@ -222,3 +222,47 @@ def test_ws_tick_not_overwritten_by_stale_rest():
     # NIFTY price must remain 25000.0 because WS tick was received < 5 seconds ago
     assert stream._items["nifty_50"].price == 25000.0
     assert stream._items["nifty_50"].source == "MSTOCK_WS"
+
+
+def test_ticker_stream_conflation():
+    import time
+
+    stream = MarketTickerStream()
+    notify_count = 0
+
+    def listener(items):
+        nonlocal notify_count
+        notify_count += 1
+
+    stream.add_listener(listener)
+    stream._conflation_interval = 0.05
+    stream.start()
+
+    try:
+        # Send 10 rapid ticks in a tight loop
+        for i in range(10):
+            tick = MStockTick(
+                mode=3,
+                exchange_type=1,
+                token="26000",
+                symbol="NSE:NIFTY 50",
+                sequence=i,
+                timestamp=1756980000.0 + i,
+                ltp=25000.0 + i,
+                open=24700.0,
+                high=25050.0,
+                low=24690.0,
+                close=24750.0,
+                volume=100000,
+            )
+            stream._on_mstock_tick(tick)
+
+        # Wait for conflator to process (e.g. 150ms)
+        time.sleep(0.15)
+
+        # Conflator should have coalesced 10 bursts into <= 3 notifications
+        assert 1 <= notify_count <= 3
+        # The latest state must be preserved
+        assert stream._items["nifty_50"].price == 25009.0
+    finally:
+        stream.stop()

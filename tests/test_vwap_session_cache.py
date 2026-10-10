@@ -49,7 +49,7 @@ def test_vwap_single_flight_deduplication():
                 val = cache.get_or_compute("BANKNIFTY", slow_compute)
                 results.append(val)
 
-            threads = [threading.Thread(target=worker) for _ in range(5)]
+            threads = [threading.Thread(target=worker, daemon=True) for _ in range(5)]
             for t in threads:
                 t.start()
             for t in threads:

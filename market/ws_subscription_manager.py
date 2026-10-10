@@ -23,21 +23,35 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-MAX_WS_SUBSCRIPTIONS = 180
+MAX_WS_SUBSCRIPTIONS = 2500  # FYERS API v3 natively supports 5,000 symbols per WebSocket connection
 
-# Permanent base set: 10 indices/commodities + top 40 liquid F&O equities
+# Permanent base set: key indices/commodities + top liquid institutional equities
 CORE_BASE_SYMBOLS: list[str] = [
+    # Benchmark & Sectoral Indices
     "NSE:NIFTY50-INDEX",
     "NSE:NIFTYBANK-INDEX",
     "NSE:FINNIFTY-INDEX",
     "NSE:MIDCPNIFTY-INDEX",
     "BSE:SENSEX-INDEX",
+    "BSE:BANKEX-INDEX",
     "NSE:INDIAVIX-INDEX",
+    "NSE:NIFTYIT-INDEX",
+    "NSE:NIFTYAUTO-INDEX",
+    "NSE:NIFTYPHARMA-INDEX",
+    "NSE:NIFTYFMCG-INDEX",
+    "NSE:NIFTYMETAL-INDEX",
+    "NSE:NIFTYENERGY-INDEX",
+    "NSE:NIFTYREALTY-INDEX",
+    "NSE:NIFTYINFRA-INDEX",
+    "NSE:NIFTYPSE-INDEX",
+    # MCX Commodities
     "MCX:CRUDEOIL",
     "MCX:NATURALGAS",
     "MCX:GOLD",
     "MCX:SILVER",
-    # Top tier institutional equities
+    "MCX:COPPER",
+    "MCX:ZINC",
+    # Top Tier Institutional Equities & Liquid F&O
     "NSE:RELIANCE-EQ",
     "NSE:HDFCBANK-EQ",
     "NSE:ICICIBANK-EQ",
@@ -79,6 +93,18 @@ CORE_BASE_SYMBOLS: list[str] = [
     "NSE:TATACONSUM-EQ",
     "NSE:HEROMOTOCO-EQ",
 ]
+
+# Dynamically populate liquid taxonomy equities from analysis.universe if available
+try:
+    from analysis.universe import SECTOR_TAXONOMY
+
+    for _sec_info in SECTOR_TAXONOMY.values():
+        for _s in _sec_info.get("symbols", []):
+            _eq_sym = f"NSE:{_s}-EQ"
+            if _eq_sym not in CORE_BASE_SYMBOLS:
+                CORE_BASE_SYMBOLS.append(_eq_sym)
+except Exception:
+    pass
 
 
 def _get_cache_path() -> Path:

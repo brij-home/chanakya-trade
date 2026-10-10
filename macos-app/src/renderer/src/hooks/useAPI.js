@@ -1,3 +1,4 @@
+import { useCallback, useMemo } from 'react'
 import { useChatStore } from '../store/chatStore'
 
 let cachedCsrfToken = null
@@ -34,10 +35,10 @@ export function useAPI() {
     : (port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1:8765')
 
   // In web mode, include credentials (cookies) with every request
-  const fetchOpts = window.__CHANAKYA_TRADE_WEB__ ? { credentials: 'include' } : {}
+  const fetchOpts = useMemo(() => (window.__CHANAKYA_TRADE_WEB__ ? { credentials: 'include' } : {}), [])
   const useSidecarIpc = !window.__CHANAKYA_TRADE_WEB__ && Boolean(window.electronAPI?.sidecarRequest)
 
-  const call = async (endpoint, body = {}, options = {}) => {
+  const call = useCallback(async (endpoint, body = {}, options = {}) => {
     if (!base) throw new Error('API not ready — sidecar is still starting')
 
     const method = (options.method || 'POST').toUpperCase()
@@ -119,9 +120,9 @@ export function useAPI() {
       throw new Error(`API ${res.status}: ${err}`)
     }
     return res.json()
-  }
+  }, [base, useSidecarIpc, fetchOpts])
 
-  const get = async (endpoint, options = {}) => {
+  const get = useCallback(async (endpoint, options = {}) => {
     if (!base) throw new Error('API not ready')
     if (useSidecarIpc) {
       try {
@@ -163,8 +164,10 @@ export function useAPI() {
       throw new Error(`API ${res.status}`)
     }
     return res.json()
-  }
+  }, [base, useSidecarIpc, fetchOpts])
 
-  return { call, get, ready: !!base, base, fetchCsrfToken: () => fetchCsrfToken(base) }
+  const fetchCsrfTokenFn = useCallback(() => fetchCsrfToken(base), [base])
+
+  return { call, get, ready: !!base, base, fetchCsrfToken: fetchCsrfTokenFn }
 }
 

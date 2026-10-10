@@ -197,10 +197,18 @@ def _try_auto_restore_sessions() -> None:
                     register_broker(
                         "fyers", b, primary=is_first, role="both" if is_first else "data"
                     )
-                    try:
-                        threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                    except Exception:
-                        pass
+                    is_testing = bool(
+                        os.environ.get("CHANAKYA_TESTING") == "1"
+                        or "PYTEST_CURRENT_TEST" in os.environ
+                        or os.environ.get("DEPLOY_MODE") == "test"
+                    )
+                    if not is_testing:
+                        try:
+                            threading.Thread(
+                                target=_start_websocket, args=(b,), daemon=True
+                            ).start()
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -217,10 +225,11 @@ def _try_auto_restore_sessions() -> None:
             b = MStockAPI()
             if b.is_authenticated():
                 register_broker("mstock", b, role="both")
-                try:
-                    threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                except Exception:
-                    pass
+                if not is_testing:
+                    try:
+                        threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
+                    except Exception:
+                        pass
                 return
     except Exception:
         pass
@@ -233,10 +242,11 @@ def _try_auto_restore_sessions() -> None:
             b = ShoonyaAPI()
             if b.is_authenticated():
                 register_broker("shoonya", b, role="both")
-                try:
-                    threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                except Exception:
-                    pass
+                if not is_testing:
+                    try:
+                        threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
+                    except Exception:
+                        pass
                 return
     except Exception:
         pass
@@ -249,10 +259,11 @@ def _try_auto_restore_sessions() -> None:
             b = KotakNeoAPI()
             if b.is_authenticated():
                 register_broker("kotak", b, role="both")
-                try:
-                    threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                except Exception:
-                    pass
+                if not is_testing:
+                    try:
+                        threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
+                    except Exception:
+                        pass
                 return
     except Exception:
         pass
@@ -788,19 +799,27 @@ def _oauth_local_server(
 
 
 def _recreate_broker_from_token(key: str):
-    """Re-create a broker instance from its saved token file (after sidecar OAuth)."""
+    """Re-create a broker instance from its saved token file (after sidecar OAuth or auto-login)."""
     try:
+        from config.credentials import get_credential
+
         if key == "fyers":
             from brokers.fyers import FyersAPI, TOKEN_FILE
 
             if TOKEN_FILE.exists():
                 b = FyersAPI(
-                    os.environ.get("FYERS_APP_ID", ""),
-                    os.environ.get("FYERS_SECRET_KEY", ""),
-                    redirect_uri=os.environ.get("FYERS_REDIRECT_URL", ""),
-                    fy_id=os.environ.get("FYERS_FY_ID", ""),
-                    totp_secret=os.environ.get("FYERS_TOTP_SECRET", ""),
-                    pin=os.environ.get("FYERS_PIN", ""),
+                    get_credential("FYERS_APP_ID", secret=False, required=False)
+                    or os.environ.get("FYERS_APP_ID", ""),
+                    get_credential("FYERS_SECRET_KEY", secret=True, required=False)
+                    or os.environ.get("FYERS_SECRET_KEY", ""),
+                    redirect_uri=get_credential("FYERS_REDIRECT_URL", secret=False, required=False)
+                    or os.environ.get("FYERS_REDIRECT_URL", ""),
+                    fy_id=get_credential("FYERS_FY_ID", secret=False, required=False)
+                    or os.environ.get("FYERS_FY_ID", ""),
+                    totp_secret=get_credential("FYERS_TOTP_SECRET", secret=True, required=False)
+                    or os.environ.get("FYERS_TOTP_SECRET", ""),
+                    pin=get_credential("FYERS_PIN", secret=True, required=False)
+                    or os.environ.get("FYERS_PIN", ""),
                 )
                 if b.is_authenticated():
                     return b
@@ -809,8 +828,54 @@ def _recreate_broker_from_token(key: str):
 
             if TOKEN_FILE.exists():
                 b = ZerodhaAPI(
-                    os.environ.get("KITE_API_KEY", ""),
-                    os.environ.get("KITE_API_SECRET", ""),
+                    get_credential("KITE_API_KEY", secret=False, required=False)
+                    or os.environ.get("KITE_API_KEY", ""),
+                    get_credential("KITE_API_SECRET", secret=True, required=False)
+                    or os.environ.get("KITE_API_SECRET", ""),
+                )
+                if b.is_authenticated():
+                    return b
+        elif key == "upstox":
+            from brokers.upstox import UpstoxAPI, TOKEN_FILE
+            from config.constants import get_broker_callback_url
+
+            if TOKEN_FILE.exists():
+                b = UpstoxAPI(
+                    api_key=get_credential("UPSTOX_API_KEY", secret=False, required=False)
+                    or os.environ.get("UPSTOX_API_KEY", ""),
+                    api_secret=get_credential("UPSTOX_API_SECRET", secret=True, required=False)
+                    or os.environ.get("UPSTOX_API_SECRET", ""),
+                    redirect_uri=get_broker_callback_url("upstox"),
+                )
+                if b.is_authenticated():
+                    return b
+        elif key == "groww":
+            from brokers.groww import GrowwAPI, TOKEN_FILE
+            from config.constants import get_broker_callback_url
+
+            if TOKEN_FILE.exists():
+                b = GrowwAPI(
+                    client_id=get_credential("GROWW_CLIENT_ID", secret=False, required=False)
+                    or os.environ.get("GROWW_CLIENT_ID", ""),
+                    client_secret=get_credential("GROWW_CLIENT_SECRET", secret=True, required=False)
+                    or os.environ.get("GROWW_CLIENT_SECRET", ""),
+                    redirect_uri=get_broker_callback_url("groww"),
+                )
+                if b.is_authenticated():
+                    return b
+        elif key == "angelone":
+            from brokers.angelone import AngelOneAPI, TOKEN_FILE
+
+            if TOKEN_FILE.exists():
+                b = AngelOneAPI(
+                    api_key=get_credential("ANGEL_API_KEY", secret=False, required=False)
+                    or os.environ.get("ANGEL_API_KEY", ""),
+                    client_code=get_credential("ANGEL_CLIENT_CODE", secret=False, required=False)
+                    or os.environ.get("ANGEL_CLIENT_CODE", ""),
+                    password=get_credential("ANGEL_PASSWORD", secret=True, required=False)
+                    or os.environ.get("ANGEL_PASSWORD", ""),
+                    totp_secret=get_credential("ANGEL_TOTP_SECRET", secret=True, required=False)
+                    or os.environ.get("ANGEL_TOTP_SECRET", ""),
                 )
                 if b.is_authenticated():
                     return b
@@ -964,6 +1029,12 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
 
 def _start_websocket(broker: BrokerAPI) -> None:
     """Start WebSocket for real-time quotes (Fyers, m.Stock, or Kotak Neo)."""
+    if (
+        os.environ.get("CHANAKYA_TESTING") == "1"
+        or "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("DEPLOY_MODE") == "test"
+    ):
+        return
     try:
         broker_cls_name = broker.__class__.__name__
         if getattr(broker, "name", "") == "kotak" or broker_cls_name == "KotakNeoAPI":

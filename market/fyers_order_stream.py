@@ -16,6 +16,7 @@ import logging
 import threading
 from typing import Callable, Optional
 
+
 logger = logging.getLogger("market.fyers_order_stream")
 
 

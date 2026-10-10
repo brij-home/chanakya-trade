@@ -152,6 +152,7 @@ def detect_commodity_breakouts(
     universe: Optional[list[str]] = None,
     quotes_map: Optional[dict[str, Any]] = None,
     ohlcv_1m_map: Optional[dict[str, Any]] = None,
+    ohlcv_map: Optional[dict[str, Any]] = None,
 ) -> list[AutoAlert]:
     """
     Scans liquid MCX commodities for high-asymmetry breakouts and options-first setups.
@@ -171,8 +172,9 @@ def detect_commodity_breakouts(
             logger.debug(f"[CommodityDetector] Commodity quotes fetch error: {e}")
             return found
 
-    # Pre-fetch 5m OHLCV concurrently across watched commodities to eliminate serial network latency
-    ohlcv_map: dict[str, Any] = {}
+    # Pre-fetch 5m OHLCV concurrently across watched commodities if not supplied
+    if ohlcv_map is None:
+        ohlcv_map = {}
     try:
         from concurrent.futures import ThreadPoolExecutor
         from market.history import get_ohlcv
@@ -361,17 +363,36 @@ def detect_commodity_breakouts(
             and rvol >= 1.10
         )
 
+        # MCX Opening Drive (09:00 - 09:45 IST): Open == Low (Bullish) or Open == High (Bearish)
+        is_opening_drive_window = now_ist.hour == 9 and 0 <= now_ist.minute <= 45
+        is_mcx_open_drive_bull = (
+            is_opening_drive_window
+            and open_p > 0
+            and abs(open_p - low_p) <= max(1.5, open_p * 0.001)
+            and ltp >= open_p * 1.002
+            and (vwap <= 0 or ltp >= vwap * 0.999)
+        )
+        is_mcx_open_drive_bear = (
+            is_opening_drive_window
+            and open_p > 0
+            and abs(open_p - high_p) <= max(1.5, open_p * 0.001)
+            and ltp <= open_p * 0.998
+            and (vwap <= 0 or ltp <= vwap * 1.001)
+        )
+
         has_bull_chg = (
             (chg_prev >= min_chg)
             or (chg_open >= min_chg)
             or (chg_from_low >= min_chg * 1.2 and roc_15m >= 0.5)
             or is_golden_thrust_bull
+            or is_mcx_open_drive_bull
         )
         has_bear_chg = (
             (chg_prev <= -min_chg)
             or (chg_open <= -min_chg)
             or (chg_from_high >= min_chg * 1.2 and roc_15m <= -0.5)
             or is_golden_thrust_bear
+            or is_mcx_open_drive_bear
         )
 
         # Smart Money Concepts (SMC) & Market Structure Analysis
@@ -651,6 +672,8 @@ def detect_commodity_breakouts(
                 or is_smc_bear
                 or is_utad_bear
                 or is_spring_bull
+                or is_mcx_open_drive_bull
+                or is_mcx_open_drive_bear
             )
 
             if transition_gate_passed:
@@ -660,6 +683,7 @@ def detect_commodity_breakouts(
                     or is_smc_bull
                     or is_thrust_bull
                     or is_spring_bull
+                    or is_mcx_open_drive_bull
                 ):
                     is_bullish = True
                     is_donchian_breakout = is_donchian_bull
@@ -669,6 +693,7 @@ def detect_commodity_breakouts(
                     or is_smc_bear
                     or is_thrust_bear
                     or is_utad_bear
+                    or is_mcx_open_drive_bear
                 ):
                     is_bearish = True
                     is_donchian_breakout = is_donchian_bear
@@ -815,8 +840,11 @@ def detect_commodity_breakouts(
         min_structural_pts = COMMODITY_MIN_SL_FLOORS.get(clean_sym, round(ltp * min_vol_pct, 1))
 
         # Institutional Smart Money Concepts (SMC) & Price Action Confluence
-        # Institutional Smart Money Concepts (SMC) & Price Action Confluence
         smc_tags: list[str] = []
+        if is_mcx_open_drive_bull:
+            smc_tags.append("MCX Bullish Opening Drive (Open==Low)")
+        elif is_mcx_open_drive_bear:
+            smc_tags.append("MCX Bearish Opening Drive (Open==High)")
         if smc_report:
             if smc_report.bos_detected:
                 if is_bullish and smc_report.bos_type == "BULLISH_BOS":
@@ -1635,6 +1663,10 @@ def detect_commodity_breakouts(
 
         if is_1m_micro_bear or is_1m_micro_bull:
             conf_boost = min(22, conf_boost + 5)
+        if is_mcx_open_drive_bull or is_mcx_open_drive_bear:
+            conf_boost = min(22, conf_boost + 5)
+        if is_golden_hours:
+            conf_boost = min(22, conf_boost + 4)
         if cvd_ratio >= 2.0:
             conf_boost = min(22, conf_boost + 3)
 
@@ -1743,6 +1775,7 @@ def detect_commodity_breakouts(
             opt_s_int = (
                 int(opt_s) if isinstance(opt_s, (int, float)) and opt_s == int(opt_s) else opt_s
             )
+            us_pfx = ""
             variant_slug = f"{direction.lower()}-{opt_s_int}{str(opt_t).lower()}"
         else:
             primary_ltp = ltp

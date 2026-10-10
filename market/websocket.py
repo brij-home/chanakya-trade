@@ -39,6 +39,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -356,7 +357,37 @@ class WebSocketManager:
 
     def _on_error(self, *args, **kwargs) -> None:
         if args:
-            logger.debug(f"WebSocket error: {args[0]}")
+            err = args[0]
+            logger.debug(f"WebSocket error: {err}")
+            err_str = str(err).lower()
+            if "token is expired" in err_str or "code': -99" in err_str or 'code": -99' in err_str:
+                logger.warning(
+                    "[WebSocket] Fyers WebSocket token expired (-99). Triggering broker re-authentication..."
+                )
+
+                def _async_reconnect():
+                    try:
+                        from brokers.session import get_data_broker
+
+                        b = get_data_broker()
+                        if hasattr(b, "_handle_auth_failure"):
+                            b._handle_auth_failure()
+                        elif hasattr(b, "is_authenticated"):
+                            b.is_authenticated()
+
+                        fresh_token = getattr(b, "_access_token", "")
+                        app_id = getattr(b, "_app_id", "")
+                        if fresh_token:
+                            logger.info(
+                                "[WebSocket] Reconnecting Fyers WebSocket with fresh access token..."
+                            )
+                            self.connect(access_token=fresh_token, app_id=app_id)
+                    except Exception as e_recon:
+                        logger.warning(f"[WebSocket] Auto-reconnect failed: {e_recon}")
+
+                threading.Thread(
+                    target=_async_reconnect, daemon=True, name="WsTokenRefresh"
+                ).start()
 
     def _on_message(self, message) -> None:
         """Process incoming tick data."""

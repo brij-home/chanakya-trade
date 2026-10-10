@@ -65,8 +65,8 @@ def detect_opening_drive(
 
     curr_t = now_dt.time()
     if not ignore_time_gate:
-        # Opening drive forms in first 30 mins (09:16 to 09:45 IST)
-        if curr_t < dtime(9, 16) or curr_t > dtime(9, 45):
+        # Opening drive forms in first 30 mins (09:15:05 to 09:45 IST)
+        if curr_t < dtime(9, 15, 5) or curr_t > dtime(9, 45):
             return None
 
     # Filter df to today's bars
@@ -81,22 +81,38 @@ def detect_opening_drive(
 
     # Extract first 5m bar of today
     first_bar = df_today.iloc[0]
-    bar_open = float(first_bar["open"])
-    bar_high = float(first_bar["high"])
-    bar_low = float(first_bar["low"])
-    bar_close = float(first_bar["close"])
+    bar_open = float(first_bar.get("open", first_bar.get("Open", 0.0)))
+    bar_high = float(first_bar.get("high", first_bar.get("High", 0.0)))
+    bar_low = float(first_bar.get("low", first_bar.get("Low", 0.0)))
+    bar_close = float(first_bar.get("close", first_bar.get("Close", 0.0)))
     bar_range = bar_high - bar_low
 
     if bar_open <= 0 or bar_range <= 0:
         return None
 
-    range_pct = (bar_range / bar_open) * 100.0
-    # Opening drive must have minimum conviction range (>= 0.40%)
-    if range_pct < 0.40:
-        return None
-
     clean_sym = canonical_alert_symbol(symbol)
     is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+    is_heavyweight = clean_sym in (
+        "RELIANCE",
+        "HDFCBANK",
+        "ICICIBANK",
+        "INFY",
+        "TCS",
+        "SBIN",
+        "AXISBANK",
+        "KOTAKBANK",
+        "TATASTEEL",
+        "LT",
+        "BHARTIARTL",
+        "ITC",
+    )
+
+    range_pct = (bar_range / bar_open) * 100.0
+    # Mega-cap heavyweights and indices have lower percentage volatility than midcaps;
+    # calibrate minimum 5m expansion range floor (0.20% for mega-caps, 0.35% for general equities):
+    min_range_pct = 0.20 if (is_index or is_heavyweight) else 0.35
+    if range_pct < min_range_pct:
+        return None
 
     if rvol is not None:
         rvol_val = float(rvol)
@@ -281,10 +297,11 @@ def detect_opening_drive(
                     )
                     opt_no_chase = round(opt_ltp * 1.04, 2)
                 else:
-                    opt_sl = round(max(0.1, opt_ltp * (0.82 if is_index else 0.78)), 2)
-                    opt_t1 = round(opt_ltp * (1.18 if is_index else 1.24), 2)
-                    opt_t2 = round(opt_ltp * (1.32 if is_index else 1.42), 2)
-                    opt_runner = round(opt_ltp * (1.55 if is_index else 1.70), 2)
+                    opt_sl = round(max(0.1, opt_ltp * (0.85 if is_index else 0.80)), 2)
+                    opt_risk = max(0.5, opt_ltp - opt_sl)
+                    opt_t1 = round(opt_ltp + (2.0 * opt_risk), 2)
+                    opt_t2 = round(opt_ltp + (3.5 * opt_risk), 2)
+                    opt_runner = round(opt_ltp + (5.5 * opt_risk), 2)
                     opt_no_chase = round(opt_ltp * 1.04, 2)
     except Exception as e:
         logger.debug(f"[OpeningDrive] Option lookup failed for {clean_sym}: {e}")
@@ -295,10 +312,11 @@ def detect_opening_drive(
         opt_strike = round(ltp / step) * step
         opt_contract_sym = f"{clean_sym} {int(opt_strike)} {opt_type}"
         opt_ltp = round(max(25.0, ltp * 0.007), 1)
-        opt_sl = round(opt_ltp * 0.82, 1)
-        opt_t1 = round(opt_ltp * 1.18, 1)
-        opt_t2 = round(opt_ltp * 1.32, 1)
-        opt_runner = round(opt_ltp * 1.55, 1)
+        opt_sl = round(opt_ltp * 0.85, 1)
+        opt_risk = max(1.0, opt_ltp - opt_sl)
+        opt_t1 = round(opt_ltp + (2.0 * opt_risk), 1)
+        opt_t2 = round(opt_ltp + (3.5 * opt_risk), 1)
+        opt_runner = round(opt_ltp + (5.5 * opt_risk), 1)
         opt_no_chase = round(opt_ltp * 1.04, 1)
 
     has_opt = bool(opt_contract_sym and opt_ltp and (is_index or opt_ltp > 0))

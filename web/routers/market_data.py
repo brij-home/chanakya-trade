@@ -388,11 +388,27 @@ async def get_fyers_status_endpoint():
             "cached_ticks_count": len(ws_manager.get_all_ticks()),
         },
         "profile": {
-            "name": profile.get("name", ""),
-            "fy_id": profile.get("fy_id", ""),
-            "email": profile.get("email", ""),
+            "name": getattr(profile, "name", "")
+            if hasattr(profile, "name")
+            else (profile.get("name", "") if isinstance(profile, dict) else ""),
+            "fy_id": getattr(profile, "user_id", "")
+            if hasattr(profile, "user_id")
+            else (profile.get("fy_id", "") if isinstance(profile, dict) else ""),
+            "email": getattr(profile, "email", "")
+            if hasattr(profile, "email")
+            else (profile.get("email", "") if isinstance(profile, dict) else ""),
         },
-        "funds": funds,
+        "funds": {
+            "available_cash": getattr(funds, "available_cash", 0.0)
+            if hasattr(funds, "available_cash")
+            else (funds.get("available_cash", 0.0) if isinstance(funds, dict) else 0.0),
+            "used_margin": getattr(funds, "used_margin", 0.0)
+            if hasattr(funds, "used_margin")
+            else (funds.get("used_margin", 0.0) if isinstance(funds, dict) else 0.0),
+            "total_balance": getattr(funds, "total_balance", 0.0)
+            if hasattr(funds, "total_balance")
+            else (funds.get("total_balance", 0.0) if isinstance(funds, dict) else 0.0),
+        },
     }
 
 
@@ -675,7 +691,292 @@ async def get_fyers_sector_heatmap_endpoint():
     if brk and hasattr(brk, "get_sector_heatmap"):
         heatmap = await asyncio.to_thread(brk.get_sector_heatmap)
         return heatmap
-    return {"status": "error", "error": "Data broker does not support sector heatmap"}
+
+
+@router.post("/api/fyers/positions/attach-legs", tags=["Fyers Advanced"])
+async def attach_fyers_position_legs_endpoint(req: dict):
+    """Attach or update server-managed TP/SL bracket legs directly to an open position."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "attach_position_legs"):
+        return {
+            "status": "error",
+            "error": "Execution broker does not support attaching position legs",
+        }
+
+    pos_id = req.get("position_id") or req.get("positionId")
+    if not pos_id:
+        return {"status": "error", "error": "position_id is required"}
+
+    res = await asyncio.to_thread(
+        brk.attach_position_legs,
+        position_id=pos_id,
+        take_profit=req.get("take_profit") or req.get("takeProfit"),
+        stop_loss=req.get("stop_loss") or req.get("stopLoss"),
+        leg_type=int(req.get("leg_type", req.get("legType", 1))),
+        qty=req.get("qty"),
+    )
+    return {
+        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
+        "response": res,
+    }
+
+
+@router.post("/api/fyers/positions/convert", tags=["Fyers Advanced"])
+async def convert_fyers_position_endpoint(req: dict):
+    """Convert an open position product type (e.g. INTRADAY to MARGIN or CNC)."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "convert_position"):
+        return {"status": "error", "error": "Execution broker does not support position conversion"}
+
+    symbol = req.get("symbol", "")
+    position_side = int(req.get("position_side", req.get("positionSide", 1)))
+    convert_qty = int(req.get("convert_qty", req.get("convertQty", 1)))
+    convert_from = req.get("convert_from", req.get("convertFrom", "INTRADAY"))
+    convert_to = req.get("convert_to", req.get("convertTo", "MARGIN"))
+
+    res = await asyncio.to_thread(
+        brk.convert_position,
+        symbol=symbol,
+        position_side=position_side,
+        convert_qty=convert_qty,
+        convert_from=convert_from,
+        convert_to=convert_to,
+    )
+    return {
+        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
+        "response": res,
+    }
+
+
+@router.post("/api/fyers/smart-orders/limit", tags=["Fyers Advanced"])
+async def place_fyers_smart_limit_endpoint(req: dict):
+    """Place a timed Smart Limit Order managed on Fyers servers."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "create_smart_order_limit"):
+        return {"status": "error", "error": "Execution broker does not support smart limit orders"}
+
+    res = await asyncio.to_thread(
+        brk.create_smart_order_limit,
+        symbol=req.get("symbol", ""),
+        qty=int(req.get("qty", 1)),
+        side=int(req.get("side", 1)),
+        limit_price=float(req.get("limit_price", req.get("limitPrice", 0.0))),
+        product=req.get("product", "INTRADAY"),
+    )
+    return {
+        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
+        "response": res,
+    }
+
+
+@router.post("/api/fyers/smart-orders/step", tags=["Fyers Advanced"])
+async def place_fyers_smart_step_endpoint(req: dict):
+    """Place a ladder step accumulation order managed on Fyers servers."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "create_smart_order_step"):
+        return {"status": "error", "error": "Execution broker does not support smart step orders"}
+
+    res = await asyncio.to_thread(
+        brk.create_smart_order_step,
+        symbol=req.get("symbol", ""),
+        qty=int(req.get("qty", 1)),
+        side=int(req.get("side", 1)),
+        avg_qty=int(req.get("avg_qty", req.get("avgqty", 1))),
+        avg_diff=float(req.get("avg_diff", req.get("avgdiff", 1.0))),
+        direction=int(req.get("direction", 1)),
+        order_type=int(req.get("order_type", req.get("orderType", 1))),
+        product=req.get("product", "INTRADAY"),
+    )
+    return {
+        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
+        "response": res,
+    }
+
+
+@router.get("/api/fyers/smart-exit/triggers", tags=["Fyers Advanced"])
+async def get_fyers_smartexit_triggers_endpoint():
+    """Retrieve active server-side Smart Exit triggers."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if brk and hasattr(brk, "get_smartexit_triggers"):
+        triggers = await asyncio.to_thread(brk.get_smartexit_triggers)
+        return {"status": "ok", "triggers": triggers}
+    return {"status": "error", "error": "Execution broker does not support smart exit triggers"}
+
+
+@router.post("/api/fyers/smart-exit/triggers", tags=["Fyers Advanced"])
+async def create_fyers_smartexit_trigger_endpoint(req: dict):
+    """Create a server-side Smart Exit trigger (profit protection or trailing exit)."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "create_smartexit_trigger"):
+        return {"status": "error", "error": "Execution broker does not support smart exit triggers"}
+
+    res = await asyncio.to_thread(
+        brk.create_smartexit_trigger,
+        name=req.get("name", "SmartExit"),
+        strategy_type=int(req.get("strategy_type", req.get("type", 2))),
+        profit_rate=req.get("profit_rate", req.get("profitRate")),
+        loss_rate=req.get("loss_rate", req.get("lossRate")),
+    )
+    return {
+        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
+        "response": res,
+    }
+
+
+# ── Fyers Post-Trade Accounting & Auditing ────────────────────
+
+
+@router.get("/api/fyers/charges", tags=["Fyers Advanced", "Audit & Accounting"])
+async def get_fyers_charges_endpoint(
+    from_date: str = "",
+    to_date: str = "",
+    page_size: int = 100,
+    page_no: int = 1,
+    segment_type: int = 0,
+    exchange_type: int = 0,
+    report_type: int = 1,
+):
+    """Query official Fyers charges history for institutional brokerage and statutory fee audit."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "get_charges_history"):
+        return {"status": "error", "error": "Execution broker does not support charges history"}
+
+    res = await asyncio.to_thread(
+        brk.get_charges_history,
+        from_date=from_date,
+        to_date=to_date,
+        page_size=page_size,
+        page_no=page_no,
+        segment_type=segment_type,
+        exchange_type=exchange_type,
+        report_type=report_type,
+    )
+    return {"status": "ok", "data": res}
+
+
+@router.get("/api/fyers/realised-pnl", tags=["Fyers Advanced", "Audit & Accounting"])
+async def get_fyers_realised_pnl_endpoint(
+    from_date: str = "",
+    to_date: str = "",
+    page_size: int = 100,
+    page_no: int = 1,
+):
+    """Retrieve realized P&L records directly from Fyers server."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "get_realised_pnl_history"):
+        return {
+            "status": "error",
+            "error": "Execution broker does not support realised P&L history",
+        }
+
+    res = await asyncio.to_thread(
+        brk.get_realised_pnl_history,
+        from_date=from_date,
+        to_date=to_date,
+        page_size=page_size,
+        page_no=page_no,
+    )
+    return {"status": "ok", "data": res}
+
+
+@router.get("/api/fyers/tax-pnl", tags=["Fyers Advanced", "Audit & Accounting"])
+async def get_fyers_tax_pnl_endpoint(
+    from_date: str = "",
+    to_date: str = "",
+    page_size: int = 100,
+    page_no: int = 1,
+):
+    """Retrieve audited tax P&L report breakdown from Fyers server."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "get_tax_pnl_history"):
+        return {"status": "error", "error": "Execution broker does not support tax P&L history"}
+
+    res = await asyncio.to_thread(
+        brk.get_tax_pnl_history,
+        from_date=from_date,
+        to_date=to_date,
+        page_size=page_size,
+        page_no=page_no,
+    )
+    return {"status": "ok", "data": res}
+
+
+@router.get("/api/fyers/ledger", tags=["Fyers Advanced", "Audit & Accounting"])
+async def get_fyers_ledger_endpoint(
+    from_date: str = "",
+    to_date: str = "",
+    page_size: int = 100,
+    page_no: int = 1,
+):
+    """Retrieve financial ledger accounting journal directly from Fyers server."""
+    from brokers.session import get_execution_broker
+
+    brk = get_execution_broker()
+    if not brk or not hasattr(brk, "get_ledger_history"):
+        return {"status": "error", "error": "Execution broker does not support ledger history"}
+
+    res = await asyncio.to_thread(
+        brk.get_ledger_history,
+        from_date=from_date,
+        to_date=to_date,
+        page_size=page_size,
+        page_no=page_no,
+    )
+    return {"status": "ok", "data": res}
+
+
+@router.post("/api/fyers/postback", tags=["Fyers Advanced", "Webhooks"])
+@router.post("/fyers/postback", tags=["Fyers Advanced", "Webhooks"])
+async def fyers_postback_webhook_endpoint(payload: dict[str, Any]):
+    """
+    Webhook postback receiver for real-time Fyers order and trade status updates.
+    Broadcasts state transitions to web SSE event bus and logs incoming execution data.
+    """
+    from web.sse import event_bus
+
+    try:
+        order_info = payload.get("order", payload)
+        order_id = (
+            order_info.get("id")
+            or order_info.get("order_id")
+            or order_info.get("orderNum")
+            or "UNKNOWN"
+        )
+        status = order_info.get("status")
+        symbol = order_info.get("symbol", "")
+
+        event_bus.publish_sync(
+            "orders",
+            {
+                "source": "fyers_webhook_postback",
+                "order_id": order_id,
+                "status": status,
+                "symbol": symbol,
+                "raw": payload,
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Error broadcasting Fyers postback webhook: {e}")
+
+    return {"status": "ok", "message": "Postback received and processed"}
 
 
 # ── 1. Options Gamma Exposure (GEX) & Dealer Zero-Gamma Levels ─────────────
