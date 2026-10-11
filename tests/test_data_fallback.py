@@ -332,6 +332,7 @@ class TestOhlcvCache:
             raise RuntimeError("no broker")
 
         monkeypatch.setattr("brokers.session.get_broker", _raise_broker)
+        monkeypatch.setattr("brokers.session.get_data_broker", _raise_broker)
         monkeypatch.setattr(
             "market.history._yfinance_fallback",
             lambda *a, **kw: [
@@ -363,6 +364,7 @@ class TestOhlcvCache:
             raise RuntimeError("no broker")
 
         monkeypatch.setattr("brokers.session.get_broker", _raise_broker)
+        monkeypatch.setattr("brokers.session.get_data_broker", _raise_broker)
         monkeypatch.setattr(
             "market.history._yfinance_fallback",
             lambda *a, **kw: [
@@ -399,6 +401,7 @@ class TestOhlcvCache:
             raise RuntimeError("no broker")
 
         monkeypatch.setattr("brokers.session.get_broker", _raise_broker)
+        monkeypatch.setattr("brokers.session.get_data_broker", _raise_broker)
         monkeypatch.setattr("market.history._yfinance_fallback", lambda *a, **kw: [])
 
         cached_rows = [

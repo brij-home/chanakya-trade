@@ -308,20 +308,24 @@ def test_black_76_pricing_and_put_call_parity():
 
 def test_commodity_options_chain_resolution():
     """Validates that get_options_chain returns populated MCX contracts for commodities."""
-    from market.options import get_options_chain, get_expiries
+    from market.options import get_options_chain, get_expiries, _CHAIN_CACHE
 
-    with patch("market.quotes.get_ltp", return_value=6520.0):
-        chain = get_options_chain("CRUDEOIL")
-        assert len(chain) == 42
-        sample = chain[0]
-        assert sample.underlying == "CRUDEOIL"
-        assert sample.exchange == "MCX"
-        assert sample.lot_size == 100
-        assert sample.strike > 0
-        assert sample.last_price > 0
+    _CHAIN_CACHE.clear()
+    with patch(
+        "market.options.get_data_broker", side_effect=Exception("No live broker in unit test")
+    ):
+        with patch("market.quotes.get_ltp", return_value=6520.0):
+            chain = get_options_chain("CRUDEOIL")
+            assert len(chain) == 42
+            sample = chain[0]
+            assert sample.underlying == "CRUDEOIL"
+            assert sample.exchange == "MCX"
+            assert sample.lot_size == 100
+            assert sample.strike > 0
+            assert sample.last_price > 0
 
-        expiries = get_expiries("CRUDEOIL")
-        assert len(expiries) >= 1
+            expiries = get_expiries("CRUDEOIL")
+            assert len(expiries) >= 1
 
 
 def test_commodity_alert_includes_defined_risk_option_alternative():

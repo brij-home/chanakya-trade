@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 import pandas as pd
 
@@ -119,13 +120,14 @@ def test_opening_drive_timing_at_09_15_30():
         index=dates,
     )
 
-    alert = detect_opening_drive(
-        symbol="NIFTY",
-        df_5m=df_5m,
-        ltp=25075.0,
-        ref_time=ref_dt,
-        ignore_time_gate=False,
-    )
+    with patch("market.options.get_options_chain", return_value=[]):
+        alert = detect_opening_drive(
+            symbol="NIFTY",
+            df_5m=df_5m,
+            ltp=25075.0,
+            ref_time=ref_dt,
+            ignore_time_gate=False,
+        )
     assert alert is not None
     assert alert.direction == "BULLISH"
     assert "OPENING DRIVE" in alert.headline

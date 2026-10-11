@@ -100,6 +100,23 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         pass
 
     try:
+        from market.options import _CHAIN_CACHE, _EXPIRIES_CACHE, _SNAPSHOT_CACHE
+
+        _CHAIN_CACHE.clear()
+        _EXPIRIES_CACHE.clear()
+        _SNAPSHOT_CACHE.clear()
+    except Exception:
+        pass
+
+    try:
+        from market.history import _df_memory_cache, _df_memory_cache_lock
+
+        with _df_memory_cache_lock:
+            _df_memory_cache.clear()
+    except Exception:
+        pass
+
+    try:
         from engine.detector_circuit_breaker import detector_circuit_breaker
 
         detector_circuit_breaker.reset_all()
