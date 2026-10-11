@@ -207,6 +207,7 @@ def test_eod_report_markdown_and_telegram_chunks(synthetic_alerts_file, tmp_path
 def test_eod_report_persistence(synthetic_alerts_file, tmp_path, monkeypatch):
     """Verify JSON, Markdown, and Excel files are created in reports directory."""
     monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
+    monkeypatch.setenv("TRADING_PLATFORM_HOME", str(tmp_path))
     gen = EODReportGenerator(data_file=synthetic_alerts_file)
     report = gen.generate(target_date="2026-09-17")
 

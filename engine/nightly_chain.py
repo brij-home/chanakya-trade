@@ -62,7 +62,7 @@ def run_nightly_post_market_chain(
     }
 
     # Safety gate: skip during market hours and weekends unless forced
-    if now_ist.weekday() >= 5:
+    if now_ist.weekday() >= 5 and not force:
         result["reason"] = "Weekend — no market data to process"
         logger.info("[NightlyChain] Skipped — weekend")
         return result

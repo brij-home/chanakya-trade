@@ -55,7 +55,7 @@ class ActionableBlueprint:
     risk_reward: str = "1:3.0"  # Minimum 1:3.0 per Invariant 12
     no_chase_boundary: Optional[float] = None
     execution_style: str = (
-        "LIMIT_ON_PULLBACK"  # "LIMIT_ON_PULLBACK" | "BREAKOUT_STOP" | "DEFINED_RISK_SPREAD"
+        "BREAKOUT_STOP"  # "BREAKOUT_STOP" | "LIMIT_ON_PULLBACK" | "DEFINED_RISK_SPREAD"
     )
     lot_size: int = 1
     when_to_buy: str = ""
@@ -171,7 +171,7 @@ class AutoAlert:
     time_horizon: str = "INTRADAY"  # "SCALP" | "INTRADAY" | "SWING_SHORT" | "SWING_MID" | "LONG_TERM" | "POSITIONAL" | "MULTIBAGGER" | "ROLLING_24H"
     eta_label: Optional[str] = None
     setup_style: str = "CONTINUATION"  # "CONTINUATION" | "REVERSAL"
-    entry_type: str = "LIMIT_ON_PULLBACK"  # "LIMIT_ON_PULLBACK" | "BREAKOUT_STOP" | "MARKET_NOW"
+    entry_type: str = "BREAKOUT_STOP"  # "BREAKOUT_STOP" | "LIMIT_ON_PULLBACK" | "MARKET_NOW"
     anchored_levels: dict[str, float] = field(default_factory=dict)
     order_flow_signals: dict[str, Any] = field(default_factory=dict)
     no_chase_boundary: Optional[float] = None

@@ -45,11 +45,12 @@ def test_ws_subscription_manager_disk_restore_on_restart():
     with tempfile.TemporaryDirectory() as tmp_dir:
         sub_file = Path(tmp_dir) / "sub.json"
         with patch("market.ws_subscription_manager._get_cache_path", return_value=sub_file):
-            mgr1 = WsSubscriptionManager(max_subscriptions=100)
+            max_limit = len(CORE_BASE_SYMBOLS) + 10
+            mgr1 = WsSubscriptionManager(max_subscriptions=max_limit)
             mgr1.add_subscriptions(["NSE:PERSIST_1-EQ", "NSE:PERSIST_2-EQ"])
 
             # Simulate restart: instantiate new manager from same disk file
-            mgr2 = WsSubscriptionManager(max_subscriptions=100)
+            mgr2 = WsSubscriptionManager(max_subscriptions=max_limit)
             desired = mgr2.get_all_desired_subscriptions()
 
             assert "NSE:PERSIST_1-EQ" in desired
