@@ -715,6 +715,7 @@ class Backtester:
             "2y": 730,
             "3y": 1095,
             "5y": 1825,
+            "10y": 3650,
         }
         days = period_days.get(norm_period, 365)
 
@@ -1096,6 +1097,7 @@ class MultiBacktester:
             "2y": 730,
             "3y": 1095,
             "5y": 1825,
+            "10y": 3650,
         }
         days = period_days.get(self.period, 365)
 

@@ -465,6 +465,10 @@ _YF_SECTOR_MAP = {
 
 def _yf_sector_fallback(sector_keys: list[str]) -> list[IndexSnapshot]:
     """Fetch sector data from yfinance when NSE returns zeros."""
+    import os
+
+    if os.environ.get("CHANAKYA_TESTING") == "1":
+        return []
     try:
         import yfinance as yf
 

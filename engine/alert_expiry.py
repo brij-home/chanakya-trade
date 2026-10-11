@@ -27,11 +27,25 @@ def classify_expiry_type(expiry_str: Optional[str], symbol: Optional[str] = None
                 continue
         if not dt:
             return "MONTHLY"
-        sym = (symbol or "").upper()
-        # Single-stock derivatives on NSE/BSE are strictly monthly contracts
-        if sym and sym not in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
+        sym = (
+            (symbol or "")
+            .upper()
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("NFO:", "")
+            .replace("BFO:", "")
+            .strip()
+        )
+        # SEBI Regulatory Mandate (Effective Nov 20, 2024):
+        # Only ONE benchmark index per exchange offers weekly options:
+        #   - NSE: NIFTY 50 (Thursday weekly expiry)
+        #   - BSE: SENSEX (Friday weekly expiry)
+        # All other indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX) and all single-stock equities
+        # trade strictly MONTHLY expiry contracts.
+        if sym not in ("NIFTY", "SENSEX"):
             return "MONTHLY"
-        # For index options, if adding 7 days changes month, it is the last expiry of that month -> MONTHLY
+
+        # For NIFTY and SENSEX weekly indices: if adding 7 days changes month, it is the month-end expiry -> MONTHLY
         if (dt + timedelta(days=7)).month != dt.month:
             return "MONTHLY"
         return "WEEKLY"

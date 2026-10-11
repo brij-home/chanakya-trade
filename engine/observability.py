@@ -19,6 +19,8 @@ Design principles:
 
 from __future__ import annotations
 
+import contextvars
+import logging
 import time
 import threading
 import uuid
@@ -26,6 +28,72 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+
+# ── Correlation Context (contextvars) ────────────────────────────────────────
+
+_CORRELATION_ID_VAR: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "correlation_id", default=None
+)
+_CORRELATION_SYMBOL_VAR: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "correlation_symbol", default=None
+)
+
+
+def set_correlation_context(
+    correlation_id: Optional[str] = None, symbol: Optional[str] = None
+) -> None:
+    """Set the correlation context for the current async task / thread."""
+    if correlation_id is not None:
+        _CORRELATION_ID_VAR.set(correlation_id)
+    if symbol is not None:
+        _CORRELATION_SYMBOL_VAR.set(symbol)
+
+
+def get_current_correlation_id() -> Optional[str]:
+    """Retrieve current correlation ID from contextvars."""
+    return _CORRELATION_ID_VAR.get()
+
+
+def get_current_correlation_symbol() -> Optional[str]:
+    """Retrieve current symbol from contextvars."""
+    return _CORRELATION_SYMBOL_VAR.get()
+
+
+def clear_correlation_context() -> None:
+    """Clear the correlation context."""
+    _CORRELATION_ID_VAR.set(None)
+    _CORRELATION_SYMBOL_VAR.set(None)
+
+
+class InstitutionalCorrelationFilter(logging.Filter):
+    """
+    Standard Python logging.Filter that enriches LogRecord with correlation attributes.
+    Enables log formatters to output %(correlation_id)s and %(symbol)s automatically.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        cid = getattr(record, "correlation_id", None)
+        if not cid or cid == "-":
+            cid = get_current_correlation_id()
+        sym = getattr(record, "symbol", None)
+        if not sym or sym == "-":
+            sym = get_current_correlation_symbol()
+        record.correlation_id = cid or "-"
+        record.symbol = sym or "-"
+        return True
+
+
+def install_institutional_correlation_filter(logger_name: Optional[str] = None) -> None:
+    """
+    Attach InstitutionalCorrelationFilter to the specified logger (or root if None).
+    Guarantees idempotency so the filter is never attached more than once.
+    """
+    target = logging.getLogger(logger_name)
+    for f in target.filters:
+        if isinstance(f, InstitutionalCorrelationFilter):
+            return
+    target.addFilter(InstitutionalCorrelationFilter())
 
 
 # ── Constants ────────────────────────────────────────────────────────────────

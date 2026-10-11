@@ -3276,8 +3276,8 @@ def render_milestone_alert(
         f" · 📞 <b>Call Given:</b> {call_time_fmt}{elapsed_fmt}" if call_time_fmt else ""
     )
     ref_line = (
-        f"🏷️ <b>Ref:</b> <code>{d.signal_id}</code>{call_time_part}"
-        if d.signal_id
+        f"🏷️ <b>Ref:</b> <code>{getattr(d, 'signal_id', None)}</code>{call_time_part}"
+        if getattr(d, "signal_id", None)
         else (f"📞 <b>Call Given:</b> {call_time_fmt}{elapsed_fmt}" if call_time_fmt else "")
     )
     footer_line = f"\n{ref_line}" if ref_line else ""
@@ -3725,6 +3725,7 @@ def render_milestone_alert(
             f"{opt_spec_line}"
             f"💰 <b>{cmp_label}:</b> {cs}{d.ltp:,.2f} | <b>T1:</b> {cs}{t1_disp:,.2f}{move_str}\n"
             f"🛡️ <b>Trail Stop:</b> <code>{cs}{ts_val:,.2f}</code>{lock_pct} (100% risk-free)\n"
+            f"🐆 <b>CHEETAH EXECUTION:</b> <code>FREE-ROLL ACTIVE · STOP RATCHETED TO {cs}{ts_val:,.2f} · ZERO DOWNSIDE RISK</code>\n"
             f"⚡ <b>DECISIVE ACTION:</b> <code>BOOK 50% PROFIT NOW & HOLD RUNNER{t2_runner_note}</code>"
             f"{orig_plan_line}"
             f"{footer_line}"

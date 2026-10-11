@@ -35,6 +35,15 @@ RISK_FREE_RATE = 0.065  # 6.5% RBI repo rate
 # ── Black-Scholes Premium ────────────────────────────────────
 
 
+def _std_norm_cdf(x: float) -> float:
+    """Standard normal cumulative distribution function using fast C-level math.erf.
+
+    Identical to scipy.stats.norm.cdf(x) to 15 decimal places without requiring
+    the heavy scipy.stats package initialization overhead.
+    """
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
 def bs_premium(
     spot: float,
     strike: float,
@@ -67,16 +76,18 @@ def bs_premium(
         return 0.0
 
     try:
-        from scipy.stats import norm
-
         T = dte / 365.0
         d1 = (math.log(spot / strike) + (rate + 0.5 * iv**2) * T) / (iv * math.sqrt(T))
         d2 = d1 - iv * math.sqrt(T)
 
         if option_type.upper() == "CE":
-            return max(0.0, spot * norm.cdf(d1) - strike * math.exp(-rate * T) * norm.cdf(d2))
+            return max(
+                0.0, spot * _std_norm_cdf(d1) - strike * math.exp(-rate * T) * _std_norm_cdf(d2)
+            )
         else:
-            return max(0.0, strike * math.exp(-rate * T) * norm.cdf(-d2) - spot * norm.cdf(-d1))
+            return max(
+                0.0, strike * math.exp(-rate * T) * _std_norm_cdf(-d2) - spot * _std_norm_cdf(-d1)
+            )
     except Exception:
         # Fallback: intrinsic + rough time value
         if option_type.upper() == "CE":
@@ -113,14 +124,12 @@ def bs_delta(
     else:
         effective_dte = float(dte)
     try:
-        from scipy.stats import norm
-
         T = max(1e-4, effective_dte / 365.0)
         d1 = (math.log(spot / strike) + (rate + 0.5 * iv**2) * T) / (iv * math.sqrt(T))
         if option_type.upper() == "CE":
-            return round(float(norm.cdf(d1)), 4)
+            return round(_std_norm_cdf(d1), 4)
         else:
-            return round(float(norm.cdf(d1) - 1.0), 4)
+            return round(_std_norm_cdf(d1) - 1.0, 4)
     except Exception:
         moneyness = (spot - strike) / max(1.0, (spot * iv * math.sqrt(effective_dte / 365.0)))
         approx = 1.0 / (1.0 + math.exp(-1.7 * moneyness))

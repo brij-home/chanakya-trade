@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -35,6 +36,20 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
+def get_optimal_workers(file_count: int | None = None, max_cap: int = 8) -> int:
+    """
+    Computes optimal parallel test worker count based on machine topology and workload size.
+    Leaves headroom for OS and disk I/O, defaults to 2 in CI environments.
+    """
+    if os.environ.get("GITHUB_ACTIONS"):
+        return 2
+    cpu = os.cpu_count() or 2
+    machine_cap = max(2, min(cpu - 2, max_cap))
+    if file_count is not None and file_count > 0:
+        return max(2, min(file_count, machine_cap))
+    return machine_cap
 
 
 def get_python_exe() -> str:
@@ -53,30 +68,64 @@ def run_command(
     cmd_args: list[str],
     cwd: Path = ROOT_DIR,
     allow_failure: bool = False,
+    timeout: float | None = 600.0,
+    stream: bool = False,
 ) -> tuple[bool, float, str]:
-    """Runs a command and returns (success, duration_seconds, output)."""
+    """Runs a command with optional real-time streaming, safety timeout, and returns (success, duration_seconds, output)."""
     print(f"\n[RUNNING] {title} ...", flush=True)
     start = time.perf_counter()
-    res = subprocess.run(
-        cmd_args,
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    duration = time.perf_counter() - start
-    output = (res.stdout + "\n" + res.stderr).strip()
+    lines: list[str] = []
 
-    if res.returncode == 0:
-        print(f"  \u2705 PASS ({duration:.2f}s): {title}", flush=True)
+    try:
+        proc = subprocess.Popen(
+            cmd_args,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+
+        if proc.stdout:
+            for line in iter(proc.stdout.readline, ""):
+                lines.append(line)
+                stripped = line.rstrip()
+                if stream and stripped:
+                    print(f"   {stripped}", flush=True)
+            proc.stdout.close()
+
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+            duration = time.perf_counter() - start
+            print(f"  ❌ TIMEOUT ({duration:.2f}s exceeded {timeout}s limit): {title}", flush=True)
+            return (
+                False,
+                duration,
+                "".join(lines) + f"\n[ERROR] Command timed out after {timeout} seconds.",
+            )
+
+    except Exception as exc:
+        duration = time.perf_counter() - start
+        print(f"  ❌ ERROR ({duration:.2f}s): {title} ({exc})", flush=True)
+        return False, duration, str(exc)
+
+    duration = time.perf_counter() - start
+    output = "".join(lines).strip()
+
+    if returncode == 0:
+        print(f"  ✅ PASS ({duration:.2f}s): {title}", flush=True)
         return True, duration, output
     else:
         if allow_failure:
-            print(f"  \u26a0\ufe0f WARN ({duration:.2f}s): {title}", flush=True)
+            print(f"  ⚠️ WARN ({duration:.2f}s): {title}", flush=True)
             return True, duration, output
-        print(f"  \u274c FAIL ({duration:.2f}s): {title}", flush=True)
-        if output:
+        print(f"  ❌ FAIL ({duration:.2f}s): {title}", flush=True)
+        if not stream and output:
             for line in output.splitlines()[-25:]:
                 print(f"     | {line}", flush=True)
         return False, duration, output
@@ -268,9 +317,21 @@ def main() -> int:
         help="Run full regression test suite in addition to invariant suites",
     )
     parser.add_argument(
+        "--invariants-only",
+        action="store_true",
+        help="Run only Tier 2 institutional invariants suites",
+    )
+    parser.add_argument(
         "--install",
         action="store_true",
         help="Install git pre-commit hook in repository",
+    )
+    parser.add_argument(
+        "--workers",
+        "-n",
+        type=int,
+        default=None,
+        help="Number of parallel pytest workers (default: auto-detected optimal)",
     )
     args = parser.parse_args()
 
@@ -278,12 +339,14 @@ def main() -> int:
         return 0 if install_hooks() else 1
 
     py_exe = get_python_exe()
+    workers = args.workers if args.workers and args.workers > 0 else get_optimal_workers()
     total_start = time.perf_counter()
 
     print("=" * 65)
     print("🛡️  CHANAKYATRADE SHIFT-LEFT INSTITUTIONAL QUALITY GATE")
-    print(f"   Python: {py_exe}")
-    print(f"   Root:   {ROOT_DIR}")
+    print(f"   Python:  {py_exe}")
+    print(f"   Root:    {ROOT_DIR}")
+    print(f"   Workers: {workers} parallel execution workers")
     print("=" * 65)
 
     if args.fix:
@@ -302,7 +365,7 @@ def main() -> int:
     results.append(("Ruff Lint Check", ok, dur))
     if not ok:
         print(
-            "\n\U0001f4a1 Hint: Run `python scripts/shift_left_check.py --fix` to auto-heal fixable lint errors."
+            "\n💡 Hint: Run `python scripts/shift_left_check.py --fix` to auto-heal fixable lint errors."
         )
         return 1
 
@@ -312,106 +375,150 @@ def main() -> int:
     )
     results.append(("Ruff Format Check", ok, dur))
     if not ok:
-        print(
-            "\n\U0001f4a1 Hint: Run `python scripts/shift_left_check.py --fix` to auto-format files."
-        )
+        print("\n💡 Hint: Run `python scripts/shift_left_check.py --fix` to auto-format files.")
         return 1
 
-    # ── Tier 2: Institutional Invariants & Safety Guardrails ──────────────────
+    # ── Tier 2 & 3 Test Suites Definition ────────────────────────────────────
     invariant_suites = [
         (
-            "Tier 2: Alert Identity & Deduplication Invariants (Rule 17)",
+            "Alert Identity & Deduplication Invariants (Rule 17)",
             "tests/test_alert_identity_invariants.py",
         ),
         (
-            "Tier 2: Zero Silent Swallowing & Observability Invariants (Rule 21)",
+            "Zero Silent Swallowing & Observability Invariants (Rule 21)",
             "tests/test_observability_invariants.py",
         ),
         (
-            "Tier 2: Pure Data Provenance & Zero Dummy Fallbacks (Rules 10, 23)",
+            "Pure Data Provenance & Zero Dummy Fallbacks (Rules 10, 23)",
             "tests/test_data_integrity_audit.py",
         ),
         (
-            "Tier 2: Fail-Closed Order Execution & OMS Safety Boundary (Rule 6)",
+            "Fail-Closed Order Execution & OMS Safety Boundary (Rule 6)",
             "tests/test_order_lifecycle.py",
         ),
-        ("Tier 2: Live OMS Paper/Live Double-Submit Protection", "tests/test_live_oms_p3b.py"),
+        ("Live OMS Paper/Live Double-Submit Protection", "tests/test_live_oms_p3b.py"),
     ]
+    invariant_files = [f for _, f in invariant_suites]
 
-    for title, test_file in invariant_suites:
-        ok, dur, _ = run_command(
-            title,
-            [py_exe, "-m", "pytest", test_file, "-q", "--tb=line"],
-        )
-        results.append((title, ok, dur))
-        if not ok:
-            return 1
-
-    # ── Tier 3: Core Signal & Alert Pipeline Sanctity ─────────────────────────
     pipeline_suites = [
         (
-            "Tier 3: Alert Quality & Realtime Feed Verification",
+            "Alert Quality & Realtime Feed Verification",
             "tests/test_alert_quality_and_realtime_feed.py",
         ),
         (
-            "Tier 3: Early Warning Interception & Proximity Promotion",
+            "Early Warning Interception & Proximity Promotion",
             "tests/test_interception_engine.py",
         ),
         (
-            "Tier 3: Opposing Mutual Exclusion & Conflicting Ignition Gates",
+            "Opposing Mutual Exclusion & Conflicting Ignition Gates",
             "tests/test_trap_and_conflict_controls.py",
         ),
         (
-            "Tier 3: Holistic Signals RCA & Multi-Milestone Trailing",
+            "Holistic Signals RCA & Multi-Milestone Trailing",
             "tests/test_holistic_signals_rca.py",
         ),
         (
-            "Tier 3: Hedged Spread & Sector Concurrency Limits",
+            "Hedged Spread & Sector Concurrency Limits",
             "tests/test_hedged_spread_and_concurrency.py",
         ),
         (
-            "Tier 3: Index Adaptive Regime & Tiger Stalking Filter",
+            "Index Adaptive Regime & Tiger Stalking Filter",
             "tests/test_index_adaptive_regime.py",
         ),
         (
-            "Tier 3: Signal Data Integrity & Diffusion Calibration",
+            "Signal Data Integrity & Diffusion Calibration",
             "tests/test_signal_data_integrity.py",
         ),
         (
-            "Tier 3: Signal Quality & Institutional Recommendations",
+            "Signal Quality & Institutional Recommendations",
             "tests/test_signal_quality_recommendations.py",
         ),
     ]
 
-    for title, test_file in pipeline_suites:
-        ok, dur, _ = run_command(
-            title,
-            [py_exe, "-m", "pytest", test_file, "-q", "--tb=line"],
+    covered_files = set(invariant_files) | {f for _, f in pipeline_suites}
+    affected_suites = get_affected_test_suites(covered_files)
+    affected_files = [f for _, f in affected_suites]
+
+    if args.invariants_only:
+        worker_count = (
+            args.workers
+            if args.workers and args.workers > 0
+            else get_optimal_workers(len(invariant_files))
         )
-        results.append((title, ok, dur))
+        print(f"\n[INFO] Running Tier 2 Invariants with {worker_count} parallel workers:")
+        for title, f in invariant_suites:
+            print(f"   • {title} ({f})")
+
+        ok, dur, _ = run_command(
+            f"Tier 2: Core Safety Invariants ({len(invariant_suites)} suites, {worker_count}w)",
+            [
+                py_exe,
+                "-m",
+                "pytest",
+                *invariant_files,
+                "-n",
+                str(worker_count),
+                "--dist",
+                "loadfile",
+                "-q",
+                "--tb=line",
+            ],
+            timeout=180.0,
+            stream=True,
+        )
+        results.append(("Tier 2: Core Safety Invariants", ok, dur))
         if not ok:
             return 1
 
-    # ── Tier 3.5: Impacted Test Suites (Dynamic Changed-File Selection) ──────
-    covered_files = {f for _, f in invariant_suites} | {f for _, f in pipeline_suites}
-    affected_suites = get_affected_test_suites(covered_files)
-    if affected_suites:
-        print(f"\n[INFO] Detected {len(affected_suites)} impacted test suite(s) from git diff:")
-        for _, f in affected_suites:
-            print(f"   -> {f}")
-        for title, test_file in affected_suites:
-            ok, dur, _ = run_command(
-                title,
-                [py_exe, "-m", "pytest", test_file, "-q", "--tb=line"],
-            )
-            results.append((title, ok, dur))
-            if not ok:
-                return 1
+    elif not args.full:
+        # ── Unified Shift-Left Pre-Commit Gate (Tier 2 + Tier 3 + Tier 3.5) ───────
+        all_test_files = invariant_files + [f for _, f in pipeline_suites] + affected_files
+        worker_count = (
+            args.workers
+            if args.workers and args.workers > 0
+            else get_optimal_workers(len(all_test_files))
+        )
 
-    # ── Tier 4: Full Fast Regression Suite (Optional / CI) ────────────────────
-    if args.full:
+        print(
+            f"\n[INFO] Running Unified Shift-Left Test Gate with {worker_count} parallel workers ({len(all_test_files)} suites):"
+        )
+        print(f"   • Tier 2 Invariants ({len(invariant_suites)} suites):")
+        for title, f in invariant_suites:
+            print(f"     - {title} ({f})")
+        print(f"   • Tier 3 Core Pipelines ({len(pipeline_suites)} suites):")
+        for title, f in pipeline_suites:
+            print(f"     - {title} ({f})")
+        if affected_suites:
+            print(f"   • Tier 3.5 Git-Impacted ({len(affected_suites)} suites):")
+            for title, f in affected_suites:
+                print(f"     - {title} ({f})")
+
+        extra_msg = f" + {len(affected_files)} impacted" if affected_files else ""
         ok, dur, _ = run_command(
-            "Tier 4: Full Fast Regression Suite",
+            f"Unified Shift-Left Gate ({len(invariant_suites) + len(pipeline_suites)} suites{extra_msg}, {worker_count}w)",
+            [
+                py_exe,
+                "-m",
+                "pytest",
+                *all_test_files,
+                "-n",
+                str(worker_count),
+                "--dist",
+                "loadfile",
+                "-q",
+                "--tb=line",
+            ],
+            timeout=180.0,
+            stream=True,
+        )
+        results.append(("Unified Shift-Left Test Gate", ok, dur))
+        if not ok:
+            return 1
+    else:
+        # ── Tier 4: Full Fast Regression Suite (Pre-Push / CI) ───────────────
+        worker_count = args.workers if args.workers and args.workers > 0 else get_optimal_workers()
+        ok, dur, _ = run_command(
+            f"Tier 4: Full Fast Regression Suite ({worker_count} workers)",
             [
                 py_exe,
                 "-m",
@@ -419,10 +526,14 @@ def main() -> int:
                 "-m",
                 "not network and not slow",
                 "-n",
-                "2",
+                str(worker_count),
+                "--dist",
+                "loadfile",
                 "-q",
                 "--tb=short",
             ],
+            timeout=600.0,
+            stream=True,
         )
         results.append(("Tier 4: Full Fast Regression Suite", ok, dur))
         if not ok:
@@ -430,10 +541,10 @@ def main() -> int:
 
     total_duration = time.perf_counter() - total_start
     print("\n" + "=" * 65)
-    print(f"\U0001f3c6 SHIFT-LEFT GATE PASSED ALL {len(results)} CHECKS IN {total_duration:.2f}s!")
+    print(f"🏆 SHIFT-LEFT GATE PASSED ALL {len(results)} CHECKS IN {total_duration:.2f}s!")
     print("=" * 65)
     for name, success, dur in results:
-        status_icon = "\u2705" if success else "\u274c"
+        status_icon = "✅" if success else "❌"
         print(f"  {status_icon} {name:<55} {dur:>6.2f}s")
     print("=" * 65)
 

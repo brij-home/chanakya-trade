@@ -421,6 +421,7 @@ class WalkForward:
             "2y": 730,
             "3y": 1095,
             "5y": 1825,
+            "10y": 3650,
         }
         total_days = period_days.get(period, 1095)
 
@@ -526,7 +527,9 @@ def _days_to_period(days: int) -> str:
         return "2y"
     if days <= 1200:
         return "3y"
-    return "5y"
+    if days <= 2200:
+        return "5y"
+    return "10y"
 
 
 def _run_for_window(

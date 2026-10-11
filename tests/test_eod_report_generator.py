@@ -254,10 +254,13 @@ def test_eod_report_excel_generation(synthetic_alerts_file, tmp_path, monkeypatc
 def test_eod_report_dispatch_telegram_mock(synthetic_alerts_file, tmp_path, monkeypatch):
     """Verify Telegram dispatch sends 3 message chunks AND attaches the Excel workbook."""
     monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
-    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
     monkeypatch.setenv("TELEGRAM_CHANNEL_ID", "1225164824")
     monkeypatch.setattr("bot.telegram_bot._get_bot_token", lambda: "mock_token_123")
     monkeypatch.setattr("bot.telegram_bot._load_chat_id", lambda: "1225164824")
+
+    gen = EODReportGenerator(data_file=synthetic_alerts_file)
+    report = gen.generate(target_date="2026-09-17")
+    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
 
     posted_calls = []
 
@@ -269,8 +272,6 @@ def test_eod_report_dispatch_telegram_mock(synthetic_alerts_file, tmp_path, monk
         return mock_resp
 
     with patch("httpx.post", side_effect=mock_post):
-        gen = EODReportGenerator(data_file=synthetic_alerts_file)
-        report = gen.generate(target_date="2026-09-17")
         success = gen.dispatch_to_telegram(report, chat_id="1225164824")
         assert success is True
 

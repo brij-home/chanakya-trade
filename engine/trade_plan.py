@@ -126,6 +126,9 @@ class TradePlan:
     # Reference Datetime
     ref_dt: Optional[datetime] = None
 
+    # Quantized Capital Position Sizing Blueprint
+    position_sizing: Optional[dict[str, Any]] = None
+
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -426,33 +429,33 @@ def calculate_trade_plan(
             max_t2_atr = 0.70 * atr * session_decay_factor
             max_t3_atr = 1.10 * atr * session_decay_factor
         else:
-            effective_atr = 0.35 * atr
-            min_stop_mult = 0.25
-            max_stop_mult = 1.00
+            effective_atr = 0.50 * atr
+            min_stop_mult = 0.60
+            max_stop_mult = 1.20
             # Target ceilings scale dynamically with remaining session volatility diffusion
-            max_t1_atr = 0.50 * atr * session_decay_factor
-            max_t2_atr = 0.85 * atr * session_decay_factor
-            max_t3_atr = 1.25 * atr * session_decay_factor
+            max_t1_atr = 0.60 * atr * session_decay_factor
+            max_t2_atr = 1.00 * atr * session_decay_factor
+            max_t3_atr = 1.50 * atr * session_decay_factor
     elif raw_tf in ("DAY", "DAILY", "SWING_SHORT", "SHORT_TERM"):
         tf = "SWING_SHORT"
-        effective_atr = 0.85 * atr
-        min_stop_mult = 0.50
-        max_stop_mult = 1.20
-        max_t1_atr = 1.80 * atr
-        max_t2_atr = 3.00 * atr
-        max_t3_atr = 4.50 * atr
+        effective_atr = 1.00 * atr
+        min_stop_mult = 1.20
+        max_stop_mult = 1.80
+        max_t1_atr = 2.40 * atr
+        max_t2_atr = 4.00 * atr
+        max_t3_atr = 6.00 * atr
     elif raw_tf in ("SWING", "SWING_MID", "WEEK", "WEEKLY", "MID_TERM"):
         tf = "SWING_MID"
-        effective_atr = 1.30 * atr
-        min_stop_mult = 0.80
-        max_stop_mult = 1.80
+        effective_atr = 1.25 * atr
+        min_stop_mult = 1.00
+        max_stop_mult = 2.20
         max_t1_atr = 3.50 * atr
         max_t2_atr = 6.00 * atr
         max_t3_atr = 9.00 * atr
     else:  # POSITIONAL / MULTIBAGGER
         tf = "POSITIONAL"
-        effective_atr = 2.20 * atr
-        min_stop_mult = 1.20
+        effective_atr = 1.80 * atr
+        min_stop_mult = 1.00
         max_stop_mult = 2.80
         max_t1_atr = 6.00 * atr
         max_t2_atr = 10.00 * atr
@@ -1095,6 +1098,27 @@ def calculate_trade_plan(
         pullback_entry_low = round(ltp, 1)
     optimal_entry_range = f"₹{pullback_entry_low:,.1f} – ₹{pullback_entry_high:,.1f}"
 
+    # ── 12. Quantized Capital Position Sizing Blueprint ──────────────────────
+    position_sizing: Optional[dict[str, Any]] = None
+    try:
+        from engine.position_sizer import calculate_position_size
+
+        clean_underlying = clean_sym.replace(".NS", "").replace("NSE:", "").strip()
+        is_futures_sizing = options_recommended_structure == "FUTURES"
+        ps_res = calculate_position_size(
+            symbol=clean_underlying,
+            entry_price=ltp,
+            stop_loss=invalidation_stop,
+            capital=100000.0,
+            target_price=target_1,
+            max_risk_pct=1.0,
+            is_fno=is_futures_sizing,
+        )
+        position_sizing = ps_res.as_dict()
+    except Exception as e_pos:
+        logger.debug(f"[TradePlan] Position sizing calculation deferred for {clean_sym}: {e_pos}")
+        position_sizing = None
+
     res = TradePlan(
         symbol=clean_sym,
         direction="LONG" if is_long else "SHORT",
@@ -1144,6 +1168,7 @@ def calculate_trade_plan(
         stagnation_advice=stagnation_advice,
         optimal_entry_range=optimal_entry_range,
         ref_dt=ref_dt,
+        position_sizing=position_sizing,
     )
 
     if df is None and ltp > 0:
@@ -1677,12 +1702,18 @@ def calculate_option_execution_plan(
     # ── Free-Roll Execution Protocol (Zero-Risk Runner Monetization at T1) ────
     t1_gain_pts = max(0.1, round(t1_prem - option_ltp, 2)) if option_ltp > 0 else 0.0
     t1_gain_pct = round((t1_gain_pts / option_ltp) * 100, 1) if option_ltp > 0 else 0.0
+    time_stop_mins = 25 if is_index_contract else 35
     free_roll_plan = {
         "status": "ELIGIBLE",
         "t1_scale_action": "SCALE_OUT_50_PCT",
         "t1_target_premium": t1_prem,
         "t1_gain_pct": t1_gain_pct,
         "breakeven_stop": breakeven_stop,
+        "time_stop_minutes": time_stop_mins,
+        "time_stop_rule": (
+            f"If Target 1 is not reached within {time_stop_mins} minutes and premium remains stagnant near entry, "
+            f"exit at market to avoid theta decay trap."
+        ),
         "net_risk_after_t1": 0.0,
         "runner_size_pct": 50.0,
         "runner_target_2": t2_prem,
@@ -1694,6 +1725,7 @@ def calculate_option_execution_plan(
         ),
         "protocol_summary": (
             f"Bank 50% at T1 (₹{t1_prem:,.1f} / +{t1_gain_pct:.0f}%), ratchet SL to Cost (₹{breakeven_stop:,.1f}). "
+            f"Time stop: {time_stop_mins}m if stagnation occurs. "
             f"Net trade risk becomes ₹0.00 (Free-Roll). Hold remaining 50% for T2 (₹{t2_prem:,.1f}) and T3 (₹{t3_prem:,.1f})."
         ),
     }
@@ -1761,4 +1793,10 @@ def calculate_option_execution_plan(
         "hedged_spread": hedged_spread_plan,
         # Free-Roll Execution Protocol (+2R Scale 50% & Zero-Risk Runner)
         "free_roll_plan": free_roll_plan,
+        "time_stop_minutes": time_stop_mins,
     }
+
+
+# Convenient aliases
+build_option_plan = calculate_option_execution_plan
+create_trade_plan = calculate_trade_plan

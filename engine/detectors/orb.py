@@ -302,13 +302,38 @@ def detect_opening_range_breakout(
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     from engine.alert_identity import generate_alert_id
 
+    # 4.3 Volatility Noise Floor Calculation
+    atr_val = round(ltp * 0.015, 2)
+    if df is not None and len(df) >= 14:
+        try:
+            import numpy as np
+
+            highs = df["high"] if "high" in df.columns else df["High"]
+            lows = df["low"] if "low" in df.columns else df["Low"]
+            closes = df["close"] if "close" in df.columns else df["Close"]
+            tr = np.maximum(
+                highs - lows, np.maximum(abs(highs - closes.shift(1)), abs(lows - closes.shift(1)))
+            )
+            calc_atr = float(tr.rolling(14).mean().iloc[-1])
+            if calc_atr > 0 and not np.isnan(calc_atr):
+                atr_val = round(calc_atr, 2)
+        except Exception:
+            pass
+
+    # Ensure stop loss is not within intraday spread/noise chop (at least 0.25x ATR or 0.4% spot)
+    min_orb_risk = max(1.0, round(max(0.25 * atr_val, ltp * 0.004), 2))
+
     stage_val = "PRIMED" if is_primed else "IGNITED"
     if is_primed:
         direction = primed_direction or "BULLISH"
         alert_type = "ORB_PRIMED"
         is_bull_setup = direction == "BULLISH"
         trigger_level = orb_high if is_bull_setup else orb_low
-        stop_loss = orb_mid
+        stop_loss = (
+            round(min(orb_mid, trigger_level - min_orb_risk), 2)
+            if is_bull_setup
+            else round(max(orb_mid, trigger_level + min_orb_risk), 2)
+        )
         target_1 = (
             round(orb_high + (1.0 * orb_range), 2)
             if is_bull_setup
@@ -342,7 +367,7 @@ def detect_opening_range_breakout(
         direction = "BULLISH"
         alert_type = "ORB_BREAKOUT"
         trigger_level = orb_high
-        stop_loss = orb_mid
+        stop_loss = round(min(orb_mid, trigger_level - min_orb_risk), 2)
         risk_pts = max(1.0, round(ltp - stop_loss, 2))
         target_1 = round(orb_high + (1.0 * orb_range), 2)
         target_2 = round(orb_high + (2.0 * orb_range), 2)
@@ -356,7 +381,7 @@ def detect_opening_range_breakout(
         )
         summary = (
             f"15-min Opening Range Breakout confirmed! High ₹{orb_high:,.1f} reclaimed with "
-            f"{rvol_val:.1f}x RVOL and VWAP support. Stop-Loss at Midpoint ₹{orb_mid:,.1f}."
+            f"{rvol_val:.1f}x RVOL and VWAP support. Stop-Loss at ₹{stop_loss:,.1f}."
         )
         when_buy = f"Enter on Ask or 5m retest of ₹{orb_high:,.1f} holding above VWAP."
         when_wait = (
@@ -366,7 +391,7 @@ def detect_opening_range_breakout(
         direction = "BEARISH"
         alert_type = "ORB_BREAKDOWN"
         trigger_level = orb_low
-        stop_loss = orb_mid
+        stop_loss = round(max(orb_mid, trigger_level + min_orb_risk), 2)
         risk_pts = max(1.0, round(stop_loss - ltp, 2))
         target_1 = round(orb_low - (1.0 * orb_range), 2)
         target_2 = round(orb_low - (2.0 * orb_range), 2)
@@ -378,7 +403,7 @@ def detect_opening_range_breakout(
         headline = f"⚡ ORB-15 BREAKDOWN: {symbol} at ₹{ltp:,.1f} (Broke Range Low ₹{orb_low:,.1f})"
         summary = (
             f"15-min Opening Range Breakdown confirmed! Low ₹{orb_low:,.1f} breached with "
-            f"{rvol_val:.1f}x RVOL and sub-VWAP pressure. Stop-Loss at Midpoint ₹{orb_mid:,.1f}."
+            f"{rvol_val:.1f}x RVOL and sub-VWAP pressure. Stop-Loss at ₹{stop_loss:,.1f}."
         )
         when_buy = f"Short on Bid or 5m retest of ₹{orb_low:,.1f} staying below VWAP."
         when_wait = (
@@ -488,6 +513,9 @@ def detect_opening_range_breakout(
                 "target_3": target_3,
                 "confirmation_candle": conf_candle,
                 "divergence_type": div_type,
+                "atr": round(atr_val, 2),
+                "atr_14": round(atr_val, 2),
+                "min_noise_sl_pts": round(min_orb_risk, 2),
             },
             actionable_plan=act_plan,
         )
@@ -524,6 +552,9 @@ def detect_opening_range_breakout(
             "target_3": target_3,
             "confirmation_candle": conf_candle,
             "divergence_type": div_type,
+            "atr": round(atr_val, 2),
+            "atr_14": round(atr_val, 2),
+            "min_noise_sl_pts": round(min_orb_risk, 2),
         },
         actionable_plan={
             "action": f"BUY_{alert_type}"

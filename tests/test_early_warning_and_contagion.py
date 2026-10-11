@@ -266,7 +266,11 @@ class TestOptionsOiVelocity:
 
         # Snapshot 2: 60s later, OI drops from 80,000 to 65,000 (shedding 15,000 contracts in 60s)
         # Mocking time.time to advance by 60s
-        with patch("time.time", side_effect=[1000.0, 1060.0, 1060.0]):
+        import itertools
+
+        with patch(
+            "time.time", side_effect=itertools.chain([1000.0, 1060.0], itertools.repeat(1060.0))
+        ):
             _STRIKE_OI_SNAPSHOTS["NIFTY_25000_CE"] = (1000.0, 80000, 5000)
             c2 = OptionsContract(
                 symbol="NIFTY25000CE",

@@ -305,13 +305,13 @@ def detect_squeeze_breakout(
             or ("PYTEST_CURRENT_TEST" in os.environ)
         )
 
-        # Time-of-Day Gates for Intraday Squeezes
-        if is_intraday and not is_test_env:
+        # Time-of-Day Gates for Squeezes
+        if not is_test_env:
             # 1. Opening Auction Discovery Freeze (09:15 - 09:25 IST)
             if now_dt.hour == 9 and now_dt.minute < 25:
                 return None
             # 2. Midday Volume Lull (11:45 - 13:15 IST) - require high RVOL (>= 2.0x) to fire during lunch
-            if (
+            if is_intraday and (
                 (now_dt.hour == 11 and now_dt.minute >= 45)
                 or (now_dt.hour == 12)
                 or (now_dt.hour == 13 and now_dt.minute < 15)

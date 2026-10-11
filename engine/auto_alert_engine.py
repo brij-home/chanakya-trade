@@ -248,10 +248,14 @@ class AutoAlertEngine:
         self._crypto_tick_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=20))
         self._crypto_last_surge_eval: dict[str, float] = {}
         self._sector_daily_dispatched: dict[str, set[str]] = defaultdict(set)
-        # Telegram has a tighter 2-per-sector-per-day cap (separate from UI's 5)
+        # Telegram has a tighter 2-to-4 per-sector-per-day cap (separate from UI's 5)
         self._sector_daily_telegram: dict[str, dict[str, int]] = defaultdict(
             lambda: defaultdict(int)
         )
+        # Index session-half Telegram dispatch tracker (date -> {"FIRST_HALF": count, "SECOND_HALF": count})
+        self._index_half_telegram: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        # Sector hourly Telegram dispatch tracker (sector_id -> list[timestamps])
+        self._sector_hourly_telegram: dict[str, list[float]] = defaultdict(list)
         # Rolling hourly Telegram pacing ledger (Max 3/hr for Index, Max 6/hr for Stocks)
         self._hourly_telegram_dispatches: dict[str, list[float]] = {
             "INDEX": [],
@@ -342,59 +346,76 @@ class AutoAlertEngine:
                     self._dispatched_milestones.add(f"{sym}:{aid}:FINAL")
                     self._dispatched_milestones.add(f"{c_tag}:{aid}:FINAL")
 
-                # Seed sector daily cap ledger (UI: up to 5 per sector/day; Telegram: up to 2)
+                # Seed sector daily cap ledger (UI: up to 5 per sector/day)
                 is_stock_opt = (getattr(a, "segment", "") == "FNO_STOCK") or (
                     sym not in self._watched_indices
                     and atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
                 )
-                if is_stock_opt:
-                    c_at = getattr(a, "created_at", "") or ""
-                    d_key = c_at.split(" ")[0] if " " in c_at else c_at[:10]
-                    sec = (getattr(a, "metrics", {}) or {}).get("sector_id")
-                    if not sec:
-                        try:
-                            from analysis.universe import get_stock_sector
+                c_at = getattr(a, "created_at", "") or ""
+                d_key = c_at.split(" ")[0] if " " in c_at else c_at[:10]
+                sec = (getattr(a, "metrics", {}) or {}).get("sector_id")
+                if not sec and sym not in self._watched_indices:
+                    try:
+                        from analysis.universe import get_stock_sector
 
-                            sec, _ = get_stock_sector(sym)
-                        except Exception:
-                            sec = None
-                    if d_key and sec and sec != "index":
-                        self._sector_daily_dispatched[d_key].add(sec)
-                        # Seed Telegram ledger based on whether this alert was Telegram-dispatched
-                        if getattr(a, "telegram_dispatched", False):
-                            self._sector_daily_telegram[d_key][sec] = (
-                                self._sector_daily_telegram[d_key].get(sec, 0) + 1
+                        sec, _ = get_stock_sector(sym)
+                    except Exception:
+                        sec = None
+                if is_stock_opt and d_key and sec and sec != "index":
+                    self._sector_daily_dispatched[d_key].add(sec)
+
+                # Seed Telegram ledgers based on whether this alert was Telegram-dispatched
+                if getattr(a, "telegram_dispatched", False):
+                    seg_cl = getattr(a, "segment", "") or ""
+                    is_idx_a = (
+                        seg_cl == "FNO_INDEX"
+                        or a.symbol in self._watched_indices
+                        or any(
+                            k in (a.contract_symbol or a.symbol).upper()
+                            for k in (
+                                "NIFTY",
+                                "BANKNIFTY",
+                                "MIDCP",
+                                "SENSEX",
+                                "FINNIFTY",
+                                "BANKEX",
                             )
-                            # Seed rolling hourly dispatches if recent (< 3600s)
-                            now_epoch = time.time()
-                            a_epoch = None
-                            if a.created_at:
-                                try:
-                                    c_str = str(a.created_at).replace(" IST", "").strip()
-                                    a_epoch = datetime.fromisoformat(c_str).timestamp()
-                                except Exception:
-                                    pass
-                            if a_epoch and (now_epoch - a_epoch) < 3600.0:
-                                seg_cl = getattr(a, "segment", "") or ""
-                                is_idx_a = (
-                                    seg_cl == "FNO_INDEX"
-                                    or a.symbol in self._watched_indices
-                                    or any(
-                                        k in (a.contract_symbol or a.symbol).upper()
-                                        for k in (
-                                            "NIFTY",
-                                            "BANKNIFTY",
-                                            "MIDCP",
-                                            "SENSEX",
-                                            "FINNIFTY",
-                                            "BANKEX",
-                                        )
-                                    )
-                                )
-                                if is_idx_a:
-                                    self._hourly_telegram_dispatches["INDEX"].append(a_epoch)
-                                elif seg_cl in ("FNO_STOCK", "EQUITY"):
-                                    self._hourly_telegram_dispatches["STOCKS"].append(a_epoch)
+                        )
+                    )
+                    now_epoch = time.time()
+                    a_epoch = None
+                    a_time = None
+                    if a.created_at:
+                        try:
+                            c_str = str(a.created_at).replace(" IST", "").strip()
+                            a_dt = datetime.fromisoformat(c_str)
+                            a_epoch = a_dt.timestamp()
+                            a_time = a_dt.time()
+                        except Exception:
+                            pass
+
+                    if is_idx_a:
+                        if d_key:
+                            a_half = (
+                                "FIRST_HALF"
+                                if (a_time and a_time < dtime(12, 30))
+                                else "SECOND_HALF"
+                            )
+                            self._index_half_telegram[d_key][a_half] = (
+                                self._index_half_telegram[d_key].get(a_half, 0) + 1
+                            )
+                        if a_epoch and (now_epoch - a_epoch) < 3600.0:
+                            self._hourly_telegram_dispatches["INDEX"].append(a_epoch)
+                    else:
+                        if d_key and sec and sec != "index":
+                            sec_k = str(sec).lower()
+                            self._sector_daily_telegram[d_key][sec_k] = (
+                                self._sector_daily_telegram[d_key].get(sec_k, 0) + 1
+                            )
+                        if a_epoch and (now_epoch - a_epoch) < 3600.0:
+                            self._hourly_telegram_dispatches["STOCKS"].append(a_epoch)
+                            if sec and sec != "index":
+                                self._sector_hourly_telegram[str(sec).lower()].append(a_epoch)
 
     @property
     def watched_crypto(self) -> list[str]:
@@ -2840,7 +2861,7 @@ class AutoAlertEngine:
         now_dt = datetime.now(IST)
         now_time = now_dt.time()
 
-        # 4. Hourly Pacing Throttle (Rolling 3600-second Window)
+        # 4. Hourly Pacing & Rate Limit Throttles
         with self._lock:
             # Purge older than 3600 seconds
             for cat in ("INDEX", "STOCKS"):
@@ -2857,23 +2878,89 @@ class AutoAlertEngine:
             )
 
             if is_index:
+                # 4a. Index Daily Limits: Overall Daily + Session Halves (1st Half 4-6, 2nd Half 2-4)
+                _today_idx = now_dt.strftime("%Y-%m-%d")
+                _total_idx_today = sum(self._index_half_telegram[_today_idx].values())
+                _max_idx_daily = (
+                    10
+                    if is_apex_opportunity
+                    else int(os.environ.get("TELEGRAM_MAX_INDEX_ALERTS_PER_DAY", "8"))
+                )
+                if _total_idx_today >= _max_idx_daily:
+                    return (
+                        False,
+                        f"Telegram index daily limit reached ({_total_idx_today}/{_max_idx_daily} today)",
+                    )
+
+                _is_first_half = now_time < dtime(12, 30)
+                _half_key = "FIRST_HALF" if _is_first_half else "SECOND_HALF"
+                _half_lbl = "1st half (09:15-12:30)" if _is_first_half else "2nd half (12:30-15:30)"
+                _base_half_cap = int(
+                    os.environ.get(
+                        "TELEGRAM_MAX_INDEX_ALERTS_FIRST_HALF"
+                        if _is_first_half
+                        else "TELEGRAM_MAX_INDEX_ALERTS_SECOND_HALF",
+                        "5" if _is_first_half else "3",
+                    )
+                )
+                _max_half_cap = (_base_half_cap + 1) if is_apex_opportunity else _base_half_cap
+                _current_half_count = self._index_half_telegram[_today_idx].get(_half_key, 0)
+                if _current_half_count >= _max_half_cap:
+                    return (
+                        False,
+                        f"Telegram index {_half_lbl} daily limit reached ({_current_half_count}/{_max_half_cap})",
+                    )
+
+                # 4b. Index Hourly Pacing (3/hr routine, up to 5/hr APEX)
                 idx_count = len(self._hourly_telegram_dispatches["INDEX"])
-                # Max 3 per hour for routine index setups; up to 5/hr for APEX institutional thrusts
-                max_idx_pacing = 5 if is_apex_opportunity else 3
+                _base_idx_hourly = int(os.environ.get("TELEGRAM_MAX_INDEX_ALERTS_PER_HOUR", "3"))
+                _apex_idx_hourly = int(os.environ.get("TELEGRAM_MAX_INDEX_APEX_PER_HOUR", "5"))
+                max_idx_pacing = _apex_idx_hourly if is_apex_opportunity else _base_idx_hourly
                 if idx_count >= max_idx_pacing:
                     return (
                         False,
                         f"Telegram index hourly pacing limit reached ({idx_count}/{max_idx_pacing} in last 60m)",
                     )
             elif is_stock:
+                # 4c. Total Stock Hourly Pacing (6/hr routine, up to 8/hr APEX)
                 stk_count = len(self._hourly_telegram_dispatches["STOCKS"])
-                # Max 6 per hour for routine stock setups; up to 8/hr for APEX 'DO NOT MISS' opportunities
-                max_stk_pacing = 8 if is_apex_opportunity else 6
+                _base_stk_hourly = int(os.environ.get("TELEGRAM_MAX_STOCKS_PER_HOUR", "6"))
+                _apex_stk_hourly = int(os.environ.get("TELEGRAM_MAX_STOCKS_APEX_PER_HOUR", "8"))
+                max_stk_pacing = _apex_stk_hourly if is_apex_opportunity else _base_stk_hourly
                 if stk_count >= max_stk_pacing:
                     return (
                         False,
                         f"Telegram stocks hourly pacing limit reached ({stk_count}/{max_stk_pacing} in last 60m)",
                     )
+
+                # 4d. Stock Hourly per Sector (2/hr routine, up to 3/hr APEX - Prevents basket flooding)
+                _sec_id_pacing = str(
+                    (getattr(alert, "metrics", {}) or {}).get("sector_id", "")
+                ).lower()
+                if not _sec_id_pacing:
+                    try:
+                        from analysis.universe import get_stock_sector
+
+                        _sec_id_pacing, _ = get_stock_sector(alert.symbol)
+                        _sec_id_pacing = (_sec_id_pacing or "").lower()
+                    except Exception:
+                        _sec_id_pacing = ""
+                if _sec_id_pacing and _sec_id_pacing != "index":
+                    self._sector_hourly_telegram[_sec_id_pacing] = [
+                        t
+                        for t in self._sector_hourly_telegram[_sec_id_pacing]
+                        if (now_ts - t) < 3600.0
+                    ]
+                    sec_h_count = len(self._sector_hourly_telegram[_sec_id_pacing])
+                    _base_sec_hourly = int(
+                        os.environ.get("TELEGRAM_MAX_STOCK_HOURLY_PER_SECTOR", "2")
+                    )
+                    max_sec_hourly = 3 if is_apex_opportunity else _base_sec_hourly
+                    if sec_h_count >= max_sec_hourly:
+                        return (
+                            False,
+                            f"Telegram sector hourly pacing limit reached for '{_sec_id_pacing}' ({sec_h_count}/{max_sec_hourly} in last 60m)",
+                        )
 
         # 5. Conviction Floor
         _calibrated_bar_whitelist = (
@@ -3370,6 +3457,10 @@ class AutoAlertEngine:
             if (_sector_rs_val >= 1.0 or alert.confidence >= 92)
             else (3 if alert.confidence >= 88 else 2)
         )
+        _conf_sec_cap = int(os.environ.get("TELEGRAM_MAX_STOCK_ALERTS_PER_SECTOR_DAY", "0"))
+        if _conf_sec_cap > 0:
+            _TG_SECTOR_CAP = min(_TG_SECTOR_CAP, _conf_sec_cap)
+
         is_stock_opt = (seg == "FNO_STOCK") or (
             not is_index and alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
         )
@@ -3384,7 +3475,10 @@ class AutoAlertEngine:
                 except Exception:
                     _sec_tg = None
             if _sec_tg and _sec_tg != "index":
-                _tg_count = self._sector_daily_telegram[_today_tg].get(_sec_tg, 0)
+                _sec_tg_k = str(_sec_tg).lower()
+                _tg_count = self._sector_daily_telegram[_today_tg].get(
+                    _sec_tg_k, 0
+                ) or self._sector_daily_telegram[_today_tg].get(_sec_tg, 0)
                 if _tg_count >= _TG_SECTOR_CAP:
                     return (
                         False,
@@ -3598,9 +3692,22 @@ class AutoAlertEngine:
                 sys_type = "target_2_achieved"
             elif is_target:
                 sys_type = "target_achieved"
-            elif is_trail:
-                sys_type = "trailing_update"
+            from web.domain_events import create_alert_domain_event
 
+            evt_type = "ALERT_CREATED"
+            if alert.is_invalidated:
+                evt_type = "ALERT_INVALIDATED"
+            elif is_runner_exit:
+                evt_type = "RUNNER_CLOSED"
+            elif is_t1 or is_t2 or is_target or is_t0_5:
+                evt_type = "MILESTONE_ACHIEVED"
+            elif is_trail:
+                evt_type = "TRAILING_STOP_UPDATE"
+            elif getattr(alert, "is_ignited", False):
+                evt_type = "ALERT_IGNITED"
+
+            domain_evt = create_alert_domain_event(alert, event_type=evt_type)
+            event_bus.publish_domain_event(domain_evt)
             event_bus.publish_sync("alert", alert_dict)
             event_bus.publish_sync(
                 "system",
@@ -4158,13 +4265,18 @@ class AutoAlertEngine:
                             )
                         )
                     )
+                    _today_tg = datetime.now(IST).strftime("%Y-%m-%d")
+                    _now_time_tg = datetime.now(IST).time()
                     if is_idx_tg:
                         self._hourly_telegram_dispatches["INDEX"].append(now_ts)
+                        _half_k = "FIRST_HALF" if _now_time_tg < dtime(12, 30) else "SECOND_HALF"
+                        self._index_half_telegram[_today_tg][_half_k] = (
+                            self._index_half_telegram[_today_tg].get(_half_k, 0) + 1
+                        )
                     else:
                         self._hourly_telegram_dispatches["STOCKS"].append(now_ts)
 
-                    # Update per-sector Telegram dispatch counter
-                    _today_tg = datetime.now(IST).strftime("%Y-%m-%d")
+                    # Update per-sector Telegram dispatch counter and sector hourly pacing
                     _sec_tg = (getattr(alert, "metrics", {}) or {}).get("sector_id")
                     if not _sec_tg:
                         try:
@@ -4178,9 +4290,11 @@ class AutoAlertEngine:
                         and alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
                     )
                     if is_stock_opt_tg and _sec_tg and _sec_tg != "index":
-                        self._sector_daily_telegram[_today_tg][_sec_tg] = (
-                            self._sector_daily_telegram[_today_tg].get(_sec_tg, 0) + 1
+                        sec_key_str = str(_sec_tg).lower()
+                        self._sector_daily_telegram[_today_tg][sec_key_str] = (
+                            self._sector_daily_telegram[_today_tg].get(sec_key_str, 0) + 1
                         )
+                        self._sector_hourly_telegram[sec_key_str].append(now_ts)
                 self._save()
 
             try:

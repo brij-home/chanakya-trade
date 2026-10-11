@@ -1451,6 +1451,9 @@ def detect_index_call_setup(
                 "DOUBLE_BOTTOM_BREAKOUT",
                 "CPR_DEMAND_BOUNCE",
                 "DAY_LOW_DEMAND_BOUNCE",
+                "BREAKOUT_RETEST_EXPANSION",
+                "EMA9_21_BULLISH_CROSSOVER",
+                "MOMENTUM_EXPANSION",
             }
             has_qualifying_setup = bool(
                 is_institutional_thrust

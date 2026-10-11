@@ -40,6 +40,7 @@ import {
   AlertCompactRow,
   AlertTriageCard,
   TradeExecutionMatrix,
+  PredatoryPipelineDrawer,
   isTestOrSimAlert,
   resolveAlertProvenance,
   isAlertActive,
@@ -203,6 +204,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
   const [showPostMortem, setShowPostMortem] = useState(false)
   const [showPlan, setShowPlan] = useState(false)
   const [showDetails, setShowDetails] = useState(false)
+  const [showPredatoryDrawer, setShowPredatoryDrawer] = useState(false)
   const [clearingLockout, setClearingLockout] = useState(false)
   const [lockoutCleared, setLockoutCleared] = useState(false)
 
@@ -540,6 +542,20 @@ const AutoAlertCard = memo(function AutoAlertCard({
             >🎫</button>
           ) : null}
 
+          {(alert.metrics?.predatory_pipeline || alert.metrics?.expected_value_r !== undefined) && (
+            <button
+              onClick={() => setShowPredatoryDrawer((v) => !v)}
+              className={`btn btn-xs text-[10px] font-bold px-2 border transition-all ${
+                showPredatoryDrawer
+                  ? 'bg-gold/25 text-gold border-gold/50 shadow-sm'
+                  : 'bg-gold/10 hover:bg-gold/20 text-gold/90 border-gold/30 hover:border-gold/50'
+              }`}
+              title="Toggle 6-Seat Predatory Execution Pipeline Diagnostic Council"
+            >
+              🏛️ Council {showPredatoryDrawer ? '▲' : '▼'}
+            </button>
+          )}
+
 
           <button
             onClick={() => setShowDetails((v) => !v)}
@@ -772,6 +788,15 @@ const AutoAlertCard = memo(function AutoAlertCard({
         expiryInfo={expiryInfo}
         densityMode={densityMode}
       />
+
+      {/* ── 6-Seat Predatory Execution Pipeline Diagnostic Drawer ── */}
+      {showPredatoryDrawer && (
+        <PredatoryPipelineDrawer
+          alert={alert}
+          isOpen={true}
+          onClose={() => setShowPredatoryDrawer(false)}
+        />
+      )}
 
       {/* ── Progressive Disclosure Deep Dive Drawer (Plan details, Hedge, Matched chips, Full metrics) ── */}
       {showDetails && (

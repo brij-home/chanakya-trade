@@ -92,6 +92,13 @@ def _format_swing_inflection_alert(
     if sl >= baseline_p or sl <= 0:
         sl = round(baseline_p * 0.94, 2)
 
+    # Institutional Volatility Noise Floor: Ensure SL is at least 1.20x ATR below baseline
+    ticket_d = getattr(setup, "execution_ticket", {}) or {}
+    atr_val = float(ticket_d.get("atr_14d") or (baseline_p * 0.025))
+    min_sl_floor = float(ticket_d.get("min_noise_sl_pts") or (1.20 * atr_val))
+    if (baseline_p - sl) < min_sl_floor:
+        sl = round(baseline_p - min_sl_floor, 2)
+
     tgt1 = float(setup.target_1)
     if tgt1 <= entry_p:
         tgt1 = round(entry_p + abs(entry_p - sl) * 2.0, 2)
@@ -121,12 +128,21 @@ def _format_swing_inflection_alert(
 
     # 2. Timing State & Interception Pipeline Stage
     is_weekend = now_dt.weekday() in (5, 6)
-    if setup.timing_state == "TRIGGER_NOW" and mkt_open:
+    is_opening_auction = now_dt.hour == 9 and now_dt.minute < 25
+    if setup.timing_state == "TRIGGER_NOW" and mkt_open and not is_opening_auction:
         stage_val = "IGNITED"
         timing_badge = "🔥 BREAKOUT IGNITED"
     elif setup.timing_state == "TRIGGER_NOW":
         stage_val = "ACTIONABLE"
-        timing_badge = "📅 WEEKEND RADAR (FOR MONDAY OPEN)" if is_weekend else "⚡ READY AT OPEN"
+        timing_badge = (
+            "📅 WEEKEND RADAR (FOR MONDAY OPEN)"
+            if is_weekend
+            else (
+                "⏳ OPENING AUCTION DISCOVERY (09:25 IST)"
+                if is_opening_auction
+                else "⚡ READY AT OPEN"
+            )
+        )
     elif setup.timing_state == "PULLBACK_RETEST":
         stage_val = "PRIMED"
         timing_badge = "🎯 PULLBACK RETEST"
@@ -193,6 +209,13 @@ def _format_swing_inflection_alert(
     }
     ttl_val = ttl_map.get(time_horizon, 86400 * 14)
 
+    trigger_lvl = entry_p
+    if setup.timing_state in ("COILING_IMMINENT", "PULLBACK_RETEST"):
+        if setup.vcp_pivot_price > 0 and setup.vcp_pivot_price > ltp_val:
+            trigger_lvl = setup.vcp_pivot_price
+        elif trigger_lvl <= ltp_val:
+            trigger_lvl = round(ltp_val * 1.008, 1)
+
     return AutoAlert(
         alert_id=alert_id,
         alert_type=setup.primary_archetype,
@@ -203,7 +226,7 @@ def _format_swing_inflection_alert(
         headline=headline,
         summary=summary,
         ltp=setup.ltp,
-        trigger_level=entry_p,
+        trigger_level=trigger_lvl,
         target_level=tgt1,
         stop_loss=sl,
         initial_stop_loss=sl,
@@ -247,6 +270,9 @@ def _format_swing_inflection_alert(
             "eta_label": eta_label,
             "is_decoupler": True,
             "sector_rs": 2.0,
+            "atr": round(atr_val, 2),
+            "atr_14": round(atr_val, 2),
+            "min_noise_sl_pts": round(min_sl_floor, 2),
         },
         actionable_plan={
             "action": "BUY",

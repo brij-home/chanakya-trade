@@ -414,6 +414,20 @@ class TradeLifecycleManager:
         ):
             if eval_res.new_milestone not in alert.achieved_milestones:
                 alert.achieved_milestones.append(eval_res.new_milestone)
+                if eval_res.new_milestone == "T1_ACHIEVED":
+                    if alert.metrics is None or not isinstance(alert.metrics, dict):
+                        alert.metrics = {}
+                    alert.metrics["free_roll_locked"] = True
+                    pred_pipe = alert.metrics.setdefault("predatory_pipeline", {})
+                    if isinstance(pred_pipe, dict):
+                        cheetah = pred_pipe.setdefault("cheetah", {})
+                        if isinstance(cheetah, dict):
+                            cheetah["status"] = "FREE_ROLL_ACTIVE"
+                            cheetah["locked_stop"] = eval_res.recommended_stop
+                    if alert.actionable_plan and isinstance(alert.actionable_plan, dict):
+                        alert.actionable_plan["free_roll_active"] = True
+                        alert.actionable_plan["stop_loss"] = eval_res.recommended_stop
+
                 try:
                     from engine.learning_engine import pattern_learning_engine
 
