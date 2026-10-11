@@ -412,7 +412,17 @@ def main() -> int:
     if args.full:
         ok, dur, _ = run_command(
             "Tier 4: Full Fast Regression Suite",
-            [py_exe, "-m", "pytest", "-m", "not network and not slow", "-q", "--tb=short"],
+            [
+                py_exe,
+                "-m",
+                "pytest",
+                "-m",
+                "not network and not slow",
+                "-n",
+                "2",
+                "-q",
+                "--tb=short",
+            ],
         )
         results.append(("Tier 4: Full Fast Regression Suite", ok, dur))
         if not ok:
