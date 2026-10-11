@@ -33,7 +33,9 @@ from rich.table import Table
 
 console = Console()
 
-STRATEGIES_DIR = Path.home() / ".trading_platform" / "strategies"
+from config.paths import app_data_path
+
+STRATEGIES_DIR = app_data_path("strategies")
 
 # Modules that user-generated strategy code is allowed to import
 IMPORT_WHITELIST = {

@@ -323,7 +323,7 @@ class AlertRepository:
         return alerts
 
     def prune_expired_archived(
-        self, alerts: list[AutoAlert], max_age_days: int = 3
+        self, alerts: list[AutoAlert], max_age_days: int = 30
     ) -> Tuple[list[AutoAlert], int]:
         """
         Prunes inactive, archived, or invalidated records older than max_age_days.

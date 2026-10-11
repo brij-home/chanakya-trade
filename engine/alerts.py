@@ -37,6 +37,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from config.paths import app_data_path
+from config.constants import IST
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -328,9 +329,6 @@ class AlertManager:
         self, alert_id: str, reason: str = "Manually invalidated"
     ) -> Optional[Alert]:
         """Invalidates an active manual alert with a clear rationale."""
-        from datetime import datetime, timezone, timedelta
-
-        IST = timezone(timedelta(hours=5, minutes=30))
         now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
         with self._lock:
             for alert in self._alerts:
@@ -341,8 +339,10 @@ class AlertManager:
                     self._save()
                     try:
                         self._notify(alert)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to notify on alert invalidation for {alert.id}: {e}"
+                        )
                     return alert
         return None
 
@@ -352,9 +352,8 @@ class AlertManager:
 
     def cleanup_archived_alerts(self, max_age_days: int = 3) -> int:
         """Prunes triggered, invalidated, or target-achieved manual alerts older than max_age_days."""
-        from datetime import datetime, timedelta, timezone
+        from datetime import timedelta
 
-        IST = timezone(timedelta(hours=5, minutes=30))
         cutoff = datetime.now(IST) - timedelta(days=max_age_days)
         purged = 0
         surviving = []
@@ -1073,8 +1072,8 @@ def _desktop_notify(title: str, message: str) -> None:
                 timeout=5,
                 capture_output=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[Alerts] macOS desktop notification skipped or failed: {e}")
 
     threading.Thread(target=_send, daemon=True).start()
 
@@ -1124,8 +1123,11 @@ def _telegram_notify(
             alert_id=alert_id,
             is_update=is_update,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(
+            f"[Alerts] Failed to dispatch Telegram push notification for alert {alert_id or 'unknown'}: {e}",
+            exc_info=True,
+        )
 
 
 def _webhook_notify(alert: Alert, ltp: Optional[float] = None) -> None:

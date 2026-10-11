@@ -177,11 +177,30 @@ _CRYPTO_MAP = {
     "BTC": "BTC-USD",
     "BITCOIN": "BTC-USD",
     "BTCUSD": "BTC-USD",
+    "BTCUSDT": "BTC-USD",
     "BTC-USD": "BTC-USD",
     "BTCINR": "BTC-INR",
     "ETH": "ETH-USD",
     "ETHEREUM": "ETH-USD",
+    "ETHUSD": "ETH-USD",
+    "ETHUSDT": "ETH-USD",
     "SOL": "SOL-USD",
+    "SOLUSD": "SOL-USD",
+    "SOLUSDT": "SOL-USD",
+    "BNB": "BNB-USD",
+    "BNBUSDT": "BNB-USD",
+    "XRP": "XRP-USD",
+    "XRPUSDT": "XRP-USD",
+    "DOGE": "DOGE-USD",
+    "DOGEUSDT": "DOGE-USD",
+    "ADA": "ADA-USD",
+    "ADAUSDT": "ADA-USD",
+    "AVAX": "AVAX-USD",
+    "AVAXUSDT": "AVAX-USD",
+    "DOT": "DOT-USD",
+    "DOTUSDT": "DOT-USD",
+    "LINK": "LINK-USD",
+    "LINKUSDT": "LINK-USD",
 }
 
 
@@ -212,9 +231,24 @@ def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
             if upper.startswith(c):
                 return _COMMODITY_MAP[c]
 
-    # 0. Check Crypto Map (BTC, ETH, SOL)
+    # 0. Check Crypto Map and Crypto USDT/USD suffixes (e.g. BTC, ETH, BTCUSDT)
     if upper in _CRYPTO_MAP:
         return _CRYPTO_MAP[upper]
+    if upper.endswith("USDT"):
+        base = upper[:-4]
+        return f"{base}-USD"
+    if upper.endswith("-USD") or upper.endswith("-INR"):
+        return upper
+
+    exch_upper = (exchange or "NSE").upper().strip()
+    if exch_upper in ("CRYPTO", "BINANCE", "COINBASE", "DERIBIT"):
+        if upper in _CRYPTO_MAP:
+            return _CRYPTO_MAP[upper]
+        if upper.endswith("USDT"):
+            return f"{upper[:-4]}-USD"
+        if not upper.endswith("-USD") and not upper.endswith("-INR"):
+            return f"{upper}-USD"
+        return upper
 
     # 1. Check Commodity Map (Gold, Silver, Crude Oil, Natural Gas, Copper, etc.)
     if upper in _COMMODITY_MAP:
@@ -229,14 +263,6 @@ def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
         return _INDEX_MAP[upper]
 
     # 4. Check exchange overrides
-    exch_upper = (exchange or "NSE").upper().strip()
-    if exch_upper in ("CRYPTO", "BINANCE", "COINBASE"):
-        if upper in _CRYPTO_MAP:
-            return _CRYPTO_MAP[upper]
-        if not upper.endswith("-USD") and not upper.endswith("-INR"):
-            return f"{upper}-USD"
-        return upper
-
     if exch_upper == "MCX":
         for c in _COMMODITY_MAP:
             if upper.startswith(c):

@@ -31,7 +31,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from config.encoding import fix_windows_console
 
@@ -39,12 +38,12 @@ from config.encoding import fix_windows_console
 fix_windows_console()
 
 logger = logging.getLogger("chanakya.eod_report")
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST_ZONE as IST
+from config.paths import app_data_path
 
 
 def get_reports_dir() -> Path:
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    p = base / "reports"
+    p = app_data_path("reports")
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -1753,10 +1752,7 @@ class EODReportGenerator:
         if data_file:
             self.alerts_file = data_file
         else:
-            base = Path(
-                os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform")
-            )
-            self.alerts_file = base / "auto_alerts.json"
+            self.alerts_file = app_data_path("auto_alerts.json")
 
     def _load_alerts(self, target_date: str) -> list[dict[str, Any]]:
         """Load and filter alerts for target_date (YYYY-MM-DD)."""

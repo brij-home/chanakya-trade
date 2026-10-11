@@ -99,6 +99,8 @@ def extract_underlying_symbol(symbol: str) -> Optional[str]:
         .replace("CDS:", "")
         .strip()
     )
+    if clean.endswith(("-EQ", "-BE")):
+        clean = clean[:-3]
     # Resolve common feed variants / display-name aliases before lookup
     clean = _SYMBOL_ALIASES.get(clean, clean)
 
@@ -119,6 +121,86 @@ def is_fno_symbol(symbol: str) -> bool:
     if not symbol:
         return False
     return extract_underlying_symbol(symbol) is not None
+
+
+def is_physical_delivery_fno(symbol: str) -> bool:
+    """
+    Return True if the symbol is a single-stock derivative subject to SEBI compulsory physical settlement.
+    Returns False for cash-settled index derivatives (NIFTY, BANKNIFTY, etc.), commodities, and currencies.
+    """
+    und = extract_underlying_symbol(symbol)
+    if not und:
+        return False
+    from market.instruments import INDEX_SYMBOLS, COMMODITY_SYMBOLS, CURRENCY_SYMBOLS
+
+    clean_und = und.upper().replace(".NS", "").replace("NSE:", "").strip()
+    if (
+        clean_und in INDEX_SYMBOLS
+        or clean_und in COMMODITY_SYMBOLS
+        or clean_und in CURRENCY_SYMBOLS
+    ):
+        return False
+    return clean_und in _F_AND_O_LOT_SIZES
+
+
+def check_sebi_physical_settlement_risk(
+    symbol: str,
+    dte: Optional[int] = None,
+    capital: float = 100000.0,
+    price: Optional[float] = None,
+) -> dict[str, Any]:
+    """
+    Evaluates SEBI physical settlement delivery risk for single-stock derivatives in expiry week (DTE <= 4).
+    Mandates 100% margin delivery coverage or warns against holding overnight to prevent auction penalties.
+    """
+    if not is_physical_delivery_fno(symbol):
+        return {
+            "applicable": False,
+            "blocked": False,
+            "requires_full_margin": False,
+            "warning": "",
+            "required_delivery_capital": 0.0,
+        }
+
+    if dte is None or dte > 4:
+        return {
+            "applicable": True,
+            "blocked": False,
+            "requires_full_margin": False,
+            "warning": "",
+            "required_delivery_capital": 0.0,
+        }
+
+    lot_size = get_lot_size(symbol)
+    current_price = price or 100.0
+    required_capital = lot_size * current_price
+
+    has_full_margin = capital >= required_capital
+    if not has_full_margin:
+        warning_msg = (
+            f"SEBI Physical Delivery Risk: '{symbol}' is a single-stock derivative expiring in {dte} day(s). "
+            f"Holding to expiry requires 100% physical delivery margin (₹{required_capital:,.2f}), but account "
+            f"capital is ₹{capital:,.2f}. Prohibiting new overnight position without full delivery margin."
+        )
+        return {
+            "applicable": True,
+            "blocked": True,
+            "requires_full_margin": True,
+            "warning": warning_msg,
+            "required_delivery_capital": required_capital,
+        }
+
+    warning_msg = (
+        f"SEBI Physical Delivery Notice: '{symbol}' is within final expiry week (DTE={dte}). "
+        f"Ensure sufficient delivery margin (₹{required_capital:,.2f}) if intending to hold into expiry."
+    )
+    return {
+        "applicable": True,
+        "blocked": False,
+        "requires_full_margin": True,
+        "warning": warning_msg,
+        "required_delivery_capital": required_capital,
+    }
 
 
 def get_lot_size(symbol: str) -> int:
@@ -526,12 +608,15 @@ def calculate_position_size_for_alert(
     is_fno: bool = False,
     vix: Optional[float] = None,
     conviction_tier: Optional[str] = None,
+    is_physical_expiry_week: bool = False,
 ) -> PositionSizeResult:
     """
     Detector-aware and conviction-tier-calibrated position sizing.
 
     Combines detector-specific historical edge multipliers with conviction tier
     allocations (APEX_CONFLUENCE: 1.25×, DEFINED_RISK_ONLY: 0.65×).
+    Applies regulatory SEBI physical settlement discount (0.50×) for single-stock
+    F&O during expiry week.
 
     Lot counts are always rounded down to maintain F&O contract integrity.
     The multiplier is logged in ``PositionSizeResult.notes`` for full traceability.
@@ -558,7 +643,17 @@ def calculate_position_size_for_alert(
     tier_multiplier = get_conviction_tier_lot_multiplier(conviction_tier)
     combined_multiplier = round(detector_multiplier * tier_multiplier, 2)
 
-    # 3. No adjustment needed for standard multiplier (1.0×)
+    # 3. SEBI Physical Delivery Settlement Protection for single-stock options
+    physical_discount_applied = False
+    is_index = any(
+        idx in symbol.upper()
+        for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+    )
+    if is_physical_expiry_week and is_fno and not is_index:
+        combined_multiplier = round(combined_multiplier * 0.50, 2)
+        physical_discount_applied = True
+
+    # 4. No adjustment needed for standard multiplier (1.0×)
     if combined_multiplier == 1.0 or base.lots <= 0:
         return base
 
@@ -584,6 +679,8 @@ def calculate_position_size_for_alert(
         f"{base.notes} | {tier_tag}Detector [{alert_type}] combined multiplier {combined_multiplier:.2f}x ({mult_label}): "
         f"{base.lots} → {adjusted_lots} lots."
     )
+    if physical_discount_applied:
+        adjusted_notes += " | [SEBI Physical Settlement] 50% lot discount applied"
 
     return PositionSizeResult(
         symbol=base.symbol,

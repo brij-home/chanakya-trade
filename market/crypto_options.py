@@ -29,7 +29,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 from market.http_pool import get_shared_client
@@ -297,17 +297,47 @@ def get_crypto_options_summary(
     if not contracts:
         return {"status": "NO_VALID_CONTRACTS", "currency": curr}
 
-    # Group by expiry to find nearest active expiries
+    # Group by expiry to find chronologically nearest prompt expiry (0-7 DTE) vs macro expiry
     by_expiry: dict[str, list[DeribitOptionContract]] = defaultdict(list)
+    expiry_dates: dict[str, datetime] = {}
+    now_utc = datetime.now(timezone.utc)
+
     for c in contracts:
         by_expiry[c.expiry].append(c)
+        if c.expiry not in expiry_dates:
+            try:
+                exp_dt = datetime.strptime(c.expiry.upper(), "%d%b%y").replace(tzinfo=timezone.utc)
+                expiry_dates[c.expiry] = exp_dt
+            except Exception:
+                pass
 
-    # Sort expiries by total OI
-    sorted_expiries = sorted(
+    # Chronologically sort future active expiries
+    active_expiries = [
+        exp
+        for exp in by_expiry.keys()
+        if exp in expiry_dates and expiry_dates[exp] >= (now_utc - timedelta(hours=12))
+    ]
+    if active_expiries:
+        sorted_chrono_expiries = sorted(active_expiries, key=lambda exp: expiry_dates[exp])
+        prompt_expiry = sorted_chrono_expiries[0]
+        prompt_dte_days = max(
+            0.0,
+            round((expiry_dates[prompt_expiry] - now_utc).total_seconds() / 86400.0, 1),
+        )
+    else:
+        # Fallback if dates cannot be parsed or historical mock
+        sorted_chrono_expiries = list(by_expiry.keys())
+        prompt_expiry = sorted_chrono_expiries[0] if sorted_chrono_expiries else ""
+        prompt_dte_days = 1.0
+
+    # Macro expiry: expiry with highest open interest across full term structure
+    sorted_by_oi = sorted(
         by_expiry.keys(), key=lambda exp: sum(c.open_interest for c in by_expiry[exp]), reverse=True
     )
-    nearest_expiry = sorted_expiries[0] if sorted_expiries else ""
-    nearest_contracts = by_expiry.get(nearest_expiry, contracts)
+    macro_expiry = sorted_by_oi[0] if sorted_by_oi else prompt_expiry
+
+    prompt_contracts = by_expiry.get(prompt_expiry, contracts)
+    macro_contracts = by_expiry.get(macro_expiry, contracts)
 
     # 1. Total Metrics
     call_oi = sum(c.open_interest for c in contracts if c.option_type == "CE")
@@ -318,8 +348,9 @@ def get_crypto_options_summary(
     pcr_oi = round(put_oi / call_oi, 3) if call_oi > 0 else 1.0
     pcr_vol = round(put_vol / call_vol, 3) if call_vol > 0 else 1.0
 
-    # 2. Max Pain Strike (calculated on nearest primary expiry)
-    max_pain = calculate_max_pain(nearest_contracts)
+    # 2. Max Pain Strike (calculated on prompt nearest expiry, eliminating distortion from 1-year leaps)
+    max_pain = calculate_max_pain(prompt_contracts)
+    macro_max_pain = calculate_max_pain(macro_contracts)
 
     # 3. ATM Implied Volatility
     atm_contracts = sorted(contracts, key=lambda c: abs(c.strike - underlying_spot))[:6]
@@ -372,7 +403,11 @@ def get_crypto_options_summary(
         "currency": curr,
         "underlying_spot": round(underlying_spot, 2),
         "contracts_count": len(contracts),
-        "primary_expiry": nearest_expiry,
+        "primary_expiry": prompt_expiry,
+        "prompt_expiry": prompt_expiry,
+        "prompt_dte_days": prompt_dte_days,
+        "macro_expiry": macro_expiry,
+        "macro_max_pain": macro_max_pain,
         "max_pain": max_pain,
         "max_pain_distance_pct": round(((max_pain - underlying_spot) / underlying_spot) * 100, 2)
         if underlying_spot > 0

@@ -25,15 +25,14 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta, time as dtime
+from datetime import datetime, time as dtime
 import os
 import threading
 import time
 from typing import Any, Optional
 
 logger = logging.getLogger("engine.alert_scrutiny")
-
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Institutional MCX Commodity Minimum Stop-Loss Volatility Floors (Points)
@@ -2934,6 +2933,75 @@ class AlertScrutinyAuditor:
         except Exception:
             return 70
 
+    def _defensive_parse_scrutiny_json(self, raw_text: str) -> dict[str, Any]:
+        """
+        Defensively extracts and repairs JSON from LLM output.
+        Handles:
+          - Markdown code blocks (```json ... ```)
+          - Truncated trailing strings and missing closing braces
+          - Regex field extraction with support for unclosed trailing values
+        """
+        if not raw_text:
+            return {}
+
+        cleaned = raw_text.strip()
+        # Strip markdown block if present
+        if "```" in cleaned:
+            m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+            if m:
+                cleaned = m.group(1).strip()
+            else:
+                cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
+                cleaned = re.sub(r"\n?```$", "", cleaned).strip()
+
+        # Find the start of the JSON object
+        start_idx = cleaned.find("{")
+        if start_idx != -1:
+            json_candidate = cleaned[start_idx:]
+            # If it has a closing brace, try parsing standard JSON
+            end_idx = json_candidate.rfind("}")
+            if end_idx != -1:
+                full_json = json_candidate[: end_idx + 1]
+                try:
+                    return json.loads(full_json)
+                except Exception:
+                    pass
+
+            # If truncated or malformed, attempt bracket and quote repair
+            repaired = json_candidate
+            # If odd number of unescaped quotes, close the open quote
+            quote_count = len(re.findall(r'(?<!\\)"', repaired))
+            if quote_count % 2 != 0:
+                repaired += '"'
+            if not repaired.rstrip().endswith("}"):
+                repaired += "}"
+            try:
+                return json.loads(repaired)
+            except Exception:
+                pass
+
+        # Resilient field extraction (works even when JSON is cut off mid-sentence)
+        data: dict[str, Any] = {}
+        for key in ("verdict", "logic_confirmation", "trap_risk_warning", "actionable_guidance"):
+            # Match standard closed string
+            m = re.search(rf'"{key}"\s*:\s*"([^"]*)"', raw_text)
+            if m:
+                data[key] = m.group(1).strip()
+            else:
+                # Match truncated string that reached end of output without closing quote
+                m_trunc = re.search(rf'"{key}"\s*:\s*"([^"\n\r}}]+)', raw_text)
+                if m_trunc:
+                    data[key] = m_trunc.group(1).strip()
+
+        sm = re.search(r'"score"\s*:\s*(\d+)', raw_text)
+        if sm:
+            try:
+                data["score"] = int(sm.group(1))
+            except ValueError:
+                pass
+
+        return data
+
     def _execute_fast_llm_scrutiny(
         self, alert: Any, flags: dict[str, bool], timeout: float = 3.5, min_score: int = 70
     ) -> Optional[ScrutinyResult]:
@@ -2951,7 +3019,7 @@ class AlertScrutinyAuditor:
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
                 enable_tools=False,
-                max_tokens=750,
+                max_tokens=1200,
             )
             return str(resp or "").strip()
 
@@ -2969,29 +3037,8 @@ class AlertScrutinyAuditor:
         if not raw_text:
             return None
 
-        # Parse JSON from response
-        clean_json = raw_text
-        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-        if match:
-            clean_json = match.group(0)
-
-        try:
-            data = json.loads(clean_json)
-        except Exception:
-            # Resilient fallback: regex field extraction to prevent losing valid audits
-            data = {}
-            for field in (
-                "verdict",
-                "logic_confirmation",
-                "trap_risk_warning",
-                "actionable_guidance",
-            ):
-                m = re.search(rf'"{field}"\s*:\s*"([^"]+)"', raw_text)
-                if m:
-                    data[field] = m.group(1)
-            sm = re.search(r'"score"\s*:\s*(\d+)', raw_text)
-            if sm:
-                data["score"] = int(sm.group(1))
+        # Parse defensively to prevent truncation breakages
+        data = self._defensive_parse_scrutiny_json(raw_text)
 
         verdict = str(data.get("verdict", "APPROVED")).upper()
         score = int(data.get("score", 80))
@@ -3096,6 +3143,7 @@ Perform 3 Institutional Commodity Scrutiny Tests:
 3. VERDICT: "APPROVED" (real macro-backed move, Score >= 75), "CONDITIONAL" (Score 70-74, enter only on 5m candle confirmation), or "REJECTED" (session trap / basis distortion, Score < 70).
 
 Respond STRICTLY in valid JSON:
+STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly under 250 tokens / 150 words total. Do NOT output markdown formatting or conversational commentary outside the JSON object.
 {{
   "verdict": "APPROVED" | "CONDITIONAL" | "REJECTED",
   "score": <integer 40-95>,
@@ -3121,6 +3169,7 @@ Perform 3 Institutional FX Scrutiny Tests:
 3. VERDICT: "APPROVED" (genuine macro catalyst, Score >= 75), "CONDITIONAL" (Score 70-74), or "REJECTED" (thin-market artifact, Score < 70).
 
 Respond STRICTLY in valid JSON:
+STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly under 250 tokens / 150 words total. Do NOT output markdown formatting or conversational commentary outside the JSON object.
 {{
   "verdict": "APPROVED" | "CONDITIONAL" | "REJECTED",
   "score": <integer 40-95>,
@@ -3205,7 +3254,8 @@ Perform 3 Institutional Council Tests:
 2. DEVIL'S ADVOCATE & VEHICLE: Identify the #1 failure mode (e.g. overhead supply, midday theta bleed). Specify whether execution should be naked or defined-risk spread.
 3. VERDICT: "APPROVED" (Score >= 75), "CONDITIONAL" (Score 70-74), or "REJECTED" (Score < 70).
 
-Respond STRICTLY in valid JSON matching this schema:
+Respond STRICTLY in valid JSON matching this schema.
+STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly under 250 tokens / 150 words total. Do NOT output markdown formatting, preamble, or conversational commentary outside the JSON object.
 {{
   "verdict": "APPROVED" | "CONDITIONAL" | "REJECTED",
   "score": <integer 40-95>,

@@ -875,3 +875,28 @@ def test_tier1_vwap_capitulation_veto(auditor):
     assert passed is False
     assert "Capitulation Exhaustion" in reason
     assert "extended" in reason
+
+
+def test_defensive_parse_scrutiny_json(auditor):
+    """Verify that _defensive_parse_scrutiny_json recovers clean data even when LLM output is truncated."""
+    # 1. Clean valid JSON
+    clean_raw = '{"verdict": "APPROVED", "score": 88, "logic_confirmation": "Valid breakout with RVOL 2.5x", "trap_risk_warning": "Watch for 25000 call wall", "actionable_guidance": "Scale 50% at T1"}'
+    data1 = auditor._defensive_parse_scrutiny_json(clean_raw)
+    assert data1["verdict"] == "APPROVED"
+    assert data1["score"] == 88
+    assert data1["logic_confirmation"] == "Valid breakout with RVOL 2.5x"
+    assert data1["trap_risk_warning"] == "Watch for 25000 call wall"
+
+    # 2. Markdown wrapped JSON
+    md_raw = '```json\n{"verdict": "APPROVED", "score": 90, "logic_confirmation": "SMC Order block reclaim", "trap_risk_warning": "No chase", "actionable_guidance": "SL to BE at T1"}\n```'
+    data2 = auditor._defensive_parse_scrutiny_json(md_raw)
+    assert data2["verdict"] == "APPROVED"
+    assert data2["score"] == 90
+
+    # 3. Truncated output (cut off at trap_risk_warning due to token ceiling)
+    trunc_raw = '{"verdict": "APPROVED", "score": 85, "logic_confirmation": "Strong reclaim above VWAP with aggressive buyers", "trap_risk_warning": "Overhead supply zone near 25200'
+    data3 = auditor._defensive_parse_scrutiny_json(trunc_raw)
+    assert data3["verdict"] == "APPROVED"
+    assert data3["score"] == 85
+    assert "Strong reclaim above VWAP" in data3["logic_confirmation"]
+    assert "Overhead supply zone near 25200" in data3["trap_risk_warning"]

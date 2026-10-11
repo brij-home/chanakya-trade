@@ -477,3 +477,28 @@ class TestParseJsonPath:
         result = parse_synthesis_output(bad_json)
         assert isinstance(result, SynthesisOutput)
         assert 0 <= result.confidence <= 100
+
+    def test_json_truncated_boundary_repaired(self):
+        """Truncated JSON cut off mid-string or missing closing braces should be defensively parsed."""
+        # Missing closing brace and trailing comma
+        truncated_json_1 = '{"verdict": "BUY", "confidence": 85, "entry": "2500",'
+        res1 = parse_synthesis_output(truncated_json_1)
+        assert res1.verdict == "BUY"
+        assert res1.confidence == 85
+        assert res1.entry == "2500"
+
+        # Cut off inside a string literal
+        truncated_json_2 = (
+            '{"verdict": "STRONG_BUY", "confidence": 80, "strategy": "Breakout momentum'
+        )
+        res2 = parse_synthesis_output(truncated_json_2)
+        assert res2.verdict == "STRONG_BUY"
+        assert res2.confidence == 80
+        assert "Breakout" in res2.strategy
+
+    def test_json_markdown_wrapped_parsed(self):
+        """JSON wrapped in markdown fences should be cleanly extracted."""
+        markdown_json = "```json\n" + VALID_JSON_TEXT + "\n```"
+        res = parse_synthesis_output(markdown_json)
+        assert res.verdict == "SELL"
+        assert res.confidence == 60

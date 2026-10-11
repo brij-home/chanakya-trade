@@ -132,7 +132,10 @@ def detect_opening_drive(
             or (prev_close and bar_close > prev_close)
             or (ltp >= bar_open * 1.003)
         ):
-            is_bull_drive = True
+            # Wick Trap Filter: reject candles where upper rejection wick > 40% unless live LTP broke bar_high
+            upper_wick = bar_high - max(bar_open, bar_close)
+            if (upper_wick / bar_range <= 0.40) or (ltp >= bar_high):
+                is_bull_drive = True
 
     # 2. Bearish Opening Drive: Open == High (within 0.15%) & expanding downward (The OFSS Archetype)
     high_diff_pct = (abs(bar_high - bar_open) / bar_open) * 100.0
@@ -142,7 +145,10 @@ def detect_opening_drive(
             or (prev_close and bar_close < prev_close)
             or (ltp <= bar_open * 0.997)
         ):
-            is_bear_drive = True
+            # Wick Trap Filter: reject candles where lower absorption wick > 40% unless live LTP broke bar_low
+            lower_wick = min(bar_open, bar_close) - bar_low
+            if (lower_wick / bar_range <= 0.40) or (ltp <= bar_low):
+                is_bear_drive = True
 
     if not (is_bull_drive or is_bear_drive):
         return None

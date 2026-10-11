@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Optional
 
 from config.constants import IST
@@ -52,6 +53,7 @@ _INDEX_ALIAS_MAP = {
 }
 
 
+@lru_cache(maxsize=2048)
 def canonical_alert_symbol(raw_sym: str) -> str:
     """
     Normalizes any asset symbol into its canonical clean uppercase identifier.

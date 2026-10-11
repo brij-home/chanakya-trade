@@ -147,23 +147,45 @@ def _get_system_ram_mb() -> tuple[float, float, float]:
     return 8192.0, 2048.0, 75.0
 
 
+def get_memory_budget_mb(total_ram_mb: float) -> tuple[float, float, float, float]:
+    """
+    Computes dynamic process RSS budget and warning thresholds based on total host physical RAM.
+    Returns: (target_budget_mb, moderate_rss_mb, critical_rss_mb, min_avail_mb)
+    """
+    # Dynamically scales process budget:
+    # 8 GB RAM  -> ~1,200 MB target budget, critical at ~1,440 MB, min avail 500 MB
+    # 16 GB RAM -> ~3,500 MB target budget, critical at ~4,200 MB, min avail 1,000 MB
+    # 24 GB RAM -> ~5,500 MB target budget, critical at ~6,500 MB, min avail 1,400 MB
+    # >= 32 GB  -> ~8,000 MB target budget
+    target_budget = min(8000.0, max(1200.0, total_ram_mb * 0.25))
+    moderate_rss = target_budget * 0.85
+    critical_rss = target_budget * 1.20
+    min_avail_mb = min(2000.0, max(500.0, total_ram_mb * 0.06))
+    return target_budget, moderate_rss, critical_rss, min_avail_mb
+
+
 def get_memory_status() -> MemoryStatus:
-    """Evaluate current host and process memory metrics."""
+    """Evaluate current host and process memory metrics dynamically."""
     total_mb, avail_mb, used_pct = _get_system_ram_mb()
     rss_mb = _get_process_rss_mb()
+    target_budget, moderate_rss, critical_rss, min_avail = get_memory_budget_mb(total_mb)
 
-    # Classification boundaries for 8 GB RAM profile
-    if avail_mb < 500.0 or rss_mb > 1400.0:
+    # Dynamic classification boundaries adapting to detected host RAM
+    if avail_mb < (min_avail * 0.6) or rss_mb > critical_rss:
         level = "CRITICAL"
         rec = (
-            "Memory pressure is severe. Aggressive cache trimming and garbage collection required."
+            f"Memory pressure is severe (RSS {rss_mb:.0f} MB > {critical_rss:.0f} MB or available < {min_avail * 0.6:.0f} MB). "
+            f"Aggressive cache trimming and garbage collection required."
         )
-    elif avail_mb < 900.0 or rss_mb > 1000.0:
+    elif avail_mb < min_avail or rss_mb > moderate_rss:
         level = "MODERATE"
-        rec = "Memory usage approaching limits for 8 GB RAM. Trimming expired in-memory items."
+        rec = (
+            f"Memory usage approaching limits for {total_mb / 1024:.1f} GB RAM profile "
+            f"(RSS {rss_mb:.0f} MB > {moderate_rss:.0f} MB). Trimming expired in-memory items."
+        )
     else:
         level = "NORMAL"
-        rec = "Memory consumption optimal within 8 GB RAM / 1.2 GB process budget."
+        rec = f"Memory consumption optimal within {total_mb / 1024:.1f} GB RAM / {target_budget:.0f} MB process budget."
 
     return MemoryStatus(
         total_ram_mb=total_mb,

@@ -12,11 +12,14 @@ Provides:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, time as dtime, timezone, timedelta
+from datetime import datetime, time as dtime, timezone
+from functools import lru_cache
 from typing import Any, Literal, Optional
 
+from config.constants import IST
+
 # Standard IST timezone offset (+05:30)
-IST_OFFSET = timezone(timedelta(hours=5, minutes=30))
+IST_OFFSET = IST
 
 Venue = Literal["NSE", "BSE", "MCX", "CDS", "NSE_IFSC"]
 Segment = Literal["EQUITY", "FNO", "COMMODITY", "CURRENCY", "INDEX"]
@@ -682,6 +685,7 @@ def get_market_session_state(
     )
 
 
+@lru_cache(maxsize=1024)
 def get_fno_lot_size(symbol: str) -> int:
     """
     Return the canonical institutional F&O contract lot size for a symbol.

@@ -99,6 +99,20 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
     except Exception:
         pass
 
+    try:
+        from engine.detector_circuit_breaker import detector_circuit_breaker
+
+        detector_circuit_breaker.reset_all()
+    except Exception:
+        pass
+
+    try:
+        from engine.risk_limits import risk_limits
+
+        risk_limits.reset_all()
+    except Exception:
+        pass
+
 
 @pytest.fixture(autouse=True)
 def isolate_test_notifications(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):

@@ -6,9 +6,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
-
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST_ZONE as IST
 
 
 def classify_expiry_type(expiry_str: Optional[str], symbol: Optional[str] = None) -> str:

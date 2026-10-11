@@ -215,7 +215,7 @@ class FyersTbtManager:
         )
 
         # Update O(1) rolling tick buffer for micro-price tracking
-        buf = self._tick_buffers.setdefault(symbol, RollingTickBuffer(capacity=100))
+        buf = self._tick_buffers.setdefault(symbol, RollingTickBuffer(capacity=1000))
         if micro_price > 0:
             buf.append(micro_price, max(1, tbq + tsq))
 

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import bisect
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 import logging
 from typing import Any, Optional
 
@@ -29,7 +29,7 @@ from engine.ring_buffer import RollingTickBuffer
 
 logger = logging.getLogger("market.order_book")
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 @dataclass
@@ -52,7 +52,7 @@ class BisectDepthBook:
       6. Integrated RollingTickBuffer for O(1) online rolling VWAP & tick volatility.
     """
 
-    def __init__(self, max_depth: int = 50, tick_buffer_capacity: int = 100) -> None:
+    def __init__(self, max_depth: int = 50, tick_buffer_capacity: int = 1000) -> None:
         self.max_depth = int(max_depth)
         # Bids stored as (-price, price, quantity, orders) so bisect_left sorts highest price first
         self._bids: list[tuple[float, float, int, int]] = []

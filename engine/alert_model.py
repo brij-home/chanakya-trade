@@ -10,14 +10,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from zoneinfo import ZoneInfo
+from config.constants import IST_ZONE as IST
 
 from engine.alert_expiry import (
     get_expiry_metadata,
     get_next_expiry_opportunity,
 )
-
-IST = ZoneInfo("Asia/Kolkata")
 
 # ── Interception Pipeline Stages ───────────────────────────────────────────
 STAGE_STALK = "STALK"  # Radar tracking & coiling base identified
@@ -183,6 +181,7 @@ class AutoAlert:
     telegram_message_id: Optional[int] = None
     telegram_root_message_id: Optional[int] = None
     trace_id: Optional[str] = None
+    correlation_id: Optional[str] = None
     quant_snapshot: Optional[dict[str, Any]] = None
     ttl_seconds: Optional[int] = None
     liquidity_status: Optional[str] = (
@@ -217,7 +216,8 @@ class AutoAlert:
             "actor": actor,
             "stage": self.stage,
             "ltp": self.ltp,
-            "trace_id": self.trace_id,
+            "trace_id": self.trace_id or self.correlation_id,
+            "correlation_id": self.correlation_id or self.trace_id,
             "details": details or {},
         }
         if self.audit_trail is None:

@@ -508,3 +508,61 @@ def test_same_day_distinct_calls_maintain_independent_threads():
     up_2 = f"🎯 [REAL/LIVE] UPDATE #1 · TARGET 1 HIT\n🏆 BTCUSDT Target 1 Hit\n🏷️ Ref: #{sig_2}"
     p_up_2 = format_telegram_push_payload(up_2, chat_id=chat_id, signal_id=sig_2, is_update=True)
     assert p_up_2["reply_to_message_id"] == 221
+
+
+def test_cmd_channels_renders_matrix():
+    """Verify that /channels displays the complete multi-channel routing matrix."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.telegram_bot import cmd_channels
+
+    update = MagicMock()
+    update.message = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+
+    asyncio.run(cmd_channels(update, context))
+
+    update.message.reply_text.assert_called_once()
+    reply_text = update.message.reply_text.call_args[0][0]
+    assert "ALPHA VORTEX MULTI-CHANNEL ROUTING MATRIX" in reply_text
+    assert "Equity_Premium_Alpha_Vortex" in reply_text
+    assert "FnO_Stocks_Premium_Alpha_Vortex" in reply_text
+    assert "FnO_Index_Premium_Alpha_Vortex" in reply_text
+    assert "MCX_Premium_Alpha_Vortex" in reply_text
+    assert "Crypto_Premium_Alpha_Vortex" in reply_text
+
+
+def test_cmd_ping_all_dispatches_heartbeats(monkeypatch):
+    """Verify that /ping_all broadcasts heartbeats across channels and returns scorecard."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.telegram_bot import cmd_ping_all
+
+    update = MagicMock()
+    update.message = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+
+    sent_pings = []
+
+    def mock_send_message(msg, chat_id=None, **kwargs):
+        sent_pings.append({"msg": msg, "chat_id": chat_id})
+
+    monkeypatch.setattr("bot.telegram_bot.send_message", mock_send_message)
+
+    asyncio.run(cmd_ping_all(update, context))
+
+    # Must have dispatched heartbeats to the channels
+    assert len(sent_pings) >= 5
+    chat_ids = {p["chat_id"] for p in sent_pings}
+    assert "-1003524867091" in chat_ids  # Equity
+    assert "-1004393392375" in chat_ids  # FNO Stock
+    assert "-1004380788314" in chat_ids  # FNO Index
+    assert "-1004320002599" in chat_ids  # MCX
+    assert "-1004323607372" in chat_ids  # Crypto
+
+    update.message.reply_text.assert_called_once()
+    reply_text = update.message.reply_text.call_args[0][0]
+    assert "MULTI-CHANNEL HEARTBEAT AUDIT RESULTS" in reply_text
+    assert "Delivered" in reply_text

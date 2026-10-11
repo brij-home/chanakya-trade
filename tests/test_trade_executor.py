@@ -258,3 +258,17 @@ class TestExecuteTradePlan:
         # Orders still execute (as paper)
         assert len(result) == 1
         assert result[0]["mode"] == "PAPER"
+
+    def test_order_records_audit_and_lifecycle_event(self):
+        """CLI orders must record security audit and order lifecycle events (Invariant 20)."""
+        broker = _make_broker("PAPER")
+        with (
+            patch("engine.security_audit.record_audit_event") as mock_audit,
+            patch("engine.order_lifecycle._record_order_event") as mock_lifecycle,
+        ):
+            result = execute_trade_plan(_make_plan(), broker)
+            assert len(result) == 1
+            mock_audit.assert_called_once()
+            assert mock_audit.call_args[1]["event_type"] == "CLI_ORDER_EXECUTED"
+            mock_lifecycle.assert_called_once()
+            assert mock_lifecycle.call_args[1]["event_type"] == "ORDER_PLACED"

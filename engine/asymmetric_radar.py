@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Any, Optional
 
 import numpy as np
@@ -42,7 +42,7 @@ from engine.precursor_radar import classify_symbol_segment, get_scan_universe
 
 logger = logging.getLogger("chanakya.asymmetric_radar")
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 def _extract_price(obj: Any, *attr_names: str) -> float:

@@ -370,4 +370,23 @@ When diagnosing alert storms, UI popup bursts, or unexpected state transitions:
    - Never inject arbitrary hardcoded stock lists inside detector evaluation loops. Symbols must originate from canonical universe resolvers (`analysis.universe.resolve_dynamic_universe`).
    - Sizing, targets, and invalidations must be derived dynamically from market structure (ATR, Swing Pivots, Order Blocks), never arbitrary multipliers.
 
+---
+
+## 13. Detector Degradation Circuit Breakers & Scrutiny Conviction Integrity
+
+1. **Rolling Kelly Degradation State Machine**:
+   - Every detector is continuously governed by `engine/detector_circuit_breaker.py`.
+   - `HALTED` ($E < -0.60$ or $\ge 5$ consecutive losses): Suppressed immediately from emitting alerts.
+   - `PROBATION` ($E < 0.0$ or Kelly $\le 0$): 25% confidence discount (`0.75x`) applied to incoming setups.
+   - `NORMAL`: Standard baseline confidence.
+   - `HEALTHY` ($E \ge 0.20$ & Win Rate $\ge 40\%$): Confirmed edge with optional +5% conviction bonus.
+2. **Conviction Integrity Across Scrutiny Layers**:
+   - Downstream AI Scrutiny (Tier-2 LLM or quantitative fallback) and `_async_enrich_scrutiny` MUST NEVER wipe out a probation discount.
+   - When updating alert confidence after scrutiny, the discount multiplier must be preserved: `target.confidence = max(target.confidence, int(round(scrutiny.score * cb_multiplier)))`.
+3. **Continuous Realized Outcome Feedback Loop**:
+   - Target milestone hits (T1, T2) and runner trail exits feed `outcome="WIN"` into `detector_circuit_breaker.record_outcome(...)`.
+   - Thesis stop-loss invalidations feed `outcome="LOSS"` into `detector_circuit_breaker.record_outcome(...)`.
+4. **Hermetic Test Isolation**:
+   - `detector_circuit_breaker.reset_all()` must be invoked in test cleanup (configured autouse in `tests/conftest.py::sanitize_test_env`) so that failed test setups never bleed degraded states into unrelated test suites.
+
 

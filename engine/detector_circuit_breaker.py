@@ -26,26 +26,26 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 import json
 import logging
-import os
 from pathlib import Path
 import threading
 from typing import Any, Literal, Optional
 
 logger = logging.getLogger("engine.detector_circuit_breaker")
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
+from config.paths import app_data_path
 
 DetectorStatus = Literal["HEALTHY", "NORMAL", "PROBATION", "HALTED"]
 
 
 def get_performance_ledger_file() -> Path:
     """Canonical path to detector performance outcome ledger."""
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "detector_performance.json"
+    p = app_data_path("detector_performance.json")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 @dataclass
@@ -245,6 +245,12 @@ class DetectorCircuitBreaker:
         clean_type = alert_type.upper().strip()
         with self._lock:
             self._history.pop(clean_type, None)
+            self._save_unlocked()
+
+    def reset_all(self) -> None:
+        """Manually clears history for all detectors and resets ledger file."""
+        with self._lock:
+            self._history.clear()
             self._save_unlocked()
 
     def _save_unlocked(self) -> None:

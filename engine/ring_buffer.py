@@ -33,7 +33,7 @@ class RollingTickBuffer:
     Fixed-capacity circular buffer with O(1) rolling VWAP, variance, and extrema.
     """
 
-    def __init__(self, capacity: int = 100) -> None:
+    def __init__(self, capacity: int = 1000) -> None:
         if capacity <= 0:
             raise ValueError("Capacity must be greater than 0")
         self.capacity = int(capacity)

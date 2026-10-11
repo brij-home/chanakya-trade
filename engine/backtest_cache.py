@@ -33,10 +33,11 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from pathlib import Path
 from typing import Any
 
-_CACHE_PATH = Path.home() / ".trading_platform" / "backtest_cache.json"
+from config.paths import app_data_path
+
+_CACHE_PATH = app_data_path("backtest_cache.json")
 
 
 def _load() -> dict[str, Any]:

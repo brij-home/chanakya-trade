@@ -32,7 +32,9 @@ import pandas as pd
 
 from analysis.technical import TechnicalSnapshot, analyse
 
-STRATEGY_ALERTS_FILE = Path.home() / ".trading_platform" / "strategy_alerts.json"
+from config.paths import app_data_path
+
+STRATEGY_ALERTS_FILE = app_data_path("strategy_alerts.json")
 
 # Minimum rows needed to compute reliable 14-period ADX
 _ADX_MIN_ROWS = 28

@@ -37,8 +37,10 @@ from typing import Any, Optional
 
 # ── Search paths ────────────────────────────────���─────────────
 
+from config.paths import app_data_path
+
 _PROJECT_SKILLS_DIR = Path(__file__).parent.parent / "skills"
-_USER_SKILLS_DIR = Path.home() / ".trading_platform" / "skills"
+_USER_SKILLS_DIR = app_data_path("skills")
 
 
 def discover_skills(extra_dirs: Optional[list[Path]] = None) -> list[Path]:

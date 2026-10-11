@@ -50,239 +50,53 @@ from rich.table import Table
 
 console = Console(legacy_windows=False)
 
-# ── Sector & Watchlist Presets ───────────────────────────────────────────────
+# ── Sector & Watchlist Presets (SSOT: analysis.universe) ──────────────────────
 
-WATCHLIST_PRESETS: dict[str, list[str]] = {
-    "nifty_50": [
-        "RELIANCE",
-        "TCS",
-        "HDFCBANK",
-        "INFY",
-        "ICICIBANK",
-        "SBIN",
-        "BHARTIARTL",
-        "ITC",
-        "LT",
-        "KOTAKBANK",
-        "AXISBANK",
-        "TATAMOTORS",
-        "MARUTI",
-        "SUNPHARMA",
-        "BAJFINANCE",
-        "TITAN",
-        "HINDUNILVR",
-        "NTPC",
-        "ONGC",
-        "POWERGRID",
-        "TATASTEEL",
-        "COALINDIA",
-        "ASIANPAINT",
-        "M&M",
-        "ADANIENT",
-        "ADANIPORTS",
-        "TECHM",
-        "HCLTECH",
-        "WIPRO",
-        "ULTRACEMCO",
-        "JSWSTEEL",
-        "GRASIM",
-        "BAJAJFINSV",
-        "NESTLEIND",
-        "TRENT",
-        "BEL",
-        "CIPLA",
-        "HEROMOTOCO",
-        "DRREDDY",
-        "APOLLOHOSP",
-        "BPCL",
-        "SHRIRAMFIN",
-        "EICHERMOT",
-        "HINDALCO",
-        "TATACONSUM",
-        "DIVISLAB",
-        "SBILIFE",
-        "HDFCLIFE",
-        "BRITANNIA",
-        "INDUSINDBK",
-    ],
-    "nifty50": [
-        "RELIANCE",
-        "TCS",
-        "HDFCBANK",
-        "INFY",
-        "ICICIBANK",
-        "SBIN",
-        "BHARTIARTL",
-        "ITC",
-        "LT",
-        "KOTAKBANK",
-        "AXISBANK",
-        "TATAMOTORS",
-        "MARUTI",
-        "SUNPHARMA",
-        "BAJFINANCE",
-        "TITAN",
-        "HINDUNILVR",
-        "NTPC",
-        "ONGC",
-        "POWERGRID",
-        "TATASTEEL",
-        "COALINDIA",
-        "ASIANPAINT",
-        "M&M",
-        "ADANIENT",
-        "ADANIPORTS",
-        "TECHM",
-        "HCLTECH",
-        "WIPRO",
-        "ULTRACEMCO",
-        "JSWSTEEL",
-        "GRASIM",
-        "BAJAJFINSV",
-        "NESTLEIND",
-        "TRENT",
-        "BEL",
-        "CIPLA",
-        "HEROMOTOCO",
-        "DRREDDY",
-        "APOLLOHOSP",
-        "BPCL",
-        "SHRIRAMFIN",
-        "EICHERMOT",
-        "HINDALCO",
-        "TATACONSUM",
-        "DIVISLAB",
-        "SBILIFE",
-        "HDFCLIFE",
-        "BRITANNIA",
-        "INDUSINDBK",
-    ],
-    "nifty_it": [
-        "INFY",
-        "TCS",
-        "HCLTECH",
-        "WIPRO",
-        "TECHM",
-        "LTIM",
-        "PERSISTENT",
-        "COFORGE",
-        "OFSS",
-        "MPHASIS",
-    ],
-    "nifty_bank": [
-        "HDFCBANK",
-        "ICICIBANK",
-        "SBIN",
-        "KOTAKBANK",
-        "AXISBANK",
-        "INDUSINDBK",
-        "BANKBARODA",
-        "PNB",
-        "FEDERALBNK",
-        "IDFCFIRSTB",
-        "AUBANK",
-        "BANDHANBNK",
-    ],
-    "nifty_auto": [
-        "TATAMOTORS",
-        "MARUTI",
-        "M&M",
-        "BAJAJ-AUTO",
-        "HEROMOTOCO",
-        "EICHERMOT",
-        "TVSMOTOR",
-        "BHARATFORG",
-        "ASHOKLEY",
-        "MOTHERSON",
-    ],
-    "nifty_metal": [
-        "TATASTEEL",
-        "JSWSTEEL",
-        "HINDALCO",
-        "JINDALSTEL",
-        "VEDL",
-        "NMDC",
-        "SAIL",
-        "NATIONALUM",
-        "APLAPOLLO",
-        "HINDCOPPER",
-    ],
-    "nifty_pharma": [
-        "SUNPHARMA",
-        "CIPLA",
-        "DRREDDY",
-        "DIVISLAB",
-        "LUPIN",
-        "AUROPHARMA",
-        "TORNTPHARM",
-        "ALKEM",
-        "BIOCON",
-        "GLENMARK",
-    ],
-    "nifty_fmcg": [
-        "ITC",
-        "HINDUNILVR",
-        "NESTLEIND",
-        "BRITANNIA",
-        "TATACONSUM",
-        "DABUR",
-        "GODREJCP",
-        "MARICO",
-        "COLPAL",
-        "VBL",
-    ],
-    "nifty_energy": [
-        "RELIANCE",
-        "ONGC",
-        "NTPC",
-        "POWERGRID",
-        "BPCL",
-        "IOC",
-        "COALINDIA",
-        "GAIL",
-        "TATAPOWER",
-        "ADANIGREEN",
-    ],
-    "nifty_finance": [
-        "HDFCBANK",
-        "ICICIBANK",
-        "SBIN",
-        "BAJFINANCE",
-        "KOTAKBANK",
-        "AXISBANK",
-        "BAJAJFINSV",
-        "HDFCLIFE",
-        "SBILIFE",
-        "SHRIRAMFIN",
-    ],
-    "nifty_infra": [
-        "LT",
-        "ULTRACEMCO",
-        "GRASIM",
-        "ADANIPORTS",
-        "POWERGRID",
-        "NTPC",
-        "BHARTIARTL",
-        "DLF",
-        "SIEMENS",
-        "ABB",
-    ],
-    "nifty_realty": [
-        "DLF",
-        "GODREJPROP",
-        "OBEROIRLTY",
-        "PHOENIXLTD",
-        "PRESTIGE",
-        "BRIGADE",
-        "SOBHA",
-    ],
-    "crypto_majors": [
-        "BTCUSDT",
-        "ETHUSDT",
-        "SOLUSDT",
-        "BNBUSDT",
-    ],
-}
+from analysis.universe import SECTOR_TAXONOMY, THEMATIC_PRESETS
+
+
+def _build_watchlist_presets() -> dict[str, list[str]]:
+    """Build unified watchlist presets sourced exclusively from canonical analysis.universe."""
+    presets: dict[str, list[str]] = {}
+
+    # 1. Thematic presets from universe SSOT (e.g. nifty50, crypto, commodities, fno_universe)
+    for k, v in THEMATIC_PRESETS.items():
+        syms = list(v.get("symbols", []))
+        presets[k] = syms
+        presets[k.replace("-", "_")] = syms
+
+    # Canonical aliases
+    if "nifty50" in THEMATIC_PRESETS:
+        n50_list = list(THEMATIC_PRESETS["nifty50"]["symbols"])
+        presets["nifty_50"] = n50_list
+        presets["nifty50"] = n50_list
+    if "crypto" in THEMATIC_PRESETS:
+        presets["crypto_majors"] = list(THEMATIC_PRESETS["crypto"]["symbols"])
+
+    # 2. Sector taxonomy mappings
+    sector_key_map = {
+        "banking": ["nifty_bank", "nifty_banking", "banking", "bank", "nifty_finance"],
+        "it": ["nifty_it", "it", "tech"],
+        "auto": ["nifty_auto", "auto"],
+        "metals": ["nifty_metal", "nifty_metals", "metals", "metal"],
+        "pharma": ["nifty_pharma", "pharma"],
+        "fmcg": ["nifty_fmcg", "fmcg"],
+        "energy": ["nifty_energy", "energy"],
+        "infra": ["nifty_infra", "infra", "infrastructure", "nifty_realty"],
+        "chemicals": ["nifty_chemicals", "chemicals"],
+        "defence": ["nifty_defence", "defence"],
+    }
+
+    for sec_id, aliases in sector_key_map.items():
+        if sec_id in SECTOR_TAXONOMY:
+            symbols = list(SECTOR_TAXONOMY[sec_id]["symbols"])
+            for alias in aliases:
+                presets[alias] = symbols
+
+    return presets
+
+
+WATCHLIST_PRESETS: dict[str, list[str]] = _build_watchlist_presets()
 
 SECTOR_NAME_MAP: dict[str, str] = {
     "crypto": "crypto_majors",

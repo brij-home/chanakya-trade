@@ -35,7 +35,9 @@ _FUT_PATTERN = re.compile(
 _quote_cache_lock = threading.Lock()
 _QUOTE_CACHE: OrderedDict[str, tuple[float, Quote]] = OrderedDict()
 _QUOTE_TTL_SECONDS = 3.0  # 3.0-second coalescing cache window
-_MAX_QUOTE_CACHE_ITEMS = 1000
+_MAX_QUOTE_CACHE_ITEMS = (
+    10000  # High-capacity in-memory cache covering full equity & option strike universe
+)
 
 # In-flight request coalescing for missing instruments (prevents duplicate REST calls)
 _in_flight_quote_lock = threading.Lock()
@@ -74,9 +76,8 @@ def _compute_raw_vwap(clean_sym: str, exchange: str = "NSE") -> Optional[float]:
     """Calculate session VWAP from today's 5-minute bars."""
     try:
         from market.history import get_ohlcv
-        from zoneinfo import ZoneInfo
+        from config.constants import IST_ZONE as IST
 
-        IST = ZoneInfo("Asia/Kolkata")
         today_str = datetime.now(IST).strftime("%Y-%m-%d")
 
         df = get_ohlcv(clean_sym, exchange=exchange, interval="5minute", days=1)

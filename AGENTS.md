@@ -7,7 +7,7 @@
 
 <!-- TOC -->
 - [1. Project Overview & Component Map](#1-project-overview--component-map)
-- [2. Safety & Trading Guardrails (24 Core Invariants)](#2-safety--trading-guardrails-24-core-invariants)
+- [2. Safety & Trading Guardrails (30 Core Invariants)](#2-safety--trading-guardrails-30-core-invariants)
 - [3. LLM Model Hierarchy & Multi-Key Resilience](#3-llm-model-hierarchy--multi-key-resilience)
 - [4. Environment & Common Commands](#4-environment--common-commands)
 - [5. On-Demand Skills Directory](#5-on-demand-skills-directory)
@@ -35,7 +35,7 @@
 
 ---
 
-## 2. Safety & Trading Guardrails (24 Core Invariants)
+## 2. Safety & Trading Guardrails (30 Core Invariants)
 
 > **⚠️ Never commit `.env` — see [`config/credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) for secure token management.**
 
@@ -154,6 +154,35 @@
    - **Async Offloading**: Synchronous, CPU-heavy, or blocking I/O operations (e.g., pandas quant calculations, SQLite bulk queries, sequential network scraping) inside FastAPI endpoints MUST be offloaded using `asyncio.to_thread(...)` to keep the main event loop responsive for SSE streams and heartbeats.
    - **Query Boundary Honesty**: Cache and database queries must strictly enforce caller filters (symbol lists, universe boundaries, dates). Caches MUST NEVER leak global data across universes when a specific subset is requested.
    - **Informative Empty States**: When a universe or scanner query returns 0 records, the system and UI must honestly communicate the empty state (e.g. "No cached compounders found for {universe}. Run Sync Market into DB to compute") with a 1-click action, rather than displaying cross-universe data.
+
+25. **Universal Timezone SSOT & Type Purity (Zero Local `IST` Redefinitions)**:
+   - Never define local `IST = ...` or ad-hoc timezone aliases in individual modules, tools, or tests.
+   - Every module requiring Indian Standard Time MUST import directly from `config.constants`:
+     `from config.constants import IST, IST_ZONE`
+   - Preserves strict type separation: `IST` is `datetime.timezone(timedelta(hours=5, minutes=30))` for datetime arithmetic and ISO formatting, while `IST_ZONE` is `zoneinfo.ZoneInfo("Asia/Kolkata")` for timezone conversions and pandas DatetimeIndex localization. Zero local overrides or conflicting timezone types allowed.
+
+26. **Unified Order Authority, Audit Parity & Zero Shadow Execution Pathways**:
+   - ALL order executions — whether originating from Desktop Web API (`/api/orders/*`), interactive CLI REPL (`engine/trade_executor.py`), background agents, or automated scrapers — MUST pass through the unified order authority and record immutable audit records in `orders.db` via `engine.security_audit.record_audit_event` and `engine.order_lifecycle._record_order_event`.
+   - Ad-hoc, direct broker calls that place orders without writing to the persisted SQLite ledger (shadow executions) are strictly prohibited. The reconciliation engine must maintain 100% parity across all execution origins.
+
+27. **Detector Degradation Governance, Kelly Circuit Breakers & Scrutiny Conviction Integrity**:
+   - Signal detectors are continuously governed by empirical forward outcomes via `engine.detector_circuit_breaker.py`.
+   - When a detector trips `HALTED` (expectancy < -0.60 or $\ge 5$ consecutive losses), it MUST be suppressed from generating new alerts.
+   - When a detector is in `PROBATION` (expectancy < 0.0 or Kelly $\le 0$), a mandatory 25% confidence discount (`0.75x`) is applied.
+   - **Scrutiny Conviction Integrity Rule**: Downstream AI Scrutiny (Tier-2 LLM or quantitative fallback in `engine/alert_scrutiny.py`) and async enrichment (`_async_enrich_scrutiny`) MUST NEVER erase or bypass this degradation discount. The final confidence MUST incorporate the probation penalty: `target.confidence = max(target.confidence, int(round(scrutiny.score * cb_multiplier)))`.
+   - Forward trade outcomes (target milestones T1/T2, runner exits, and thesis invalidations) MUST immediately feed realized R outcomes into `detector_circuit_breaker.record_outcome(...)`.
+
+28. **Hermetic Test Isolation & State Cleanliness for Persistent Singletons**:
+   - Any service, singleton, or engine that persists state to disk (such as `detector_circuit_breaker`, `quotes_cache`, `learning_engine`, `trade_memory`) MUST implement a clean `reset_all()` / `clear()` method.
+   - Global autouse test fixtures in `tests/conftest.py` MUST reset these singletons before and after test execution to prevent test ordering coupling, polluted test state, and flaky test runs. Tests must remain 100% deterministic, hermetic, and idempotent.
+
+29. **SEBI Derivatives Physical Settlement Risk Gate in Position Sizing**:
+   - Single-stock options in Indian markets are physically settled. In the final expiry week, mandatory margin requirements step up dramatically (up to 40–50% of underlying contract value).
+   - `engine.position_sizer.py` MUST enforce a mandatory 50% lot discount / margin risk buffer during expiry week for all single-stock F&O contracts (`is_physical_expiry_week=True`). Stock options during expiry week must never be sized using standard out-of-the-money margin assumptions.
+
+30. **Canonical Storage Path Resolution (Zero Hardcoded Home Paths)**:
+   - Hardcoding `Path.home() / ".trading_platform"` or raw user home directories in any module is strictly prohibited.
+   - All runtime databases, ledgers, caches, PDFs, and config files MUST resolve via `config.paths.app_data_path(...)`. This guarantees containerization support, clean test redirection via `TRADING_PLATFORM_HOME`, and multi-environment portability.
 
 ---
 

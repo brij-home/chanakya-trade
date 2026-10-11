@@ -84,7 +84,7 @@
 
 ## 8. Watchlist & Data Integrity
 
-- **Unique Watchlist Presets**: Watchlist preset dictionaries (`WATCHLIST_PRESETS` in `agent/smart_funnel.py`) must have unique keys mapping to unique symbol lists. Duplicate aliases (e.g., both `"nifty_50"` and `"nifty50"` mapping to identical 50-stock lists) are prohibited — keep one canonical key.
+- **Dynamic Universe Resolution (Zero Static Tickers)**: Watchlist presets (`WATCHLIST_PRESETS` in `agent/smart_funnel.py`) MUST NOT hardcode static ticker lists. They must resolve dynamically from canonical SSOT registries in `analysis.universe` (`SECTOR_TAXONOMY` and `THEMATIC_PRESETS`).
 - **Cache Integrity**: Never cache empty collections (`opportunities: []`, `alerts: []`). Treat empty results as cache misses. Only persist verified, non-empty data. Empty caches poison downstream queries that rely on fresh data.
 
 ---
@@ -96,3 +96,39 @@
   - **Always execute targeted pytest only**: `python -m pytest tests/<relevant_test>.py -k "<test_filter>" -q`.
   - Apply the fix, run the targeted test (must take $<3$s), restart the background daemon via `scripts\service.ps1 -Action restart`, and confirm resolution directly.
   - Reserve `validate_all.py` exclusively for when the user explicitly asks for full pre-commit/pre-push validation or before production tagging.
+
+---
+
+## 10. Unified Order Execution Authority & Audit Parity
+
+- **Zero Shadow Order Pathways**: All order placements — whether triggered via Desktop Web API, interactive CLI REPL (`engine/trade_executor.py`), automated agents, or scripts — MUST record immutable audit events in `orders.db` via `record_audit_event` and `_record_order_event`.
+- **Reconciliation Parity**: A trade placed from the terminal must be immediately visible in `/api/reconciliation` with consistent audit lineage.
+
+---
+
+## 11. Detector Circuit Breaker & Scrutiny Conviction Integrity
+
+- **Mathematical Degradation Gate**: Detectors are governed by `engine/detector_circuit_breaker.py`. Tripped detectors (`HALTED`) are suppressed; degraded detectors (`PROBATION`) receive a mandatory 25% confidence discount (`0.75x`).
+- **Conviction Integrity**: Downstream AI Scrutiny or asynchronous enrichment MUST NEVER overwrite or remove the probation discount. The final confidence score must preserve the penalty: `target.confidence = max(target.confidence, int(round(scrutiny.score * cb_multiplier)))`.
+- **Realized Outcome Loop**: Milestone targets (T1, T2), runner trailing stops, and invalidations must immediately record empirical WIN/LOSS outcomes into `detector_circuit_breaker.record_outcome(...)`.
+
+---
+
+## 12. SEBI Derivatives Physical Settlement Risk Gate
+
+- **Single-Stock Expiry Week Risk**: Near-month single-stock options incur severe physical delivery margins in expiry week.
+- **Mandatory Position Discount**: `engine.position_sizer.py` must enforce a 50% lot discount / margin buffer for stock F&O during expiry week (`is_physical_expiry_week=True`). Never size expiring stock options assuming index-style cash settlement.
+
+---
+
+## 13. Hermetic Test Isolation for Persistent Singletons
+
+- **Clean State Teardown**: Any singleton or service that persists state to disk (ledgers, caches, circuit breakers) must provide a `reset_all()` method.
+- **Autouse Fixture Registration**: Global autouse fixtures in `tests/conftest.py` (`sanitize_test_env`) MUST call `reset_all()` to ensure no accumulated test outcomes leak across unrelated test suites.
+
+---
+
+## 14. Zero Blocking Calls on Async Event Loop Threads
+
+- **Async Event Loop Purity**: Never execute synchronous database queries, SQLite audit transactions, pandas number-crunching, or broker network requests directly on the FastAPI asyncio event loop thread.
+- **Worker Thread Offloading**: Always wrap blocking operations with `await asyncio.to_thread(...)` to ensure smooth real-time SSE event publishing and WebSocket responsiveness.

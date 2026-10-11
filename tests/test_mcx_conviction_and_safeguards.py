@@ -2503,3 +2503,177 @@ def test_scan_commodities_now_target_filtering():
     ) as mock_detect:
         engine.scan_commodities_now(targets=["CRUDEOIL", "NATURALGAS", "GOLD"])
         mock_detect.assert_called_once_with(universe=["CRUDEOIL", "NATURALGAS", "GOLD"])
+
+
+def test_prior_session_alert_never_dispatches_telegram_session_close():
+    """
+    Regression Test:
+    Verifies that when resolve_session_end_alerts() cleans up prior-calendar-session alerts
+    (e.g., created on 2026-10-05 and retired on 2026-10-11):
+    1. The alert is properly archived as 'Prior session alert retired'.
+    2. No Telegram message is EVER dispatched, even if it reached partial milestones and had telegram_dispatched=True.
+    """
+    from datetime import datetime, timezone, timedelta
+    from unittest.mock import patch, MagicMock
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+    engine = AutoAlertEngine()
+    engine._alerts = []
+
+    old_alert = AutoAlert(
+        alert_id="aa-commodity-momentum-crudeoil-20261005",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        contract_symbol="MCX:CRUDEOIL26OCT8700PE",
+        exchange="MCX",
+        direction="BEARISH",
+        headline="MCX Crude Momentum",
+        summary="Crude oil short setup",
+        ltp=8408.79,
+        trigger_level=8686.0,
+        stop_loss=8783.0,
+        target_level=8414.4,
+        confidence=94,
+        created_at="2026-10-05 22:53:32 IST",
+        target_status="T0_5_ACHIEVED",
+        achieved_milestones=["T0_5_ACHIEVED"],
+        telegram_dispatched=True,
+    )
+    engine._alerts = [old_alert]
+
+    mock_send = MagicMock()
+    time_sunday = datetime(2026, 10, 11, 11, 25, 0, tzinfo=IST)
+
+    with patch("engine.auto_alert_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = time_sunday
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+        with patch("bot.telegram_bot.send_message", mock_send):
+            resolved = engine.resolve_session_end_alerts()
+
+    assert old_alert in resolved
+    assert old_alert.is_archived is True
+    assert "Prior session alert retired" in old_alert.archive_reason
+    # CRITICAL: Telegram must NEVER be sent for historical alerts retired during housecleaning!
+    mock_send.assert_not_called()
+
+
+def test_session_close_option_coordinate_parity():
+    """
+    Verifies that when a live same-day option alert is closed at session end:
+    1. If initial_entry_premium is present, Entry and T1 use Option Premium coordinates,
+       not mixing underlying futures (8686) with option target (452).
+    """
+    from datetime import datetime, timezone, timedelta
+    from unittest.mock import patch, MagicMock
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+    engine = AutoAlertEngine()
+    engine._alerts = []
+
+    today_opt_alert = AutoAlert(
+        alert_id="aa-commodity-momentum-crudeoil-20261011",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        contract_symbol="MCX:CRUDEOIL26OCT8700PE",
+        exchange="MCX",
+        direction="BEARISH",
+        headline="MCX Crude Momentum",
+        summary="Crude oil option",
+        ltp=8408.79,
+        trigger_level=8686.0,
+        stop_loss=8783.0,
+        target_level=8414.4,
+        initial_entry_premium=308.20,
+        option_premium=450.00,
+        actionable_plan={"target_1": 452.70},
+        confidence=94,
+        created_at="2026-10-11 18:00:00 IST",
+        target_status="T0_5_ACHIEVED",
+        achieved_milestones=["T0_5_ACHIEVED"],
+        telegram_dispatched=True,
+    )
+    engine._alerts = [today_opt_alert]
+
+    mock_send = MagicMock()
+    time_mcx_close = datetime(2026, 10, 11, 23, 31, 0, tzinfo=IST)
+
+    with patch("engine.auto_alert_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = time_mcx_close
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+        with patch("bot.telegram_bot.send_message", mock_send):
+            resolved = engine.resolve_session_end_alerts()
+
+    assert today_opt_alert in resolved
+    mock_send.assert_called_once()
+    sent_msg = mock_send.call_args[0][0]
+    # Check that Entry is option premium ₹308.20 and T1 is ₹452.70, not ₹8,686
+    assert "Entry   : ₹308.20" in sent_msg
+    assert "T1      : ₹452.70" in sent_msg
+    assert "Entry   : ₹8,686.00" not in sent_msg
+
+
+def test_mcx_pre_squareoff_advisory_broadcast(monkeypatch):
+    """
+    Verifies that open MCX commodity alerts trigger a dedicated 23:10 IST pre-squareoff
+    advisory dispatched to the COMMODITY Telegram channel (-1004320002599) and idempotently latches.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
+
+    engine = AutoAlertEngine()
+    engine.clear_alerts()
+    engine._session_closing_warned_mcx_date = None
+
+    alert = AutoAlert(
+        alert_id="aa-mcx-squareoff-test",
+        symbol="CRUDEOIL",
+        contract_symbol="MCX:CRUDEOIL26OCT8700PE",
+        exchange="MCX",
+        segment="COMMODITY",
+        alert_type="COMMODITY_MOMENTUM",
+        direction="BULLISH",
+        headline="MCX Crude Momentum",
+        summary="Crude oil option",
+        stage="T0_5_ACHIEVED",
+        ltp=345.0,
+        trigger_level=300.0,
+        stop_loss=250.0,
+        target_level=450.0,
+        actionable_plan={"target_1": 450.0},
+        initial_entry_premium=300.0,
+        option_premium=345.0,
+        achieved_milestones=["T0_5_ACHIEVED"],
+        time_horizon="INTRADAY",
+        is_live=True,
+    )
+    engine._alerts.append(alert)
+
+    sent_calls = []
+
+    def mock_send_message(msg, **kwargs):
+        sent_calls.append({"msg": msg, "kwargs": kwargs})
+
+    monkeypatch.setattr("bot.telegram_bot.send_message", mock_send_message)
+
+    res = engine.check_session_closing_warning(market="MCX")
+    assert res is not None
+    assert res["mcx_open_count"] == 1
+    assert len(sent_calls) == 1
+
+    call = sent_calls[0]
+    assert "23:10 IST MCX AUTO-SQUAREOFF ADVISORY" in call["msg"]
+    assert "CRUDEOIL" in call["msg"]
+    # Check that it routed to the COMMODITY channel
+    assert call["kwargs"].get("chat_id") == "-1004320002599"
+
+    # Calling again in the same session without force must be latched (no duplicate push)
+    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    res2 = engine.check_session_closing_warning(market="MCX")
+    assert res2 is None
+    assert len(sent_calls) == 1

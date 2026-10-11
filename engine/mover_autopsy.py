@@ -27,22 +27,20 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 
 logger = logging.getLogger("chanakya.mover_autopsy")
-
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
+from config.paths import app_data_path
 
 
 def get_mover_autopsies_file() -> Path:
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    return base / "mover_autopsies.json"
+    return app_data_path("mover_autopsies.json")
 
 
 # ── Archetypes & Trap Identifiers ──────────────────────────────

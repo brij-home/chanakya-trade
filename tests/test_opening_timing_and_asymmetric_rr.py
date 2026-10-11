@@ -345,3 +345,29 @@ def test_synthetic_option_chain_ssot_expiries_and_paper_fallback():
     os.environ["TRADING_MODE"] = "PAPER"
     chain = get_options_chain("NIFTY")
     assert len(chain) > 0, "Option chain should successfully return in PAPER mode"
+
+
+def test_opening_drive_wick_trap_filtered():
+    """Verify that an opening candle with a heavy upper rejection wick (>40%) is rejected as a bull trap."""
+    ref_dt = datetime(2026, 10, 9, 9, 15, 30, tzinfo=IST)
+    dates = pd.date_range("2026-10-09 09:15:00", periods=1, freq="5min")
+    # Open: 25000, High: 25080, Low: 24995, Close: 25035 (Upper wick = 45 / 85 = 52.9% rejection)
+    df_rejection = pd.DataFrame(
+        {
+            "open": [25000.0],
+            "high": [25080.0],
+            "low": [24995.0],
+            "close": [25035.0],
+            "volume": [150000.0],
+        },
+        index=dates,
+    )
+
+    alert = detect_opening_drive(
+        symbol="NIFTY",
+        df_5m=df_rejection,
+        ltp=25035.0,  # LTP has retreated from high and not broken out
+        ref_time=ref_dt,
+        ignore_time_gate=False,
+    )
+    assert alert is None, "Exhaustion wick rejection must be filtered out to prevent bull trap"

@@ -26,6 +26,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 
 from rich.console import Console
@@ -35,6 +36,7 @@ from rich.table import Table
 
 from brokers.base import BrokerAPI, OrderRequest
 
+logger = logging.getLogger("engine.trade_executor")
 console = Console()
 
 
@@ -425,6 +427,51 @@ def execute_trade_plan(
                 f"({leg.order_type}) → [{status_style}]{response.status}[/{status_style}] "
                 f"(ID: {response.order_id})"
             )
+
+            # Record immutable audit event for institutional traceability (Invariant 20)
+            try:
+                from engine.security_audit import record_audit_event
+
+                mode_audit = "EXECUTE" if live else "SIMULATE"
+                record_audit_event(
+                    event_type="CLI_ORDER_EXECUTED",
+                    mode=mode_audit,
+                    actor="CLI_TRADE_EXECUTOR",
+                    details={
+                        "order_id": response.order_id,
+                        "symbol": leg.instrument,
+                        "action": leg.action,
+                        "quantity": leg.quantity,
+                        "order_type": leg.order_type,
+                        "status": response.status,
+                        "message": response.message,
+                        "strategy": plan.strategy_name,
+                    },
+                )
+            except Exception as _e_audit:
+                logger.debug(f"[TradeExecutor] Security audit record skipped: {_e_audit}")
+
+            # Append tamper-evident order lifecycle event in orders.db
+            try:
+                from engine.order_lifecycle import _record_order_event
+
+                _record_order_event(
+                    order_id=response.order_id,
+                    event_type="ORDER_PLACED",
+                    broker_name=getattr(broker.get_profile(), "broker", "Connected Broker")
+                    if hasattr(broker, "get_profile")
+                    else "Broker",
+                    broker_order_id=response.order_id,
+                    payload={
+                        "symbol": leg.instrument,
+                        "action": leg.action,
+                        "quantity": leg.quantity,
+                        "status": response.status,
+                        "strategy": plan.strategy_name,
+                    },
+                )
+            except Exception as _e_evt:
+                logger.debug(f"[TradeExecutor] Order lifecycle event skipped: {_e_evt}")
 
             results.append(
                 {

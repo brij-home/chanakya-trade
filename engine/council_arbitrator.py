@@ -23,10 +23,9 @@ import logging
 import threading
 import time
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST_ZONE as IST
 
 _ARBITRATION_INTERVAL: float = 60.0
 _SOTD_COUNT: int = 3

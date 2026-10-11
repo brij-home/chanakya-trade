@@ -41,12 +41,11 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 logger = logging.getLogger("chanakya.trade_plan")
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST_ZONE as IST
 
 
 @dataclass

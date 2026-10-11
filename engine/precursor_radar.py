@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Any, Optional
 
 import numpy as np
@@ -37,7 +37,7 @@ import pandas as pd
 
 logger = logging.getLogger("chanakya.precursor_radar")
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 MAJOR_INDICES = [
     "NIFTY",

@@ -94,3 +94,71 @@ def test_publish_domain_event_on_sse_bus(monkeypatch):
     assert channel == "alert"
     assert data["type"] == "trailing_stop_update"
     assert data["alert"]["symbol"] == "INFY"
+
+
+def test_create_regime_shift_event():
+    """Verify factory accurately produces REGIME_SHIFT domain event with VIX metrics."""
+    from web.domain_events import create_regime_shift_event
+
+    evt = create_regime_shift_event(
+        from_regime="NORMAL",
+        to_regime="ELEVATED_VOLATILITY",
+        vix_level=23.4,
+        reason="VIX spike above 22.0",
+    )
+    assert evt.event_type == "REGIME_SHIFT"
+    assert evt.symbol == "INDIA_VIX"
+    assert evt.ltp == 23.4
+    assert evt.metrics["from_regime"] == "NORMAL"
+    assert evt.metrics["to_regime"] == "ELEVATED_VOLATILITY"
+    assert "REGIME_SHIFT" in evt.headline or "Regime Shift" in evt.headline
+    sse_dict = evt.to_sse_dict()
+    assert sse_dict["type"] == "regime_shift"
+
+
+def test_regime_shift_emission_from_signal_ensemble(monkeypatch):
+    """Verify get_regime_weights broadcasts REGIME_SHIFT event when VIX changes regime."""
+    import engine.signal_ensemble
+    from engine.signal_ensemble import get_regime_weights
+
+    mock_publish = MagicMock()
+    monkeypatch.setattr(event_bus, "publish_domain_event", mock_publish)
+
+    # Initial state
+    engine.signal_ensemble._last_vix_regime = "NORMAL"
+
+    # Shift to ELEVATED_VOLATILITY (VIX = 24.0)
+    weights = get_regime_weights(24.0)
+    assert weights["volatility"] == 0.25
+    mock_publish.assert_called_once()
+    evt = mock_publish.call_args[0][0]
+    assert evt.event_type == "REGIME_SHIFT"
+    assert evt.metrics["from_regime"] == "NORMAL"
+    assert evt.metrics["to_regime"] == "ELEVATED_VOLATILITY"
+
+
+def test_regime_shift_emission_from_commodity_regime(monkeypatch):
+    """Verify evaluate_commodity_eagle_regime broadcasts REGIME_SHIFT event when MCX commodity regime shifts."""
+    import engine.commodity_adaptive_regime
+    from engine.commodity_adaptive_regime import evaluate_commodity_eagle_regime
+
+    mock_publish = MagicMock()
+    monkeypatch.setattr(event_bus, "publish_domain_event", mock_publish)
+
+    # Initial state
+    with engine.commodity_adaptive_regime._commodity_regime_lock:
+        engine.commodity_adaptive_regime._last_commodity_regime["CRUDEOIL"] = "BALANCED_RANGE"
+
+    # Evaluate with trap detected -> shifts to COUNTER_TREND_EXHAUSTION
+    reg = evaluate_commodity_eagle_regime(
+        symbol="CRUDEOIL",
+        spot=6200.0,
+        trap_detected=True,
+        trap_reason="Delta absorption divergence",
+    )
+    assert reg.overall_environment == "COUNTER_TREND_EXHAUSTION"
+    mock_publish.assert_called_once()
+    evt = mock_publish.call_args[0][0]
+    assert evt.event_type == "REGIME_SHIFT"
+    assert evt.metrics["from_regime"] == "BALANCED_RANGE"
+    assert evt.metrics["to_regime"] == "COUNTER_TREND_EXHAUSTION"

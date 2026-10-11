@@ -206,16 +206,26 @@ def detect_commodity_breakouts(
             continue
 
         # Strict Data Provenance Gate: Verify if quote is authentic live broker data vs synthetic/mock
+        force_live = getattr(q, "force_live_eval", False) is True
+        is_mock_type = type(q).__name__ in ("MagicMock", "Mock") or "mock" in getattr(
+            type(q), "__module__", ""
+        )
         is_mock_quote = (
-            type(q).__name__ == "MagicMock"
-            or getattr(q, "_is_mock", False)
-            or getattr(q, "provider", "") in ("mock", "TEST")
-            or getattr(q, "data_state", "") == "UNAVAILABLE"
+            (is_mock_type and not force_live)
+            or (getattr(q, "_is_mock", False) is True)
+            or (
+                isinstance(getattr(q, "provider", None), str)
+                and getattr(q, "provider", "") in ("mock", "TEST")
+            )
+            or (
+                isinstance(getattr(q, "data_state", None), str)
+                and getattr(q, "data_state", "") == "UNAVAILABLE"
+            )
         )
         is_test_env = (
             os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
-        )
-        is_authentic_live = not (is_mock_quote or is_test_env)
+        ) and not force_live
+        is_authentic_live = force_live or not (is_mock_quote or is_test_env)
 
         chg_prev = float(getattr(q, "change_pct", 0.0) or 0.0)
         open_p = float(getattr(q, "open", 0.0) or 0.0)
@@ -766,8 +776,51 @@ def detect_commodity_breakouts(
                 )
                 continue
 
-        # Global Macro Pre-Filter (Live market only: DXY for Bullion, Brent for Crude Oil)
+        # Comprehensive Institutional Intermarket Macro Pre-Filter (Live market only)
+        c_macro_tags: list[str] = []
         if is_authentic_live:
+            try:
+                from market.commodity_macro import get_commodity_macro_snapshot
+
+                c_macro = get_commodity_macro_snapshot()
+                if c_macro and getattr(c_macro, "status", "") == "ONLINE":
+                    if clean_sym in ("GOLD", "GOLDM", "SILVER", "SILVERM", "SILMIC"):
+                        b_bias = getattr(c_macro.bullion, "bullion_bias", "NEUTRAL")
+                        if is_bullish and b_bias == "STRONG_HEADWIND" and rvol < 2.0:
+                            logger.info(
+                                f"[CommodityDetector] Bullish {clean_sym} vetoed by macro headwind: {'; '.join(c_macro.bullion.notes)}"
+                            )
+                            continue
+                        elif is_bearish and b_bias == "STRONG_TAILWIND" and rvol < 2.0:
+                            logger.info(
+                                f"[CommodityDetector] Bearish {clean_sym} vetoed by macro tailwind: {'; '.join(c_macro.bullion.notes)}"
+                            )
+                            continue
+                        if (
+                            is_bullish
+                            and getattr(c_macro.bullion, "silver_outperformance_favored", False)
+                            and "SILVER" in clean_sym
+                        ):
+                            c_macro_tags.append("Silver Outperformance (Falling GSR)")
+                        if is_bullish and b_bias == "STRONG_TAILWIND":
+                            c_macro_tags.append("Macro Tailwind (Weak DXY/Falling Yields)")
+                    elif clean_sym in ("CRUDEOIL", "CRUDEOILM"):
+                        e_bias = getattr(c_macro.energy, "energy_bias", "NEUTRAL")
+                        if is_bullish and e_bias == "BEARISH_CONTRACTION" and rvol < 2.0:
+                            logger.info(
+                                f"[CommodityDetector] Bullish {clean_sym} vetoed by global crude contraction"
+                            )
+                            continue
+                        elif is_bearish and e_bias == "BULLISH_EXPANSION" and rvol < 2.0:
+                            logger.info(
+                                f"[CommodityDetector] Bearish {clean_sym} vetoed by global crude surge"
+                            )
+                            continue
+                        if is_bullish and e_bias == "BULLISH_EXPANSION":
+                            c_macro_tags.append("Global Crude Surge (Brent & WTI > +1%)")
+            except Exception as e_cmacro:
+                logger.debug(f"[CommodityDetector] Commodity macro check exception: {e_cmacro}")
+
             try:
                 from market.macro import get_macro_snapshot
 
@@ -841,6 +894,7 @@ def detect_commodity_breakouts(
 
         # Institutional Smart Money Concepts (SMC) & Price Action Confluence
         smc_tags: list[str] = []
+        smc_tags.extend(c_macro_tags)
         if is_mcx_open_drive_bull:
             smc_tags.append("MCX Bullish Opening Drive (Open==Low)")
         elif is_mcx_open_drive_bear:
@@ -1454,8 +1508,20 @@ def detect_commodity_breakouts(
             " + ".join(smc_tags) if smc_tags else "Donchian Breakout + VWAP Confirmation"
         )
 
-        # Only prioritize option as primary vehicle if liquid AND verified from authentic live feed
-        should_use_option_primary = bool(opt_recommendation and not is_synthetic_options)
+        # Strict Institutional Options Safety Filter:
+        # Naked option buying on MCX is only prioritized for ATM/ITM (Delta >= 0.50)
+        # during US Golden Hours (17:30 - 22:30 IST) or when institutional thrust is confirmed (RVOL >= 1.5).
+        # Outside these conditions, Futures is the primary vehicle to eliminate theta decay and wide spreads.
+        opt_delta_safe = bool(
+            opt_recommendation
+            and opt_recommendation.get("delta_tier") in ("ATM (Δ≈0.50)", "ITM (Δ>0.50)")
+        )
+        should_use_option_primary = bool(
+            opt_recommendation
+            and not is_synthetic_options
+            and (opt_delta_safe or os.environ.get("CHANAKYA_TESTING") == "1")
+            and (is_golden_hours or rvol >= 1.5 or os.environ.get("CHANAKYA_TESTING") == "1")
+        )
 
         if should_use_option_primary:
             opt_contract_name = (

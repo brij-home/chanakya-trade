@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Optional
 
+from config.constants import IST
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -574,9 +576,8 @@ def get_mcx_prompt_expiry_and_dte(sym: str, as_of: Optional[Any] = None) -> tupl
     Crucially, MCX contracts NEVER expire on weekends (Saturday/Sunday).
     If an expiry date falls on a weekend, it automatically rolls backward to the preceding Friday.
     """
-    from datetime import datetime, timezone, timedelta, date
+    from datetime import datetime, timedelta, date
 
-    IST = timezone(timedelta(hours=5, minutes=30))
     now_dt = as_of or datetime.now(IST)
     today = now_dt.date() if isinstance(now_dt, datetime) else now_dt
 
@@ -672,9 +673,8 @@ def build_commodity_option_chain_synthetic(
     else:
         target_exp = expiry_date
         try:
-            from datetime import datetime, timezone, timedelta
+            from datetime import datetime
 
-            IST = timezone(timedelta(hours=5, minutes=30))
             exp_d = datetime.strptime(expiry_date, "%Y-%m-%d").date()
             dte = max(1, (exp_d - datetime.now(IST).date()).days)
         except Exception:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import sqlite3
@@ -16,12 +17,14 @@ from typing import Optional
 from config.paths import app_data_path
 from market.data_events import MarketDataEvent
 
+logger = logging.getLogger(__name__)
+
 
 def _retention_days() -> int:
     try:
-        return min(30, max(7, int(os.environ.get("RAW_TICK_RETENTION_DAYS", "14"))))
+        return min(60, max(7, int(os.environ.get("RAW_TICK_RETENTION_DAYS", "30"))))
     except ValueError:
-        return 14
+        return 30
 
 
 def _db_path() -> Path:
@@ -80,10 +83,11 @@ class TickArchive:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=30000")
-            conn.execute("PRAGMA cache_size=-32000")
-            conn.execute("PRAGMA mmap_size=134217728")
-        except Exception:
-            pass
+            conn.execute("PRAGMA cache_size=-65536")  # 64 MB RAM cache
+            conn.execute("PRAGMA mmap_size=268435456")  # 256 MB memory-mapped file I/O
+            conn.execute("PRAGMA temp_store=MEMORY")  # Temporary tables in RAM
+        except Exception as e:
+            logger.warning(f"[TickArchive] Could not set full high-performance SQLite pragmas: {e}")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS raw_market_ticks (

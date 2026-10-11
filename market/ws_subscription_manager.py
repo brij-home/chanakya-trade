@@ -103,13 +103,14 @@ try:
             _eq_sym = f"NSE:{_s}-EQ"
             if _eq_sym not in CORE_BASE_SYMBOLS:
                 CORE_BASE_SYMBOLS.append(_eq_sym)
-except Exception:
-    pass
+except Exception as e:
+    logger.warning(f"Could not load SECTOR_TAXONOMY into CORE_BASE_SYMBOLS: {e}")
+
+from config.paths import app_data_path
 
 
 def _get_cache_path() -> Path:
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    cache_dir = base / "cache"
+    cache_dir = app_data_path("cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / "ws_active_subscriptions.json"
 

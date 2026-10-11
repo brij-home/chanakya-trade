@@ -25,9 +25,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 import threading
 from typing import Any, Optional
@@ -45,13 +44,14 @@ from analysis.universe import THEMATIC_PRESETS
 
 logger = logging.getLogger("chanakya.compounder_scanner")
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
+from config.paths import app_data_path
 
 
 def _get_roster_cache_file() -> Path:
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "compounder_roster.json"
+    p = app_data_path("compounder_roster.json")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 @dataclass

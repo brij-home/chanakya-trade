@@ -211,3 +211,19 @@ broker_positions = internal_positions  # circular self-comparison
 # Full execution routing
 .venv\Scripts\pytest.exe tests/test_execution_routing.py tests/test_trade_executor.py -v
 ```
+
+---
+
+## 9. Unified Execution Authority & Audit Parity Across CLI and Web
+
+- **Single Execution Truth**: `engine/order_lifecycle.py` and `engine/trade_executor.py` share unified audit ledger semantics.
+- **Audit Parity**: Every placed order — whether via the Desktop Web API, interactive CLI REPL, or agent harness — MUST record immutable audit events via `record_audit_event(...)` and order lifecycle events via `_record_order_event(...)` into `orders.db`.
+- **Zero Shadow Executions**: Never place direct broker orders in any tool or command without persisting the order intent and audit log.
+
+---
+
+## 10. SEBI Derivatives Physical Delivery Settlement Risk Gate
+
+- **Physical Delivery Margin Step-Up**: Near-month single-stock options in Indian markets carry severe physical settlement risk during the final expiry week (margins step up to 40–50% of contract notional).
+- **Mandatory Position Discount**: `engine.position_sizer.py` must enforce a 50% lot discount / margin risk buffer during expiry week for all single-stock F&O contracts (`is_physical_expiry_week=True`).
+- **Index Exemption**: Cash-settled index options (NIFTY, BANKNIFTY, FINNIFTY) are exempt from physical settlement margins.

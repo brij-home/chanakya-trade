@@ -41,7 +41,6 @@ import os
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Optional
 
 from rich.console import Console
@@ -50,10 +49,13 @@ from rich.table import Table
 
 from agent.schema_parser import parse_synthesis_output as _parse_synthesis_output
 
+from config.paths import app_data_path
+
 console = Console()
 
-MEMORY_FILE = Path.home() / ".trading_platform" / "trade_memory.json"
+MEMORY_FILE = app_data_path("trade_memory.json")
 MAX_MEMORIES = 500  # cap to prevent unbounded growth
+MAX_MEMORY_AGE_DAYS = 90  # evict records older than 90 days to prevent pattern degradation
 
 
 # ── Data Model ───────────────────────────────────────────────

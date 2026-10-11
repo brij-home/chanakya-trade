@@ -22,9 +22,8 @@ import csv
 import io
 import json
 import logging
-import os
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 import threading
 from typing import Any, Optional
@@ -33,12 +32,12 @@ from market.single_flight_cache import SingleFlightCache
 
 logger = logging.getLogger("market.participant_oi")
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
+from config.paths import app_data_path
 
 
 def _get_cache_dir() -> Path:
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    p = base / "cache"
+    p = app_data_path("cache")
     p.mkdir(parents=True, exist_ok=True)
     return p
 

@@ -8,14 +8,14 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Any, Optional
 
 from engine.alert_expiry import is_alert_option_premium_level
 from engine.alert_model import INDEX_WEEKLY_EXPIRY_WEEKDAY
 
 logger = logging.getLogger(__name__)
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 def evaluate_alert_invalidation(

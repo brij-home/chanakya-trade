@@ -23,12 +23,12 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Optional, Any
 import pandas as pd
 
 logger = logging.getLogger(__name__)
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 DEFAULT_WATCHED_INDICES = [
     "NIFTY",

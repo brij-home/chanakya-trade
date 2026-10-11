@@ -42,15 +42,18 @@ import logging
 import math
 from dataclasses import asdict, dataclass
 from datetime import datetime, time as dtime
+import threading
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
+from config.constants import IST
 
 logger = logging.getLogger("chanakya.commodity_adaptive_regime")
-IST = ZoneInfo("Asia/Kolkata")
+
+_commodity_regime_lock = threading.Lock()
+_last_commodity_regime: dict[str, str] = {}
 
 # Canonical noise tolerance & step scale per commodity
 COMMODITY_STEP_TOLERANCES: dict[str, float] = {
@@ -409,6 +412,29 @@ def evaluate_commodity_eagle_regime(
     else:
         env = "BALANCED_RANGE"
         summary = f"Standard {phase_name.replace('_', ' ').title()} conditions with {chop_status.lower().replace('_', ' ')}."
+
+    with _commodity_regime_lock:
+        prev_env = _last_commodity_regime.get(clean_sym)
+        if prev_env and prev_env != env:
+            try:
+                from web.domain_events import create_regime_shift_event
+                from web.sse import event_bus
+
+                evt = create_regime_shift_event(
+                    from_regime=prev_env,
+                    to_regime=env,
+                    vix_level=float(chop_val or 0.0),
+                    reason=f"MCX Commodity {clean_sym} shifted from {prev_env} to {env}: {summary}",
+                )
+                event_bus.publish_domain_event(evt)
+                event_bus.publish_sync(
+                    "system", {"type": "regime_shift", "event": evt.to_sse_dict()}
+                )
+            except Exception as e_reg:
+                logger.debug(
+                    f"[CommodityAdaptiveRegime] Regime shift event publish skipped: {e_reg}"
+                )
+        _last_commodity_regime[clean_sym] = env
 
     return CommodityEagleRegime(
         symbol=clean_sym,

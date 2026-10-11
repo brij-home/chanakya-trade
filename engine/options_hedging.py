@@ -22,10 +22,10 @@ Provides:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time as dtime, timezone, timedelta
+from datetime import datetime, time as dtime
 from typing import Any, Optional
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 @dataclass

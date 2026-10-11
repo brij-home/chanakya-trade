@@ -20,10 +20,9 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("market.calendar")
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST_ZONE as IST
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Trading Holiday Master Data (NSE / BSE / MCX / CDS)
