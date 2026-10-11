@@ -24,16 +24,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST_ZONE as IST
+from config.paths import app_data_path
 
 
 def _get_cache_dir() -> Path:
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    cache_dir = base / "cache"
+    cache_dir = app_data_path("cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 

@@ -156,3 +156,149 @@ class TestFyersHistoricalChunking:
             d_from = datetime.strptime(payload["range_from"], "%Y-%m-%d")
             d_to = datetime.strptime(payload["range_to"], "%Y-%m-%d")
             assert (d_to - d_from).days <= 95
+
+
+class TestFyersScreenerDeduplicationAndToolIntegration:
+    """Validate OpenClaw and Agent Tool integration with thread-safe TTL deduplication."""
+
+    def test_screener_deduplication_cache(self, monkeypatch):
+        from unittest.mock import MagicMock
+        from brokers.fyers import FyersAPI
+
+        api = FyersAPI(app_id="TEST-100", secret_key="test_secret")
+        mock_sdk = MagicMock()
+        mock_sdk.screeners_technical.return_value = {
+            "s": "ok",
+            "screener": "cs004",
+            "data": [{"symbol": "TCS"}],
+        }
+        mock_sdk.screeners_candlestick.return_value = {
+            "s": "ok",
+            "pattern": "hammer",
+            "data": [{"symbol": "INFY"}],
+        }
+        monkeypatch.setattr(api, "_get_fyers", lambda: mock_sdk)
+
+        # 1. First technical call -> queries SDK
+        res1 = api.get_screener_technical("cs004")
+        assert res1["s"] == "ok"
+        assert mock_sdk.screeners_technical.call_count == 1
+
+        # 2. Second technical call within TTL -> returns cached without hitting SDK
+        res2 = api.get_screener_technical("cs004")
+        assert res2["s"] == "ok"
+        assert mock_sdk.screeners_technical.call_count == 1
+
+        # 3. Third call with force_refresh=True -> queries SDK again
+        res3 = api.get_screener_technical("cs004", force_refresh=True)
+        assert res3["s"] == "ok"
+        assert mock_sdk.screeners_technical.call_count == 2
+
+        # 4. Candlestick first call -> queries SDK
+        c1 = api.get_screener_candlestick("hammer")
+        assert c1["s"] == "ok"
+        assert mock_sdk.screeners_candlestick.call_count == 1
+
+        # 5. Candlestick second call within TTL -> returns cached
+        c2 = api.get_screener_candlestick("hammer")
+        assert c2["s"] == "ok"
+        assert mock_sdk.screeners_candlestick.call_count == 1
+
+    def test_screener_registered_in_agent_tool_registry(self):
+        from unittest.mock import MagicMock, patch
+        from agent.tools import build_registry
+
+        reg = build_registry()
+        assert "fyers_technical_screener" in reg.names
+        assert "fyers_candlestick_screener" in reg.names
+        assert "fyers_market_status" in reg.names
+
+        mock_broker = MagicMock()
+        mock_broker.get_screener_technical.return_value = {
+            "s": "ok",
+            "screener": "cs004",
+            "data": [{"symbol": "RELIANCE"}],
+        }
+        mock_broker.get_screener_candlestick.return_value = {
+            "s": "ok",
+            "pattern": "hammer",
+            "data": [{"symbol": "WIPRO"}],
+        }
+        mock_broker.get_market_status.return_value = {
+            "status": "ok",
+            "marketStatus": [{"exchange": "NSE", "status": "OPEN"}],
+        }
+
+        with patch("brokers.session.get_data_broker", return_value=mock_broker):
+            tech_res = reg.execute("fyers_technical_screener", {"screener": "cs004"})
+            assert tech_res["s"] == "ok"
+            assert tech_res["data"][0]["symbol"] == "RELIANCE"
+
+            candle_res = reg.execute("fyers_candlestick_screener", {"pattern": "hammer"})
+            assert candle_res["s"] == "ok"
+            assert candle_res["data"][0]["symbol"] == "WIPRO"
+
+            status_res = reg.execute("fyers_market_status", {})
+            assert status_res["status"] == "ok"
+            assert status_res["marketStatus"][0]["exchange"] == "NSE"
+
+    def test_openclaw_manifest_registration(self):
+        from web.openclaw import MANIFEST
+
+        skill_names = [s["name"] for s in MANIFEST.get("skills", [])]
+        assert "fyers_technical_screener" in skill_names
+        assert "fyers_candlestick_screener" in skill_names
+        assert "fyers_market_status" in skill_names
+
+    def test_fyers_market_status_skill_endpoint(self):
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        from web.skills import skill_fyers_market_status
+
+        mock_broker = MagicMock()
+        mock_broker.get_market_status.return_value = {
+            "status": "ok",
+            "marketStatus": [
+                {"exchange": "NSE", "market_type": "Capital Market", "status": "OPEN"}
+            ],
+        }
+
+        with patch("brokers.session.get_data_broker", return_value=mock_broker):
+            resp = asyncio.run(skill_fyers_market_status())
+            assert resp["status"] == "ok"
+            assert resp["data"]["marketStatus"][0]["status"] == "OPEN"
+
+    def test_api_orders_batch_execute_endpoint(self):
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        from web.api import api_order_batch_execute, OrderBatchExecuteRequest
+        from engine.order_lifecycle import OrderIntent
+
+        req = OrderBatchExecuteRequest(order_ids=["ord-1", "ord-2"])
+        mock_req = MagicMock()
+        mock_req.state.user = {"username": "TEST_TRADER"}
+
+        mock_order1 = MagicMock(spec=OrderIntent)
+        mock_order1.order_id = "ord-1"
+        mock_order1.mode = "PAPER"
+        mock_order1.status = "FILLED"
+        mock_order1.broker_order_id = "MOCK-1"
+        mock_order1.to_dict.return_value = {"order_id": "ord-1", "status": "FILLED"}
+
+        mock_order2 = MagicMock(spec=OrderIntent)
+        mock_order2.order_id = "ord-2"
+        mock_order2.mode = "PAPER"
+        mock_order2.status = "FILLED"
+        mock_order2.broker_order_id = "MOCK-2"
+        mock_order2.to_dict.return_value = {"order_id": "ord-2", "status": "FILLED"}
+
+        with patch(
+            "engine.order_lifecycle.execute_order_batch", return_value=[mock_order1, mock_order2]
+        ):
+            resp = asyncio.run(api_order_batch_execute(req, mock_req))
+            import json
+
+            body = json.loads(resp.body.decode())
+            assert len(body) == 2
+            assert body[0]["order_id"] == "ord-1"
+            assert body[1]["order_id"] == "ord-2"

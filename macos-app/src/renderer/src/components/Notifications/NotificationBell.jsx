@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useRef } from 'react'
 import { useNotificationStore } from '../../store/notificationStore'
 import { useAPI } from '../../hooks/useAPI'
 import NotificationDropdown from './NotificationDropdown'
@@ -22,18 +22,22 @@ export default function NotificationBell({ onOpenOrderTicket }) {
   const stopPolling = useNotificationStore((s) => s.stopPolling)
 
   const { call } = useAPI()
+  const callRef = useRef(call)
+  useEffect(() => {
+    callRef.current = call
+  }, [call])
 
   // Start the singleton polling loop on mount; stop on unmount.
   // startPolling is idempotent — safe even if AlertsView calls it too.
   useEffect(() => {
-    startPolling(call)
+    startPolling(callRef.current)
     return () => stopPolling()
-  }, [call, startPolling, stopPolling])
+  }, [startPolling, stopPolling])
 
   const handleToggle = () => {
     if (!isDropdownOpen) {
       // On-demand refresh when user opens the dropdown
-      fetchAlerts(call)
+      fetchAlerts(callRef.current, true)
     }
     toggleDropdown()
   }
@@ -77,7 +81,7 @@ export default function NotificationBell({ onOpenOrderTicket }) {
         isOpen={isDropdownOpen}
         onClose={() => setDropdownOpen(false)}
         onOpenOrderTicket={onOpenOrderTicket}
-        onRefresh={() => fetchAlerts(call)}
+        onRefresh={() => fetchAlerts(callRef.current, true)}
         isLoading={isLoading}
       />
     </div>

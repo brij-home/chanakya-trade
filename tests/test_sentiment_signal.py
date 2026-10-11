@@ -25,8 +25,16 @@ from market.sentiment import (
     _bulk_deals_signal,
     _fii_dii_signal,
     _news_signal,
+    _SENTIMENT_SINGLE_FLIGHT,
     get_sentiment,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_sentiment_single_flight_cache():
+    _SENTIMENT_SINGLE_FLIGHT.invalidate()
+    yield
+    _SENTIMENT_SINGLE_FLIGHT.invalidate()
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -419,3 +427,31 @@ class TestGetSentiment:
             result = get_sentiment("INFY")
         # FII weight=0.30, news weight=0.25 → net = 0.30 - 0.25 = 0.05 (NEUTRAL threshold)
         assert result.overall_signal == "NEUTRAL"
+
+    def test_single_flight_caching_and_coalescing(self):
+        """Verifies SingleFlightCache prevents redundant computation."""
+        compute_count = 0
+
+        def _counted_fii(*args, **kwargs):
+            nonlocal compute_count
+            compute_count += 1
+            return ("BULLISH", 1.0, ["fii"])
+
+        with (
+            patch("market.sentiment._fii_dii_signal", side_effect=_counted_fii),
+            patch("market.sentiment._news_signal", return_value=("BULLISH", 1.0, [])),
+            patch("market.sentiment._bulk_deals_signal", return_value=("NEUTRAL", 0.0, [])),
+            patch("market.sentiment._breadth_signal", return_value=("NEUTRAL", 0.0, [])),
+        ):
+            res1 = get_sentiment("RELIANCE")
+            assert compute_count == 1
+            # Second call should hit single-flight cache
+            res2 = get_sentiment("RELIANCE")
+            assert compute_count == 1
+            assert res2.symbol == res1.symbol
+            assert res2.score == res1.score
+
+            # force_refresh should re-compute
+            res3 = get_sentiment("RELIANCE", force_refresh=True)
+            assert compute_count == 2
+            assert res3.score == res1.score

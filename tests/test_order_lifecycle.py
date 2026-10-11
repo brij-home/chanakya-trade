@@ -454,3 +454,124 @@ def test_preview_order_intent_ttl_expiration():
 
     with pytest.raises(TimeoutError, match="has expired"):
         confirm_order_intent(intent.order_id, intent.preview_hash)
+
+
+def test_execute_order_batch_paper_flow():
+    from engine.order_lifecycle import (
+        preview_order_intent,
+        confirm_order_intent,
+        execute_order_batch,
+    )
+
+    intent1 = preview_order_intent(symbol="INFY", side="BUY", quantity=10, price=1800.0)
+    intent2 = preview_order_intent(symbol="TCS", side="BUY", quantity=5, price=3800.0)
+
+    confirmed1 = confirm_order_intent(intent1.order_id, intent1.preview_hash)
+    confirmed2 = confirm_order_intent(intent2.order_id, intent2.preview_hash)
+
+    assert confirmed1.status == "CONFIRMED"
+    assert confirmed2.status == "CONFIRMED"
+
+    results = execute_order_batch([intent1.order_id, intent2.order_id])
+    assert len(results) == 2
+    assert results[0].status == "FILLED_PAPER"
+    assert results[1].status == "FILLED_PAPER"
+    assert results[0].order_id == intent1.order_id
+    assert results[1].order_id == intent2.order_id
+
+
+def test_execute_order_batch_live_basket(tmp_path, monkeypatch):
+    from engine.order_lifecycle import (
+        preview_order_intent,
+        confirm_order_intent,
+        execute_order_batch,
+    )
+    from brokers.base import OrderResponse, Quote, Funds
+    from engine.kill_switch import KillSwitchRegistry
+    import engine.kill_switch as ks_module
+
+    monkeypatch.setenv("TRADING_MODE", "EXECUTE")
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+    monkeypatch.setenv("PILOT_ALLOW_LIVE_EXECUTION", "1")
+    monkeypatch.setenv("PILOT_ALLOWED_SEGMENTS", "EQUITY_INTRADAY")
+    monkeypatch.setenv("PILOT_ALLOWED_PRODUCTS", "MIS")
+    monkeypatch.setenv("PILOT_MAX_ORDER_NOTIONAL", "1000000")
+
+    ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+
+    class _MockBasketBroker:
+        account_id = "BASKET_TEST"
+        basket_called = False
+
+        def get_funds(self):
+            return Funds(available_cash=500_000.0, used_margin=0.0, total_balance=500_000.0)
+
+        def place_basket_orders(self, orders):
+            self.basket_called = True
+            return [
+                OrderResponse(order_id="FY_BASKET_1", status="OPEN", message="Submitted"),
+                OrderResponse(order_id="FY_BASKET_2", status="COMPLETE", message="Filled"),
+            ]
+
+    mock_broker = _MockBasketBroker()
+    monkeypatch.setattr("brokers.session.get_execution_broker", lambda: mock_broker)
+
+    quote_infy = Quote(
+        symbol="NSE:INFY",
+        last_price=1800.0,
+        open=1800.0,
+        high=1810.0,
+        low=1790.0,
+        close=1800.0,
+        volume=1000,
+        provider="fyers",
+        source="REST",
+        data_state="LIVE",
+    )
+    quote_tcs = Quote(
+        symbol="NSE:TCS",
+        last_price=3800.0,
+        open=3800.0,
+        high=3810.0,
+        low=3790.0,
+        close=3800.0,
+        volume=1000,
+        provider="fyers",
+        source="REST",
+        data_state="LIVE",
+    )
+    monkeypatch.setattr(
+        "market.quotes.get_quote",
+        lambda insts: {
+            "NSE:INFY": quote_infy,
+            "NSE:TCS": quote_tcs,
+            "INFY": quote_infy,
+            "TCS": quote_tcs,
+        },
+    )
+
+    class _AllowedPretrade:
+        is_eligible = True
+        blocking_reasons = []
+
+    monkeypatch.setattr("engine.pretrade.validate_pretrade", lambda **kw: _AllowedPretrade())
+
+    o1 = preview_order_intent(
+        symbol="INFY", side="BUY", quantity=10, price=1800.0, idempotency_key="BASKET-IDEMP-1"
+    )
+    o2 = preview_order_intent(
+        symbol="TCS", side="BUY", quantity=5, price=3800.0, idempotency_key="BASKET-IDEMP-2"
+    )
+
+    confirm_order_intent(o1.order_id, preview_hash=o1.preview_hash)
+    confirm_order_intent(o2.order_id, preview_hash=o2.preview_hash)
+
+    results = execute_order_batch([o1.order_id, o2.order_id])
+    assert len(results) == 2
+    assert mock_broker.basket_called is True
+    assert results[0].status == "OPEN"
+    assert results[0].broker_order_id == "FY_BASKET_1"
+    assert results[1].status == "FILLED"
+    assert results[1].broker_order_id == "FY_BASKET_2"

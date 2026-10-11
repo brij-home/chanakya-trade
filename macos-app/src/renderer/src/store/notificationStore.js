@@ -4,6 +4,7 @@ import { isTestOrSimAlert, isAlertActive } from '../components/Views/alerts/aler
 const STORAGE_KEY = 'chanakya_notifications_v1'
 // Singleton polling interval — only ONE interval runs across the entire app
 let _pollTimer = null
+let _callFn = null
 const MAX_NOTIFICATIONS = 300
 
 // Safe localStorage loader with prior-day intraday expiration sanitization and test alert pruning
@@ -385,15 +386,16 @@ export const useNotificationStore = create((set, get) => ({
    * Fetches alerts from the backend using the provided `call` function and
    * merges them into the store. Safe to call concurrently — uses a guard flag.
    */
-  fetchAlerts: async (call) => {
-    if (!call) return
+  fetchAlerts: async (call, isManual = false) => {
+    const fn = call || _callFn
+    if (!fn) return
     const state = useNotificationStore.getState()
     if (state.isLoading) return // skip if a fetch is already in-flight
-    set({ isLoading: true })
+    if (isManual) set({ isLoading: true })
     try {
       let list = []
       try {
-        const res = await call('/skills/alerts/auto/list', { view_mode: 'ALL', limit: 300 })
+        const res = await fn('/skills/alerts/auto/list', { view_mode: 'ALL', limit: 300 })
         list = res?.data ?? res ?? []
       } catch (_callErr) {
         // Vite browser dev fallback — sidecar IPC unavailable
@@ -424,7 +426,7 @@ export const useNotificationStore = create((set, get) => ({
     } catch (err) {
       console.error('[notificationStore] fetchAlerts error:', err)
     } finally {
-      set({ isLoading: false })
+      if (isManual) set({ isLoading: false })
     }
   },
 
@@ -434,11 +436,12 @@ export const useNotificationStore = create((set, get) => ({
    * @param {Function} call - the useAPI `call` function
    */
   startPolling: (call) => {
+    if (call) _callFn = call
     if (_pollTimer !== null) return // already running
-    // Immediate first fetch
-    useNotificationStore.getState().fetchAlerts(call)
+    // Immediate first fetch (silent)
+    useNotificationStore.getState().fetchAlerts(_callFn || call, false)
     _pollTimer = setInterval(() => {
-      useNotificationStore.getState().fetchAlerts(call)
+      useNotificationStore.getState().fetchAlerts(_callFn, false)
     }, 30_000)
   },
 

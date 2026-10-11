@@ -484,9 +484,11 @@ def _require_localhost(request: _Request) -> None:
 
 app.include_router(_skills_router)
 from web.routers import alerts_router, market_router
+from web.mcp import mcp_router
 
 app.include_router(alerts_router)
 app.include_router(market_router)
+app.include_router(mcp_router)
 
 # Re-exports for backward compatibility
 from web.routers.alerts_api import (
@@ -980,9 +982,9 @@ async def get_system_diagnostics():
     from engine.maintenance import get_storage_breakdown
     from engine.telemetry import get_telemetry_summary
 
-    preflight_rep = run_preflight(verbose=False)
+    preflight_rep = await asyncio.to_thread(run_preflight, verbose=False)
     mem_status = get_memory_status()
-    storage_bd = get_storage_breakdown()
+    storage_bd = await asyncio.to_thread(get_storage_breakdown)
     telem_summary = get_telemetry_summary()
 
     return JSONResponse(
@@ -3956,7 +3958,8 @@ async def api_order_preview(req: OrderPreviewRequest, request: _Request):
         actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
 
     try:
-        order = preview_order_intent(
+        order = await asyncio.to_thread(
+            preview_order_intent,
             symbol=req.symbol,
             side=req.side,  # type: ignore
             quantity=req.quantity,
@@ -3966,7 +3969,8 @@ async def api_order_preview(req: OrderPreviewRequest, request: _Request):
             idempotency_key=req.idempotency_key,
         )
 
-        record_audit_event(
+        await asyncio.to_thread(
+            record_audit_event,
             event_type="ORDER_PREVIEW_REQUESTED",
             mode=order.mode,
             actor=actor,
@@ -3997,14 +4001,15 @@ async def api_order_confirm(req: OrderConfirmRequest, request: _Request):
         actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
 
     try:
-        order = confirm_order_intent(req.order_id, req.preview_hash)
+        order = await asyncio.to_thread(confirm_order_intent, req.order_id, req.preview_hash)
     except PermissionError as exc:
         raise _HTTPException(403, str(exc)) from exc
     except ValueError as exc:
         status_code = 404 if "not found" in str(exc).lower() else 409
         raise _HTTPException(status_code, str(exc)) from exc
 
-    record_audit_event(
+    await asyncio.to_thread(
+        record_audit_event,
         event_type="ORDER_CONFIRMED_BY_USER",
         mode=order.mode,
         actor=actor,
@@ -4025,8 +4030,9 @@ async def api_order_execute(req: OrderExecuteRequest, request: _Request):
         actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
 
     try:
-        order = execute_order_intent(order_id=req.order_id)
-        record_audit_event(
+        order = await asyncio.to_thread(execute_order_intent, order_id=req.order_id)
+        await asyncio.to_thread(
+            record_audit_event,
             event_type="ORDER_EXECUTE_REQUESTED",
             mode=order.mode,
             actor=actor,
@@ -4037,6 +4043,42 @@ async def api_order_execute(req: OrderExecuteRequest, request: _Request):
             },
         )
         return JSONResponse(order.to_dict())
+    except PermissionError as exc:
+        raise _HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 409
+        raise _HTTPException(status_code, str(exc)) from exc
+
+
+class OrderBatchExecuteRequest(BaseModel):
+    order_ids: list[str]
+
+
+@app.post("/api/orders/batch/execute")
+async def api_order_batch_execute(req: OrderBatchExecuteRequest, request: _Request):
+    """Execute micro-batch of order intents atomically with mode gate and double-confirmation validation."""
+    from engine.order_lifecycle import execute_order_batch
+    from engine.security_audit import record_audit_event
+
+    actor = "LOCAL"
+    if hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
+
+    try:
+        orders = await asyncio.to_thread(execute_order_batch, order_ids=req.order_ids)
+        for order in orders:
+            await asyncio.to_thread(
+                record_audit_event,
+                event_type="ORDER_BATCH_EXECUTE_REQUESTED",
+                mode=order.mode,
+                actor=actor,
+                details={
+                    "order_id": order.order_id,
+                    "status": order.status,
+                    "broker_order_id": order.broker_order_id,
+                },
+            )
+        return JSONResponse([o.to_dict() for o in orders])
     except PermissionError as exc:
         raise _HTTPException(403, str(exc)) from exc
     except ValueError as exc:
@@ -4097,8 +4139,8 @@ async def api_reconciliation():
         if live_broker is None:
             raise RuntimeError("No authenticated broker session.")
 
-        broker_positions_raw = live_broker.get_positions()
-        broker_funds_raw = live_broker.get_funds()
+        broker_positions_raw = await asyncio.to_thread(live_broker.get_positions)
+        broker_funds_raw = await asyncio.to_thread(live_broker.get_funds)
 
         # Validate snapshot freshness
         snapshot_at = datetime.now(timezone.utc).isoformat()
@@ -4160,8 +4202,8 @@ async def api_reconciliation():
 
         # Refresh known lifecycle states before comparing positions.  Failure is
         # visible below as a degraded reconciliation, never silently ignored.
-        sync_execution_orders()
-        internal = get_internal_ledger_snapshot(broker_account_id)
+        await asyncio.to_thread(sync_execution_orders)
+        internal = await asyncio.to_thread(get_internal_ledger_snapshot, broker_account_id)
     except Exception as ledger_exc:
         internal = None
         ledger_reason = str(ledger_exc)
@@ -4187,7 +4229,8 @@ async def api_reconciliation():
         )
 
     # 3. Run reconciliation against independent local ledger + real broker snapshot.
-    report = reconcile_ledger(
+    report = await asyncio.to_thread(
+        reconcile_ledger,
         internal_positions=internal["positions"],
         broker_positions=broker_positions,
         internal_cash=float(internal["cash"]),

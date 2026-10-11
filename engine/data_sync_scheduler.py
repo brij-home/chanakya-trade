@@ -23,12 +23,12 @@ import asyncio
 import gc
 import logging
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("engine.data_sync")
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 class DataSyncScheduler:

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Any
 
 from rich.console import Console
@@ -35,7 +35,7 @@ from rich.table import Table
 logger = logging.getLogger("engine.drift")
 console = Console()
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 @dataclass

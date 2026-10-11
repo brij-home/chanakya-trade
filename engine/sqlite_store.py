@@ -21,13 +21,12 @@ import json
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger("engine.sqlite_store")
-
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 def get_default_db_path() -> Path:
@@ -57,10 +56,13 @@ class SQLiteAlertStore:
             check_same_thread=False,
         )
         conn.row_factory = sqlite3.Row
-        # Enable WAL mode and performance pragmas
+        # Enable WAL mode and high-performance RAM/SSD pragmas
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute("PRAGMA cache_size = -65536;")  # 64 MB RAM cache (negative = KiB)
+        conn.execute("PRAGMA mmap_size = 268435456;")  # 256 MB memory-mapped file I/O
+        conn.execute("PRAGMA temp_store = MEMORY;")  # Intermediate tables and sorts in RAM
         return conn
 
     def _init_db(self) -> None:

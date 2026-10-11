@@ -13,7 +13,7 @@ def app_data_dir() -> Path:
     Defaults to ~/.trading_platform for desktop/CLI compatibility. Tests,
     CI, and containers can override this with TRADING_PLATFORM_HOME.
     """
-    override = os.environ.get("TRADING_PLATFORM_HOME") or os.environ.get("TRADING_PLATFORM_DATA")
+    override = os.environ.get("TRADING_PLATFORM_DATA") or os.environ.get("TRADING_PLATFORM_HOME")
     if override:
         return Path(override).expanduser()
     return Path.home() / ".trading_platform"

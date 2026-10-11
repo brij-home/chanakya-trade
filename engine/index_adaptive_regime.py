@@ -39,13 +39,15 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, time as dtime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger("chanakya.index_adaptive_regime")
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST_ZONE as IST
+
+_last_eagle_regime: dict[str, str] = {}
+_eagle_regime_lock = threading.Lock()
 
 
 # ── Data Models ───────────────────────────────────────────────────────────────
@@ -538,6 +540,27 @@ def evaluate_eagle_regime(
         f"🦅 Eagle Radar: {clean_sym} {overall_env} | CHOP: {chop_val:.1f} ({chop_status}) | "
         f"ADX: {adx_val:.1f} ({adx_status}) | Phase: {phase} | Multi-TF: {mtf.bias}"
     )
+
+    with _eagle_regime_lock:
+        prev_env = _last_eagle_regime.get(clean_sym)
+        if prev_env and prev_env != overall_env:
+            try:
+                from web.domain_events import create_regime_shift_event
+                from web.sse import event_bus
+
+                evt = create_regime_shift_event(
+                    from_regime=prev_env,
+                    to_regime=overall_env,
+                    vix_level=float(vix_val or 0.0),
+                    reason=summary,
+                )
+                event_bus.publish_domain_event(evt)
+                event_bus.publish_sync(
+                    "system", {"type": "regime_shift", "event": evt.to_sse_dict()}
+                )
+            except Exception as e_reg:
+                logger.debug(f"[IndexAdaptiveRegime] Regime shift event publish skipped: {e_reg}")
+        _last_eagle_regime[clean_sym] = overall_env
 
     return EagleRegime(
         symbol=clean_sym,

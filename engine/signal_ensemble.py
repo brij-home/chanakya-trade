@@ -22,12 +22,19 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import math
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger("engine.signal_ensemble")
+
+_last_vix_regime: Optional[str] = None
+_vix_regime_lock = threading.Lock()
 
 
 # ── Strategy weights (regime-adaptive) ──────────────────────
@@ -74,7 +81,8 @@ def get_regime_weights(vix: Optional[float] = None) -> dict[str, float]:
 
     if vix < 15:
         # Calm/trending regime: trend + momentum dominate
-        return {
+        regime_name = "CALM_TRENDING"
+        weights = {
             "trend": 0.30,
             "momentum": 0.30,
             "mean_rev": 0.15,
@@ -83,10 +91,12 @@ def get_regime_weights(vix: Optional[float] = None) -> dict[str, float]:
         }
     elif vix < 22:
         # Normal regime: balanced (default)
-        return dict(STRATEGY_WEIGHTS)
+        regime_name = "NORMAL"
+        weights = dict(STRATEGY_WEIGHTS)
     elif vix < 28:
         # Elevated volatility: shift to volatility + statistical, reduce trend
-        return {
+        regime_name = "ELEVATED_VOLATILITY"
+        weights = {
             "trend": 0.20,
             "momentum": 0.15,
             "mean_rev": 0.20,
@@ -95,13 +105,37 @@ def get_regime_weights(vix: Optional[float] = None) -> dict[str, float]:
         }
     else:
         # Extreme VIX (tail risk): mean reversion + volatility dominant, momentum unreliable
-        return {
+        regime_name = "EXTREME_TAIL_RISK"
+        weights = {
             "trend": 0.15,
             "momentum": 0.10,
             "mean_rev": 0.25,
             "volatility": 0.30,
             "statistical": 0.20,
         }
+
+    global _last_vix_regime
+    with _vix_regime_lock:
+        if _last_vix_regime and _last_vix_regime != regime_name:
+            try:
+                from web.domain_events import create_regime_shift_event
+                from web.sse import event_bus
+
+                evt = create_regime_shift_event(
+                    from_regime=_last_vix_regime,
+                    to_regime=regime_name,
+                    vix_level=float(vix),
+                    reason=f"India VIX shifted from {_last_vix_regime} to {regime_name} ({vix:.2f})",
+                )
+                event_bus.publish_domain_event(evt)
+                event_bus.publish_sync(
+                    "system", {"type": "regime_shift", "event": evt.to_sse_dict()}
+                )
+            except Exception as e_reg:
+                logger.debug(f"[SignalEnsemble] Regime shift event publish skipped: {e_reg}")
+        _last_vix_regime = regime_name
+
+    return weights
 
 
 _SIGNAL_LABELS = {1: "BULLISH", -1: "BEARISH", 0: "NEUTRAL"}

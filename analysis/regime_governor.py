@@ -21,10 +21,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, time as dtime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("chanakya.analysis.regime_governor")
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST_ZONE as IST
 
 
 @dataclass

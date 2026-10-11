@@ -11,11 +11,15 @@ across the codebase (historically defined in 8+ separate files).
 from __future__ import annotations
 
 from datetime import timezone, timedelta
+from zoneinfo import ZoneInfo
 
 # ── Timezone ─────────────────────────────────────────────────────────────────
 
-#: Indian Standard Time (UTC+5:30)
+#: Indian Standard Time (UTC+5:30) offset
 IST = timezone(timedelta(hours=5, minutes=30))
+
+#: Indian Standard Time IANA ZoneInfo instance
+IST_ZONE = ZoneInfo("Asia/Kolkata")
 
 # ── NSE/BSE Market Hours (HHMM integers for fast comparison) ──────────────────
 

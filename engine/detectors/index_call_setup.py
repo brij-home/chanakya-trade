@@ -182,9 +182,19 @@ def detect_index_call_setup(
     # First 10 minutes (09:15 - 09:25 IST) are noisy opening auction price discovery.
     # Multi-candle structural setups (trend pullbacks, double bottoms, day-high breakouts)
     # require at least 2 completed 5m bars and cannot form before 09:25 IST.
+    # EXCEPTION: Opening Range Displacement (ORD) — If spot has aggressively sliced
+    # through Previous Day High (PDH) by >= 0.20% and is up >= 0.50% from open,
+    # institutional accumulation is already underway. Bypass opening buffer so early breakouts are caught.
+    _is_opening_displacement = bool(
+        prev_day_high
+        and prev_day_high > 0
+        and spot > prev_day_high * 1.002
+        and _spot_above_open_escape
+    )
     is_opening_buffer = (
         (curr_time < dtime(9, 25))
         and not ignore_time_gate
+        and not _is_opening_displacement
         and (not is_test_runner or ref_time is not None)
     )
     if is_opening_buffer:
@@ -335,8 +345,10 @@ def detect_index_call_setup(
         else 0.0
     )
     is_breakout_momentum = (
-        cand_ce_pchange >= 15.0 and cand_ce_vol_oi >= 1.2 and cand_ce_vol >= min_vol
-    ) or (cand_ce_vol_oi >= 2.0 and cand_ce_vol >= int(min_vol * 1.5))
+        (cand_ce_pchange >= 15.0 and cand_ce_vol_oi >= 1.2 and cand_ce_vol >= min_vol)
+        or (cand_ce_vol_oi >= 2.0 and cand_ce_vol >= int(min_vol * 1.5))
+        or _is_opening_displacement
+    )
     is_explosive_momentum = (cand_ce_vol_oi >= 3.0 and cand_ce_vol >= min_vol * 2) or (
         cand_ce_pchange >= 25.0 and cand_ce_vol_oi >= 2.0 and cand_ce_vol >= min_vol
     )
@@ -1575,16 +1587,16 @@ def detect_index_call_setup(
         opt_plan = None
         mkt_status = {"status": "SESSION_OPEN", "label": "⚡ SESSION OPEN"}
 
-    t1_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.18, 1)
-    t2_premium = opt_plan.get("t2_premium") if opt_plan else round(opt_ltp * 1.32, 1)
-    t3_premium = opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 1.55, 1)
-    sl_premium = opt_plan["sl_premium"] if opt_plan else round(max(0.5, opt_ltp * 0.82), 1)
+    t1_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.24, 1)
+    t2_premium = opt_plan.get("t2_premium") if opt_plan else round(opt_ltp * 1.42, 1)
+    t3_premium = opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 1.66, 1)
+    sl_premium = opt_plan["sl_premium"] if opt_plan else round(max(0.5, opt_ltp * 0.88), 1)
     t0_5_premium = (
         opt_plan.get("t0_5_premium")
         if opt_plan
-        else round(opt_ltp + (0.8 * max(1.0, opt_ltp - sl_premium)), 1)
+        else round(opt_ltp + (1.0 * max(1.0, opt_ltp - sl_premium)), 1)
     )
-    rr_str = opt_plan.get("option_rr", "1:1.8") if opt_plan else "1:1.8"
+    rr_str = opt_plan.get("option_rr", "1:2.0") if opt_plan else "1:2.0"
     net_rr_str = opt_plan.get("net_option_rr", rr_str) if opt_plan else rr_str
 
     # ── Intraday Feasibility & Greeks-Aligned Scalp Risk Engine ──
@@ -1605,12 +1617,12 @@ def detect_index_call_setup(
         if calc_risk > max_intraday_opt_risk:
             calc_risk = max_intraday_opt_risk
             sl_premium = round(max(0.5, opt_ltp - calc_risk), 1)
-            t0_5_premium = round(opt_ltp + (calc_risk * 0.8), 1)
-            t1_premium = round(opt_ltp + (calc_risk * 1.5), 1)
-            t2_premium = round(opt_ltp + (calc_risk * 2.8), 1)
-            t3_premium = round(opt_ltp + (calc_risk * 4.5), 1)
-            rr_str = "1:1.5"
-            net_rr_str = "1:1.5"
+            t0_5_premium = round(opt_ltp + (calc_risk * 1.0), 1)
+            t1_premium = round(opt_ltp + (calc_risk * 2.0), 1)
+            t2_premium = round(opt_ltp + (calc_risk * 3.5), 1)
+            t3_premium = round(opt_ltp + (calc_risk * 5.5), 1)
+            rr_str = "1:2.0"
+            net_rr_str = "1:2.0"
 
     friction_pts = (
         opt_plan.get("friction_pts", round(opt_ltp * 0.012 + 0.35, 2))

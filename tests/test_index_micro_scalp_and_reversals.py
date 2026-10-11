@@ -105,7 +105,7 @@ def test_index_micro_scalp_detection():
     plan = pe_alert.actionable_plan
     assert "Buy above" in plan["when_to_buy"]
     assert "DO NOT CHASE" in plan["when_to_wait"]
-    assert "Scale Blueprint" in plan["profit_rule"]
+    assert "Institutional Blueprint" in plan["profit_rule"]
     assert pe_alert.no_chase_boundary > pe_alert.trigger_level
 
 

@@ -1031,6 +1031,287 @@ def execute_order_intent(order_id: str) -> OrderIntent:
     )
 
 
+def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
+    """
+    Execute a micro-batch of server-CONFIRMED order intents atomically.
+
+    Optimizations & Safety Invariants:
+      1. Micro-Batching: If the execution broker supports `place_basket_orders`,
+         dispatches all validated orders in a single atomic network roundtrip
+         instead of sequential HTTP requests, minimizing latency and execution slippage.
+      2. Atomicity & Anti-Replay: Pre-validates all orders against P0 invariants
+         (cross-mode protection, CONFIRMED status, preview hash integrity, pilot safety).
+      3. Fail-Closed Fallback: If broker does not support batch placement,
+         executes sequentially via `execute_order_intent` without breaking contracts.
+    """
+    if not order_ids:
+        return []
+
+    if len(order_ids) == 1:
+        return [execute_order_intent(order_ids[0])]
+
+    mode_info = get_trading_mode()
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # If in OBSERVE or SIMULATE mode, execute sequentially via execute_order_intent
+    # (paper execution maintains accurate sequential fill sequence and balances)
+    if not mode_info.is_execute:
+        return [execute_order_intent(oid) for oid in order_ids]
+
+    # Live Execution Mode
+    from engine.modes import assert_live_execution_allowed
+
+    assert_live_execution_allowed()
+
+    from brokers.base import OrderRequest
+    from brokers.session import get_execution_broker, get_execution_broker_key
+    from engine.observability import new_correlation_id
+    from engine.pilot_safety import assert_pilot_execution_allowed
+    from engine.pretrade import validate_pretrade
+    from market.instruments import resolve_canonical_instrument
+    from market.quotes import get_quote
+
+    live_broker = get_execution_broker()
+    if live_broker is None:
+        raise RuntimeError("No authenticated broker session available for live execution.")
+
+    # Fall back to sequential execution if adapter does not support basket placement
+    if not hasattr(live_broker, "place_basket_orders"):
+        return [execute_order_intent(oid) for oid in order_ids]
+
+    _init_orders_db()
+
+    # Step 1: Load and pre-validate all orders from ledger
+    loaded_orders: list[dict[str, Any]] = []
+    with _get_orders_db() as conn:
+        conn.row_factory = sqlite3.Row
+        for oid in order_ids:
+            cursor = conn.execute("SELECT * FROM orders_ledger WHERE order_id = ?", (oid,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"Order {oid} not found.")
+            d = dict(row)
+            if d["mode"] != mode_info.mode.name:
+                raise PermissionError(
+                    f"Order {oid} was generated in {d['mode']} mode but execution was attempted in "
+                    f"{mode_info.mode.name} mode."
+                )
+            if d["status"] != "CONFIRMED":
+                raise ValueError(
+                    f"Order {oid} cannot be executed because status is '{d['status']}'."
+                )
+
+            # Preview hash integrity
+            canonical_str = (
+                f"{d.get('exchange', 'NSE')}:{d['symbol'].upper()}:{d.get('segment', 'EQUITY_INTRADAY')}:{d['side']}:"
+                f"{d['quantity']}:{float(d['price']):.4f}:{d['order_type']}:{d['product']}:{d['mode']}"
+            )
+            expected_hash = hashlib.sha256(canonical_str.encode()).hexdigest()
+            if d.get("preview_hash") and d["preview_hash"] != expected_hash:
+                raise ValueError(f"Order {oid} preview hash verification failed.")
+
+            # Instrument authority
+            _, canonical_exchange, canonical_segment = _resolve_order_instrument(
+                d["symbol"], d["product"]
+            )
+            if d.get("exchange") != canonical_exchange or d.get("segment") != canonical_segment:
+                raise ValueError(
+                    f"Order {oid} instrument metadata does not match instrument master."
+                )
+
+            loaded_orders.append(d)
+
+    # Step 2: Transition all to SUBMITTING atomically
+    with _get_orders_db() as conn:
+        for d in loaded_orders:
+            cursor = conn.execute(
+                """
+                UPDATE orders_ledger
+                SET status = 'SUBMITTING', updated_at = ?
+                WHERE order_id = ? AND status = 'CONFIRMED' AND mode = ?
+                """,
+                (now_iso, d["order_id"], mode_info.mode.name),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError(f"Order {d['order_id']} transition to SUBMITTING failed.")
+        conn.commit()
+
+    for d in loaded_orders:
+        d["status"] = "SUBMITTING"
+
+    # Step 3: Validate pilot safety & pretrade for each order
+    batch_correlation_id = new_correlation_id("batch_order")
+    _account = getattr(live_broker, "account_id", None) or getattr(live_broker, "client_id", None)
+
+    _funds = live_broker.get_funds()
+    _available_cash = (
+        _funds.available_cash
+        if hasattr(_funds, "available_cash")
+        else float(_funds.get("available_cash", 0.0))
+        if isinstance(_funds, dict)
+        else None
+    )
+
+    instruments_to_fetch = [f"{d.get('exchange', 'NSE')}:{d['symbol']}" for d in loaded_orders]
+    quotes_map = get_quote(instruments_to_fetch)
+
+    order_requests: list[OrderRequest] = []
+    validated_orders: list[dict[str, Any]] = []
+
+    for d in loaded_orders:
+        oid = d["order_id"]
+        inst = resolve_canonical_instrument(d["symbol"])
+        _live_exchange = d.get("exchange") or inst.exchange
+        _live_segment = d.get("segment") or inst.segment
+
+        # Pilot safety
+        assert_pilot_execution_allowed(
+            segment=_live_segment,
+            product=d["product"],
+            notional=float(d["price"]) * int(d["quantity"]),
+        )
+
+        inst_key = f"{_live_exchange}:{d['symbol']}"
+        _q = quotes_map.get(inst_key) or quotes_map.get(d["symbol"])
+        if not _q or getattr(_q, "data_state", "UNAVAILABLE") != "LIVE":
+            raise RuntimeError(f"Live execution of {oid} requires fresh LIVE data.")
+        _ltp = getattr(_q, "last_price", None)
+        _quote_age = getattr(_q, "age_seconds", None)
+        if callable(_quote_age):
+            _quote_age = _quote_age()
+
+        pretrade = validate_pretrade(
+            symbol=d["symbol"],
+            side=d["side"],
+            quantity=d["quantity"],
+            order_type=d["order_type"],
+            price=d["price"] if d["price"] else None,
+            segment=_live_segment,
+            account=_account,
+            ltp=_ltp,
+            quote_age_seconds=_quote_age,
+            available_cash=_available_cash,
+            correlation_id=batch_correlation_id,
+        )
+        if not pretrade.is_eligible:
+            reasons = "; ".join(pretrade.blocking_reasons)
+            d["status"] = "REJECTED"
+            d["rejection_reason"] = f"Pre-trade validation blocked: {reasons}"
+            with _get_orders_db() as conn:
+                conn.execute(
+                    "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                    (d["status"], d["rejection_reason"], now_iso, oid),
+                )
+                conn.commit()
+            raise ValueError(f"Pre-trade validation blocked for order {oid}: {reasons}")
+
+        order_requests.append(
+            OrderRequest(
+                symbol=d["symbol"],
+                exchange=_live_exchange,
+                transaction_type=d["side"],
+                order_type=d["order_type"],
+                product=d["product"],
+                quantity=d["quantity"],
+                price=d["price"],
+            )
+        )
+        validated_orders.append(d)
+
+    # Step 4: Dispatch batch to live broker
+    execution_provider = get_execution_broker_key() or live_broker.__class__.__name__.lower()
+    try:
+        batch_responses = live_broker.place_basket_orders(order_requests)
+    except Exception as exc:
+        for d in validated_orders:
+            d["status"] = "UNKNOWN_FREEZE"
+            d["broker_order_id"] = None
+            d["rejection_reason"] = f"Live batch call raised {type(exc).__name__}: {exc}"
+            with _get_orders_db() as conn:
+                conn.execute(
+                    "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                    (
+                        d["status"],
+                        d["broker_order_id"],
+                        d["rejection_reason"],
+                        now_iso,
+                        d["order_id"],
+                    ),
+                )
+                conn.commit()
+            record_audit_event(
+                event_type="ORDER_UNKNOWN_FREEZE",
+                mode=mode_info.mode.name,
+                details={
+                    "order_id": d["order_id"],
+                    "correlation_id": batch_correlation_id,
+                    "exception": str(exc),
+                },
+            )
+        raise RuntimeError(f"Live batch order frozen due to broker exception: {exc}") from exc
+
+    # Step 5: Map batch responses back to each order intent
+    results: list[OrderIntent] = []
+    for idx, d in enumerate(validated_orders):
+        oid = d["order_id"]
+        resp = batch_responses[idx] if idx < len(batch_responses) else None
+        if resp and resp.status in ("COMPLETE", "OPEN", "SUBMITTED"):
+            d["status"] = "OPEN" if resp.status in ("OPEN", "SUBMITTED") else "FILLED"
+            d["broker_order_id"] = resp.order_id
+            d["rejection_reason"] = None
+        elif resp and resp.status == "REJECTED":
+            d["status"] = "REJECTED"
+            d["broker_order_id"] = None
+            d["rejection_reason"] = resp.message or "Rejected by broker basket"
+        else:
+            d["status"] = "UNKNOWN_FREEZE"
+            d["broker_order_id"] = None
+            d["rejection_reason"] = (
+                f"Ambiguous broker basket response: {getattr(resp, 'status', None)}"
+            )
+
+        with _get_orders_db() as conn:
+            conn.execute(
+                "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                (d["status"], d["broker_order_id"], d["rejection_reason"], now_iso, oid),
+            )
+            conn.commit()
+
+        _record_order_event(
+            oid,
+            "BROKER_RESPONSE" if d["status"] != "UNKNOWN_FREEZE" else "UNKNOWN_FREEZE",
+            correlation_id=batch_correlation_id,
+            broker_name=execution_provider,
+            broker_order_id=d.get("broker_order_id"),
+            payload={"status": d["status"], "reason": d.get("rejection_reason")},
+        )
+
+        results.append(
+            OrderIntent(
+                order_id=d["order_id"],
+                idempotency_key=d["idempotency_key"],
+                symbol=d["symbol"],
+                exchange=d.get("exchange", "NSE"),
+                segment=d.get("segment", "EQUITY_INTRADAY"),
+                side=d["side"],
+                quantity=d["quantity"],
+                price=d["price"],
+                order_type=d["order_type"],
+                product=d["product"],
+                status=d["status"],
+                mode=d["mode"],
+                broker_order_id=d.get("broker_order_id"),
+                charges=json.loads(d.get("charges_json") or "{}"),
+                rejection_reason=d.get("rejection_reason"),
+                preview_hash=d.get("preview_hash"),
+                created_at=d.get("created_at", now_iso),
+                updated_at=now_iso,
+            )
+        )
+
+    return results
+
+
 def set_ledger_cash_baseline(account_id: str, opening_cash: float, *, actor: str = "USER") -> None:
     """Explicitly establish a cash baseline for honest broker reconciliation.
 

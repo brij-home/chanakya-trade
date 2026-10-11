@@ -36,7 +36,7 @@ import logging
 import os
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 import time
@@ -47,22 +47,20 @@ import pandas as pd
 
 logger = logging.getLogger("engine.learning_engine")
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
+from config.paths import app_data_path
 
 
 def get_pattern_memory_file() -> Path:
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    return base / "pattern_memory.json"
+    return app_data_path("pattern_memory.json")
 
 
 def get_pattern_outcomes_file() -> Path:
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    return base / "pattern_outcomes.json"
+    return app_data_path("pattern_outcomes.json")
 
 
 def get_pattern_post_mortems_file() -> Path:
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    return base / "invalidation_post_mortems.json"
+    return app_data_path("invalidation_post_mortems.json")
 
 
 @dataclass

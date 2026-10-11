@@ -51,6 +51,8 @@ def test_fyers_budget_diagnostics_endpoint(client):
     cb = data["circuit_breaker"]
     assert cb["state"] in ("CLOSED", "OPEN", "HALF_OPEN")
 
+    from market.ws_subscription_manager import MAX_WS_SUBSCRIPTIONS
+
     subs = data["websocket_subscriptions"]
-    assert subs["max_limit"] == 180
+    assert subs["max_limit"] == MAX_WS_SUBSCRIPTIONS
     assert subs["total_count"] >= 40

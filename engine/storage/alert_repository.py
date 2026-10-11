@@ -258,7 +258,7 @@ class AlertRepository:
                             time_horizon=d.get("time_horizon", "INTRADAY"),
                             eta_label=d.get("eta_label"),
                             setup_style=d.get("setup_style", "CONTINUATION"),
-                            entry_type=d.get("entry_type", "LIMIT_ON_PULLBACK"),
+                            entry_type=d.get("entry_type", "BREAKOUT_STOP"),
                             no_chase_boundary=d.get("no_chase_boundary"),
                             telegram_dispatched=bool(d.get("telegram_dispatched", False)),
                             dispatched_channels=list(d.get("dispatched_channels", [])),
@@ -323,7 +323,7 @@ class AlertRepository:
         return alerts
 
     def prune_expired_archived(
-        self, alerts: list[AutoAlert], max_age_days: int = 3
+        self, alerts: list[AutoAlert], max_age_days: int = 30
     ) -> Tuple[list[AutoAlert], int]:
         """
         Prunes inactive, archived, or invalidated records older than max_age_days.

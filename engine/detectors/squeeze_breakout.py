@@ -585,7 +585,7 @@ def detect_squeeze_breakout(
             and (ltp - pivot_high) / pivot_high <= 0.025
             and rvol >= 1.6
             and ltp > sma20
-            and not (upper_wick_ratio >= 0.50 and candle_range >= 0.50 * atr20)
+            and not (upper_wick_ratio >= 0.40 and candle_range >= 0.40 * atr20)
             and (is_test_env or adx_val >= 21.0 or adx_slope > 1.0)
         ):
             tp = None
@@ -688,7 +688,7 @@ def detect_squeeze_breakout(
             and (pivot_low - ltp) / pivot_low <= 0.025
             and rvol >= 1.6
             and ltp < sma20
-            and not (lower_wick_ratio >= 0.50 and candle_range >= 0.50 * atr20)
+            and not (lower_wick_ratio >= 0.40 and candle_range >= 0.40 * atr20)
             and (is_test_env or adx_val >= 21.0 or adx_slope > 1.0)
         ):
             # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance)

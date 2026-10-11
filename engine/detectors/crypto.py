@@ -457,6 +457,13 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
             rvol = round(cur_vol / max(v20, 1.0), 2)
             ema20 = float(df["close"].ewm(span=20, adjust=False).mean().iloc[-1])
 
+            # Institutional Order Flow & CVD Divergence Check
+            from engine.detectors.order_flow import compute_order_flow_cvd_divergence
+
+            cvd_data = compute_order_flow_cvd_divergence(df, ltp)
+            has_bull_absorption = bool(cvd_data.get("is_bullish_absorption", False))
+            has_bear_exhaustion = bool(cvd_data.get("is_bearish_exhaustion", False))
+
             # ── A. BULLISH SMC: Demand OB Reclaim / Retest OR Confirmed Breakout ──
             is_bull_struct = regime == "BULLISH" or (
                 smc.choch_detected and smc.choch_type == "BULLISH_CHOCH"
@@ -472,14 +479,14 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     cur_close = float(df["close"].iloc[-1])
                     is_bull_candle = cur_close >= cur_open or cur_close >= ltp * 0.999
 
-                    passes_breakout_vol = True
                     if is_breakout:
-                        passes_breakout_vol = (
-                            rvol >= 1.15 or ob.volume_ratio >= 1.15
-                        ) and is_bull_candle
+                        passes_vol = (rvol >= 1.15 or ob.volume_ratio >= 1.15) and is_bull_candle
+                    else:
+                        # Retest: Reject dead overnight drift / chop (RVOL < 0.85) unless confirmed CVD absorption
+                        passes_vol = (rvol >= 0.85) or (rvol >= 0.60 and has_bull_absorption)
 
                     # Momentum must-have: not overbought (RSI <= 74), bullish momentum floor (RSI >= 42)
-                    if (42.0 <= rsi <= 74.0) and passes_breakout_vol:
+                    if (42.0 <= rsi <= 74.0) and passes_vol:
                         supplies = [s for s in smc.active_supply_zones if s.bottom > ltp]
                         opposing_target = (
                             min(supplies, key=lambda s: s.bottom).bottom if supplies else None
@@ -536,6 +543,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                             if ltp >= ema20:
                                 confluences.append("Above 20-EMA")
                                 conf_score += 3
+                            if has_bull_absorption:
+                                confluences.append("Taker CVD Absorption Divergence")
+                                conf_score += 5
 
                             smc_confidence = min(96, max(85, conf_score))
                             conf = " + ".join(confluences)
@@ -642,14 +652,14 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     cur_close = float(df["close"].iloc[-1])
                     is_bear_candle = cur_close <= cur_open or cur_close <= ltp * 1.001
 
-                    passes_breakdown_vol = True
                     if is_breakdown:
-                        passes_breakdown_vol = (
-                            rvol >= 1.15 or ob.volume_ratio >= 1.15
-                        ) and is_bear_candle
+                        passes_vol = (rvol >= 1.15 or ob.volume_ratio >= 1.15) and is_bear_candle
+                    else:
+                        # Supply Rejection: Reject low-volume drift (RVOL < 0.85) unless confirmed CVD exhaustion
+                        passes_vol = (rvol >= 0.85) or (rvol >= 0.60 and has_bear_exhaustion)
 
                     # Momentum must-have: not oversold (RSI >= 26), bearish momentum ceiling (RSI <= 58)
-                    if (26.0 <= rsi <= 58.0) and passes_breakdown_vol:
+                    if (26.0 <= rsi <= 58.0) and passes_vol:
                         demands = [d for d in smc.active_demand_zones if d.top < ltp]
                         opposing_target = max(demands, key=lambda d: d.top).top if demands else None
                         plan = derive_crypto_trade_plan(
@@ -705,6 +715,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                             if ltp <= ema20:
                                 confluences.append("Below 20-EMA")
                                 conf_score += 3
+                            if has_bear_exhaustion:
+                                confluences.append("Taker CVD Exhaustion Divergence")
+                                conf_score += 5
 
                             smc_confidence = min(96, max(85, conf_score))
                             conf = " + ".join(confluences)
@@ -950,117 +963,133 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
             net_gex = float(opt_sum.get("net_gex_usd", 0.0) or 0.0)
             gamma_regime = str(opt_sum.get("gamma_regime", "NEUTRAL"))
             gex_flip = float(opt_sum.get("gex_flip_strike", 0.0) or 0.0)
+            prompt_dte = float(opt_sum.get("prompt_dte_days", 1.0) or 1.0)
 
-            if abs(dist_pct) >= 4.5 and max_pain > 0:
-                # Correct Institutional Deribit Max Pain Gravitational Mechanics:
-                # If dist_pct > 0 (Max Pain > Spot), spot is below Max Pain and pulled UP -> BULLISH
-                # If dist_pct < 0 (Max Pain < Spot), spot is above Max Pain and pulled DOWN -> BEARISH
+            # Institutional Deribit Guardrails:
+            # 1. Prompt DTE constraint: Pinning requires prompt expiry window (<= 3.5 DTE). Macro expiries don't pin spot.
+            # 2. Negative Gamma veto: When dealers are short gamma, hedging accelerates moves away from strikes instead of pinning!
+            is_valid_pinning_regime = gamma_regime != "NEGATIVE_GAMMA_EXPANSION"
+            is_valid_dte = prompt_dte <= 3.5
+
+            if abs(dist_pct) >= 4.5 and max_pain > 0 and is_valid_pinning_regime and is_valid_dte:
                 is_bullish = dist_pct > 0
-                direction = "BULLISH" if is_bullish else "BEARISH"
-                alert_id = generate_alert_id(
-                    clean_sym, "CRYPTO_VOLATILITY", variant="options-gravity"
-                )
-                plan = derive_crypto_trade_plan(
-                    clean_sym,
-                    direction=direction,
-                    ltp=ltp,
-                    df=df,
-                    anchor_target=max_pain,
-                )
-                sl_price = plan.sl_price
-                t1_price = plan.t1_price
-                t2_price = plan.t2_price
-                t3_price = plan.t3_price
-                rr_str = plan.rr_str
-                profit_rule = plan.profit_rule
-                entry_range = f"${plan.entry_min:,.2f} – ${plan.entry_max:,.2f}"
-                no_chase = plan.no_chase
 
-                if is_bullish:
-                    headline = f"🌊 DERIBIT OPTIONS GRAVITY: {clean_sym} Max Pain Magnet at ${max_pain:,.0f}"
-                    summary = (
-                        f"Spot (${ltp:,.2f}) is {abs(dist_pct):.1f}% below Deribit Max Pain (${max_pain:,.0f}). "
-                        f"Options dealer gamma position exerts strong upward gravitational pull into expiry."
+                # Trend momentum sanity: Do not short into a runaway bull breakout or catch a free-falling liquidation knife
+                trend_ok = True
+                if df is not None and len(df) >= 20:
+                    c_rsi = compute_crypto_rsi(df)
+                    c_ema20 = float(df["close"].ewm(span=20, adjust=False).mean().iloc[-1])
+                    if not is_bullish and ltp > c_ema20 and c_rsi >= 72.0:
+                        trend_ok = False  # Strong bull impulse; do not fade with Max Pain short
+                    elif is_bullish and ltp < c_ema20 and c_rsi <= 28.0:
+                        trend_ok = False  # Free-fall breakdown; do not catch knife into Max Pain
+
+                if trend_ok:
+                    direction = "BULLISH" if is_bullish else "BEARISH"
+                    alert_id = generate_alert_id(
+                        clean_sym, "CRYPTO_VOLATILITY", variant="options-gravity"
                     )
-                    action = "BUY_SPOT / LONG"
-                else:
-                    headline = f"🌊 DERIBIT OPTIONS GRAVITY: {clean_sym} Overextended Above Max Pain (${max_pain:,.0f})"
-                    summary = (
-                        f"Spot (${ltp:,.2f}) is +{abs(dist_pct):.1f}% extended above Deribit Max Pain (${max_pain:,.0f}). "
-                        f"Dealer gamma pull indicates mean-reversion pull down towards ${max_pain:,.0f}."
+                    plan = derive_crypto_trade_plan(
+                        clean_sym,
+                        direction=direction,
+                        ltp=ltp,
+                        df=df,
+                        anchor_target=max_pain,
                     )
-                    action = "SELL_SHORT_FUTURES / SHORT"
+                    sl_price = plan.sl_price
+                    t1_price = plan.t1_price
+                    t2_price = plan.t2_price
+                    t3_price = plan.t3_price
+                    rr_str = plan.rr_str
+                    profit_rule = plan.profit_rule
+                    entry_range = f"${plan.entry_min:,.2f} – ${plan.entry_max:,.2f}"
+                    no_chase = plan.no_chase
 
-                conf = (
-                    f"Deribit {base_curr} Max Pain Gravitational Magnet (${max_pain:,.0f} | "
-                    f"PCR: {pcr_oi:.2f} | {gamma_regime} Net GEX: ${net_gex:+,.0f})"
-                )
+                    if is_bullish:
+                        headline = f"🌊 DERIBIT OPTIONS GRAVITY: {clean_sym} Max Pain Magnet at ${max_pain:,.0f}"
+                        summary = (
+                            f"Spot (${ltp:,.2f}) is {abs(dist_pct):.1f}% below Deribit Max Pain (${max_pain:,.0f}). "
+                            f"Options dealer gamma position exerts strong upward gravitational pull into expiry."
+                        )
+                        action = "BUY_SPOT / LONG"
+                    else:
+                        headline = f"🌊 DERIBIT OPTIONS GRAVITY: {clean_sym} Overextended Above Max Pain (${max_pain:,.0f})"
+                        summary = (
+                            f"Spot (${ltp:,.2f}) is +{abs(dist_pct):.1f}% extended above Deribit Max Pain (${max_pain:,.0f}). "
+                            f"Dealer gamma pull indicates mean-reversion pull down towards ${max_pain:,.0f}."
+                        )
+                        action = "SELL_SHORT_FUTURES / SHORT"
 
-                alert = AutoAlert(
-                    alert_id=alert_id,
-                    alert_type="CRYPTO_VOLATILITY",
-                    stage="EARLY_WARNING",
-                    symbol=clean_sym,
-                    exchange="CRYPTO",
-                    segment="CRYPTO",
-                    time_horizon="ROLLING_24H",
-                    eta_label="24h Rolling",
-                    direction=direction,
-                    headline=headline,
-                    summary=summary,
-                    ltp=ltp,
-                    trigger_level=(
-                        round(ltp * 1.0025, 2) if is_bullish else round(ltp * 0.9975, 2)
-                    ),
-                    target_level=t1_price,
-                    stop_loss=sl_price,
-                    confidence=85,
-                    created_at=now_iso,
-                    is_live=True,
-                    environment="LIVE",
-                    market_status="LIVE",
-                    metrics={
-                        "change_pct": chg_pct,
-                        "segment": "CRYPTO",
-                        "time_horizon": "SWING",
-                        "max_pain": max_pain,
-                        "max_pain_dist_pct": dist_pct,
-                        "pcr_oi": pcr_oi,
-                        "net_gex_usd": net_gex,
-                        "gamma_regime": gamma_regime,
-                        "gex_flip_strike": gex_flip,
-                        "setup_confluence": conf,
-                    },
-                    actionable_plan={
-                        "action": action,
-                        "segment": "CRYPTO",
-                        "contract": f"CRYPTO:{clean_sym}",
-                        "entry_range": entry_range,
-                        "stop_loss": f"${sl_price:,.2f}",
-                        "target": f"${t1_price:,.2f}",
-                        "target_2": f"${t2_price:,.2f}",
-                        "target_3": f"${t3_price:,.2f}",
-                        "runner": f"${t3_price:,.2f}",
-                        "risk_reward": rr_str,
-                        "when_to_buy": "Execute on structural support with defined risk below SL.",
-                        "when_to_wait": "Do not chase if price moves > 1% towards Max Pain without retest.",
-                        "no_chase_boundary": no_chase,
-                        "setup_confluence": conf,
-                        "profit_rule": profit_rule,
-                        "trade_plan": {
-                            "symbol": clean_sym,
-                            "direction": direction,
-                            "timeframe": "SWING",
-                            "entry_price": ltp,
-                            "invalidation_stop": sl_price,
-                            "target_1": t1_price,
-                            "target_2": t2_price,
-                            "target_3": t3_price,
-                            "risk_reward": rr_str,
+                    conf = (
+                        f"Deribit {base_curr} Max Pain Gravitational Magnet (${max_pain:,.0f} | "
+                        f"PCR: {pcr_oi:.2f} | {gamma_regime} Net GEX: ${net_gex:+,.0f})"
+                    )
+
+                    alert = AutoAlert(
+                        alert_id=alert_id,
+                        alert_type="CRYPTO_VOLATILITY",
+                        stage="EARLY_WARNING",
+                        symbol=clean_sym,
+                        exchange="CRYPTO",
+                        segment="CRYPTO",
+                        time_horizon="ROLLING_24H",
+                        eta_label="24h Rolling",
+                        direction=direction,
+                        headline=headline,
+                        summary=summary,
+                        ltp=ltp,
+                        trigger_level=(
+                            round(ltp * 1.0025, 2) if is_bullish else round(ltp * 0.9975, 2)
+                        ),
+                        target_level=t1_price,
+                        stop_loss=sl_price,
+                        confidence=85,
+                        created_at=now_iso,
+                        is_live=True,
+                        environment="LIVE",
+                        market_status="LIVE",
+                        metrics={
+                            "change_pct": chg_pct,
+                            "segment": "CRYPTO",
+                            "time_horizon": "SWING",
+                            "max_pain": max_pain,
+                            "max_pain_dist_pct": dist_pct,
+                            "pcr_oi": pcr_oi,
+                            "net_gex_usd": net_gex,
+                            "gamma_regime": gamma_regime,
+                            "gex_flip_strike": gex_flip,
+                            "setup_confluence": conf,
                         },
-                    },
-                )
-                found.append(alert)
+                        actionable_plan={
+                            "action": action,
+                            "segment": "CRYPTO",
+                            "contract": f"CRYPTO:{clean_sym}",
+                            "entry_range": entry_range,
+                            "stop_loss": f"${sl_price:,.2f}",
+                            "target": f"${t1_price:,.2f}",
+                            "target_2": f"${t2_price:,.2f}",
+                            "target_3": f"${t3_price:,.2f}",
+                            "runner": f"${t3_price:,.2f}",
+                            "risk_reward": rr_str,
+                            "when_to_buy": "Execute on structural support with defined risk below SL.",
+                            "when_to_wait": "Do not chase if price moves > 1% towards Max Pain without retest.",
+                            "no_chase_boundary": no_chase,
+                            "setup_confluence": conf,
+                            "profit_rule": profit_rule,
+                            "trade_plan": {
+                                "symbol": clean_sym,
+                                "direction": direction,
+                                "timeframe": "SWING",
+                                "entry_price": ltp,
+                                "invalidation_stop": sl_price,
+                                "target_1": t1_price,
+                                "target_2": t2_price,
+                                "target_3": t3_price,
+                                "risk_reward": rr_str,
+                            },
+                        },
+                    )
+                    found.append(alert)
         except Exception as e:
             logger.debug(f"[CryptoDetector] Options gravity check failed for {clean_sym}: {e}")
 

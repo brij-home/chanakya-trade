@@ -18,13 +18,12 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from engine.alert_identity import generate_alert_id
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("engine.index_contagion")
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST_ZONE as IST
 
 # ── Institutional Constituent Weightings (Active 2026) ───────────────────────
 

@@ -22,28 +22,33 @@ import csv
 import io
 import json
 import logging
-import os
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 import threading
 from typing import Any, Optional
 from market.http_pool import get_nse_client
+from market.single_flight_cache import SingleFlightCache
 
 logger = logging.getLogger("market.participant_oi")
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
+from config.paths import app_data_path
 
 
 def _get_cache_dir() -> Path:
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    p = base / "cache"
+    p = app_data_path("cache")
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 CACHE_FILE = _get_cache_dir() / "participant_oi_latest.json"
 _CACHE_LOCK = threading.Lock()
+_PARTICIPANT_OI_SINGLE_FLIGHT = SingleFlightCache[Any](
+    soft_ttl=3600.0,
+    hard_ttl=21600.0,
+    name="participant_oi",
+)
 
 
 @dataclass
@@ -291,19 +296,25 @@ def fetch_and_cache_participant_oi() -> ParticipantOISummary:
     return _BASELINE_FALLBACK
 
 
-def get_latest_participant_oi() -> ParticipantOISummary:
-    """Returns the latest available participant OI summary with in-memory / disk caching."""
-    with _CACHE_LOCK:
-        if CACHE_FILE.exists():
-            try:
-                mtime = CACHE_FILE.stat().st_mtime
-                age_seconds = datetime.now().timestamp() - mtime
-                # Use cache if updated within the last 6 hours
-                if age_seconds < 21600:
-                    with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        return ParticipantOISummary(**data)
-            except Exception:
-                pass
+def get_latest_participant_oi(force_refresh: bool = False) -> ParticipantOISummary:
+    """Returns the latest available participant OI summary with SingleFlight coalescing and disk caching."""
 
-    return fetch_and_cache_participant_oi()
+    def _fetch() -> ParticipantOISummary:
+        with _CACHE_LOCK:
+            if not force_refresh and CACHE_FILE.exists():
+                try:
+                    mtime = CACHE_FILE.stat().st_mtime
+                    age_seconds = datetime.now().timestamp() - mtime
+                    # Use cache if updated within the last 6 hours
+                    if age_seconds < 21600:
+                        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                            return ParticipantOISummary(**data)
+                except Exception:
+                    pass
+
+        return fetch_and_cache_participant_oi()
+
+    return _PARTICIPANT_OI_SINGLE_FLIGHT.get_or_fetch_sync(
+        "latest", _fetch, force_refresh=force_refresh
+    )

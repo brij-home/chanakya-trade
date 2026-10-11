@@ -31,8 +31,8 @@ def _cache_file(key: str, cache_dir: Path) -> Path:
 
 def prune_disk_cache(
     cache_dir: Optional[Path] = None,
-    max_age_days: int = 7,
-    max_total_mb: float = 200.0,
+    max_age_days: int = 30,
+    max_total_mb: float = 2048.0,
 ) -> int:
     """
     Purge stale disk cache JSON files and enforce directory size ceiling.

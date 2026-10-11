@@ -189,7 +189,7 @@ RISKS (2-3 bullets):
 - [primary risk]
 - [secondary risk]
 
-Keep the output concise and terminal-friendly. Use bullets. All prices in INR.
+Keep the output concise and terminal-friendly. STRICT OUTPUT CONSTRAINT: Keep the entire output under 300 words / 450 tokens so that the synthesis remains crisp, decisive, and never truncates. Use bullets. All prices in INR.
 
 Alternatively, if you prefer structured output, you MAY return a single JSON object instead of the text format above. Use these exact keys:
 {{"verdict": "BUY", "confidence": 72, "winner": "BULL", "strategy": "Buy on dip", "entry": "₹2,850", "stop_loss": "₹2,700 (5.3%)", "target": "₹3,150 (10.5%)", "risk_reward": "1:2.0 / 1:3.5", "position": "12 shares", "rationale": ["reason 1", "reason 2", "reason 3"], "risks": ["risk 1", "risk 2"]}}

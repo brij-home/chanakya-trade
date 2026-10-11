@@ -124,3 +124,90 @@ class TestParsePctArg:
 
         with pytest.raises(ValueError, match="Quantity must be > 0"):
             parse_qty_or_pct("-10")
+
+    def test_physical_expiry_week_discount(self):
+        from engine.position_sizer import calculate_position_size_for_alert
+
+        # Single-stock F&O: RELIANCE (lot size 500)
+        res_normal = calculate_position_size_for_alert(
+            alert_type="SQUEEZE_BREAKOUT",
+            symbol="RELIANCE",
+            entry_price=2500.0,
+            stop_loss=2450.0,
+            capital=5000000.0,
+            is_fno=True,
+            is_physical_expiry_week=False,
+        )
+        res_physical = calculate_position_size_for_alert(
+            alert_type="SQUEEZE_BREAKOUT",
+            symbol="RELIANCE",
+            entry_price=2500.0,
+            stop_loss=2450.0,
+            capital=5000000.0,
+            is_fno=True,
+            is_physical_expiry_week=True,
+        )
+        assert res_physical.lots <= res_normal.lots
+        assert "SEBI Physical Settlement" in res_physical.notes
+
+
+class TestSebiPhysicalSettlementRiskGate:
+    def test_single_stock_vs_index_classification(self):
+        from engine.position_sizer import is_physical_delivery_fno
+
+        # Single-stock derivatives are subject to physical delivery
+        assert is_physical_delivery_fno("RELIANCE") is True
+        assert is_physical_delivery_fno("INFY") is True
+        assert is_physical_delivery_fno("HDFCBANK") is True
+        assert is_physical_delivery_fno("NSE:TCS-EQ") is True
+        assert is_physical_delivery_fno("RELIANCE26OCT3000CE") is True
+
+        # Indices, MCX Commodities and CDS Currencies are cash settled
+        assert is_physical_delivery_fno("NIFTY") is False
+        assert is_physical_delivery_fno("BANKNIFTY") is False
+        assert is_physical_delivery_fno("FINNIFTY") is False
+        assert is_physical_delivery_fno("CRUDEOIL") is False
+        assert is_physical_delivery_fno("USDINR") is False
+
+    def test_risk_gate_blocks_underfunded_expiry_week_stock_derivative(self):
+        from engine.position_sizer import check_sebi_physical_settlement_risk
+        from engine.risk_gate import compute_allowed_actions
+
+        # RELIANCE lot size = 500. At ₹2500, delivery value = 500 * 2500 = ₹12,50,000.
+        # Account capital = ₹1,00,000 (< ₹12.5L required) and DTE = 2 days
+        risk = check_sebi_physical_settlement_risk(
+            "RELIANCE", dte=2, capital=100000.0, price=2500.0
+        )
+        assert risk["applicable"] is True
+        assert risk["blocked"] is True
+        assert risk["requires_full_margin"] is True
+        assert "SEBI Physical Delivery Risk" in risk["warning"]
+
+        # In compute_allowed_actions, it must fail-closed with SEBI_PHYSICAL_DELIVERY_RISK
+        allowed = compute_allowed_actions(
+            "RELIANCE",
+            capital=100000.0,
+            prices={"RELIANCE": 2500.0},
+            dte=2,
+        )
+        assert allowed.allowed is False
+        assert "SEBI_PHYSICAL_DELIVERY_RISK" in allowed.flags
+        assert "SEBI Physical Delivery Risk" in allowed.block_reason
+
+    def test_risk_gate_allows_cash_settled_index_derivative_in_expiry_week(self):
+        from engine.position_sizer import check_sebi_physical_settlement_risk
+        from engine.risk_gate import compute_allowed_actions
+
+        # NIFTY is cash settled: not applicable to physical delivery block
+        risk = check_sebi_physical_settlement_risk("NIFTY", dte=1, capital=100000.0, price=25000.0)
+        assert risk["applicable"] is False
+        assert risk["blocked"] is False
+
+        allowed = compute_allowed_actions(
+            "NIFTY",
+            capital=500000.0,
+            prices={"NIFTY": 25000.0},
+            dte=1,
+        )
+        assert allowed.allowed is True
+        assert "SEBI_PHYSICAL_DELIVERY_RISK" not in allowed.flags

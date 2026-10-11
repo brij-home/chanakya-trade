@@ -102,3 +102,107 @@ def test_reset_detector(temp_breaker):
 
     temp_breaker.reset_detector("SQUEEZE")
     assert temp_breaker.get_metrics("SQUEEZE").status == "NORMAL"
+
+
+def test_auto_alert_engine_circuit_breaker_halt(monkeypatch):
+    """When a detector is HALTED, AutoAlertEngine.record_alert rejects it."""
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+    from engine.detector_circuit_breaker import detector_circuit_breaker
+
+    engine = AutoAlertEngine()
+    test_type = "TEST_CIRCUIT_TRIP"
+
+    # Trip breaker
+    for i in range(5):
+        detector_circuit_breaker.record_outcome(f"halt-{i}", "RELIANCE", test_type, "LOSS", -1.0)
+
+    try:
+        alert = AutoAlert(
+            alert_id="live-test-halt-001",
+            alert_type=test_type,
+            stage="IGNITED",
+            symbol="RELIANCE",
+            exchange="NSE",
+            direction="BULLISH",
+            headline="Breakout",
+            summary="Testing halt",
+            ltp=2500.0,
+            trigger_level=2500.0,
+            target_level=2550.0,
+            stop_loss=2480.0,
+            confidence=85,
+            is_live=True,
+            environment="LIVE",
+        )
+        res = engine.record_alert(alert)
+        assert res is False, "Alert from HALTED detector must be rejected"
+    finally:
+        detector_circuit_breaker.reset_detector(test_type)
+
+
+def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
+    """When a detector is in PROBATION, AutoAlertEngine applies a 25% confidence discount."""
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+    from engine.detector_circuit_breaker import detector_circuit_breaker
+
+    engine = AutoAlertEngine()
+    test_type = "TEST_CIRCUIT_PROBATION"
+
+    # Degrade to probation (5 samples >= min_samples: 1 win of 1.5R, 4 losses of -1.0R with win in middle)
+    detector_circuit_breaker.record_outcome("p1", "RELIANCE", test_type, "LOSS", -1.0)
+    detector_circuit_breaker.record_outcome("p2", "RELIANCE", test_type, "LOSS", -1.0)
+    detector_circuit_breaker.record_outcome("p3", "RELIANCE", test_type, "WIN", 1.5)
+    detector_circuit_breaker.record_outcome("p4", "RELIANCE", test_type, "LOSS", -1.0)
+    detector_circuit_breaker.record_outcome("p5", "RELIANCE", test_type, "LOSS", -1.0)
+
+    import uuid
+
+    aid = f"live-test-prob-{uuid.uuid4().hex[:6]}"
+    with engine._lock:
+        engine._alerts = [
+            a for a in engine._alerts if not (a.symbol == "RELIANCE" and a.alert_type == test_type)
+        ]
+
+    try:
+        alert = AutoAlert(
+            alert_id=aid,
+            alert_type=test_type,
+            stage="IGNITED",
+            symbol="RELIANCE",
+            exchange="NSE",
+            direction="BULLISH",
+            headline="Breakout",
+            summary="Testing probation",
+            ltp=2500.0,
+            trigger_level=2500.0,
+            target_level=2600.0,
+            stop_loss=2460.0,
+            confidence=80,
+            is_live=True,
+            environment="LIVE",
+        )
+        # Mock market hours to avoid off-market suppression during test
+        monkeypatch.setattr("engine.alerts._is_market_hours", lambda exchange: True)
+        from engine.quality_gate import VetoVerdict
+
+        monkeypatch.setattr(
+            "engine.quality_gate.evaluate_institutional_quality_gate",
+            lambda *args, **kwargs: VetoVerdict(
+                is_vetoed=False,
+                execution_mandate="STANDARD",
+                conviction_tier="HIGH_CONVICTION",
+            ),
+        )
+        import unittest.mock
+
+        with unittest.mock.patch.object(engine, "_async_enrich_scrutiny"):
+            res = engine.record_alert(alert)
+            assert res is True
+            # Original 80 * 0.75 = 60
+            assert alert.confidence == 60
+    finally:
+        detector_circuit_breaker.reset_detector(test_type)
+        with engine._lock:
+            engine._alerts = [a for a in engine._alerts if a.alert_id != aid]

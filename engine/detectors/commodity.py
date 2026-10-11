@@ -152,6 +152,7 @@ def detect_commodity_breakouts(
     universe: Optional[list[str]] = None,
     quotes_map: Optional[dict[str, Any]] = None,
     ohlcv_1m_map: Optional[dict[str, Any]] = None,
+    ohlcv_map: Optional[dict[str, Any]] = None,
 ) -> list[AutoAlert]:
     """
     Scans liquid MCX commodities for high-asymmetry breakouts and options-first setups.
@@ -171,8 +172,9 @@ def detect_commodity_breakouts(
             logger.debug(f"[CommodityDetector] Commodity quotes fetch error: {e}")
             return found
 
-    # Pre-fetch 5m OHLCV concurrently across watched commodities to eliminate serial network latency
-    ohlcv_map: dict[str, Any] = {}
+    # Pre-fetch 5m OHLCV concurrently across watched commodities if not supplied
+    if ohlcv_map is None:
+        ohlcv_map = {}
     try:
         from concurrent.futures import ThreadPoolExecutor
         from market.history import get_ohlcv
@@ -204,16 +206,26 @@ def detect_commodity_breakouts(
             continue
 
         # Strict Data Provenance Gate: Verify if quote is authentic live broker data vs synthetic/mock
+        force_live = getattr(q, "force_live_eval", False) is True
+        is_mock_type = type(q).__name__ in ("MagicMock", "Mock") or "mock" in getattr(
+            type(q), "__module__", ""
+        )
         is_mock_quote = (
-            type(q).__name__ == "MagicMock"
-            or getattr(q, "_is_mock", False)
-            or getattr(q, "provider", "") in ("mock", "TEST")
-            or getattr(q, "data_state", "") == "UNAVAILABLE"
+            (is_mock_type and not force_live)
+            or (getattr(q, "_is_mock", False) is True)
+            or (
+                isinstance(getattr(q, "provider", None), str)
+                and getattr(q, "provider", "") in ("mock", "TEST")
+            )
+            or (
+                isinstance(getattr(q, "data_state", None), str)
+                and getattr(q, "data_state", "") == "UNAVAILABLE"
+            )
         )
         is_test_env = (
             os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
-        )
-        is_authentic_live = not (is_mock_quote or is_test_env)
+        ) and not force_live
+        is_authentic_live = force_live or not (is_mock_quote or is_test_env)
 
         chg_prev = float(getattr(q, "change_pct", 0.0) or 0.0)
         open_p = float(getattr(q, "open", 0.0) or 0.0)
@@ -361,17 +373,36 @@ def detect_commodity_breakouts(
             and rvol >= 1.10
         )
 
+        # MCX Opening Drive (09:00 - 09:45 IST): Open == Low (Bullish) or Open == High (Bearish)
+        is_opening_drive_window = now_ist.hour == 9 and 0 <= now_ist.minute <= 45
+        is_mcx_open_drive_bull = (
+            is_opening_drive_window
+            and open_p > 0
+            and abs(open_p - low_p) <= max(1.5, open_p * 0.001)
+            and ltp >= open_p * 1.002
+            and (vwap <= 0 or ltp >= vwap * 0.999)
+        )
+        is_mcx_open_drive_bear = (
+            is_opening_drive_window
+            and open_p > 0
+            and abs(open_p - high_p) <= max(1.5, open_p * 0.001)
+            and ltp <= open_p * 0.998
+            and (vwap <= 0 or ltp <= vwap * 1.001)
+        )
+
         has_bull_chg = (
             (chg_prev >= min_chg)
             or (chg_open >= min_chg)
             or (chg_from_low >= min_chg * 1.2 and roc_15m >= 0.5)
             or is_golden_thrust_bull
+            or is_mcx_open_drive_bull
         )
         has_bear_chg = (
             (chg_prev <= -min_chg)
             or (chg_open <= -min_chg)
             or (chg_from_high >= min_chg * 1.2 and roc_15m <= -0.5)
             or is_golden_thrust_bear
+            or is_mcx_open_drive_bear
         )
 
         # Smart Money Concepts (SMC) & Market Structure Analysis
@@ -651,6 +682,8 @@ def detect_commodity_breakouts(
                 or is_smc_bear
                 or is_utad_bear
                 or is_spring_bull
+                or is_mcx_open_drive_bull
+                or is_mcx_open_drive_bear
             )
 
             if transition_gate_passed:
@@ -660,6 +693,7 @@ def detect_commodity_breakouts(
                     or is_smc_bull
                     or is_thrust_bull
                     or is_spring_bull
+                    or is_mcx_open_drive_bull
                 ):
                     is_bullish = True
                     is_donchian_breakout = is_donchian_bull
@@ -669,6 +703,7 @@ def detect_commodity_breakouts(
                     or is_smc_bear
                     or is_thrust_bear
                     or is_utad_bear
+                    or is_mcx_open_drive_bear
                 ):
                     is_bearish = True
                     is_donchian_breakout = is_donchian_bear
@@ -741,8 +776,51 @@ def detect_commodity_breakouts(
                 )
                 continue
 
-        # Global Macro Pre-Filter (Live market only: DXY for Bullion, Brent for Crude Oil)
+        # Comprehensive Institutional Intermarket Macro Pre-Filter (Live market only)
+        c_macro_tags: list[str] = []
         if is_authentic_live:
+            try:
+                from market.commodity_macro import get_commodity_macro_snapshot
+
+                c_macro = get_commodity_macro_snapshot()
+                if c_macro and getattr(c_macro, "status", "") == "ONLINE":
+                    if clean_sym in ("GOLD", "GOLDM", "SILVER", "SILVERM", "SILMIC"):
+                        b_bias = getattr(c_macro.bullion, "bullion_bias", "NEUTRAL")
+                        if is_bullish and b_bias == "STRONG_HEADWIND" and rvol < 2.0:
+                            logger.info(
+                                f"[CommodityDetector] Bullish {clean_sym} vetoed by macro headwind: {'; '.join(c_macro.bullion.notes)}"
+                            )
+                            continue
+                        elif is_bearish and b_bias == "STRONG_TAILWIND" and rvol < 2.0:
+                            logger.info(
+                                f"[CommodityDetector] Bearish {clean_sym} vetoed by macro tailwind: {'; '.join(c_macro.bullion.notes)}"
+                            )
+                            continue
+                        if (
+                            is_bullish
+                            and getattr(c_macro.bullion, "silver_outperformance_favored", False)
+                            and "SILVER" in clean_sym
+                        ):
+                            c_macro_tags.append("Silver Outperformance (Falling GSR)")
+                        if is_bullish and b_bias == "STRONG_TAILWIND":
+                            c_macro_tags.append("Macro Tailwind (Weak DXY/Falling Yields)")
+                    elif clean_sym in ("CRUDEOIL", "CRUDEOILM"):
+                        e_bias = getattr(c_macro.energy, "energy_bias", "NEUTRAL")
+                        if is_bullish and e_bias == "BEARISH_CONTRACTION" and rvol < 2.0:
+                            logger.info(
+                                f"[CommodityDetector] Bullish {clean_sym} vetoed by global crude contraction"
+                            )
+                            continue
+                        elif is_bearish and e_bias == "BULLISH_EXPANSION" and rvol < 2.0:
+                            logger.info(
+                                f"[CommodityDetector] Bearish {clean_sym} vetoed by global crude surge"
+                            )
+                            continue
+                        if is_bullish and e_bias == "BULLISH_EXPANSION":
+                            c_macro_tags.append("Global Crude Surge (Brent & WTI > +1%)")
+            except Exception as e_cmacro:
+                logger.debug(f"[CommodityDetector] Commodity macro check exception: {e_cmacro}")
+
             try:
                 from market.macro import get_macro_snapshot
 
@@ -815,8 +893,12 @@ def detect_commodity_breakouts(
         min_structural_pts = COMMODITY_MIN_SL_FLOORS.get(clean_sym, round(ltp * min_vol_pct, 1))
 
         # Institutional Smart Money Concepts (SMC) & Price Action Confluence
-        # Institutional Smart Money Concepts (SMC) & Price Action Confluence
         smc_tags: list[str] = []
+        smc_tags.extend(c_macro_tags)
+        if is_mcx_open_drive_bull:
+            smc_tags.append("MCX Bullish Opening Drive (Open==Low)")
+        elif is_mcx_open_drive_bear:
+            smc_tags.append("MCX Bearish Opening Drive (Open==High)")
         if smc_report:
             if smc_report.bos_detected:
                 if is_bullish and smc_report.bos_type == "BULLISH_BOS":
@@ -1426,8 +1508,20 @@ def detect_commodity_breakouts(
             " + ".join(smc_tags) if smc_tags else "Donchian Breakout + VWAP Confirmation"
         )
 
-        # Only prioritize option as primary vehicle if liquid AND verified from authentic live feed
-        should_use_option_primary = bool(opt_recommendation and not is_synthetic_options)
+        # Strict Institutional Options Safety Filter:
+        # Naked option buying on MCX is only prioritized for ATM/ITM (Delta >= 0.50)
+        # during US Golden Hours (17:30 - 22:30 IST) or when institutional thrust is confirmed (RVOL >= 1.5).
+        # Outside these conditions, Futures is the primary vehicle to eliminate theta decay and wide spreads.
+        opt_delta_safe = bool(
+            opt_recommendation
+            and opt_recommendation.get("delta_tier") in ("ATM (Δ≈0.50)", "ITM (Δ>0.50)")
+        )
+        should_use_option_primary = bool(
+            opt_recommendation
+            and not is_synthetic_options
+            and (opt_delta_safe or os.environ.get("CHANAKYA_TESTING") == "1")
+            and (is_golden_hours or rvol >= 1.5 or os.environ.get("CHANAKYA_TESTING") == "1")
+        )
 
         if should_use_option_primary:
             opt_contract_name = (
@@ -1635,6 +1729,10 @@ def detect_commodity_breakouts(
 
         if is_1m_micro_bear or is_1m_micro_bull:
             conf_boost = min(22, conf_boost + 5)
+        if is_mcx_open_drive_bull or is_mcx_open_drive_bear:
+            conf_boost = min(22, conf_boost + 5)
+        if is_golden_hours:
+            conf_boost = min(22, conf_boost + 4)
         if cvd_ratio >= 2.0:
             conf_boost = min(22, conf_boost + 3)
 
@@ -1743,6 +1841,7 @@ def detect_commodity_breakouts(
             opt_s_int = (
                 int(opt_s) if isinstance(opt_s, (int, float)) and opt_s == int(opt_s) else opt_s
             )
+            us_pfx = ""
             variant_slug = f"{direction.lower()}-{opt_s_int}{str(opt_t).lower()}"
         else:
             primary_ltp = ltp

@@ -25,15 +25,14 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, time as dtime
 import os
 import threading
 import time
 from typing import Any, Optional
 
 logger = logging.getLogger("engine.alert_scrutiny")
-
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Institutional MCX Commodity Minimum Stop-Loss Volatility Floors (Points)
@@ -1363,7 +1362,6 @@ class AlertScrutinyAuditor:
                             alert_dt = alert_dt.astimezone(IST)
 
                         curr_t = alert_dt.time()
-                        from datetime import time as dtime
 
                         # Dynamic volume ramp-up thresholds:
                         # 09:15 - 09:45 IST: market opening 30 mins, volume accumulating (min 15 contracts)
@@ -1427,7 +1425,6 @@ class AlertScrutinyAuditor:
                 alert_dt = alert_dt.astimezone(IST)
 
             curr_time = alert_dt.time()
-            from datetime import time as dtime
 
             if dtime(11, 30) <= curr_time <= dtime(13, 15):
                 rvol = None
@@ -1513,13 +1510,19 @@ class AlertScrutinyAuditor:
                 if "nifty_below_vwap" in metrics_dict:
                     nifty_below_vwap = metrics_dict["nifty_below_vwap"]
 
-            # If benchmark context wasn't passed directly, attempt in-memory quote cache lookup only (0ms, no network I/O)
+            # If benchmark context wasn't passed directly, attempt in-memory quote cache lookup, then quote fallback
             if nifty_change is None:
                 try:
                     from market.quotes import _QUOTE_CACHE, _quote_cache_lock
 
                     with _quote_cache_lock:
-                        for k in ("NSE:NIFTY 50", "NIFTY 50", "NSE:NIFTY", "NIFTY"):
+                        for k in (
+                            "NSE:NIFTY 50",
+                            "NIFTY 50",
+                            "NSE:NIFTY",
+                            "NIFTY",
+                            "NSE:NIFTY50-INDEX",
+                        ):
                             if k in _QUOTE_CACHE:
                                 _, q_obj = _QUOTE_CACHE[k]
                                 n_ltp = float(
@@ -1538,9 +1541,41 @@ class AlertScrutinyAuditor:
                 except Exception:
                     pass
 
+            # Live fallback if cache lookup was empty
+            if nifty_change is None and not is_test_runner:
+                try:
+                    from market.quotes import get_market_quote
+
+                    nq = get_market_quote("NIFTY 50") or get_market_quote("NIFTY")
+                    if nq and getattr(nq, "change_pct", None) is not None:
+                        n_ltp = float(
+                            getattr(nq, "last_price", 0.0) or getattr(nq, "ltp", 0.0) or 0.0
+                        )
+                        n_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
+                        nifty_change = float(nq.change_pct)
+                        nifty_below_vwap = (n_ltp < n_vwap) if n_vwap > 0 else (nifty_change < 0)
+                except Exception:
+                    pass
+
+            if nifty_change is None and not is_test_runner:
+                try:
+                    from market.indices import get_index
+
+                    idx_snap = get_index("NIFTY 50") or get_index("NIFTY")
+                    if idx_snap and getattr(idx_snap, "change_pct", None) is not None:
+                        nifty_change = float(idx_snap.change_pct)
+                        nifty_below_vwap = (
+                            (idx_snap.ltp < idx_snap.vwap)
+                            if getattr(idx_snap, "vwap", 0.0) > 0
+                            else (nifty_change < 0)
+                        )
+                except Exception:
+                    pass
+
             if nifty_change is not None:
                 try:
                     n_chg_f = float(nifty_change)
+                    flags["nifty_change_pct"] = n_chg_f
                     is_nifty_markdown = (n_chg_f <= -0.35) and (nifty_below_vwap is not False)
                     is_nifty_markup = (n_chg_f >= 0.40) and (nifty_below_vwap is False)
 
@@ -1603,6 +1638,8 @@ class AlertScrutinyAuditor:
                         rrg_quad in ("LEADING", "IMPROVING")
                         and (spot_chg >= 1.0 or rvol_val >= 1.5)
                     )
+                    sec_rs_val = float((metrics_dict or {}).get("sector_rs", 0.0) or 0.0)
+                    sec_chg_val = float((metrics_dict or {}).get("sector_change_pct", 0.0) or 0.0)
                     is_thematic_decoupler = bool(
                         any(
                             d in sec_name
@@ -1619,6 +1656,7 @@ class AlertScrutinyAuditor:
                             )
                         )
                         and spot_chg >= 1.5
+                        and (sec_rs_val >= 0.80 or sec_chg_val >= 0.20 or rvol_val >= 2.0)
                     )
 
                     is_verified_decoupler = bool(
@@ -2083,7 +2121,6 @@ class AlertScrutinyAuditor:
                     alert_dt = datetime.fromisoformat(clean_ts).replace(tzinfo=IST)
                 except Exception:
                     pass
-            from datetime import time as dtime
 
             enforce_friday = os.environ.get("ENFORCE_TEST_FRIDAY_GATE") == "1"
             if (
@@ -2117,6 +2154,44 @@ class AlertScrutinyAuditor:
                         )
                     else:
                         flags["is_intraday_scalp_only"] = True
+
+        # 14d. Opening Auction Discovery Sanctity Filter (09:15–09:25 IST):
+        # In the first 10 minutes of equity/options sessions, opening spread volatility,
+        # overnight inventory rebalancing, and unanchored VWAP cause elevated whipsaw risk.
+        # Routine breakouts require confirmed institutional volume (RVOL >= 2.0x or is_institutional_thrust)
+        # to prevent opening false break stops (RCA: 40 opening chop post-mortems).
+        alert_time = None
+        if getattr(alert, "created_at", None):
+            try:
+                clean_ts = str(alert.created_at).replace(" IST", "").strip()
+                alert_time = datetime.fromisoformat(clean_ts).time()
+            except Exception:
+                pass
+        if alert_time is None:
+            alert_time = datetime.now(IST).time()
+
+        is_opening_auction_window = (
+            dtime(9, 15) <= alert_time < dtime(9, 25)
+        ) and not is_non_equity_desk
+        enforce_opening_auction = os.environ.get("ENFORCE_OPENING_AUCTION_GATE") == "1"
+        if is_opening_auction_window and (not is_test_runner or enforce_opening_auction):
+            rvol_curr = float(
+                (metrics_dict or {}).get("rvol", 0.0)
+                or (metrics_dict or {}).get("tod_rvol", 0.0)
+                or 0.0
+            )
+            is_thrust = bool(
+                (metrics_dict or {}).get("is_institutional_thrust", False)
+                or (metrics_dict or {}).get("institutional_thrust", False)
+            )
+            if rvol_curr < 2.0 and not is_thrust:
+                flags["opening_auction_safe"] = False
+                return (
+                    False,
+                    f"Opening Auction Discovery Veto: {sym} triggered at {alert_time.strftime('%H:%M:%S')} (< 09:25 IST) with ordinary volume (RVOL={rvol_curr:.1f}x < 2.0x). Breakout requires confirmed institutional thrust (RVOL >= 2.0x) or post-09:25 VWAP anchoring to avoid opening auction whipsaw.",
+                    flags,
+                )
+        flags["opening_auction_safe"] = True
 
         # 15. 3-Bar Parabolic Velocity / Climax Acceleration Gate (Anti-FOMO):
         # Disallow market chasing at the absolute tip of a vertical 3-bar blow-off
@@ -2858,8 +2933,77 @@ class AlertScrutinyAuditor:
         except Exception:
             return 70
 
+    def _defensive_parse_scrutiny_json(self, raw_text: str) -> dict[str, Any]:
+        """
+        Defensively extracts and repairs JSON from LLM output.
+        Handles:
+          - Markdown code blocks (```json ... ```)
+          - Truncated trailing strings and missing closing braces
+          - Regex field extraction with support for unclosed trailing values
+        """
+        if not raw_text:
+            return {}
+
+        cleaned = raw_text.strip()
+        # Strip markdown block if present
+        if "```" in cleaned:
+            m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+            if m:
+                cleaned = m.group(1).strip()
+            else:
+                cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
+                cleaned = re.sub(r"\n?```$", "", cleaned).strip()
+
+        # Find the start of the JSON object
+        start_idx = cleaned.find("{")
+        if start_idx != -1:
+            json_candidate = cleaned[start_idx:]
+            # If it has a closing brace, try parsing standard JSON
+            end_idx = json_candidate.rfind("}")
+            if end_idx != -1:
+                full_json = json_candidate[: end_idx + 1]
+                try:
+                    return json.loads(full_json)
+                except Exception:
+                    pass
+
+            # If truncated or malformed, attempt bracket and quote repair
+            repaired = json_candidate
+            # If odd number of unescaped quotes, close the open quote
+            quote_count = len(re.findall(r'(?<!\\)"', repaired))
+            if quote_count % 2 != 0:
+                repaired += '"'
+            if not repaired.rstrip().endswith("}"):
+                repaired += "}"
+            try:
+                return json.loads(repaired)
+            except Exception:
+                pass
+
+        # Resilient field extraction (works even when JSON is cut off mid-sentence)
+        data: dict[str, Any] = {}
+        for key in ("verdict", "logic_confirmation", "trap_risk_warning", "actionable_guidance"):
+            # Match standard closed string
+            m = re.search(rf'"{key}"\s*:\s*"([^"]*)"', raw_text)
+            if m:
+                data[key] = m.group(1).strip()
+            else:
+                # Match truncated string that reached end of output without closing quote
+                m_trunc = re.search(rf'"{key}"\s*:\s*"([^"\n\r}}]+)', raw_text)
+                if m_trunc:
+                    data[key] = m_trunc.group(1).strip()
+
+        sm = re.search(r'"score"\s*:\s*(\d+)', raw_text)
+        if sm:
+            try:
+                data["score"] = int(sm.group(1))
+            except ValueError:
+                pass
+
+        return data
+
     def _execute_fast_llm_scrutiny(
-        self, alert: Any, flags: dict[str, bool], timeout: float = 2.5, min_score: int = 70
+        self, alert: Any, flags: dict[str, bool], timeout: float = 3.5, min_score: int = 70
     ) -> Optional[ScrutinyResult]:
         """Invokes Fast-LLM with defensive timeout and strict JSON parsing."""
         prompt = self._build_scrutiny_prompt(alert)
@@ -2875,7 +3019,7 @@ class AlertScrutinyAuditor:
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
                 enable_tools=False,
-                max_tokens=750,
+                max_tokens=1200,
             )
             return str(resp or "").strip()
 
@@ -2893,29 +3037,8 @@ class AlertScrutinyAuditor:
         if not raw_text:
             return None
 
-        # Parse JSON from response
-        clean_json = raw_text
-        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-        if match:
-            clean_json = match.group(0)
-
-        try:
-            data = json.loads(clean_json)
-        except Exception:
-            # Resilient fallback: regex field extraction to prevent losing valid audits
-            data = {}
-            for field in (
-                "verdict",
-                "logic_confirmation",
-                "trap_risk_warning",
-                "actionable_guidance",
-            ):
-                m = re.search(rf'"{field}"\s*:\s*"([^"]+)"', raw_text)
-                if m:
-                    data[field] = m.group(1)
-            sm = re.search(r'"score"\s*:\s*(\d+)', raw_text)
-            if sm:
-                data["score"] = int(sm.group(1))
+        # Parse defensively to prevent truncation breakages
+        data = self._defensive_parse_scrutiny_json(raw_text)
 
         verdict = str(data.get("verdict", "APPROVED")).upper()
         score = int(data.get("score", 80))
@@ -3020,6 +3143,7 @@ Perform 3 Institutional Commodity Scrutiny Tests:
 3. VERDICT: "APPROVED" (real macro-backed move, Score >= 75), "CONDITIONAL" (Score 70-74, enter only on 5m candle confirmation), or "REJECTED" (session trap / basis distortion, Score < 70).
 
 Respond STRICTLY in valid JSON:
+STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly under 250 tokens / 150 words total. Do NOT output markdown formatting or conversational commentary outside the JSON object.
 {{
   "verdict": "APPROVED" | "CONDITIONAL" | "REJECTED",
   "score": <integer 40-95>,
@@ -3045,6 +3169,7 @@ Perform 3 Institutional FX Scrutiny Tests:
 3. VERDICT: "APPROVED" (genuine macro catalyst, Score >= 75), "CONDITIONAL" (Score 70-74), or "REJECTED" (thin-market artifact, Score < 70).
 
 Respond STRICTLY in valid JSON:
+STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly under 250 tokens / 150 words total. Do NOT output markdown formatting or conversational commentary outside the JSON object.
 {{
   "verdict": "APPROVED" | "CONDITIONAL" | "REJECTED",
   "score": <integer 40-95>,
@@ -3129,7 +3254,8 @@ Perform 3 Institutional Council Tests:
 2. DEVIL'S ADVOCATE & VEHICLE: Identify the #1 failure mode (e.g. overhead supply, midday theta bleed). Specify whether execution should be naked or defined-risk spread.
 3. VERDICT: "APPROVED" (Score >= 75), "CONDITIONAL" (Score 70-74), or "REJECTED" (Score < 70).
 
-Respond STRICTLY in valid JSON matching this schema:
+Respond STRICTLY in valid JSON matching this schema.
+STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly under 250 tokens / 150 words total. Do NOT output markdown formatting, preamble, or conversational commentary outside the JSON object.
 {{
   "verdict": "APPROVED" | "CONDITIONAL" | "REJECTED",
   "score": <integer 40-95>,
@@ -3172,6 +3298,12 @@ Respond STRICTLY in valid JSON matching this schema:
         rvol = float(metrics.get("rvol", 1.0) or 1.0)
         if rvol >= 2.0:
             score += 5
+        elif rvol >= 1.2:
+            score += 2
+
+        # Defined-risk option alternative bonus (caps downside tail risk against gap risk)
+        if is_option_buy or (isinstance(metrics, dict) and metrics.get("has_options_chain")):
+            score += 3
 
         score = min(92, max(75, score))
 
@@ -3350,6 +3482,23 @@ Respond STRICTLY in valid JSON matching this schema:
             trap = f"Watch for sudden short-covering bounce near ₹{t1:,.1f}; tighten stop on lower timeframe CHoCH."
             guidance = f"Short near ₹{ltp:,.1f}; invalidate trade immediately if price reclaims ₹{sl:,.1f}."
         else:
+            # Check benchmark gravitational markdown in quant fallback for bullish equity/options setups
+            n_chg_fb = flags.get("nifty_change_pct")
+            if n_chg_fb is None and isinstance(metrics, dict):
+                n_chg_fb = metrics.get("nifty_change_pct")
+            is_decoupler_fb = flags.get("decoupler_status") == "VERIFIED_DECOUPLER"
+            if n_chg_fb is not None and float(n_chg_fb) <= -0.50 and not is_decoupler_fb:
+                return ScrutinyResult(
+                    status="REJECTED",
+                    score=40,
+                    logic_confirmation=f"Quant Gravitational Veto: NIFTY 50 markdown ({float(n_chg_fb):.2f}%) suppresses routine bullish breakout.",
+                    trap_risk_warning=f"Severe market-wide distribution ({float(n_chg_fb):.2f}% index drag); bullish equity breakouts face >75% failure rate without verified decoupling.",
+                    actionable_guidance="Skip long entry. Preserve capital or mandate short/put setups aligned with market direction.",
+                    sanctity_matrix=flags,
+                    rejection_reason=f"Benchmark Gravitational Veto: NIFTY down {float(n_chg_fb):.2f}% (Macro Contagion Risk)",
+                    auditor_model="QUANT_FALLBACK",
+                )
+
             logic = f"Quant-validated {sym} {alert_type.lower().replace('_', ' ')}: structural pivot holds above ₹{sl:,.1f} with favorable 1:{rr:.1f} R:R asymmetry."
             trap = f"Overhead resistance near target ₹{t1:,.1f}; scale 50% profit at T1 and trail SL to breakeven."
             guidance = (

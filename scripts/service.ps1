@@ -20,7 +20,7 @@ param (
     [string]$ApiHost = "127.0.0.1",
     [int]$ApiPort = 8765,
     [int]$VitePort = 5173,
-    [int]$TimeoutSeconds = 25
+    [int]$TimeoutSeconds = 45
 )
 
 $ErrorActionPreference = "Stop"

@@ -467,3 +467,21 @@ def test_telegram_index_hourly_pacing_apex_override():
     )
     passed, reason = engine._eval_telegram_apex_gate(alert_apex, in_market=True)
     assert passed, f"Expected APEX 95% index setup to pass pacing override, but got: {reason}"
+
+
+def test_obstacle_runway_trap_suppressed_on_telegram():
+    """An alert obstructed by an immediate heavy resistance wall or max Call OI must be suppressed on Telegram."""
+    engine = AutoAlertEngine()
+    engine._hourly_telegram_dispatches = {"INDEX": [], "STOCKS": []}
+
+    alert = _make_dummy_alert(
+        "stk-obstacle-trap",
+        "RELIANCE",
+        segment="FNO_STOCK",
+        confidence=90,
+    )
+    alert.metrics["trap_immediate_resistance"] = True
+
+    passed, reason = engine._eval_telegram_apex_gate(alert, in_market=True)
+    assert not passed
+    assert "Obstacle Runway Trap" in reason

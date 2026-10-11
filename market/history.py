@@ -44,7 +44,7 @@ import threading
 from collections import OrderedDict
 
 _df_memory_cache_lock = threading.Lock()
-MAX_MEMORY_DFS = 256  # Bounded for 8 GB RAM profile (<30 MB footprint)
+MAX_MEMORY_DFS = 2048  # Scaled for 24 GB RAM hardware (~500 stocks across multiple timeframes)
 _df_memory_cache: OrderedDict[str, tuple[float, pd.DataFrame]] = OrderedDict()
 _DF_TTL_SECONDS = 300.0  # 5 minutes in-memory cache for daily
 _INTRADAY_TTL_SECONDS = 60.0  # 60s in-memory cache for intraday (5m, 15m)

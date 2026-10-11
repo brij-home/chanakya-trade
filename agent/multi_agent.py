@@ -42,6 +42,7 @@ Key design choices:
 from __future__ import annotations
 
 import json
+import os
 import queue as _queue_mod
 import re
 import sys
@@ -1861,11 +1862,10 @@ class MultiAgentAnalyzer:
 
         if self.verbose:
             console.print()
-            console.print(
-                f"[bold]Analyst Team[/bold] — running {len(self.analysts)} analysts in parallel..."
-            )
-
-        with ThreadPoolExecutor(max_workers=len(self.analysts)) as executor:
+        max_workers = min(
+            len(self.analysts), max(1, int(os.environ.get("MAX_CONCURRENT_ANALYSTS", "3")))
+        )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(a.analyze, symbol, exchange): a for a in self.analysts}
             for future in as_completed(futures):
                 analyst = futures[future]

@@ -171,6 +171,7 @@ def compute_allowed_actions(
     upcoming_events: dict | None = None,  # {symbol: "YYYY-MM-DD"} earnings dates
     vix: float | None = None,  # India VIX value (None = skip VIX check)
     max_sector_pct: float = 0.30,  # Max portfolio concentration in a single sector (default 30%)
+    dte: int | None = None,  # Days to expiry for derivative contracts
 ) -> AllowedAction:
     """
     Compute what actions are allowed for this symbol before LLM sees it.
@@ -303,6 +304,31 @@ def compute_allowed_actions(
         warnings.append(f"VIX {vix:.1f} — high volatility, position halved")
         max_qty = max(max_qty // 2, 0)
         max_capital = max_capital / 2.0
+
+    # ── Check 5: SEBI Physical Settlement Delivery Risk (DTE <= 4) ───
+    if dte is not None:
+        from engine.position_sizer import check_sebi_physical_settlement_risk
+
+        sebi_risk = check_sebi_physical_settlement_risk(
+            sym, dte=dte, capital=total_capital, price=current_price
+        )
+        if sebi_risk.get("applicable"):
+            if sebi_risk.get("blocked"):
+                flags.append("SEBI_PHYSICAL_DELIVERY_RISK")
+                return AllowedAction(
+                    symbol=sym,
+                    allowed=False,
+                    direction="NONE",
+                    max_qty=0,
+                    max_capital=0.0,
+                    flags=flags,
+                    block_reason=sebi_risk["warning"],
+                    warnings=warnings + [sebi_risk["warning"]],
+                    requires_double_confirmation=True,
+                )
+            elif sebi_risk.get("warning"):
+                flags.append("SEBI_PHYSICAL_DELIVERY_PROXIMITY")
+                warnings.append(sebi_risk["warning"])
 
     # ── Final: determine direction ────────────────────────────
     # Default to BOTH — caller can override based on portfolio context

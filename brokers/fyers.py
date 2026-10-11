@@ -39,6 +39,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -527,8 +528,13 @@ class FyersAPI(BrokerAPI):
         self._access_token = ""
         self._profile: Optional[UserProfile] = None
         self._token_ts: float = 0.0
+        self._reauth_lock = threading.Lock()
         self._fyers = None  # FyersModel instance
         self._last_oc_metadata: dict[str, Any] = {}
+        self._expiries_dates_cache: dict[str, tuple[float, list[str]]] = {}
+        self._expiry_ts_cache: dict[str, tuple[float, str]] = {}
+        self._screener_cache: dict[str, tuple[float, Any]] = {}
+        self._screener_cache_lock = threading.Lock()
         self.name: str = "fyers"
         self._load_token()
 
@@ -545,18 +551,44 @@ class FyersAPI(BrokerAPI):
             )
         return self._fyers
 
-    # ── Token persistence ──────────────────────────────────────
+    def _is_token_expired(self, ts: float) -> bool:
+        """
+        Validates token freshness against both maximum TTL and market session boundaries.
+        Fyers invalidates tokens daily before market open (~06:00-08:00 AM IST).
+        """
+        if not ts or ts <= 0:
+            return True
+        now = time.time()
+        if now - ts >= TOKEN_EXPIRY:
+            return True
+        try:
+            from config.constants import IST
+
+            dt_token = datetime.fromtimestamp(ts, tz=IST)
+            dt_now = datetime.fromtimestamp(now, tz=IST)
+            if dt_token.date() < dt_now.date():
+                return True
+            if dt_token.hour < 8 and (
+                dt_now.hour > 8 or (dt_now.hour == 8 and dt_now.minute >= 30)
+            ):
+                return True
+        except Exception:
+            pass
+        return False
 
     def _load_token(self) -> None:
         try:
             if TOKEN_FILE.exists():
                 data = json.loads(TOKEN_FILE.read_text())
                 ts = data.get("timestamp", 0)
-                if time.time() - ts < TOKEN_EXPIRY:
+                if not self._is_token_expired(ts):
                     self._access_token = data.get("access_token", "")
                     self._token_ts = ts
                     if not self._app_id and data.get("app_id"):
                         self._app_id = data.get("app_id")
+                else:
+                    self._access_token = ""
+                    self._token_ts = 0.0
         except Exception:
             pass
 
@@ -797,10 +829,49 @@ class FyersAPI(BrokerAPI):
         self._save_token(token)
         return self.get_profile()
 
+    def _handle_auth_failure(self, failed_ts: float | None = None) -> bool:
+        """
+        Thread-safe self-healing recovery when Fyers API rejects the token.
+        Clears expired token and triggers headless auto-login.
+        """
+        with self._reauth_lock:
+            if failed_ts and self._token_ts > failed_ts and self._access_token:
+                return True
+
+            logger.warning(
+                "[FyersAPI] Token rejected by Fyers. Attempting headless re-authentication..."
+            )
+            self._access_token = ""
+            self._profile = None
+            self._fyers = None
+            try:
+                TOKEN_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+            if (
+                self._fy_id
+                and self._totp_secret
+                and self._pin
+                and self._app_id
+                and self._secret_key
+            ):
+                try:
+                    self.complete_login()
+                    if self._access_token:
+                        logger.info(
+                            "[FyersAPI] Headless re-authentication succeeded. Fresh session active."
+                        )
+                        return True
+                except Exception as exc:
+                    logger.error(f"[FyersAPI] Headless re-authentication failed: {exc}")
+                    return False
+            return False
+
     def is_authenticated(self) -> bool:
-        if not self._access_token:
+        if not self._access_token or self._is_token_expired(self._token_ts):
             self._load_token()
-            if self._access_token:
+            if self._access_token and not self._is_token_expired(self._token_ts):
                 return True
             if (
                 self._fy_id
@@ -819,29 +890,6 @@ class FyersAPI(BrokerAPI):
                     logger.warning(f"[FyersAPI] Headless auto-login attempt failed: {e}")
                     return False
             return False
-        if self._token_ts and time.time() - self._token_ts >= TOKEN_EXPIRY:
-            self._access_token = ""
-            self._fyers = None
-            try:
-                TOKEN_FILE.unlink(missing_ok=True)
-            except Exception:
-                pass
-            if (
-                self._fy_id
-                and self._totp_secret
-                and self._pin
-                and self._app_id
-                and self._secret_key
-            ):
-                try:
-                    logger.info("[FyersAPI] Token expired, refreshing headlessly via TOTP + PIN...")
-                    self.complete_login()
-                    return bool(self._access_token)
-                except Exception as e:
-                    logger.warning(f"[FyersAPI] Headless auto-login refresh failed: {e}")
-                    return False
-            return False
-        # Token exists and is < 12 hours old — trust it (no API call)
         return True
 
     def logout(self) -> None:
@@ -990,6 +1038,27 @@ class FyersAPI(BrokerAPI):
             try:
                 _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
                 data = fyers.quotes({"symbols": ",".join(chunk)})
+                if isinstance(data, dict) and (
+                    data.get("code") in (-15, -16, -99, 401)
+                    or any(
+                        p in str(data.get("message", "")).lower()
+                        for p in (
+                            "could not authenticate",
+                            "token is expired",
+                            "valid token",
+                            "invalid token",
+                        )
+                    )
+                ):
+                    failed_ts = self._token_ts
+                    logger.warning(
+                        f"[FyersAPI] Quotes API auth rejection ({data.get('message')}). Retrying after auto-reauth..."
+                    )
+                    if self._handle_auth_failure(failed_ts=failed_ts):
+                        fyers = self._get_fyers()
+                        if fyers:
+                            data = fyers.quotes({"symbols": ",".join(chunk)})
+
                 if not isinstance(data, dict) or data.get("s") != "ok":
                     err_msg = (
                         str(data.get("message", "Fyers quotes error"))
@@ -1471,7 +1540,7 @@ class FyersAPI(BrokerAPI):
         _fyers_rate_limiter.acquire()
         data = fyers.place_basket_orders(payload_orders)
         responses = []
-        for item in data.get("data", []):
+        for item in data.get("data", []) if isinstance(data, dict) else []:
             responses.append(
                 OrderResponse(
                     order_id=str(item.get("id", "")),
@@ -1479,7 +1548,42 @@ class FyersAPI(BrokerAPI):
                     message=item.get("message", "Basket order placed"),
                 )
             )
+        if not responses and orders:
+            err_msg = (
+                data.get("message") if isinstance(data, dict) else None
+            ) or "Basket order rejected by broker"
+            return [
+                OrderResponse(
+                    order_id="",
+                    status="REJECTED",
+                    message=err_msg,
+                )
+                for _ in orders
+            ]
         return responses
+
+    def modify_basket_orders(self, orders: list[dict]) -> list[dict]:
+        """Modify multiple pending orders atomically in a single batch network call."""
+        fyers = self._get_fyers()
+        if not fyers or not orders:
+            return []
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        data = fyers.modify_basket_orders(orders)
+        if isinstance(data, dict):
+            return data.get("data", []) or [data]
+        return []
+
+    def cancel_basket_orders(self, order_ids: list[str] | list[dict]) -> list[dict]:
+        """Cancel multiple pending orders atomically in a single batch network call."""
+        fyers = self._get_fyers()
+        if not fyers or not order_ids:
+            return []
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        payload = [{"id": str(x)} if isinstance(x, str) else x for x in order_ids]
+        data = fyers.cancel_basket_orders(payload)
+        if isinstance(data, dict):
+            return data.get("data", []) or [data]
+        return []
 
     def place_multileg_order(
         self,
@@ -1544,6 +1648,213 @@ class FyersAPI(BrokerAPI):
             return data.get("s") == "ok"
         except Exception:
             return False
+
+    def attach_position_legs(
+        self,
+        position_id: str,
+        take_profit: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        leg_type: int = 1,  # 1 = Points (default), 2 = Percentage
+        qty: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """
+        Attach or update server-managed TP/SL legs on an existing open position (PATCH /positions).
+        Provides exchange-managed OCO bracket protection that remains active even if terminal disconnects.
+        """
+        fyers = self._get_fyers()
+        if not fyers:
+            return {"s": "error", "message": "Fyers broker session not authenticated"}
+        payload: dict[str, Any] = {
+            "positionId": str(position_id),
+            "legType": int(leg_type),
+        }
+        if take_profit is not None:
+            payload["takeProfit"] = float(take_profit)
+        if stop_loss is not None:
+            payload["stopLoss"] = float(stop_loss)
+        if qty is not None:
+            payload["qty"] = int(qty)
+
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        try:
+            return fyers.attach_position_legs(payload)
+        except Exception as exc:
+            return {"s": "error", "message": str(exc)}
+
+    def convert_position(
+        self,
+        symbol: str,
+        position_side: int,  # 1 for Long, -1 for Short
+        convert_qty: int,
+        convert_from: str,  # e.g. "INTRADAY"
+        convert_to: str,  # e.g. "MARGIN" or "CNC"
+    ) -> dict[str, Any]:
+        """
+        Converts positions between product types (PUT /positions).
+        Supports converting intraday positions to carry-forward margin or delivery.
+        """
+        fyers = self._get_fyers()
+        if not fyers:
+            return {"s": "error", "message": "Fyers broker session not authenticated"}
+        fyers_sym = _to_fyers_symbol(symbol)
+        payload = {
+            "symbol": fyers_sym,
+            "positionSide": int(position_side),
+            "convertQty": int(convert_qty),
+            "convertFrom": str(convert_from).upper(),
+            "convertTo": str(convert_to).upper(),
+        }
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        try:
+            return fyers.convert_position(payload)
+        except Exception as exc:
+            return {"s": "error", "message": str(exc)}
+
+    def create_smart_order_limit(
+        self,
+        symbol: str,
+        qty: int,
+        side: int,  # 1 for BUY, -1 for SELL
+        limit_price: float,
+        product: str = "INTRADAY",
+        end_time: Optional[int] = None,
+        order_type: int = 1,
+        on_exp: int = 1,
+        stop_price: float = 0.0,
+        hpr: float = 0.0,
+        lpr: float = 0.0,
+        mpp: int = 0,
+    ) -> dict[str, Any]:
+        """Place a timed Smart Limit Order managed on Fyers servers."""
+        fyers = self._get_fyers()
+        if not fyers:
+            return {"s": "error", "message": "Fyers broker session not authenticated"}
+        fyers_sym = _to_fyers_symbol(symbol)
+        if not end_time:
+            from config.constants import IST
+
+            now = datetime.now(IST)
+            close_time = now.replace(hour=15, minute=20, second=0, microsecond=0)
+            end_time = int(close_time.timestamp())
+        payload = {
+            "symbol": fyers_sym,
+            "qty": int(qty),
+            "side": int(side),
+            "productType": str(product).upper(),
+            "limitPrice": round_price_to_tick(float(limit_price)),
+            "endTime": int(end_time),
+            "orderType": int(order_type),
+            "onExp": int(on_exp),
+        }
+        if stop_price > 0:
+            payload["stopPrice"] = float(stop_price)
+        if hpr > 0:
+            payload["hpr"] = float(hpr)
+        if lpr > 0:
+            payload["lpr"] = float(lpr)
+        if mpp != 0:
+            payload["mpp"] = int(mpp)
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        try:
+            return fyers.create_smart_order_limit(payload)
+        except Exception as exc:
+            return {"s": "error", "message": str(exc)}
+
+    def create_smart_order_step(
+        self,
+        symbol: str,
+        qty: int,
+        side: int,  # 1 for BUY, -1 for SELL
+        avg_qty: int,
+        avg_diff: float,
+        direction: int = 1,
+        order_type: int = 1,
+        product: str = "INTRADAY",
+        limit_price: Optional[float] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Place a Step Smart Order (iceberg/TWAP style ladder accumulation) on Fyers infrastructure."""
+        fyers = self._get_fyers()
+        if not fyers:
+            return {"s": "error", "message": "Fyers broker session not authenticated"}
+        fyers_sym = _to_fyers_symbol(symbol)
+        now_ts = int(time.time())
+        if not start_time:
+            start_time = now_ts
+        if not end_time:
+            from config.constants import IST
+
+            now = datetime.now(IST)
+            close_time = now.replace(hour=15, minute=25, second=0, microsecond=0)
+            end_time = int(close_time.timestamp())
+        payload = {
+            "symbol": fyers_sym,
+            "qty": int(qty),
+            "side": int(side),
+            "productType": str(product).upper(),
+            "avgqty": int(avg_qty),
+            "avgdiff": int(avg_diff) if float(avg_diff).is_integer() else float(avg_diff),
+            "direction": int(direction),
+            "orderType": int(order_type),
+            "startTime": int(start_time),
+            "endTime": int(end_time),
+        }
+        if limit_price is not None and limit_price > 0:
+            payload["limitPrice"] = round_price_to_tick(float(limit_price))
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        try:
+            return fyers.create_smart_order_step(payload)
+        except Exception as exc:
+            return {"s": "error", "message": str(exc)}
+
+    def create_smartexit_trigger(
+        self,
+        name: str,
+        strategy_type: int = 2,  # 1: Alert Only, 2: Auto Exit, 3: Trailing Exit
+        profit_rate: Optional[float] = None,
+        loss_rate: Optional[float] = None,
+        wait_time: int = 0,
+    ) -> dict[str, Any]:
+        """Create a server-side Smart Exit Trigger managed on Fyers servers."""
+        fyers = self._get_fyers()
+        if not fyers:
+            return {"s": "error", "message": "Fyers broker session not authenticated"}
+        payload: dict[str, Any] = {
+            "name": str(name),
+            "type": int(strategy_type),
+        }
+        if profit_rate is not None:
+            payload["profitRate"] = float(profit_rate)
+        if loss_rate is not None:
+            payload["lossRate"] = float(loss_rate)
+        if wait_time > 0 or strategy_type == 3:
+            payload["waitTime"] = int(wait_time)
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        try:
+            return fyers.create_smartexit_trigger(payload)
+        except Exception as exc:
+            return {"s": "error", "message": str(exc)}
+
+    def get_smartexit_triggers(self, filters: Optional[dict] = None) -> list[dict]:
+        """Fetch active server-side Smart Exit Triggers."""
+        fyers = self._get_fyers()
+        if not fyers:
+            return []
+        try:
+            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
+            res = (
+                fyers.get_smartexit_triggers(filters or {})
+                if filters
+                else fyers.get_smartexit_triggers()
+            )
+            if isinstance(res, dict):
+                return res.get("data", res.get("triggers", []))
+            elif isinstance(res, list):
+                return res
+            return []
+        except Exception:
+            return []
 
     def get_orders(self) -> list[Order]:
         fyers = self._get_fyers()
@@ -1719,6 +2030,26 @@ class FyersAPI(BrokerAPI):
             }
             try:
                 data = fyers.history(payload)
+                if isinstance(data, dict) and (
+                    data.get("code") in (-15, -16, -99, 401)
+                    or any(
+                        p in str(data.get("message", "")).lower()
+                        for p in (
+                            "could not authenticate",
+                            "token is expired",
+                            "valid token",
+                            "invalid token",
+                        )
+                    )
+                ):
+                    failed_ts = self._token_ts
+                    logger.warning(
+                        f"[FyersAPI] History API auth rejection ({data.get('message')}). Retrying after auto-reauth..."
+                    )
+                    if self._handle_auth_failure(failed_ts=failed_ts):
+                        fyers = self._get_fyers()
+                        if fyers:
+                            data = fyers.history(payload)
                 if isinstance(data, dict) and data.get("s") == "ok":
                     all_candles.extend(data.get("candles", []))
             except Exception as exc:
@@ -1832,23 +2163,58 @@ class FyersAPI(BrokerAPI):
         payload = {"segment": segment} if segment else {"exit_all": 1}
         return fyers.exit_positions(payload)
 
-    def get_screener_technical(self, screener: str = "cs004") -> dict[str, Any]:
-        """Query native Fyers server-side technical screeners."""
+    def get_screener_technical(
+        self, screener: str = "cs004", force_refresh: bool = False
+    ) -> dict[str, Any]:
+        """Query native Fyers server-side technical screeners (with thread-safe TTL deduplication)."""
+        now = time.time()
+        cache_key = f"tech:{screener}"
+        if not force_refresh:
+            with self._screener_cache_lock:
+                if cache_key in self._screener_cache:
+                    ts, val = self._screener_cache[cache_key]
+                    if now - ts < 120.0:
+                        return val
+
         fyers = self._get_fyers()
+        if not fyers:
+            return {"status": "error", "error": "Broker session not authenticated", "s": "error"}
         try:
-            return fyers.screeners_technical({"screener": screener})
+            res = fyers.screeners_technical({"screener": screener})
+            if isinstance(res, dict) and res.get("s", "ok") == "ok":
+                with self._screener_cache_lock:
+                    self._screener_cache[cache_key] = (now, res)
+            return res
         except Exception as e:
             return {"status": "error", "error": str(e), "s": "error"}
 
-    def get_screener_candlestick(self, pattern: str = "hammer") -> dict[str, Any]:
-        """Query native Fyers server-side candlestick pattern recognizer."""
+    def get_screener_candlestick(
+        self, pattern: str = "hammer", force_refresh: bool = False
+    ) -> dict[str, Any]:
+        """Query native Fyers server-side candlestick pattern recognizer (with thread-safe TTL deduplication)."""
+        now = time.time()
+        cache_key = f"candle:{pattern}"
+        if not force_refresh:
+            with self._screener_cache_lock:
+                if cache_key in self._screener_cache:
+                    ts, val = self._screener_cache[cache_key]
+                    if now - ts < 120.0:
+                        return val
+
         fyers = self._get_fyers()
+        if not fyers:
+            return {"status": "error", "error": "Broker session not authenticated", "s": "error"}
         try:
             if hasattr(fyers, "screeners_candlestick"):
-                return fyers.screeners_candlestick({"pattern": pattern})
+                res = fyers.screeners_candlestick({"pattern": pattern})
             elif hasattr(fyers, "screeners"):
-                return fyers.screeners({"pattern": pattern, "type": "candlestick"})
-            return {"s": "ok", "pattern": pattern, "data": []}
+                res = fyers.screeners({"pattern": pattern, "type": "candlestick"})
+            else:
+                res = {"s": "ok", "pattern": pattern, "data": []}
+            if isinstance(res, dict) and res.get("s", "ok") == "ok":
+                with self._screener_cache_lock:
+                    self._screener_cache[cache_key] = (now, res)
+            return res
         except Exception as e:
             return {"status": "error", "error": str(e), "s": "error"}
 
@@ -1972,6 +2338,110 @@ class FyersAPI(BrokerAPI):
             "breadth_ratio": breadth_ratio,
             "sectors": items,
         }
+
+    # ── Post-Trade Audit, Charges & Tax Accounting ───────────
+
+    def get_charges_history(
+        self,
+        from_date: str = "",
+        to_date: str = "",
+        page_size: int = 100,
+        page_no: int = 1,
+        segment_type: int = 0,
+        exchange_type: int = 0,
+        report_type: int = 1,
+    ) -> dict[str, Any]:
+        """Retrieves charges history from Fyers server for audited tax and brokerage reconciliation."""
+        fyers = self._get_fyers()
+        if not fyers:
+            return {"s": "error", "message": "Broker session not authenticated"}
+        payload: dict[str, Any] = {
+            "page_size": page_size,
+            "page_no": page_no,
+            "segment_type": segment_type,
+            "exchange_type": exchange_type,
+            "report_type": report_type,
+        }
+        if from_date:
+            payload["from_date"] = from_date
+        if to_date:
+            payload["to_date"] = to_date
+        try:
+            return fyers.charges_history(payload)
+        except Exception as e:
+            return {"s": "error", "message": str(e)}
+
+    def get_realised_pnl_history(
+        self,
+        from_date: str = "",
+        to_date: str = "",
+        page_size: int = 100,
+        page_no: int = 1,
+    ) -> dict[str, Any]:
+        """Retrieves realised P&L history directly from Fyers server."""
+        fyers = self._get_fyers()
+        if not fyers:
+            return {"s": "error", "message": "Broker session not authenticated"}
+        payload: dict[str, Any] = {
+            "page_size": page_size,
+            "page_no": page_no,
+        }
+        if from_date:
+            payload["from_date"] = from_date
+        if to_date:
+            payload["to_date"] = to_date
+        try:
+            return fyers.realised_profit_history(payload)
+        except Exception as e:
+            return {"s": "error", "message": str(e)}
+
+    def get_tax_pnl_history(
+        self,
+        from_date: str = "",
+        to_date: str = "",
+        page_size: int = 100,
+        page_no: int = 1,
+    ) -> dict[str, Any]:
+        """Retrieves tax P&L report breakdown from Fyers server."""
+        fyers = self._get_fyers()
+        if not fyers:
+            return {"s": "error", "message": "Broker session not authenticated"}
+        payload: dict[str, Any] = {
+            "page_size": page_size,
+            "page_no": page_no,
+        }
+        if from_date:
+            payload["from_date"] = from_date
+        if to_date:
+            payload["to_date"] = to_date
+        try:
+            return fyers.tax_pnl_history(payload)
+        except Exception as e:
+            return {"s": "error", "message": str(e)}
+
+    def get_ledger_history(
+        self,
+        from_date: str = "",
+        to_date: str = "",
+        page_size: int = 100,
+        page_no: int = 1,
+    ) -> dict[str, Any]:
+        """Retrieves financial ledger transaction journal entries from Fyers server."""
+        fyers = self._get_fyers()
+        if not fyers:
+            return {"s": "error", "message": "Broker session not authenticated"}
+        payload: dict[str, Any] = {
+            "page_size": page_size,
+            "page_no": page_no,
+        }
+        if from_date:
+            payload["from_date"] = from_date
+        if to_date:
+            payload["to_date"] = to_date
+        try:
+            return fyers.ledger_history(payload)
+        except Exception as e:
+            return {"s": "error", "message": str(e)}
 
     def check_order_margin(
         self,

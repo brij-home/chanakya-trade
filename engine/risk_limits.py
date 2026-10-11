@@ -395,6 +395,11 @@ class RiskLimits:
             or streak >= self.max_consecutive_losses,
         }
 
+    def reset_all(self) -> None:
+        """Clear all recorded trades and reset counters (for testing and midnight resets)."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM daily_trades")
+
 
 # ── Singleton ─────────────────────────────────────────────────
 risk_limits = RiskLimits()

@@ -246,11 +246,11 @@ def generate_html_tear_sheet(
     if output_path:
         out_file = Path(output_path)
     else:
-        out_file = (
-            Path.home()
-            / ".trading_platform"
-            / "reports"
-            / f"tear_sheet_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+        from config.paths import app_data_path
+
+        out_file = app_data_path(
+            "reports",
+            f"tear_sheet_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
         )
 
     out_file.parent.mkdir(parents=True, exist_ok=True)

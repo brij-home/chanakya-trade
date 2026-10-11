@@ -46,7 +46,7 @@ def _extract_json_block(text: str) -> str | None:
     """
     Extract the first JSON object from text.
     Returns the raw JSON string or None if not found.
-    Handles JSON embedded in prose (LLMs often wrap output in explanation text).
+    Handles JSON embedded in prose, and returns candidate substring even if truncated.
     """
     start = text.find("{")
     if start == -1:
@@ -60,6 +60,88 @@ def _extract_json_block(text: str) -> str | None:
             depth -= 1
             if depth == 0:
                 return text[start : i + 1]
+    # If text ended before depth reached 0 (e.g. truncated JSON), return candidate from start
+    return text[start:]
+
+
+def _defensive_repair_json(json_str: str) -> dict | None:
+    """
+    Defensively parses JSON with repair for cut-off strings, unclosed brackets/braces,
+    markdown wrapping, or falling back to regex field extraction.
+    """
+    # 1. Strip markdown fences if present
+    cleaned = re.sub(r"^```(?:json)?\s*", "", json_str.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+
+    # 2. Direct attempt
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    # 3. Defensive structural repair for truncated JSON
+    work = cleaned
+    # Trim trailing incomplete punctuation
+    work = re.sub(r",\s*$", "", work)
+    work = re.sub(r":\s*$", "", work)
+
+    # Balance unclosed string quotes
+    in_str = False
+    esc = False
+    for ch in work:
+        if ch == "\\" and not esc:
+            esc = True
+            continue
+        if ch == '"' and not esc:
+            in_str = not in_str
+        esc = False
+
+    if in_str:
+        work += '"'
+
+    # Remove trailing incomplete key like , "key" or "key":
+    work = re.sub(r',\s*"[^"]*"\s*:\s*$', "", work)
+    work = re.sub(r',\s*"[^"]*"\s*$', "", work)
+
+    # Balance brackets and braces
+    open_brackets = work.count("[") - work.count("]")
+    if open_brackets > 0:
+        work += "]" * open_brackets
+
+    open_braces = work.count("{") - work.count("}")
+    if open_braces > 0:
+        work += "}" * open_braces
+
+    try:
+        return json.loads(work)
+    except Exception:
+        pass
+
+    # 4. Regex extraction fallback
+    fields: dict = {}
+    m = re.search(r'"verdict"\s*:\s*"([^"]+)"', cleaned, re.IGNORECASE)
+    if m:
+        fields["verdict"] = _parse_verdict(m.group(1))
+
+    m = re.search(r'"confidence"\s*:\s*(\d+)', cleaned, re.IGNORECASE)
+    if m:
+        try:
+            fields["confidence"] = _clamp_confidence(int(m.group(1)))
+        except ValueError:
+            pass
+
+    m = re.search(r'"winner"\s*:\s*"([^"]+)"', cleaned, re.IGNORECASE)
+    if m:
+        fields["winner"] = _parse_winner(m.group(1))
+
+    for k in ("strategy", "entry", "stop_loss", "target", "risk_reward", "position"):
+        m = re.search(rf'"{k}"\s*:\s*"([^"]*)"', cleaned, re.IGNORECASE)
+        if m:
+            fields[k] = m.group(1)
+
+    if fields:
+        return fields
+
     return None
 
 
@@ -246,15 +328,20 @@ def parse_synthesis_output(text: str) -> SynthesisOutput:
     if "{" in text:
         json_str = _extract_json_block(text)
         if json_str:
-            try:
-                data = json.loads(json_str)
-                # Clamp confidence if present before validation
-                if "confidence" in data and isinstance(data["confidence"], (int, float)):
-                    data["confidence"] = _clamp_confidence(int(data["confidence"]))
-                return SynthesisOutput.model_validate(data)
-            except (json.JSONDecodeError, ValidationError, Exception):
-                # JSON failed — fall through to text path
-                pass
+            data = _defensive_repair_json(json_str)
+            if data and isinstance(data, dict):
+                try:
+                    # Sanitize fields to match SynthesisOutput schema constraints
+                    if "confidence" in data and isinstance(data["confidence"], (int, float)):
+                        data["confidence"] = _clamp_confidence(int(data["confidence"]))
+                    if "verdict" in data and isinstance(data["verdict"], str):
+                        data["verdict"] = _parse_verdict(data["verdict"])
+                    if "winner" in data and isinstance(data["winner"], str):
+                        data["winner"] = _parse_winner(data["winner"])
+                    return SynthesisOutput.model_validate(data)
+                except (ValidationError, Exception):
+                    # JSON validation failed — fall through to text path
+                    pass
 
     # ── Path 2: Text ──────────────────────────────────────────────────────────
     try:

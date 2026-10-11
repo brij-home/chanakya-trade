@@ -58,7 +58,7 @@ _quotes_batch_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=3, thread_name_prefix="QuotesBatchWorker"
 )
 _alerts_serializer_pool = concurrent.futures.ThreadPoolExecutor(
-    max_workers=2, thread_name_prefix="AlertsSerializer"
+    max_workers=4, thread_name_prefix="AlertsSerializer"
 )
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
@@ -229,6 +229,16 @@ from web.schemas import (
     TaxEstimateRequest,
     DefinedRiskSpreadRequest,
 )
+
+
+class FyersTechnicalScreenerRequest(BaseModel):
+    screener: str = Field(default="cs004", description="Technical screener identifier, e.g. cs004")
+
+
+class FyersCandlestickScreenerRequest(BaseModel):
+    pattern: str = Field(
+        default="hammer", description="Candlestick pattern name, e.g. hammer, doji"
+    )
 
 
 # ── Helper ────────────────────────────────────────────────────
@@ -886,6 +896,85 @@ async def skill_sector_heatmap():
                 "top_loser": sectors[-1] if sectors else None,
             }
         )
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/fyers_technical_screener")
+async def skill_fyers_technical_screener(req: Optional[FyersTechnicalScreenerRequest] = None):
+    """Query Fyers native server-side technical screener (momentum, breakouts, oversold/overbought)."""
+    try:
+        from brokers.session import get_data_broker
+        import asyncio
+
+        brk = get_data_broker()
+        screener_code = req.screener if req else "cs004"
+        if brk and hasattr(brk, "get_screener_technical"):
+            data = await asyncio.to_thread(brk.get_screener_technical, screener_code)
+            return _ok(data)
+        return _err("Data broker does not support technical screeners")
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/fyers_candlestick_screener")
+async def skill_fyers_candlestick_screener(req: Optional[FyersCandlestickScreenerRequest] = None):
+    """Query Fyers native server-side candlestick pattern screener (hammer, doji, engulfing, morning star)."""
+    try:
+        from brokers.session import get_data_broker
+        import asyncio
+
+        brk = get_data_broker()
+        pattern_name = req.pattern if req else "hammer"
+        if brk and hasattr(brk, "get_screener_candlestick"):
+            data = await asyncio.to_thread(brk.get_screener_candlestick, pattern_name)
+            return _ok(data)
+        return _err("Data broker does not support candlestick screeners")
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/fyers_market_status")
+async def skill_fyers_market_status():
+    """Query Fyers real-time exchange market status (NSE, BSE, MCX, CDS)."""
+    try:
+        from brokers.session import get_data_broker
+        import asyncio
+
+        brk = get_data_broker()
+        if brk and hasattr(brk, "get_market_status"):
+            data = await asyncio.to_thread(brk.get_market_status)
+            return _ok(data)
+        return _err("Data broker does not support market status")
+    except Exception as e:
+        raise _err(str(e))
+
+
+class SimulateOrderBookSweepRequest(BaseModel):
+    symbol: str
+    side: str = "BUY"
+    quantity: int = 100
+
+
+@router.post("/simulate_order_book_sweep")
+async def skill_simulate_order_book_sweep(req: SimulateOrderBookSweepRequest):
+    """Simulate pre-trade slippage and market sweep across 50-level depth book."""
+    try:
+        import asyncio
+        from market.order_book import analyze_symbol_order_book
+
+        def _sweep():
+            snap = analyze_symbol_order_book(req.symbol)
+            sweep_res = snap.simulate_sweep(req.side, req.quantity)
+            return {
+                "symbol": snap.symbol,
+                "ltp": snap.ltp,
+                "provenance": snap.provenance,
+                "sweep": sweep_res,
+            }
+
+        data = await asyncio.to_thread(_sweep)
+        return _ok(data)
     except Exception as e:
         raise _err(str(e))
 

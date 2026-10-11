@@ -96,3 +96,34 @@ def create_alert_domain_event(
         metrics=getattr(alert, "metrics", {}) or {},
         actionable_plan=getattr(alert, "actionable_plan", {}) or {},
     )
+
+
+def create_regime_shift_event(
+    from_regime: str,
+    to_regime: str,
+    vix_level: float,
+    *,
+    reason: str = "",
+    correlation_id: Optional[str] = None,
+) -> AlertDomainEvent:
+    """Factory helper creating a strongly-typed REGIME_SHIFT domain event."""
+    return AlertDomainEvent(
+        event_type="REGIME_SHIFT",
+        alert_id=f"regime-{to_regime.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}",
+        symbol="INDIA_VIX",
+        exchange="NSE",
+        stage="ACTIVE",
+        headline=f"Market Regime Shift: {from_regime} ➔ {to_regime} (VIX: {vix_level:.2f})",
+        summary=reason or f"Adaptive market regime transitioned from {from_regime} to {to_regime}",
+        ltp=float(vix_level),
+        trigger_level=float(vix_level),
+        target_level=0.0,
+        stop_loss=0.0,
+        correlation_id=correlation_id or f"evt-{uuid.uuid4().hex[:8]}",
+        timestamp_iso=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        environment="LIVE",
+        metrics={"from_regime": from_regime, "to_regime": to_regime, "vix": vix_level},
+        actionable_plan={
+            "adaptation": f"Adjust factor weights and risk parameters for {to_regime}"
+        },
+    )

@@ -175,6 +175,9 @@ class MarketTickerStream:
         self._lock = threading.Lock()
         self._running = False
         self._worker_thread: Optional[threading.Thread] = None
+        self._conflation_interval: float = 0.05  # 50ms (20 Hz max SSE broadcast rate)
+        self._dirty_event = threading.Event()
+        self._conflation_thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._listeners: list[Callable[[list[dict]], None]] = []
 
@@ -494,7 +497,7 @@ class MarketTickerStream:
                             else ("down" if item.change_pct < 0 else "flat")
                         )
 
-        self._notify_listeners()
+        self._schedule_conflated_notify()
 
     def _on_fyers_tick(self, tick: Any) -> None:
         """Handle live tick from Fyers WebSocket."""
@@ -535,7 +538,7 @@ class MarketTickerStream:
                                 else ("down" if item.change_pct < 0 else "flat")
                             )
 
-        self._notify_listeners()
+        self._schedule_conflated_notify()
 
     def _on_crypto_tick(self, tick: dict[str, Any]) -> None:
         """Handle live tick from Binance Crypto WebSocket."""
@@ -570,11 +573,18 @@ class MarketTickerStream:
                             else ("down" if item.change_pct < 0 else "flat")
                         )
 
-        self._notify_listeners()
+        self._schedule_conflated_notify()
 
     def add_listener(self, listener: Callable[[list[dict]], None]) -> None:
         """Register a callback for real-time ticker updates."""
         self._listeners.append(listener)
+
+    def _schedule_conflated_notify(self) -> None:
+        """Mark state dirty for conflated SSE broadcast. If conflation thread is inactive, notifies directly."""
+        if self._running and self._conflation_thread and self._conflation_thread.is_alive():
+            self._dirty_event.set()
+        else:
+            self._notify_listeners()
 
     def _notify_listeners(self) -> None:
         """Publish update to local listeners and SSE event bus."""
@@ -709,10 +719,33 @@ class MarketTickerStream:
         }
 
     def start(self, poll_interval_seconds: float = 3.0) -> None:
-        """Start background polling thread for global/macro tickers with adaptive intervals."""
+        """Start background polling thread for global/macro tickers with adaptive intervals and conflated SSE broadcaster."""
         if self._running:
             return
         self._running = True
+
+        def _conflate_worker():
+            logger.info(
+                f"[TickerStream] Conflation worker started (interval={self._conflation_interval}s / {int(1.0 / self._conflation_interval)}Hz)"
+            )
+            while self._running:
+                if self._dirty_event.wait(timeout=self._conflation_interval):
+                    if not self._running:
+                        break
+                    self._dirty_event.clear()
+                    try:
+                        self._notify_listeners()
+                    except Exception as e:
+                        logger.warning(
+                            f"[TickerStream] Conflation broadcast error: {e}", exc_info=True
+                        )
+                time.sleep(self._conflation_interval)
+            logger.info("[TickerStream] Conflation worker stopped")
+
+        self._conflation_thread = threading.Thread(
+            target=_conflate_worker, daemon=True, name="TickerStreamConflater"
+        )
+        self._conflation_thread.start()
 
         def _poll_worker():
             logger.info(
@@ -725,11 +758,11 @@ class MarketTickerStream:
                     now = time.time()
                     ws_active = self.is_ws_alive()
                     # When WS is active: refresh macro every 15s, ribbon reconcile every 60s
-                    # When WS is inactive: poll both every poll_interval_seconds
-                    need_ribbon = (not ws_active) or (now - last_ribbon_reconcile >= 60.0)
-                    need_macro = now - last_macro_fetch >= (
-                        15.0 if ws_active else poll_interval_seconds
-                    )
+                    # When WS is inactive: poll ribbon every 6s, macro every 10s to prevent REST thread starvation
+                    ribbon_interval = 6.0 if not ws_active else 60.0
+                    macro_interval = 15.0 if ws_active else 10.0
+                    need_ribbon = (now - last_ribbon_reconcile) >= ribbon_interval
+                    need_macro = (now - last_macro_fetch) >= macro_interval
 
                     if need_ribbon:
                         last_ribbon_reconcile = now
@@ -757,8 +790,18 @@ class MarketTickerStream:
         self._worker_thread.start()
 
     def stop(self, timeout: float = 2.0) -> None:
-        """Stop background worker and join cleanly."""
+        """Stop background workers and join cleanly."""
         self._running = False
+        self._dirty_event.set()
+        if self._conflation_thread and self._conflation_thread.is_alive():
+            try:
+                self._conflation_thread.join(timeout=timeout)
+            except Exception as exc:
+                logger.warning(
+                    f"[TickerStream] Error joining conflation thread: {exc}", exc_info=True
+                )
+        self._conflation_thread = None
+
         if self._worker_thread and self._worker_thread.is_alive():
             try:
                 self._worker_thread.join(timeout=timeout)

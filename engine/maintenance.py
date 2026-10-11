@@ -146,9 +146,10 @@ def get_storage_breakdown() -> StorageBreakdown:
 
 
 def run_maintenance_purge(
-    raw_tick_retention_days: int = 7,
-    disk_cache_retention_days: int = 7,
-    export_retention_days: int = 14,
+    raw_tick_retention_days: int = 30,
+    disk_cache_retention_days: int = 30,
+    alert_retention_days: int = 30,
+    export_retention_days: int = 30,
     vacuum_databases: bool = False,
 ) -> MaintenanceReport:
     """
@@ -177,7 +178,9 @@ def run_maintenance_purge(
     try:
         from market.disk_cache import prune_disk_cache
 
-        deleted_files = prune_disk_cache(max_age_days=disk_cache_retention_days, max_total_mb=150.0)
+        deleted_files = prune_disk_cache(
+            max_age_days=disk_cache_retention_days, max_total_mb=2048.0
+        )
         if deleted_files > 0:
             actions.append(
                 f"Purged {deleted_files} stale OHLCV JSON cache files from ~/.trading_platform/cache/."
@@ -218,12 +221,14 @@ def run_maintenance_purge(
     try:
         from engine.auto_alert_engine import auto_alert_engine
 
-        purged_alerts = auto_alert_engine.cleanup_archived_records(max_age_days=1)
+        purged_alerts = auto_alert_engine.cleanup_archived_records(
+            max_age_days=alert_retention_days
+        )
         purged_expired = auto_alert_engine.purge_expired_alerts()
         total_alert_purges = purged_alerts + purged_expired
         if total_alert_purges > 0:
             actions.append(
-                f"Purged {total_alert_purges} stale, expired, and quarantined records from auto_alerts.json."
+                f"Purged {total_alert_purges} stale, expired, and quarantined records from auto_alerts.json (older than {alert_retention_days}d)."
             )
             items_deleted += total_alert_purges
     except Exception as e:

@@ -465,6 +465,21 @@ class TradeLifecycleManager:
                         realized_rr=float(r_mult),
                         factors_present=m_factors,
                     )
+                    try:
+                        from engine.detector_circuit_breaker import detector_circuit_breaker
+
+                        cb_outcome = "WIN" if outcome_str == "WIN" else "LOSS"
+                        detector_circuit_breaker.record_outcome(
+                            alert_id=alert.alert_id,
+                            symbol=alert.symbol,
+                            alert_type=alert.alert_type,
+                            outcome=cb_outcome,
+                            realized_r=float(r_mult),
+                        )
+                    except Exception as e_cb:
+                        logger.debug(
+                            f"[TradeLifecycleManager] Error recording outcome to detector circuit breaker: {e_cb}"
+                        )
                 except Exception as e_learn:
                     logger.debug(
                         f"[TradeLifecycleManager] Error recording milestone outcome to learning engine: {e_learn}"

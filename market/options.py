@@ -261,7 +261,10 @@ def get_options_chain(
         broker_key = ""
 
     trading_mode = os.environ.get("TRADING_MODE", "").upper()
-    if broker_key == "mock" or trading_mode == "DEMO":
+    allow_synthetic = (
+        broker_key == "mock" or trading_mode in ("DEMO", "PAPER", "SIMULATE", "") or not broker_key
+    )
+    if allow_synthetic:
         if clean_sym in ("SENSEX", "BANKEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
             try:
                 from market.quotes import get_ltp
@@ -323,8 +326,11 @@ def build_index_synthetic_option_chain(
     if expiry:
         exp_str = expiry
     else:
-        # Friday for BSE (SENSEX/BANKEX), Thursday for NIFTY, Tuesday for FINNIFTY
-        target_wd = 4 if is_bse else (3 if clean_sym in ("NIFTY", "NIFTY50") else 1)
+        # Resolve canonical weekday from SSOT (engine.alert_model)
+        # MIDCPNIFTY/BANKEX=Mon(0), FINNIFTY=Tue(1), BANKNIFTY=Wed(2), NIFTY=Thu(3), SENSEX=Fri(4)
+        from engine.alert_model import INDEX_WEEKLY_EXPIRY_WEEKDAY
+
+        target_wd = INDEX_WEEKLY_EXPIRY_WEEKDAY.get(clean_sym, 4 if is_bse else 3)
         days_ahead = (target_wd - today.weekday()) % 7
         if days_ahead == 0 and datetime.now(_ist).hour >= 15:
             days_ahead = 7

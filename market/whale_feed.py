@@ -17,9 +17,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 import threading
 from typing import Any, Optional
@@ -27,12 +26,12 @@ from market.http_pool import get_nse_client
 
 logger = logging.getLogger("market.whale_feed")
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
+from config.paths import app_data_path
 
 
 def _get_cache_dir() -> Path:
-    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
-    p = base / "cache"
+    p = app_data_path("cache")
     p.mkdir(parents=True, exist_ok=True)
     return p
 

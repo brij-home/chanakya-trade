@@ -20,10 +20,9 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("market.calendar")
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST_ZONE as IST
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Trading Holiday Master Data (NSE / BSE / MCX / CDS)
@@ -538,3 +537,11 @@ def get_trading_days_elapsed(
         cur += timedelta(days=1)
 
     return trading_days
+
+
+def is_trading_day(target_date: date, exchange: str = "NSE") -> bool:
+    """
+    Returns True if target_date is an official exchange trading day.
+    Excludes weekends (Saturday & Sunday) and exchange trading holidays.
+    """
+    return target_date.weekday() < 5 and not is_trading_holiday(target_date, exchange)

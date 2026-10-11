@@ -19,6 +19,7 @@ from typing import Any, Optional
 from config.constants import IST
 from market.http_pool import get_nse_client
 from market.news import NewsItem
+from market.single_flight_cache import SingleFlightCache
 
 
 # ── FII / DII Data ───────────────────────────────────────────
@@ -546,7 +547,19 @@ def _breadth_signal() -> tuple[str, float, list[str]]:
     return "NEUTRAL", 0.0, sources
 
 
-def get_sentiment(symbol: str, exchange: str = "NSE") -> SentimentSignal:
+_SENTIMENT_SINGLE_FLIGHT = SingleFlightCache[SentimentSignal](
+    soft_ttl=60.0,
+    hard_ttl=300.0,
+    name="sentiment",
+)
+
+
+def get_sentiment(
+    symbol: str,
+    exchange: str = "NSE",
+    use_cache: bool = True,
+    force_refresh: bool = False,
+) -> SentimentSignal:
     """
     Aggregate India market sentiment for a symbol (#172).
 
@@ -558,65 +571,79 @@ def get_sentiment(symbol: str, exchange: str = "NSE") -> SentimentSignal:
 
     Returns a SentimentSignal with BULLISH / NEUTRAL / BEARISH verdict
     and 0-100 confidence.
+
+    Protected by SingleFlightCache with Stale-While-Revalidate (SWR) to prevent
+    thundering herd stampedes across concurrent multi-agent persona analysis.
     """
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
 
-    # Gather signals from each component
-    fii_signal, fii_score, fii_sources = _fii_dii_signal(days=5)
-    news_signal, news_score, news_sources = _news_signal(sym)
-    deal_signal, deal_score, deal_sources = _bulk_deals_signal(sym, days=10)
-    breadth_signal, breadth_score, breadth_sources = _breadth_signal()
+    def _compute() -> SentimentSignal:
+        # Gather signals from each component
+        fii_signal, fii_score, fii_sources = _fii_dii_signal(days=5)
+        news_signal, news_score, news_sources = _news_signal(sym)
+        deal_signal, deal_score, deal_sources = _bulk_deals_signal(sym, days=10)
+        breadth_signal, breadth_score, breadth_sources = _breadth_signal()
 
-    component_signals = {
-        "fii_dii": fii_signal,
-        "news": news_signal,
-        "bulk_deals": deal_signal,
-        "breadth": breadth_signal,
-    }
-    component_scores = {
-        "fii_dii": fii_score,
-        "news": news_score,
-        "bulk_deals": deal_score,
-        "breadth": breadth_score,
-    }
+        component_signals = {
+            "fii_dii": fii_signal,
+            "news": news_signal,
+            "bulk_deals": deal_signal,
+            "breadth": breadth_signal,
+        }
+        component_scores = {
+            "fii_dii": fii_score,
+            "news": news_score,
+            "bulk_deals": deal_score,
+            "breadth": breadth_score,
+        }
 
-    # Weighted total score
-    total_score = sum(component_scores[k] * _COMPONENT_WEIGHTS[k] for k in _COMPONENT_WEIGHTS)
+        # Weighted total score
+        total_score = sum(component_scores[k] * _COMPONENT_WEIGHTS[k] for k in _COMPONENT_WEIGHTS)
 
-    # Overall verdict
-    if total_score >= 0.15:
-        overall = "BULLISH"
-    elif total_score <= -0.15:
-        overall = "BEARISH"
-    else:
-        overall = "NEUTRAL"
+        # Overall verdict
+        if total_score >= 0.15:
+            overall = "BULLISH"
+        elif total_score <= -0.15:
+            overall = "BEARISH"
+        else:
+            overall = "NEUTRAL"
 
-    # Confidence: how strongly does the weighted score lean?
-    confidence = int(min(100, abs(total_score) / 0.3 * 100))
+        # Confidence: how strongly does the weighted score lean?
+        confidence = int(min(100, abs(total_score) / 0.3 * 100))
 
-    # Key driver: highest absolute weighted contribution
-    weighted_contribs = {
-        k: abs(component_scores[k] * _COMPONENT_WEIGHTS[k]) for k in _COMPONENT_WEIGHTS
-    }
-    key_driver_key = max(weighted_contribs, key=weighted_contribs.get)
-    key_driver_labels = {
-        "fii_dii": "FII/DII flows",
-        "news": "news sentiment",
-        "bulk_deals": "bulk deals",
-        "breadth": "market breadth",
-    }
-    key_driver = f"{key_driver_labels[key_driver_key]} ({component_signals[key_driver_key]})"
+        # Key driver: highest absolute weighted contribution
+        weighted_contribs = {
+            k: abs(component_scores[k] * _COMPONENT_WEIGHTS[k]) for k in _COMPONENT_WEIGHTS
+        }
+        key_driver_key = max(weighted_contribs, key=weighted_contribs.get)
+        key_driver_labels = {
+            "fii_dii": "FII/DII flows",
+            "news": "news sentiment",
+            "bulk_deals": "bulk deals",
+            "breadth": "market breadth",
+        }
+        key_driver = f"{key_driver_labels[key_driver_key]} ({component_signals[key_driver_key]})"
 
-    all_sources = fii_sources + news_sources + deal_sources + breadth_sources
+        all_sources = fii_sources + news_sources + deal_sources + breadth_sources
 
-    return SentimentSignal(
-        symbol=sym,
-        overall_signal=overall,
-        confidence=confidence,
-        breakdown=component_signals,
-        key_driver=key_driver,
-        sources=all_sources,
-        score=round(total_score, 3),
+        return SentimentSignal(
+            symbol=sym,
+            overall_signal=overall,
+            confidence=confidence,
+            breakdown=component_signals,
+            key_driver=key_driver,
+            sources=all_sources,
+            score=round(total_score, 3),
+        )
+
+    if not use_cache:
+        return _compute()
+
+    cache_key = f"{sym}:{exchange.upper()}"
+    return _SENTIMENT_SINGLE_FLIGHT.get_or_fetch_sync(
+        cache_key,
+        _compute,
+        force_refresh=force_refresh,
     )
 
 

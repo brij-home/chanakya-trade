@@ -20,12 +20,11 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime, timezone, timedelta
+from datetime import datetime, time as dtime
 from typing import Any, Optional
 
 logger = logging.getLogger("engine.quality_gate")
-
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 @dataclass
@@ -508,6 +507,36 @@ def evaluate_institutional_quality_gate(
             notes.append(
                 f"High Outlay Premium (₹{prem_val:,.1f} >= ₹450): Elevated capital at risk; defined-risk spread mandated."
             )
+
+    # ── 6d. Check 5d: Low-Liquidity Chop & Volume Drift Floor (Crypto & Commodity) ──
+    rvol_metric = (getattr(alert, "metrics", {}) or {}).get("rvol") or (
+        getattr(alert, "actionable_plan", {}) or {}
+    ).get("rvol")
+    if is_commodity_or_crypto and rvol_metric is not None:
+        try:
+            rvol_f = float(rvol_metric)
+            verdict_metrics["rvol"] = rvol_f
+            alert_type_s = str(getattr(alert, "alert_type", "") or "")
+            is_arb = any(k in alert_type_s for k in ("ARBITRAGE", "SQUEEZE", "LIQUIDATION"))
+            has_absorption = (
+                "ABSORPTION" in alert_type_s
+                or "ABSORPTION" in str(getattr(alert, "summary", "")).upper()
+                or "CVD" in str(getattr(alert, "summary", "")).upper()
+            )
+            if rvol_f < 0.70 and not is_arb and not has_absorption:
+                return VetoVerdict(
+                    is_vetoed=True,
+                    veto_reason=f"Dead Liquidity Chop (RVOL {rvol_f:.2f}x < 0.70x floor): Trading during volume vacuum carries extreme false-breakout risk.",
+                    execution_mandate="VETOED",
+                    conviction_tier="REJECTED",
+                    metrics=verdict_metrics,
+                    coaching_notes=[
+                        "Low relative volume indicates absence of institutional participation.",
+                        "Wait for active market session volume before entering breakout/retest setups.",
+                    ],
+                )
+        except Exception:
+            pass
 
     # ── 7. Conviction Tier Classification & Execution Mandate ─────────────────
     execution_mandate = "STANDARD"

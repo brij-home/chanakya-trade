@@ -75,7 +75,7 @@ def detect_index_micro_scalp(
         or (os.environ.get("DEPLOY_MODE") == "test")
     )
     if not is_test_runner and not ignore_time_gate:
-        if curr_time < dtime(9, 18) or curr_time > dtime(15, 15):
+        if curr_time < dtime(9, 16) or curr_time > dtime(15, 15):
             return []
         # Midday Chop Gate (11:15 - 13:15 IST):
         # 1-minute and 3-minute option breakouts during midday consolidation suffer high failure rates and theta bleed.
@@ -108,6 +108,16 @@ def detect_index_micro_scalp(
     min_vol = 500 if clean_sym in ("MIDCPNIFTY", "FINNIFTY", "SENSEX", "BANKEX") else 1000
     min_oi = 800 if clean_sym in ("MIDCPNIFTY", "FINNIFTY", "SENSEX", "BANKEX") else 2000
     min_prem = 15.0 if clean_sym in ("MIDCPNIFTY", "FINNIFTY") else 25.0
+
+    # Early session liquidity relaxation: In the opening 10-20 minutes, option contracts
+    # have not accumulated midday volume/OI yet. Graduate thresholds dynamically:
+    _session_minute = (curr_time.hour * 60 + curr_time.minute) - (9 * 60 + 15)
+    if _session_minute <= 10:  # 09:15–09:25 IST: early opening momentum
+        min_vol = max(50, int(min_vol * 0.20))
+        min_oi = max(100, int(min_oi * 0.25))
+    elif _session_minute <= 20:  # 09:25–09:35 IST
+        min_vol = max(100, int(min_vol * 0.40))
+        min_oi = max(200, int(min_oi * 0.50))
 
     valid_contracts: list[Any] = [
         c
@@ -209,13 +219,13 @@ def detect_index_micro_scalp(
             trigger_level = round(c_ltp, 1)
             no_chase = round(trigger_level + (risk_pts * 0.35), 1)
             sl_level = round(max(1.0, trigger_level - risk_pts), 1)
-            tgt1 = round(trigger_level + (risk_pts * 1.0), 1)
-            tgt2 = round(trigger_level + (risk_pts * 2.0), 1)
-            tgt3 = round(trigger_level + (risk_pts * 3.2), 1)
+            tgt1 = round(trigger_level + (risk_pts * 2.0), 1)
+            tgt2 = round(trigger_level + (risk_pts * 3.5), 1)
+            tgt3 = round(trigger_level + (risk_pts * 5.5), 1)
 
             # Verify R:R
             rr_val = round((tgt1 - trigger_level) / max(0.1, trigger_level - sl_level), 2)
-            if rr_val < 1.0:
+            if rr_val < 1.6:
                 continue
 
             direction = "BEARISH" if c_opt == "PE" else "BULLISH"
@@ -232,7 +242,7 @@ def detect_index_micro_scalp(
             summary = (
                 f"{clean_sym} {int(c_strk)} {c_opt} micro breakout ignited at ₹{c_ltp:,.1f}. "
                 f"Buy above ₹{trigger_level:,.1f} (1-min close basis). SL ₹{sl_level:,.1f}, "
-                f"TGT ₹{tgt1:,.1f}, ₹{tgt2:,.1f}, ₹{tgt3:,.1f}. High-Delta torque."
+                f"T1 (+2R) ₹{tgt1:,.1f}, T2 (+3.5R) ₹{tgt2:,.1f}, Runner ₹{tgt3:,.1f}. High-Delta torque."
             )
 
             actionable_blueprint = ActionableBlueprint(
@@ -243,13 +253,13 @@ def detect_index_micro_scalp(
                 target_1=tgt1,
                 target_2=tgt2,
                 runner_target=tgt3,
-                risk_reward=f"1:{round((tgt2 - trigger_level) / risk_pts, 1)}",
+                risk_reward=f"1:{rr_val:.1f}",
                 no_chase_boundary=no_chase,
                 execution_style="BREAKOUT_STOP",
                 lot_size=lot_sz,
                 when_to_buy=f"Buy above ₹{trigger_level:,.1f} on 1-min candle close confirmation or immediate impulse breach.",
-                when_to_wait=f"DO NOT CHASE above ₹{no_chase:,.1f}. If premium exceeds ₹{no_chase:,.1f}, wait for 1m pullback retest or cancel.",
-                profit_rule=f"Scale Blueprint: Book 50% at Target 1 (₹{tgt1:,.1f}) and trail SL to Cost/Breakeven. Book 25% at Target 2 (₹{tgt2:,.1f}). Hold 25% runner trailing on 1m 9-EMA.",
+                when_to_wait=f"DO NOT CHASE above ₹{no_chase:,.1f}. If premium exceeds ₹{no_chase:,.1f}, wait for 1m pullback retest into entry zone.",
+                profit_rule=f"Institutional Blueprint: Book 50% at Target 1 (+2.0R: ₹{tgt1:,.1f}) and trail SL to Cost/Breakeven (+0.2%). Book 25% at Target 2 (+3.5R: ₹{tgt2:,.1f}). Hold 25% runner trailing on 1m 9-EMA.",
                 segment="FNO_INDEX",
                 contract=c_sym,
                 strike=c_strk,
