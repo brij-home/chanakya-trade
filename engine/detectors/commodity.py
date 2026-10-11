@@ -868,6 +868,25 @@ def detect_commodity_breakouts(
             except Exception as e:
                 logger.debug(f"[CommodityDetector] Macro snapshot check exception: {e}")
 
+        # High-Impact Scheduled EIA Inventory Blackout Gate (Shift-Left)
+        if clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI"):
+            wday = now_ist.weekday()
+            hh, mm = now_ist.hour, now_ist.minute
+            # Crude: Wednesday EIA Weekly Petroleum Status Report (19:55 - 20:15 IST)
+            if clean_sym in ("CRUDEOIL", "CRUDEOILM") and wday == 2:
+                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 15):
+                    logger.info(
+                        f"[CommodityDetector] 🛑 EIA Crude Inventory Blackout active for {clean_sym} ({hh:02d}:{mm:02d} IST). Suppressing routine candidate generation."
+                    )
+                    continue
+            # NatGas: Thursday EIA Natural Gas Storage Report (19:55 - 20:15 IST)
+            if clean_sym in ("NATURALGAS", "NATGASMINI") and wday == 3:
+                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 15):
+                    logger.info(
+                        f"[CommodityDetector] 🛑 EIA Natural Gas Storage Blackout active for {clean_sym} ({hh:02d}:{mm:02d} IST). Suppressing routine candidate generation."
+                    )
+                    continue
+
         # Noise-Safe Quantitative Volatility Risk
         atr_calc = None
         if df_5m is not None and len(df_5m) >= 14:

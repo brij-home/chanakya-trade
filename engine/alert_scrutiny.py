@@ -157,6 +157,25 @@ class AlertScrutinyAuditor:
             except Exception:
                 pass
 
+        # 0.5. Closed-Loop Detector Degradation Circuit Breaker Enforcement
+        raw_atype = str(getattr(alert, "alert_type", "") or "")
+        if raw_atype:
+            try:
+                from engine.detector_circuit_breaker import detector_circuit_breaker
+
+                cb_allowed, cb_mult, cb_msg = detector_circuit_breaker.evaluate_alert_allowed(
+                    raw_atype
+                )
+                if not cb_allowed:
+                    flags["circuit_breaker_valid"] = False
+                    return False, f"Detector Circuit Breaker Tripped: {cb_msg}", flags
+                flags["circuit_breaker_valid"] = True
+                if cb_mult < 1.0:
+                    flags["circuit_breaker_probation"] = True
+            except Exception as e_cb:
+                logger.debug(f"[AlertScrutiny] Detector circuit breaker check bypassed: {e_cb}")
+                flags["circuit_breaker_valid"] = True
+
         # 1. Non-zero price check
         if ltp <= 0 or sl <= 0 or t1 <= 0:
             return False, f"Incomplete price levels (LTP={ltp}, SL={sl}, T1={t1})", flags
@@ -308,11 +327,26 @@ class AlertScrutinyAuditor:
                 eq_atr = float(metrics.get("atr") or metrics.get("atr_14") or 0.0)
             if eq_atr <= 0 and ltp > 0:
                 eq_atr = round(ltp * 0.015, 2)
-            if eq_atr > 0 and risk_pts < (0.70 * eq_atr * 0.95):
+
+            # Institutional Minimum Stop-Loss Volatility Floor:
+            # Multi-session swing setups and stage expansions require at least 1.20x ATR to survive ordinary intraday Brownian noise.
+            min_floor_pts = float((metrics or {}).get("min_noise_sl_pts") or 0.0)
+            is_swing_setup = time_horizon in (
+                "POSITIONAL",
+                "MULTIBAGGER",
+                "LONG_TERM",
+            ) or atype in (
+                "STAGE_1_TO_2_EXPANSION",
+                "MULTIBAGGER",
+                "RRG_SECTOR_ROTATION",
+            )
+            min_floor_mult = 1.20 if is_swing_setup else 0.70
+            effective_floor = max(min_floor_mult * eq_atr, min_floor_pts)
+            if eq_atr > 0 and risk_pts < (effective_floor * 0.95):
                 flags["risk_within_bounds"] = False
                 return (
                     False,
-                    f"Sub-ATR Equity Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < 0.70x ATR volatility floor ({0.70 * eq_atr:.1f} pts).",
+                    f"Sub-ATR Equity Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < {min_floor_mult:.2f}x ATR volatility floor ({effective_floor:.1f} pts). Mandate wider structural stop or higher timeframe.",
                     flags,
                 )
 
@@ -427,6 +461,92 @@ class AlertScrutinyAuditor:
                     )
 
         flags["risk_within_bounds"] = True
+
+        # 3e. Universal Falcon & Cheetah Single-Stock Equity Adaptive Regime Gate
+        # Eliminates consolidation false breakouts and whipsaw traps in cash equities
+        if (
+            not is_option_premium_levels
+            and clean_sym not in COMMODITY_MIN_SL_FLOORS
+            and clean_sym not in INDEX_MIN_SL_FLOORS
+        ):
+            metrics_d = getattr(alert, "metrics", {}) or {}
+            is_breakout_candidate = (
+                atype
+                in (
+                    "BREAKOUT",
+                    "ORB_BREAKOUT",
+                    "SQUEEZE_BREAKOUT",
+                    "INTRADAY_EQUITY",
+                    "MOMENTUM",
+                    "STAGE_1_TO_2_EXPANSION",
+                    "PATTERN_COILING",
+                    "SWING_INFLECTION",
+                    "INTRADAY_MOVER_IGNITED",
+                    "INTRADAY_MOVER_SPARK",
+                    "VOLUME_EXPANSION",
+                    "SPARK",
+                )
+                or "BREAKOUT" in atype
+                or "ORB" in atype
+            )
+            if is_breakout_candidate:
+                try:
+                    from engine.equity_adaptive_regime import evaluate_equity_adaptive_regime
+
+                    ref_dt = None
+                    if getattr(alert, "created_at", None):
+                        try:
+                            clean_ts = str(alert.created_at).replace(" IST", "").strip()
+                            ref_dt = datetime.fromisoformat(clean_ts).replace(tzinfo=IST)
+                        except Exception:
+                            pass
+
+                    decision = evaluate_equity_adaptive_regime(
+                        symbol=clean_sym,
+                        spot=ltp,
+                        ref_time=ref_dt,
+                        metrics=metrics_d if isinstance(metrics_d, dict) else None,
+                    )
+
+                    cheetah = decision.cheetah
+                    falcon = decision.falcon
+                    flags["cheetah_mandate"] = cheetah.mandate
+                    flags["falcon_environment"] = falcon.overall_environment
+
+                    if cheetah.mandate == "CHEETAH_STALKING_PRESERVE_CAPITAL":
+                        rvol_val = float(
+                            (metrics_d or {}).get("rvol", 0.0)
+                            or (metrics_d or {}).get("rvol_val", 0.0)
+                            or (metrics_d or {}).get("tod_rvol", 0.0)
+                            or getattr(alert, "rvol", 0.0)
+                            or 1.0
+                        )
+                        is_thrust = bool(
+                            (metrics_d or {}).get("is_institutional_thrust")
+                            or (metrics_d or {}).get("institutional_thrust")
+                        )
+                        has_sweep = bool(
+                            (metrics_d or {}).get("pdl_sweep")
+                            or (metrics_d or {}).get("pdh_sweep")
+                            or (metrics_d or {}).get("turtle_soup")
+                        )
+                        if rvol_val < cheetah.min_required_rvol and not is_thrust and not has_sweep:
+                            flags["equity_regime_valid"] = False
+                            return (
+                                False,
+                                f"Falcon Chop Trap Veto: {clean_sym} in severe consolidation chop "
+                                f"(CHOP {falcon.chop_index:.1f} >= 61.8 or ADX {falcon.adx_14:.1f} < 20.0). "
+                                f"Routine breakouts have high failure rate; preserve capital. "
+                                f"Mandate institutional thrust (RVOL {rvol_val:.2f}x < {cheetah.min_required_rvol:.1f}x) "
+                                f"or spring reclaim.",
+                                flags,
+                            )
+                    flags["equity_regime_valid"] = True
+                except Exception as e_eq_regime:
+                    logger.debug(
+                        f"[AlertScrutiny] Equity adaptive regime check bypassed: {e_eq_regime}"
+                    )
+                    flags["equity_regime_valid"] = True
 
         # 4. Dynamic VIX Regime Adaptation & Mathematical Risk:Reward Asymmetry
         vix_val = None
@@ -728,6 +848,74 @@ class AlertScrutinyAuditor:
                         logger.debug(
                             f"[AlertScrutiny] Obstacle Runway Trap: {clean_sym} Bearish setup obstructed by floor at ₹{nearest_obs:.1f} (only {obs_dist:.1f} pts away vs {risk_pts:.1f} pts risk)"
                         )
+
+            # Reward-to-Obstacle (R:Obs >= 1.5R) Headroom Gate:
+            # Rejects setups where nearest major structural obstacle (Daily 200-EMA, Supply/Demand OB,
+            # or explicit resistance) truncates available runway before Target 1.
+            nearest_res = (
+                metrics.get("nearest_resistance")
+                or metrics.get("daily_200_ema")
+                or metrics.get("overhead_resistance")
+                or metrics.get("supply_order_block")
+            )
+            nearest_sup = (
+                metrics.get("nearest_support")
+                or metrics.get("daily_200_ema_sup")
+                or metrics.get("underlying_support")
+                or metrics.get("demand_order_block")
+            )
+            is_intentional_breakout = (
+                atype
+                in (
+                    "BREAKOUT",
+                    "ORB_BREAKOUT",
+                    "ORB_BREAKDOWN",
+                    "SQUEEZE_BREAKOUT",
+                    "SQUEEZE_BREAKDOWN",
+                )
+                or "BREAKOUT" in atype
+                or "BREAKDOWN" in atype
+            )
+            if is_bull and nearest_res:
+                try:
+                    res_f = float(nearest_res)
+                    if res_f > ltp and risk_pts > 0:
+                        obs_dist = res_f - ltp
+                        r_obs = obs_dist / risk_pts
+                        if (
+                            r_obs < 1.50
+                            and obs_dist < (0.85 * reward_pts)
+                            and not (is_intentional_breakout and abs(ltp - res_f) / ltp < 0.005)
+                        ):
+                            flags["obstacle_runway_clear"] = False
+                            flags["trap_immediate_resistance"] = True
+                            return (
+                                False,
+                                f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{res_f:,.1f} provides only {r_obs:.2f}R headroom (< 1.50R required). Insufficient runway to achieve asymmetric Target 1.",
+                                flags,
+                            )
+                except (ValueError, TypeError):
+                    pass
+            elif not is_bull and nearest_sup:
+                try:
+                    sup_f = float(nearest_sup)
+                    if sup_f < ltp and risk_pts > 0:
+                        obs_dist = ltp - sup_f
+                        r_obs = obs_dist / risk_pts
+                        if (
+                            r_obs < 1.50
+                            and obs_dist < (0.85 * reward_pts)
+                            and not (is_intentional_breakout and abs(ltp - sup_f) / ltp < 0.005)
+                        ):
+                            flags["obstacle_runway_clear"] = False
+                            flags["trap_immediate_support"] = True
+                            return (
+                                False,
+                                f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{sup_f:,.1f} provides only {r_obs:.2f}R headroom (< 1.50R required). Insufficient runway to achieve asymmetric Target 1.",
+                                flags,
+                            )
+                except (ValueError, TypeError):
+                    pass
 
             # 4g. Volume Profile Airspace Clearance (LVN vs HVN Congestion Check)
             # Identifies whether Target 1 enters clean Low Volume Node (LVN) airspace or risks stalling at Volume POC
@@ -2193,6 +2381,27 @@ class AlertScrutinyAuditor:
                 )
         flags["opening_auction_safe"] = True
 
+        # 14e. Late-Session Exhaustion & MIS Square-Off Gate (Post-15:05 IST):
+        # Prevent new intraday momentum alerts right before MIS auto-square-off (15:15 IST).
+        is_intraday_momentum = time_horizon in ("INTRADAY", "SCALP", "INTRADAY_SCALP_ONLY") and (
+            atype
+            in (
+                "INTRADAY_EQUITY",
+                "INTRADAY_MOVER_SPARK",
+                "INTRADAY_BREAKDOWN_SPARK",
+                "SCALP",
+            )
+            or "ORB" in atype
+        )
+        if is_intraday_momentum and not is_non_equity_desk:
+            if dtime(15, 5) <= alert_time <= dtime(15, 30):
+                flags["velocity_sustainable"] = False
+                return (
+                    False,
+                    f"Late-Session Exhaustion Gate: {sym} triggered post-15:05 IST ({alert_time.strftime('%H:%M:%S')}). Intraday MIS auto-square-off cutoff (15:15 IST) prevents disciplined risk management.",
+                    flags,
+                )
+
         # 15. 3-Bar Parabolic Velocity / Climax Acceleration Gate (Anti-FOMO):
         # Disallow market chasing at the absolute tip of a vertical 3-bar blow-off
         move_3b = None
@@ -2443,6 +2652,48 @@ class AlertScrutinyAuditor:
                     )
         flags["divergence_sanity_valid"] = True
 
+        # 19b. Institutional Order Flow Cumulative Volume Delta (CVD) Absorption Gate:
+        # Prevents buying when passive institutional limit sellers are absorbing aggressive buyers (Bearish Exhaustion),
+        # and prevents shorting when passive institutional limit buyers are absorbing sellers (Bullish Absorption).
+        cvd_div = None
+        if isinstance(metrics_dict, dict):
+            cvd_div = (
+                metrics_dict.get("cvd_divergence")
+                or (metrics_dict.get("order_flow") or {}).get("cvd_divergence")
+                or (metrics_dict.get("volume_profile") or {}).get("cvd_divergence")
+            )
+        if not cvd_div and hasattr(alert, "cvd_divergence"):
+            cvd_div = getattr(alert, "cvd_divergence", None)
+
+        if cvd_div and isinstance(cvd_div, str):
+            cvd_upper = cvd_div.upper()
+            is_call_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+            is_put_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+
+            # Long breakout into Bearish Exhaustion / Limit Sell Absorption
+            if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
+                if "BEARISH_EXHAUSTION" in cvd_upper or "SELL_ABSORPTION" in cvd_upper:
+                    flags["cvd_flow_valid"] = False
+                    return (
+                        False,
+                        f"Order Flow CVD Exhaustion Veto: {clean_sym} printing Bearish CVD Divergence ({cvd_div}). "
+                        f"Aggressive buyers are being absorbed by passive institutional limit asks at the highs. "
+                        f"Breakout is an institutional distribution trap.",
+                        flags,
+                    )
+            # Short breakdown into Bullish Absorption / Limit Buy Accumulation
+            elif (direction in ("BEARISH", "SHORT", "SELL") or is_put_opt) and not is_call_opt:
+                if "BULLISH_ABSORPTION" in cvd_upper or "BUY_ABSORPTION" in cvd_upper:
+                    flags["cvd_flow_valid"] = False
+                    return (
+                        False,
+                        f"Order Flow CVD Absorption Veto: {clean_sym} printing Bullish CVD Divergence ({cvd_div}). "
+                        f"Aggressive sellers are being absorbed by passive institutional limit bids at the lows. "
+                        f"Breakdown is a bear trap / Wyckoff spring accumulation.",
+                        flags,
+                    )
+        flags["cvd_flow_valid"] = True
+
         # 20. ADR (Average Daily Range) Exhaustion Gate:
         # Prevent buying the high of the day when asset has already exhausted >= 80% of its ADR/ATR,
         # or shorting the low of the day when >= 80% of ADR is exhausted.
@@ -2505,26 +2756,42 @@ class AlertScrutinyAuditor:
         )
 
         if not is_option_premium_levels and ltp > 0:
-            if (direction in ("BULLISH", "LONG", "BUY")) and upper_circuit > ltp:
-                uc_headroom_pts = upper_circuit - ltp
-                uc_headroom_pct = (uc_headroom_pts / ltp) * 100.0
-                if uc_headroom_pts < (1.25 * risk_pts) or uc_headroom_pct < 0.8:
+            if (direction in ("BULLISH", "LONG", "BUY")) and upper_circuit > 0:
+                if t1 > upper_circuit:
                     flags["circuit_headroom_valid"] = False
                     return (
                         False,
-                        f"Insufficient Circuit Headroom: Spot ₹{ltp:,.2f} is within {uc_headroom_pct:.2f}% of Upper Circuit (₹{upper_circuit:,.2f}); risk-reward ratio is truncated by exchange price band.",
+                        f"Circuit Ceiling Veto: Target 1 (₹{t1:,.2f}) exceeds Upper Circuit (₹{upper_circuit:,.2f}); target is mathematically unreachable within current session price band.",
                         flags,
                     )
-            elif (direction in ("BEARISH", "SHORT", "SELL")) and 0 < lower_circuit < ltp:
-                lc_headroom_pts = ltp - lower_circuit
-                lc_headroom_pct = (lc_headroom_pts / ltp) * 100.0
-                if lc_headroom_pts < (1.25 * risk_pts) or lc_headroom_pct < 0.8:
+                if upper_circuit > ltp:
+                    uc_headroom_pts = upper_circuit - ltp
+                    uc_headroom_pct = (uc_headroom_pts / ltp) * 100.0
+                    if uc_headroom_pts < (1.25 * risk_pts) or uc_headroom_pct < 0.8:
+                        flags["circuit_headroom_valid"] = False
+                        return (
+                            False,
+                            f"Insufficient Circuit Headroom: Spot ₹{ltp:,.2f} is within {uc_headroom_pct:.2f}% of Upper Circuit (₹{upper_circuit:,.2f}); risk-reward ratio is truncated by exchange price band.",
+                            flags,
+                        )
+            elif (direction in ("BEARISH", "SHORT", "SELL")) and lower_circuit > 0:
+                if t1 < lower_circuit:
                     flags["circuit_headroom_valid"] = False
                     return (
                         False,
-                        f"Insufficient Circuit Headroom: Spot ₹{ltp:,.2f} is within {lc_headroom_pct:.2f}% of Lower Circuit (₹{lower_circuit:,.2f}); risk-reward ratio is truncated by exchange price band.",
+                        f"Circuit Floor Veto: Target 1 (₹{t1:,.2f}) is below Lower Circuit (₹{lower_circuit:,.2f}); target is mathematically unreachable within current session price band.",
                         flags,
                     )
+                if lower_circuit < ltp:
+                    lc_headroom_pts = ltp - lower_circuit
+                    lc_headroom_pct = (lc_headroom_pts / ltp) * 100.0
+                    if lc_headroom_pts < (1.25 * risk_pts) or lc_headroom_pct < 0.8:
+                        flags["circuit_headroom_valid"] = False
+                        return (
+                            False,
+                            f"Insufficient Circuit Headroom: Spot ₹{ltp:,.2f} is within {lc_headroom_pct:.2f}% of Lower Circuit (₹{lower_circuit:,.2f}); risk-reward ratio is truncated by exchange price band.",
+                            flags,
+                        )
         flags["circuit_headroom_valid"] = True
 
         # 22. Market Breadth & Macro Tide Alignment Gate (Advance / Decline Ratio):
@@ -2731,7 +2998,10 @@ class AlertScrutinyAuditor:
                             and tw.rs_momentum < 98.0
                             and not is_decoupled
                         ):
-                            if tw.intraday_alignment == "INTRADAY_BEARISH_DIVERGENCE":
+                            if (
+                                tw.intraday_alignment == "INTRADAY_BEARISH_DIVERGENCE"
+                                or tw.intraday_rs <= -1.0
+                            ):
                                 flags["sector_rrg_valid"] = False
                                 return (
                                     False,
@@ -2747,7 +3017,10 @@ class AlertScrutinyAuditor:
                             and tw.rs_momentum > 102.0
                             and not is_decoupled
                         ):
-                            if tw.intraday_alignment == "INTRADAY_BULLISH_DIVERGENCE":
+                            if (
+                                tw.intraday_alignment == "INTRADAY_BULLISH_DIVERGENCE"
+                                or tw.intraday_rs >= 1.0
+                            ):
                                 flags["sector_rrg_valid"] = False
                                 return (
                                     False,
@@ -2807,6 +3080,195 @@ class AlertScrutinyAuditor:
         flags["physical_expiry_valid"] = True
 
         return True, "", flags
+
+    def compile_predatory_pipeline_dossier(
+        self, alert: Any, flags: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Compiles the comprehensive 6-seat Predatory Execution Pipeline dossier:
+          🦅 EAGLE: Macro trend + Sector Rotation filter (Vetoes longs if Nifty < -0.50% / -0.60%).
+          🐅 TIGER: Stalking phase in tight base (VCP / Squeeze) & Kill Zone (±0.35% proximity).
+          🧠 CHANAKYA: De-trapping: Vetoes >40% upper wick, opposing OI walls, 0DTE afternoon theta traps.
+          🎯 SNIPER: Laser entry, strict R:R >= 1:2.5, no chasing > 0.5% above trigger, structural SL.
+          🐆 CHEETAH: Target 1 (+1.5R to +2.0R) bank 50% profit & shift SL to Cost (+0.2%) -> 100% Risk-Free.
+          🐘 ELEPHANT: Institutional footprints: Unmitigated OB, FVG, Volume POC clearance, RVOL >= 2.0x.
+        """
+        metrics = getattr(alert, "metrics", {}) or {}
+        if not isinstance(metrics, dict):
+            metrics = alert.get("metrics", {}) if isinstance(alert, dict) else {}
+        if not isinstance(metrics, dict):
+            metrics = {}
+
+        ltp = float(
+            getattr(alert, "ltp", 0.0)
+            or (alert.get("ltp", 0.0) if isinstance(alert, dict) else 0.0)
+            or 0.0
+        )
+        trigger = float(
+            getattr(alert, "trigger_level", 0.0)
+            or (alert.get("trigger_level", 0.0) if isinstance(alert, dict) else 0.0)
+            or ltp
+        )
+        sl = float(
+            getattr(alert, "stop_loss", 0.0)
+            or (alert.get("stop_loss", 0.0) if isinstance(alert, dict) else 0.0)
+            or 0.0
+        )
+        t1 = float(
+            getattr(alert, "target_level", 0.0)
+            or (alert.get("target_level", 0.0) if isinstance(alert, dict) else 0.0)
+            or 0.0
+        )
+
+        risk_pts = abs(ltp - sl) if sl > 0 else 1.0
+        reward_pts = abs(t1 - ltp) if t1 > 0 else 2.5
+        rr_val = round(reward_pts / risk_pts, 2) if risk_pts > 0 else 2.5
+
+        # 1. 🦅 EAGLE
+        nifty_c = flags.get("nifty_change_pct")
+        if nifty_c is None:
+            nifty_c = metrics.get("nifty_change_pct")
+        sec_phase = flags.get("sector_rrg_phase") or metrics.get("sector_rrg_phase") or "ALIGNED"
+        is_eagle_aligned = True
+        if (
+            nifty_c is not None
+            and float(nifty_c) <= -0.50
+            and flags.get("decoupler_status") != "VERIFIED_DECOUPLER"
+        ):
+            is_eagle_aligned = False
+
+        # 2. 🐅 TIGER
+        prox_pct = round(abs(ltp - trigger) / trigger * 100.0, 2) if trigger > 0 else 0.0
+        in_kill_zone = prox_pct <= 0.35
+        tiger_status = "KILL_ZONE_LOCKED" if in_kill_zone else "STALKING_COIL"
+        squeeze_phase = metrics.get("squeeze_state") or flags.get("squeeze_state") or "SQUEEZE_ON"
+
+        # 3. 🧠 CHANAKYA
+        wick_ratio = float(
+            metrics.get("upper_wick_ratio", 0.0) or metrics.get("upper_wick_pct", 0.0) or 0.0
+        )
+        oi_clear = flags.get("obstacle_runway_clear", True) and not flags.get(
+            "trap_immediate_resistance", False
+        )
+        theta_safe = not flags.get("trap_afternoon_0dte", False)
+        chanakya_de_trapped = (wick_ratio < 0.40) and oi_clear and theta_safe
+
+        # 4. 🎯 SNIPER & Mathematical Expected Value (EV >= +0.85R)
+        no_chase_ok = flags.get("no_chase", True)
+        chase_pct = (
+            round(((ltp / trigger) - 1.0) * 100.0, 2) if (trigger > 0 and ltp >= trigger) else 0.0
+        )
+        sniper_confirmed = (rr_val >= 2.0 or flags.get("staged_rr_scaleout", False)) and no_chase_ok
+
+        # Mathematical Expected Value (EV) Gate
+        # EV = (P_win * Payoff_R) - ((1 - P_win) * 1.0) - Friction_drag
+        alert_type = str(getattr(alert, "alert_type", "") or "")
+        p_win = 0.60
+        cb_summary: dict[str, Any] = {}
+        try:
+            from engine.detector_circuit_breaker import detector_circuit_breaker
+
+            cb_m = detector_circuit_breaker.get_metrics(alert_type)
+            cb_summary = cb_m.to_dict()
+            if cb_m.sample_count >= 5:
+                p_win = max(0.40, min(0.85, cb_m.win_rate))
+        except Exception:
+            pass
+
+        # Friction drag (bid-ask slippage + STT/exchange transaction fees)
+        is_fno = bool(
+            getattr(alert, "contract_symbol", None)
+            or getattr(alert, "option_type", None)
+            or "OPTIONS" in alert_type
+            or "GAMMA" in alert_type
+        )
+        friction_drag = 0.15 if is_fno else 0.08
+        ev_r = round((p_win * rr_val) - ((1.0 - p_win) * 1.0) - friction_drag, 2)
+
+        # 5. 🐆 CHEETAH
+        cheetah_mandate = (
+            flags.get("cheetah_mandate")
+            or metrics.get("cheetah_mandate")
+            or "CHEETAH_POUNCE_MOMENTUM"
+        )
+
+        # 6. 🐘 ELEPHANT
+        rvol_val = float(
+            flags.get("rvol", 0.0)
+            or metrics.get("rvol", 0.0)
+            or metrics.get("rvol_val", 0.0)
+            or getattr(alert, "rvol", 1.0)
+            or 1.0
+        )
+        has_ob = bool(
+            metrics.get("order_block")
+            or metrics.get("bullish_ob")
+            or metrics.get("bearish_ob")
+            or "OB" in str(metrics.get("signals", []))
+        )
+        has_fvg = bool(
+            metrics.get("fvg")
+            or metrics.get("fair_value_gap")
+            or "FVG" in str(metrics.get("signals", []))
+        )
+        poc_clear = flags.get("lvn_vacuum_clear", True) and not flags.get(
+            "hvn_congestion_risk", False
+        )
+        is_elephant_footprint = (rvol_val >= 1.8) or has_ob or has_fvg
+
+        return {
+            "status": "APPROVED_PREDATORY_SANCTIONED",
+            "expected_value_r": ev_r,
+            "circuit_breaker": cb_summary,
+            "eagle": {
+                "seat": "🦅 EAGLE",
+                "status": "ALIGNED" if is_eagle_aligned else "HEADWIND_VETO",
+                "nifty_change_pct": nifty_c,
+                "sector_rrg_phase": sec_phase,
+                "macro_aligned": is_eagle_aligned,
+            },
+            "tiger": {
+                "seat": "🐅 TIGER",
+                "status": tiger_status,
+                "proximity_pct": prox_pct,
+                "in_kill_zone": in_kill_zone,
+                "squeeze_phase": squeeze_phase,
+            },
+            "chanakya": {
+                "seat": "🧠 CHANAKYA",
+                "status": "DE_TRAPPED" if chanakya_de_trapped else "SCRUTINIZED",
+                "upper_wick_ratio": wick_ratio,
+                "obstacle_runway_clear": oi_clear,
+                "theta_safe": theta_safe,
+            },
+            "sniper": {
+                "seat": "🎯 SNIPER",
+                "status": "LASER_ENTRY"
+                if (sniper_confirmed and ev_r >= 0.85)
+                else ("MODERATE_EV" if sniper_confirmed else "STANDARD"),
+                "rr_ratio": rr_val,
+                "chase_pct": chase_pct,
+                "no_chase_passed": no_chase_ok,
+                "expected_value_r": ev_r,
+                "p_win_est": round(p_win, 2),
+                "friction_drag_r": friction_drag,
+            },
+            "cheetah": {
+                "seat": "🐆 CHEETAH",
+                "status": "FREE_ROLL_READY",
+                "mandate": cheetah_mandate,
+                "t1_action": "Bank 50% profit at T1 (+1.5R to +2.0R)",
+                "sl_ratchet": "Shift SL to Cost (+0.2%) -> Trade becomes 100% Risk-Free",
+            },
+            "elephant": {
+                "seat": "🐘 ELEPHANT",
+                "status": "INSTITUTIONAL_FOOTPRINT" if is_elephant_footprint else "STANDARD",
+                "rvol": rvol_val,
+                "poc_clear": poc_clear,
+                "has_order_block": has_ob,
+                "has_fair_value_gap": has_fvg,
+            },
+        }
 
     # ── Tier 2: AI Devil's Advocate & Scrutiny ─────────────────────────────────
 
@@ -2876,6 +3338,32 @@ class AlertScrutinyAuditor:
                     auditor_model="TIER1_GATE",
                 )
             )
+
+        # Step 1.2: Compile 6-Seat Predatory Execution Pipeline Dossier
+        pred_dossier = self.compile_predatory_pipeline_dossier(alert, flags)
+        flags["predatory_pipeline"] = pred_dossier
+        if isinstance(alert, dict):
+            m = alert.setdefault("metrics", {})
+            if isinstance(m, dict):
+                m["predatory_pipeline"] = pred_dossier
+                m["expected_value_r"] = pred_dossier.get("expected_value_r")
+                if "circuit_breaker" in pred_dossier:
+                    m["circuit_breaker"] = pred_dossier["circuit_breaker"]
+                if "cheetah_mandate" in flags:
+                    m["cheetah_mandate"] = flags["cheetah_mandate"]
+                if "falcon_environment" in flags:
+                    m["falcon_environment"] = flags["falcon_environment"]
+        elif hasattr(alert, "metrics"):
+            if not isinstance(alert.metrics, dict):
+                alert.metrics = {}
+            alert.metrics["predatory_pipeline"] = pred_dossier
+            alert.metrics["expected_value_r"] = pred_dossier.get("expected_value_r")
+            if "circuit_breaker" in pred_dossier:
+                alert.metrics["circuit_breaker"] = pred_dossier["circuit_breaker"]
+            if "cheetah_mandate" in flags:
+                alert.metrics["cheetah_mandate"] = flags["cheetah_mandate"]
+            if "falcon_environment" in flags:
+                alert.metrics["falcon_environment"] = flags["falcon_environment"]
 
         # Step 1.5: Adaptive Regime-Aware Conviction Gate
         # In compressed VIX regimes (<12.5) or ORB-trapped Nifty days, raise the minimum

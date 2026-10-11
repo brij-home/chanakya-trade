@@ -2363,6 +2363,12 @@ def resolve_dynamic_universe(
 resolve_universe = resolve_dynamic_universe
 
 
+def get_universe(universe: str, max_stocks: int = 500) -> list[str]:
+    """Return list of symbols for a given universe or thematic preset."""
+    symbols, _ = resolve_dynamic_universe(universe, max_stocks=max_stocks)
+    return symbols
+
+
 def normalize_symbol_exchange(symbol: str, exchange: str | None = None) -> tuple[str, str]:
     """
     Canonical Single Source of Truth (SSOT) for Indian market instrument resolution.

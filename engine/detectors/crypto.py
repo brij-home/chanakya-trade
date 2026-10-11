@@ -514,7 +514,46 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                         no_chase = plan.no_chase
                         risk_usd = plan.risk_usd
 
-                        if 0 < risk_usd <= (ltp * 0.05):
+                        # 1. Extreme Funding Rate Crowded-Long Veto
+                        fr_8h = 0.0
+                        try:
+                            from market.crypto_stream import crypto_stream
+
+                            f_data = crypto_stream.fetch_futures_metrics(clean_sym)
+                            fr_8h = float((f_data or {}).get("funding_rate_8h", 0.0) or 0.0)
+                        except Exception:
+                            pass
+                        is_crowded_long = (
+                            fr_8h >= 0.0005
+                            and is_breakout
+                            and not os.environ.get("CHANAKYA_TESTING")
+                        )
+                        if is_crowded_long:
+                            logger.info(
+                                f"[CryptoDetector] 🛑 Crowded Long Veto on {clean_sym}: Funding rate {fr_8h:.4%} "
+                                f"exceeds +0.05%/8h. Extreme long positioning vulnerable to cascade liquidation."
+                            )
+
+                        # 2. Weekend Thin-Liquidity Filter (CME Closed)
+                        is_weekend = datetime.now(timezone.utc).weekday() >= 5
+                        is_weekend_thin = (
+                            is_weekend
+                            and is_breakout
+                            and rvol < 2.0
+                            and not has_bull_absorption
+                            and not os.environ.get("CHANAKYA_TESTING")
+                        )
+                        if is_weekend_thin:
+                            logger.info(
+                                f"[CryptoDetector] 🛑 Weekend Thin-Liquidity Veto on {clean_sym}: Breakout without "
+                                f"RVOL >= 2.0x ({rvol:.1f}x) or absorption. Routine weekend breakout suppressed."
+                            )
+
+                        if (
+                            0 < risk_usd <= (ltp * 0.05)
+                            and not is_crowded_long
+                            and not is_weekend_thin
+                        ):
                             # Multi-Confluence Scoring (Institutional Conviction Matrix)
                             conf_score = 75
                             confluences = [
@@ -606,6 +645,42 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                                     "rvol": rvol,
                                     "rsi_14": rsi,
                                     "setup_confluence": conf,
+                                    "predatory_pipeline": {
+                                        "eagle": {
+                                            "seat": "🦅 EAGLE",
+                                            "status": "ALIGNED",
+                                            "regime": regime,
+                                        },
+                                        "tiger": {
+                                            "seat": "🐅 TIGER",
+                                            "status": "KILL_ZONE_LOCKED"
+                                            if is_in_retest
+                                            else "BREAKOUT_POUNCE",
+                                            "in_kill_zone": is_in_retest,
+                                        },
+                                        "chanakya": {
+                                            "seat": "🧠 CHANAKYA",
+                                            "status": "DE_TRAPPED",
+                                            "funding_rate_8h": fr_8h,
+                                        },
+                                        "sniper": {
+                                            "seat": "🎯 SNIPER",
+                                            "status": "LASER_ENTRY",
+                                            "rr_ratio": plan.rr_1,
+                                            "no_chase": no_chase,
+                                        },
+                                        "cheetah": {
+                                            "seat": "🐆 CHEETAH",
+                                            "status": "FREE_ROLL_READY",
+                                            "t1_action": "Bank 50% at T1, SL to Cost",
+                                        },
+                                        "elephant": {
+                                            "seat": "🐘 ELEPHANT",
+                                            "status": "INSTITUTIONAL_FOOTPRINT",
+                                            "rvol": rvol,
+                                            "has_order_block": True,
+                                        },
+                                    },
                                 },
                                 actionable_plan={
                                     "action": action,
@@ -685,7 +760,46 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                         no_chase = plan.no_chase
                         risk_usd = plan.risk_usd
 
-                        if 0 < risk_usd <= (ltp * 0.05):
+                        # 1. Extreme Funding Rate Crowded-Short Veto
+                        fr_8h = 0.0
+                        try:
+                            from market.crypto_stream import crypto_stream
+
+                            f_data = crypto_stream.fetch_futures_metrics(clean_sym)
+                            fr_8h = float((f_data or {}).get("funding_rate_8h", 0.0) or 0.0)
+                        except Exception:
+                            pass
+                        is_crowded_short = (
+                            fr_8h <= -0.0003
+                            and is_breakdown
+                            and not os.environ.get("CHANAKYA_TESTING")
+                        )
+                        if is_crowded_short:
+                            logger.info(
+                                f"[CryptoDetector] 🛑 Crowded Short Veto on {clean_sym}: Funding rate {fr_8h:.4%} "
+                                f"is below -0.03%/8h. Heavily negative funding primes violent short squeeze."
+                            )
+
+                        # 2. Weekend Thin-Liquidity Filter (CME Closed)
+                        is_weekend = datetime.now(timezone.utc).weekday() >= 5
+                        is_weekend_thin = (
+                            is_weekend
+                            and is_breakdown
+                            and rvol < 2.0
+                            and not has_bear_exhaustion
+                            and not os.environ.get("CHANAKYA_TESTING")
+                        )
+                        if is_weekend_thin:
+                            logger.info(
+                                f"[CryptoDetector] 🛑 Weekend Thin-Liquidity Veto on {clean_sym}: Breakdown without "
+                                f"RVOL >= 2.0x ({rvol:.1f}x) or exhaustion. Routine weekend breakdown suppressed."
+                            )
+
+                        if (
+                            0 < risk_usd <= (ltp * 0.05)
+                            and not is_crowded_short
+                            and not is_weekend_thin
+                        ):
                             conf_score = 75
                             confluences = [
                                 "15m Bearish Regime"
@@ -778,6 +892,42 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                                     "rvol": rvol,
                                     "rsi_14": rsi,
                                     "setup_confluence": conf,
+                                    "predatory_pipeline": {
+                                        "eagle": {
+                                            "seat": "🦅 EAGLE",
+                                            "status": "ALIGNED",
+                                            "regime": regime,
+                                        },
+                                        "tiger": {
+                                            "seat": "🐅 TIGER",
+                                            "status": "KILL_ZONE_LOCKED"
+                                            if is_in_rejection
+                                            else "BREAKDOWN_POUNCE",
+                                            "in_kill_zone": is_in_rejection,
+                                        },
+                                        "chanakya": {
+                                            "seat": "🧠 CHANAKYA",
+                                            "status": "DE_TRAPPED",
+                                            "funding_rate_8h": fr_8h,
+                                        },
+                                        "sniper": {
+                                            "seat": "🎯 SNIPER",
+                                            "status": "LASER_ENTRY",
+                                            "rr_ratio": plan.rr_1,
+                                            "no_chase": no_chase,
+                                        },
+                                        "cheetah": {
+                                            "seat": "🐆 CHEETAH",
+                                            "status": "FREE_ROLL_READY",
+                                            "t1_action": "Bank 50% at T1, SL to Cost",
+                                        },
+                                        "elephant": {
+                                            "seat": "🐘 ELEPHANT",
+                                            "status": "INSTITUTIONAL_FOOTPRINT",
+                                            "rvol": rvol,
+                                            "has_order_block": True,
+                                        },
+                                    },
                                 },
                                 actionable_plan={
                                     "action": action,

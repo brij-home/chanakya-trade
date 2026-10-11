@@ -42,7 +42,7 @@ def test_tier1_level_sanctity_bullish(auditor: AlertScrutinyAuditor):
         environment="LIVE",
     )
     passed, reason, flags = auditor.verify_tier1_sanity(alert)
-    assert passed is True
+    assert passed is True, f"Failed Tier-1 sanity: {reason}"
     assert reason == ""
     assert flags["level_coherence"] is True
     assert flags["rr_valid"] is True

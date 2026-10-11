@@ -46,6 +46,7 @@ except Exception:
 
 # 2. Defensively ensure ANY thread instantiated during pytest sessions is a daemon thread,
 # preventing non-daemon threads from hanging Python process shutdown (threading._shutdown).
+import socket
 import threading
 
 _orig_thread_init = threading.Thread.__init__
@@ -59,6 +60,28 @@ def _test_safe_thread_init(self, *args, **kwargs):
 
 threading.Thread.__init__ = _test_safe_thread_init
 
+# 3. Institutional zero-network quarantine:
+# Defensively isolate test sessions from unmocked external network connections.
+# Any attempt to connect to a non-loopback host raises RuntimeError unless marked with @pytest.mark.network.
+_orig_socket_connect = socket.socket.connect
+_PROCESS_ALLOW_NETWORK = False
+_ALLOWED_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
+def _test_guarded_socket_connect(self, address):
+    if os.environ.get("CHANAKYA_TESTING") == "1" and not _PROCESS_ALLOW_NETWORK:
+        if isinstance(address, (tuple, list)) and len(address) >= 1:
+            host = address[0]
+            if isinstance(host, str) and host not in _ALLOWED_LOCAL_HOSTS:
+                raise RuntimeError(
+                    f"Outbound network connection blocked during test: socket.connect to {host}. "
+                    "Mock this external API call or mark the test with @pytest.mark.network."
+                )
+    return _orig_socket_connect(self, address)
+
+
+socket.socket.connect = _test_guarded_socket_connect
+
 
 def pytest_configure(config: pytest.Config) -> None:
     """Keep pytest's temporary files inside the checkout by default.
@@ -69,12 +92,27 @@ def pytest_configure(config: pytest.Config) -> None:
     reliable as the CI command while still respecting explicit CLI overrides.
     """
     if config.option.basetemp is None:
-        config.option.basetemp = str(_TEST_DATA_DIR / "pytest-tmp")
+        session_tmp = _TEST_DATA_DIR / f"pytest-tmp-{os.getpid()}"
+        config.option.basetemp = str(session_tmp)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Safely cleans up session temp directory if created for this process."""
+    try:
+        import shutil
+
+        basetemp = getattr(config.option, "basetemp", None)
+        if basetemp and Path(basetemp).name.startswith("pytest-tmp-") and Path(basetemp).exists():
+            shutil.rmtree(basetemp, ignore_errors=True)
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
 def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
     """Ensure no unit test accidentally inherits live AI credentials or makes live LLM calls."""
+    global _PROCESS_ALLOW_NETWORK
+    _PROCESS_ALLOW_NETWORK = "network" in request.keywords
     # Several legacy module-scoped clients mutate DEPLOY_MODE directly. Reset
     # the default for every test so a self-hosted test cannot leak its auth
     # policy into unrelated endpoint tests. Auth tests opt in explicitly.
@@ -100,6 +138,23 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         pass
 
     try:
+        from market.options import _CHAIN_CACHE, _EXPIRIES_CACHE, _SNAPSHOT_CACHE
+
+        _CHAIN_CACHE.clear()
+        _EXPIRIES_CACHE.clear()
+        _SNAPSHOT_CACHE.clear()
+    except Exception:
+        pass
+
+    try:
+        from market.history import _df_memory_cache, _df_memory_cache_lock
+
+        with _df_memory_cache_lock:
+            _df_memory_cache.clear()
+    except Exception:
+        pass
+
+    try:
         from engine.detector_circuit_breaker import detector_circuit_breaker
 
         detector_circuit_breaker.reset_all()
@@ -112,6 +167,11 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         risk_limits.reset_all()
     except Exception:
         pass
+
+    try:
+        yield
+    finally:
+        _PROCESS_ALLOW_NETWORK = False
 
 
 @pytest.fixture(autouse=True)
@@ -202,42 +262,86 @@ def isolate_learning_engine(monkeypatch: pytest.MonkeyPatch):
         yield
 
 
+@pytest.fixture(autouse=True)
+def seed_test_rrg_cache():
+    """Ensure analysis cache has deterministic RRG sector matrix for zero-network testing."""
+    try:
+        from engine.analysis_cache import analysis_cache
+        from analysis.sector_rotation import (
+            NSE_SECTORS,
+            SECTOR_PROXY_STOCKS,
+            SECTOR_CONSTITUENTS,
+            SECTOR_DRIVERS,
+        )
+
+        cached = analysis_cache.get_macro("sector_rrg_matrix")
+        if not cached:
+            quadrants = ["LEADING", "IMPROVING", "WEAKENING", "LAGGING"]
+            fake_matrix = []
+            for i, (sec, sym) in enumerate(NSE_SECTORS.items()):
+                quad = quadrants[i % len(quadrants)]
+                rs_r = 102.5 if quad in ("LEADING", "WEAKENING") else 98.0
+                rs_m = 101.5 if quad in ("LEADING", "IMPROVING") else 98.5
+                proxy = SECTOR_PROXY_STOCKS.get(sec, "INFY")
+                fake_matrix.append(
+                    {
+                        "sector": sec,
+                        "symbol": sym,
+                        "rs_ratio": rs_r,
+                        "rs_momentum": rs_m,
+                        "quadrant": quad,
+                        "day_change_pct": 1.2,
+                        "benchmark_change_pct": 0.5,
+                        "relative_strength": 103.5,
+                        "trail": [{"rs_ratio": rs_r, "rs_momentum": rs_m}],
+                        "top_stocks": SECTOR_CONSTITUENTS.get(sec, [proxy]),
+                        "factor_drivers": SECTOR_DRIVERS.get(sec, ["Institutional Flow"]),
+                    }
+                )
+            analysis_cache.save_macro("sector_rrg_matrix", fake_matrix, ttl_minutes=180)
+    except Exception:
+        pass
+    yield
+
+
+_BASE_OHLCV_DF: pd.DataFrame | None = None
+
+
+def _get_base_ohlcv_df() -> pd.DataFrame:
+    global _BASE_OHLCV_DF
+    if _BASE_OHLCV_DF is None:
+        np.random.seed(42)
+        n = 200
+        dates = pd.date_range("2025-01-01", periods=n, freq="B")
+        trend = np.concatenate(
+            [
+                np.linspace(100, 150, 100),
+                np.linspace(150, 110, 100),
+            ]
+        )
+        noise = np.random.randn(n) * 2
+        close = trend + noise
+        high = close + np.abs(np.random.randn(n)) * 1.5
+        low = close - np.abs(np.random.randn(n)) * 1.5
+        opn = close + np.random.randn(n) * 0.5
+        volume = np.random.randint(500_000, 5_000_000, n)
+        _BASE_OHLCV_DF = pd.DataFrame(
+            {
+                "open": opn,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": volume,
+            },
+            index=dates,
+        )
+    return _BASE_OHLCV_DF
+
+
 @pytest.fixture
 def ohlcv_df() -> pd.DataFrame:
-    """200-row OHLCV DataFrame with deterministic prices.
-
-    Pattern: uptrend for first 100 bars, downtrend for next 100.
-    This lets us test indicators in both regimes.
-    """
-    np.random.seed(42)
-    n = 200
-    dates = pd.date_range("2025-01-01", periods=n, freq="B")
-
-    # Uptrend then downtrend
-    trend = np.concatenate(
-        [
-            np.linspace(100, 150, 100),
-            np.linspace(150, 110, 100),
-        ]
-    )
-    noise = np.random.randn(n) * 2
-    close = trend + noise
-
-    high = close + np.abs(np.random.randn(n)) * 1.5
-    low = close - np.abs(np.random.randn(n)) * 1.5
-    opn = close + np.random.randn(n) * 0.5
-    volume = np.random.randint(500_000, 5_000_000, n)
-
-    return pd.DataFrame(
-        {
-            "open": opn,
-            "high": high,
-            "low": low,
-            "close": close,
-            "volume": volume,
-        },
-        index=dates,
-    )
+    """200-row OHLCV DataFrame with deterministic prices (fast cached copy)."""
+    return _get_base_ohlcv_df().copy()
 
 
 @pytest.fixture

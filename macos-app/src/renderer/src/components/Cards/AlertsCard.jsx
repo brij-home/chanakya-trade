@@ -115,6 +115,18 @@ export default function AlertsCard({ data }) {
                       🐅 {a.metrics.tiger_mandate.mandate === 'MOMENTUM_EXPANSION' ? 'POUNCE' : a.metrics.tiger_mandate.mandate === 'TURTLE_SOUP_RANGE_FADE' ? 'TURTLE SOUP' : 'STALKER'}
                     </span>
                   )}
+                  {(a.metrics?.cheetah_mandate || a.metrics?.predatory_pipeline?.cheetah?.mandate) && (
+                    <span
+                      className={`text-[8px] px-1 py-0.2 rounded font-mono font-bold border ${
+                        (a.metrics?.cheetah_mandate || a.metrics?.predatory_pipeline?.cheetah?.mandate) === 'CHEETAH_POUNCE_MOMENTUM'
+                          ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
+                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                      }`}
+                      title={`Cheetah mandate: ${a.metrics?.cheetah_mandate || a.metrics?.predatory_pipeline?.cheetah?.mandate}`}
+                    >
+                      🐆 {(a.metrics?.cheetah_mandate || a.metrics?.predatory_pipeline?.cheetah?.mandate) === 'CHEETAH_POUNCE_MOMENTUM' ? 'POUNCE' : 'STALKER'}
+                    </span>
+                  )}
                   {isRunnerExit ? (
                     <span className="text-[10px] font-ui text-emerald-300 font-bold bg-emerald-500/20 px-1.5 py-0.5 rounded border border-emerald-500/40">💰 RUNNER CLOSED</span>
                   ) : isBreakevenExit ? (

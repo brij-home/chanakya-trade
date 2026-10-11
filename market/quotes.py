@@ -8,6 +8,7 @@ is logged in or the broker call fails.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import threading
@@ -505,6 +506,9 @@ def _yf_fallback_quotes(
     instruments: list[str], *, correlation_id: Optional[str] = None
 ) -> dict[str, Quote]:
     """Try yfinance when broker is unavailable (skips Indian options & futures which yfinance does not host)."""
+    if os.environ.get("CHANAKYA_TESTING") == "1" and os.environ.get("ALLOW_TEST_NETWORK") != "1":
+        return {}
+
     try:
         from market.yfinance_provider import yf_get_quotes, yf_available, is_yf_rate_limited
 

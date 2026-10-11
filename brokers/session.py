@@ -274,8 +274,12 @@ def get_broker() -> BrokerAPI:
     if not _primary_key or _primary_key not in _brokers:
         _try_auto_restore_sessions()
     if not _primary_key or _primary_key not in _brokers:
-        raise RuntimeError(
-            "No broker is connected. Run the 'login' command to connect your broker."
+        from .exceptions import BrokerAuthError
+
+        raise BrokerAuthError(
+            "No broker is connected. Run the 'login' command to connect your broker.",
+            broker="SESSION",
+            error_code="NOT_LOGGED_IN",
         )
     return _brokers[_primary_key]
 

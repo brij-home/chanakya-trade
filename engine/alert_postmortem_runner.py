@@ -47,6 +47,7 @@ def generate_session_scorecard(
     wins = 0
     losses = 0
     unfulfilled = 0
+    active_swings = 0
     pos_r_sum = 0.0
     neg_r_sum = 0.0
     best_trade = None
@@ -89,6 +90,17 @@ def generate_session_scorecard(
         else:
             r_val = float(r_mult)
 
+        th = (getattr(alert, "time_horizon", "") or "").upper()
+        is_multi_session = th in (
+            "SWING",
+            "SWING_SHORT",
+            "SWING_MID",
+            "LONG_TERM",
+            "POSITIONAL",
+            "MULTIBAGGER",
+        ) or getattr(alert, "setup_style", "") in ("SWING", "POSITIONAL")
+        is_expired = getattr(alert, "is_expired", False)
+
         if t1_reached or r_val > 0.3:
             wins += 1
             pos_r_sum += max(0.0, r_val)
@@ -101,6 +113,9 @@ def generate_session_scorecard(
             losses += 1
             neg_r_sum += abs(min(0.0, r_val))
             stat["losses"] += 1
+            stat["net_r"] = round(stat["net_r"] + r_val, 2)
+        elif is_multi_session and not is_expired:
+            active_swings += 1
             stat["net_r"] = round(stat["net_r"] + r_val, 2)
         else:
             unfulfilled += 1
@@ -121,6 +136,7 @@ def generate_session_scorecard(
         "wins": wins,
         "losses": losses,
         "unfulfilled": unfulfilled,
+        "active_swings": active_swings,
         "win_rate_pct": win_rate,
         "profit_factor": profit_factor,
         "net_realized_r": net_r,
@@ -138,6 +154,7 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
     wins = scorecard.get("wins", 0)
     losses = scorecard.get("losses", 0)
     unf = scorecard.get("unfulfilled", 0)
+    active_sw = scorecard.get("active_swings", 0)
     wr = scorecard.get("win_rate_pct", 0.0)
     pf = scorecard.get("profit_factor", 1.0)
     net_r = scorecard.get("net_realized_r", 0.0)
@@ -164,6 +181,7 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📅 <b>Session:</b> {date_str} | <b>Close:</b> 15:35 IST\n"
         f"📊 <b>Total Setups:</b> {total} | 🟢 <b>Wins:</b> {wins} | 🔴 <b>Losses:</b> {losses}"
+        + (f" | ⏳ <b>Swings:</b> {active_sw}" if active_sw > 0 else "")
         + (f" | ⚪ <b>Flat:</b> {unf}" if unf > 0 else "")
         + f"\n"
         f"🎯 <b>Win Rate:</b> <b>{wr:.1f}%</b> | <b>Profit Factor:</b> <b>{pf:.2f}x</b>\n"
@@ -275,8 +293,31 @@ def run_eod_alert_postmortems(
         achieved_milestones = getattr(alert, "achieved_milestones", []) or []
         t1_reached = any("T1" in str(m) for m in achieved_milestones)
 
+        th = (getattr(alert, "time_horizon", "") or "").upper()
+        is_multi_session = th in (
+            "SWING",
+            "SWING_SHORT",
+            "SWING_MID",
+            "LONG_TERM",
+            "POSITIONAL",
+            "MULTIBAGGER",
+        ) or getattr(alert, "setup_style", "") in ("SWING", "POSITIONAL")
+        is_expired = getattr(alert, "is_expired", False)
+
+        # Multi-session swing setups that are neither invalidated nor expired are still active across calendar days.
+        # Do not record premature UNFULFILLED_EOD post-mortems on Day 1.
+        if is_multi_session and not is_invalidated and not is_expired:
+            logger.info(
+                f"[AlertPostMortem] Skipping premature EOD evaluation for active swing setup {alert_id} ({th})"
+            )
+            continue
+
         # We conduct post-mortem if the alert was invalidated, or if it expired/closed without hitting T1
-        needs_postmortem = is_invalidated or (not t1_reached)
+        needs_postmortem = (
+            is_invalidated
+            or (not t1_reached and is_expired)
+            or (not is_multi_session and not t1_reached)
+        )
         if not needs_postmortem:
             continue
 

@@ -590,7 +590,8 @@ def evaluate_single_stock_inflection(
     # ─────────────────────────────────────────────────────────────────
     # 8. TIMING STATE CLASSIFICATION
     # ─────────────────────────────────────────────────────────────────
-    if (rvol_20d >= 1.8 and day_change_pct >= 1.2) or squeeze_status == "FIRED":
+    # TRIGGER_NOW requires kinetic volume spark (RVOL >= 1.5x) or confirmed fired squeeze
+    if (rvol_20d >= 1.5 and day_change_pct >= 0.8) or squeeze_status == "FIRED":
         timing_state = "TRIGGER_NOW"
         timing_label = "🔥 Trigger Now"
     elif squeeze.is_squeeze_on or (is_vcp and vcp_tightness <= 5.0 and rvol_20d <= 1.1):
@@ -648,15 +649,19 @@ def evaluate_single_stock_inflection(
         )
         atr = float(np.mean(tr))
 
+    # Institutional Volatility Noise Floor:
+    # Swing setups must enforce at least 1.25x ATR stop-loss buffer to eliminate sub-ATR noise whipsaws
+    min_sl_buffer = max(1.0, 1.25 * atr)
+
     if timing_state == "TRIGGER_NOW":
         entry_price = round(ltp, 2)
-        stop_loss = round(max(0.1, ltp - (1.15 * atr)), 2)
+        stop_loss = round(max(0.1, ltp - min_sl_buffer), 2)
     elif is_vcp and vcp_pivot > 0:
         entry_price = round(vcp_pivot, 2)
-        stop_loss = round(max(0.1, vcp_pivot - (1.1 * atr)), 2)
+        stop_loss = round(max(0.1, vcp_pivot - min_sl_buffer), 2)
     else:
         entry_price = round(ltp, 2)
-        stop_loss = round(max(0.1, ltp - (1.25 * atr)), 2)
+        stop_loss = round(max(0.1, ltp - min_sl_buffer), 2)
 
     risk_per_share = max(0.5, entry_price - stop_loss)
     target_1 = round(entry_price + (2.0 * risk_per_share), 2)
@@ -678,6 +683,8 @@ def evaluate_single_stock_inflection(
         "circuit_state": circuit_state,
         "is_executable": circuit_state != "UPPER_CIRCUIT_LOCKED",
         "turnover_20d_cr": turnover_20d_cr,
+        "atr_14d": round(atr, 2),
+        "min_noise_sl_pts": round(min_sl_buffer, 2),
     }
 
     # Labels and catalysts

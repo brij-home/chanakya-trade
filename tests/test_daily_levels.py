@@ -182,6 +182,15 @@ def test_get_premarket_battle_plan_uses_daily_levels(monkeypatch):
     """Confirms get_premarket_battle_plan successfully retrieves and returns daily levels."""
     from market.indices import get_premarket_battle_plan
 
+    mock_df = pd.DataFrame(
+        [
+            {"open": 24500, "high": 24700, "low": 24400, "close": 24600, "volume": 1000},
+            {"open": 24650, "high": 25000, "low": 24600, "close": 24800, "volume": 1500},
+        ],
+        index=pd.to_datetime(["2026-10-06", "2026-10-07"]),
+    )
+    monkeypatch.setattr("market.history.get_ohlcv", lambda *a, **k: mock_df)
+
     plan = get_premarket_battle_plan(["NIFTY"])
     assert "NIFTY" in plan
     nifty = plan["NIFTY"]

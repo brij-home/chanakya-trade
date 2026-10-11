@@ -605,6 +605,11 @@ def _yfinance_fallback(
     to_date: datetime,
 ) -> list[dict]:
     """Try yfinance for real market data when broker API is unavailable, with 429 rate-limit backoff."""
+    import os
+
+    if os.environ.get("CHANAKYA_TESTING") == "1":
+        return []
+
     global _YF_CONSECUTIVE_FAILURES, _YF_GLOBAL_BACKOFF
     sym_key = f"{exchange}:{symbol}:{interval}".upper()
     now = time.time()

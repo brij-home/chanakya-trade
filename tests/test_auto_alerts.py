@@ -1201,6 +1201,11 @@ def test_classify_expiry_type():
     # 2026-09-24 + 7 days = 2026-10-01 (next month) -> MONTHLY
     assert classify_expiry_type("2026-09-24", symbol="NIFTY") == "MONTHLY"
     assert classify_expiry_type("2026-09-24", symbol="BANKNIFTY") == "MONTHLY"
+    # Under SEBI regulations (Nov 2024), only NIFTY & SENSEX have weekly options; rest are strictly MONTHLY
+    assert classify_expiry_type("2026-09-17", symbol="BANKNIFTY") == "MONTHLY"
+    assert classify_expiry_type("2026-09-17", symbol="MIDCPNIFTY") == "MONTHLY"
+    assert classify_expiry_type("2026-09-17", symbol="FINNIFTY") == "MONTHLY"
+    assert classify_expiry_type("2026-09-17", symbol="BANKEX") == "MONTHLY"
 
 
 def test_archive_alert_by_id():

@@ -485,3 +485,156 @@ def test_obstacle_runway_trap_suppressed_on_telegram():
     passed, reason = engine._eval_telegram_apex_gate(alert, in_market=True)
     assert not passed
     assert "Obstacle Runway Trap" in reason
+
+
+def test_telegram_index_first_half_daily_limit_and_apex_expansion():
+    """1st half index daily limit caps routine setups at 5, allowing APEX up to 6."""
+    engine = AutoAlertEngine()
+    engine._hourly_telegram_dispatches = {"INDEX": [], "STOCKS": []}
+    today_k = datetime.now(IST).strftime("%Y-%m-%d")
+
+    # Set 5 alerts in 1st half
+    engine._index_half_telegram[today_k]["FIRST_HALF"] = 5
+
+    # Mock datetime.now to return 10:30 AM IST (1st half)
+    fake_now = datetime.now(IST).replace(hour=10, minute=30, second=0)
+    with patch("engine.auto_alert_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = fake_now
+        mock_dt.fromisoformat = datetime.fromisoformat
+        mock_dt.strptime = datetime.strptime
+
+        # 6th routine alert (confidence 90) must be blocked
+        alert_routine = _make_dummy_alert("idx-6-routine", "NIFTY", confidence=90)
+        passed, reason = engine._eval_telegram_apex_gate(alert_routine, in_market=True)
+        assert not passed
+        assert "1st half" in reason
+        assert "5/5" in reason
+
+        # 6th APEX alert (confidence 95) must pass (expansion to 6)
+        alert_apex = _make_dummy_alert("idx-6-apex", "NIFTY", confidence=95, is_0dte=True)
+        passed, reason = engine._eval_telegram_apex_gate(alert_apex, in_market=True)
+        assert passed, f"Expected APEX to pass with cap expansion, got: {reason}"
+
+        # If count reaches 6, even APEX is blocked
+        engine._index_half_telegram[today_k]["FIRST_HALF"] = 6
+        alert_7_apex = _make_dummy_alert("idx-7-apex", "NIFTY", confidence=95, is_0dte=True)
+        passed, reason = engine._eval_telegram_apex_gate(alert_7_apex, in_market=True)
+        assert not passed
+        assert "1st half" in reason
+        assert "6/6" in reason
+
+
+def test_telegram_index_second_half_daily_limit_and_apex_expansion():
+    """2nd half index daily limit caps routine setups at 3, allowing APEX up to 4."""
+    engine = AutoAlertEngine()
+    engine._hourly_telegram_dispatches = {"INDEX": [], "STOCKS": []}
+    today_k = datetime.now(IST).strftime("%Y-%m-%d")
+
+    # Set 3 alerts in 2nd half
+    engine._index_half_telegram[today_k]["SECOND_HALF"] = 3
+
+    # Mock datetime.now to return 13:30 PM IST (2nd half)
+    fake_now = datetime.now(IST).replace(hour=13, minute=30, second=0)
+    with patch("engine.auto_alert_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = fake_now
+        mock_dt.fromisoformat = datetime.fromisoformat
+        mock_dt.strptime = datetime.strptime
+
+        # 4th routine alert (confidence 90) must be blocked
+        alert_routine = _make_dummy_alert(
+            "idx-4-routine", "NIFTY", confidence=90, rvol=3.0, vol_oi=2.5
+        )
+        passed, reason = engine._eval_telegram_apex_gate(alert_routine, in_market=True)
+        assert not passed
+        assert "2nd half" in reason
+        assert "3/3" in reason
+
+        # 4th APEX alert (confidence 95) must pass (expansion to 4)
+        alert_apex = _make_dummy_alert(
+            "idx-4-apex", "NIFTY", confidence=95, is_0dte=True, rvol=3.0, vol_oi=2.5
+        )
+        passed, reason = engine._eval_telegram_apex_gate(alert_apex, in_market=True)
+        assert passed, f"Expected APEX to pass with cap expansion, got: {reason}"
+
+        # If count reaches 4, even APEX is blocked
+        engine._index_half_telegram[today_k]["SECOND_HALF"] = 4
+        alert_5_apex = _make_dummy_alert(
+            "idx-5-apex", "NIFTY", confidence=95, is_0dte=True, rvol=3.0, vol_oi=2.5
+        )
+        passed, reason = engine._eval_telegram_apex_gate(alert_5_apex, in_market=True)
+        assert not passed
+        assert "2nd half" in reason
+        assert "4/4" in reason
+
+
+def test_telegram_stock_sector_hourly_pacing_prevents_basket_flooding():
+    """Stock sector hourly pacing enforces 2/hr routine, 3/hr APEX per sector."""
+    engine = AutoAlertEngine()
+    engine._hourly_telegram_dispatches = {"INDEX": [], "STOCKS": []}
+    now_t = time.time()
+
+    # Simulate 2 IT alerts already sent within the last 30 minutes
+    engine._sector_hourly_telegram["it"] = [now_t - 1200.0, now_t - 600.0]
+
+    # 3rd routine IT alert arrives in same 60m window (confidence 90)
+    alert3_it = _make_dummy_alert("it-3-routine", "INFY", segment="FNO_STOCK", confidence=90)
+    alert3_it.metrics["sector_id"] = "it"
+    passed, reason = engine._eval_telegram_apex_gate(alert3_it, in_market=True)
+    assert not passed
+    assert "sector hourly pacing limit reached for 'it'" in reason
+    assert "2/2" in reason
+
+    # 3rd APEX IT alert arrives (confidence 95) -> must pass (up to 3 APEX)
+    alert3_apex = _make_dummy_alert("it-3-apex", "INFY", segment="FNO_STOCK", confidence=95)
+    alert3_apex.metrics["sector_id"] = "it"
+    passed, reason = engine._eval_telegram_apex_gate(alert3_apex, in_market=True)
+    assert passed, f"Expected APEX stock setup to pass sector hourly pacing, got: {reason}"
+
+    # If count reaches 3, even APEX is blocked
+    engine._sector_hourly_telegram["it"].append(now_t - 300.0)
+    alert4_apex = _make_dummy_alert("it-4-apex", "INFY", segment="FNO_STOCK", confidence=95)
+    alert4_apex.metrics["sector_id"] = "it"
+    passed, reason = engine._eval_telegram_apex_gate(alert4_apex, in_market=True)
+    assert not passed
+    assert "sector hourly pacing limit reached for 'it'" in reason
+    assert "3/3" in reason
+
+    # Cross-sector isolation: Alert in 'auto' sector (TATAMOTORS) must NOT be blocked by 'it'
+    alert_auto = _make_dummy_alert("auto-1", "TATAMOTORS", segment="FNO_STOCK", confidence=90)
+    alert_auto.metrics["sector_id"] = "auto"
+    passed, reason = engine._eval_telegram_apex_gate(alert_auto, in_market=True)
+    assert passed, f"Expected non-flooded sector to pass, got: {reason}"
+
+
+def test_dispatch_records_index_half_and_sector_hourly():
+    """_dispatch records to _index_half_telegram and _sector_hourly_telegram on success."""
+    engine = AutoAlertEngine()
+    engine._alerts.clear()
+    today_k = datetime.now(IST).strftime("%Y-%m-%d")
+
+    # Dispatch Index Alert during active market session
+    idx_alert = _make_dummy_alert("idx-dispatch-test", "NIFTY", confidence=92)
+    with (
+        patch("engine.alerts._is_market_hours", return_value=True),
+        patch("engine.alerts._telegram_notify"),
+    ):
+        engine._dispatch(idx_alert)
+
+    # Check that it recorded in _index_half_telegram
+    total_idx = sum(engine._index_half_telegram[today_k].values())
+    assert total_idx == 1
+
+    # Dispatch Stock Alert in sector 'metals'
+    stk_alert = _make_dummy_alert(
+        "stk-dispatch-test", "TATASTEEL", segment="FNO_STOCK", confidence=90
+    )
+    stk_alert.metrics["sector_id"] = "metals"
+    with (
+        patch("engine.alerts._is_market_hours", return_value=True),
+        patch("engine.alerts._telegram_notify"),
+    ):
+        engine._dispatch(stk_alert)
+
+    # Check that it recorded in _sector_hourly_telegram and _sector_daily_telegram
+    assert len(engine._sector_hourly_telegram["metals"]) == 1
+    assert engine._sector_daily_telegram[today_k]["metals"] == 1

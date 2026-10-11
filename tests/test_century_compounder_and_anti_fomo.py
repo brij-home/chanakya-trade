@@ -130,8 +130,11 @@ def test_detect_pre_inflection_dryup_rejection_on_expansion():
     assert alert is None, "Should reject assets with high volume and wide price swings"
 
 
-def test_scan_century_compounders_deterministic():
+def test_scan_century_compounders_deterministic(monkeypatch):
     """Verify scanning returns ranked compounders without exceptions."""
+    synthetic_df = _build_synthetic_coiling_df(50, dry_up=True)
+    monkeypatch.setattr("market.history.get_ohlcv", lambda *a, **k: synthetic_df)
+
     results = scan_century_compounders(universe=["TRENT", "DIXON", "KAYNES"], min_score=50, top_n=3)
     assert isinstance(results, list)
     assert len(results) > 0

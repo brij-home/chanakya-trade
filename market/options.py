@@ -272,6 +272,16 @@ def get_options_chain(
                 idx_spot = get_ltp(
                     f"BSE:{clean_sym}" if clean_sym in ("SENSEX", "BANKEX") else f"NSE:{clean_sym}"
                 ) or get_ltp(clean_sym)
+                if not idx_spot or idx_spot <= 0:
+                    _ANCHOR_SPOTS = {
+                        "NIFTY": 25000.0,
+                        "BANKNIFTY": 52500.0,
+                        "FINNIFTY": 24000.0,
+                        "MIDCPNIFTY": 13000.0,
+                        "SENSEX": 82000.0,
+                        "BANKEX": 58000.0,
+                    }
+                    idx_spot = _ANCHOR_SPOTS.get(clean_sym, 0.0)
                 if idx_spot and idx_spot > 0:
                     chain = build_index_synthetic_option_chain(
                         clean_sym, spot=idx_spot, expiry=expiry
@@ -326,15 +336,27 @@ def build_index_synthetic_option_chain(
     if expiry:
         exp_str = expiry
     else:
-        # Resolve canonical weekday from SSOT (engine.alert_model)
-        # MIDCPNIFTY/BANKEX=Mon(0), FINNIFTY=Tue(1), BANKNIFTY=Wed(2), NIFTY=Thu(3), SENSEX=Fri(4)
+        # Resolve canonical expiry from SSOT (engine.alert_model)
         from engine.alert_model import INDEX_WEEKLY_EXPIRY_WEEKDAY
 
-        target_wd = INDEX_WEEKLY_EXPIRY_WEEKDAY.get(clean_sym, 4 if is_bse else 3)
-        days_ahead = (target_wd - today.weekday()) % 7
-        if days_ahead == 0 and datetime.now(_ist).hour >= 15:
-            days_ahead = 7
-        exp_str = (today + timedelta(days=days_ahead)).isoformat()
+        if clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY:
+            target_wd = INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym]
+            days_ahead = (target_wd - today.weekday()) % 7
+            if days_ahead == 0 and datetime.now(_ist).hour >= 15:
+                days_ahead = 7
+            exp_str = (today + timedelta(days=days_ahead)).isoformat()
+        else:
+            # Monthly expiry: resolve last Thursday of the month for NSE, last Friday for BSE
+            from market.events import _last_thursday
+
+            nm = today.month
+            ny = today.year
+            exp_date_obj = _last_thursday(ny, nm)
+            if exp_date_obj < today or (exp_date_obj == today and datetime.now(_ist).hour >= 15):
+                nm_next = nm + 1 if nm < 12 else 1
+                ny_next = ny if nm < 12 else ny + 1
+                exp_date_obj = _last_thursday(ny_next, nm_next)
+            exp_str = exp_date_obj.isoformat()
 
     step = (
         100

@@ -109,6 +109,7 @@ def test_derivative_requires_verified_contract(tmp_path, monkeypatch):
 
     close_db()
     monkeypatch.setenv("TRADING_PLATFORM_HOME", str(tmp_path))
+    monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
     from engine.order_lifecycle import _resolve_order_instrument
     from market.instrument_master import upsert_verified_contract
 

@@ -356,6 +356,78 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           </span>
         )}
 
+        {/* Cheetah Pounce / Equity Adaptive Regime Badge */}
+        {(alert.metrics?.cheetah_mandate || alert.metrics?.predatory_pipeline?.cheetah?.mandate) && (
+          <span
+            className={`text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap border hidden sm:inline ${
+              (alert.metrics?.cheetah_mandate || alert.metrics?.predatory_pipeline?.cheetah?.mandate) === 'CHEETAH_POUNCE_MOMENTUM'
+                ? 'bg-amber-500/25 text-amber-300 border-amber-500/50 animate-pulse'
+                : (alert.metrics?.cheetah_mandate || alert.metrics?.predatory_pipeline?.cheetah?.mandate) === 'CHEETAH_SPRING_INVERSION'
+                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+            }`}
+            title={`🐆 CHEETAH MANDATE: ${alert.metrics?.cheetah_mandate || alert.metrics?.predatory_pipeline?.cheetah?.mandate}`}
+          >
+            {(alert.metrics?.cheetah_mandate || alert.metrics?.predatory_pipeline?.cheetah?.mandate) === 'CHEETAH_POUNCE_MOMENTUM' ? '🐆 CHEETAH POUNCE' :
+             (alert.metrics?.cheetah_mandate || alert.metrics?.predatory_pipeline?.cheetah?.mandate) === 'CHEETAH_SPRING_INVERSION' ? '⚡ SPRING INVERSION' :
+             '🐆 CHEETAH STALKER'}
+          </span>
+        )}
+
+        {/* Falcon Eye Equity Radar Badge */}
+        {alert.metrics?.falcon_environment === 'WHIPSAW_CHOP_TRAP' && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/20 text-rose-300 border border-rose-500/40 hidden sm:inline"
+            title="🦅 FALCON EYE: Severe chop detected. Preserving capital."
+          >
+            🦅 FALCON CHOP
+          </span>
+        )}
+
+        {/* Elephant Footprint Badge (RVOL >= 2.0x or Institutional OB/FVG) */}
+        {((alert.metrics?.rvol && alert.metrics.rvol >= 2.0) || alert.metrics?.predatory_pipeline?.elephant?.status === 'INSTITUTIONAL_FOOTPRINT') && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-purple-500/20 text-purple-300 border border-purple-500/40 hidden sm:inline"
+            title={`🐘 ELEPHANT: Institutional footprint detected (RVOL=${alert.metrics?.rvol?.toFixed(1) || '2.0+'}x, Order Block / FVG confirmed)`}
+          >
+            🐘 ELEPHANT
+          </span>
+        )}
+
+        {/* Chanakya De-Trapped Badge */}
+        {alert.metrics?.predatory_pipeline?.chanakya?.status === 'DE_TRAPPED' && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-emerald-500/20 text-emerald-300 border border-emerald-500/35 hidden sm:inline"
+            title="🧠 CHANAKYA: De-trapped (No upper wick rejection, runway clear of OI walls, theta safe)"
+          >
+            🧠 DE-TRAPPED
+          </span>
+        )}
+
+        {/* Cheetah Free-Roll Active Badge */}
+        {(alert.metrics?.free_roll_locked || alert.metrics?.predatory_pipeline?.cheetah?.status === 'FREE_ROLL_ACTIVE') && (
+          <span
+            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-emerald-500/25 text-emerald-300 border border-emerald-500/50 animate-pulse hidden sm:inline"
+            title="🐆 CHEETAH FREE-ROLL: Stop ratcheted to cost/breakeven. Zero downside risk."
+          >
+            🐆 FREE-ROLL
+          </span>
+        )}
+
+        {/* Expected Value (EV) Badge */}
+        {(alert.metrics?.expected_value_r !== undefined || alert.metrics?.predatory_pipeline?.expected_value_r !== undefined) && (
+          <span
+            className={`text-[7px] px-1.5 py-px rounded font-black font-mono uppercase whitespace-nowrap border hidden sm:inline ${
+              Number(alert.metrics?.expected_value_r ?? alert.metrics?.predatory_pipeline?.expected_value_r) >= 0.85
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+            }`}
+            title={`Mathematical Expected Value: +${Number(alert.metrics?.expected_value_r ?? alert.metrics?.predatory_pipeline?.expected_value_r).toFixed(2)}R net of friction`}
+          >
+            EV: +{Number(alert.metrics?.expected_value_r ?? alert.metrics?.predatory_pipeline?.expected_value_r).toFixed(2)}R
+          </span>
+        )}
+
         {/* Multi-Horizon Confluence Alignment */}
         {confluenceAlignment === 'TRIPLE_HORIZON' && (
           <span

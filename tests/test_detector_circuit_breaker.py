@@ -149,28 +149,27 @@ def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
 
     engine = AutoAlertEngine()
     test_type = "TEST_CIRCUIT_PROBATION"
+    test_sym = "CIRCUIT_PROB_TEST"
 
     # Degrade to probation (5 samples >= min_samples: 1 win of 1.5R, 4 losses of -1.0R with win in middle)
-    detector_circuit_breaker.record_outcome("p1", "RELIANCE", test_type, "LOSS", -1.0)
-    detector_circuit_breaker.record_outcome("p2", "RELIANCE", test_type, "LOSS", -1.0)
-    detector_circuit_breaker.record_outcome("p3", "RELIANCE", test_type, "WIN", 1.5)
-    detector_circuit_breaker.record_outcome("p4", "RELIANCE", test_type, "LOSS", -1.0)
-    detector_circuit_breaker.record_outcome("p5", "RELIANCE", test_type, "LOSS", -1.0)
+    detector_circuit_breaker.record_outcome("p1", test_sym, test_type, "LOSS", -1.0)
+    detector_circuit_breaker.record_outcome("p2", test_sym, test_type, "LOSS", -1.0)
+    detector_circuit_breaker.record_outcome("p3", test_sym, test_type, "WIN", 1.5)
+    detector_circuit_breaker.record_outcome("p4", test_sym, test_type, "LOSS", -1.0)
+    detector_circuit_breaker.record_outcome("p5", test_sym, test_type, "LOSS", -1.0)
 
     import uuid
 
     aid = f"live-test-prob-{uuid.uuid4().hex[:6]}"
     with engine._lock:
-        engine._alerts = [
-            a for a in engine._alerts if not (a.symbol == "RELIANCE" and a.alert_type == test_type)
-        ]
+        engine._alerts = [a for a in engine._alerts if a.symbol != test_sym]
 
     try:
         alert = AutoAlert(
             alert_id=aid,
             alert_type=test_type,
             stage="IGNITED",
-            symbol="RELIANCE",
+            symbol=test_sym,
             exchange="NSE",
             direction="BULLISH",
             headline="Breakout",
@@ -205,4 +204,4 @@ def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
     finally:
         detector_circuit_breaker.reset_detector(test_type)
         with engine._lock:
-            engine._alerts = [a for a in engine._alerts if a.alert_id != aid]
+            engine._alerts = [a for a in engine._alerts if a.symbol != test_sym]

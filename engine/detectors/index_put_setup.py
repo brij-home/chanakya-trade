@@ -1462,6 +1462,9 @@ def detect_index_put_setup(
                 "DOUBLE_TOP_BREAKDOWN",
                 "CPR_SUPPLY_REJECTION",
                 "DAY_HIGH_SUPPLY_REJECTION",
+                "BREAKDOWN_RETEST_EXPANSION",
+                "EMA9_21_BEARISH_CROSSOVER",
+                "MOMENTUM_EXPANSION_PE",
             }
             has_qualifying_setup = bool(
                 is_institutional_thrust

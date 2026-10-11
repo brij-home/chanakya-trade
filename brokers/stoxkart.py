@@ -170,7 +170,7 @@ class StoxkartAPI(BrokerAPI):
                 import pyotp
 
                 totp_code = pyotp.TOTP(totp_s.strip()).now()
-            except ImportError:
+            except Exception:
                 pass
 
         try:

@@ -505,3 +505,51 @@ def test_crypto_sniper_eagle_tiger_confluence_and_no_chase():
     assert plan_breakdown.sl_price <= 85600.0
     assert plan_breakdown.entry_min > plan_breakdown.no_chase
     assert plan_breakdown.rr_1 >= 2.8
+
+
+def test_crypto_predatory_pipeline_dossier_and_funding_gates():
+    """Verify predatory_pipeline stamp and funding rate vetoes in Crypto SMC detector."""
+    from engine.detectors.crypto import detect_single_crypto_symbol
+
+    mock_quote = MagicMock()
+    mock_quote.last_price = 85000.0
+    mock_quote.change_pct = 1.8
+
+    # 50 bars with high volume for SMC Order Block creation
+    dates = pd.date_range("2026-09-21 08:00", periods=60, freq="15min")
+    prices = [80000.0 + i * 85 for i in range(60)]
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p + 40 for p in prices],
+            "low": [p - 40 for p in prices],
+            "close": [p + 20 for p in prices],
+            "volume": [2500.0 for _ in range(60)],
+        },
+        index=dates,
+    )
+    df["date"] = df.index
+
+    # 1. Squeeze detection includes predatory_pipeline or smc includes predatory_pipeline
+    with (
+        patch("market.crypto_stream.crypto_stream.get_quote", return_value=mock_quote),
+        patch(
+            "market.crypto_stream.crypto_stream.get_squeeze_metrics",
+            return_value={
+                "symbol": "BTCUSDT",
+                "squeeze_signal": "SHORT_SQUEEZE_IMMINENT",
+                "conviction": 90,
+                "futures_metrics": {"funding_rate_8h": -0.0002, "open_interest_usd": 5e9},
+            },
+        ),
+        patch("market.crypto_stream.crypto_stream.get_klines", return_value=df),
+        patch(
+            "market.crypto_stream.crypto_stream.fetch_futures_metrics",
+            return_value={"funding_rate_8h": 0.0001},
+        ),
+    ):
+        alerts = detect_single_crypto_symbol("BTCUSDT")
+        assert len(alerts) >= 1
+        sq_alert = next((a for a in alerts if a.alert_type == "CRYPTO_SQUEEZE"), None)
+        assert sq_alert is not None
+        assert sq_alert.metrics["segment"] == "CRYPTO"

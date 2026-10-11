@@ -621,18 +621,7 @@ def evaluate_tiger_mandate(
             action_guidance="Execute mean-reversion scalp back to VWAP with stop just beyond the sweep wick.",
         )
 
-    # Rule 3: Low VIX Mandatory Spreads
-    if eagle.vix_regime == "LOW_VIX_THETA_BURDEN":
-        return TigerStrategyMandate(
-            mandate="DEFINED_RISK_SPREAD_ONLY",
-            allow_routine_breakouts=True,
-            allow_thrust_only=False,
-            suggested_strategy="HEDGED_SPREAD",
-            reason="🛡️ Low-VIX Regime (India VIX < 13.0): Naked option buying prohibited due to theta decay.",
-            action_guidance="Execute defined-risk vertical debit spread only (Bull Call / Bear Put Spread).",
-        )
-
-    # Rule 4: Tiger Stalking & Capital Preservation Filter (Midday Lull or Severe Chop)
+    # Rule 3: Tiger Stalking & Capital Preservation Filter (Midday Lull or Severe Chop)
     is_severe_chop = eagle.chop_index >= 58.0 or eagle.adx_14 < 18.0
     if eagle.is_midday_chop_window or is_severe_chop:
         reason_parts = []
@@ -657,6 +646,17 @@ def evaluate_tiger_mandate(
                 "Routine breakout entries suspended to prevent whipsaw bleeding. "
                 "Wait patiently for verified institutional expansion thrust or range boundary sweep."
             ),
+        )
+
+    # Rule 4: Low VIX Mandatory Spreads (when market is active/trending, naked buying is prohibited)
+    if eagle.vix_regime == "LOW_VIX_THETA_BURDEN":
+        return TigerStrategyMandate(
+            mandate="DEFINED_RISK_SPREAD_ONLY",
+            allow_routine_breakouts=True,
+            allow_thrust_only=False,
+            suggested_strategy="HEDGED_SPREAD",
+            reason="🛡️ Low-VIX Regime (India VIX < 13.0): Naked option buying prohibited due to theta decay.",
+            action_guidance="Execute defined-risk vertical debit spread only (Bull Call / Bear Put Spread).",
         )
 
     # Rule 5: Healthy Trending Phase

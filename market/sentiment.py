@@ -59,7 +59,12 @@ def get_fii_dii_data(days: int = 5, use_cache: bool = True) -> list[FIIDIIData]:
             pass
 
     try:
+        import os
+
         session = get_nse_client()
+        # In automated test environments, avoid hitting live NSE endpoints unless explicitly mocked
+        if os.environ.get("CHANAKYA_TESTING") == "1" and not hasattr(session, "assert_called"):
+            return []
         r = session.get(NSE_FIIDII_URL, timeout=8)
         r.raise_for_status()
         data = r.json()

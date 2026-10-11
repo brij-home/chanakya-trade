@@ -644,6 +644,13 @@ def execute_order_intent(order_id: str) -> OrderIntent:
 
         d = dict(row)
 
+    from engine.observability import set_correlation_context
+
+    set_correlation_context(
+        correlation_id=d.get("correlation_id") or order_id,
+        symbol=d.get("symbol"),
+    )
+
     mode_info = get_trading_mode()
     now_iso = datetime.now(timezone.utc).isoformat()
 

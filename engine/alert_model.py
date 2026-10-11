@@ -26,13 +26,14 @@ STAGE_INVALIDATED = "INVALIDATED"  # Stop-loss breached or setup structure broke
 STAGE_EXPIRED = "EXPIRED"  # Session or TTL expired
 STAGE_COMPLETED = "COMPLETED"  # Final profit targets or runner exited
 
+# SEBI Regulatory Mandate (Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136):
+# Only ONE benchmark index derivative contract per exchange offers weekly options:
+#   - NSE: NIFTY 50 (Thursday = 3)
+#   - BSE: SENSEX (Friday = 4)
+# All other indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX) trade strictly MONTHLY expiries.
 INDEX_WEEKLY_EXPIRY_WEEKDAY = {
-    "MIDCPNIFTY": 0,  # Monday
-    "BANKEX": 0,  # Monday
-    "FINNIFTY": 1,  # Tuesday
-    "BANKNIFTY": 2,  # Wednesday
-    "NIFTY": 3,  # Thursday
-    "SENSEX": 4,  # Friday
+    "NIFTY": 3,  # Thursday (NSE sole weekly index)
+    "SENSEX": 4,  # Friday (BSE sole weekly index)
 }
 
 
