@@ -15,10 +15,17 @@ from engine.order_lifecycle import confirm_order_intent, execute_order_intent, p
 
 @pytest.fixture(autouse=True)
 def clean_order_db(tmp_path, monkeypatch):
-    """Use isolated orders.db per test."""
+    """Use isolated orders.db and fresh paper portfolio per test."""
     db_file = tmp_path / "test_orders.db"
+    paper_file = tmp_path / "paper_portfolio.json"
     monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
+    monkeypatch.setenv("TRADING_PLATFORM_HOME", str(tmp_path))
     monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_file)
+    monkeypatch.setattr("engine.paper.get_paper_file", lambda: paper_file)
+    from engine.paper import PaperBroker
+
+    PaperBroker().reset(capital=200_000.0)
     yield
 
 

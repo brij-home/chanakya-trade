@@ -83,10 +83,11 @@ def run_command(
 
 
 def install_hooks() -> bool:
-    """Installs local git pre-commit hook targeting shift_left_check.py."""
+    """Installs local git pre-commit and pre-push hooks targeting shift_left_check.py."""
     githooks_dir = ROOT_DIR / ".githooks"
     githooks_dir.mkdir(exist_ok=True)
     pre_commit_hook = githooks_dir / "pre-commit"
+    pre_push_hook = githooks_dir / "pre-push"
 
     hook_script = """#!/bin/sh
 # ChanakyaTrade Shift-Left Institutional Pre-Commit Gate
@@ -109,10 +110,34 @@ echo "✅ Shift-Left validation passed!"
 exit 0
 """
     pre_commit_hook.write_text(hook_script, encoding="utf-8")
+
+    pre_push_script = """#!/bin/sh
+# ChanakyaTrade Shift-Left Institutional Pre-Push Parity Gate
+echo "🛡️  Running ChanakyaTrade Shift-Left Pre-Push Parity Gate..."
+
+if [ -f ".venv/Scripts/python.exe" ]; then
+    PYTHON_BIN=".venv/Scripts/python.exe"
+elif [ -f ".venv/bin/python" ]; then
+    PYTHON_BIN=".venv/bin/python"
+else
+    PYTHON_BIN="python"
+fi
+
+"$PYTHON_BIN" scripts/shift_left_check.py --full
+if [ $? -ne 0 ]; then
+    echo "❌ Pre-push gate failed! Regression detected before push. Fix before pushing (or git push --no-verify if emergency)."
+    exit 1
+fi
+echo "✅ Pre-push verification passed! Remote CI parity guaranteed."
+exit 0
+"""
+    pre_push_hook.write_text(pre_push_script, encoding="utf-8")
+
     try:
         import stat
 
         pre_commit_hook.chmod(pre_commit_hook.stat().st_mode | stat.S_IEXEC)
+        pre_push_hook.chmod(pre_push_hook.stat().st_mode | stat.S_IEXEC)
     except Exception:
         pass
 
@@ -124,11 +149,108 @@ exit 0
         text=True,
     )
     if res.returncode == 0:
-        print("\u2705 Configured git core.hooksPath -> .githooks")
+        print("✅ Configured git core.hooksPath -> .githooks (pre-commit & pre-push)")
         return True
     else:
-        print(f"\u274c Failed to configure git hooks: {res.stderr}")
+        print(f"❌ Failed to configure git hooks: {res.stderr}")
         return False
+
+
+def get_affected_test_suites(already_covered: set[str]) -> list[tuple[str, str]]:
+    """
+    Dynamically identifies test suites impacted by currently staged or modified files.
+    Ensures that domain changes (alert models, detectors, brokers, configs)
+    automatically trigger their corresponding unit tests in shift-left pre-commit.
+    """
+    cmd = ["git", "diff", "--cached", "--name-only"]
+    res = subprocess.run(cmd, cwd=str(ROOT_DIR), capture_output=True, text=True)
+    changed_files = [f.strip().replace("\\", "/") for f in res.stdout.splitlines() if f.strip()]
+    if not changed_files:
+        # Check unstaged working tree diff against HEAD
+        res_work = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+        )
+        changed_files = [
+            f.strip().replace("\\", "/") for f in res_work.stdout.splitlines() if f.strip()
+        ]
+    if not changed_files:
+        # Check last commit diff
+        res_last = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+        )
+        changed_files = [
+            f.strip().replace("\\", "/") for f in res_last.stdout.splitlines() if f.strip()
+        ]
+
+    impacted: list[str] = []
+
+    for path_str in changed_files:
+        p = Path(path_str)
+        # 1. Direct test file modification
+        if (
+            p.parts
+            and p.parts[0] == "tests"
+            and p.name.startswith("test_")
+            and p.name.endswith(".py")
+        ):
+            rel_test = str(p).replace("\\", "/")
+            if (ROOT_DIR / rel_test).exists():
+                impacted.append(rel_test)
+
+        # 2. Direct stem match in tests/
+        stem = p.stem
+        candidate = f"tests/test_{stem}.py"
+        if (ROOT_DIR / candidate).exists():
+            impacted.append(candidate)
+
+        # 3. Known domain mappings
+        if "alert_model" in stem or "auto_alert_engine" in stem or "interception_engine" in stem:
+            for extra in [
+                "tests/test_interception_engine.py",
+                "tests/test_trap_and_conflict_controls.py",
+                "tests/test_holistic_signals_rca.py",
+                "tests/test_alert_calibration_and_enhancements.py",
+            ]:
+                if (ROOT_DIR / extra).exists():
+                    impacted.append(extra)
+
+        if "ws_subscription_manager" in stem:
+            candidate = "tests/test_ws_subscription_manager.py"
+            if (ROOT_DIR / candidate).exists():
+                impacted.append(candidate)
+
+        if "eod_report_generator" in stem or stem == "paths":
+            candidate = "tests/test_eod_report_generator.py"
+            if (ROOT_DIR / candidate).exists():
+                impacted.append(candidate)
+
+        if "nightly_chain" in stem or "mover_autopsy" in stem:
+            candidate = "tests/test_nightly_chain.py"
+            if (ROOT_DIR / candidate).exists():
+                impacted.append(candidate)
+
+        if "index_micro_scalp" in stem:
+            candidate = "tests/test_index_micro_scalp_and_reversals.py"
+            if (ROOT_DIR / candidate).exists():
+                impacted.append(candidate)
+
+    # Deduplicate and remove already covered suites
+    unique_impacted: list[tuple[str, str]] = []
+    seen = set()
+    norm_covered = {c.replace("\\", "/") for c in already_covered}
+    for t in impacted:
+        norm = t.replace("\\", "/")
+        if norm not in norm_covered and norm not in seen and (ROOT_DIR / norm).exists():
+            seen.add(norm)
+            unique_impacted.append((f"Tier 3.5: Impacted Suite ({Path(norm).name})", norm))
+
+    return unique_impacted
 
 
 def main() -> int:
@@ -232,6 +354,18 @@ def main() -> int:
             "tests/test_alert_quality_and_realtime_feed.py",
         ),
         (
+            "Tier 3: Early Warning Interception & Proximity Promotion",
+            "tests/test_interception_engine.py",
+        ),
+        (
+            "Tier 3: Opposing Mutual Exclusion & Conflicting Ignition Gates",
+            "tests/test_trap_and_conflict_controls.py",
+        ),
+        (
+            "Tier 3: Holistic Signals RCA & Multi-Milestone Trailing",
+            "tests/test_holistic_signals_rca.py",
+        ),
+        (
             "Tier 3: Hedged Spread & Sector Concurrency Limits",
             "tests/test_hedged_spread_and_concurrency.py",
         ),
@@ -257,6 +391,22 @@ def main() -> int:
         results.append((title, ok, dur))
         if not ok:
             return 1
+
+    # ── Tier 3.5: Impacted Test Suites (Dynamic Changed-File Selection) ──────
+    covered_files = {f for _, f in invariant_suites} | {f for _, f in pipeline_suites}
+    affected_suites = get_affected_test_suites(covered_files)
+    if affected_suites:
+        print(f"\n[INFO] Detected {len(affected_suites)} impacted test suite(s) from git diff:")
+        for _, f in affected_suites:
+            print(f"   -> {f}")
+        for title, test_file in affected_suites:
+            ok, dur, _ = run_command(
+                title,
+                [py_exe, "-m", "pytest", test_file, "-q", "--tb=line"],
+            )
+            results.append((title, ok, dur))
+            if not ok:
+                return 1
 
     # ── Tier 4: Full Fast Regression Suite (Optional / CI) ────────────────────
     if args.full:

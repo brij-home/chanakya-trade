@@ -1,0 +1,19 @@
+#!/bin/sh
+# ChanakyaTrade Shift-Left Institutional Pre-Push Parity Gate
+echo "🛡️  Running ChanakyaTrade Shift-Left Pre-Push Parity Gate..."
+
+if [ -f ".venv/Scripts/python.exe" ]; then
+    PYTHON_BIN=".venv/Scripts/python.exe"
+elif [ -f ".venv/bin/python" ]; then
+    PYTHON_BIN=".venv/bin/python"
+else
+    PYTHON_BIN="python"
+fi
+
+"$PYTHON_BIN" scripts/shift_left_check.py --full
+if [ $? -ne 0 ]; then
+    echo "❌ Pre-push gate failed! Regression detected before push. Fix before pushing (or git push --no-verify if emergency)."
+    exit 1
+fi
+echo "✅ Pre-push verification passed! Remote CI parity guaranteed."
+exit 0
