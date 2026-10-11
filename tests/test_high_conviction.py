@@ -35,7 +35,7 @@ def fake_ohlcv_df():
     )
 
 
-def test_evaluate_single_stock_bullish_breakout():
+def test_evaluate_single_stock_bullish_breakout(fake_ohlcv_df):
     fake_ms = MarketStructureReport(
         symbol="TRENT",
         ltp=6500.0,
@@ -90,7 +90,7 @@ def test_evaluate_single_stock_bullish_breakout():
             return_value={"sector": "Retail", "tailwind_score": 85, "quadrant": "LEADING"},
         ),
     ):
-        opp = _evaluate_single_stock("TRENT")
+        opp = _evaluate_single_stock("TRENT", data_override=fake_ohlcv_df)
         assert opp is not None
         assert opp.symbol == "TRENT"
         assert opp.conviction_score >= 80

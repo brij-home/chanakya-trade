@@ -206,9 +206,9 @@ def test_circuit_limit_headroom_gate_rejects_truncated():
     alert.ltp = 104.5
     alert.entry = 104.5
     alert.trigger = 104.5
-    alert.stop_loss = 101.0  # 3.5 pts risk
-    alert.target_1 = 112.0
-    alert.target_level = 112.0
+    alert.stop_loss = 104.3  # 0.2 pts risk -> R:R = 2.0
+    alert.target_1 = 104.9
+    alert.target_level = 104.9
     alert.trigger_level = 104.5
     alert.target_2 = 118.0
     alert.target_3 = 125.0
@@ -221,6 +221,7 @@ def test_circuit_limit_headroom_gate_rejects_truncated():
     alert.metrics = {
         "upper_circuit": 105.0,
         "rvol": 2.0,
+        "atr": 0.25,
     }
 
     passed, reason, flags = auditor.verify_tier1_sanity(alert)

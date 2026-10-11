@@ -262,6 +262,48 @@ def isolate_learning_engine(monkeypatch: pytest.MonkeyPatch):
         yield
 
 
+@pytest.fixture(autouse=True)
+def seed_test_rrg_cache():
+    """Ensure analysis cache has deterministic RRG sector matrix for zero-network testing."""
+    try:
+        from engine.analysis_cache import analysis_cache
+        from analysis.sector_rotation import (
+            NSE_SECTORS,
+            SECTOR_PROXY_STOCKS,
+            SECTOR_CONSTITUENTS,
+            SECTOR_DRIVERS,
+        )
+
+        cached = analysis_cache.get_macro("sector_rrg_matrix")
+        if not cached:
+            quadrants = ["LEADING", "IMPROVING", "WEAKENING", "LAGGING"]
+            fake_matrix = []
+            for i, (sec, sym) in enumerate(NSE_SECTORS.items()):
+                quad = quadrants[i % len(quadrants)]
+                rs_r = 102.5 if quad in ("LEADING", "WEAKENING") else 98.0
+                rs_m = 101.5 if quad in ("LEADING", "IMPROVING") else 98.5
+                proxy = SECTOR_PROXY_STOCKS.get(sec, "INFY")
+                fake_matrix.append(
+                    {
+                        "sector": sec,
+                        "symbol": sym,
+                        "rs_ratio": rs_r,
+                        "rs_momentum": rs_m,
+                        "quadrant": quad,
+                        "day_change_pct": 1.2,
+                        "benchmark_change_pct": 0.5,
+                        "relative_strength": 103.5,
+                        "trail": [{"rs_ratio": rs_r, "rs_momentum": rs_m}],
+                        "top_stocks": SECTOR_CONSTITUENTS.get(sec, [proxy]),
+                        "factor_drivers": SECTOR_DRIVERS.get(sec, ["Institutional Flow"]),
+                    }
+                )
+            analysis_cache.save_macro("sector_rrg_matrix", fake_matrix, ttl_minutes=180)
+    except Exception:
+        pass
+    yield
+
+
 _BASE_OHLCV_DF: pd.DataFrame | None = None
 
 

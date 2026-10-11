@@ -327,20 +327,28 @@ def test_synthetic_option_chain_ssot_expiries_and_paper_fallback():
     """Verify synthetic option chain resolves canonical weekdays and functions in PAPER mode."""
     from market.options import build_index_synthetic_option_chain, get_options_chain
 
-    # Test BANKNIFTY expiry weekday (Wednesday = 2)
+    # Test NIFTY weekly expiry weekday (Thursday = 3)
+    nifty_chain = build_index_synthetic_option_chain("NIFTY", spot=22500.0)
+    assert len(nifty_chain) > 0
+    nifty_exp_dt = datetime.fromisoformat(nifty_chain[0].expiry)
+    assert nifty_exp_dt.weekday() == 3, (
+        f"Nifty weekly expiry must be Thursday (3), got {nifty_exp_dt.weekday()}"
+    )
+
+    # Test SENSEX weekly expiry weekday (Friday = 4)
+    sensex_chain = build_index_synthetic_option_chain("SENSEX", spot=75000.0)
+    assert len(sensex_chain) > 0
+    sensex_exp_dt = datetime.fromisoformat(sensex_chain[0].expiry)
+    assert sensex_exp_dt.weekday() == 4, (
+        f"Sensex weekly expiry must be Friday (4), got {sensex_exp_dt.weekday()}"
+    )
+
+    # Test BANKNIFTY monthly expiry (last Thursday = 3)
     bn_chain = build_index_synthetic_option_chain("BANKNIFTY", spot=52500.0)
     assert len(bn_chain) > 0
     bn_exp_dt = datetime.fromisoformat(bn_chain[0].expiry)
-    assert bn_exp_dt.weekday() == 2, (
-        f"Bank Nifty weekly expiry must be Wednesday (2), got {bn_exp_dt.weekday()}"
-    )
-
-    # Test MIDCPNIFTY expiry weekday (Monday = 0)
-    mid_chain = build_index_synthetic_option_chain("MIDCPNIFTY", spot=13000.0)
-    assert len(mid_chain) > 0
-    mid_exp_dt = datetime.fromisoformat(mid_chain[0].expiry)
-    assert mid_exp_dt.weekday() == 0, (
-        f"Midcap Nifty weekly expiry must be Monday (0), got {mid_exp_dt.weekday()}"
+    assert bn_exp_dt.weekday() == 3, (
+        f"Bank Nifty monthly expiry must be Thursday (3), got {bn_exp_dt.weekday()}"
     )
 
     # Test PAPER mode fallback

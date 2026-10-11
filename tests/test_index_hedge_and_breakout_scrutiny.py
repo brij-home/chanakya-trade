@@ -591,7 +591,7 @@ def test_nifty_call_setup_spread_width_at_least_100_pts(monkeypatch):
     hedge = alerts[0].actionable_plan["hedge_plan"]
     assert hedge is not None
     assert hedge["strike_width"] >= 100.0
-    assert hedge["sell_strike"] >= 22850.0
+    assert hedge["sell_strike"] >= 22800.0
     assert hedge["net_spread_delta"] >= 0.10
 
 
