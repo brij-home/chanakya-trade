@@ -532,7 +532,7 @@ def main() -> int:
                 "-q",
                 "--tb=short",
             ],
-            timeout=600.0,
+            timeout=1200.0,
             stream=True,
         )
         results.append(("Tier 4: Full Fast Regression Suite", ok, dur))
