@@ -5691,10 +5691,23 @@ class AutoAlertEngine:
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
 
-        # Batch-refresh all early-warning symbols in ONE get_quote() call before the loop if not provided.
-        ew_ltp_batch = (
-            quotes_map if quotes_map is not None else self._batch_refresh_quotes(early_alerts)
-        )
+        # Batch-refresh all early-warning symbols using shared quotes_map, fetching any missing symbols in ONE batch
+        ew_ltp_batch = dict(quotes_map) if quotes_map is not None else {}
+        missing_early = [
+            a
+            for a in early_alerts
+            if not (
+                ew_ltp_batch.get(self._lookup_sym(a))
+                or ew_ltp_batch.get(f"{a.exchange}:{a.symbol}")
+                or ew_ltp_batch.get(a.symbol)
+            )
+        ]
+        if missing_early:
+            try:
+                missing_quotes = self._batch_refresh_quotes(missing_early, priority="URGENT")
+            except TypeError:
+                missing_quotes = self._batch_refresh_quotes(missing_early)
+            ew_ltp_batch.update(missing_quotes)
 
         for alert in early_alerts:
             try:
@@ -11085,8 +11098,8 @@ class AutoAlertEngine:
         self._init_crypto_stream_listener()
         # Initialize domestic WebSocket stream listener for sub-second tick updates
         self._init_domestic_stream_listener()
-        # Seed streaming subscriptions for core liquid indices and MCX commodities
-        self._auto_subscribe_stream(
+        # Seed streaming subscriptions for core liquid indices, commodities, and all loaded active/early alerts
+        seed_symbols = set(
             [
                 "NSE:NIFTY50-INDEX",
                 "NSE:NIFTYBANK-INDEX",
@@ -11100,6 +11113,15 @@ class AutoAlertEngine:
                 "MCX:SILVER",
             ]
         )
+        with self._lock:
+            for a in self._alerts:
+                if not a.is_invalidated and not a.is_archived:
+                    sym = self._lookup_sym(a)
+                    if sym and " " not in sym:
+                        seed_symbols.add(sym)
+                    if getattr(a, "contract_symbol", None) and " " not in a.contract_symbol:
+                        seed_symbols.add(a.contract_symbol)
+        self._auto_subscribe_stream(list(seed_symbols))
         self._poller_thread = threading.Thread(
             target=self._run_loop,
             args=(interval_seconds,),
@@ -11174,7 +11196,7 @@ class AutoAlertEngine:
         )
         while self._is_running and not self._stop_event.is_set():
             try:
-                # 1. Quick lock inspection: are there any active in-flight trades?
+                # 1. Quick lock inspection: are there any active in-flight trades or early warnings?
                 with self._lock:
                     active_trades = [
                         a
@@ -11188,17 +11210,29 @@ class AutoAlertEngine:
                             "EXPIRED",
                             "TARGET_ACHIEVED",
                             "RUNNER_EXIT",
+                            "EARLY_WARNING",
+                            "STALK",
+                            "PRIMED",
                         )
                         and not (a.environment == "TEST" or not a.is_live)
                     ]
+                    early_alerts = [
+                        a
+                        for a in self._alerts
+                        if not a.is_invalidated
+                        and not a.is_archived
+                        and a.stage in ("EARLY_WARNING", "STALK", "PRIMED")
+                        and not (a.environment == "TEST" or not a.is_live)
+                    ]
+                    monitored_trades = active_trades + early_alerts
 
-                if not active_trades:
-                    # Sleep when no active in-flight positions
+                if not monitored_trades:
+                    # Sleep when no active in-flight positions or pending early warnings
                     self._stop_event.wait(interval)
                     continue
 
-                # 2. Extract active exchanges from currently running trades
-                active_exchanges = list({(a.exchange or "NSE").upper() for a in active_trades})
+                # 2. Extract active exchanges from currently monitored setups
+                active_exchanges = list({(a.exchange or "NSE").upper() for a in monitored_trades})
 
                 # Only evaluate open markets (exempt 24x7 crypto)
                 from market.calendar import is_market_open
@@ -11212,17 +11246,27 @@ class AutoAlertEngine:
                     self._stop_event.wait(interval)
                     continue
 
-                # 3. Single unified high-priority quote batch for all active trades
-                quotes_map = self._batch_refresh_quotes(active_trades, priority="URGENT")
+                # 3. Single unified high-priority quote batch for all active and early-warning setups
+                try:
+                    quotes_map = self._batch_refresh_quotes(monitored_trades, priority="URGENT")
+                except TypeError:
+                    quotes_map = self._batch_refresh_quotes(monitored_trades)
 
-                # 4. Sub-second evaluation of safety and target milestones using the shared quotes map:
-                self.check_and_alert_invalidations(exchanges=open_exchanges, quotes_map=quotes_map)
-                self.check_and_alert_in_flight_decay(
-                    exchanges=open_exchanges, quotes_map=quotes_map
-                )
-                self.check_and_alert_targets_and_trailing(
-                    exchanges=open_exchanges, quotes_map=quotes_map
-                )
+                # 4. Sub-second evaluation of breakouts, safety, and target milestones using the shared quotes map:
+                if early_alerts:
+                    self.check_and_ignite_early_warnings(
+                        exchanges=open_exchanges, quotes_map=quotes_map
+                    )
+                if active_trades:
+                    self.check_and_alert_invalidations(
+                        exchanges=open_exchanges, quotes_map=quotes_map
+                    )
+                    self.check_and_alert_in_flight_decay(
+                        exchanges=open_exchanges, quotes_map=quotes_map
+                    )
+                    self.check_and_alert_targets_and_trailing(
+                        exchanges=open_exchanges, quotes_map=quotes_map
+                    )
 
             except Exception as e:
                 logger.debug(f"[AutoAlertEngine] In-Flight Guardian tick error: {e}")

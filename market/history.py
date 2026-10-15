@@ -130,7 +130,15 @@ def get_ohlcv(
 
     # Tier 1: Instant In-Memory DataFrame Cache (0.1ms latency)
     ttl_limit = _DF_TTL_SECONDS if kite_interval == "day" else _INTRADAY_TTL_SECONDS
-    if not from_date and not to_date:
+    is_live_request = (as_of is None) and (
+        (not from_date and not to_date)
+        or (
+            to_date is not None
+            and isinstance(to_date, datetime)
+            and abs((to_date - datetime.now(to_date.tzinfo or None)).total_seconds()) < 600
+        )
+    )
+    if is_live_request:
         with _df_memory_cache_lock:
             # 1a. Check exact cache key
             if cache_key in _df_memory_cache:
@@ -409,7 +417,7 @@ def get_ohlcv(
             while len(_df_memory_cache) >= MAX_MEMORY_DFS:
                 _df_memory_cache.popitem(last=False)
             _df_memory_cache[cache_key] = (now_ts, df.copy())
-            if kite_interval != "day" and days >= 2:
+            if kite_interval != "day":
                 _df_memory_cache[norm_intraday_key] = (now_ts, df.copy())
 
     return df
