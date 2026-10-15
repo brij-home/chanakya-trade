@@ -279,7 +279,7 @@ class BrokerAPI(ABC):
     # ── Market Data ───────────────────────────────────────────
 
     @abstractmethod
-    def get_quote(self, instruments: list[str]) -> dict[str, Quote]:
+    def get_quote(self, instruments: list[str], **kwargs: Any) -> dict[str, Quote]:
         """
         Return live quotes for a list of instruments.
         Instrument format: "EXCHANGE:SYMBOL" e.g. "NSE:RELIANCE"

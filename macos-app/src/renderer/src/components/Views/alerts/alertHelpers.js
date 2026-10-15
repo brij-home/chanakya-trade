@@ -75,7 +75,7 @@ export function resolveAlertProvenance(alert) {
 
   const env = String(alert.environment || '').toUpperCase()
   const mkt = String(alert.market_status || alert.actionable_plan?.market_status?.status || '').toUpperCase()
-  const isOffMarket = env === 'EOD_SCAN' || env === 'OFF-MARKET' || mkt === 'SESSION_CLOSED'
+  const isOffMarket = env === 'EOD_SCAN' || env === 'OFF-MARKET' || (env !== 'LIVE' && mkt === 'SESSION_CLOSED')
 
   if (isOffMarket) {
     return {
@@ -1691,7 +1691,7 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     trajectoryStatus = { badge: '📈 TRAILING ACTIVE', text: alert.trailing_rationale || 'Trailing stop active to protect gains', theme: 'blue' }
   } else if (rawStage === 'ACTIONABLE') {
     const isWeekend = new Date().getDay() === 0 || new Date().getDay() === 6
-    const isClosed = alert.market_status === 'SESSION_CLOSED' || isWeekend
+    const isClosed = (String(alert.environment || '').toUpperCase() !== 'LIVE' && alert.market_status === 'SESSION_CLOSED') || isWeekend
     if (isClosed) {
       stagePill = { label: '📅 MONDAY OPEN', cls: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 ring-1 ring-indigo-500/30', icon: '📅' }
       trajectoryStatus = { badge: '📅 WEEKEND RADAR', text: 'Off-market swing playbook — stalk for Monday 09:15 open', theme: 'indigo' }

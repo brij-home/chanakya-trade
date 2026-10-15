@@ -868,6 +868,17 @@ class AutoAlertEngine:
             except Exception:
                 pass
 
+        # 00b-1. Market Status Calibration
+        if alert.environment == "LIVE" and not is_sim:
+            try:
+                from market.calendar import is_market_open
+
+                if is_market_open(alert.exchange or "NSE"):
+                    alert.market_status = "LIVE"
+                    alert.is_live = True
+            except Exception:
+                pass
+
         # 00b-2. Real Real-Time Data Feed Integrity Gate (Zero Tolerance for Delayed / Synthetic Data)
         # Decision making on delayed feeds (e.g. 15-minute delayed yfinance or synthetic futures)
         # risks real trader money. Live alerts must originate strictly from verified real-time feeds.
@@ -4800,7 +4811,12 @@ class AutoAlertEngine:
         exch = alert.exchange or "NSE"
         return sym if ":" in sym else f"{exch}:{sym}"
 
-    def _batch_refresh_quotes(self, alerts: list["AutoAlert"]) -> dict[str, float]:
+    def _batch_refresh_quotes(
+        self,
+        alerts: list["AutoAlert"],
+        priority: str = "NORMAL",
+        category: Any = None,
+    ) -> dict[str, float]:
         """
         Single batched get_quote() call for all unique symbols across a set of alerts.
 
@@ -4817,7 +4833,7 @@ class AutoAlertEngine:
         syms: set[str] = set()
         for a in alerts:
             l_sym = self._lookup_sym(a)
-            if l_sym:
+            if l_sym and " " not in l_sym.split(":")[-1]:
                 syms.add(l_sym)
             # Include option contract symbol as a secondary lookup for underlying alerts
             if a.contract_symbol and not is_alert_option_premium_level(a):
@@ -4826,7 +4842,7 @@ class AutoAlertEngine:
                     .replace("NIFTY BANK", "BANKNIFTY")
                     .strip()
                 )
-                if clean_c:
+                if clean_c and " " not in clean_c.split(":")[-1]:
                     syms.add(clean_c)
 
             # If alert has a hedge plan, ensure underlying symbol and spread legs are in quote batch
@@ -4840,7 +4856,7 @@ class AutoAlertEngine:
                     .replace("NIFTY BANK", "BANKNIFTY")
                     .strip()
                 )
-                if u_sym:
+                if u_sym and " " not in u_sym:
                     exch = a.exchange or "NSE"
                     syms.add(f"{exch}:{u_sym}")
                     syms.add(u_sym)
@@ -4849,10 +4865,10 @@ class AutoAlertEngine:
                 )
                 if isinstance(hp, dict):
                     for leg in hp.get("legs", []):
-                        for k_inst in ("instrument", "symbol", "contract"):
+                        for k_inst in ("contract", "instrument", "symbol"):
                             inst = leg.get(k_inst)
-                            if inst and isinstance(inst, str):
-                                syms.add(inst)
+                            if inst and isinstance(inst, str) and " " not in inst.strip():
+                                syms.add(inst.strip())
 
         sym_list = list(syms)
         if not sym_list:
@@ -4875,7 +4891,7 @@ class AutoAlertEngine:
             return res
 
         try:
-            quote_map = get_quote(sym_list)
+            quote_map = get_quote(sym_list, priority=priority, category=category)
             res = {}
             for k, q in quote_map.items():
                 if q and getattr(q, "last_price", 0.0) > 0:
@@ -5468,7 +5484,9 @@ class AutoAlertEngine:
         return inv_alert
 
     def check_and_alert_invalidations(
-        self, exchanges: Optional[list[str]] = None
+        self,
+        exchanges: Optional[list[str]] = None,
+        quotes_map: Optional[dict[str, float]] = None,
     ) -> list[AutoAlert]:
         """
         Scans all active (non-invalidated) alerts to check if their trade thesis
@@ -5499,7 +5517,9 @@ class AutoAlertEngine:
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
 
-        ltp_batch = self._batch_refresh_quotes(active_alerts)
+        ltp_batch = (
+            quotes_map if quotes_map is not None else self._batch_refresh_quotes(active_alerts)
+        )
         for alert in active_alerts:
             # Refresh alert.ltp from the batch map so evaluate_alert_invalidation() sees fresh price
             lookup_sym = self._lookup_sym(alert)
@@ -5648,7 +5668,9 @@ class AutoAlertEngine:
     # ── Early Warning Ignition Monitoring ───────────────────────
 
     def check_and_ignite_early_warnings(
-        self, exchanges: Optional[list[str]] = None
+        self,
+        exchanges: Optional[list[str]] = None,
+        quotes_map: Optional[dict[str, float]] = None,
     ) -> list[AutoAlert]:
         """
         Scans all active EARLY_WARNING alerts against live market price to detect
@@ -5669,8 +5691,10 @@ class AutoAlertEngine:
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
 
-        # Batch-refresh all early-warning symbols in ONE get_quote() call before the loop.
-        ew_ltp_batch = self._batch_refresh_quotes(early_alerts)
+        # Batch-refresh all early-warning symbols in ONE get_quote() call before the loop if not provided.
+        ew_ltp_batch = (
+            quotes_map if quotes_map is not None else self._batch_refresh_quotes(early_alerts)
+        )
 
         for alert in early_alerts:
             try:
@@ -6691,7 +6715,9 @@ class AutoAlertEngine:
         return True
 
     def check_and_alert_targets_and_trailing(
-        self, exchanges: Optional[list[str]] = None
+        self,
+        exchanges: Optional[list[str]] = None,
+        quotes_map: Optional[dict[str, float]] = None,
     ) -> list[AutoAlert]:
         """
         Scans all active (non-invalidated, non-completed) alerts against live quotes to evaluate:
@@ -6701,19 +6727,20 @@ class AutoAlertEngine:
         Optionally filters by list of active exchange names (e.g. ['NSE', 'NFO']).
         """
         # First, check and ignite any pending early warnings that crossed trigger levels
-        self.check_and_ignite_early_warnings(exchanges=exchanges)
+        self.check_and_ignite_early_warnings(exchanges=exchanges, quotes_map=quotes_map)
 
-        # Automatically resolve expired intraday alerts if session has closed (post 15:30 IST)
-        self.resolve_session_end_alerts()
-
-        # Check and broadcast 15:10 IST pre-squareoff advisory for open intraday positions
-        self.check_session_closing_warning()
-
-        # Check and broadcast 15:35 IST automated EOD session performance review
-        self.check_eod_session_review()
+        now_ts = time.time()
+        # Throttled session boundary reviews (run at most once per 60 seconds)
+        if (now_ts - getattr(self, "_last_session_check_ts", 0.0)) > 60.0:
+            self._last_session_check_ts = now_ts
+            # Automatically resolve expired intraday alerts if session has closed (post 15:30 IST)
+            self.resolve_session_end_alerts()
+            # Check and broadcast 15:10 IST pre-squareoff advisory for open intraday positions
+            self.check_session_closing_warning()
+            # Check and broadcast 15:35 IST automated EOD session performance review
+            self.check_eod_session_review()
 
         updated_alerts: list[AutoAlert] = []
-        now_ts = time.time()
         exch_filter = {e.upper() for e in exchanges} if exchanges else None
 
         with self._lock:
@@ -6734,9 +6761,11 @@ class AutoAlertEngine:
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
 
-        # Batch-refresh all unique symbols in ONE get_quote() call before the loop.
+        # Batch-refresh all unique symbols in ONE get_quote() call before the loop if not provided.
         # Both underlying symbol and option contract_symbol are fetched in the same batch.
-        tgt_ltp_batch = self._batch_refresh_quotes(active_alerts)
+        tgt_ltp_batch = (
+            quotes_map if quotes_map is not None else self._batch_refresh_quotes(active_alerts)
+        )
 
         for alert in active_alerts:
             try:
@@ -6866,7 +6895,9 @@ class AutoAlertEngine:
     # ── In-Flight Decay & Danger Zone Warning Monitoring ────────
 
     def check_and_alert_in_flight_decay(
-        self, exchanges: Optional[list[str]] = None
+        self,
+        exchanges: Optional[list[str]] = None,
+        quotes_map: Optional[dict[str, float]] = None,
     ) -> list[AutoAlert]:
         """
         Scans all active (non-invalidated, non-completed) alerts against live market price to detect:
@@ -6932,8 +6963,10 @@ class AutoAlertEngine:
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
 
-        # Batch-refresh all in-flight alert symbols in ONE get_quote() call.
-        inflight_ltp_batch = self._batch_refresh_quotes(active_alerts)
+        # Batch-refresh all in-flight alert symbols in ONE get_quote() call if not provided.
+        inflight_ltp_batch = (
+            quotes_map if quotes_map is not None else self._batch_refresh_quotes(active_alerts)
+        )
 
         for alert in active_alerts:
             try:
@@ -11128,12 +11161,12 @@ class AutoAlertEngine:
 
         logger.info("[AutoAlertEngine] Background poller stopped cleanly")
 
-    def _run_in_flight_guardian_loop(self, interval: float = 2.0) -> None:
+    def _run_in_flight_guardian_loop(self, interval: float = 3.0) -> None:
         """
-        High-Frequency In-Flight Trade Guardian Thread (Decoupled Sub-2-Second Monitor).
+        High-Frequency In-Flight Trade Guardian Thread (Decoupled Sub-3-Second Monitor).
         Dedicated exclusively to monitoring active in-flight trades (IGNITED or active partial milestones).
-        Does NOT run heavy universe scans. Fetches micro-batch quotes in <50ms and immediately
-        evaluates invalidations, target milestones, and trailing ratchets with sub-second reactivity.
+        Does NOT run heavy universe scans. Fetches micro-batch quotes in <50ms with URGENT priority
+        and immediately evaluates invalidations, target milestones, and trailing ratchets with sub-second reactivity.
         """
         logger.info(
             "[AutoAlertEngine] High-Frequency In-Flight Guardian thread active (interval=%.1fs)",
@@ -11179,10 +11212,17 @@ class AutoAlertEngine:
                     self._stop_event.wait(interval)
                     continue
 
-                # 3. Sub-second evaluation of safety and target milestones:
-                self.check_and_alert_invalidations(exchanges=open_exchanges)
-                self.check_and_alert_in_flight_decay(exchanges=open_exchanges)
-                self.check_and_alert_targets_and_trailing(exchanges=open_exchanges)
+                # 3. Single unified high-priority quote batch for all active trades
+                quotes_map = self._batch_refresh_quotes(active_trades, priority="URGENT")
+
+                # 4. Sub-second evaluation of safety and target milestones using the shared quotes map:
+                self.check_and_alert_invalidations(exchanges=open_exchanges, quotes_map=quotes_map)
+                self.check_and_alert_in_flight_decay(
+                    exchanges=open_exchanges, quotes_map=quotes_map
+                )
+                self.check_and_alert_targets_and_trailing(
+                    exchanges=open_exchanges, quotes_map=quotes_map
+                )
 
             except Exception as e:
                 logger.debug(f"[AutoAlertEngine] In-Flight Guardian tick error: {e}")

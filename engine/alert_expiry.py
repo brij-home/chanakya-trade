@@ -13,8 +13,11 @@ def classify_expiry_type(expiry_str: Optional[str], symbol: Optional[str] = None
     """
     Classifies an Indian market option contract expiry into 'WEEKLY' or 'MONTHLY'.
     - Single-stock equities in NSE/BSE only have monthly options.
-    - Index options have weekly expiries, with the final expiry of the month being 'MONTHLY'.
+    - Under SEBI single-benchmark index derivative regulations (effective Nov 2024):
+      Only NIFTY 50 (NSE, Thursday) and SENSEX (BSE, Friday) offer weekly options.
+      All other indices (MIDCPNIFTY, BANKNIFTY, FINNIFTY, BANKEX) trade strictly MONTHLY expiries.
     """
+    _WEEKLY_INDEX_SYMBOLS = frozenset({"NIFTY", "SENSEX"})
     if not expiry_str:
         return "MONTHLY"
     try:
@@ -36,16 +39,12 @@ def classify_expiry_type(expiry_str: Optional[str], symbol: Optional[str] = None
             .replace("BFO:", "")
             .strip()
         )
-        # SEBI Regulatory Mandate (Effective Nov 20, 2024):
-        # Only ONE benchmark index per exchange offers weekly options:
-        #   - NSE: NIFTY 50 (Thursday weekly expiry)
-        #   - BSE: SENSEX (Friday weekly expiry)
-        # All other indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX) and all single-stock equities
-        # trade strictly MONTHLY expiry contracts.
-        if sym not in ("NIFTY", "SENSEX"):
+        # Only NIFTY and SENSEX support weekly contracts
+        if sym not in _WEEKLY_INDEX_SYMBOLS:
             return "MONTHLY"
 
-        # For NIFTY and SENSEX weekly indices: if adding 7 days changes month, it is the month-end expiry -> MONTHLY
+        # Monthly determination: if adding 7 days falls in the NEXT calendar month,
+        # this IS the last / monthly expiry of the series.
         if (dt + timedelta(days=7)).month != dt.month:
             return "MONTHLY"
         return "WEEKLY"
@@ -104,15 +103,8 @@ def get_expiry_metadata(
                         .replace("NSE:", "")
                         .strip()
                     )
-                    is_idx = clean_und in (
-                        "NIFTY",
-                        "BANKNIFTY",
-                        "FINNIFTY",
-                        "MIDCPNIFTY",
-                        "SENSEX",
-                        "BANKEX",
-                    )
-                    if is_idx:
+                    is_weekly_idx = clean_und in ("NIFTY", "SENSEX")
+                    if is_weekly_idx:
                         expiry_type = (
                             "MONTHLY" if (dt + timedelta(days=7)).month != dt.month else "WEEKLY"
                         )
@@ -131,15 +123,8 @@ def get_expiry_metadata(
                 .replace("NSE:", "")
                 .strip()
             )
-            is_idx = clean_und in (
-                "NIFTY",
-                "BANKNIFTY",
-                "FINNIFTY",
-                "MIDCPNIFTY",
-                "SENSEX",
-                "BANKEX",
-            )
-            if is_idx:
+            is_weekly_idx = clean_und in ("NIFTY", "SENSEX")
+            if is_weekly_idx:
                 m_weekly = re.search(r"^([A-Z]+)(\d{2})([1-9OND])(0[1-9]|[12]\d|3[01])", csym)
                 if m_weekly:
                     yr = 2000 + int(m_weekly.group(2))

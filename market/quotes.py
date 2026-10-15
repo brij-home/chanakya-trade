@@ -584,6 +584,8 @@ def get_quote(
     instruments: list[str] | str,
     *,
     bypass_cache: bool = False,
+    priority: str = "NORMAL",
+    category: Any = None,
 ) -> dict[str, Quote]:
     """
     Live quotes for one or more instruments.
@@ -594,6 +596,8 @@ def get_quote(
         instruments: List of "EXCHANGE:SYMBOL" strings, or a single instrument string.
                      e.g. ["NSE:RELIANCE", "NSE:NIFTY 50", "NFO:NIFTY24APR22900CE", "GOLD", "USDINR"]
         bypass_cache: Explicitly bypass the 3.0s coalesced cache to force a fresh quote query.
+        priority: "NORMAL" or "URGENT" (prioritized over background scanner quotes).
+        category: Optional FyersCallCategory (e.g. URGENT_QUOTE).
 
     Returns:
         Dict keyed by instrument string → Quote dataclass.
@@ -672,7 +676,20 @@ def get_quote(
                 # 3a. Try broker REST API
                 try:
                     provider = get_data_broker_key() or "broker"
-                    broker_quotes = get_data_broker().get_quote(leaders)
+                    call_category = category
+                    if call_category is None and priority == "URGENT":
+                        from market.fyers_rate_gate import FyersCallCategory
+
+                        call_category = FyersCallCategory.URGENT_QUOTE
+
+                    broker = get_data_broker()
+                    if call_category is not None:
+                        try:
+                            broker_quotes = broker.get_quote(leaders, category=call_category)
+                        except TypeError:
+                            broker_quotes = broker.get_quote(leaders)
+                    else:
+                        broker_quotes = broker.get_quote(leaders)
                     valid_broker_quotes = {
                         instrument: _enrich_quote(
                             quote,

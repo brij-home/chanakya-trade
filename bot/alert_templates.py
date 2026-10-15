@@ -451,7 +451,9 @@ def resolve_expiry_cycle(
     final_dte = int(dte) if dte is not None else calc_dte
 
     # 5. Classify monthly vs weekly
-    if not is_index:
+    # Under SEBI regulations (effective Nov 2024), only NIFTY (NSE) and SENSEX (BSE) offer weekly options.
+    # Equities and all other indices (MIDCPNIFTY, BANKNIFTY, FINNIFTY, BANKEX) trade strictly MONTHLY expiries.
+    if not is_index or und not in ("NIFTY", "SENSEX"):
         is_monthly = True
         is_weekly = False
     else:

@@ -1000,11 +1000,17 @@ class FyersAPI(BrokerAPI):
 
     # ── Quotes ────────────────────────────────────────────────
 
-    def get_quote(self, instruments: list[str] | str) -> dict[str, Quote]:
+    def get_quote(
+        self,
+        instruments: list[str] | str,
+        category: FyersCallCategory = FyersCallCategory.SCANNER_QUOTE,
+        **kwargs: Any,
+    ) -> dict[str, Quote]:
         """
         Get quotes. Instruments: ["NSE:RELIANCE", "NSE:NIFTY 50", "GOLD", "USDINR"]
         Fyers format: "NSE:RELIANCE-EQ", "NSE:NIFTY50-INDEX", "MCX:GOLD26OCTFUT"
         Batch chunking by 50 to honor Fyers API constraints.
+        Category supports prioritized queuing (e.g. URGENT_QUOTE vs SCANNER_QUOTE).
         """
         if isinstance(instruments, str):
             instruments = [instruments]
@@ -1036,7 +1042,7 @@ class FyersAPI(BrokerAPI):
         for i in range(0, len(unique_fyers_symbols), CHUNK_SIZE):
             chunk = unique_fyers_symbols[i : i + CHUNK_SIZE]
             try:
-                _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
+                _fyers_rate_limiter.acquire(category=category)
                 data = fyers.quotes({"symbols": ",".join(chunk)})
                 if isinstance(data, dict) and (
                     data.get("code") in (-15, -16, -99, 401)

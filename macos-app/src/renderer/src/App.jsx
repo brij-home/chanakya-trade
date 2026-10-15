@@ -350,7 +350,7 @@ export default function App() {
     const isTest = payload.environment === 'TEST' || payload.is_live === false
     const isInvalidated = payload.is_invalidated === true || payload.stage === 'INVALIDATED'
     const isTarget = payload.is_target === true || payload.stage === 'T1_ACHIEVED' || payload.stage === 'TARGET_ACHIEVED' || payload.target_achieved === true
-    const isOffMarket = payload.environment === 'EOD_SCAN' || payload.environment === 'OFF-MARKET' || payload.market_status === 'SESSION_CLOSED'
+    const isOffMarket = payload.environment === 'EOD_SCAN' || payload.environment === 'OFF-MARKET' || (payload.environment !== 'LIVE' && payload.market_status === 'SESSION_CLOSED')
     const envBadge = isTest ? '🧪 [TEST]' : (isOffMarket ? '🌙 [OFF-MARKET/EOD]' : '🟢 [REAL/LIVE]')
 
     const now = Date.now()

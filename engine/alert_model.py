@@ -168,7 +168,7 @@ class AutoAlert:
     )
     disaster_stop_floor: Optional[float] = None  # Hard catastrophe option floor (-32% max drawdown)
     trailing_spot_sl: Optional[float] = None  # Trailed underlying spot level
-    market_status: str = "SESSION_CLOSED"  # "LIVE" | "PRE_MARKET" | "SESSION_CLOSED"
+    market_status: str = ""  # "LIVE" | "PRE_MARKET" | "SESSION_CLOSED"
     lot_size: Optional[int] = None  # Contract market lot size (SEBI 2026 active)
     segment: str = ""  # "FNO" | "EQUITY" | "COMMODITY" | "CURRENCY"
     signal_ref: Optional[str] = None
@@ -433,6 +433,28 @@ class AutoAlert:
                     .upper()
                 )
                 self.lot_size = STANDARD_LOT_SIZES.get(clean)
+
+        # Auto-resolve market_status if not explicitly provided or defaulted to closed
+        if not self.market_status or (
+            self.market_status == "SESSION_CLOSED" and self.environment == "LIVE"
+        ):
+            if self.environment in ("EOD_SCAN", "OFF-MARKET", "OFF_MARKET"):
+                self.market_status = "SESSION_CLOSED"
+            elif self.environment in ("TEST", "SIMULATION"):
+                self.market_status = "LIVE"
+            else:
+                try:
+                    from market.calendar import is_market_open, get_market_status
+
+                    exch = (self.exchange or "NSE").upper()
+                    if is_market_open(exch):
+                        self.market_status = "LIVE"
+                    elif not self.market_status:
+                        st = get_market_status(exch)
+                        self.market_status = st.get("status", "SESSION_CLOSED")
+                except Exception:
+                    if not self.market_status:
+                        self.market_status = "LIVE" if self.is_live else "SESSION_CLOSED"
 
         # Auto-resolve expiry_date and expiry_type if not provided
         if not self.expiry_date:
