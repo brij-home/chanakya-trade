@@ -213,3 +213,145 @@ def test_mathematical_expected_value_and_sniper_stamping():
     # EV = (0.60 * 2.50) - (0.40 * 1.0) - 0.08 = 1.50 - 0.40 - 0.08 = 1.02R
     assert dossier["expected_value_r"] >= 0.85
     assert dossier["sniper"]["status"] == "LASER_ENTRY"
+
+
+def test_predatory_cross_desk_calibration_and_strike_clock():
+    """Verify that compile_predatory_pipeline_dossier stamps Cross-Desk Calibration and Strike Clock."""
+    auditor = AlertScrutinyAuditor()
+    mock_alert = SimpleNamespace(
+        alert_id="aa-orb-tata-20261014",
+        symbol="TATASTEEL",
+        alert_type="ORB_BREAKOUT",
+        direction="BULLISH",
+        ltp=160.0,
+        stop_loss=156.0,
+        target_level=170.0,
+        trigger_level=160.0,
+        environment="REAL",
+        is_live=True,
+        metrics={"nifty_change_pct": -0.65},
+    )
+
+    # 1. Non-decoupled equity setup under active Nifty liquidation -> THROTTLED
+    flags_throttled = {"no_chase": True, "nifty_change_pct": -0.65, "decoupler_status": "NONE"}
+    dossier = auditor.compile_predatory_pipeline_dossier(mock_alert, flags_throttled)
+
+    assert "cross_desk" in dossier
+    cd = dossier["cross_desk"]
+    assert cd["seat"] == "🏛️ CROSS-DESK CALIBRATION"
+    assert cd["nifty_posture"] == "LIQUIDATION_DUMP"
+    assert cd["status"] == "INDEX_HEADWIND_THROTTLED"
+    assert "strike_clock_zone" in cd
+    assert cd["strike_clock_efficiency"] > 0
+
+    # 2. Verified decoupler under Nifty liquidation -> PASS
+    flags_decoupled = {
+        "no_chase": True,
+        "nifty_change_pct": -0.65,
+        "decoupler_status": "VERIFIED_DECOUPLER",
+    }
+    dossier_dec = auditor.compile_predatory_pipeline_dossier(mock_alert, flags_decoupled)
+    assert dossier_dec["cross_desk"]["status"] != "INDEX_HEADWIND_THROTTLED"
+
+
+def test_predatory_position_sizing_timing_calibration():
+    """Verify that predatory strike clock kill zones dynamically calibrate position sizing."""
+    from engine.position_sizer import calculate_position_size_for_alert
+
+    # Baseline position sizing
+    base_res = calculate_position_size_for_alert(
+        symbol="NIFTY",
+        entry_price=25000.0,
+        stop_loss=24900.0,
+        alert_type="ORB_BREAKOUT",
+        capital=500000.0,
+        max_risk_pct=1.0,
+        is_fno=True,
+    )
+
+    # Lunchtime chop zone sizing dampener (0.75x)
+    chop_res = calculate_position_size_for_alert(
+        symbol="NIFTY",
+        entry_price=25000.0,
+        stop_loss=24900.0,
+        alert_type="ORB_BREAKOUT",
+        capital=500000.0,
+        max_risk_pct=1.0,
+        is_fno=True,
+        strike_clock_zone="LUNCHTIME_CHOP_ZONE",
+    )
+
+    # Power hour sizing boost (1.10x)
+    power_res = calculate_position_size_for_alert(
+        symbol="NIFTY",
+        entry_price=25000.0,
+        stop_loss=24900.0,
+        alert_type="ORB_BREAKOUT",
+        capital=500000.0,
+        max_risk_pct=1.0,
+        is_fno=True,
+        strike_clock_zone="AFTERNOON_GAMMA_POWER_HOUR",
+    )
+
+    assert chop_res.lots <= base_res.lots
+    assert power_res.lots >= base_res.lots
+
+
+def test_trade_lifecycle_manager_records_target_milestones_as_wins_in_circuit_breaker(tmp_path):
+    """Regression test: Milestone wins (T0_5, T1, T2, TARGET) MUST record as WIN in circuit breaker."""
+    from engine.detector_circuit_breaker import DetectorCircuitBreaker
+    import engine.detector_circuit_breaker
+    from unittest.mock import patch
+
+    ledger = tmp_path / "cb_milestone_test.json"
+    cb = DetectorCircuitBreaker(ledger_file=ledger, min_samples=3)
+
+    with patch.object(engine.detector_circuit_breaker, "detector_circuit_breaker", cb):
+        mgr = TradeLifecycleManager()
+
+        mock_alert = SimpleNamespace(
+            alert_id="aa-orb-test-20261014",
+            symbol="SENSEX",
+            contract_symbol=None,
+            alert_type="ORB_PRIMED",
+            direction="BEARISH",
+            trigger_level=300.0,
+            stop_loss=250.0,
+            target_level=450.0,
+            ltp=380.0,
+            metrics={},
+            actionable_plan={"stop_loss": 250.0},
+            environment="TEST",
+            is_live=False,
+            achieved_milestones=[],
+            stage="ACTIVE",
+        )
+
+        eval_res = SimpleNamespace(
+            should_trail=True,
+            trailing_decision="SCALE_35_TRAIL_BREAKEVEN",
+            recommended_stop=302.3,
+            trailing_rationale="Target 0.5 reached",
+            locked_profit_pts=2.3,
+            locked_profit_pct=0.2,
+            target_status="T0_5_ACHIEVED",
+            r_multiple=1.0,
+            pnl_pct=26.0,
+            strike_roll_recommendation=None,
+            new_milestone="T0_5_ACHIEVED",
+        )
+
+        mgr.apply_milestone_state(
+            alert=mock_alert,
+            eval_res=eval_res,
+            cur_quote_ltp=380.0,
+            now_ts=1728711300.0,
+            now_str="2026-10-14 11:38:00 IST",
+        )
+
+        # Check circuit breaker history
+        assert cb.get_metrics("ORB_PRIMED") is not None
+        records = list(cb._history.get("ORB_PRIMED", []))
+        assert len(records) == 1
+        assert records[0].outcome == "WIN"
+        assert records[0].realized_r == 1.0

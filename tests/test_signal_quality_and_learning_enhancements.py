@@ -171,8 +171,8 @@ def test_dual_invalidation_rendering_in_options_template():
     )
 
     rendered = render_auto_alert(alert, in_market=True)
-    assert "SL:</b> <code>₹22.90</code>" in rendered
-    assert "Spot Anchor: <code>₹23,180.0</code>" in rendered
+    assert "Safe SL (Tactical):</b> <code>₹22.90</code>" in rendered
+    assert "Structural SL (Spot):</b> <code>₹23,180.0</code>" in rendered
     assert "Playbook:</b> <i>Book 50% at T1 (₹45.80), move SL to Cost.</i>" in rendered
 
 

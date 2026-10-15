@@ -1417,6 +1417,7 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   }
 
   // 4. Stage & Milestones Resolution (SSOT)
+  let isDisqualified = false
   let isTimeStop = false
   let isSLHit = false
   let isBreakevenHit = false
@@ -1455,7 +1456,10 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
 
   if (isTerminal) {
     // IMMUTABLE HISTORICAL RECORD: Read stage strictly from backend SSOT
-    if (rawStage === 'TIME_STOP_EXIT' || targetStatus === 'TIME_STOP_EXIT' || reason.includes('TIME-STOP') || reason.includes('TIME STOP')) {
+    if (rawStage === 'SETUP_DISQUALIFIED' || targetStatus === 'SETUP_DISQUALIFIED' || (!isTriggered && (alert.is_invalidated || alert.isInvalidated))) {
+      resolvedStage = 'SETUP_DISQUALIFIED'
+      isDisqualified = true
+    } else if (rawStage === 'TIME_STOP_EXIT' || targetStatus === 'TIME_STOP_EXIT' || reason.includes('TIME-STOP') || reason.includes('TIME STOP')) {
       resolvedStage = 'TIME_STOP_EXIT'
       isTimeStop = true
     } else if (rawStage === 'SL_HIT' || targetStatus === 'SL_HIT' || (isTriggered && (reason.includes('STOP_LOSS') || reason.includes('SL HIT') || reason.includes('SL BREACH')))) {
@@ -1649,7 +1653,10 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   let stagePill = { label: '🟢 ACTIVE', cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20', icon: '🟢' }
   let trajectoryStatus = { badge: '🟢 ACTIVE', text: 'Trade in flight — active execution', theme: 'emerald' }
 
-  if (isTimeStop) {
+  if (isDisqualified) {
+    stagePill = { label: '🚫 CANCELLED', cls: 'bg-zinc-700/40 text-zinc-300 border-zinc-600/40', icon: '🚫' }
+    trajectoryStatus = { badge: '🚫 CANCELLED (NO FILL)', text: alert.invalidation_reason || 'Setup invalidated prior to trigger — trade was never entered', theme: 'slate' }
+  } else if (isTimeStop) {
     stagePill = { label: '⏱️ TIME STOP', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/40', icon: '⏱️' }
     trajectoryStatus = { badge: '⏱️ TIME STOP', text: alert.invalidation_reason || 'Velocity time stop reached — closed at CMP', theme: 'amber' }
   } else if (isTrailedProfitHit) {
@@ -1746,6 +1753,7 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
 
   return {
     isTerminal,
+    isDisqualified,
     isDerivative,
     isBull,
     isBear,

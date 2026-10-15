@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import pandas as pd
 
 from engine.alert_model import AutoAlert
 from engine.detectors.index_micro_scalp import detect_index_micro_scalp
@@ -227,3 +228,75 @@ def test_predatory_reversal_interception_logic():
     assert call_alert.is_invalidated is True, "Struggling long alert should be invalidated"
     assert call_alert.stage == "INVALIDATED"
     assert "BEARISH reversal" in (call_alert.invalidation_reason or "")
+
+
+def test_short_squeeze_put_suppression():
+    """
+    Institutional Invariant: Put micro-scalps must NEVER be fired into a vertical rally/short-squeeze.
+    Specifically tests the exact MIDCPNIFTY scenario at 13:35 IST:
+    Spot rallied from Day Low (13682) to 13758.9 (+0.56% surge, above VWAP),
+    even though it was 0.34% below the 09:30 AM morning Day High (13805).
+    """
+    # Build synthetic chain around MIDCPNIFTY 13750
+    spot = 13758.9
+    day_high = 13805.35  # Hit at 09:30 AM
+    day_low = 13682.0  # Hit earlier in session
+    vwap = 13735.0  # Spot is above VWAP
+
+    chain = [
+        MockOptionContract(
+            symbol="NSE:MIDCPNIFTY26OCT13750PE",
+            strike=13750.0,
+            option_type="PE",
+            last_price=168.0,
+            volume=25000,
+            oi=30000,
+            pchange=-8.5,
+            oi_change=1200,
+        ),
+        MockOptionContract(
+            symbol="NSE:MIDCPNIFTY26OCT13775CE",
+            strike=13775.0,
+            option_type="CE",
+            last_price=220.0,
+            volume=35000,
+            oi=40000,
+            pchange=25.0,
+            oi_change=3200,
+        ),
+    ]
+
+    # Bullish consecutive 5m candles
+    dates = pd.date_range("2026-10-14 13:20", periods=4, freq="5min")
+    df_5m = pd.DataFrame(
+        {
+            "open": [13720.0, 13732.0, 13745.0, 13750.0],
+            "high": [13735.0, 13748.0, 13755.0, 13760.0],
+            "low": [13715.0, 13730.0, 13740.0, 13748.0],
+            "close": [13732.0, 13745.0, 13752.0, 13758.9],
+            "volume": [10000, 15000, 20000, 25000],
+        },
+        index=dates,
+    )
+
+    ref_dt = datetime(2026, 10, 14, 13, 35, 0, tzinfo=IST)
+
+    alerts = detect_index_micro_scalp(
+        underlying="MIDCPNIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=vwap,
+        day_high=day_high,
+        day_low=day_low,
+        ohlcv_5m=df_5m,
+        ref_time=ref_dt,
+        ignore_time_gate=True,
+    )
+
+    # Put micro-scalp MUST be completely suppressed
+    pe_alerts = [
+        a for a in alerts if a.direction == "BEARISH" or getattr(a, "option_type", "") == "PE"
+    ]
+    assert len(pe_alerts) == 0, (
+        f"Expected 0 PE alerts during vertical bull surge, got {len(pe_alerts)}"
+    )

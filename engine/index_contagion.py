@@ -231,6 +231,7 @@ class IndexContagionEngine:
                 sync_pct=bullish_pct,
                 leading=leading_bulls,
                 now_iso=now_iso,
+                quotes_map=quotes_map,
             )
         elif bearish_pct >= 68.0 and net_score <= -1.2 and is_index_bear_active:
             alert = self._create_contagion_alert(
@@ -242,6 +243,7 @@ class IndexContagionEngine:
                 sync_pct=bearish_pct,
                 leading=leading_bears,
                 now_iso=now_iso,
+                quotes_map=quotes_map,
             )
 
         result.alert = alert
@@ -257,6 +259,7 @@ class IndexContagionEngine:
         sync_pct: float,
         leading: list[str],
         now_iso: str,
+        quotes_map: Optional[dict[str, Any]] = None,
     ) -> Optional[AutoAlert]:
         """Creates an early-warning institutional contagion alert."""
         from engine.trade_plan import calculate_trade_plan
@@ -280,7 +283,36 @@ class IndexContagionEngine:
         is_viable = True
         asym_verdict = "ACCEPTABLE"
         asym_note = ""
-        if tp:
+
+        # Day Extreme Exhaustion Guard:
+        # If spot is pressing within 0.10% of Day High (Bullish) or Day Low (Bearish)
+        # while extended >= 0.25% from VWAP, fatigue/mean-reversion risk is severe.
+        day_high = 0.0
+        day_low = 0.0
+        if isinstance(quotes_map, dict):
+            idx_q = quotes_map.get(index_name) or quotes_map.get(f"NSE:{index_name}")
+            if idx_q:
+                day_high = float(
+                    getattr(idx_q, "high", 0.0) or getattr(idx_q, "day_high", 0.0) or 0.0
+                )
+                day_low = float(getattr(idx_q, "low", 0.0) or getattr(idx_q, "day_low", 0.0) or 0.0)
+
+        vwap_dist_pct = abs(spot - vwap) / max(1.0, vwap) * 100.0
+        if is_bull and day_high > 0 and spot >= (day_high * 0.9990) and vwap_dist_pct >= 0.25:
+            is_viable = False
+            asym_verdict = "DAY_HIGH_FATIGUE_TRAP"
+            asym_note = (
+                f"Index spot is pinned against Day High (₹{day_high:,.1f}) and +{vwap_dist_pct:.2f}% from VWAP. "
+                f"High risk of exhaustion trap; await consolidation pullback to VWAP."
+            )
+        elif not is_bull and day_low > 0 and spot <= (day_low * 1.0010) and vwap_dist_pct >= 0.25:
+            is_viable = False
+            asym_verdict = "DAY_LOW_FATIGUE_TRAP"
+            asym_note = (
+                f"Index spot is pinned against Day Low (₹{day_low:,.1f}) and -{vwap_dist_pct:.2f}% from VWAP. "
+                f"High risk of exhaustion bounce; await consolidation pullback to VWAP."
+            )
+        elif tp:
             sl = tp.invalidation_stop
             t1 = tp.target_1
             t2 = tp.target_2

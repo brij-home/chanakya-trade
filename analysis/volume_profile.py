@@ -451,3 +451,91 @@ def analyze_volume_profile(
         summary=summary,
         takeaway=takeaway,
     )
+
+
+def compute_developing_poc_migration(df: pd.DataFrame, num_bins: int = 12) -> dict[str, Any]:
+    """
+    Auction Market Theory (AMT) Developing POC Migration & 80% Rule Engine.
+    Tracks whether Point of Control (d-POC) is actively migrating in the direction of
+    price discovery, or if price is printing an unaccepted initiative auction trap.
+
+    Returns:
+      - poc_migration: 'ASCENDING' | 'DESCENDING' | 'STAGNANT_LOW' | 'STAGNANT_HIGH' | 'STABLE'
+      - developing_poc: float
+      - developing_vah: float
+      - developing_val: float
+      - is_value_accepted: bool
+      - amt_80_rule_triggered: bool
+      - amt_target: Optional[float]
+    """
+    res = {
+        "poc_migration": "STABLE",
+        "developing_poc": 0.0,
+        "developing_vah": 0.0,
+        "developing_val": 0.0,
+        "is_value_accepted": True,
+        "amt_80_rule_triggered": False,
+        "amt_target": None,
+        "amt_rule_direction": None,
+    }
+    if df is None or len(df) < 6:
+        return res
+
+    cols = {c.lower(): c for c in df.columns}
+    if not all(k in cols for k in ("high", "low", "close")):
+        return res
+
+    n = len(df)
+    slice1_end = max(3, n // 3)
+    slice2_end = max(5, (2 * n) // 3)
+
+    poc1, vah1, val1, _ = compute_volume_profile(df.iloc[:slice1_end], num_bins=num_bins)
+    poc2, vah2, val2, _ = compute_volume_profile(df.iloc[:slice2_end], num_bins=num_bins)
+    poc3, vah3, val3, _ = compute_volume_profile(df, num_bins=num_bins)
+
+    res["developing_poc"] = round(poc3, 2)
+    res["developing_vah"] = round(vah3, 2)
+    res["developing_val"] = round(val3, 2)
+
+    cur_close = float(df[cols["close"]].iloc[-1])
+    day_high = float(df[cols["high"]].max())
+    day_low = float(df[cols["low"]].min())
+
+    # Developing POC Directional Migration
+    if poc3 > poc2 * 1.002 and poc2 >= poc1 * 0.998:
+        res["poc_migration"] = "ASCENDING"
+    elif poc3 < poc2 * 0.998 and poc2 <= poc1 * 1.002:
+        res["poc_migration"] = "DESCENDING"
+    else:
+        # Check for initiative auction failure / divergence
+        if cur_close >= day_high * 0.995 and poc3 <= poc1 * 1.003:
+            # Price at high of day, but volume acceptance remains anchored at lows
+            res["poc_migration"] = "STAGNANT_LOW"
+            res["is_value_accepted"] = False
+        elif cur_close <= day_low * 1.005 and poc3 >= poc1 * 0.997:
+            # Price at low of day, but volume acceptance remains anchored at highs
+            res["poc_migration"] = "STAGNANT_HIGH"
+            res["is_value_accepted"] = False
+        else:
+            res["poc_migration"] = "STABLE"
+
+    # Auction Market Theory 80% Rule Check
+    # If price opened or probed outside initial value area (val1, vah1) and subsequent
+    # 2 completed bars close back inside (val1, vah1), probability of full traversal to opposite boundary is ~80%.
+    if n >= 8 and val1 > 0 and vah1 > val1:
+        early_low = float(df[cols["low"]].iloc[:slice1_end].min())
+        early_high = float(df[cols["high"]].iloc[:slice1_end].max())
+        c_recent = df[cols["close"]].iloc[-2:].to_numpy(dtype=float)
+
+        # Probed below Value Area Low and re-accepted inside Value Area
+        if early_low < val1 * 0.998 and np.all(c_recent > val1) and np.all(c_recent < vah1):
+            res["amt_80_rule_triggered"] = True
+            res["amt_target"] = round(vah1, 2)
+            res["amt_rule_direction"] = "BULLISH_80_PCT_RULE"
+        # Probed above Value Area High and re-accepted inside Value Area
+        elif early_high > vah1 * 1.002 and np.all(c_recent < vah1) and np.all(c_recent > val1):
+            res["amt_80_rule_triggered"] = True
+            res["amt_target"] = round(val1, 2)
+            res["amt_rule_direction"] = "BEARISH_80_PCT_RULE"
+
+    return res

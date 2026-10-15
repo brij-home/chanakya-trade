@@ -14,8 +14,14 @@ function loadStoredNotifications() {
     if (!raw) return []
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
-    // Sanitize any legacy test/sim alerts right upon initial load!
-    const sanitized = parsed.filter((item) => !isTestOrSimAlert(item))
+    // Sanitize any legacy test/sim alerts and corrupted UNKNOWN/empty records right upon initial load!
+    const sanitized = parsed.filter((item) => {
+      if (!item || typeof item !== 'object') return false
+      if (isTestOrSimAlert(item)) return false
+      const sym = String(item.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
+      if (!sym || sym === 'UNKNOWN' || sym === '—') return false
+      return true
+    })
     if (sanitized.length !== parsed.length) {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized.slice(0, MAX_NOTIFICATIONS)))
@@ -106,13 +112,28 @@ function saveNotifications(items) {
 
 /**
  * Normalizes alert payloads into a consistent, institutional notification structure.
+ * Returns null if the payload is missing, invalid, or lacks a verifiable symbol.
  */
-export function normalizeNotification(payload) {
-  if (!payload) return null
-  const now = new Date()
-  const id = payload.id || payload.alert_id || `notif_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+export function normalizeNotification(rawPayload) {
+  if (!rawPayload) return null
+  // Defensive unwrapping: support root-level, nested .alert, or nested .data payloads
+  const payload = (rawPayload && typeof rawPayload === 'object' && (rawPayload.alert || rawPayload.data))
+    ? { ...(rawPayload.alert || rawPayload.data), ...rawPayload }
+    : rawPayload
+  if (!payload || typeof payload !== 'object') return null
 
-  const cleanSym = String(payload.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+  const cleanSym = String(payload.symbol || payload.alert?.symbol || payload.data?.symbol || '')
+    .replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '')
+    .trim()
+    .toUpperCase()
+
+  // Strict invariant: Never mint an alert with UNKNOWN or missing symbol
+  if (!cleanSym || cleanSym === 'UNKNOWN' || cleanSym === '—') {
+    return null
+  }
+
+  const now = new Date()
+  const id = payload.id || payload.alert_id || payload.alert?.alert_id || payload.data?.alert_id || `notif_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
   const isTest = payload.environment === 'TEST' || payload.is_live === false
   const isInvalidated = payload.is_invalidated === true || payload.stage === 'INVALIDATED'
   const isTarget = payload.is_target === true || payload.stage === 'T1_ACHIEVED' || payload.stage === 'TARGET_ACHIEVED' || payload.target_achieved === true
@@ -154,7 +175,7 @@ export function normalizeNotification(payload) {
   return {
     id,
     alert_id: id,
-    symbol: cleanSym || 'UNKNOWN',
+    symbol: cleanSym,
     contract_symbol: payload.contract_symbol || null,
     exchange: payload.exchange || 'NSE',
     segment: payload.segment || null,

@@ -546,6 +546,7 @@ def test_eod_session_scorecard_and_review(monkeypatch):
         symbol="INFY",
         stage="INVALIDATED",
         is_invalidated=True,
+        triggered_at="2026-10-14 10:00:00 IST",
         ltp=1500.0,
         trigger_level=1520.0,
         stop_loss=1500.0,

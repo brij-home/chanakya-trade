@@ -236,11 +236,16 @@ def render_free_index_milestone(
 
     # 1. Target 1 Achieved
     if d.milestone_type in ("TARGET_1", "TARGET_1_HIT", "T1_ACHIEVED"):
+        spot_tr_txt = (
+            f" (Spot Trail: {d.trailing_spot_sl or d.spot_invalidation_anchor})"
+            if (d.trailing_spot_sl or d.spot_invalidation_anchor)
+            else ""
+        )
         return (
             f"🎯 <b>{update_prefix}T1 HIT</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🚨 <b>{color_icon} {contract_title}</b> hit T1 @ <code>₹{d.ltp:,.2f}</code>!{move_str}\n"
-            f"• <b>Action:</b> Scale 50% profit & trail SL to entry cost.\n"
+            f"• <b>Action:</b> Scale 50% profit & trail SL to entry cost{spot_tr_txt}.\n"
             f"• <b>Next:</b> Remaining 50% runner targeting T2.\n\n"
             f"{SEBI_COMPACT_DISCLAIMER}"
             f"{footer_line}"
@@ -299,11 +304,12 @@ def render_free_index_milestone(
     ):
         trail_sl = d.trailing_stop or "COST / BREAKEVEN"
         trail_val_str = f"₹{trail_sl:,.2f}" if isinstance(trail_sl, (int, float)) else str(trail_sl)
+        spot_tr_txt = f" | Spot: <code>{d.trailing_spot_sl}</code>" if d.trailing_spot_sl else ""
         return (
             f"⚡ <b>{update_prefix}TRAIL SL</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🚨 <b>{color_icon} {contract_title}</b> (CMP: <code>₹{d.ltp:,.2f}</code>){move_str}\n"
-            f"• <b>Action:</b> Move SL to <code>{trail_val_str}</code> to lock profit.\n\n"
+            f"• <b>Action:</b> Move SL to <code>{trail_val_str}</code>{spot_tr_txt} to lock profit.\n\n"
             f"{SEBI_COMPACT_DISCLAIMER}"
             f"{footer_line}"
         )
@@ -847,12 +853,33 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
     if getattr(alert, "alert_type", "") in ("GAMMA_BLAST", "OPTIONS_MOMENTUM"):
         alert_tag = "GAMMA BLAST"
 
+    spot_anchor = (
+        actionable_plan.get("spot_invalidation_anchor")
+        or (getattr(alert, "metrics", {}) or {}).get("spot_invalidation_anchor")
+        or getattr(alert, "structural_spot_sl", None)
+        or actionable_plan.get("underlying_sl")
+    )
+    disaster_floor = getattr(alert, "disaster_stop_floor", None)
+    if not disaster_floor and entry_val_num and entry_val_num > 0:
+        disaster_floor = round(entry_val_num * 0.68, 2)
+
+    if spot_anchor and str(spot_anchor) not in str(sl_val):
+        disaster_note = (
+            f" [Disaster Floor: -32% @ ₹{disaster_floor:,.1f}]" if disaster_floor else ""
+        )
+        sl_block = [
+            f"• <b>🛑 Safe SL (Tactical):</b> <code>{sl_val}</code> <i>(1m close — filters freak wicks)</i>",
+            f"• <b>🏛️ Structural SL (Spot):</b> <code>{spot_anchor} Spot breach</code><i>{disaster_note}</i>",
+        ]
+    else:
+        sl_block = [f"• <b>SL:</b> <code>{sl_val}</code>"]
+
     lines = [
         f"{icon} <b>{env_tag} NEW CALL · {setup_label} · {alert_tag}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
         f"🎯 <b>{display_contract}</b>{price_meta}",
         f"• <b>Entry:</b> <code>{entry_range}</code>",
-        f"• <b>SL:</b> <code>{sl_val}</code>",
+        *sl_block,
         targets_line,
         f"• <b>R:R:</b> <b>{rr_val}</b>{lot_str}{no_chase_str}",
         f"• <b>Bias:</b> <i>{confluence}</i>",

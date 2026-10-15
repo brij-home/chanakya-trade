@@ -360,9 +360,9 @@ def evaluate_hbcm(
 
         # ── Weighted Fallback (Momentum Bypass for early fast rallies) ─────────
         # Symmetric to the BEARISH weighted fallback below.
-        # 3/5 bullish heavyweights that cover >= 55% of index weight = institutional rally.
+        # 2+ bullish heavyweights that cover >= 55% of index weight = institutional rally.
         _bullish_weighted_pass = False
-        if not confluence_pass and allow_weighted_fallback and b_count >= 3:
+        if not confluence_pass and allow_weighted_fallback and b_count >= 2:
             bull_weight = sum(weights_map.get(s, 0.0) for s in bullish_symbols)
             bull_weight_pct = (bull_weight / max(1.0, tot_weight)) * 100.0
             if bull_weight_pct >= MIN_WEIGHTED_CONFLUENCE_PCT:
@@ -394,13 +394,13 @@ def evaluate_hbcm(
         confluence_pass = bear_count >= MIN_CONFLUENCE_THRESHOLD
 
         # ── Weighted Fallback (Momentum Bypass for early fast dumps) ──────────
-        # When the caller signals explosive momentum AND we have exactly 3 of 5
+        # When the caller signals explosive momentum or verified V-top AND we have >= 2 of 5
         # bearish heavyweights, check if their combined index weight covers >= 55%
-        # of the total represented weight.  This allows signals like:
-        #   HDFCBANK (27%) + ICICIBANK (23%) + SBIN (11%) = 61% → PASS
-        # while still rejecting weak 3/5 where only lightweight names align.
+        # of the total represented weight. This allows signals like:
+        #   HDFCBANK (27%) + ICICIBANK (23%) = 50% / 80% = 62.5% → PASS
+        # while still rejecting weak setups where only lightweight names align.
         _weighted_fallback_pass = False
-        if not confluence_pass and allow_weighted_fallback and bear_count >= 3:
+        if not confluence_pass and allow_weighted_fallback and bear_count >= 2:
             bear_weight = sum(weights_map.get(s, 0.0) for s in bearish_symbols)
             bear_weight_pct = (bear_weight / max(1.0, tot_weight)) * 100.0
             if bear_weight_pct >= MIN_WEIGHTED_CONFLUENCE_PCT:

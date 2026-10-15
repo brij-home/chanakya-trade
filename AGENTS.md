@@ -7,7 +7,7 @@
 
 <!-- TOC -->
 - [1. Project Overview & Component Map](#1-project-overview--component-map)
-- [2. Safety & Trading Guardrails (30 Core Invariants)](#2-safety--trading-guardrails-30-core-invariants)
+- [2. Safety & Trading Guardrails (34 Core Invariants)](#2-safety--trading-guardrails-34-core-invariants)
 - [3. LLM Model Hierarchy & Multi-Key Resilience](#3-llm-model-hierarchy--multi-key-resilience)
 - [4. Environment & Common Commands](#4-environment--common-commands)
 - [5. On-Demand Skills Directory](#5-on-demand-skills-directory)
@@ -35,7 +35,7 @@
 
 ---
 
-## 2. Safety & Trading Guardrails (30 Core Invariants)
+## 2. Safety & Trading Guardrails (34 Core Invariants)
 
 > **⚠️ Never commit `.env` — see [`config/credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) for secure token management.**
 
@@ -183,6 +183,34 @@
 30. **Canonical Storage Path Resolution (Zero Hardcoded Home Paths)**:
    - Hardcoding `Path.home() / ".trading_platform"` or raw user home directories in any module is strictly prohibited.
    - All runtime databases, ledgers, caches, PDFs, and config files MUST resolve via `config.paths.app_data_path(...)`. This guarantees containerization support, clean test redirection via `TRADING_PLATFORM_HOME`, and multi-environment portability.
+
+31. **Stale Assumption Elimination & Market Master Authority (October 2026 Mandate)**:
+   - System components, detectors, risk planners, and backtest engines MUST NEVER rely on stale historical assumptions or static heuristics (e.g. legacy Nifty lot size 50/25, discontinued weekly expiries on Bank Nifty/FinNifty, pre-Oct 2024 STT rates, static 5-paise ticks on sub-₹250 cash equities, or hardcoded arbitrary stops `max(1.0, ...)`).
+   - All instrument specifications, lot sizes, tick sizes, expiry structures, statutory charges, and circuit boundaries MUST resolve exclusively from canonical SSOT modules:
+     - Lot sizes: `market.instruments.STANDARD_LOT_SIZES`
+     - Expiry architecture & single-weekly index rule: `engine.alert_expiry.classify_expiry_type`
+     - Nominal price tiers & dynamic risk clamping: `engine.dynamic_risk.resolve_price_tier` and `clamp_dynamic_risk`
+     - Statutory taxes & STT schedule: `engine.charges.calculate_charges`
+   - Zero ad-hoc local guesswork or legacy pre-2024 heuristics permitted anywhere in code or AI agent logic.
+
+32. **Timeframe-Agnostic & Adaptive Risk Invariant**:
+   - All risk calculations, stop-loss floors, volatility buffers, and target expansions MUST be strictly timeframe-agnostic and adapt dynamically to the intended trade horizon:
+     - `INTRADAY` (5m, 15m, 60m): ATR bounds ($0.35\times - 1.50\times$), max risk cap 3.5%, Brownian square-root-of-time session decay ($\sqrt{t}$).
+     - `SWING_SHORT` (2–5 days): Overnight gap tolerance ($0.80\times - 2.20\times$ ATR), max risk cap 5.5%, floor multiplier $1.5\times$.
+     - `SWING_MID` (1–4 weeks): Multi-week structure ($1.20\times - 3.50\times$ ATR), max risk cap 8.5%, floor multiplier $2.0\times$.
+     - `POSITIONAL` (1–6 months): Macro cycle ($1.80\times - 5.00\times$ ATR), max risk cap 12.0%, floor multiplier $2.5\times$.
+   - Hardcoded intraday-only assumptions (like fixed 1-bar time horizons or static daily ATR multiples) inside shared risk models are strictly prohibited.
+
+33. **Regression Prevention & Architectural Invariant Defense**:
+   - Any institutional requirement, nominal price tier, regulatory constraint (1-paisa tick on sub-₹250 cash equities, SEBI single-weekly index expiry calendar, physical delivery expiry margin step-ups), or statutory cost schedule MUST be guarded by deterministic, fast (< 1s) regression test suites (e.g. `tests/test_standardized_risk_invariants.py`, `tests/test_dynamic_risk.py`).
+   - AI agents, developers, and automated tools are strictly prohibited from re-introducing arbitrary magic numbers (e.g. `max(1.0, ...)`), hardcoded legacy lot sizes, or bypassing canonical SSOT modules (`market.instruments`, `engine.dynamic_risk`, `engine.alert_expiry`, `engine.charges`).
+   - Every trade setup, execution ticket draft, and radar scan MUST carry explicit timeframe and provenance metadata, ensuring complete downstream auditability.
+
+34. **Tri-Directional Holistic Calibration & Symmetric Integrity Mandate (Zero Unilateral Patching)**:
+   - **Cross-Regime Symmetry Invariant**: When investigating, fixing, or refining any trade setup, detector, or filter for one directional bias (**BEAR** / Put or **BULL** / Call), agents and developers MUST systematically review, analyze, and calibrate the opposing side and the neutral regime (**NEUTRAL** / Range-bound defined-risk spreads like Iron Condor) before finalizing changes.
+   - **Universal Options Applicability**: Directional and structural guards (e.g., VWAP alignment, short-squeeze / dead-cat bounce defense, dynamic momentum vs static morning extremes, volume/OI sweet-spots, liquidity caps, 0DTE afternoon theta exhaustion) apply symmetrically across ALL option contracts (both Index Options like NIFTY/BANKNIFTY/SENSEX and Single-Stock Options) where relevant and valid.
+   - **Anti-Blindspot Protocol**: A patch applied to Call options (e.g., Dead-Cat Bounce Guard) must have its exact mathematical mirror implemented on Put options (e.g., Short-Squeeze Guard), and vice versa. Unilateral patches that leave the opposing side unanchored or over-suppress structural V-reversals violate the institutional symmetry contract.
+   - **Tri-Directional Regression Test Defense**: Any change to directional or volatility filters must execute regression tests spanning Bull, Bear, and Neutral setups simultaneously to ensure holistic calibration without cross-regime degradation.
 
 ---
 

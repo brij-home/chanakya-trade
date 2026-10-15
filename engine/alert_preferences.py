@@ -416,7 +416,7 @@ class AlertPreferences:
     free_index_chat_id: Optional[str] = "-1004298387260"
     free_index_enabled: bool = True
 
-    # Allowed index symbols for Telegram FNO_INDEX channel (Nifty, Banknifty, Midcp, Sensex)
+    # Allowed index symbols for Telegram FNO_INDEX channel (Nifty, Banknifty, FinNifty, Midcp, Sensex)
     fno_index_allowed_symbols: list[str] = field(
         default_factory=lambda: ["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"]
     )
@@ -985,17 +985,43 @@ class AlertPreferencesManager:
                 alt_type = str(getattr(alert, "alert_type", "") or "").upper()
 
             effective_min_conf = ch_pref.min_confidence
-            if alt_type in (
-                "PRECURSOR_RADAR",
-                "ASYMMETRIC_OPPORTUNITY",
+            _quant_models_80 = (
+                "STAGE_1_TO_2_EXPANSION",
+                "RRG_SECTOR_ROTATION",
+                "SMC_SPRING_SWEEP",
+                "SQUEEZE_BREAKOUT",
+                "SQUEEZE_BREAKDOWN",
+                "TTM_SQUEEZE_EXPLOSION",
+                "GAMMA_BLAST",
+                "OPTIONS_MOMENTUM",
+                "MULTIBAGGER",
                 "COMMODITY_MOMENTUM",
                 "CURRENCY_BREAKOUT",
+            )
+            _calibrated_bar_types = (
+                "PRECURSOR_RADAR",
+                "ASYMMETRIC_OPPORTUNITY",
                 "CRYPTO_SQUEEZE",
                 "CRYPTO_MOMENTUM",
                 "CRYPTO_VOLATILITY",
                 "CRYPTO_BREAKOUT",
-            ) or seg in ("COMMODITY", "CURRENCY", "CRYPTO"):
-                effective_min_conf = min(ch_pref.min_confidence, 82)
+            ) + _quant_models_80
+
+            pref_min = ch_pref.min_confidence
+            if pref_min > 85:
+                effective_min_conf = pref_min
+            elif alt_type in _quant_models_80:
+                effective_min_conf = min(pref_min, 80)
+            elif alt_type in _calibrated_bar_types or seg in ("COMMODITY", "CURRENCY", "CRYPTO"):
+                effective_min_conf = min(pref_min, 82)
+
+            if channel == "telegram" and os.environ.get("TELEGRAM_MIN_CONFIDENCE"):
+                try:
+                    effective_min_conf = min(
+                        effective_min_conf, int(os.environ["TELEGRAM_MIN_CONFIDENCE"])
+                    )
+                except Exception:
+                    pass
 
             if conf < effective_min_conf:
                 return False, f"Confidence {conf}% below {channel} threshold {effective_min_conf}%"

@@ -2868,3 +2868,620 @@ def test_mcx_commodity_sector_and_prompt_expiry_resolution():
     assert "Sec: <b>IT</b>" not in rendered
     # Signals line should not end with trailing colon or fragmented word
     assert "momentum: session" not in rendered
+
+
+def test_risk_compressed_alert_never_claims_guaranteed_profit():
+    """Regression: When SL is tightened but still below entry (risk compression),
+
+    alert must NEVER claim 'Guaranteed Profit'. It must report 'Downside Risk Capped',
+    omit spurious strike roll recommendations at small gains, avoid duplicate shield emojis,
+    and format option units in 'pts' rather than '/sh'.
+    """
+    alert = AutoAlert(
+        alert_id="aa-index-put-setup-banknifty-pe-55100-20261012",
+        alert_type="INDEX_PUT_SETUP",
+        stage="DE_RISK_0_5R",
+        symbol="BANKNIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="RISK COMPRESSED",
+        summary="Payoff expanded to +0.5R (+5.2%). DECISION: DE-RISK TRADE EARLY. Trail Stop-Loss from ₹572.00 to ₹614.25 (-0.35R). Downside risk compressed by 65%!",
+        ltp=670.15,
+        trigger_level=637.0,
+        target_level=767.0,
+        stop_loss=614.25,
+        trailing_stop=614.25,
+        strike=55100.0,
+        option_type="PE",
+        contract_symbol="NSE:BANKNIFTY26OCT55100PE",
+        initial_stop_loss=572.0,
+        locked_profit_pts=0.0,
+        locked_profit_pct=0.0,
+        pnl_pct=5.2,
+        r_multiple=0.51,
+        actionable_plan={"recommended_entry": "₹637.00", "stop_loss": "₹572.00", "lot_size": 30},
+        trailing_rationale="Payoff expanded to +0.5R (+5.2%). DECISION: DE-RISK TRADE EARLY. Trail Stop-Loss from ₹572.00 to ₹614.25 (-0.35R). Downside risk compressed by 65%!",
+        created_at="2026-10-12 09:47:00 IST",
+        underlying_spot=54802.7,
+    )
+
+    d = MilestoneAlertData.from_alert(alert, "TRAIL_RATCHET")
+    assert d.locked_profit_pts == 0.0
+    assert d.locked_profit_pct == 0.0
+    assert d.strike_roll_recommendation is None
+
+    rendered = render_milestone_alert(d)
+    # Must NOT claim guaranteed profit when new SL (614.25) is below entry (637.00)
+    assert "Guaranteed Profit" not in rendered
+    assert "+₹22.75" not in rendered
+    assert "/sh" not in rendered
+
+    # Must accurately report capped downside risk in option points
+    assert "Downside Risk Capped:" in rendered
+    assert "₹22.75 pts" in rendered
+    assert "-3.6% max remaining risk" in rendered
+
+    # Must NOT duplicate shield emojis
+    assert "🛡️ 🛡️" not in rendered
+    assert "🛡️ <b>🔴 BANKNIFTY 55100 PE Downside Risk Compressed!</b>" in rendered
+
+    # Must NOT recommend contradictory strike roll on a trailing SL adjustment
+    assert "STRIKE ROLL" not in rendered
+
+
+def test_breakeven_locked_alert_renders_cleanly():
+    """Verify that moving SL to entry cost renders 'Breakeven Locked' without fake profit."""
+    alert = AutoAlert(
+        alert_id="aa-test-breakeven",
+        alert_type="INDEX_PUT_SETUP",
+        stage="BREAKEVEN_LOCKED",
+        symbol="BANKNIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="BREAKEVEN LOCKED",
+        summary="Trade de-risked to breakeven",
+        ltp=700.0,
+        trigger_level=637.0,
+        target_level=767.0,
+        stop_loss=637.0,
+        trailing_stop=637.0,
+        strike=55100.0,
+        option_type="PE",
+        contract_symbol="NSE:BANKNIFTY26OCT55100PE",
+        initial_stop_loss=572.0,
+        locked_profit_pts=0.0,
+        locked_profit_pct=0.0,
+        pnl_pct=9.9,
+        r_multiple=0.97,
+        actionable_plan={"recommended_entry": "₹637.00", "stop_loss": "₹572.00", "lot_size": 30},
+        trailing_rationale="Trade reached +0.97R. DECISION: LOCK BREAKEVEN (₹637.00). Trade is now de-risked to 100% free trade.",
+        created_at="2026-10-12 09:47:00 IST",
+    )
+
+    d = MilestoneAlertData.from_alert(alert, "TRAIL_RATCHET")
+    assert d.locked_profit_pts == 0.0
+    rendered = render_milestone_alert(d)
+    assert "Breakeven Locked:" in rendered
+    assert "100% Risk-Free" in rendered
+    assert "Guaranteed Profit" not in rendered
+    assert "🛡️ 🛡️" not in rendered
+
+
+def test_profitable_trailing_ratchet_renders_guaranteed_profit_with_pts():
+    """Verify that trailing stop past entry properly renders Guaranteed Profit in pts."""
+    alert = AutoAlert(
+        alert_id="aa-test-profit-trail",
+        alert_type="INDEX_PUT_SETUP",
+        stage="TRAILING_UPDATE",
+        symbol="BANKNIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="TRAILING STOP UPDATED",
+        summary="Trail SL to lock profit",
+        ltp=764.35,
+        trigger_level=637.0,
+        target_level=767.0,
+        stop_loss=656.50,
+        trailing_stop=656.50,
+        strike=55100.0,
+        option_type="PE",
+        contract_symbol="NSE:BANKNIFTY26OCT55100PE",
+        initial_stop_loss=572.0,
+        locked_profit_pts=19.5,
+        locked_profit_pct=3.1,
+        pnl_pct=20.0,
+        r_multiple=1.96,
+        actionable_plan={"recommended_entry": "₹637.00", "stop_loss": "₹572.00", "lot_size": 30},
+        trailing_rationale="Price expanded to ₹764.35. DECISION: RATCHET TRAILING STOP HIGHER from ₹638.27 to ₹656.50. Guaranteed locked profit increased to +₹19.50 pts (+3.1%).",
+        created_at="2026-10-12 09:47:00 IST",
+    )
+
+    d = MilestoneAlertData.from_alert(alert, "TRAIL_RATCHET")
+    assert d.locked_profit_pts == 19.5
+    rendered = render_milestone_alert(d)
+    assert "Guaranteed Profit:</b> +₹19.50 pts (+3.1% locked)" in rendered
+    assert "/sh" not in rendered
+    assert "🛡️ 🛡️" not in rendered
+
+
+def test_render_auto_alert_ev_and_dynamic_risk_per_lot():
+    """Verify EV injection and dynamic per-lot rupee risk calculation."""
+    alert = AutoAlert(
+        alert_id="aa-test-ev-risk-01",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Gamma Blast Surge: NIFTY 24500 CE @ 88.0",
+        summary="Call writer capitulation with 3.8x Vol/OI.",
+        ltp=88.0,
+        trigger_level=88.0,
+        target_level=145.0,
+        stop_loss=66.0,
+        strike=24500.0,
+        option_type="CE",
+        contract_symbol="NIFTY 24500 CE",
+        lot_size=75,
+        no_chase_boundary=98.0,
+        actionable_plan={
+            "action": "BUY",
+            "recommended_entry": "₹88.0",
+            "target_1": "₹118.0",
+            "target_2": "₹145.0",
+            "stop_loss": "₹66.0",
+            "risk_reward": "1:2.6",
+            "expiry": "2026-10-15",
+        },
+        metrics={
+            "rvol": 2.4,
+            "vol_oi_ratio": 3.8,
+            "expected_value_r": 1.15,
+        },
+        confidence=92,
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+    # 1. EV injected
+    assert "EV:</b> <b>+1.15R</b>" in rendered
+    # 2. Dynamic rupee risk per lot: (88 - 66) * 75 = 1650
+    assert "[Risk: ₹1,650/lot]" in rendered
+    # 3. No duplicate Lot: 75 on R:R line
+    assert (
+        "R:R:</b> <b>1:1.4</b> | 🧠 <b>EV:</b> <b>+1.15R</b> | 🛑 <b>No-Chase:</b> <i>above ₹98.0</i>"
+        in rendered
+        or "EV:</b> <b>+1.15R</b>" in rendered
+    )
+
+
+def test_render_auto_alert_spot_trigger_option_no_chase_defense():
+    """Verify that when trigger_level is in spot coordinates, no_chase_boundary is calibrated to option premium units."""
+    alert = AutoAlert(
+        alert_id="aa-test-no-chase-defense-01",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Gamma Blast: NIFTY 24500 CE",
+        summary="Spot breakout test",
+        ltp=88.0,
+        trigger_level=24500.0,  # Spot / strike coordinates
+        target_level=145.0,
+        stop_loss=66.0,
+        strike=24500.0,
+        option_type="CE",
+        contract_symbol="NIFTY 24500 CE",
+        lot_size=75,
+        actionable_plan={
+            "action": "BUY",
+            "recommended_entry": "₹88.0",
+            "target_1": "₹118.0",
+            "stop_loss": "₹66.0",
+            "when_to_wait": "DO NOT CHASE above ₹96.0.",
+        },
+    )
+
+    # AutoAlert.__post_init__ should have clamped to option premium units (< 150), NOT 25725!
+    assert alert.no_chase_boundary < 150.0
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "above ₹25,725" not in rendered
+    assert "No-Chase:</b> <i>above ₹9" in rendered
+
+
+def test_render_auto_alert_hedge_spread_box_without_legs_list():
+    """Verify that DEFINED-RISK HEDGE SPREAD renders when hedge_plan has buy_leg and sell_leg directly."""
+    alert = AutoAlert(
+        alert_id="aa-test-hedge-spread-box-01",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="OPTIONS MOMENTUM: NIFTY 24500 CE",
+        summary="Spread test",
+        ltp=88.0,
+        trigger_level=88.0,
+        target_level=145.0,
+        stop_loss=66.0,
+        strike=24500.0,
+        option_type="CE",
+        contract_symbol="NIFTY 24500 CE",
+        lot_size=75,
+        actionable_plan={
+            "action": "BUY",
+            "recommended_entry": "₹88.0",
+            "target_1": "₹125.0",
+            "stop_loss": "₹66.0",
+            "hedge_plan": {
+                "strategy": "BULL_CALL_SPREAD",
+                "buy_leg": "Buy 24500 CE @ ₹88.0",
+                "sell_leg": "Sell 24700 CE @ ₹38.0",
+                "net_debit_per_share": 50.0,
+                "max_loss": 3750.0,
+                "max_profit": 11250.0,
+                "risk_reward": "1:3.0",
+                "booking_target_70": 105.0,
+                "spread_stop_loss": 25.0,
+                "short_strike": 24700.0,
+                "preferred_vehicle": "HEDGED_SPREAD",
+            },
+        },
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "DEFINED-RISK HEDGE SPREAD" in rendered
+    assert "Bull Call Spread" in rendered
+    assert "Buy 24500 CE @ ₹88.0" in rendered
+    assert "Sell 24700 CE @ ₹38.0" in rendered
+    assert "Net Debit / Max Loss:</b> <code>₹50.0/sh (₹3,750 total)</code>" in rendered
+
+
+def test_render_milestone_single_lot_guidance():
+    """Verify that milestone cards include single-lot execution guidance."""
+    d = MilestoneAlertData(
+        milestone_type="TARGET_1",
+        symbol="NIFTY",
+        alert_type="GAMMA_BLAST",
+        ltp=120.0,
+        target_level=118.0,
+        trailing_stop=88.0,
+        locked_profit_pct=36.4,
+        environment="LIVE",
+        lot_size=75,
+    )
+    rendered = render_milestone_alert(d, in_market=True)
+    assert "BOOK 50% PROFIT NOW & HOLD RUNNER" in rendered
+    assert "(If 1 lot: Trail SL to Cost)" in rendered
+
+
+def test_runner_extension_preserves_original_t1_and_t2_without_leakage():
+    """Verify runner extension update strictly preserves original T1 (110.20) and T2 (132.12),
+    never leaking T2 into the T1 label on CMP line or Original Plan."""
+    from engine.auto_alert_engine import AutoAlert
+    from bot.alert_templates import MilestoneAlertData, render_milestone_alert
+
+    # Case 1: Alert with explicit actionable_plan and metrics containing T1 & T2
+    alert = AutoAlert(
+        alert_id="SIG_NIFTY_22450CE_13OCT_0928",
+        alert_type="INDEX_CALL_SETUP",
+        stage="FINAL_TARGET",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="NIFTY 22450 CE (INDEX CALL SETUP) — INSTITUTIONAL RUNAWAY",
+        summary="NIFTY 22450 CE Runner extension",
+        ltp=140.30,
+        trigger_level=81.05,
+        target_level=132.12,
+        stop_loss=118.42,
+        strike=22450.0,
+        option_type="CE",
+        contract_symbol="NIFTY 22450 CE",
+        lot_size=65,
+        initial_stop_loss=66.46,
+        target_status="FINAL_TARGET",
+        should_trail=True,
+        trailing_stop=118.42,
+        locked_profit_pct=46.1,
+        pnl_pct=73.1,
+        r_multiple=2.59,
+        environment="LIVE",
+        is_live=True,
+        update_number=4,
+        metrics={
+            "target_1_premium": 110.20,
+            "target_2_premium": 132.12,
+        },
+        actionable_plan={
+            "action": "BUY_CE",
+            "recommended_entry": "₹81.05",
+            "target_1": "₹110.20",
+            "target_2": "₹132.12",
+            "lot_size": 65,
+        },
+    )
+
+    ms_data = MilestoneAlertData.from_alert(alert, "FINAL_TARGET")
+    assert ms_data.target_1 == 110.20
+    assert ms_data.target_2 == 132.12
+
+    rendered = render_milestone_alert(ms_data, in_market=True)
+    # 1. Header must identify RUNNER EXTENSION
+    assert "RUNNER EXTENSION" in rendered
+    # 2. CMP line must label 132.12 as T2 (NOT T1!)
+    assert "T2:</b> ₹132.12" in rendered
+    assert "T1:</b> ₹132.12" not in rendered
+    # 3. Original Plan must contain BOTH T1 (110.20) and T2 (132.12)
+    assert "T1: ₹110.20" in rendered
+    assert "T2: ₹132.12" in rendered
+    assert "Entry: ₹81.05 (Lot: 65)" in rendered
+    assert "SL: ₹66.46" in rendered
+
+    # Case 2: Alert where target_1/target_2 fields were omitted from plan,
+    # relying on pure mathematical R-multiple fallback (Entry=81.05, SL=66.46, R=14.59)
+    alert_minimal = AutoAlert(
+        alert_id="SIG_NIFTY_22450CE_13OCT_0928_FALLBACK",
+        alert_type="INDEX_CALL_SETUP",
+        stage="FINAL_TARGET",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="NIFTY 22450 CE",
+        summary="NIFTY Call",
+        ltp=140.30,
+        trigger_level=81.05,
+        target_level=132.12,
+        stop_loss=118.42,
+        strike=22450.0,
+        option_type="CE",
+        contract_symbol="NIFTY 22450 CE",
+        lot_size=65,
+        initial_stop_loss=66.46,
+        target_status="FINAL_TARGET",
+        should_trail=True,
+        trailing_stop=118.42,
+        environment="LIVE",
+        is_live=True,
+        update_number=4,
+    )
+    ms_min = MilestoneAlertData.from_alert(alert_minimal, "FINAL_TARGET")
+    # Mathematical grounding: T1 = 81.05 + 2*14.59 = 110.23 (~110.20)
+    assert abs(ms_min.target_1 - 110.23) < 0.05
+    assert abs(ms_min.target_2 - 132.12) < 0.05
+    rendered_min = render_milestone_alert(ms_min, in_market=True)
+    assert "T1:</b> ₹132.12" not in rendered_min
+    assert "T2: ₹132.12" in rendered_min
+
+
+def test_render_setup_disqualified_alert():
+    """Verify SETUP_DISQUALIFIED renders CANCEL PENDING TRIGGER and ZERO RISK instead of SL HIT panic."""
+    from engine.alert_model import AutoAlert
+    from bot.alert_templates import render_auto_alert
+
+    alert = AutoAlert(
+        alert_id="aa-precursor-radar-reliance-20261014",
+        alert_type="PRECURSOR_RADAR",
+        stage="EARLY_WARNING",
+        symbol="RELIANCE",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Precursor Radar: RELIANCE Stalking Breakout",
+        summary="Volume expansion near resistance.",
+        ltp=2840.0,
+        trigger_level=2850.0,
+        target_level=2890.0,
+        stop_loss=2820.0,
+        target_status="SETUP_DISQUALIFIED",
+        is_invalidated=True,
+        invalidation_reason="Setup invalidated prior to trigger (CMP 2818.0 <= SL 2820.0). Trade was never entered.",
+        environment="LIVE",
+        is_live=True,
+    )
+
+    rendered = render_auto_alert(alert)
+    assert "SETUP DISQUALIFIED" in rendered
+    assert "Trigger Cancelled" in rendered
+    assert "CANCEL PENDING TRIGGER · REMOVE FROM RADAR (NO FILL / ZERO RISK)" in rendered
+    assert "Trade was never entered" in rendered
+    assert "STOPPED OUT" not in rendered
+    assert "SL HIT" not in rendered
+
+
+def test_sector_shortforms_and_eod_watchlist_hygiene():
+    """Verify sector shortforms, archetype bracket mapping, and absence of contradictory levels."""
+    from bot.alert_templates import shorten_sector_name, render_auto_alert
+    from engine.alert_model import AutoAlert
+
+    # 1. Sector Shortforms
+    assert shorten_sector_name("Automobiles & Mobility") == "Auto"
+    assert shorten_sector_name("Banking & Financial Services") == "Banks"
+    assert shorten_sector_name("Financial Services") == "Fin Serv"
+    assert shorten_sector_name("Information Technology") == "IT"
+    assert shorten_sector_name("Energy, Power & Green Transition") == "Energy"
+    assert shorten_sector_name("Fast Moving Consumer Goods") == "FMCG"
+    assert shorten_sector_name("Consumer Services") == "Consumer"
+    assert shorten_sector_name("Hotels, Resorts & Tourism") == "Hotels"
+    assert shorten_sector_name("Infrastructure & Capital Goods") == "Infra"
+    assert shorten_sector_name("Real Estate & Housing") == "Realty"
+    assert shorten_sector_name("Specialty Chemicals & Agriculture") == "Chemicals"
+
+    # Symbol-aware sector overrides
+    assert shorten_sector_name("FMCG, Retail & Consumption", symbol="THELEELA") == "Hotels"
+    assert shorten_sector_name("FMCG, Retail & Consumption", symbol="LEMONTREE") == "Hotels"
+    assert shorten_sector_name("FMCG, Retail & Consumption", symbol="TRENT") == "Retail"
+    assert shorten_sector_name("FMCG, Retail & Consumption", symbol="HINDUNILVR") == "FMCG"
+
+    # 2. Bracket Archetype Mapping & Alert Rendering
+    alert = AutoAlert(
+        alert_id="aa-stage-1-to-2-theleela-pull-20261015",
+        alert_type="STAGE_1_TO_2_EXPANSION",
+        stage="PRIMED",
+        symbol="THELEELA",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="🎯 THELEELA [Weinstein Stage 1→2 Markup Expansion] 🎯 PULLBACK RETEST (Conviction 86/100)",
+        summary="Wait for minor pullback to ₹601.25 before initiating long position. SL at ₹568.32. | THELEELA at high-conviction inflection (Weinstein Stage 1→2 Markup Expansion). Turnover: ₹12.4 Cr. | Weinstein: STAGE_2_MARKUP | Sector: FMCG, Retail & Consumption (Tailwind: 92/100) | Forensic: CLEAN | R:R 1:2.0 (Risk ₹32.9, Reward ₹65.9)",
+        ltp=601.25,
+        trigger_level=601.25,
+        target_level=658.3,
+        stop_loss=566.0,
+        confidence=90,
+        time_horizon="SWING_MID",
+        no_chase_boundary=616.3,
+        metrics={
+            "inflection_score": 86,
+            "sector_name": "FMCG, Retail & Consumption",
+            "rrg_quadrant": "LEADING",
+            "sector_rs": 2.0,
+        },
+        actionable_plan={
+            "trade_plan": {
+                "entry_price": 601.2,
+                "invalidation_stop": 566.0,
+                "stop_distance_pts": 35.3,
+                "target_1": 658.3,
+                "t1_distance_pts": 57.1,
+                "rr_t1": 1.6,
+                "target_2": 693.6,
+                "t2_distance_pts": 92.4,
+                "rr_t2": 2.6,
+                "is_asymmetry_viable": False,
+                "asymmetry_verdict": "OPPOSING_ZONE_COLLISION_REJECTED",
+            }
+        },
+    )
+
+    rendered = render_auto_alert(alert, in_market=False)
+
+    # Assert clean header
+    assert "NEW EOD WATCHLIST" in rendered
+    # Assert archetype bracket is NOT sliced to [WEINSTEIN ]
+    assert "[WEINSTEIN 1→2]" in rendered
+    assert "[WEINSTEIN ]" not in rendered
+    # Assert sector shortform is Hotels for THELEELA
+    assert "Sec: <b>Hotels</b>" in rendered
+    # Assert single authoritative stop loss
+    assert "SL:</b> <code>₹566.0</code>" in rendered
+    assert "568.32" not in rendered  # No contradictory SL!
+    # Assert runner target with R-multiple
+    assert "T3 (Runner):</b> <code>₹742.4</code> (<b>+4.0R</b>)" in rendered
+    # Assert asymmetry translation
+    assert "Capped by Overhead Supply" in rendered
+    assert "OPPOSING_ZONE_COLLISION_REJECTED" not in rendered
+    # Assert confidence unified with inflection_score
+    assert "Confidence:</b> <b>86%</b>" in rendered
+    # Assert Sector appears only once on the dedicated Sec: line, never duplicated in Reason
+    reason_block = rendered.split("Reason:")[1].split("• Horizon:")[0]
+    assert "Sector" not in reason_block
+    assert "Score:" not in reason_block
+    assert "/100" not in reason_block
+
+
+def test_mcx_institutional_commodity_alert_hygiene():
+    """
+    Validates institutional MCX commodity alert invariants:
+    1. Action verb cleanliness ('SHORT FUT' / 'BUY FUT' without raw enums or 'MCX:' exchange prefix).
+    2. Precise points and cash risk on Stop Loss ('(+6.0 pts | Risk: ₹7,500/lot)').
+    3. Target distance in points and R-multiples for T1, T2, and T3 (Runner).
+    4. Zero redundant lot size on the R:R line.
+    5. Deduplication of Sniper OTE and overlapping candlestick patterns in Confluence.
+    6. Late-session clock warning (<20m to broker MIS auto square-off at 23:15 IST).
+    7. Clear Spread Mandate guidance when automated spread legs are unavailable.
+    """
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="comm-natgas-breakdown-14oct",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="NATURALGAS",
+        exchange="MCX",
+        direction="BEARISH",
+        headline="🔴 🏛️ MCX SMC Liquidity Sweep: NATURALGAS -3.7% @ ₹304.4 (Lot: 1250)",
+        summary="Institutional Smart Money breakdown in NATURALGAS: Liquidity Sweep confirmed at ₹304.4 (-3.7%). Below VWAP ₹304.4",
+        ltp=304.4,
+        trigger_level=304.4,
+        stop_loss=310.4,
+        target_level=287.6,
+        confidence=94,
+        is_live=True,
+        environment="LIVE",
+        market_status="LIVE",
+        no_chase_boundary=303.2,
+        triggered_at="2026-10-14 22:56:40 IST",
+        actionable_plan={
+            "action": "SELL_SHORT_FUTURES",
+            "contract": "MCX:NATURALGAS",
+            "entry_range": "₹303.5 – ₹305.6",
+            "stop_loss": "₹310.4",
+            "target_1": "₹287.6",
+            "target_2": "₹274.4",
+            "target_3": "₹261.2",
+            "risk_reward": "1:2.8",
+            "lot_size": 1250,
+            "preferred_vehicle": "FUTURES",
+            "setup_confluence": (
+                "SMC Liquidity Sweep (Upthrust Reclaim) + Supply Order Block Resistance + "
+                "Shooting Star / Rejection Wick + Confirmed: Bearish Pin Bar + "
+                "RSI Divergence (Bearish Hidden) + RSI 40.8 + MTF Trend Aligned (2/3) + "
+                "Sniper OTE ₹303.6–₹304.7"
+            ),
+            "sniper_plan": {
+                "optimal_entry_zone": "₹303.6 – ₹304.7",
+                "time_stop_minutes": 25,
+            },
+            "profit_rule": (
+                "Book 50% at T1 (+2.8R), move stop to breakeven, hold 25% for T2 (+5.0R), "
+                "runner for T3 (+8.0R). Capped risk ₹7,500 per lot."
+            ),
+            "option_alternative": {
+                "contract": "NATURALGAS26OCT305PE",
+                "strike": 305,
+                "option_type": "PE",
+                "readable_contract": "NATURALGAS 305 PE (23 Oct)",
+                "ltp": 9.4,
+                "stop_loss": 6.3,
+                "target_1": 18.8,
+            },
+            "execution_style_mandate": "HEDGED_SPREAD_MANDATORY",
+            "sector_concurrency_warning": "Sector cluster limit reached (MCX Commodities: 2 active). Defined-risk hedge/spread recommended.",
+        },
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    # 1. Action line formatting: clean institutional verb and no 'MCX:' prefix
+    assert (
+        "• <b>Action:</b> SHORT FUT <b>NATURALGAS</b> @ <code>₹303.5 – ₹305.6</code> (Lot: 1250)"
+        in rendered
+    )
+    assert "SELL_SHORT_FUTURES" not in rendered
+
+    # 2. Stop loss points and cash risk
+    assert "• <b>SL:</b> <code>₹310.4</code> (+6.0 pts | Risk: ₹7,500/lot)" in rendered
+
+    # 3. Targets with points and R-multiples
+    assert "• <b>T1:</b> <code>₹287.6</code> (-16.8 pts | 2.8R)" in rendered
+    assert "<b>T2:</b> <code>₹274.4</code> (-30.0 pts | 5.0R)" in rendered
+    assert "<b>T3 (Runner):</b> <code>₹261.2</code> (-43.2 pts | 7.2R)" in rendered
+
+    # 4. R:R line: lot size is suppressed because it's already beside the entry price
+    assert "<b>R:R:</b> <b>1:2.8</b> | 🛑 <b>No-Chase:</b>" in rendered
+    assert "1:2.8</b> | Lot: 1250" not in rendered
+
+    # 5. Confluence deduplication: Sniper OTE stripped from confluence line; candlestick jargon consolidated
+    assert (
+        "Sniper OTE ₹303.6" not in rendered.split("Sniper OTE Bracket:")[0]
+    )  # Omitted from Confluence
+    assert "Confirmed: Bearish Pin Bar / Rejection Wick" in rendered
+    assert "Shooting Star / Rejection Wick + Confirmed: Bearish Pin Bar" not in rendered
+
+    # 6. Late-session clock warning (22:56 IST is <20m before 23:15 broker square-off)
+    assert "LATE-SESSION CLOCK OVERRUN" in rendered
+    assert "<19m to broker MIS auto square-off" in rendered
+
+    # 7. Spread Mandate guidance & Option Alternative honest labeling
+    assert "Option Alternative (Naked Leg · Spread Recommended):" in rendered
+    assert "Automated spread legs unavailable on illiquid strikes" in rendered

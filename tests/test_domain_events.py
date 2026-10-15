@@ -38,8 +38,15 @@ def test_alert_domain_event_creation():
     sse_dict = event.to_sse_dict()
     assert sse_dict["type"] == "alert_created"
     assert sse_dict["event_type"] == "ALERT_CREATED"
+    assert sse_dict["symbol"] == "NIFTY"
+    assert sse_dict["alert_id"] == "aa-gamma-blast-nifty-20260926"
+    assert sse_dict["stage"] == "EARLY_WARNING"
+    assert sse_dict["ltp"] == 24210.0
+    assert sse_dict["direction"] == "BULLISH"
+    assert sse_dict["headline"] == "NIFTY Early Warning Gamma Blast"
     assert sse_dict["alert"]["symbol"] == "NIFTY"
     assert sse_dict["alert"]["ltp"] == 24210.0
+    assert sse_dict["data"]["symbol"] == "NIFTY"
 
 
 def test_create_alert_domain_event_from_auto_alert():
@@ -93,6 +100,8 @@ def test_publish_domain_event_on_sse_bus(monkeypatch):
     channel, data = mock_publish.call_args[0]
     assert channel == "alert"
     assert data["type"] == "trailing_stop_update"
+    assert data["symbol"] == "INFY"
+    assert data["alert_id"] == "aa-orb-infy-20260926"
     assert data["alert"]["symbol"] == "INFY"
 
 

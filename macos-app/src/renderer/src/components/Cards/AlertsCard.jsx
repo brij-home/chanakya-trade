@@ -44,7 +44,8 @@ export default function AlertsCard({ data }) {
           const isTest = a.environment === 'TEST' || a.is_live === false
           const isRunnerExit = a.stage === 'RUNNER_EXIT' || a.target_status === 'RUNNER_CLOSED'
           const isBreakevenExit = a.stage === 'BREAKEVEN_EXIT' || a.target_status === 'BREAKEVEN_CLOSED'
-          const isInvalidated = (a.is_invalidated || a.stage === 'INVALIDATED') && !isRunnerExit && !isBreakevenExit
+          const isDisqualified = a.target_status === 'SETUP_DISQUALIFIED' || a.stage === 'SETUP_DISQUALIFIED' || (a.has_triggered === false && a.is_invalidated)
+          const isInvalidated = (a.is_invalidated || a.stage === 'INVALIDATED') && !isRunnerExit && !isBreakevenExit && !isDisqualified
           const isT1Hit = a.stage === 'T1_ACHIEVED' || a.target_status === 'T1_ACHIEVED' || a.target_status === 'T1_HIT'
           const isT2Hit = a.stage === 'T2_ACHIEVED' || a.target_status === 'T2_ACHIEVED'
           const isT3Hit = a.stage === 'TARGET_ACHIEVED' || a.target_status === 'TARGET_ACHIEVED' || a.target_status === 'TARGET_HIT' || a.stage === 'COMPLETED'
@@ -61,7 +62,7 @@ export default function AlertsCard({ data }) {
 
           return (
             <div key={id} className={`flex items-start justify-between rounded-lg border px-3 py-2.5
-              ${isRunnerExit ? 'border-emerald-500/40 bg-emerald-500/5' : isBreakevenExit ? 'border-amber-500/40 bg-amber-500/5' : isInvalidated ? 'border-rose-500/40 bg-rose-500/5' : isT3Hit ? 'border-purple-500/40 bg-purple-500/5' : isT2Hit ? 'border-cyan-500/40 bg-cyan-500/5' : isT1Hit ? 'border-emerald-500/40 bg-emerald-500/5' : triggered ? 'border-green/40 bg-green/5' : 'border-border bg-panel'}`}>
+              ${isRunnerExit ? 'border-emerald-500/40 bg-emerald-500/5' : isBreakevenExit ? 'border-amber-500/40 bg-amber-500/5' : isDisqualified ? 'border-slate-500/40 bg-slate-500/5' : isInvalidated ? 'border-rose-500/40 bg-rose-500/5' : isT3Hit ? 'border-purple-500/40 bg-purple-500/5' : isT2Hit ? 'border-cyan-500/40 bg-cyan-500/5' : isT1Hit ? 'border-emerald-500/40 bg-emerald-500/5' : triggered ? 'border-green/40 bg-green/5' : 'border-border bg-panel'}`}>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-text text-[12px] font-mono font-semibold">{symbol}</span>
@@ -131,6 +132,8 @@ export default function AlertsCard({ data }) {
                     <span className="text-[10px] font-ui text-emerald-300 font-bold bg-emerald-500/20 px-1.5 py-0.5 rounded border border-emerald-500/40">💰 RUNNER CLOSED</span>
                   ) : isBreakevenExit ? (
                     <span className="text-[10px] font-ui text-amber-300 font-bold bg-amber-500/20 px-1.5 py-0.5 rounded border border-amber-500/40">🛡️ BREAKEVEN EXIT</span>
+                  ) : isDisqualified ? (
+                    <span className="text-[10px] font-ui text-slate-300 font-bold bg-slate-500/20 px-1.5 py-0.5 rounded border border-slate-500/40">🚫 CANCELLED</span>
                   ) : isInvalidated ? (
                     <span className="text-[10px] font-ui text-rose-300 font-bold bg-rose-500/20 px-1.5 py-0.5 rounded border border-rose-500/40 animate-pulse">🛑 SL HIT</span>
                   ) : isT3Hit ? (
@@ -158,6 +161,11 @@ export default function AlertsCard({ data }) {
                 <p className="text-muted text-[11px] font-ui mt-0.5 truncate">
                   {condition} {threshold}
                 </p>
+                {isDisqualified && a.invalidation_reason && (
+                  <p className="text-slate-400 text-[10px] font-ui mt-0.5">
+                    ℹ️ {a.invalidation_reason}
+                  </p>
+                )}
                 {isInvalidated && a.invalidation_reason && (
                   <p className="text-rose-400 text-[10px] font-ui mt-0.5">
                     ⚠️ {a.invalidation_reason}
@@ -171,7 +179,7 @@ export default function AlertsCard({ data }) {
                     <span className={`px-1 rounded font-mono font-semibold ${a.should_trail ? 'text-emerald-300 bg-emerald-500/10' : 'text-amber-300 bg-amber-500/10'}`}>
                       {a.trailing_decision}
                     </span>
-                    {a.locked_profit_pct != null && (
+                    {Number(a.locked_profit_pct) > 0 && (
                       <span className="text-emerald-400 font-mono">
                         +{Number(a.locked_profit_pct).toFixed(1)}% Locked
                       </span>

@@ -80,7 +80,8 @@ def test_swing_inflection_blueprint_and_active_stages():
     assert alert.ttl_seconds >= 86400 * 10
 
     # 2. Market-open generation -> stage must be IGNITED
-    alert_open = _format_swing_inflection_alert(setup, mkt_open=True)
+    market_dt = datetime(2026, 9, 17, 10, 0, tzinfo=IST)
+    alert_open = _format_swing_inflection_alert(setup, session_dt=market_dt, mkt_open=True)
     assert alert_open.stage == "IGNITED"
     assert alert_open.is_active is True
 

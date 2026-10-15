@@ -15,6 +15,7 @@ from engine.detectors.index_micro_scalp import detect_index_micro_scalp
 from engine.detectors.intraday_spark import detect_intraday_mover_sparks
 from engine.detectors.multibagger import detect_multibagger_breakouts, get_multibagger_universe
 from engine.detectors.opening_drive import detect_opening_drive
+from engine.detectors.afternoon_thrust import detect_afternoon_thrust
 from engine.detectors.options_momentum import detect_options_momentum_breakouts
 from engine.detectors.orb import detect_opening_range_breakout
 from engine.detectors.order_flow import detect_order_flow_divergence, OrderFlowDivergenceDetector
@@ -49,6 +50,7 @@ __all__ = [
     "detect_index_put_setup",
     "detect_index_micro_scalp",
     "detect_opening_drive",
+    "detect_afternoon_thrust",
     "detect_preopen_bias",
     "detect_squeeze_breakout",
     "detect_circuit_proximity",

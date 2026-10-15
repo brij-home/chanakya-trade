@@ -69,8 +69,16 @@ def generate_session_scorecard(
             "TARGET" in str(m) for m in milestones
         )
 
+        has_triggered = getattr(alert, "has_triggered", True)
+        if hasattr(alert, "stage") and alert.stage in ("STALK", "EARLY_WARNING", "PRIMED"):
+            has_triggered = False
+
         r_mult = getattr(alert, "r_multiple", None)
-        if r_mult is None or r_mult == 0.0:
+        if not has_triggered or getattr(alert, "target_status", "") == "SETUP_DISQUALIFIED":
+            r_val = 0.0
+        elif r_mult is not None:
+            r_val = float(r_mult)
+        else:
             entry = float(
                 getattr(alert, "entry_price", 0.0)
                 or getattr(alert, "trigger_level", 0.0)
@@ -87,8 +95,6 @@ def generate_session_scorecard(
             if is_inv and sl > 0:
                 cur = sl
             r_val = round(((cur - entry) if is_bull else (entry - cur)) / max(0.01, risk), 2)
-        else:
-            r_val = float(r_mult)
 
         th = (getattr(alert, "time_horizon", "") or "").upper()
         is_multi_session = th in (
@@ -101,7 +107,10 @@ def generate_session_scorecard(
         ) or getattr(alert, "setup_style", "") in ("SWING", "POSITIONAL")
         is_expired = getattr(alert, "is_expired", False)
 
-        if t1_reached or r_val > 0.3:
+        if not has_triggered:
+            unfulfilled += 1
+            stat["unfulfilled"] = stat.get("unfulfilled", 0) + 1
+        elif t1_reached or r_val > 0.3:
             wins += 1
             pos_r_sum += max(0.0, r_val)
             stat["wins"] += 1
@@ -310,6 +319,13 @@ def run_eod_alert_postmortems(
             logger.info(
                 f"[AlertPostMortem] Skipping premature EOD evaluation for active swing setup {alert_id} ({th})"
             )
+            continue
+
+        # Untriggered radar setups (never entered into market) do not conduct invalidation post-mortems
+        has_triggered = getattr(alert, "has_triggered", True)
+        if hasattr(alert, "stage") and alert.stage in ("STALK", "EARLY_WARNING", "PRIMED"):
+            has_triggered = False
+        if not has_triggered or getattr(alert, "target_status", "") == "SETUP_DISQUALIFIED":
             continue
 
         # We conduct post-mortem if the alert was invalidated, or if it expired/closed without hitting T1

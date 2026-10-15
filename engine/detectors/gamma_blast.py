@@ -11,7 +11,11 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from engine.alert_expiry import classify_expiry_type
-from engine.alert_identity import generate_alert_id, canonical_alert_symbol
+from engine.alert_identity import (
+    generate_alert_id,
+    canonical_alert_symbol,
+    get_session_phase_slot,
+)
 from engine.alert_model import AutoAlert
 
 import time
@@ -149,6 +153,7 @@ def detect_gamma_blast(
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     is_opening_drive = now_dt.hour == 9 and now_dt.minute <= 45
     clean_sym = canonical_alert_symbol(underlying)
+    phase_slot = get_session_phase_slot(now_dt)
     is_test_env = os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
 
     vix_val = None
@@ -399,7 +404,7 @@ def detect_gamma_blast(
                     today_ist = now_dt.date()
                     dte_days = (exp_dt - today_ist).days
                     max_gamma_dte = (
-                        8 if (is_index and clean_sym == "NIFTY") else (16 if is_index else 50)
+                        8 if (is_index and clean_sym == "NIFTY") else (12 if is_index else 45)
                     )
                     if dte_days > max_gamma_dte:
                         continue
@@ -539,7 +544,18 @@ def detect_gamma_blast(
         ):
             if (day_high - spot) / spot * 100 < 0.15:
                 # If spot is pressing right up against day high, allow it if high volume expansion or strong momentum
-                if not (is_high_volume_expansion or pchange >= 8.0 or vol_oi_ratio >= 1.5):
+                # OR in PM session (>= 13:00 IST) when writer capitulation or healthy turnover is confirmed
+                _is_pm_breakout_press = (
+                    now_dt.hour >= 13
+                    and (is_oi_shedding or short_term_unwind or vol_oi_ratio >= 1.20)
+                    and spot_above_vwap
+                )
+                if not (
+                    is_high_volume_expansion
+                    or pchange >= 8.0
+                    or vol_oi_ratio >= 1.5
+                    or _is_pm_breakout_press
+                ):
                     continue  # Spot is colliding into day high resistance (< 0.15% headroom without breakout momentum)
 
         # Major Call OI Wall interaction:
@@ -789,7 +805,7 @@ def detect_gamma_blast(
                     alert_id=generate_alert_id(
                         underlying,
                         "GAMMA_BLAST",
-                        variant=f"ce-{int(strike)}",
+                        variant=f"ce-{int(strike)}-{phase_slot}",
                     ),
                     alert_type="GAMMA_BLAST",
                     stage=stage,
@@ -913,6 +929,16 @@ def detect_gamma_blast(
                         if t3_premium
                         else f"₹{round(target_premium * 2.5, 2):,.2f}",
                         "stop_loss": f"₹{sl_premium:,.2f}",
+                        "execution_trigger": f"ABOVE_₹{opt_ltp:,.1f}_ON_1M_CLOSE"
+                        if opt_ltp
+                        else "ON_TRIGGER",
+                        "confirmation_rule": "1_MIN_CANDLE_CLOSE_MANDATORY",
+                        "execution_notes": (
+                            f"Wait for confirmed 1-min candle close above ₹{opt_ltp:,.1f} before market entry. "
+                            "Do not buy on unconfirmed spike wick."
+                            if opt_ltp
+                            else "Wait for candle confirmation."
+                        ),
                         "risk_reward": rr_str,
                         "net_risk_reward": net_rr_ce,
                         "max_loss_capped": max_loss_ce_inr,
@@ -1030,7 +1056,7 @@ def detect_gamma_blast(
                     today_ist = now_dt.date()
                     dte_days = (exp_dt - today_ist).days
                     max_gamma_dte = (
-                        8 if (is_index and clean_sym == "NIFTY") else (16 if is_index else 50)
+                        8 if (is_index and clean_sym == "NIFTY") else (12 if is_index else 45)
                     )
                     if dte_days > max_gamma_dte:
                         continue
@@ -1171,7 +1197,18 @@ def detect_gamma_blast(
         ):
             if (spot - day_low) / spot * 100 < 0.15:
                 # If spot is pressing right down against day low, allow it if high volume expansion or strong momentum
-                if not (is_high_volume_expansion or pchange >= 8.0 or vol_oi_ratio >= 1.5):
+                # OR in PM session (>= 13:00 IST) when put writer capitulation or healthy turnover is confirmed
+                _is_pm_breakdown_press = (
+                    now_dt.hour >= 13
+                    and (is_oi_shedding or short_term_unwind or vol_oi_ratio >= 1.20)
+                    and spot_below_vwap
+                )
+                if not (
+                    is_high_volume_expansion
+                    or pchange >= 8.0
+                    or vol_oi_ratio >= 1.5
+                    or _is_pm_breakdown_press
+                ):
                     continue  # Spot is colliding into day low support (< 0.15% headroom without breakdown momentum)
 
         # Major Put OI Wall interaction:
@@ -1423,7 +1460,7 @@ def detect_gamma_blast(
                     alert_id=generate_alert_id(
                         underlying,
                         "GAMMA_BLAST",
-                        variant=f"pe-{int(strike)}",
+                        variant=f"pe-{int(strike)}-{phase_slot}",
                     ),
                     alert_type="GAMMA_BLAST",
                     stage=stage,
@@ -1549,6 +1586,16 @@ def detect_gamma_blast(
                         if t3_premium
                         else f"₹{round(target_premium * 2.5, 2):,.2f}",
                         "stop_loss": f"₹{sl_premium:,.2f}",
+                        "execution_trigger": f"ABOVE_₹{opt_ltp:,.1f}_ON_1M_CLOSE"
+                        if opt_ltp
+                        else "ON_TRIGGER",
+                        "confirmation_rule": "1_MIN_CANDLE_CLOSE_MANDATORY",
+                        "execution_notes": (
+                            f"Wait for confirmed 1-min candle close above ₹{opt_ltp:,.1f} before market entry. "
+                            "Do not buy on unconfirmed spike wick."
+                            if opt_ltp
+                            else "Wait for candle confirmation."
+                        ),
                         "risk_reward": rr_str,
                         "net_risk_reward": net_rr_pe,
                         "max_loss_capped": max_loss_pe_inr,

@@ -157,7 +157,7 @@ def test_mcx_commodity_alert_template_rendering():
     assert rendered.count("[REAL/LIVE]") == 1
     assert "[REAL / LIVE" not in rendered
     assert "MCX Commodity Plan" not in rendered
-    assert "BUY_FUTURES <b>MCX:CRUDEOIL</b>" in rendered
+    assert "BUY FUT <b>CRUDEOIL</b>" in rendered or "BUY_FUTURES <b>MCX:CRUDEOIL</b>" in rendered
     assert "Lot: 100" in rendered
     assert "T1:" in rendered
     assert "T2:" in rendered

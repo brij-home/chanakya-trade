@@ -503,3 +503,39 @@ async def get_eod_session_scorecard():
         generate_session_scorecard, today_alerts, session_date=today_date
     )
     return scorecard
+
+
+@router.get("/api/alerts/auto/circuit-breakers/status")
+async def get_circuit_breakers_status():
+    """Retrieve current status, metrics, and health of all detector circuit breakers."""
+    from engine.detector_circuit_breaker import detector_circuit_breaker
+
+    metrics = await asyncio.to_thread(detector_circuit_breaker.get_all_metrics)
+    return {
+        "status": "ok",
+        "detectors": metrics,
+    }
+
+
+@router.post("/api/alerts/auto/circuit-breakers/reset")
+async def reset_circuit_breakers(payload: Optional[dict] = None):
+    """
+    Manually clear circuit breaker degradation for a specific alert type or all detectors.
+    Restores detectors to NORMAL state and enables generation.
+    """
+    from engine.detector_circuit_breaker import detector_circuit_breaker
+
+    atype = (payload or {}).get("alert_type")
+    if atype:
+        await asyncio.to_thread(detector_circuit_breaker.reset_detector, atype)
+        msg = f"Detector circuit breaker reset for '{atype}'"
+    else:
+        await asyncio.to_thread(detector_circuit_breaker.reset_all)
+        msg = "All detector circuit breakers reset to NORMAL"
+
+    metrics = await asyncio.to_thread(detector_circuit_breaker.get_all_metrics)
+    return {
+        "status": "ok",
+        "message": msg,
+        "detectors": metrics,
+    }

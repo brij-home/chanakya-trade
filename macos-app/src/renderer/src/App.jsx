@@ -291,33 +291,49 @@ export default function App() {
   const lastToastTimeRef = useRef(0)
   const lastChimeTimeRef = useRef(0)
 
-  const handleAlertMessage = useCallback((payload) => {
-    if (!payload) return
+  const handleAlertMessage = useCallback((rawPayload) => {
+    if (!rawPayload) return
 
-    if (payload.type === 'auto_alerts_cleared') {
-      if (payload.mode === 'TEST_ONLY') {
+    // 0. Handle market regime shift events (broadcast over alert channel)
+    const evtType = String(rawPayload.type || rawPayload.event_type || '').toLowerCase()
+    if (evtType === 'regime_shift') {
+      window.dispatchEvent(new CustomEvent('market-regime-shift', { detail: rawPayload }))
+      return
+    }
+
+    if (rawPayload.type === 'auto_alerts_cleared') {
+      if (rawPayload.mode === 'TEST_ONLY') {
         useNotificationStore.getState().purgeTestAlerts()
       } else {
         useNotificationStore.getState().clearAll()
       }
-      window.dispatchEvent(new CustomEvent('auto-alerts-cleared', { detail: payload }))
+      window.dispatchEvent(new CustomEvent('auto-alerts-cleared', { detail: rawPayload }))
       return
     }
 
-    if (payload.type === 'auto_alert_archived') {
-      const { alert_id, is_archived } = payload
+    if (rawPayload.type === 'auto_alert_archived') {
+      const { alert_id, is_archived } = rawPayload
       if (alert_id) {
         useNotificationStore.getState().updateAlertArchived?.(alert_id, is_archived)
-        window.dispatchEvent(new CustomEvent('auto-alert-archived', { detail: payload }))
+        window.dispatchEvent(new CustomEvent('auto-alert-archived', { detail: rawPayload }))
       }
       return
     }
 
-    if (payload.type === 'auto_alerts_bulk_archived') {
+    if (rawPayload.type === 'auto_alerts_bulk_archived') {
       useNotificationStore.getState().archiveAllInvalidated?.()
-      window.dispatchEvent(new CustomEvent('auto-alerts-bulk-archived', { detail: payload }))
+      window.dispatchEvent(new CustomEvent('auto-alerts-bulk-archived', { detail: rawPayload }))
       return
     }
+
+    // Defensive unwrapping: support root-level, nested .alert, or nested .data payloads
+    const payload = (rawPayload && typeof rawPayload === 'object' && (rawPayload.alert || rawPayload.data))
+      ? { ...(rawPayload.alert || rawPayload.data), ...rawPayload }
+      : rawPayload
+
+    const sym = String(payload.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
+    // Strict invariant: Ignore incomplete or corrupt alert packets missing a verifiable symbol
+    if (!sym || sym === 'UNKNOWN' || sym === '—') return
 
     // Always record into persistent notification store (glanceable feed & history)
     useNotificationStore.getState().addNotification(payload)

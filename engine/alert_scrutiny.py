@@ -228,39 +228,49 @@ class AlertScrutinyAuditor:
             is_option_premium_levels = False
 
         # 2. Geometric Level Coherence
+        entry_anchor = float(
+            getattr(alert, "trigger_level", None) or getattr(alert, "entry_price", None) or 0.0
+        )
+        if entry_anchor <= 0.0:
+            entry_anchor = ltp
+
         if is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY"):
             # For equity long OR long option premium (Call or Put buyer):
-            if sl >= ltp:
-                return False, f"Inverted Stop-Loss: SL (Rs.{sl:,.2f}) >= LTP (Rs.{ltp:,.2f})", flags
-            if t1 <= ltp:
+            if sl >= entry_anchor:
                 return (
                     False,
-                    f"Inverted Target: Target (Rs.{t1:,.2f}) <= LTP (Rs.{ltp:,.2f})",
+                    f"Inverted Stop-Loss: SL (Rs.{sl:,.2f}) >= Entry (Rs.{entry_anchor:,.2f})",
                     flags,
                 )
-            risk_pts = ltp - sl
-            reward_pts = t1 - ltp
+            if t1 <= entry_anchor:
+                return (
+                    False,
+                    f"Inverted Target: Target (Rs.{t1:,.2f}) <= Entry (Rs.{entry_anchor:,.2f})",
+                    flags,
+                )
+            risk_pts = entry_anchor - sl
+            reward_pts = t1 - entry_anchor
 
         elif direction in ("BEARISH", "SHORT", "SELL"):
             # For cash equity short or futures short:
-            if sl <= ltp:
+            if sl <= entry_anchor:
                 return (
                     False,
-                    f"Inverted Bearish Stop-Loss: SL (Rs.{sl:,.2f}) <= LTP (Rs.{ltp:,.2f})",
+                    f"Inverted Bearish Stop-Loss: SL (Rs.{sl:,.2f}) <= Entry (Rs.{entry_anchor:,.2f})",
                     flags,
                 )
-            if t1 >= ltp:
+            if t1 >= entry_anchor:
                 return (
                     False,
-                    f"Inverted Bearish Target: Target (Rs.{t1:,.2f}) >= LTP (Rs.{ltp:,.2f})",
+                    f"Inverted Bearish Target: Target (Rs.{t1:,.2f}) >= Entry (Rs.{entry_anchor:,.2f})",
                     flags,
                 )
-            risk_pts = sl - ltp
-            reward_pts = ltp - t1
+            risk_pts = sl - entry_anchor
+            reward_pts = entry_anchor - t1
         else:
             # NEUTRAL or non-directional (e.g. straddle range)
-            risk_pts = abs(ltp - sl)
-            reward_pts = abs(t1 - ltp)
+            risk_pts = abs(entry_anchor - sl)
+            reward_pts = abs(t1 - entry_anchor)
 
         flags["level_coherence"] = True
 
@@ -285,7 +295,7 @@ class AlertScrutinyAuditor:
             max_risk = 3.5
         else:
             max_risk = self.max_intraday_risk_pct
-        risk_pct = (risk_pts / ltp) * 100.0 if ltp > 0 else 0.0
+        risk_pct = (risk_pts / entry_anchor) * 100.0 if entry_anchor > 0 else 0.0
         if risk_pct > max_risk:
             return (
                 False,
@@ -463,13 +473,39 @@ class AlertScrutinyAuditor:
         flags["risk_within_bounds"] = True
 
         # 3e. Universal Falcon & Cheetah Single-Stock Equity Adaptive Regime Gate
-        # Eliminates consolidation false breakouts and whipsaw traps in cash equities
+        # Eliminates consolidation false breakouts and whipsaw traps in cash equities & stock options
+        metrics_d = getattr(alert, "metrics", {}) or {}
+        target_eval_sym = None
+        target_eval_spot = ltp
+
         if (
             not is_option_premium_levels
             and clean_sym not in COMMODITY_MIN_SL_FLOORS
             and clean_sym not in INDEX_MIN_SL_FLOORS
         ):
-            metrics_d = getattr(alert, "metrics", {}) or {}
+            target_eval_sym = clean_sym
+            target_eval_spot = ltp
+        elif is_option_premium_levels or atype == "OPTIONS_MOMENTUM":
+            try:
+                from engine.synthetic_sl import extract_underlying_symbol
+
+                cand_und = extract_underlying_symbol(alert)
+                if (
+                    cand_und
+                    and cand_und not in COMMODITY_MIN_SL_FLOORS
+                    and cand_und not in INDEX_MIN_SL_FLOORS
+                ):
+                    target_eval_sym = cand_und
+                    target_eval_spot = float(
+                        (metrics_d or {}).get("underlying_ltp")
+                        or (metrics_d or {}).get("spot")
+                        or (metrics_d or {}).get("underlying_spot")
+                        or 0.0
+                    )
+            except Exception:
+                target_eval_sym = None
+
+        if target_eval_sym:
             is_breakout_candidate = (
                 atype
                 in (
@@ -485,9 +521,11 @@ class AlertScrutinyAuditor:
                     "INTRADAY_MOVER_SPARK",
                     "VOLUME_EXPANSION",
                     "SPARK",
+                    "OPTIONS_MOMENTUM",
                 )
                 or "BREAKOUT" in atype
                 or "ORB" in atype
+                or "MOMENTUM" in atype
             )
             if is_breakout_candidate:
                 try:
@@ -502,8 +540,8 @@ class AlertScrutinyAuditor:
                             pass
 
                     decision = evaluate_equity_adaptive_regime(
-                        symbol=clean_sym,
-                        spot=ltp,
+                        symbol=target_eval_sym,
+                        spot=target_eval_spot,
                         ref_time=ref_dt,
                         metrics=metrics_d if isinstance(metrics_d, dict) else None,
                     )
@@ -532,9 +570,14 @@ class AlertScrutinyAuditor:
                         )
                         if rvol_val < cheetah.min_required_rvol and not is_thrust and not has_sweep:
                             flags["equity_regime_valid"] = False
+                            item_lbl = (
+                                f"Underlying stock {target_eval_sym}"
+                                if target_eval_sym != clean_sym
+                                else clean_sym
+                            )
                             return (
                                 False,
-                                f"Falcon Chop Trap Veto: {clean_sym} in severe consolidation chop "
+                                f"Falcon Chop Trap Veto: {item_lbl} in severe consolidation chop "
                                 f"(CHOP {falcon.chop_index:.1f} >= 61.8 or ADX {falcon.adx_14:.1f} < 20.0). "
                                 f"Routine breakouts have high failure rate; preserve capital. "
                                 f"Mandate institutional thrust (RVOL {rvol_val:.2f}x < {cheetah.min_required_rvol:.1f}x) "
@@ -849,21 +892,63 @@ class AlertScrutinyAuditor:
                             f"[AlertScrutiny] Obstacle Runway Trap: {clean_sym} Bearish setup obstructed by floor at ₹{nearest_obs:.1f} (only {obs_dist:.1f} pts away vs {risk_pts:.1f} pts risk)"
                         )
 
-            # Reward-to-Obstacle (R:Obs >= 1.5R) Headroom Gate:
-            # Rejects setups where nearest major structural obstacle (Daily 200-EMA, Supply/Demand OB,
-            # or explicit resistance) truncates available runway before Target 1.
-            nearest_res = (
-                metrics.get("nearest_resistance")
-                or metrics.get("daily_200_ema")
-                or metrics.get("overhead_resistance")
-                or metrics.get("supply_order_block")
-            )
-            nearest_sup = (
-                metrics.get("nearest_support")
-                or metrics.get("daily_200_ema_sup")
-                or metrics.get("underlying_support")
-                or metrics.get("demand_order_block")
-            )
+            # Reward-to-Obstacle (R:Obs >= 2.0R) Structural Headroom Gate:
+            # Rejects setups where nearest major structural obstacle (Daily 200/50-EMA, Supply/Demand OB,
+            # Options Call/Put OI Wall, PDH/PDL, or Value Area VAH/VAL) truncates available runway before Target 1 (+2.0R).
+            overhead_candidates = [
+                metrics.get("nearest_resistance"),
+                metrics.get("overhead_resistance"),
+                metrics.get("daily_200_ema"),
+                metrics.get("daily_50_ema"),
+                metrics.get("supply_order_block"),
+                metrics.get("call_oi_wall"),
+                metrics.get("highest_call_oi"),
+                metrics.get("call_wall"),
+                metrics.get("max_pain_strike"),
+                metrics.get("pdh"),
+                metrics.get("prior_day_high"),
+                metrics.get("d_vah"),
+                metrics.get("vah"),
+            ]
+            underlying_candidates = [
+                metrics.get("nearest_support"),
+                metrics.get("underlying_support"),
+                metrics.get("daily_200_ema_sup"),
+                metrics.get("daily_50_ema_sup"),
+                metrics.get("demand_order_block"),
+                metrics.get("put_oi_wall"),
+                metrics.get("highest_put_oi"),
+                metrics.get("put_wall"),
+                metrics.get("max_pain_strike"),
+                metrics.get("pdl"),
+                metrics.get("prior_day_low"),
+                metrics.get("d_val"),
+                metrics.get("val"),
+            ]
+
+            valid_res = []
+            for oc in overhead_candidates:
+                if oc is not None:
+                    try:
+                        f_oc = float(oc)
+                        if f_oc > ltp:
+                            valid_res.append(f_oc)
+                    except (ValueError, TypeError):
+                        pass
+
+            valid_sup = []
+            for uc in underlying_candidates:
+                if uc is not None:
+                    try:
+                        f_uc = float(uc)
+                        if 0 < f_uc < ltp:
+                            valid_sup.append(f_uc)
+                    except (ValueError, TypeError):
+                        pass
+
+            nearest_res = min(valid_res) if valid_res else None
+            nearest_sup = max(valid_sup) if valid_sup else None
+
             is_intentional_breakout = (
                 atype
                 in (
@@ -876,46 +961,44 @@ class AlertScrutinyAuditor:
                 or "BREAKOUT" in atype
                 or "BREAKDOWN" in atype
             )
-            if is_bull and nearest_res:
-                try:
-                    res_f = float(nearest_res)
-                    if res_f > ltp and risk_pts > 0:
-                        obs_dist = res_f - ltp
-                        r_obs = obs_dist / risk_pts
-                        if (
-                            r_obs < 1.50
-                            and obs_dist < (0.85 * reward_pts)
-                            and not (is_intentional_breakout and abs(ltp - res_f) / ltp < 0.005)
-                        ):
-                            flags["obstacle_runway_clear"] = False
-                            flags["trap_immediate_resistance"] = True
-                            return (
-                                False,
-                                f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{res_f:,.1f} provides only {r_obs:.2f}R headroom (< 1.50R required). Insufficient runway to achieve asymmetric Target 1.",
-                                flags,
-                            )
-                except (ValueError, TypeError):
-                    pass
-            elif not is_bull and nearest_sup:
-                try:
-                    sup_f = float(nearest_sup)
-                    if sup_f < ltp and risk_pts > 0:
-                        obs_dist = ltp - sup_f
-                        r_obs = obs_dist / risk_pts
-                        if (
-                            r_obs < 1.50
-                            and obs_dist < (0.85 * reward_pts)
-                            and not (is_intentional_breakout and abs(ltp - sup_f) / ltp < 0.005)
-                        ):
-                            flags["obstacle_runway_clear"] = False
-                            flags["trap_immediate_support"] = True
-                            return (
-                                False,
-                                f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{sup_f:,.1f} provides only {r_obs:.2f}R headroom (< 1.50R required). Insufficient runway to achieve asymmetric Target 1.",
-                                flags,
-                            )
-                except (ValueError, TypeError):
-                    pass
+            if is_bull and nearest_res is not None:
+                res_f = float(nearest_res)
+                if res_f > ltp and risk_pts > 0:
+                    obs_dist = res_f - ltp
+                    r_obs = obs_dist / risk_pts
+                    flags["nearest_obstacle"] = res_f
+                    flags["r_obs"] = round(r_obs, 2)
+                    if (
+                        r_obs < 2.00
+                        and obs_dist < (0.90 * reward_pts)
+                        and not (is_intentional_breakout and abs(ltp - res_f) / ltp < 0.005)
+                    ):
+                        flags["obstacle_runway_clear"] = False
+                        flags["trap_immediate_resistance"] = True
+                        return (
+                            False,
+                            f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{res_f:,.1f} provides only {r_obs:.2f}R headroom (< 2.00R required). Insufficient runway to achieve asymmetric Target 1.",
+                            flags,
+                        )
+            elif not is_bull and nearest_sup is not None:
+                sup_f = float(nearest_sup)
+                if sup_f < ltp and risk_pts > 0:
+                    obs_dist = ltp - sup_f
+                    r_obs = obs_dist / risk_pts
+                    flags["nearest_obstacle"] = sup_f
+                    flags["r_obs"] = round(r_obs, 2)
+                    if (
+                        r_obs < 2.00
+                        and obs_dist < (0.90 * reward_pts)
+                        and not (is_intentional_breakout and abs(ltp - sup_f) / ltp < 0.005)
+                    ):
+                        flags["obstacle_runway_clear"] = False
+                        flags["trap_immediate_support"] = True
+                        return (
+                            False,
+                            f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{sup_f:,.1f} provides only {r_obs:.2f}R headroom (< 2.00R required). Insufficient runway to achieve asymmetric Target 1.",
+                            flags,
+                        )
 
             # 4g. Volume Profile Airspace Clearance (LVN vs HVN Congestion Check)
             # Identifies whether Target 1 enters clean Low Volume Node (LVN) airspace or risks stalling at Volume POC
@@ -1805,7 +1888,9 @@ class AlertScrutinyAuditor:
 
                     # Explicit decoupler tag from upstream scan engine (highest precedence)
                     upstream_decoupler_tag = str(
-                        (metrics_dict or {}).get("decoupler_status", "") or ""
+                        getattr(alert, "decoupler_status", "")
+                        or (metrics_dict or {}).get("decoupler_status", "")
+                        or ""
                     ).upper()
                     is_upstream_decoupler = upstream_decoupler_tag == "VERIFIED_DECOUPLER"
 
@@ -1847,8 +1932,41 @@ class AlertScrutinyAuditor:
                         and (sec_rs_val >= 0.80 or sec_chg_val >= 0.20 or rvol_val >= 2.0)
                     )
 
+                    is_opening_drive_decoupler = bool(
+                        (
+                            atype in ("OPENING_DRIVE", "OPENING_DRIVE_IGNITION")
+                            or (metrics_dict or {}).get("setup") == "OPENING_DRIVE"
+                        )
+                        and (
+                            (metrics_dict or {}).get("open_pattern")
+                            in ("OPEN_EQUALS_LOW", "OPEN_LOW")
+                            or (metrics_dict or {}).get("open_low_matched") is True
+                        )
+                        and (
+                            rvol_val >= 1.5
+                            or float((metrics_dict or {}).get("rvol", 0.0) or 0.0) >= 1.5
+                        )
+                        and (
+                            spot_chg >= 0.4
+                            or float((metrics_dict or {}).get("day_change_pct", 0.0) or 0.0) >= 0.4
+                            or float((metrics_dict or {}).get("opening_range_pct", 0.0) or 0.0)
+                            >= 0.35
+                        )
+                    )
+
+                    is_high_rvol_breakout_decoupler = bool(
+                        rvol_val >= 2.0
+                        and (
+                            float((metrics_dict or {}).get("range_pct", 0.0) or 0.0) >= 0.8
+                            or spot_chg >= 0.8
+                            or float((metrics_dict or {}).get("day_change_pct", 0.0) or 0.0) >= 0.8
+                        )
+                    )
+
                     is_verified_decoupler = bool(
                         is_upstream_decoupler
+                        or is_opening_drive_decoupler
+                        or is_high_rvol_breakout_decoupler
                         or is_defensive_leader
                         or is_options_surge_decoupler
                         or is_equity_momentum_decoupler
@@ -1887,7 +2005,23 @@ class AlertScrutinyAuditor:
                         )
                     ) and is_nifty_markup:
                         is_short_breakdown_decoupler = bool(
-                            rrg_quad == "LAGGING"
+                            is_upstream_decoupler
+                            or rrg_quad == "LAGGING"
+                            or (
+                                (
+                                    atype in ("OPENING_DRIVE", "OPENING_DRIVE_IGNITION")
+                                    or (metrics_dict or {}).get("setup") == "OPENING_DRIVE"
+                                )
+                                and (
+                                    (metrics_dict or {}).get("open_pattern")
+                                    in ("OPEN_EQUALS_HIGH", "OPEN_HIGH")
+                                    or (metrics_dict or {}).get("open_high_matched") is True
+                                )
+                                and (
+                                    rvol_val >= 1.5
+                                    or float((metrics_dict or {}).get("rvol", 0.0) or 0.0) >= 1.5
+                                )
+                            )
                             or (
                                 vol_oi_val >= 2.0
                                 and opt_vol >= 3000
@@ -2610,6 +2744,38 @@ class AlertScrutinyAuditor:
                                 )
             except (ValueError, TypeError):
                 pass
+
+        # Auction Market Theory: Developing POC Directional Migration Check
+        poc_mig = None
+        if isinstance(metrics_dict, dict):
+            poc_mig = (
+                metrics_dict.get("poc_migration")
+                or metrics_dict.get("developing_poc_migration")
+                or (metrics_dict.get("volume_profile") or {}).get("poc_migration")
+            )
+        if poc_mig and isinstance(poc_mig, str):
+            poc_mig_upper = poc_mig.upper()
+            flags["poc_migration"] = poc_mig_upper
+            is_call_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+            is_put_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+            if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
+                if poc_mig_upper in ("DESCENDING", "STAGNANT_LOW"):
+                    flags["poc_acceptance_valid"] = False
+                    return (
+                        False,
+                        f"Developing POC Stagnation Veto: Price pushing to highs, but developing Point of Control (d-POC) is {poc_mig_upper}. "
+                        f"Auction Market Theory indicates lack of institutional value migration. High false breakout risk.",
+                        flags,
+                    )
+            elif (direction in ("BEARISH", "SHORT", "SELL") or is_put_opt) and not is_call_opt:
+                if poc_mig_upper in ("ASCENDING", "STAGNANT_HIGH"):
+                    flags["poc_acceptance_valid"] = False
+                    return (
+                        False,
+                        f"Developing POC Stagnation Veto: Price breaking down to lows, but developing Point of Control (d-POC) is {poc_mig_upper}. "
+                        f"Auction Market Theory indicates lack of institutional value migration lower. High bear trap risk.",
+                        flags,
+                    )
         flags["poc_acceptance_valid"] = True
 
         # 19. Momentum Divergence Exhaustion Trap Gate:
@@ -2692,6 +2858,43 @@ class AlertScrutinyAuditor:
                         f"Breakdown is a bear trap / Wyckoff spring accumulation.",
                         flags,
                     )
+
+        # Also check CVD Delta Aggression Ratio if present
+        cvd_ratio_val = None
+        if isinstance(metrics_dict, dict):
+            cvd_ratio_val = metrics_dict.get("cvd_ratio") or metrics_dict.get(
+                "cvd_divergence_ratio"
+            )
+        if cvd_ratio_val is not None:
+            try:
+                c_ratio = float(cvd_ratio_val)
+                flags["cvd_ratio"] = c_ratio
+                is_call_opt = (
+                    atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+                )
+                is_put_opt = (
+                    atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+                )
+                if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
+                    if 0 < c_ratio < 0.50:
+                        flags["cvd_flow_valid"] = False
+                        return (
+                            False,
+                            f"Order Flow CVD Exhaustion Veto: Seller volume delta outpaces buyers (CVD Ratio {c_ratio:.2f}x < 0.50x). "
+                            f"Disallow long breakout into aggressive institutional selling pressure.",
+                            flags,
+                        )
+                elif (direction in ("BEARISH", "SHORT", "SELL") or is_put_opt) and not is_call_opt:
+                    if 0 < c_ratio < 0.50:
+                        flags["cvd_flow_valid"] = False
+                        return (
+                            False,
+                            f"Order Flow CVD Absorption Veto: Buyer volume delta outpaces sellers (CVD Ratio {c_ratio:.2f}x < 0.50x). "
+                            f"Disallow short breakdown into aggressive institutional buying accumulation.",
+                            flags,
+                        )
+            except (ValueError, TypeError):
+                pass
         flags["cvd_flow_valid"] = True
 
         # 20. ADR (Average Daily Range) Exhaustion Gate:
@@ -3200,6 +3403,12 @@ class AlertScrutinyAuditor:
             or getattr(alert, "rvol", 1.0)
             or 1.0
         )
+        cvd_ratio = float(
+            flags.get("cvd_ratio", 0.0)
+            or metrics.get("cvd_ratio", 0.0)
+            or metrics.get("cvd_divergence_ratio", 0.0)
+            or 1.0
+        )
         has_ob = bool(
             metrics.get("order_block")
             or metrics.get("bullish_ob")
@@ -3214,7 +3423,58 @@ class AlertScrutinyAuditor:
         poc_clear = flags.get("lvn_vacuum_clear", True) and not flags.get(
             "hvn_congestion_risk", False
         )
-        is_elephant_footprint = (rvol_val >= 1.8) or has_ob or has_fvg
+        is_elephant_footprint = (
+            (rvol_val >= 1.8 and cvd_ratio >= 1.5) or (rvol_val >= 2.0) or has_ob or has_fvg
+        )
+
+        # 7. 🏛️ CROSS-DESK CALIBRATION & PREDATORY STRIKE CLOCK
+        now_time = datetime.now(IST).time()
+        if dtime(9, 20) <= now_time <= dtime(10, 45):
+            strike_zone = "MORNING_EXPANSION_KILL_ZONE"
+            is_kz = True
+            timing_eff = 98
+            clock_action = "Prime expansion window: Maximum institutional follow-through."
+        elif dtime(11, 30) <= now_time <= dtime(12, 45):
+            strike_zone = "LUNCHTIME_CHOP_ZONE"
+            is_kz = False
+            timing_eff = 65
+            clock_action = "Midday turnover vacuum: High chop trap probability; selective sizing."
+        elif dtime(12, 45) <= now_time <= dtime(13, 45):
+            strike_zone = "EUROPEAN_OPEN_INFLECTION"
+            is_kz = True
+            timing_eff = 90
+            clock_action = "European session open: Trap inversion & trend resumption inflection."
+        elif dtime(13, 45) <= now_time <= dtime(15, 15):
+            strike_zone = "AFTERNOON_GAMMA_POWER_HOUR"
+            is_kz = True
+            timing_eff = 96
+            clock_action = "Power Hour: Gamma blasts & institutional index settlement drive."
+        else:
+            strike_zone = "OFF_PEAK_AUCTION"
+            is_kz = False
+            timing_eff = 75
+            clock_action = "Standard execution: Strict trigger validation required."
+
+        nifty_posture = "BALANCED"
+        if nifty_c is not None:
+            if float(nifty_c) <= -0.50:
+                nifty_posture = "LIQUIDATION_DUMP"
+            elif float(nifty_c) >= 0.50:
+                nifty_posture = "MARKUP_RALLY"
+
+        hbcm_valid = flags.get("heavyweight_confluence_valid", True)
+        if not hbcm_valid:
+            cd_status = "HBCM_CONTRADICTION_HOLD"
+            cd_summary = "Constituent heavyweights contradict setup direction; waiting for locomotive alignment."
+        elif not is_eagle_aligned:
+            cd_status = "INDEX_HEADWIND_THROTTLED"
+            cd_summary = f"Primary benchmark NIFTY ({nifty_c}%) in liquidation; equity long throttled unless decoupled."
+        elif is_kz:
+            cd_status = "OPTIMAL_KILL_ZONE_EXECUTION"
+            cd_summary = f"Prime {strike_zone} active with verified cross-desk alignment ({timing_eff}% efficiency)."
+        else:
+            cd_status = "STANDARD_CROSS_DESK_CALIBRATED"
+            cd_summary = "Cross-desk inter-market parameters calibrated and approved."
 
         return {
             "status": "APPROVED_PREDATORY_SANCTIONED",
@@ -3264,9 +3524,22 @@ class AlertScrutinyAuditor:
                 "seat": "🐘 ELEPHANT",
                 "status": "INSTITUTIONAL_FOOTPRINT" if is_elephant_footprint else "STANDARD",
                 "rvol": rvol_val,
+                "cvd_ratio": round(cvd_ratio, 2),
                 "poc_clear": poc_clear,
                 "has_order_block": has_ob,
                 "has_fair_value_gap": has_fvg,
+            },
+            "cross_desk": {
+                "seat": "🏛️ CROSS-DESK CALIBRATION",
+                "status": cd_status,
+                "summary": cd_summary,
+                "nifty_posture": nifty_posture,
+                "nifty_change_pct": nifty_c,
+                "hbcm_aligned": hbcm_valid,
+                "strike_clock_zone": strike_zone,
+                "kill_zone_active": is_kz,
+                "strike_clock_efficiency": timing_eff,
+                "clock_action": clock_action,
             },
         }
 

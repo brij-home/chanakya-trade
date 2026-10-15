@@ -57,7 +57,7 @@ from engine.lifecycle.trade_lifecycle_manager import (
 # ── Modular Subsystems & Re-exports ─────────────────────────────────────────
 
 from engine.alert_model import ActionableBlueprint, AutoAlert
-from engine.alert_identity import generate_alert_id
+from engine.alert_identity import canonical_alert_symbol, generate_alert_id
 from engine.alert_expiry import (
     classify_expiry_type as classify_expiry_type,
     is_alert_option_premium_level,
@@ -74,11 +74,14 @@ from engine.detectors import (
     detect_learned_pattern_coiling,
     detect_multibagger_breakouts,
     detect_opening_drive,
+    detect_afternoon_thrust,
     detect_opening_range_breakout,
     detect_pre_inflection_dryup,
     detect_squeeze_breakout,
     get_multibagger_universe,
 )
+
+_INDEX_SYMS_SET = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"})
 
 
 def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool]:
@@ -189,7 +192,7 @@ class AutoAlertEngine:
         self._lifecycle = trade_lifecycle_manager
         self._alerts: list[AutoAlert] = []
         self._cooldowns: dict[str, float] = {}  # signature -> timestamp
-        self._cooldown_ttl = 900.0  # 15 minutes anti-spam per signature
+        self._cooldown_ttl = 600.0  # 10 minutes anti-spam per signature (reduced from 900s to enable PM re-evaluation)
         self._dispatched_milestones: set[str] = set()
         self._dispatch_cooldowns: dict[str, float] = {}
         self._stop_event = threading.Event()
@@ -248,18 +251,22 @@ class AutoAlertEngine:
         self._crypto_tick_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=20))
         self._crypto_last_surge_eval: dict[str, float] = {}
         self._sector_daily_dispatched: dict[str, set[str]] = defaultdict(set)
-        # Telegram has a tighter 2-to-4 per-sector-per-day cap (separate from UI's 5)
+        # Telegram has a tighter 3-to-5 per-sector-per-day cap (separate from UI's 5)
         self._sector_daily_telegram: dict[str, dict[str, int]] = defaultdict(
             lambda: defaultdict(int)
         )
+        # Index daily Telegram dispatch tracker (date -> count)
+        self._daily_index_telegram: dict[str, int] = defaultdict(int)
         # Index session-half Telegram dispatch tracker (date -> {"FIRST_HALF": count, "SECOND_HALF": count})
         self._index_half_telegram: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         # Sector hourly Telegram dispatch tracker (sector_id -> list[timestamps])
         self._sector_hourly_telegram: dict[str, list[float]] = defaultdict(list)
-        # Rolling hourly Telegram pacing ledger (Max 3/hr for Index, Max 6/hr for Stocks)
+        # Rolling hourly Telegram pacing ledger (Max 4/hr for Index, Max 10/hr for Stocks/Options, Apex 15/hr)
         self._hourly_telegram_dispatches: dict[str, list[float]] = {
             "INDEX": [],
             "STOCKS": [],
+            "FNO_STOCK": [],
+            "EQUITY": [],
         }
         self._cycle_quotes_cache: dict[str, Any] = {}
         self._cycle_quotes_ts: float = 0.0
@@ -274,6 +281,9 @@ class AutoAlertEngine:
         self._session_closing_warned_date: Optional[str] = None
         self._session_closing_warned_mcx_date: Optional[str] = None
         self._eod_session_reviewed_date: Optional[str] = None
+        self._index_put_scan_counts: dict[str, int] = defaultdict(int)
+        self._index_put_scan_date: Optional[str] = None
+        self._winner_cooldowns: dict[tuple[str, str], float] = {}
 
         self._load()
         self.cleanup_corrupted_test_alerts()
@@ -346,6 +356,29 @@ class AutoAlertEngine:
                     self._dispatched_milestones.add(f"{sym}:{aid}:FINAL")
                     self._dispatched_milestones.add(f"{c_tag}:{aid}:FINAL")
 
+                # Seed winner cooldowns for index assets reaching target within the last 900s
+                is_win_stage = (
+                    "T1_ACHIEVED" in achieved
+                    or astage in ("T1_ACHIEVED", "TARGET_ACHIEVED", "COMPLETED")
+                    or "T1" in tstatus
+                    or "FINAL" in tstatus
+                )
+                if is_win_stage and getattr(a, "direction", ""):
+                    now_epoch = time.time()
+                    a_ts = None
+                    if getattr(a, "created_at", None):
+                        try:
+                            c_str = str(a.created_at).replace(" IST", "").strip()
+                            a_ts = datetime.fromisoformat(c_str).timestamp()
+                        except Exception:
+                            pass
+                    if a_ts and (now_epoch - a_ts) < 900.0:
+                        _raw_s = (getattr(a, "contract_symbol", "") or sym or "").upper()
+                        for _idx_k in _INDEX_SYMS_SET:
+                            if _idx_k in _raw_s:
+                                self._winner_cooldowns[(_idx_k, a.direction.upper())] = a_ts
+                                break
+
                 # Seed sector daily cap ledger (UI: up to 5 per sector/day)
                 is_stock_opt = (getattr(a, "segment", "") == "FNO_STOCK") or (
                     sym not in self._watched_indices
@@ -396,6 +429,9 @@ class AutoAlertEngine:
 
                     if is_idx_a:
                         if d_key:
+                            self._daily_index_telegram[d_key] = (
+                                self._daily_index_telegram.get(d_key, 0) + 1
+                            )
                             a_half = (
                                 "FIRST_HALF"
                                 if (a_time and a_time < dtime(12, 30))
@@ -414,6 +450,18 @@ class AutoAlertEngine:
                             )
                         if a_epoch and (now_epoch - a_epoch) < 3600.0:
                             self._hourly_telegram_dispatches["STOCKS"].append(a_epoch)
+                            is_fno_a = (a.segment == "FNO_STOCK") or bool(
+                                a.contract_symbol
+                                and any(x in a.contract_symbol for x in ("CE", "PE", "FUT"))
+                            )
+                            if is_fno_a:
+                                self._hourly_telegram_dispatches.setdefault("FNO_STOCK", []).append(
+                                    a_epoch
+                                )
+                            else:
+                                self._hourly_telegram_dispatches.setdefault("EQUITY", []).append(
+                                    a_epoch
+                                )
                             if sec and sec != "index":
                                 self._sector_hourly_telegram[str(sec).lower()].append(a_epoch)
 
@@ -1130,8 +1178,9 @@ class AutoAlertEngine:
                             or (alert.metrics or {}).get("mss")
                             or (alert.metrics or {}).get("is_utad_reversal")
                             or (alert.metrics or {}).get("is_spring_reversal")
+                            or (alert.alert_type == "AFTERNOON_THRUST")
                             or re.search(
-                                r"\b(choch|mss|change of character|market structure shift|trend reversal|structural reversal|reversal|utad|spring)\b",
+                                r"\b(choch|mss|change of character|market structure shift|trend reversal|structural reversal|reversal|utad|spring|afternoon thrust|afternoon flush)\b",
                                 f"{alert.headline or ''} {alert.summary or ''}",
                                 re.IGNORECASE,
                             )
@@ -1324,8 +1373,37 @@ class AutoAlertEngine:
 
         with self._lock:
             # Check for existing alert with identical ID
-            if any(a.alert_id == alert.alert_id for a in self._alerts):
-                return False
+            existing_match = next((a for a in self._alerts if a.alert_id == alert.alert_id), None)
+            if existing_match:
+                # If existing alert is still live or in-flight, suppress duplicate insertion!
+                if existing_match.stage not in (
+                    "INVALIDATED",
+                    "COMPLETED",
+                    "EXPIRED",
+                    "RUNNER_EXIT",
+                ):
+                    return False
+
+                # Allow controlled in-session secondary re-entry if the prior alert
+                # exited on a minor scratch / trailing breakeven runner stop:
+                is_idx_scalp = alert.alert_type in (
+                    "INDEX_MICRO_SCALP",
+                    "INDEX_PUT_SETUP",
+                    "INDEX_CALL_SETUP",
+                    "GAMMA_BLAST",
+                )
+                if is_idx_scalp and "-v2" not in alert.alert_id:
+                    v2_id = re.sub(r"-(\d{8})$", r"-v2-\1", alert.alert_id)
+                    if not any(a.alert_id == v2_id for a in self._alerts):
+                        logger.info(
+                            f"[AutoAlertEngine] 🔄 Permitting in-session secondary re-entry for {alert.symbol} ({v2_id}) "
+                            f"after previous {existing_match.stage} scratch exit."
+                        )
+                        alert.alert_id = v2_id
+                    else:
+                        return False
+                else:
+                    return False
 
             alert_dt_date = self._alert_date(alert) or datetime.now(IST).date()
 
@@ -1570,6 +1648,10 @@ class AutoAlertEngine:
                                 "SPREAD_FREE_ROLL",
                                 "PARTIAL_PROFIT",
                                 "RUNNER",
+                                "DE_RISK_0_5R",
+                                "T0_5_ACHIEVED",
+                                "BREAKEVEN_LOCKED",
+                                "TRAILING_UPDATE",
                             )
                         ):
                             # Check for Institutional Reversal Exception (Change of Character / Supply/Demand Sweep)
@@ -1586,6 +1668,14 @@ class AutoAlertEngine:
                                     "DAY_LOW_DEMAND_BOUNCE",
                                     "VWAP_BREAKOUT",
                                     "CAMARILLA_H4_BREAKOUT",
+                                    "DOUBLE_TOP_BREAKDOWN",
+                                    "INTRADAY_CAPITULATION_TOP",
+                                    "PWH_SUPPLY_REJECTION",
+                                    "TREND_PULLBACK_REJECTION",
+                                    "CALL_WRITING_CEILING",
+                                    "DOUBLE_BOTTOM_BREAKOUT",
+                                    "PWL_DEMAND_BOUNCE",
+                                    "PUT_WRITING_FLOOR",
                                 }
                             )
                             incoming_sigs = set((alert.metrics or {}).get("signals", []))
@@ -1608,6 +1698,25 @@ class AutoAlertEngine:
                                 and opp_spot_val > 0
                             ):
                                 is_opp_failing = curr_spot_val > (opp_spot_val * 1.0008)
+
+                            _derisked_stages = frozenset(
+                                {
+                                    "TARGET_ACHIEVED",
+                                    "T1_ACHIEVED",
+                                    "T2_ACHIEVED",
+                                    "DE_RISK_0_5R",
+                                    "T0_5_ACHIEVED",
+                                    "BREAKEVEN_LOCKED",
+                                    "TRAILING_UPDATE",
+                                    "SPREAD_PROFIT_70",
+                                    "SPREAD_FREE_ROLL",
+                                    "PARTIAL_PROFIT",
+                                    "RUNNER",
+                                }
+                            )
+                            is_opp_derisked = existing_opp.stage in _derisked_stages or getattr(
+                                existing_opp, "status", ""
+                            ) in ("TARGET_ACHIEVED", "COMPLETED")
 
                             opp_created_sec = 0.0
                             try:
@@ -1634,8 +1743,9 @@ class AutoAlertEngine:
                                 or (alert.metrics or {}).get("mss")
                                 or (alert.metrics or {}).get("is_institutional_thrust")
                                 or (incoming_sigs & reversal_signals)
+                                or (alert.alert_type == "AFTERNOON_THRUST")
                                 or re.search(
-                                    r"\b(choch|mss|change of character|market structure shift|trend reversal|structural reversal)\b",
+                                    r"\b(choch|mss|change of character|market structure shift|trend reversal|structural reversal|afternoon thrust|afternoon flush)\b",
                                     summary_str,
                                     re.IGNORECASE,
                                 )
@@ -1643,38 +1753,70 @@ class AutoAlertEngine:
 
                             can_intercept_reversal = (
                                 has_structural_reversal
-                                and (is_opp_failing or existing_opp.stage == "IN_FLIGHT_WARNING")
+                                and (
+                                    is_opp_failing
+                                    or is_opp_derisked
+                                    or existing_opp.stage == "IN_FLIGHT_WARNING"
+                                )
                                 and (opp_elapsed_sec >= 900.0 or is_test_env)
                             )
 
                             if can_intercept_reversal:
-                                # Invalidate the failing trade immediately to allow predatory reversal interception
                                 now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-                                existing_opp.is_invalidated = True
-                                existing_opp.stage = "INVALIDATED"
-                                existing_opp.invalidation_reason = (
-                                    f"Superseded by institutional {alert.direction} reversal ({alert.alert_type}: "
-                                    f"{', '.join(incoming_sigs or [alert.alert_type])})"
-                                )
-                                existing_opp.invalidated_at = now_iso
-                                if hasattr(existing_opp, "record_audit"):
-                                    existing_opp.record_audit(
-                                        "REVERSAL_INVALIDATED",
-                                        existing_opp.invalidation_reason,
-                                        actor="DISPATCH_GATE",
+                                if is_opp_derisked:
+                                    # Predatory Lifecycle Handshake: Bank the de-risked morning runner gracefully
+                                    # and transition capital to the newly confirmed structural counter-trend reversal
+                                    existing_opp.is_active = False
+                                    existing_opp.target_status = "TARGET_ACHIEVED"
+                                    existing_opp.stage = "RUNNER_EXIT"
+                                    exit_msg = (
+                                        f"Runner banked: Predatory trend transition to {alert.direction} reversal ({alert.alert_type}: "
+                                        f"{', '.join(incoming_sigs or [alert.alert_type])})"
                                     )
-                                # Clear directional quarantine so incoming reversal setup can dispatch cleanly
-                                if clean_target in getattr(self, "_directional_quarantine", {}):
-                                    del self._directional_quarantine[clean_target]
-                                self._alerts = [
-                                    a for a in self._alerts if a.alert_id != existing_opp.alert_id
-                                ]
-                                self._save()
-                                logger.info(
-                                    f"[AutoAlertEngine] 🔄 Predatory Reversal Interception for {clean_target}: "
-                                    f"Invalidated struggling {existing_opp.direction} trade ({existing_opp.alert_type}) "
-                                    f"in favor of high-conviction {alert.direction} reversal ({alert.alert_type})."
-                                )
+                                    existing_opp.invalidation_reason = exit_msg
+                                    if hasattr(existing_opp, "record_audit"):
+                                        existing_opp.record_audit(
+                                            "RUNNER_BANKED",
+                                            exit_msg,
+                                            actor="DISPATCH_GATE",
+                                        )
+                                    if clean_target in getattr(self, "_directional_quarantine", {}):
+                                        del self._directional_quarantine[clean_target]
+                                    self._save()
+                                    logger.info(
+                                        f"[AutoAlertEngine] 🔄 Predatory Reversal Handshake for {clean_target}: "
+                                        f"Banked de-risked {existing_opp.direction} runner ({existing_opp.alert_type}, stage={existing_opp.stage}) "
+                                        f"in favor of confirmed {alert.direction} reversal ({alert.alert_type})."
+                                    )
+                                else:
+                                    # Invalidate the failing trade immediately to allow predatory reversal interception
+                                    existing_opp.is_invalidated = True
+                                    existing_opp.stage = "INVALIDATED"
+                                    existing_opp.invalidation_reason = (
+                                        f"Superseded by institutional {alert.direction} reversal ({alert.alert_type}: "
+                                        f"{', '.join(incoming_sigs or [alert.alert_type])})"
+                                    )
+                                    existing_opp.invalidated_at = now_iso
+                                    if hasattr(existing_opp, "record_audit"):
+                                        existing_opp.record_audit(
+                                            "REVERSAL_INVALIDATED",
+                                            existing_opp.invalidation_reason,
+                                            actor="DISPATCH_GATE",
+                                        )
+                                    # Clear directional quarantine so incoming reversal setup can dispatch cleanly
+                                    if clean_target in getattr(self, "_directional_quarantine", {}):
+                                        del self._directional_quarantine[clean_target]
+                                    self._alerts = [
+                                        a
+                                        for a in self._alerts
+                                        if a.alert_id != existing_opp.alert_id
+                                    ]
+                                    self._save()
+                                    logger.info(
+                                        f"[AutoAlertEngine] 🔄 Predatory Reversal Interception for {clean_target}: "
+                                        f"Invalidated struggling {existing_opp.direction} trade ({existing_opp.alert_type}) "
+                                        f"in favor of high-conviction {alert.direction} reversal ({alert.alert_type})."
+                                    )
                             else:
                                 logger.info(
                                     f"[AutoAlertEngine] 🛑 In-Flight Directional Lockout for {clean_target}: "
@@ -1689,94 +1831,95 @@ class AutoAlertEngine:
                         # Resolution: Compute a supremacy_score = confidence × R:R for each side.
                         # Winner (higher score, min 25-point gap) survives. If regime is CHOP_PINNED,
                         # both legs are upgraded to defined-risk spreads instead of naked singles.
-                        if clean_target in _INDEX_SYMS_SET and not getattr(
-                            existing_opp, "is_invalidated", False
-                        ):
-                            # Compute supremacy scores: confidence × R:R (capped at 99×10)
-                            def _supremacy(a: AutoAlert) -> float:
-                                conf = float(a.confidence or 60)
-                                try:
-                                    if a.ltp > 0 and a.target_level > 0 and a.stop_loss > 0:
-                                        risk = abs(a.ltp - a.stop_loss)
-                                        reward = abs(a.target_level - a.ltp)
-                                        rr = reward / max(0.01, risk)
-                                    else:
+                        if clean_target in _INDEX_SYMS_SET:
+                            if existing_opp.is_active and not getattr(
+                                existing_opp, "is_invalidated", False
+                            ):
+                                # Compute supremacy scores: confidence × R:R (capped at 99×10)
+                                def _supremacy(a: AutoAlert) -> float:
+                                    conf = float(a.confidence or 60)
+                                    try:
+                                        if a.ltp > 0 and a.target_level > 0 and a.stop_loss > 0:
+                                            risk = abs(a.ltp - a.stop_loss)
+                                            reward = abs(a.target_level - a.ltp)
+                                            rr = reward / max(0.01, risk)
+                                        else:
+                                            rr = 2.0
+                                    except Exception:
                                         rr = 2.0
+                                    raid_score = float(
+                                        (a.metrics or {}).get("smart_money_score") or 0.0
+                                    )
+                                    if raid_score > 0:
+                                        conf = max(conf, raid_score)
+                                    return conf * min(rr, 6.0)
+
+                                inc_score = _supremacy(alert)
+                                ext_score = _supremacy(existing_opp)
+
+                                # Detect regime; if CHOP_PINNED → mandate spreads on both
+                                _regime_tag = "NORMAL"
+                                try:
+                                    _regime_tag = self._get_index_intraday_regime(None, alert.ltp)
                                 except Exception:
-                                    rr = 2.0
-                                raid_score = float(
-                                    (a.metrics or {}).get("smart_money_score") or 0.0
-                                )
-                                if raid_score > 0:
-                                    conf = max(conf, raid_score)
-                                return conf * min(rr, 6.0)
+                                    pass
 
-                            inc_score = _supremacy(alert)
-                            ext_score = _supremacy(existing_opp)
-
-                            # Detect regime; if CHOP_PINNED → mandate spreads on both
-                            _regime_tag = "NORMAL"
-                            try:
-                                _regime_tag = self._get_index_intraday_regime(None, alert.ltp)
-                            except Exception:
-                                pass
-
-                            if _regime_tag in ("CHOP_PINNED", "CHOP_CONSOLIDATION"):
-                                # In chop regime: neither naked CE nor naked PE; mandate spreads
-                                for _leg in (alert, existing_opp):
-                                    if not isinstance(_leg.actionable_plan, dict):
-                                        _leg.actionable_plan = {}
-                                    _spread_type = (
-                                        "BULL_CALL_SPREAD"
-                                        if _leg.direction == "BULLISH"
-                                        else "BEAR_PUT_SPREAD"
+                                if _regime_tag in ("CHOP_PINNED", "CHOP_CONSOLIDATION"):
+                                    # In chop regime: neither naked CE nor naked PE; mandate spreads
+                                    for _leg in (alert, existing_opp):
+                                        if not isinstance(_leg.actionable_plan, dict):
+                                            _leg.actionable_plan = {}
+                                        _spread_type = (
+                                            "BULL_CALL_SPREAD"
+                                            if _leg.direction == "BULLISH"
+                                            else "BEAR_PUT_SPREAD"
+                                        )
+                                        _leg.actionable_plan["preferred_vehicle"] = _spread_type
+                                        _leg.actionable_plan["mandate_reason"] = (
+                                            f"CHOP_PINNED regime: naked {_leg.option_type or 'option'} has high whipsaw risk. "
+                                            f"Use defined-risk {_spread_type} to cap theta bleed."
+                                        )
+                                    self._save()
+                                    logger.info(
+                                        f"[AutoAlertEngine] 🔀 CHOP_PINNED Index Regime: Upgraded both "
+                                        f"{clean_target} CE+PE alerts to defined-risk spreads."
                                     )
-                                    _leg.actionable_plan["preferred_vehicle"] = _spread_type
-                                    _leg.actionable_plan["mandate_reason"] = (
-                                        f"CHOP_PINNED regime: naked {_leg.option_type or 'option'} has high whipsaw risk. "
-                                        f"Use defined-risk {_spread_type} to cap theta bleed."
-                                    )
-                                self._save()
-                                logger.info(
-                                    f"[AutoAlertEngine] 🔀 CHOP_PINNED Index Regime: Upgraded both "
-                                    f"{clean_target} CE+PE alerts to defined-risk spreads."
-                                )
 
-                            # If incoming has confirmed structural reversal or clear conviction supremacy on an untriggered early warning:
-                            has_reversal = bool(
-                                metrics_dict.get("choch")
-                                or metrics_dict.get("mss")
-                                or metrics_dict.get("pdh_sweep")
-                                or metrics_dict.get("pdl_sweep")
-                                or (alert.metrics or {}).get("pdh_sweep")
-                                or (alert.metrics or {}).get("pdl_sweep")
-                                or re.search(
-                                    r"\b(choch|mss|change of character|market structure shift|trend reversal|structural reversal)\b",
-                                    summary_str,
-                                    re.IGNORECASE,
+                                # If incoming has confirmed structural reversal or clear conviction supremacy on an untriggered early warning:
+                                has_reversal = bool(
+                                    metrics_dict.get("choch")
+                                    or metrics_dict.get("mss")
+                                    or metrics_dict.get("pdh_sweep")
+                                    or metrics_dict.get("pdl_sweep")
+                                    or (alert.metrics or {}).get("pdh_sweep")
+                                    or (alert.metrics or {}).get("pdl_sweep")
+                                    or re.search(
+                                        r"\b(choch|mss|change of character|market structure shift|trend reversal|structural reversal)\b",
+                                        summary_str,
+                                        re.IGNORECASE,
+                                    )
                                 )
-                            )
-                            if (
-                                has_reversal or inc_score > ext_score + 8
-                            ) and existing_opp.stage in ("EARLY_WARNING", "RADAR"):
-                                logger.info(
-                                    f"[AutoAlertEngine] ⚡ Structural Reversal / Conviction Supremacy on {clean_target}! "
-                                    f"Retiring untriggered {existing_opp.direction} {existing_opp.stage} alert in favor of "
-                                    f"{alert.direction} alert (Score {inc_score:.1f} vs {ext_score:.1f}, Reversal={has_reversal})."
-                                )
-                                existing_opp.is_invalidated = True
-                                existing_opp.stage = "INVALIDATED"
-                                existing_opp.invalidation_reason = f"Retired: Market structure shifted to {alert.direction} ({alert.alert_type})"
-                                self._save()
-                            else:
-                                # Without confirmed structural reversal, protect trader focus by suppressing opposing flip on same symbol
-                                logger.info(
-                                    f"[AutoAlertEngine] 🛑 Opposing Direction Guard: Suppressed conflicting "
-                                    f"{alert.direction} {clean_target} {alert.alert_type}. "
-                                    f"Active {existing_opp.direction} trade ({existing_opp.symbol}) is already in flight. "
-                                    f"Prohibit opposing flip on same symbol without confirmed structural reversal."
-                                )
-                                return False
+                                if (
+                                    has_reversal or inc_score > ext_score + 8
+                                ) and existing_opp.stage in ("EARLY_WARNING", "RADAR"):
+                                    logger.info(
+                                        f"[AutoAlertEngine] ⚡ Structural Reversal / Conviction Supremacy on {clean_target}! "
+                                        f"Retiring untriggered {existing_opp.direction} {existing_opp.stage} alert in favor of "
+                                        f"{alert.direction} alert (Score {inc_score:.1f} vs {ext_score:.1f}, Reversal={has_reversal})."
+                                    )
+                                    existing_opp.is_invalidated = True
+                                    existing_opp.stage = "INVALIDATED"
+                                    existing_opp.invalidation_reason = f"Retired: Market structure shifted to {alert.direction} ({alert.alert_type})"
+                                    self._save()
+                                else:
+                                    # Without confirmed structural reversal, protect trader focus by suppressing opposing flip on same symbol
+                                    logger.info(
+                                        f"[AutoAlertEngine] 🛑 Opposing Direction Guard: Suppressed conflicting "
+                                        f"{alert.direction} {clean_target} {alert.alert_type}. "
+                                        f"Active {existing_opp.direction} trade ({existing_opp.symbol}) is already in flight. "
+                                        f"Prohibit opposing flip on same symbol without confirmed structural reversal."
+                                    )
+                                    return False
                         else:
                             # ── Non-index: Standard CHoCH Whiplash Guard ──────────────────────
                             # Only verified structural reversals (CHoCH / MSS) can supersede an active setup.
@@ -1814,6 +1957,36 @@ class AutoAlertEngine:
                                 ]
                                 self._save()
 
+                # 1d. Post-Target Winner Fatigue Cooldown Gate:
+                # When an index option or index setup has reached target (TARGET_ACHIEVED / T1_ACHIEVED),
+                # the impulsive trend expansion has completed its primary leg.
+                # Suppress subsequent same-direction naked index entries within a 15-minute (900s) cooldown window
+                # to prevent buying into day high/low extension exhaustion (retail fatigue trap).
+                if not is_sim and alert.stage in ("IGNITED", "EARLY_WARNING"):
+                    _cand_idx = (
+                        clean_target
+                        if clean_target in _INDEX_SYMS_SET
+                        else (underlying_sym if underlying_sym in _INDEX_SYMS_SET else None)
+                    )
+                    if not _cand_idx:
+                        _c_str_up = (alert.contract_symbol or alert.symbol or "").upper()
+                        for _idx_k in _INDEX_SYMS_SET:
+                            if _idx_k in _c_str_up:
+                                _cand_idx = _idx_k
+                                break
+                    if _cand_idx and alert.direction in ("BULLISH", "BEARISH"):
+                        _last_win_time = self._winner_cooldowns.get(
+                            (_cand_idx, alert.direction.upper()), 0.0
+                        )
+                        if (now - _last_win_time) < 900.0:
+                            _rem_m = (900.0 - (now - _last_win_time)) / 60.0
+                            logger.info(
+                                f"[AutoAlertEngine] 🛑 Post-Target Winner Fatigue Cooldown active for {_cand_idx} {alert.direction}: "
+                                f"Prior setup reached target {int(now - _last_win_time)}s ago (< 900s, {_rem_m:.1f}m remaining). "
+                                f"Suppressing subsequent entry ({alert.alert_type}) to prevent buying exhaustion at extreme levels."
+                            )
+                            return False
+
                 # 2. Signature-based cooldown check (differentiating options contracts by symbol/strike)
                 c_tag = alert.contract_symbol or (
                     f"{alert.strike}_{alert.option_type}" if alert.strike else ""
@@ -1827,7 +2000,36 @@ class AutoAlertEngine:
                 # If a different detector is already tracking an active trade for this stock in the same direction today,
                 # suppress new initial alerts from other detectors (e.g. don't fire GAMMA_BLAST if
                 # OPTIONS_MOMENTUM or INTRADAY_SPARK is already active).
-                if alert.stage in ("IGNITED", "EARLY_WARNING"):
+                _INDEX_SYMS_SET = frozenset(
+                    {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"}
+                )
+                if (
+                    alert.stage in ("IGNITED", "EARLY_WARNING")
+                    and clean_target not in _INDEX_SYMS_SET
+                    and alert.alert_type != "AFTERNOON_THRUST"
+                ):
+
+                    def _is_recent_unbanked_trade(cand_a: Any) -> bool:
+                        if cand_a.stage in (
+                            "INVALIDATED",
+                            "COMPLETED",
+                            "EXPIRED",
+                            "TARGET_ACHIEVED",
+                            "T1_ACHIEVED",
+                            "T2_ACHIEVED",
+                            "TRAILING_UPDATE",
+                            "RUNNER_EXIT",
+                        ):
+                            return False
+                        try:
+                            c_str = (cand_a.created_at or "").replace(" IST", "").strip()
+                            cand_ts = datetime.fromisoformat(c_str).timestamp()
+                            if (now - cand_ts) >= 2700.0:  # 45 minutes
+                                return False
+                        except Exception:
+                            pass
+                        return True
+
                     active_diff_detector = next(
                         (
                             a
@@ -1843,8 +2045,7 @@ class AutoAlertEngine:
                             and a.alert_type != alert.alert_type
                             and a.is_active
                             and not a.is_invalidated
-                            and a.stage
-                            not in ("INVALIDATED", "COMPLETED", "EXPIRED", "TARGET_ACHIEVED")
+                            and _is_recent_unbanked_trade(a)
                             and a.alert_id != alert.alert_id
                             and (_alert_date(a) is None or _alert_date(a) == alert_dt_date)
                         ),
@@ -2385,6 +2586,13 @@ class AutoAlertEngine:
 
         # If an existing active alert was upgraded or aggregated with multi-radar confluence, dispatch immediately!
         if to_dispatch:
+            try:
+                from engine.thematic_peer_sympathy import thematic_sympathy_engine
+
+                thematic_sympathy_engine.record_leader_alert(to_dispatch)
+            except Exception as e_symp:
+                logger.debug(f"[AutoAlertEngine] Sympathy leader registration error: {e_symp}")
+
             self._dispatch(to_dispatch)
             return True
 
@@ -2714,6 +2922,13 @@ class AutoAlertEngine:
                 to_sub.append(to_dispatch.contract_symbol)
             self._auto_subscribe_stream(to_sub)
 
+            try:
+                from engine.thematic_peer_sympathy import thematic_sympathy_engine
+
+                thematic_sympathy_engine.record_leader_alert(to_dispatch)
+            except Exception as e_symp:
+                logger.debug(f"[AutoAlertEngine] Sympathy leader registration error: {e_symp}")
+
             self._dispatch(to_dispatch)
             return True
         return False
@@ -2838,6 +3053,16 @@ class AutoAlertEngine:
             )
         )
         is_stock = seg in ("FNO_STOCK", "EQUITY")
+        is_fno_stock = (seg == "FNO_STOCK") or bool(
+            not is_index
+            and (
+                alert.contract_symbol
+                or alert.strike
+                or getattr(alert, "option_type", None)
+                or getattr(alert, "derivative_type", "") in ("OPT", "FUT")
+            )
+        )
+        is_cash_equity = (seg == "EQUITY") and not is_fno_stock
         is_non_equity = (
             seg in ("COMMODITY", "CRYPTO", "CURRENCY")
             or getattr(alert, "exchange", "") in ("MCX", "CRYPTO", "BINANCE", "DERIBIT")
@@ -2864,27 +3089,35 @@ class AutoAlertEngine:
         # 4. Hourly Pacing & Rate Limit Throttles
         with self._lock:
             # Purge older than 3600 seconds
-            for cat in ("INDEX", "STOCKS"):
-                self._hourly_telegram_dispatches[cat] = [
-                    t for t in self._hourly_telegram_dispatches[cat] if (now_ts - t) < 3600.0
-                ]
+            for cat in ("INDEX", "STOCKS", "FNO_STOCK", "EQUITY"):
+                if cat in self._hourly_telegram_dispatches:
+                    self._hourly_telegram_dispatches[cat] = [
+                        t for t in self._hourly_telegram_dispatches[cat] if (now_ts - t) < 3600.0
+                    ]
 
             is_apex_opportunity = bool(
                 (alert.confidence and alert.confidence >= 95)
                 or (
                     isinstance(alert.metrics, dict)
-                    and alert.metrics.get("conviction_tier") == "SUPERPERFORMER"
+                    and alert.metrics.get("conviction_tier")
+                    in ("APEX_CONFLUENCE", "SUPERPERFORMER")
+                )
+                or (
+                    getattr(alert, "scrutiny", None)
+                    and getattr(alert.scrutiny, "tier", "") in ("APEX_CONFLUENCE", "SUPERPERFORMER")
                 )
             )
 
             if is_index:
-                # 4a. Index Daily Limits: Overall Daily + Session Halves (1st Half 4-6, 2nd Half 2-4)
+                # 4a. Index Daily Limits (10/day routine, up to 12/day APEX)
                 _today_idx = now_dt.strftime("%Y-%m-%d")
-                _total_idx_today = sum(self._index_half_telegram[_today_idx].values())
+                _total_idx_today = self._daily_index_telegram.get(
+                    _today_idx, sum(self._index_half_telegram[_today_idx].values())
+                )
                 _max_idx_daily = (
-                    10
+                    12
                     if is_apex_opportunity
-                    else int(os.environ.get("TELEGRAM_MAX_INDEX_ALERTS_PER_DAY", "8"))
+                    else int(os.environ.get("TELEGRAM_MAX_INDEX_ALERTS_PER_DAY", "10"))
                 )
                 if _total_idx_today >= _max_idx_daily:
                     return (
@@ -2892,28 +3125,9 @@ class AutoAlertEngine:
                         f"Telegram index daily limit reached ({_total_idx_today}/{_max_idx_daily} today)",
                     )
 
-                _is_first_half = now_time < dtime(12, 30)
-                _half_key = "FIRST_HALF" if _is_first_half else "SECOND_HALF"
-                _half_lbl = "1st half (09:15-12:30)" if _is_first_half else "2nd half (12:30-15:30)"
-                _base_half_cap = int(
-                    os.environ.get(
-                        "TELEGRAM_MAX_INDEX_ALERTS_FIRST_HALF"
-                        if _is_first_half
-                        else "TELEGRAM_MAX_INDEX_ALERTS_SECOND_HALF",
-                        "5" if _is_first_half else "3",
-                    )
-                )
-                _max_half_cap = (_base_half_cap + 1) if is_apex_opportunity else _base_half_cap
-                _current_half_count = self._index_half_telegram[_today_idx].get(_half_key, 0)
-                if _current_half_count >= _max_half_cap:
-                    return (
-                        False,
-                        f"Telegram index {_half_lbl} daily limit reached ({_current_half_count}/{_max_half_cap})",
-                    )
-
-                # 4b. Index Hourly Pacing (3/hr routine, up to 5/hr APEX)
+                # 4b. Index Hourly Pacing (4/hr routine, up to 5/hr APEX)
                 idx_count = len(self._hourly_telegram_dispatches["INDEX"])
-                _base_idx_hourly = int(os.environ.get("TELEGRAM_MAX_INDEX_ALERTS_PER_HOUR", "3"))
+                _base_idx_hourly = int(os.environ.get("TELEGRAM_MAX_INDEX_ALERTS_PER_HOUR", "4"))
                 _apex_idx_hourly = int(os.environ.get("TELEGRAM_MAX_INDEX_APEX_PER_HOUR", "5"))
                 max_idx_pacing = _apex_idx_hourly if is_apex_opportunity else _base_idx_hourly
                 if idx_count >= max_idx_pacing:
@@ -2922,69 +3136,170 @@ class AutoAlertEngine:
                         f"Telegram index hourly pacing limit reached ({idx_count}/{max_idx_pacing} in last 60m)",
                     )
             elif is_stock:
-                # 4c. Total Stock Hourly Pacing (6/hr routine, up to 8/hr APEX)
-                stk_count = len(self._hourly_telegram_dispatches["STOCKS"])
-                _base_stk_hourly = int(os.environ.get("TELEGRAM_MAX_STOCKS_PER_HOUR", "6"))
-                _apex_stk_hourly = int(os.environ.get("TELEGRAM_MAX_STOCKS_APEX_PER_HOUR", "8"))
-                max_stk_pacing = _apex_stk_hourly if is_apex_opportunity else _base_stk_hourly
-                if stk_count >= max_stk_pacing:
-                    return (
-                        False,
-                        f"Telegram stocks hourly pacing limit reached ({stk_count}/{max_stk_pacing} in last 60m)",
+                # 4c. Total Stock Hourly Pacing (Removed by default; opt-in if env var > 0)
+                # User mandate: Remove stocks and its options hourly/daily pacing limit.
+                # All valid stock and stock option setups dispatch without hourly/daily throttling.
+                _base_stk_hourly = int(
+                    os.environ.get(
+                        "TELEGRAM_MAX_FNO_STOCKS_PER_HOUR",
+                        os.environ.get("TELEGRAM_MAX_STOCKS_PER_HOUR", "0"),
                     )
-
-                # 4d. Stock Hourly per Sector (2/hr routine, up to 3/hr APEX - Prevents basket flooding)
-                _sec_id_pacing = str(
-                    (getattr(alert, "metrics", {}) or {}).get("sector_id", "")
-                ).lower()
-                if not _sec_id_pacing:
-                    try:
-                        from analysis.universe import get_stock_sector
-
-                        _sec_id_pacing, _ = get_stock_sector(alert.symbol)
-                        _sec_id_pacing = (_sec_id_pacing or "").lower()
-                    except Exception:
-                        _sec_id_pacing = ""
-                if _sec_id_pacing and _sec_id_pacing != "index":
-                    self._sector_hourly_telegram[_sec_id_pacing] = [
-                        t
-                        for t in self._sector_hourly_telegram[_sec_id_pacing]
-                        if (now_ts - t) < 3600.0
-                    ]
-                    sec_h_count = len(self._sector_hourly_telegram[_sec_id_pacing])
-                    _base_sec_hourly = int(
-                        os.environ.get("TELEGRAM_MAX_STOCK_HOURLY_PER_SECTOR", "2")
-                    )
-                    max_sec_hourly = 3 if is_apex_opportunity else _base_sec_hourly
-                    if sec_h_count >= max_sec_hourly:
-                        return (
-                            False,
-                            f"Telegram sector hourly pacing limit reached for '{_sec_id_pacing}' ({sec_h_count}/{max_sec_hourly} in last 60m)",
+                )
+                if _base_stk_hourly > 0:
+                    if (
+                        is_fno_stock
+                        and "FNO_STOCK" in self._hourly_telegram_dispatches
+                        and self._hourly_telegram_dispatches["FNO_STOCK"]
+                    ):
+                        stk_count = len(self._hourly_telegram_dispatches["FNO_STOCK"])
+                        _apex_stk_hourly = int(
+                            os.environ.get(
+                                "TELEGRAM_MAX_FNO_STOCKS_APEX_PER_HOUR",
+                                os.environ.get(
+                                    "TELEGRAM_MAX_STOCKS_APEX_PER_HOUR",
+                                    str(_base_stk_hourly + 5),
+                                ),
+                            )
+                        )
+                    elif (
+                        is_cash_equity
+                        and "EQUITY" in self._hourly_telegram_dispatches
+                        and self._hourly_telegram_dispatches["EQUITY"]
+                    ):
+                        stk_count = len(self._hourly_telegram_dispatches["EQUITY"])
+                        _base_stk_hourly = int(
+                            os.environ.get(
+                                "TELEGRAM_MAX_EQUITY_PER_HOUR",
+                                os.environ.get("TELEGRAM_MAX_STOCKS_PER_HOUR", "0"),
+                            )
+                        )
+                        _apex_stk_hourly = int(
+                            os.environ.get(
+                                "TELEGRAM_MAX_EQUITY_APEX_PER_HOUR",
+                                os.environ.get(
+                                    "TELEGRAM_MAX_STOCKS_APEX_PER_HOUR",
+                                    str(_base_stk_hourly + 5),
+                                ),
+                            )
+                        )
+                    else:
+                        stk_count = len(self._hourly_telegram_dispatches.get("STOCKS", []))
+                        _apex_stk_hourly = int(
+                            os.environ.get(
+                                "TELEGRAM_MAX_STOCKS_APEX_PER_HOUR",
+                                str(_base_stk_hourly + 5),
+                            )
                         )
 
+                    max_stk_pacing = (
+                        _apex_stk_hourly
+                        if (is_apex_opportunity and _apex_stk_hourly > 0)
+                        else _base_stk_hourly
+                    )
+                    if stk_count >= max_stk_pacing:
+                        return (
+                            False,
+                            f"Telegram stocks hourly pacing limit reached ({stk_count}/{max_stk_pacing} in last 60m)",
+                        )
+
+                # 4d. Optional Total Stock Daily Cap (if configured via env var > 0)
+                _conf_stk_daily = int(os.environ.get("TELEGRAM_MAX_STOCKS_PER_DAY", "0"))
+                if _conf_stk_daily > 0:
+                    _today_stk = now_dt.strftime("%Y-%m-%d")
+                    _total_stk_today = sum(self._sector_daily_telegram[_today_stk].values())
+                    _apex_stk_daily = int(
+                        os.environ.get(
+                            "TELEGRAM_MAX_STOCKS_APEX_PER_DAY",
+                            str(_conf_stk_daily + 5),
+                        )
+                    )
+                    _max_stk_daily = _apex_stk_daily if is_apex_opportunity else _conf_stk_daily
+                    if _total_stk_today >= _max_stk_daily:
+                        return (
+                            False,
+                            f"Telegram stocks daily limit reached ({_total_stk_today}/{_max_stk_daily} today)",
+                        )
+
+                # 4e. Stock Hourly per Sector (Removed by default; opt-in if env var > 0)
+                _base_sec_hourly = int(os.environ.get("TELEGRAM_MAX_STOCK_HOURLY_PER_SECTOR", "0"))
+                if _base_sec_hourly > 0:
+                    _sec_id_pacing = str(
+                        (getattr(alert, "metrics", {}) or {}).get("sector_id", "")
+                    ).lower()
+                    if not _sec_id_pacing:
+                        try:
+                            from analysis.universe import get_stock_sector
+
+                            _sec_id_pacing, _ = get_stock_sector(alert.symbol)
+                            _sec_id_pacing = (_sec_id_pacing or "").lower()
+                        except Exception:
+                            _sec_id_pacing = ""
+                    if _sec_id_pacing and _sec_id_pacing != "index":
+                        self._sector_hourly_telegram[_sec_id_pacing] = [
+                            t
+                            for t in self._sector_hourly_telegram[_sec_id_pacing]
+                            if (now_ts - t) < 3600.0
+                        ]
+                        sec_h_count = len(self._sector_hourly_telegram[_sec_id_pacing])
+                        _apex_sec_hourly = int(
+                            os.environ.get(
+                                "TELEGRAM_MAX_STOCK_APEX_PER_SECTOR",
+                                str(_base_sec_hourly + 2),
+                            )
+                        )
+                        max_sec_hourly = (
+                            _apex_sec_hourly if is_apex_opportunity else _base_sec_hourly
+                        )
+                        if sec_h_count >= max_sec_hourly:
+                            return (
+                                False,
+                                f"Telegram sector hourly pacing limit reached for '{_sec_id_pacing}' ({sec_h_count}/{max_sec_hourly} in last 60m)",
+                            )
+
         # 5. Conviction Floor
+        _quant_model_whitelist = (
+            "STAGE_1_TO_2_EXPANSION",
+            "RRG_SECTOR_ROTATION",
+            "SMC_SPRING_SWEEP",
+            "SQUEEZE_BREAKOUT",
+            "SQUEEZE_BREAKDOWN",
+            "TTM_SQUEEZE_EXPLOSION",
+            "GAMMA_BLAST",
+            "OPTIONS_MOMENTUM",
+            "MULTIBAGGER",
+            "COMMODITY_MOMENTUM",
+            "CURRENCY_BREAKOUT",
+        )
         _calibrated_bar_whitelist = (
             "PRECURSOR_RADAR",
             "ASYMMETRIC_OPPORTUNITY",
-            "COMMODITY_MOMENTUM",
-            "CURRENCY_BREAKOUT",
             "CRYPTO_SQUEEZE",
             "CRYPTO_MOMENTUM",
             "CRYPTO_VOLATILITY",
             "CRYPTO_BREAKOUT",
-        )
+        ) + _quant_model_whitelist
         is_calibrated = (alert.alert_type in _calibrated_bar_whitelist) or is_non_equity
-        # Calibrated bar: indices require 88%, commodities and currency require 80% (defined-risk options/futures), crypto 85%
-        if is_index:
+        # Calibrated bar: indices require 88%, verified quant models require 80%, commodities and currency require 80%, crypto 85%
+        pref_min = getattr(alert_preferences.telegram, "min_confidence", 85)
+        if pref_min > 85:
+            min_conf = pref_min
+        elif is_index:
             min_conf = 88
-        elif alert.alert_type in ("COMMODITY_MOMENTUM", "CURRENCY_BREAKOUT"):
+        elif alert.alert_type in _quant_model_whitelist:
             min_conf = 80
         elif is_non_equity:
             min_conf = 85
         elif is_calibrated:
             min_conf = 82
         else:
-            min_conf = getattr(alert_preferences.telegram, "min_confidence", 85)
+            min_conf = pref_min
+
+        _env_tg_min = os.environ.get("TELEGRAM_MIN_CONFIDENCE")
+        if _env_tg_min:
+            try:
+                min_conf = min(min_conf, int(_env_tg_min))
+            except Exception:
+                pass
 
         is_lifecycle_update = bool(
             getattr(alert, "telegram_dispatched", False)
@@ -3025,11 +3340,19 @@ class AutoAlertEngine:
                 entry_ref = float(alert.ltp)
 
             risk_pts = (alert.stop_loss - entry_ref) if is_short else (entry_ref - alert.stop_loss)
-            reward_pts = (
-                (entry_ref - alert.target_level) if is_short else (alert.target_level - entry_ref)
-            )
+            t_ref = alert.target_level
+            reward_pts = (entry_ref - t_ref) if is_short else (t_ref - entry_ref)
             if risk_pts > 0 and reward_pts > 0:
                 rr_ratio = reward_pts / risk_pts
+                plan_rr_str = str(
+                    (getattr(alert, "actionable_plan", {}) or {}).get("risk_reward", "")
+                )
+                if "1:" in plan_rr_str:
+                    try:
+                        p_rr = float(plan_rr_str.split("1:")[1].split()[0])
+                        rr_ratio = max(rr_ratio, p_rr)
+                    except Exception:
+                        pass
                 min_rr = 1.8 if is_non_equity else (1.6 if is_index else 1.4)
                 if rr_ratio < min_rr:
                     return False, f"R:R 1:{rr_ratio:.1f} below minimum 1:{min_rr:.1f} threshold"
@@ -3434,9 +3757,32 @@ class AutoAlertEngine:
             )
 
         # 12. Segment Pacing Throttle (Burst protection)
+        # CRITICAL REFINEMENT:
+        # A. APEX opportunities (conviction_tier in APEX_CONFLUENCE/SUPERPERFORMER or confidence >= 95)
+        #    MUST NOT be blocked by cross-symbol pacing cooldowns.
+        # B. Distinct benchmark indices (NIFTY vs MIDCPNIFTY vs BANKNIFTY) are independent instruments
+        #    and must not throttle each other.
+        is_apex_bypass = bool(
+            is_apex_opportunity
+            or alert.confidence >= 95
+            or (
+                isinstance(metrics, dict)
+                and metrics.get("conviction_tier") in ("APEX_CONFLUENCE", "SUPERPERFORMER")
+            )
+            or (
+                getattr(alert, "scrutiny", None)
+                and getattr(alert.scrutiny, "tier", "") in ("APEX_CONFLUENCE", "SUPERPERFORMER")
+            )
+        )
+        pacing_sym_key = f"PACING:{seg or 'GENERAL'}:{alert.symbol}"
+        last_pace_sym_t = self._dispatch_cooldowns.get(pacing_sym_key, 0.0)
         pacing_key = f"PACING:{seg or 'GENERAL'}"
         last_pace_t = self._dispatch_cooldowns.get(pacing_key, 0.0)
-        burst_cooldown = 15.0 if alert.confidence >= 90 else 45.0
+        if is_index or seg == "FNO_INDEX":
+            burst_cooldown = 0.0 if (is_apex_bypass or alert.confidence >= 90) else 15.0
+        else:
+            burst_cooldown = 0.0 if is_apex_bypass else (15.0 if alert.confidence >= 90 else 45.0)
+
         is_synthetic_test = getattr(alert, "environment", "") in (
             "TEST",
             "SIMULATION",
@@ -3444,46 +3790,51 @@ class AutoAlertEngine:
             alert.alert_id.startswith(("test-", "sim-", "mock-", "live-", "auto-"))
             and not alert.alert_id.startswith("opt-pacing-")
         )
-        if not is_synthetic_test and (now_ts - last_pace_t) < burst_cooldown:
-            return (
-                False,
-                f"Telegram pacing throttle active on {seg} ({int(now_ts - last_pace_t)}s < {int(burst_cooldown)}s)",
-            )
+        if not is_synthetic_test and burst_cooldown > 0:
+            if (now_ts - last_pace_sym_t) < burst_cooldown:
+                return (
+                    False,
+                    f"Telegram pacing throttle active on {alert.symbol} ({int(now_ts - last_pace_sym_t)}s < {int(burst_cooldown)}s)",
+                )
+            if seg != "FNO_INDEX" and (now_ts - last_pace_t) < burst_cooldown:
+                return (
+                    False,
+                    f"Telegram pacing throttle active on {seg} ({int(now_ts - last_pace_t)}s < {int(burst_cooldown)}s)",
+                )
 
-        # 13. Sector Daily Cap
-        _sector_rs_val = float(metrics.get("sector_rs", 0.0) or 0.0)
-        _TG_SECTOR_CAP = (
-            4
-            if (_sector_rs_val >= 1.0 or alert.confidence >= 92)
-            else (3 if alert.confidence >= 88 else 2)
-        )
+        # 13. Sector Daily Cap (Removed by default; opt-in if env var > 0)
         _conf_sec_cap = int(os.environ.get("TELEGRAM_MAX_STOCK_ALERTS_PER_SECTOR_DAY", "0"))
         if _conf_sec_cap > 0:
-            _TG_SECTOR_CAP = min(_TG_SECTOR_CAP, _conf_sec_cap)
+            _sector_rs_val = float(metrics.get("sector_rs", 0.0) or 0.0)
+            _TG_SECTOR_CAP = (
+                _conf_sec_cap + 2
+                if (is_apex_opportunity or _sector_rs_val >= 1.0 or alert.confidence >= 92)
+                else (_conf_sec_cap + 1 if alert.confidence >= 88 else _conf_sec_cap)
+            )
 
-        is_stock_opt = (seg == "FNO_STOCK") or (
-            not is_index and alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
-        )
-        if is_stock_opt:
-            _today_tg = now_dt.strftime("%Y-%m-%d")
-            _sec_tg = metrics.get("sector_id")
-            if not _sec_tg:
-                try:
-                    from analysis.universe import get_stock_sector
+            is_stock_opt = (seg == "FNO_STOCK") or (
+                not is_index and alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+            )
+            if is_stock_opt:
+                _today_tg = now_dt.strftime("%Y-%m-%d")
+                _sec_tg = metrics.get("sector_id")
+                if not _sec_tg:
+                    try:
+                        from analysis.universe import get_stock_sector
 
-                    _sec_tg, _ = get_stock_sector(alert.symbol)
-                except Exception:
-                    _sec_tg = None
-            if _sec_tg and _sec_tg != "index":
-                _sec_tg_k = str(_sec_tg).lower()
-                _tg_count = self._sector_daily_telegram[_today_tg].get(
-                    _sec_tg_k, 0
-                ) or self._sector_daily_telegram[_today_tg].get(_sec_tg, 0)
-                if _tg_count >= _TG_SECTOR_CAP:
-                    return (
-                        False,
-                        f"Telegram sector cap ({_TG_SECTOR_CAP}/{_TG_SECTOR_CAP}) reached for '{_sec_tg}' today",
-                    )
+                        _sec_tg, _ = get_stock_sector(alert.symbol)
+                    except Exception:
+                        _sec_tg = None
+                if _sec_tg and _sec_tg != "index":
+                    _sec_tg_k = str(_sec_tg).lower()
+                    _tg_count = self._sector_daily_telegram[_today_tg].get(
+                        _sec_tg_k, 0
+                    ) or self._sector_daily_telegram[_today_tg].get(_sec_tg, 0)
+                    if _tg_count >= _TG_SECTOR_CAP:
+                        return (
+                            False,
+                            f"Telegram sector cap ({_TG_SECTOR_CAP}/{_TG_SECTOR_CAP}) reached for '{_sec_tg}' today",
+                        )
 
         return True, "PASSED_APEX_GATE"
 
@@ -3638,6 +3989,30 @@ class AutoAlertEngine:
                             alert.target_status = "PENDING"
                     self._save()
                 return
+
+        # Update Post-Target Winner Fatigue Cooldown for Index Assets
+        if (is_t1 or is_final) and alert.direction:
+            _raw_sym = getattr(alert, "contract_symbol", "") or alert.symbol or ""
+            _clean = self._clean_sym(alert.symbol)
+            _underlying = (
+                (alert.metrics or {}).get("underlying") if isinstance(alert.metrics, dict) else None
+            )
+            _idx_cand = (
+                _clean
+                if _clean in _INDEX_SYMS_SET
+                else (_underlying if _underlying in _INDEX_SYMS_SET else None)
+            )
+            if not _idx_cand:
+                for _idx_k in _INDEX_SYMS_SET:
+                    if _idx_k in _raw_sym.upper():
+                        _idx_cand = _idx_k
+                        break
+            if _idx_cand:
+                self._winner_cooldowns[(_idx_cand, alert.direction.upper())] = time.time()
+                logger.info(
+                    f"[AutoAlertEngine] 🏆 Post-Target Winner Cooldown initiated for {_idx_cand} {alert.direction.upper()}: "
+                    f"Prior trade hit {'Target 1' if is_t1 else 'Final Target'}. 15-minute fatigue cooldown activated."
+                )
 
         from engine.alert_preferences import alert_preferences
 
@@ -3921,6 +4296,9 @@ class AutoAlertEngine:
                     return
 
             from engine.alerts import _telegram_notify
+            from engine.alert_preferences import classify_alert_segment
+
+            target_seg = getattr(alert, "segment", None) or classify_alert_segment(alert)
 
             # Anti-flood / deduplication filter for Telegram channel
             now_ts = time.time()
@@ -4067,18 +4445,56 @@ class AutoAlertEngine:
                     self._dispatch_cooldowns[m_key] = now_ts
 
                 elif alert.stage == "EARLY_WARNING":
-                    m_key = f"{alert.symbol}:{alert.alert_type}:EARLY"
+                    c_key_suffix = (
+                        f":{alert.contract_symbol}"
+                        if getattr(alert, "contract_symbol", None)
+                        else (
+                            f":{alert.strike}:{alert.option_type}"
+                            if getattr(alert, "strike", None)
+                            else ""
+                        )
+                    )
+                    v_suffix = ":v2" if "-v2" in aid else ""
+                    m_key = f"{alert.symbol}:{alert.alert_type}{c_key_suffix}{v_suffix}:EARLY"
                     last_e = self._dispatch_cooldowns.get(m_key, 0.0)
-                    if (now_ts - last_e) < 1800.0:
-                        _suppress_tg("Early warning 30m cooldown active")
+                    is_idx_or_apex = bool(
+                        target_seg == "FNO_INDEX"
+                        or alert.confidence >= 95
+                        or getattr(alert, "conviction_tier", "")
+                        in ("APEX_CONFLUENCE", "SUPERPERFORMER")
+                    )
+                    ew_cooldown = 180.0 if is_idx_or_apex else 1800.0
+                    if (now_ts - last_e) < ew_cooldown:
+                        _suppress_tg(
+                            f"Early warning cooldown active ({int(now_ts - last_e)}s < {int(ew_cooldown)}s)"
+                        )
                         return
                     self._dispatch_cooldowns[m_key] = now_ts
 
                 elif alert.stage == "IGNITED":
-                    m_key = f"{alert.symbol}:{alert.alert_type}:IGNITED"
+                    c_key_suffix = (
+                        f":{alert.contract_symbol}"
+                        if getattr(alert, "contract_symbol", None)
+                        else (
+                            f":{alert.strike}:{alert.option_type}"
+                            if getattr(alert, "strike", None)
+                            else ""
+                        )
+                    )
+                    v_suffix = ":v2" if "-v2" in aid else ""
+                    m_key = f"{alert.symbol}:{alert.alert_type}{c_key_suffix}{v_suffix}:IGNITED"
                     last_i = self._dispatch_cooldowns.get(m_key, 0.0)
-                    if (now_ts - last_i) < 1800.0:
-                        _suppress_tg("Ignited 30m cooldown active")
+                    is_idx_or_apex = bool(
+                        target_seg == "FNO_INDEX"
+                        or alert.confidence >= 95
+                        or getattr(alert, "conviction_tier", "")
+                        in ("APEX_CONFLUENCE", "SUPERPERFORMER")
+                    )
+                    ignited_cooldown = 180.0 if is_idx_or_apex else 1800.0
+                    if (now_ts - last_i) < ignited_cooldown:
+                        _suppress_tg(
+                            f"Ignited cooldown active ({int(now_ts - last_i)}s < {int(ignited_cooldown)}s)"
+                        )
                         return
                     self._dispatch_cooldowns[m_key] = now_ts
 
@@ -4248,6 +4664,7 @@ class AutoAlertEngine:
                 if not is_milestone:
                     seg_lbl = alert_dict.get("segment") or "GENERAL"
                     self._dispatch_cooldowns[f"PACING:{seg_lbl}"] = now_ts
+                    self._dispatch_cooldowns[f"PACING:{seg_lbl}:{alert.symbol}"] = now_ts
                     # Update rolling hourly pacing tracker
                     _clean_t = self._clean_sym(alert.symbol)
                     is_idx_tg = (
@@ -4269,12 +4686,25 @@ class AutoAlertEngine:
                     _now_time_tg = datetime.now(IST).time()
                     if is_idx_tg:
                         self._hourly_telegram_dispatches["INDEX"].append(now_ts)
+                        self._daily_index_telegram[_today_tg] = (
+                            self._daily_index_telegram.get(_today_tg, 0) + 1
+                        )
                         _half_k = "FIRST_HALF" if _now_time_tg < dtime(12, 30) else "SECOND_HALF"
                         self._index_half_telegram[_today_tg][_half_k] = (
                             self._index_half_telegram[_today_tg].get(_half_k, 0) + 1
                         )
                     else:
-                        self._hourly_telegram_dispatches["STOCKS"].append(now_ts)
+                        self._hourly_telegram_dispatches.setdefault("STOCKS", []).append(now_ts)
+                        is_fno_tg = (seg_lbl == "FNO_STOCK") or bool(
+                            alert.contract_symbol
+                            and any(x in alert.contract_symbol for x in ("CE", "PE", "FUT"))
+                        )
+                        if is_fno_tg:
+                            self._hourly_telegram_dispatches.setdefault("FNO_STOCK", []).append(
+                                now_ts
+                            )
+                        else:
+                            self._hourly_telegram_dispatches.setdefault("EQUITY", []).append(now_ts)
 
                     # Update per-sector Telegram dispatch counter and sector hourly pacing
                     _sec_tg = (getattr(alert, "metrics", {}) or {}).get("sector_id")
@@ -4708,7 +5138,58 @@ class AutoAlertEngine:
             logger.info(
                 f"[AutoAlertEngine] Alert {alert.alert_id} TIME-STOP EXPIRED ({loop_context}): {reason}"
             )
-            return False
+        elif (
+            "invalidated prior to trigger" in reason.lower()
+            or "never entered" in reason.lower()
+            or (
+                not getattr(alert, "has_triggered", True)
+                and alert.stage in ("STALK", "EARLY_WARNING", "PRIMED")
+                and not has_hit_target
+            )
+        ):
+            # Untriggered Radar Setup Disqualification:
+            # The setup anchor was breached before entry was ever filled.
+            # Capital was NEVER at risk; trade was NEVER entered. Realized PnL is strictly 0.0R.
+            with self._lock:
+                alert.is_invalidated = True
+                alert.stage = "EXPIRED"
+                alert.target_status = "SETUP_DISQUALIFIED"
+                alert.is_active = False
+                alert.should_trail = False
+                alert.trailing_decision = "SETUP_DISQUALIFIED"
+                alert.is_archived = True
+                alert.archived_at = now_iso
+                alert.archive_reason = f"Setup Disqualified: Anchor breached before trigger was reached. Trade was never entered ({reason})."
+                alert.invalidation_reason = alert.archive_reason
+                alert.r_multiple = 0.0
+                alert.pnl_pct = 0.0
+                if alert.achieved_milestones is None:
+                    alert.achieved_milestones = []
+                if "SETUP_DISQUALIFIED" not in alert.achieved_milestones:
+                    alert.achieved_milestones.append("SETUP_DISQUALIFIED")
+                alert.headline = (
+                    f"🛑 {tag} SETUP DISQUALIFIED: {alert.symbol} (Untriggered Invalidation)"
+                )
+                alert.summary = alert.archive_reason
+                if hasattr(alert, "record_audit"):
+                    alert.record_audit(
+                        "SETUP_DISQUALIFIED",
+                        alert.archive_reason,
+                        actor="INTERCEPTION_RADAR",
+                        details={
+                            "reason": reason,
+                            "exit_price": exit_p,
+                            "r_multiple": 0.0,
+                            "pnl_pct": 0.0,
+                        },
+                    )
+                self._save()
+
+            self._dispatch(alert)
+            logger.info(
+                f"[AutoAlertEngine] Alert {alert.alert_id} SETUP DISQUALIFIED ({loop_context}): {reason} (Trade was never entered, PnL=0.0R)"
+            )
+            return True
 
         else:
             # Genuine Invalidation (Stop-Loss Breach)
@@ -4783,27 +5264,208 @@ class AutoAlertEngine:
             except Exception as e:
                 logger.debug(f"[AutoAlertEngine] Error invalidating pattern outcomes: {e}")
 
-            # Record loss outcome in detector circuit breaker
+            # Record outcome in detector circuit breaker
             try:
                 from engine.detector_circuit_breaker import detector_circuit_breaker
+
+                # Institutional Guard: An alert that already achieved Target 1 / Target 2
+                # or closed with positive R is a WIN or profitable scale-out, NOT a LOSS.
+                has_hit_win = bool(
+                    alert.has_hit_target
+                    or (
+                        alert.achieved_milestones
+                        and any(
+                            m in alert.achieved_milestones
+                            for m in (
+                                "T0_5",
+                                "T1",
+                                "T2",
+                                "T3",
+                                "RUNNER_CLOSED",
+                                "T0_5_ACHIEVED",
+                                "T1_ACHIEVED",
+                                "T2_ACHIEVED",
+                            )
+                        )
+                    )
+                    or (alert.r_multiple is not None and alert.r_multiple > 0.0)
+                    or (alert.pnl_pct is not None and alert.pnl_pct > 0.0)
+                )
+                cb_outcome = "WIN" if has_hit_win else "LOSS"
+                cb_r = float(
+                    alert.r_multiple
+                    if alert.r_multiple is not None
+                    else (1.0 if has_hit_win else -1.0)
+                )
 
                 detector_circuit_breaker.record_outcome(
                     alert_id=alert.alert_id,
                     symbol=alert.symbol,
                     alert_type=alert.alert_type,
-                    outcome="LOSS",
-                    realized_r=float(alert.r_multiple if alert.r_multiple is not None else -1.0),
+                    outcome=cb_outcome,
+                    realized_r=cb_r,
                 )
             except Exception as e_cb:
                 logger.debug(
-                    f"[AutoAlertEngine] Error recording loss to detector circuit breaker: {e_cb}"
+                    f"[AutoAlertEngine] Error recording outcome to detector circuit breaker: {e_cb}"
                 )
 
             self._dispatch(alert)
             logger.warning(
                 f"[AutoAlertEngine] Alert {alert.alert_id} INVALIDATED ({loop_context}): {reason}"
             )
+
+            # Evaluate Wyckoff Trap Inversion (Spring / Turtle Soup)
+            try:
+                self._evaluate_wyckoff_trap_inversion(alert, reason, exit_p, now_iso)
+            except Exception as e_inv:
+                logger.debug(
+                    f"[AutoAlertEngine] Wyckoff trap inversion evaluation bypassed: {e_inv}"
+                )
+
             return True
+
+    def _evaluate_wyckoff_trap_inversion(
+        self,
+        alert: AutoAlert,
+        invalidation_reason: str,
+        exit_price: float,
+        now_iso: str,
+    ) -> Optional[AutoAlert]:
+        """
+        Wyckoff Trap Inversion & Turtle Soup Reversal Protocol:
+        When an active momentum or breakout setup is invalidated by an upper/lower wick rejection
+        or false breakout, inverts the trapped retail liquidity into an institutional counter-trade setup.
+        """
+        atype_upper = str(alert.alert_type).upper()
+        eligible_types = (
+            "BREAKOUT",
+            "ORB_BREAKOUT",
+            "ORB_BREAKDOWN",
+            "SQUEEZE_BREAKOUT",
+            "SQUEEZE_BREAKDOWN",
+            "MOMENTUM",
+            "OPTIONS_MOMENTUM",
+            "INDEX_CALL_SETUP",
+            "INDEX_PUT_SETUP",
+            "OPENING_DRIVE",
+            "INTRADAY_EQUITY",
+        )
+        if not any(et in atype_upper for et in eligible_types):
+            return None
+
+        r_lower = invalidation_reason.lower()
+        if any(skip_k in r_lower for skip_k in ("session close", "cutoff", "manual", "expired")):
+            return None
+
+        is_failed_bull = (
+            alert.direction in ("BULLISH", "LONG", "BUY")
+            or getattr(alert, "option_type", "") == "CE"
+        )
+        inv_dir = "BEARISH" if is_failed_bull else "BULLISH"
+        inv_label = "Bearish Upthrust" if is_failed_bull else "Bullish Spring"
+
+        ltp_val = exit_price if exit_price > 0 else (alert.ltp or 0.0)
+        if ltp_val <= 0:
+            return None
+
+        peak_level = max(float(alert.trigger_level or ltp_val), float(alert.ltp or ltp_val))
+        trough_level = min(float(alert.trigger_level or ltp_val), float(alert.ltp or ltp_val))
+
+        if is_failed_bull:
+            stop_loss = round(peak_level * 1.006, 2)
+            risk = abs(stop_loss - ltp_val)
+            if risk <= 0:
+                risk = ltp_val * 0.008
+                stop_loss = round(ltp_val + risk, 2)
+            target_1 = round(ltp_val - (2.5 * risk), 2)
+        else:
+            stop_loss = round(trough_level * 0.994, 2)
+            risk = abs(ltp_val - stop_loss)
+            if risk <= 0:
+                risk = ltp_val * 0.008
+                stop_loss = round(ltp_val - risk, 2)
+            target_1 = round(ltp_val + (2.5 * risk), 2)
+
+        clean_sym = canonical_alert_symbol(alert.symbol)
+        inv_id = generate_alert_id(
+            symbol=clean_sym,
+            alert_type="TURTLE_SOUP",
+            session_date=datetime.now(IST).date(),
+            variant=f"trap-inv-{'short' if is_failed_bull else 'long'}",
+        )
+
+        with self._lock:
+            if any(a.alert_id == inv_id for a in self._alerts):
+                return None
+
+        headline = f"🐢 [WYCKOFF TRAP INVERSION] {clean_sym} {inv_label}: Inverting Failed {alert.alert_type}"
+        summary = (
+            f"Institutional liquidity trap inversion: {clean_sym} false {'breakout' if is_failed_bull else 'breakdown'} "
+            f"trapped retail traders. Reversing into asymmetric predatory counter-trade (R:R 1:2.5)."
+        )
+
+        m_dict = {
+            "is_trap_inversion": True,
+            "parent_alert_id": alert.alert_id,
+            "trap_reason": invalidation_reason,
+            "rvol": float(getattr(alert, "rvol", 1.5) or 1.5),
+            "underlying_symbol": clean_sym,
+        }
+
+        inv_alert = AutoAlert(
+            alert_id=inv_id,
+            alert_type="TURTLE_SOUP_SWEEP",
+            stage="IGNITED",
+            symbol=alert.symbol,
+            exchange=alert.exchange or "NSE",
+            direction=inv_dir,
+            headline=headline,
+            summary=summary,
+            ltp=ltp_val,
+            trigger_level=ltp_val,
+            stop_loss=stop_loss,
+            target_level=target_1,
+            time_horizon=alert.time_horizon or "INTRADAY",
+            is_live=alert.is_live,
+            environment=alert.environment,
+            confidence=85.0,
+            metrics=m_dict,
+        )
+
+        passed, reason_s, flags = self._auditor.verify_tier1_sanity(inv_alert)
+        if not passed:
+            logger.debug(f"[AutoAlertEngine] Trap inversion {inv_id} vetoed by sanity: {reason_s}")
+            return None
+
+        t2_val = round(ltp_val + (3.5 * risk * (1 if not is_failed_bull else -1)), 2)
+        runner_val = round(ltp_val + (5.0 * risk * (1 if not is_failed_bull else -1)), 2)
+        no_chase_val = round(ltp_val + (0.5 * risk * (1 if not is_failed_bull else -1)), 2)
+
+        inv_alert.actionable_plan = ActionableBlueprint(
+            action="SELL" if is_failed_bull else "BUY",
+            entry_range=f"₹{ltp_val * 0.998:,.2f} – ₹{ltp_val * 1.002:,.2f}",
+            trigger_level=ltp_val,
+            invalidation_stop=stop_loss,
+            target_1=target_1,
+            target_2=t2_val,
+            runner_target=runner_val,
+            risk_reward="1:2.5",
+            no_chase_boundary=no_chase_val,
+            execution_style="LIMIT_ON_PULLBACK",
+            when_to_buy=f"Limit order at OTE pullback near ₹{ltp_val:,.2f} after structural trap rejection.",
+            when_to_wait=f"Do not chase if spot moves beyond ₹{no_chase_val:,.2f}.",
+            profit_rule="Book 50% at Target 1 (+2R) and shift SL to Breakeven (+0.2%). Trail runner to Target 2.",
+            segment=getattr(alert, "segment", "") or "EQUITY",
+        )
+
+        with self._lock:
+            self._alerts.append(inv_alert)
+            self._save()
+
+        self._dispatch(inv_alert)
+        logger.info(f"[AutoAlertEngine] 🎯 Executed Wyckoff Trap Inversion: {inv_id} ({inv_dir})")
+        return inv_alert
 
     def check_and_alert_invalidations(
         self, exchanges: Optional[list[str]] = None
@@ -5118,7 +5780,6 @@ class AutoAlertEngine:
                     is_asym_setup = alert.alert_type in (
                         "ASYMMETRIC_OPPORTUNITY",
                         "POCKET_PIVOT",
-                        "PRECURSOR_RADAR",
                     )
                     if dist_ratio <= 0.0025:
                         if is_payoff_up and (sl <= 0 or cur_ltp > sl):
@@ -5255,11 +5916,19 @@ class AutoAlertEngine:
                                 self._save()
 
                     with self._lock:
-                        prom_reason = (
-                            f"Limit entry ₹{trigger:,.2f} filled at LTP ₹{cur_ltp:,.2f}"
-                            if is_pullback
-                            else f"Trigger level ₹{trigger:,.2f} crossed by LTP ₹{cur_ltp:,.2f}"
+                        is_actual_cross = (is_payoff_up and cur_ltp >= trigger) or (
+                            not is_payoff_up and cur_ltp <= trigger
                         )
+                        if is_pullback:
+                            prom_reason = (
+                                f"Limit entry ₹{trigger:,.2f} filled at LTP ₹{cur_ltp:,.2f}"
+                            )
+                        elif not is_actual_cross:
+                            prom_reason = f"Pre-ignition trigger at LTP ₹{cur_ltp:,.2f} (within 0.25% proximity to trigger ₹{trigger:,.2f})"
+                        else:
+                            prom_reason = (
+                                f"Trigger level ₹{trigger:,.2f} crossed by LTP ₹{cur_ltp:,.2f}"
+                            )
                         alert.promote_stage(
                             "IGNITED",
                             reason=prom_reason,
@@ -5621,24 +6290,46 @@ class AutoAlertEngine:
 
         for alert in candidates:
             seg = getattr(alert, "segment", None) or classify_alert_segment(alert)
+            pacing_sym_key = f"PACING:{seg or 'GENERAL'}:{alert.symbol}"
+            last_pace_sym_t = self._dispatch_cooldowns.get(pacing_sym_key, 0.0)
             pacing_key = f"PACING:{seg or 'GENERAL'}"
             last_pace_t = self._dispatch_cooldowns.get(pacing_key, 0.0)
-            burst_cooldown = 15.0 if alert.confidence >= 90 else 45.0
+            if seg == "FNO_INDEX":
+                burst_cooldown = 0.0 if alert.confidence >= 90 else 15.0
+            else:
+                burst_cooldown = 15.0 if alert.confidence >= 90 else 45.0
 
-            if (now_ts - last_pace_t) >= burst_cooldown:
+            is_cooled = (now_ts - last_pace_sym_t) >= burst_cooldown
+            if seg != "FNO_INDEX":
+                is_cooled = is_cooled and ((now_ts - last_pace_t) >= burst_cooldown)
+
+            if is_cooled:
                 logger.info(
                     f"[AutoAlertEngine] 🚀 Segment burst pacing cooldown ({int(burst_cooldown)}s) elapsed for {alert.symbol} "
                     f"({alert.alert_id}). Retrying multi-channel Telegram dispatch..."
                 )
                 # Clear m_key IGNITED cooldown for this alert so retry dispatches cleanly
-                m_key = f"{alert.symbol}:{alert.alert_type}:IGNITED"
-                if m_key in self._dispatch_cooldowns:
-                    del self._dispatch_cooldowns[m_key]
+                c_key_suffix = (
+                    f":{alert.contract_symbol}"
+                    if getattr(alert, "contract_symbol", None)
+                    else (
+                        f":{alert.strike}:{alert.option_type}"
+                        if getattr(alert, "strike", None)
+                        else ""
+                    )
+                )
+                v_suffix = ":v2" if "-v2" in alert.alert_id else ""
+                scoped_m_key = f"{alert.symbol}:{alert.alert_type}{c_key_suffix}{v_suffix}:IGNITED"
+                legacy_m_key = f"{alert.symbol}:{alert.alert_type}:IGNITED"
+                self._dispatch_cooldowns.pop(scoped_m_key, None)
+                self._dispatch_cooldowns.pop(legacy_m_key, None)
 
                 self._dispatch(alert)
                 if getattr(alert, "telegram_dispatched", False):
                     dispatched.append(alert)
-                    self._dispatch_cooldowns[pacing_key] = time.time()
+                    now_done = time.time()
+                    self._dispatch_cooldowns[pacing_key] = now_done
+                    self._dispatch_cooldowns[pacing_sym_key] = now_done
                     self._save()
 
         return dispatched
@@ -6201,34 +6892,40 @@ class AutoAlertEngine:
                     "COMPLETED",
                     "IN_FLIGHT_WARNING",
                     "EARLY_WARNING",
-                    "T0_5_ACHIEVED",
-                    "DE_RISK_0_5R",
                     "T1_ACHIEVED",
                     "T2_ACHIEVED",
-                    "BREAKEVEN_LOCKED",
+                    "TARGET_ACHIEVED",
+                    "FINAL_TARGET",
+                    "TIME_STOP_EXIT",
+                    "TIME_STOP_SCRATCH",
                 )
                 and (
-                    a.stage in ("IGNITED", "TRAILING_UPDATE")
+                    a.stage
+                    in (
+                        "IGNITED",
+                        "TRAILING_UPDATE",
+                        "T0_5_ACHIEVED",
+                        "DE_RISK_0_5R",
+                        "BREAKEVEN_LOCKED",
+                    )
                     or getattr(a, "triggered_at", None) is not None
                 )
                 and not getattr(a, "in_flight_warning_sent", False)
                 and getattr(a, "target_status", "")
                 not in (
-                    "T0_5_ACHIEVED",
-                    "TARGET_0_5_ACHIEVED",
                     "T1_ACHIEVED",
                     "T2_ACHIEVED",
                     "FINAL_ACHIEVED",
                     "TARGET_ACHIEVED",
+                    "TIME_STOP_EXIT",
                 )
                 and not any(
                     m in (getattr(a, "achieved_milestones", []) or [])
                     for m in (
-                        "T0_5_ACHIEVED",
                         "T1_ACHIEVED",
                         "T2_ACHIEVED",
                         "FINAL_ACHIEVED",
-                        "DE_RISK_0_5R",
+                        "TARGET_ACHIEVED",
                     )
                 )
                 and not (a.environment == "TEST" or not a.is_live)
@@ -8270,6 +8967,25 @@ class AutoAlertEngine:
             logger.debug(f"[AutoAlertEngine] Index contagion scan failure: {e}")
         return found
 
+    def scan_thematic_peer_sympathy(
+        self, quotes_map: Optional[dict[str, Any]] = None
+    ) -> list[AutoAlert]:
+        """
+        Scans liquid sector peers for sympathy breakout / breakdown cascades when a sector
+        leader has ignited (e.g. RVNL in Railways igniting IRFC/RAILTEL, DABUR in FMCG igniting ITC/COLPAL).
+        """
+        found: list[AutoAlert] = []
+        try:
+            from engine.thematic_peer_sympathy import thematic_sympathy_engine
+
+            alerts = thematic_sympathy_engine.evaluate_peer_sympathy(quotes_map=quotes_map)
+            for alert in alerts:
+                if self.record_alert(alert):
+                    found.append(alert)
+        except Exception as e:
+            logger.debug(f"[AutoAlertEngine] Thematic peer sympathy scan error: {e}")
+        return found
+
     def scan_opening_drives(self, quotes_map: Optional[dict[str, Any]] = None) -> list[AutoAlert]:
         """
         Scans watched indices and comprehensive F&O universe for explosive Opening Drive ignitions
@@ -8327,7 +9043,9 @@ class AutoAlertEngine:
 
                     vwap_val = get_computed_vwap(sym, exchange=exch)
                 prev_close = (
-                    getattr(q, "previous_close", None) or getattr(q, "prev_close", None)
+                    getattr(q, "previous_close", None)
+                    or getattr(q, "prev_close", None)
+                    or getattr(q, "close", None)
                     if q
                     else None
                 )
@@ -8418,7 +9136,7 @@ class AutoAlertEngine:
                         else:
                             stock_candidates.append(alert)
 
-        # Anti-storm pacing for stock opening drives: select top 2-3 highest conviction
+        # Anti-storm pacing for stock opening drives: rank by dynamic Decoupling Score
         if stock_candidates:
             core_hw_set = {
                 "RELIANCE",
@@ -8434,23 +9152,23 @@ class AutoAlertEngine:
                 "BHARTIARTL",
                 "ITC",
             }
-            stock_candidates.sort(
-                key=lambda a: (
-                    1
-                    if (
-                        a.symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
-                        in core_hw_set
-                    )
-                    else 0,
-                    a.confidence,
-                    float(
-                        (a.actionable_plan or {}).get("opening_drive_bar", {}).get("range_pct", 0.0)
-                        or 0.0
-                    ),
-                    1 if (a.actionable_plan or {}).get("instrument_type") == "OPTION" else 0,
-                ),
-                reverse=True,
-            )
+
+            def _opening_drive_score(a: AutoAlert) -> float:
+                plan = a.actionable_plan or {}
+                bar = plan.get("opening_drive_bar", {})
+                range_pct = float(
+                    bar.get("range_pct", 0.0)
+                    or (a.metrics or {}).get("opening_range_pct", 0.0)
+                    or 0.0
+                )
+                rvol = float((a.metrics or {}).get("rvol", 1.8) or 1.8)
+                conf = float(a.confidence or 80.0)
+                clean = a.symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+                hw_mult = 1.15 if clean in core_hw_set else 1.0
+                has_opt = 1.1 if plan.get("instrument_type") == "OPTION" else 1.0
+                return round((rvol * 2.5 + range_pct * 1.5 + (conf / 10.0)) * hw_mult * has_opt, 2)
+
+            stock_candidates.sort(key=_opening_drive_score, reverse=True)
             max_stock_drives = (
                 3 if (is_test_env or (now_ist.hour == 9 and now_ist.minute <= 30)) else 2
             )
@@ -8463,6 +9181,199 @@ class AutoAlertEngine:
                     f"[AutoAlertEngine] Anti-storm pacing: selected top {max_stock_drives} "
                     f"stock opening drive alerts out of {len(stock_candidates)} candidates."
                 )
+
+        return found
+
+    def scan_afternoon_thrusts(
+        self, indices_only: bool = False, quotes_map: Optional[dict[str, Any]] = None
+    ) -> list[AutoAlert]:
+        """
+        Scans watched indices and comprehensive F&O universe for explosive Afternoon Thrust &
+        Power Hour breakouts (13:00 - 15:15 IST).
+        Indices are prioritized and unthrottled.
+        Stock options enforce institutional segment gating and anti-storm pacing (up to 3 per sector).
+        """
+        now_ist = datetime.now(IST)
+        curr_t = now_ist.time()
+        is_test_env = (
+            (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+        if not is_test_env and (curr_t < dtime(13, 0) or curr_t > dtime(15, 0)):
+            return []
+
+        from market.history import get_ohlcv
+        from market.quotes import get_ltp
+        from engine.alert_preferences import alert_preferences
+
+        fno_stock_allowed = alert_preferences.is_segment_allowed("FNO_STOCK")
+        fno_index_allowed = alert_preferences.is_segment_allowed("FNO_INDEX")
+
+        found: list[AutoAlert] = []
+        stock_candidates: list[AutoAlert] = []
+
+        if indices_only:
+            targets = list(self._watched_indices) if fno_index_allowed else []
+        else:
+            targets = self._get_prioritized_targets()
+
+        if not targets:
+            return []
+
+        if quotes_map is None:
+            quotes_map = self._get_cycle_quotes(targets)
+
+        eval_thrust_targets: list[tuple[str, str, float, Any, float, float, Any, bool]] = []
+        for sym in targets:
+            clean_sym = (
+                sym.upper().replace(".NS", "").replace("NSE:", "").replace("NFO:", "").strip()
+            )
+            is_sym_index = clean_sym in (
+                "NIFTY",
+                "BANKNIFTY",
+                "FINNIFTY",
+                "MIDCPNIFTY",
+                "SENSEX",
+                "BANKEX",
+            )
+            if not is_sym_index and not fno_stock_allowed:
+                continue
+
+            try:
+                exch = self._resolve_index_exchange(sym)
+                lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
+
+                q = (
+                    (
+                        quotes_map.get(lookup_sym)
+                        or quotes_map.get(sym)
+                        or quotes_map.get(sym.replace(".NS", ""))
+                    )
+                    if quotes_map
+                    else None
+                )
+
+                ltp = (
+                    float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
+                    if q
+                    else 0.0
+                )
+                if ltp <= 0:
+                    ltp = get_ltp(lookup_sym) or 0.0
+                if not ltp or ltp <= 0:
+                    continue
+
+                vwap_val = getattr(q, "vwap", None) if q else None
+                if not vwap_val or vwap_val <= 0:
+                    from market.quotes import get_computed_vwap
+
+                    vwap_val = get_computed_vwap(sym, exchange=exch)
+
+                day_high_val = float(getattr(q, "high", 0.0) or 0.0) if q else 0.0
+                day_low_val = float(getattr(q, "low", 0.0) or 0.0) if q else 0.0
+                prev_close = (
+                    getattr(q, "previous_close", None)
+                    or getattr(q, "prev_close", None)
+                    or getattr(q, "close", None)
+                    if q
+                    else None
+                )
+
+                # Pre-filter: Spot must be near Day High or Day Low (within 0.40%) or breaking out
+                if day_high_val > 0 and day_low_val > 0:
+                    dist_h = (day_high_val - ltp) / ltp * 100
+                    dist_l = (ltp - day_low_val) / ltp * 100
+                    if dist_h > 0.40 and dist_l > 0.40 and not is_test_env:
+                        continue
+
+                eval_thrust_targets.append(
+                    (sym, exch, ltp, vwap_val, day_high_val, day_low_val, prev_close, is_sym_index)
+                )
+            except Exception as e_pre:
+                logger.debug(
+                    f"[AutoAlertEngine] Afternoon thrust pre-filter error for {sym}: {e_pre}"
+                )
+
+        def _eval_thrust_sym(item):
+            sym, exch, ltp, vwap_val, day_high_val, day_low_val, prev_close, is_sym_index = item
+            try:
+                df_5m = get_ohlcv(
+                    sym, exchange=exch, interval="5minute", days=1, include_live_candle=True
+                )
+                if df_5m is None or len(df_5m) < 3:
+                    return None
+
+                rvol_val = 1.3
+                try:
+                    vols = df_5m["volume"].values if "volume" in df_5m.columns else None
+                    if vols is not None and len(vols) >= 3:
+                        cur_v = float(vols[-1])
+                        avg_v = float(np.mean(vols[:-1]))
+                        if avg_v > 0:
+                            rvol_val = round(cur_v / avg_v, 2)
+                except Exception:
+                    pass
+
+                return detect_afternoon_thrust(
+                    symbol=sym,
+                    df_5m=df_5m,
+                    ltp=ltp,
+                    vwap=vwap_val,
+                    rvol=rvol_val,
+                    day_high=day_high_val if day_high_val > 0 else None,
+                    day_low=day_low_val if day_low_val > 0 else None,
+                    ref_time=now_ist,
+                    prev_close=prev_close,
+                    ignore_time_gate=is_test_env,
+                )
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Afternoon thrust scan error for {sym}: {e}")
+                return None
+
+        if eval_thrust_targets:
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(12, len(eval_thrust_targets))
+            ) as executor:
+                for alert in executor.map(_eval_thrust_sym, eval_thrust_targets):
+                    if alert:
+                        clean_sym = (
+                            alert.symbol.upper()
+                            .replace(".NS", "")
+                            .replace("NSE:", "")
+                            .replace("NFO:", "")
+                            .strip()
+                        )
+                        is_sym_index = clean_sym in (
+                            "NIFTY",
+                            "BANKNIFTY",
+                            "FINNIFTY",
+                            "MIDCPNIFTY",
+                            "SENSEX",
+                            "BANKEX",
+                        )
+                        if is_sym_index:
+                            if self.record_alert(alert):
+                                found.append(alert)
+                        else:
+                            stock_candidates.append(alert)
+
+        # Anti-storm pacing for stock afternoon thrusts: top 3 highest conviction
+        if stock_candidates:
+            stock_candidates.sort(
+                key=lambda a: (
+                    1 if a.stage == "IGNITED" else 0,
+                    a.confidence,
+                    float((a.metrics or {}).get("rvol", 0.0) or 0.0),
+                ),
+                reverse=True,
+            )
+            max_stock_thrusts = 3
+            for alert in stock_candidates[:max_stock_thrusts]:
+                if self.record_alert(alert):
+                    found.append(alert)
 
         return found
 
@@ -8820,6 +9731,7 @@ class AutoAlertEngine:
                     vwap_val = get_computed_vwap(sym, exchange=exch) or 0.0
                 day_high_val = self._extract_quote_val(q_obj, "high", "day_high")
                 day_low_val = self._extract_quote_val(q_obj, "low", "day_low")
+                spot_change_pct = self._extract_quote_val(q_obj, "change_pct")
 
                 # Top-down Benchmark Filter with Dynamic Sector Decoupling:
                 # If NIFTY 50 is trending red (spot < VWAP & chg <= -0.05%), secondary indices
@@ -8849,19 +9761,33 @@ class AutoAlertEngine:
                         else 0.0
                     )
                     sym_above_own_vwap = vwap_val > 0 and spot >= vwap_val
-                    _base_bounce = _CE_BOUNCE_THRESHOLDS.get(sym, 0.40)
-                    # When benchmark NIFTY is trending down (spot < VWAP & chg <= -0.05%):
-                    # 1. If secondary index has reclaimed its own VWAP, base bounce from low confirms reversal.
-                    # 2. If STILL below its own VWAP, require a decisive structural V-reversal threshold
-                    #    (2.5x base, >= 0.70%-1.1%) to prevent buying counter-trend dead-cat bounces into VWAP resistance.
-                    _min_bounce = _base_bounce if sym_above_own_vwap else (_base_bounce * 2.5)
-                    if sym_bounce < _min_bounce:
+                    _base_bounce = _CE_BOUNCE_THRESHOLDS.get(sym, 0.35)
+
+                    # Top-down Macro Benchmark Decoupling Check (symmetric to Put scanner lines 10088-10116):
+                    # If benchmark NIFTY is trending red (spot < VWAP & chg <= -0.05%), secondary
+                    # indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY) are allowed to scan for CE setups
+                    # if they demonstrate lead-lag divergence decoupling:
+                    # 1. Trading at/above own VWAP (spot >= vwap_val > 0)
+                    # 2. Staged a verified structural bounce from session low (>= _base_bounce)
+                    # 3. Leading benchmark change by >= +0.20% (spot_change_pct >= nifty_chg + 0.20)
+                    is_decoupled = (
+                        sym_above_own_vwap
+                        or (sym_bounce >= _base_bounce)
+                        or (spot_change_pct >= (nifty_chg + 0.20))
+                    )
+                    if not is_decoupled:
                         logger.debug(
                             f"[AutoAlertEngine] CE scan suppressed for {sym}: "
-                            f"benchmark bearish, bounce {sym_bounce:.2f}% < {_min_bounce:.2f}% threshold "
-                            f"(above_own_vwap={sym_above_own_vwap}). Waiting for stronger reversal."
+                            f"Benchmark Nifty is bearish ({nifty_chg:.2f}%) and {sym} has not decoupled "
+                            f"(spot={spot:,.1f}, vwap={vwap_val:,.1f}, bounce={sym_bounce:.2f}% < {_base_bounce:.2f}%)."
                         )
                         return local_alerts
+                    else:
+                        logger.info(
+                            f"[AutoAlertEngine] CE scan ALLOWED for {sym} despite bearish benchmark Nifty: "
+                            f"{sym} has decoupled from benchmark (spot={spot:,.1f}, vwap={vwap_val:,.1f}, "
+                            f"bounce={sym_bounce:.2f}%, chg={spot_change_pct:.2f}% vs Nifty {nifty_chg:.2f}%)."
+                        )
 
                 # Resolve prev day high/low; fall back to daily OHLCV
                 prev_day_high = self._extract_quote_val(q_obj, "prev_day_high", "prev_high")
@@ -9116,6 +10042,11 @@ class AutoAlertEngine:
         if not is_active_session and not is_test_runner:
             return []
 
+        today_str = now_dt.strftime("%Y-%m-%d")
+        if self._index_put_scan_date != today_str:
+            self._index_put_scan_date = today_str
+            self._index_put_scan_counts.clear()
+
         # ── Upgrade 2: EDGELESS CHOP — PRESERVE CAPITAL Gate (PUT) ──────────────
         # Suppress ALL new index PUT setups when VIX < 12.5 AND A/D ratio is neutral,
         # UNLESS a verified institutional breakdown thrust occurs.
@@ -9178,12 +10109,6 @@ class AutoAlertEngine:
 
         def _eval_put_index(sym: str) -> list[tuple[AutoAlert, str]]:
             local_alerts: list[tuple[AutoAlert, str]] = []
-            if (
-                benchmark_is_bullish
-                and sym in ("MIDCPNIFTY", "FINNIFTY", "BANKNIFTY")
-                and not is_test_runner
-            ):
-                return local_alerts
             try:
                 exch = self._resolve_index_exchange(sym)
                 lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
@@ -9212,6 +10137,36 @@ class AutoAlertEngine:
 
                     vwap_val = get_computed_vwap(sym, exchange=exch) or 0.0
                 prev_close = self._extract_quote_val(q_obj, "prev_close", "previous_close")
+
+                # Top-down Macro Benchmark Check: If benchmark NIFTY is trending green,
+                # secondary indices (MIDCPNIFTY, FINNIFTY, BANKNIFTY) must NOT scan for counter-trend Put setups
+                # UNLESS they demonstrate lead-lag divergence decoupling (trading at/below own VWAP,
+                # retreated >=0.30% from day high, or lagging Nifty change by >=0.20%).
+                if (
+                    benchmark_is_bullish
+                    and sym in ("MIDCPNIFTY", "FINNIFTY", "BANKNIFTY")
+                    and (not is_test_runner or enforce_regime)
+                ):
+                    is_decoupled = (
+                        (vwap_val > 0 and spot <= vwap_val)
+                        or (
+                            day_high_val > 0
+                            and (day_high_val - spot) / max(1.0, day_high_val) >= 0.003
+                        )
+                        or (spot_change_pct <= (nifty_chg - 0.20))
+                    )
+                    if not is_decoupled:
+                        logger.debug(
+                            f"[AutoAlertEngine] Put scanner suppressed for {sym}: "
+                            f"Benchmark Nifty is bullish (+{nifty_chg:.2f}%) and {sym} has not decoupled."
+                        )
+                        return local_alerts
+                    else:
+                        logger.info(
+                            f"[AutoAlertEngine] Put scanner ALLOWED for {sym} despite bullish benchmark Nifty: "
+                            f"{sym} has decoupled from benchmark (spot={spot:,.1f}, vwap={vwap_val:,.1f}, "
+                            f"chg={spot_change_pct:.2f}% vs Nifty {nifty_chg:.2f}%)."
+                        )
 
                 # Pre-filter: skip if index is strongly trending up AND has ample room to continue.
                 # KEY DISTINCTION:
@@ -9294,6 +10249,15 @@ class AutoAlertEngine:
                 if not chain:
                     return local_alerts
 
+                is_subsequent_put_scan = (
+                    self._index_put_scan_counts[sym] > 0
+                    or (now_dt.time() >= dtime(9, 30) if not is_test_runner else False)
+                    or any(
+                        getattr(a, "symbol", "") == sym and getattr(a, "direction", "") == "BEARISH"
+                        for a in self._alerts
+                    )
+                )
+
                 alerts = detect_index_put_setup(
                     underlying=sym,
                     spot=spot,
@@ -9305,11 +10269,57 @@ class AutoAlertEngine:
                     prev_day_low=prev_day_low,
                     prev_week_high=prev_week_high,
                     ohlcv_5m=df_5m,
+                    mandate_vwap_confirmation=is_subsequent_put_scan,
                 )
+                self._index_put_scan_counts[sym] += 1
                 regime = self._get_index_intraday_regime(df_5m, spot)
 
                 if not alerts:
                     return local_alerts
+
+                # Mandated intraday VWAP confirmation filter on subsequent scans:
+                # If subsequent scan and spot is trading above VWAP, allow ONLY if:
+                # 1) Confirmed by VWAP_BREAKDOWN or VWAP_REJECTION, OR
+                # 2) Stage 1 Top Reversal formed at session ceiling (DOUBLE_TOP_BREAKDOWN, PDH/PWH/DAY_HIGH supply
+                #    rejection, or CALL_WRITING_CEILING) with a verified retreat >=0.20% from Day High or institutional thrust.
+                if is_subsequent_put_scan and vwap_val > 0 and spot > (vwap_val * 1.0005):
+                    _top_reversal_sigs = {
+                        "DOUBLE_TOP_BREAKDOWN",
+                        "PDH_SUPPLY_REJECTION",
+                        "PWH_SUPPLY_REJECTION",
+                        "DAY_HIGH_SUPPLY_REJECTION",
+                        "INTRADAY_CAPITULATION_TOP",
+                        "TREND_PULLBACK_REJECTION",
+                        "CALL_WRITING_CEILING",
+                    }
+                    validated_alerts = []
+                    for a in alerts:
+                        sigs = set(a.metrics.get("signals") or [])
+                        has_vwap_break = bool(sigs & {"VWAP_BREAKDOWN", "VWAP_REJECTION"})
+                        has_top_rev = bool(sigs & _top_reversal_sigs)
+                        has_retreat = (
+                            day_high_val > 0
+                            and ((day_high_val - spot) / max(1.0, day_high_val)) >= 0.0020
+                        )
+                        is_thrust = bool(
+                            a.metrics.get("is_institutional_thrust")
+                            or float((a.metrics or {}).get("smart_money_score") or 0) >= 80
+                        )
+                        if has_vwap_break:
+                            validated_alerts.append(a)
+                        elif has_top_rev and (has_retreat or is_thrust):
+                            if isinstance(a.metrics, dict):
+                                a.metrics["reversal_stage"] = "STAGE_1_TOP_REVERSAL"
+                            validated_alerts.append(a)
+
+                    alerts = validated_alerts
+                    if not alerts:
+                        logger.info(
+                            f"[AutoAlertEngine] Mandated Intraday VWAP confirmation filtered out subsequent PE setup on {sym}: "
+                            f"Spot ₹{spot:,.1f} is trading above VWAP ₹{vwap_val:,.1f} without verified VWAP breakdown/rejection "
+                            f"or Stage 1 top supply rejection with retreat from session high."
+                        )
+                        return local_alerts
 
                 # Filter under EDGELESS CHOP: ONLY allow verified institutional expansion breakdown
                 if edgeless_chop_active:
@@ -9605,6 +10615,10 @@ class AutoAlertEngine:
             ("index_puts", lambda: self.scan_index_put_setups(quotes_map=quotes_map)),
             ("opening_drives", lambda: self.scan_opening_drives(quotes_map=quotes_map)),
             ("index_contagion", lambda: self.scan_index_contagion(quotes_map=quotes_map)),
+            (
+                "thematic_sympathy",
+                lambda: self.scan_thematic_peer_sympathy(quotes_map=quotes_map),
+            ),
             ("gamma_blasts", lambda: self.scan_gamma_blasts(quotes_map=quotes_map)),
             (
                 "options_momentum",
@@ -9613,6 +10627,7 @@ class AutoAlertEngine:
             ("sparks", lambda: self.scan_intraday_mover_sparks(quotes_map=quotes_map)),
             ("circuits", lambda: self.scan_circuits(quotes_map=quotes_map)),
             ("squeeze", lambda: self.scan_squeeze_breakouts(quotes_map=quotes_map)),
+            ("afternoon_thrusts", lambda: self.scan_afternoon_thrusts(quotes_map=quotes_map)),
             ("orb", lambda: self.scan_opening_range_breakouts(quotes_map=quotes_map)),
             ("patterns", lambda: self.scan_pattern_coilings(quotes_map=quotes_map)),
             ("precursor", lambda: self.scan_precursor_radars()),
@@ -9627,6 +10642,29 @@ class AutoAlertEngine:
                 ),
             ),
         ]
+
+        now_ist = datetime.now(IST)
+        curr_t = now_ist.time()
+        is_post_1500_cutoff = (curr_t >= dtime(15, 0)) and not is_test
+        if is_post_1500_cutoff:
+            intraday_only_detectors = {
+                "index_micro_scalp",
+                "opening_drives",
+                "index_contagion",
+                "thematic_sympathy",
+                "gamma_blasts",
+                "options_momentum",
+                "sparks",
+                "circuits",
+                "squeeze",
+                "afternoon_thrusts",
+                "orb",
+            }
+            tasks = [t for t in tasks if t[0] not in intraday_only_detectors]
+            logger.info(
+                f"[AutoAlertEngine] Post-15:00 IST cutoff active ({curr_t.strftime('%H:%M:%S')}). "
+                "Intraday momentum/scalp detectors suppressed prior to broker MIS square-off window."
+            )
 
         results: list[AutoAlert] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -10190,6 +11228,27 @@ class AutoAlertEngine:
                         self.scan_index_call_setups()
                         self.scan_index_put_setups()
                         self.scan_gamma_blasts(indices_only=True)
+
+                        # ── Power Hour Squeeze Scan (13:15 – 15:10 IST) ──────────────────
+                        # TTM squeeze coils built during the midday lull (11:30–13:15) release
+                        # their energy in the PM power hour. Explicitly scan indices for
+                        # squeeze breakouts at session transition so no coil is missed.
+                        _is_power_hour = (
+                            (now_ist.hour == 13 and now_ist.minute >= 15)
+                            or (now_ist.hour == 14)
+                            or (now_ist.hour == 15 and now_ist.minute <= 10)
+                        )
+                        if _is_power_hour:
+                            try:
+                                # Dedicated Power Hour squeeze scan — re-evaluates midday coils
+                                # built during 11:30–13:15 for PM breakout ignition.
+                                # scan_squeeze_breakouts() internally prioritizes index targets.
+                                self.scan_squeeze_breakouts()
+                                self.scan_afternoon_thrusts(indices_only=True)
+                            except Exception as e_ph:
+                                logger.debug(
+                                    f"[AutoAlertEngine] Power Hour squeeze scan error: {e_ph}"
+                                )
                     except Exception as e_fast:
                         logger.debug(f"[AutoAlertEngine] HF Index scan error: {e_fast}")
 

@@ -2291,10 +2291,51 @@ async def skill_auto_alerts_clear_lockouts(req: Optional[dict[str, Any]] = None)
 
         sym = (req or {}).get("symbol")
         pattern_learning_engine.clear_symbol_lockout(symbol=sym)
+        if not sym or (req or {}).get("reset_detectors"):
+            from engine.detector_circuit_breaker import detector_circuit_breaker
+
+            detector_circuit_breaker.reset_all()
         return {
             "status": "ok",
-            "message": f"Lockouts cleared for {sym or 'all symbols'}",
+            "message": f"Lockouts cleared for {sym or 'all symbols and detectors'}",
             "active_lockouts": pattern_learning_engine.get_locked_out_symbols(),
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/circuit-breakers/reset")
+async def skill_auto_alerts_reset_circuit_breakers(req: Optional[dict[str, Any]] = None):
+    """Resets detector circuit breaker degradation for a specific alert type or all detectors."""
+    try:
+        from engine.detector_circuit_breaker import detector_circuit_breaker
+
+        atype = (req or {}).get("alert_type")
+        if atype:
+            detector_circuit_breaker.reset_detector(atype)
+            msg = f"Detector circuit breaker reset for '{atype}'"
+        else:
+            detector_circuit_breaker.reset_all()
+            msg = "All detector circuit breakers reset to NORMAL"
+
+        return {
+            "status": "ok",
+            "message": msg,
+            "detectors": detector_circuit_breaker.get_all_metrics(),
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/alerts/auto/circuit-breakers/status")
+async def skill_auto_alerts_circuit_breakers_status():
+    """Returns current status and metrics of all detector circuit breakers."""
+    try:
+        from engine.detector_circuit_breaker import detector_circuit_breaker
+
+        return {
+            "status": "ok",
+            "detectors": detector_circuit_breaker.get_all_metrics(),
         }
     except Exception as e:
         raise _err(str(e))

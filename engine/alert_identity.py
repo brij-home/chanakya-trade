@@ -13,7 +13,7 @@ Institutional Invariants:
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, time as dtime
 from functools import lru_cache
 from typing import Optional
 
@@ -111,6 +111,38 @@ def generate_alert_id(
     parts.append(date_str)
 
     return "-".join(parts)
+
+
+# ── Session Phase Slot ─────────────────────────────────────────────────────
+
+_SLOT_BOUNDARIES = (
+    (dtime(13, 15), "1315"),  # Power Hour + Closing (13:15 – 15:30 IST)
+    (dtime(11, 30), "1130"),  # Midday Consolidation (11:30 – 13:14 IST)
+)
+
+
+def get_session_phase_slot(ref_dt: Optional[datetime] = None) -> str:
+    """
+    Maps the current (or given) IST datetime to a deterministic 24hr market phase slot.
+
+    Used as the time-block variant in alert IDs so that structurally distinct setups
+    in different session phases receive distinct IDs, enabling PM re-evaluation without
+    violating Invariant #17 (no volatile minute/second timestamps).
+
+    Slots (3 per trading day, 24hr IST notation):
+        '0915'  — Opening + Morning     (09:15 – 11:29 IST)
+        '1130'  — Midday Consolidation  (11:30 – 13:14 IST)
+        '1315'  — Power Hour + Closing  (13:15 – 15:30 IST)
+
+    Returns the slot label, e.g. '1315'.
+    Invariant compliant: same minute always maps to the same label; no randomness.
+    """
+    now_ist = (ref_dt or datetime.now(IST)).astimezone(IST)
+    t = now_ist.time()
+    for boundary, label in _SLOT_BOUNDARIES:
+        if t >= boundary:
+            return label
+    return "0915"
 
 
 def validate_alert_id(alert_id: str) -> tuple[bool, str]:

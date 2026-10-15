@@ -176,19 +176,30 @@ class DetectorCircuitBreaker:
         kelly = win_rate - ((1.0 - win_rate) / payoff_ratio) if payoff_ratio > 0 else 0.0
         half_kelly = max(0.0, 0.5 * kelly)
 
-        # Consecutive losses from tail
+        # Consecutive losses from tail in CURRENT session vs historical
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
         consecutive_losses = 0
+        today_consecutive_losses = 0
         for r in reversed(records):
             if r.outcome == "LOSS":
                 consecutive_losses += 1
+                r_day = (r.timestamp or "")[:10]
+                if r_day == today_str:
+                    today_consecutive_losses += 1
             else:
                 break
 
         # State Machine Evaluation
-        if expectancy < -0.60 or consecutive_losses >= 5:
+        # If 5 consecutive losses occurred in TODAY's session, or deeply negative expectancy with >=3 losses today:
+        if today_consecutive_losses >= 5 or (expectancy < -0.60 and today_consecutive_losses >= 3):
             status: DetectorStatus = "HALTED"
             multiplier = 0.0
-        elif expectancy < 0.0 or kelly <= 0.0:
+        elif (
+            consecutive_losses >= 3
+            or expectancy < 0.0
+            or kelly <= 0.0
+            or (expectancy < -0.60 and today_consecutive_losses < 3)
+        ):
             status = "PROBATION"
             multiplier = 0.75
         elif expectancy >= 0.20 and win_rate >= 0.40:
@@ -219,6 +230,7 @@ class DetectorCircuitBreaker:
         Checks if an alert is allowed to fire based on detector degradation.
         Returns: (is_allowed, confidence_multiplier, status_message)
         """
+        self._maybe_reload()
         metrics = self.get_metrics(alert_type)
         if metrics.status == "HALTED":
             return (
@@ -240,6 +252,13 @@ class DetectorCircuitBreaker:
             )
         return (True, 1.0, f"Detector '{alert_type}' operating within normal tolerances.")
 
+    def get_all_metrics(self) -> dict[str, dict[str, Any]]:
+        """Returns metrics for all known detectors."""
+        self._maybe_reload()
+        with self._lock:
+            keys = sorted(self._history.keys())
+        return {k: self.get_metrics(k).to_dict() for k in keys}
+
     def reset_detector(self, alert_type: str) -> None:
         """Manually clears history for a detector (e.g. after parameter tuning or regime reset)."""
         clean_type = alert_type.upper().strip()
@@ -253,6 +272,17 @@ class DetectorCircuitBreaker:
             self._history.clear()
             self._save_unlocked()
 
+    def _maybe_reload(self) -> None:
+        """Reloads ledger if external processes updated the file on disk."""
+        if not self.ledger_file.exists():
+            return
+        try:
+            mtime = self.ledger_file.stat().st_mtime
+            if mtime > getattr(self, "_last_mtime", 0.0):
+                self._load()
+        except Exception:
+            pass
+
     def _save_unlocked(self) -> None:
         """Persists trade history to JSON file."""
         try:
@@ -261,6 +291,8 @@ class DetectorCircuitBreaker:
                 data[k] = [asdict(r) for r in deq]
             with open(self.ledger_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            if self.ledger_file.exists():
+                self._last_mtime = self.ledger_file.stat().st_mtime
         except Exception as e:
             logger.error(f"[DetectorCircuitBreaker] Failed to save ledger: {e}")
 
@@ -269,6 +301,7 @@ class DetectorCircuitBreaker:
         if not self.ledger_file.exists():
             return
         try:
+            self._last_mtime = self.ledger_file.stat().st_mtime
             with open(self.ledger_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             for k, records in data.items():

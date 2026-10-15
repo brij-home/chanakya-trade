@@ -56,19 +56,32 @@ class AlertDomainEvent:
     environment: str = "LIVE"
     metrics: dict[str, Any] = field(default_factory=dict)
     actionable_plan: dict[str, Any] = field(default_factory=dict)
+    alert_type: str = "ALERT"
+    direction: str = "BULLISH"
+    contract_symbol: Optional[str] = None
+    strike: Optional[float] = None
+    option_type: Optional[str] = None
+    segment: Optional[str] = None
+    time_horizon: Optional[str] = None
 
     def to_sse_dict(self) -> dict[str, Any]:
         """Converts domain event to clean SSE broadcast dictionary."""
         d = asdict(self)
-        # Flatten for frontend backward compatibility
-        return {
-            "type": self.event_type.lower(),
-            "event_type": self.event_type,
-            "data": d,
-            "alert": d,
-            "timestamp": self.timestamp_iso,
-            "correlation_id": self.correlation_id,
-        }
+        # Flatten for frontend backward compatibility:
+        # All alert fields (symbol, alert_id, alert_type, stage, etc.) are exposed directly at root level
+        # while 'alert' and 'data' wrappers remain intact for nested consumers.
+        res = dict(d)
+        res.update(
+            {
+                "type": self.event_type.lower(),
+                "event_type": self.event_type,
+                "data": d,
+                "alert": d,
+                "timestamp": self.timestamp_iso,
+                "correlation_id": self.correlation_id,
+            }
+        )
+        return res
 
 
 def create_alert_domain_event(
@@ -78,6 +91,14 @@ def create_alert_domain_event(
     correlation_id: Optional[str] = None,
 ) -> AlertDomainEvent:
     """Factory helper converting an AutoAlert into a strongly-typed domain event."""
+    raw_strike = getattr(alert, "strike", None)
+    strike_val = None
+    if raw_strike is not None:
+        try:
+            strike_val = float(str(raw_strike).replace(",", ""))
+        except (ValueError, TypeError):
+            strike_val = None
+
     return AlertDomainEvent(
         event_type=event_type,
         alert_id=getattr(alert, "alert_id", ""),
@@ -95,6 +116,13 @@ def create_alert_domain_event(
         environment=getattr(alert, "environment", "LIVE"),
         metrics=getattr(alert, "metrics", {}) or {},
         actionable_plan=getattr(alert, "actionable_plan", {}) or {},
+        alert_type=getattr(alert, "alert_type", "ALERT"),
+        direction=getattr(alert, "direction", "BULLISH"),
+        contract_symbol=getattr(alert, "contract_symbol", None),
+        strike=strike_val,
+        option_type=getattr(alert, "option_type", None),
+        segment=getattr(alert, "segment", None),
+        time_horizon=getattr(alert, "time_horizon", None),
     )
 
 

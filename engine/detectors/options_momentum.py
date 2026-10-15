@@ -319,9 +319,15 @@ def detect_options_momentum_breakouts(
                     )
                 )
                 if is_idx
-                else spot * 0.02
+                else max(
+                    spot * 0.025, 2.5 if spot < 100.0 else (5.0 if spot < 250.0 else spot * 0.02)
+                )
             )
-            min_opt_price = 2.5 if clean_sym in ("MIDCPNIFTY",) else (5.0 if is_idx else 1.5)
+            min_opt_price = (
+                2.5
+                if clean_sym in ("MIDCPNIFTY",)
+                else (5.0 if is_idx else (0.50 if spot < 100.0 else (1.0 if spot < 300.0 else 1.5)))
+            )
 
             atm_contracts = [
                 c
@@ -506,8 +512,9 @@ def detect_options_momentum_breakouts(
                         continue
                     if spot_open and spot_open > 0 and spot > spot_open * 1.005:
                         continue
-                    if spot_vwap and spot_vwap > 0 and spot > spot_vwap * 1.007:
-                        continue
+                    if is_idx:
+                        if spot_vwap and spot_vwap > 0 and spot > spot_vwap:
+                            continue
                     else:
                         if spot_vwap and spot_vwap > 0 and spot > spot_vwap * 0.9995:
                             continue
@@ -914,12 +921,16 @@ def detect_options_momentum_breakouts(
                             f"[OptionsBreakout] Volume profile error for {clean_sym}: {e_vp}"
                         )
 
-                from engine.alert_identity import generate_alert_id
+                from engine.alert_identity import (
+                    generate_alert_id,
+                    get_session_phase_slot,
+                )
 
+                phase_slot = get_session_phase_slot(now_dt)
                 alert_id = generate_alert_id(
                     clean_sym,
                     "OPTIONS_MOMENTUM",
-                    variant=f"{opt_type.lower()}-{int(strike)}",
+                    variant=f"{opt_type.lower()}-{int(strike)}-{phase_slot}",
                 )
 
                 tp = None
@@ -1424,7 +1435,12 @@ def detect_options_momentum_breakouts(
         is_stock = not alert.symbol.startswith(
             ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
         )
-        if is_stock and (recent_options_count + len(found)) >= 3:
+        _opt_pacing_limit = int(os.environ.get("OPTIONS_MOMENTUM_STOCK_PACING", "0"))
+        if (
+            _opt_pacing_limit > 0
+            and is_stock
+            and (recent_options_count + len(found)) >= _opt_pacing_limit
+        ):
             if (
                 alert.confidence < 88
                 and alert.metrics.get("decoupler_status") != "VERIFIED_DECOUPLER"

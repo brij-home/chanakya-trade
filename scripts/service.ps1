@@ -64,16 +64,10 @@ function Stop-ChanakyaServices {
         } catch {}
     }
 
-    # 3. If any port is still bound or deep cleanup requested, run quick_cleanup.ps1
-    $stillListening = $false
+    # 3. Always run quick_cleanup to safely purge orphaned Electron/node/uvicorn processes
     try {
-        $remaining = Get-NetTCPConnection -LocalPort $ApiPort,$VitePort -State Listen -ErrorAction SilentlyContinue
-        if ($remaining) { $stillListening = $true }
+        & (Join-Path $ScriptDir "quick_cleanup.ps1") | Out-Null
     } catch {}
-
-    if ($stillListening) {
-        & (Join-Path $ScriptDir "quick_cleanup.ps1")
-    }
 }
 
 function Get-ServiceStatus {
@@ -178,28 +172,8 @@ $backendCmd = "cmd.exe /c `"`"$PythonExe`" -m uvicorn web.api:app --host $ApiHos
 $bRes = $processClass.Create($backendCmd, $RootDir, $startupInfo)
 $backendPid = $bRes.ProcessId
 
-# 3. Launch Frontend (if requested)
-$frontendPid = $null
-if (-not $NoFrontend -and (Test-Path $FrontendDir)) {
-    $frontendOut = Join-Path $LogDir "frontend.log"
-    $frontendErr = Join-Path $LogDir "frontend_err.log"
-
-    Write-Host "[*] Launching hidden background Vite Dev Server on http://localhost:$VitePort ..." -ForegroundColor Cyan
-    $frontendCmd = "cmd.exe /c `"npm.cmd run dev:renderer > `"$frontendOut`" 2> `"$frontendErr`"`""
-    $fRes = $processClass.Create($frontendCmd, $FrontendDir, $startupInfo)
-    $frontendPid = $fRes.ProcessId
-}
-
-# Save PID info
-$pids = @{
-    backend_pid = $backendPid
-    frontend_pid = $frontendPid
-    started_at = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-}
-$pids | ConvertTo-Json | Set-Content -Path $PidFile -Force
-
-# 4. Wait for healthy socket binding with fast 100ms polling
-Write-Host "[*] Waiting for services to initialize..." -ForegroundColor Gray
+# 3. Wait for FastAPI sidecar to bind port with fast 100ms polling BEFORE launching frontend
+Write-Host "[*] Waiting for FastAPI Sidecar to initialize on http://${ApiHost}:${ApiPort} ..." -ForegroundColor Gray
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $backendReady = $false
 
@@ -215,41 +189,53 @@ while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
     } catch {}
 }
 
-if ($backendReady) {
-    Write-Host " [+] FastAPI Sidecar is healthy and listening on http://${ApiHost}:${ApiPort} (PID: $backendPid)" -ForegroundColor Green
-    if (-not $NoFrontend) {
-        $frontendReady = $false
-        while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-            try {
-                $fConn = Get-NetTCPConnection -LocalPort $VitePort -State Listen -ErrorAction SilentlyContinue
-                if ($fConn) {
-                    $frontendReady = $true
-                    $frontendPid = $fConn.OwningProcess
-                    break
-                }
-            } catch {}
-            Start-Sleep -Milliseconds 100
-        }
-        if ($frontendReady) {
-            Write-Host " [+] Frontend Desktop & Vite are listening on http://localhost:$VitePort (PID: $frontendPid)" -ForegroundColor Green
-        } else {
-            Write-Host " [*] Frontend is initializing in background (check $LogDir\frontend.log)" -ForegroundColor Yellow
-        }
-    }
-
-    # Update PID file with verified owning process PIDs
-    $pids = @{
-        backend_pid = $backendPid
-        frontend_pid = $frontendPid
-        started_at = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    }
-    $pids | ConvertTo-Json | Set-Content -Path $PidFile -Force
-
-    Write-Host "`n[SUCCESS] ChanakyaTrade background services restarted in $([math]::Round($sw.Elapsed.TotalSeconds, 2))s!" -ForegroundColor Green
-    Write-Host "  • Logs: $LogDir\backend.log, $LogDir\frontend.log" -ForegroundColor DarkGray
-    Write-Host "  • Management: .\scripts\service.ps1 [status | stop | restart]" -ForegroundColor DarkGray
-} else {
-    Write-Warning "Backend did not respond within $TimeoutSeconds seconds. Check $backendErr"
+if (-not $backendReady) {
+    Write-Warning "Backend did not bind to port $ApiPort within $TimeoutSeconds seconds. Check $backendErr"
+    exit 1
 }
+
+Write-Host " [+] FastAPI Sidecar is healthy and listening on http://${ApiHost}:${ApiPort} (PID: $backendPid)" -ForegroundColor Green
+
+# 4. Launch Frontend (if requested)
+$frontendPid = $null
+if (-not $NoFrontend -and (Test-Path $FrontendDir)) {
+    $frontendOut = Join-Path $LogDir "frontend.log"
+    $frontendErr = Join-Path $LogDir "frontend_err.log"
+
+    Write-Host "[*] Launching hidden background Vite Dev Server on http://localhost:$VitePort ..." -ForegroundColor Cyan
+    $frontendCmd = "cmd.exe /c `"npm.cmd run dev:renderer > `"$frontendOut`" 2> `"$frontendErr`"`""
+    $fRes = $processClass.Create($frontendCmd, $FrontendDir, $startupInfo)
+    $frontendPid = $fRes.ProcessId
+
+    $frontendReady = $false
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        try {
+            $fConn = Get-NetTCPConnection -LocalPort $VitePort -State Listen -ErrorAction SilentlyContinue
+            if ($fConn) {
+                $frontendReady = $true
+                $frontendPid = $fConn.OwningProcess
+                break
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 100
+    }
+    if ($frontendReady) {
+        Write-Host " [+] Frontend Desktop & Vite are listening on http://localhost:$VitePort (PID: $frontendPid)" -ForegroundColor Green
+    } else {
+        Write-Host " [*] Frontend is initializing in background (check $LogDir\frontend.log)" -ForegroundColor Yellow
+    }
+}
+
+# Save PID info
+$pids = @{
+    backend_pid = $backendPid
+    frontend_pid = $frontendPid
+    started_at = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+}
+$pids | ConvertTo-Json | Set-Content -Path $PidFile -Force
+
+Write-Host "`n[SUCCESS] ChanakyaTrade background services restarted in $([math]::Round($sw.Elapsed.TotalSeconds, 2))s!" -ForegroundColor Green
+Write-Host "  • Logs: $LogDir\backend.log, $LogDir\frontend.log" -ForegroundColor DarkGray
+Write-Host "  • Management: .\scripts\service.ps1 [status | stop | restart]" -ForegroundColor DarkGray
 
 exit 0

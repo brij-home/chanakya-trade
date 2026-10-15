@@ -572,6 +572,13 @@ _CONVICTION_TIER_LOT_MULTIPLIERS: dict[str, float] = {
     "LOW_CONVICTION": 0.50,  # Damped sizing for marginal setups (<70%)
 }
 
+_CHEETAH_MANDATE_MULTIPLIERS: dict[str, float] = {
+    "CHEETAH_POUNCE_MOMENTUM": 1.15,  # Trending expansion confirmation -> +15% size
+    "CHEETAH_SPRING_INVERSION": 1.0,  # Asymmetric Wyckoff trap inversion -> baseline size
+    "CHEETAH_SELECTIVE_SNIPER": 0.70,  # Selective sniper mode in mixed chop -> 30% risk compression
+    "CHEETAH_STALKING_PRESERVE_CAPITAL": 0.50,  # Capital preservation stalk -> 50% risk compression
+}
+
 
 def get_detector_lot_multiplier(alert_type: str) -> float:
     """
@@ -609,12 +616,15 @@ def calculate_position_size_for_alert(
     vix: Optional[float] = None,
     conviction_tier: Optional[str] = None,
     is_physical_expiry_week: bool = False,
+    cheetah_mandate: Optional[str] = None,
+    strike_clock_zone: Optional[str] = None,
 ) -> PositionSizeResult:
     """
     Detector-aware and conviction-tier-calibrated position sizing.
 
     Combines detector-specific historical edge multipliers with conviction tier
-    allocations (APEX_CONFLUENCE: 1.25×, DEFINED_RISK_ONLY: 0.65×).
+    allocations (APEX_CONFLUENCE: 1.25×, DEFINED_RISK_ONLY: 0.65×), cheetah regime multipliers,
+    and predatory strike clock kill zone timing calibration (Lunchtime chop: 0.75×, Power Hour: 1.10×).
     Applies regulatory SEBI physical settlement discount (0.50×) for single-stock
     F&O during expiry week.
 
@@ -638,10 +648,25 @@ def calculate_position_size_for_alert(
         vix=vix,
     )
 
-    # 2. Resolve combined detector & conviction tier multiplier
+    # 2. Resolve combined detector, conviction tier, cheetah regime & strike clock multiplier
     detector_multiplier = get_detector_lot_multiplier(alert_type)
     tier_multiplier = get_conviction_tier_lot_multiplier(conviction_tier)
-    combined_multiplier = round(detector_multiplier * tier_multiplier, 2)
+    cheetah_mult = (
+        _CHEETAH_MANDATE_MULTIPLIERS.get(str(cheetah_mandate).upper(), 1.0)
+        if cheetah_mandate
+        else 1.0
+    )
+    clock_mult = 1.0
+    if strike_clock_zone:
+        sc_upper = str(strike_clock_zone).upper()
+        if "LUNCH" in sc_upper or "CHOP_ZONE" in sc_upper:
+            clock_mult = 0.75  # Midday turnover vacuum capital preservation
+        elif "POWER_HOUR" in sc_upper or "GAMMA_POWER" in sc_upper:
+            clock_mult = 1.10  # Power hour institutional breakout thrust
+
+    combined_multiplier = round(
+        detector_multiplier * tier_multiplier * cheetah_mult * clock_mult, 2
+    )
 
     # 3. SEBI Physical Delivery Settlement Protection for single-stock options
     physical_discount_applied = False
@@ -820,3 +845,6 @@ def calibrate_off_number_stop(
                 return round(round(calibrated / tick_size) * tick_size, 2)
 
     return round(round(raw_stop / tick_size) * tick_size, 2)
+
+
+# ── Hierarchical Dynamic Risk Scaling Re-exports ─────────────────────────────

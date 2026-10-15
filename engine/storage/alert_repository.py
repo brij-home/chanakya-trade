@@ -104,8 +104,18 @@ class AlertRepository:
             else:
                 filtered_alerts = list(alerts)
 
-            data = [a.to_dict() for a in filtered_alerts]
-            alerts_snapshot = list(filtered_alerts)
+            data = []
+            alerts_snapshot = []
+            for a in filtered_alerts:
+                try:
+                    data.append(a.to_dict())
+                    alerts_snapshot.append(a)
+                except Exception as err:
+                    logger.error(
+                        f"[AlertRepository] Failed to serialize alert {getattr(a, 'id', 'UNKNOWN')} "
+                        f"({getattr(a, 'symbol', 'UNKNOWN')}): {err}",
+                        exc_info=True,
+                    )
 
             # Atomic persistence: write to sibling PID-tagged temp file then atomic replace
             payload = json.dumps(data, indent=2)

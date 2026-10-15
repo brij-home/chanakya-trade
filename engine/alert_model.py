@@ -68,6 +68,10 @@ class ActionableBlueprint:
     option_type: Optional[str] = None
     expiry_date: Optional[str] = None
     hedged_spread: Optional[dict[str, Any]] = None
+    tactical_sl: Optional[str] = None  # e.g. "₹120.00 (1m candle CLOSE)"
+    structural_spot_sl: Optional[str] = None  # e.g. "24,820.0 Spot breach"
+    disaster_stop_floor: Optional[str] = None  # e.g. "-32% (₹95.00 hard exit)"
+    dual_invalidation: Optional[dict[str, Any]] = None
     extra_details: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -97,6 +101,10 @@ class ActionableBlueprint:
             "option_type": self.option_type,
             "expiry_date": self.expiry_date,
             "hedged_spread": self.hedged_spread,
+            "tactical_sl": self.tactical_sl,
+            "structural_spot_sl": self.structural_spot_sl,
+            "disaster_stop_floor": self.disaster_stop_floor,
+            "dual_invalidation": self.dual_invalidation,
         }
         if self.extra_details:
             d.update(self.extra_details)
@@ -153,6 +161,13 @@ class AutoAlert:
     derivative_type: Optional[str] = None  # "OPT" | "FUT"
     option_stop_loss: Optional[float] = None
     option_target_level: Optional[float] = None
+    tactical_sl: Optional[float] = None  # Option SL (1m candle close basis)
+    structural_spot_sl: Optional[float] = None  # Underlying spot structure level
+    underlying_sl: Optional[float] = (
+        None  # Underlying spot invalidation anchor (synced with structural_spot_sl)
+    )
+    disaster_stop_floor: Optional[float] = None  # Hard catastrophe option floor (-32% max drawdown)
+    trailing_spot_sl: Optional[float] = None  # Trailed underlying spot level
     market_status: str = "SESSION_CLOSED"  # "LIVE" | "PRE_MARKET" | "SESSION_CLOSED"
     lot_size: Optional[int] = None  # Contract market lot size (SEBI 2026 active)
     segment: str = ""  # "FNO" | "EQUITY" | "COMMODITY" | "CURRENCY"
@@ -201,6 +216,7 @@ class AutoAlert:
     physical_delivery_risk: bool = False
     premarket_gap_risk: Optional[str] = None  # "GAP_OVER_SL" | "GAP_NO_CHASE"
     details: dict[str, Any] = field(default_factory=dict)
+    decoupler_status: str = "CORRELATED"  # "VERIFIED_DECOUPLER" | "CORRELATED" | "INDEX_DRAGGED"
 
     def record_audit(
         self,
@@ -265,6 +281,63 @@ class AutoAlert:
                 self.initial_entry_premium = float(self.option_premium)
             elif (self.strike or self.option_type) and self.trigger_level > 0:
                 self.initial_entry_premium = float(self.trigger_level)
+
+        # Derive Dual-Horizon Invalidation coordinates (Tactical 1m close vs Structural Spot)
+        is_opt_setup = bool(
+            self.option_premium
+            or self.option_type
+            or self.strike
+            or "OPTION" in str(self.alert_type).upper()
+            or "GAMMA" in str(self.alert_type).upper()
+            or (
+                self.contract_symbol
+                and ("CE" in self.contract_symbol or "PE" in self.contract_symbol)
+            )
+        )
+        if self.tactical_sl is None and self.stop_loss and self.stop_loss > 0:
+            if self.option_stop_loss and self.option_stop_loss > 0:
+                self.tactical_sl = float(self.option_stop_loss)
+            elif (
+                self.actionable_plan
+                and isinstance(self.actionable_plan.get("option_plan"), dict)
+                and self.actionable_plan["option_plan"].get("sl_premium")
+            ):
+                try:
+                    self.tactical_sl = float(self.actionable_plan["option_plan"]["sl_premium"])
+                except (ValueError, TypeError):
+                    self.tactical_sl = float(self.stop_loss)
+            elif is_opt_setup:
+                self.tactical_sl = float(self.stop_loss)
+
+        if self.structural_spot_sl is None:
+            spot_anchor = (
+                (self.metrics or {}).get("spot_invalidation_anchor")
+                or (self.actionable_plan or {}).get("spot_invalidation_anchor")
+                or (self.actionable_plan or {}).get("underlying_sl")
+            )
+            if spot_anchor:
+                try:
+                    m_sp = re.findall(r"[\d.]+", str(spot_anchor).replace(",", ""))
+                    if m_sp:
+                        self.structural_spot_sl = float(m_sp[0])
+                except Exception:
+                    pass
+
+        if self.underlying_sl is None and self.structural_spot_sl is not None:
+            self.underlying_sl = self.structural_spot_sl
+        elif self.structural_spot_sl is None and self.underlying_sl is not None:
+            self.structural_spot_sl = self.underlying_sl
+
+        if self.disaster_stop_floor is None and is_opt_setup:
+            opt_entry_ref = float(
+                self.initial_entry_premium
+                or self.option_premium
+                or (float(self.stop_loss) * 1.33 if (self.stop_loss and self.tactical_sl) else 0.0)
+                or 0.0
+            )
+            if opt_entry_ref > 0:
+                # Maximum 32% drawdown catastrophe floor on premium
+                self.disaster_stop_floor = round(opt_entry_ref * 0.68, 2)
 
         if not self.created_at:
             self.created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
@@ -383,7 +456,9 @@ class AutoAlert:
             elif eff_contract:
                 from engine.alert_expiry import get_expiry_metadata
 
-                exp_info = get_expiry_metadata(None, self.expiry_type, self.symbol, eff_contract)
+                exp_info = (
+                    get_expiry_metadata(None, self.expiry_type, self.symbol, eff_contract) or {}
+                )
                 if exp_info.get("raw_date"):
                     self.expiry_date = exp_info["raw_date"]
                     if not self.expiry_type:
@@ -496,8 +571,26 @@ class AutoAlert:
                 in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
                 or (self.segment in ("FNO", "OPTIONS") and (self.strike or self.option_type))
             )
+            is_spot_trigger = bool(
+                is_opt_level
+                and self.strike
+                and self.trigger_level >= self.strike * 0.5
+                and (
+                    (self.option_premium and self.option_premium < self.trigger_level * 0.3)
+                    or (self.ltp and self.ltp < self.trigger_level * 0.3)
+                )
+            )
+            opt_prem_base = (
+                self.option_premium
+                if (self.option_premium and self.option_premium > 0)
+                else (
+                    self.ltp
+                    if (self.ltp and is_spot_trigger and self.ltp < self.trigger_level * 0.3)
+                    else None
+                )
+            )
             # If the alert coordinates themselves are option premium levels
-            is_option_prem = is_opt_level or (
+            is_option_prem = (is_opt_level and not is_spot_trigger) or (
                 is_plan_opt
                 and self.option_premium
                 and abs(self.trigger_level - self.option_premium) < 0.01
@@ -505,7 +598,7 @@ class AutoAlert:
 
             # Determine if this position is LONG (price expected to increase) or SHORT (price expected to decrease)
             is_short_trade = False
-            if is_option_prem:
+            if is_option_prem or is_spot_trigger:
                 if act_str.startswith("SELL") or "SHORT" in act_str or "WRITE" in act_str:
                     is_short_trade = True
                 else:
@@ -526,7 +619,13 @@ class AutoAlert:
                 is_short_trade = self.target_level < self.trigger_level
 
             th = (self.time_horizon or "INTRADAY").upper()
-            if is_option_prem:
+            if is_spot_trigger and opt_prem_base and opt_prem_base > 0:
+                if is_short_trade:
+                    mult = 0.95 if th == "INTRADAY" else 0.92
+                else:
+                    mult = 1.05 if th == "INTRADAY" else 1.08
+                self.no_chase_boundary = round(opt_prem_base * mult, 2)
+            elif is_option_prem:
                 if is_short_trade:
                     # Option Writing / Credit Spread
                     mult = 0.95 if th == "INTRADAY" else 0.92
@@ -664,30 +763,54 @@ class AutoAlert:
                     "T2_ACHIEVED",
                     "DE_RISK_0_5R",
                     "BREAKEVEN_LOCKED",
+                    "STOP_HIT",
+                    "CLOSED",
+                    "EXPIRED",
+                    "CANCELLED",
                 )
             )
             or (
                 getattr(self, "target_status", "")
-                in ("RUNNER_CLOSED", "T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED")
+                in (
+                    "RUNNER_CLOSED",
+                    "T1_ACHIEVED",
+                    "T2_ACHIEVED",
+                    "TARGET_ACHIEVED",
+                    "STOP_HIT",
+                    "INVALIDATED",
+                    "CLOSED",
+                )
             )
         )
 
         if not has_trailing_ratchet:
+            entry_anchor = float(
+                getattr(self, "trigger_level", None) or getattr(self, "entry_price", None) or 0.0
+            )
+            if entry_anchor <= 0.0:
+                entry_anchor = ltp
+
             if is_long:
-                if sl >= ltp:
-                    return False, f"Inverted Stop-Loss: SL (₹{sl:,.2f}) >= LTP (₹{ltp:,.2f})"
-                if t1 <= ltp:
-                    return False, f"Inverted Target: Target (₹{t1:,.2f}) <= LTP (₹{ltp:,.2f})"
-            elif is_short:
-                if sl <= ltp:
+                if sl >= entry_anchor:
                     return (
                         False,
-                        f"Inverted Bearish Stop-Loss: SL (₹{sl:,.2f}) <= LTP (₹{ltp:,.2f})",
+                        f"Inverted Stop-Loss: SL (₹{sl:,.2f}) >= Entry Anchor (₹{entry_anchor:,.2f})",
                     )
-                if t1 >= ltp:
+                if t1 <= entry_anchor:
                     return (
                         False,
-                        f"Inverted Bearish Target: Target (₹{t1:,.2f}) >= LTP (₹{ltp:,.2f})",
+                        f"Inverted Target: Target (₹{t1:,.2f}) <= Entry Anchor (₹{entry_anchor:,.2f})",
+                    )
+            elif is_short:
+                if sl <= entry_anchor:
+                    return (
+                        False,
+                        f"Inverted Bearish Stop-Loss: SL (₹{sl:,.2f}) <= Entry Anchor (₹{entry_anchor:,.2f})",
+                    )
+                if t1 >= entry_anchor:
+                    return (
+                        False,
+                        f"Inverted Bearish Target: Target (₹{t1:,.2f}) >= Entry Anchor (₹{entry_anchor:,.2f})",
                     )
 
             # Multi-Target Monotonicity Guard
@@ -892,21 +1015,27 @@ class AutoAlert:
             plan_dict.get("option_plan") if isinstance(plan_dict.get("option_plan"), dict) else {}
         )
 
-        # If the actionable plan represents an option vehicle (option buying/selling):
-        if plan_is_option:
+        # ── Domain-Isolated Target Harmonization ──────────────────────────────
+        # When an alert represents an underlying spot asset (is_opt is False), root fields MUST
+        # strictly contain spot price targets. If actionable_plan carries an option recommendation,
+        # option premium targets are resolved in their own separate domain without contaminating root levels.
+        curr = "$" if self.segment == "CRYPTO" else "₹"
+        dec = (
+            4
+            if self.segment == "CDS"
+            else (2 if self.ltp < 100 or (is_opt and self.ltp < 100) else 1)
+        )
+
+        if is_opt:
+            # PURE OPTION ALERT: Root targets are option premium levels
             opt_entry = float(
                 getattr(self, "option_premium", 0.0)
                 or (plan_dict.get("trade_plan") or {}).get("entry_price", 0.0)
-                or (plan_dict.get("option_alternative") or {}).get("ltp", 0.0)
+                or self.trigger_level
+                or self.ltp
                 or 0.0
             )
-            entry_ref = (
-                opt_entry
-                if opt_entry > 0
-                else float(
-                    self.trigger_level or getattr(self, "entry_price", 0.0) or self.ltp or 0.0
-                )
-            )
+            entry_ref = opt_entry
             target_sources = [
                 plan_dict.get("target_1"),
                 plan_dict.get("target_2"),
@@ -921,24 +1050,40 @@ class AutoAlert:
                 opt_plan.get("t3_premium"),
                 opt_plan.get("target_1"),
                 opt_plan.get("target_2"),
+                self.target_level,
             ]
-            # If this is a pure option alert, self.target_level also represents option premium target
-            if is_opt:
-                target_sources.append(self.target_level)
         else:
+            # SPOT EQUITY / INDEX ALERT: Root targets MUST be spot levels
             entry_ref = float(
                 self.trigger_level or getattr(self, "entry_price", 0.0) or self.ltp or 0.0
             )
-            target_sources = [
+            raw_sources = [
+                plan_dict.get("spot_target_1"),
+                plan_dict.get("spot_target_2"),
+                plan_dict.get("spot_target_3"),
+                (plan_dict.get("trade_plan") or {}).get("target_1"),
+                (plan_dict.get("trade_plan") or {}).get("target_2"),
+                (plan_dict.get("trade_plan") or {}).get("target_3"),
                 plan_dict.get("target_1"),
                 plan_dict.get("target_2"),
                 plan_dict.get("target_3"),
-                plan_dict.get("runner_target"),
                 plan_dict.get("target"),
                 self.target_level,
             ]
+            target_sources = []
+            for src in raw_sources:
+                if src is None:
+                    continue
+                try:
+                    num = float(str(src).replace(",", "").replace("₹", "").replace("$", "").strip())
+                    # Discard leaked option premiums (e.g. 118.24 when spot is 2838.6)
+                    if entry_ref > 100 and num < (entry_ref * 0.5) and not is_short:
+                        continue
+                    target_sources.append(num)
+                except Exception:
+                    pass
 
-        # Collect raw target candidates from all plan keys
+        # Collect raw target candidates from target_sources
         candidates: list[float] = []
         for src in target_sources:
             if src is None:
@@ -948,65 +1093,90 @@ class AutoAlert:
                     str(src).replace(",", "").replace("₹", "").replace("$", "").strip()
                 )
                 if clean_num > 0 and clean_num not in candidates:
-                    # Avoid duplicates within 0.05
                     if not any(abs(clean_num - c) < 0.05 for c in candidates):
                         candidates.append(clean_num)
             except Exception:
                 pass
 
-        if not candidates:
-            return
+        if candidates:
+            # Directional filter: profit targets must extend beyond entry
+            if entry_ref > 0:
+                if not is_short:
+                    valid_tgts = [c for c in candidates if c >= entry_ref * 0.999]
+                else:
+                    valid_tgts = [c for c in candidates if c <= entry_ref * 1.001]
+                if valid_tgts:
+                    candidates = valid_tgts
 
-        # Directional filter: profit targets must extend beyond entry
-        if entry_ref > 0:
-            if not is_short:
-                # Long / option buying: targets must be >= entry
-                valid_tgts = [c for c in candidates if c >= entry_ref * 0.999]
-            else:
-                # Short: targets must be <= entry
-                valid_tgts = [c for c in candidates if c <= entry_ref * 1.001]
-            if valid_tgts:
-                candidates = valid_tgts
+            candidates.sort(reverse=is_short)
 
-        # Sort monotonically
-        candidates.sort(reverse=is_short)
+            if candidates:
+                t1 = candidates[0]
+                self.target_level = t1
+                plan_dict["target"] = f"{curr}{t1:,.{dec}f}"
+                plan_dict["target_1"] = f"{curr}{t1:,.{dec}f}"
 
-        if not candidates:
-            return
+                if len(candidates) >= 2:
+                    t2 = candidates[1]
+                    plan_dict["target_2"] = f"{curr}{t2:,.{dec}f}"
+                if len(candidates) >= 3:
+                    t3 = candidates[2]
+                    plan_dict["target_3"] = f"{curr}{t3:,.{dec}f}"
+                    plan_dict["runner_target"] = f"{curr}{t3:,.{dec}f}"
 
-        curr = "$" if self.segment == "CRYPTO" else "₹"
-        dec = (
-            4
-            if self.segment == "CDS"
-            else (2 if self.ltp < 100 or (plan_is_option and entry_ref < 100) else 1)
-        )
+        # ── Harmonize Option Plan in its own isolated domain ──────────────────
+        if opt_plan or plan_is_option:
+            opt_entry_val = float(
+                opt_plan.get("entry_premium") or getattr(self, "option_premium", 0.0) or 0.0
+            )
+            raw_opt_sources = [
+                opt_plan.get("t1_premium"),
+                opt_plan.get("t2_premium"),
+                opt_plan.get("t3_premium"),
+                opt_plan.get("target_1"),
+                opt_plan.get("target_2"),
+                plan_dict.get("option_target_1"),
+                plan_dict.get("option_target_2"),
+                plan_dict.get("option_target"),
+                getattr(self, "option_target_level", None),
+                getattr(self, "option_target_1", None),
+            ]
+            opt_candidates: list[float] = []
+            for src in raw_opt_sources:
+                if src is None:
+                    continue
+                try:
+                    num = float(str(src).replace(",", "").replace("₹", "").replace("$", "").strip())
+                    if num > 0 and num not in opt_candidates:
+                        # Exclude spot targets that accidentally leaked into option sources
+                        if entry_ref > 100 and num > (entry_ref * 0.5) and not is_opt:
+                            continue
+                        if not any(abs(num - c) < 0.05 for c in opt_candidates):
+                            opt_candidates.append(num)
+                except Exception:
+                    pass
 
-        t1 = candidates[0]
-        if not plan_is_option or is_opt:
-            self.target_level = t1
-        else:
-            self.option_target_level = t1
-            self.option_target_1 = t1
+            if opt_candidates:
+                if opt_entry_val > 0:
+                    v_opt = [c for c in opt_candidates if c >= opt_entry_val * 0.999]
+                    if v_opt:
+                        opt_candidates = v_opt
+                opt_candidates.sort()
 
-        plan_dict["target"] = f"{curr}{t1:,.{dec}f}"
-        plan_dict["target_1"] = f"{curr}{t1:,.{dec}f}"
+                opt_t1 = opt_candidates[0]
+                self.option_target_level = opt_t1
+                self.option_target_1 = opt_t1
+                opt_plan["t1_premium"] = opt_t1
+                plan_dict["option_target"] = f"{curr}{opt_t1:,.{dec}f}"
+                plan_dict["option_target_1"] = f"{curr}{opt_t1:,.{dec}f}"
 
-        if len(candidates) >= 2:
-            t2 = candidates[1]
-            plan_dict["target_2"] = f"{curr}{t2:,.{dec}f}"
-            if plan_is_option and not is_opt:
-                self.option_target_2 = t2
-        if len(candidates) >= 3:
-            t3 = candidates[2]
-            plan_dict["target_3"] = f"{curr}{t3:,.{dec}f}"
-            plan_dict["runner_target"] = f"{curr}{t3:,.{dec}f}"
-
-        if opt_plan:
-            opt_plan["t1_premium"] = t1
-            if len(candidates) >= 2:
-                opt_plan["t2_premium"] = candidates[1]
-            if len(candidates) >= 3:
-                opt_plan["t3_premium"] = candidates[2]
+                if len(opt_candidates) >= 2:
+                    opt_t2 = opt_candidates[1]
+                    self.option_target_2 = opt_t2
+                    opt_plan["t2_premium"] = opt_t2
+                    plan_dict["option_target_2"] = f"{curr}{opt_t2:,.{dec}f}"
+                if len(opt_candidates) >= 3:
+                    opt_plan["t3_premium"] = opt_candidates[2]
 
     @property
     def is_expired(self) -> bool:
@@ -1265,6 +1435,48 @@ class AutoAlert:
         """True if the alert has fired its execution trigger."""
         return self.stage in ("IGNITED", "TRIGGERED")
 
+    @property
+    def has_triggered(self) -> bool:
+        """
+        True if the alert has reached an active/ignited execution stage or executed in the market.
+        Untriggered radar alerts in STALK/EARLY_WARNING/PRIMED return False.
+        """
+        if getattr(self, "triggered_at", None):
+            return True
+        if self.stage in (
+            "IGNITED",
+            "TRIGGERED",
+            "ACTIVE",
+            "IN_FLIGHT",
+            "RUNNER_EXIT",
+            "COMPLETED",
+            "T1_ACHIEVED",
+            "T2_ACHIEVED",
+            "T3_ACHIEVED",
+            "TARGET_ACHIEVED",
+            "DE_RISK_0_5R",
+            "T0_5_ACHIEVED",
+            "BREAKEVEN_LOCKED",
+        ):
+            return True
+        milestones = getattr(self, "achieved_milestones", None) or []
+        return any(
+            m
+            in (
+                "IGNITED",
+                "ACTIVE",
+                "T1_ACHIEVED",
+                "T2_ACHIEVED",
+                "T3_ACHIEVED",
+                "TARGET_ACHIEVED",
+                "DE_RISK_0_5R",
+                "T0_5_ACHIEVED",
+                "BREAKEVEN_LOCKED",
+                "RUNNER_EXIT",
+            )
+            for m in milestones
+        )
+
     def promote_stage(
         self,
         new_stage: str,
@@ -1343,7 +1555,27 @@ class AutoAlert:
     @property
     def target_1(self) -> Optional[float]:
         """Canonical Target 1 price level."""
+        try:
+            from engine.alert_expiry import is_alert_option_premium_level
+
+            is_opt = is_alert_option_premium_level(self)
+        except Exception:
+            is_opt = False
+
         plan = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
+        ep = self.entry_price
+
+        # If this is a spot alert with an option recommendation, prioritize spot_target_1
+        if not is_opt and plan.get("spot_target_1"):
+            try:
+                import re
+
+                m = re.findall(r"[\d.]+", str(plan.get("spot_target_1")).replace(",", ""))
+                if m and float(m[0]) > 0:
+                    return float(m[0])
+            except Exception:
+                pass
+
         t1_val = plan.get("target_1")
         if t1_val:
             try:
@@ -1351,12 +1583,24 @@ class AutoAlert:
 
                 m = re.findall(r"[\d.]+", str(t1_val).replace(",", ""))
                 if m:
-                    return float(m[0])
+                    val = float(m[0])
+                    # Guard against option premium leakage into spot coordinate:
+                    # If spot entry > 100 and target < 50% of entry on a non-option bullish setup, ignore leaked option target
+                    if (
+                        not is_opt
+                        and ep
+                        and ep > 100
+                        and val < (ep * 0.5)
+                        and str(self.direction).upper() not in ("BEARISH", "SHORT", "SELL")
+                    ):
+                        if self.target_level and self.target_level > ep:
+                            return float(self.target_level)
+                    else:
+                        return val
             except Exception:
                 pass
 
         # If not explicitly defined as target_1, compute canonical +2R milestone if entry & SL exist
-        ep = self.entry_price
         sl = getattr(self, "initial_stop_loss", None) or self.stop_loss
         if ep and sl and ep != sl:
             risk = abs(ep - sl)
@@ -1364,8 +1608,9 @@ class AutoAlert:
             if tgt_lvl > 0 and tgt_lvl != ep:
                 is_expanding_up = tgt_lvl > ep
             else:
-                is_opt = bool(
-                    self.strike
+                is_opt_check = bool(
+                    is_opt
+                    or self.strike
                     or self.option_type
                     or self.contract_symbol
                     or self.alert_type
@@ -1374,7 +1619,7 @@ class AutoAlert:
                 is_opt_prem = bool(
                     self.alert_type in ("OPTIONS_MOMENTUM", "OPTION_WRITE")
                     or (
-                        is_opt
+                        is_opt_check
                         and getattr(self, "option_premium", None)
                         and abs(ep - float(self.option_premium))
                         < max(1.0, float(self.option_premium) * 0.15)
@@ -1409,7 +1654,25 @@ class AutoAlert:
     @property
     def target_2(self) -> Optional[float]:
         """Canonical Target 2 price level with strict monotonicity guardrails."""
+        try:
+            from engine.alert_expiry import is_alert_option_premium_level
+
+            is_opt = is_alert_option_premium_level(self)
+        except Exception:
+            is_opt = False
+
         plan = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
+        # If this is a spot alert with an option plan, check spot_target_2 first
+        if not is_opt and plan.get("spot_target_2"):
+            try:
+                import re
+
+                m = re.findall(r"[\d.]+", str(plan.get("spot_target_2")).replace(",", ""))
+                if m and float(m[0]) > 0:
+                    return float(m[0])
+            except Exception:
+                pass
+
         t2_val = plan.get("target_2")
         t2_num = None
         if t2_val:
@@ -1418,7 +1681,18 @@ class AutoAlert:
 
                 m = re.findall(r"[\d.]+", str(t2_val).replace(",", ""))
                 if m:
-                    t2_num = float(m[0])
+                    val = float(m[0])
+                    ep_chk = self.entry_price
+                    if (
+                        not is_opt
+                        and ep_chk
+                        and ep_chk > 100
+                        and val < (ep_chk * 0.5)
+                        and str(self.direction).upper() not in ("BEARISH", "SHORT", "SELL")
+                    ):
+                        t2_num = None
+                    else:
+                        t2_num = val
             except Exception:
                 pass
         t1 = self.target_1
@@ -1485,6 +1759,7 @@ class AutoAlert:
         )
         d["is_active"] = self.is_active
         d["is_expired"] = self.is_expired
+        d["has_triggered"] = self.has_triggered
 
         plan_opt = (
             (self.actionable_plan or {}).get("option_plan", {})
@@ -1513,7 +1788,7 @@ class AutoAlert:
             eff_exp_type = classify_expiry_type(eff_exp_date, self.symbol)
 
         # Rich expiry details & next-expiry opportunities
-        exp_info = get_expiry_metadata(eff_exp_date, eff_exp_type, self.symbol, eff_contract)
+        exp_info = get_expiry_metadata(eff_exp_date, eff_exp_type, self.symbol, eff_contract) or {}
         resolved_date = eff_exp_date or exp_info.get("raw_date")
         resolved_type = eff_exp_type or (
             "WEEKLY"

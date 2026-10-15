@@ -2,6 +2,9 @@
 Market data, calendar, feeds, quotes, and intelligence modules.
 """
 
+# Ensure fyers_apiv3 WebSocket background threads are always daemon=True
+import market.fyers_socket_patch  # noqa: F401
+
 from market.calendar import (
     is_trading_holiday,
     get_holiday_reason,

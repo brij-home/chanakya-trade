@@ -340,3 +340,62 @@ def test_option_put_buyer_milestone_integrity_payoff_direction():
     free_msg_passed = render_free_index_alert(put_alert, in_market=True)
     assert "T1 HIT" in free_msg_passed
     assert "hit T1" in free_msg_passed
+
+
+def test_option_unit_scale_and_spot_contamination_vetoed():
+    """
+    Regression Test for Signal #SIG_MIDCPNIFTY_13750PE_14OCT_1335:
+    Verifies that a rogue quote (e.g. ₹1,420 or index spot ₹13,750) compared against an option
+    premium (e.g. ₹168 entry, ₹188 T1) is STRICTLY VETOED by the milestone integrity gate,
+    preventing any false 'T1 ACHIEVED' or false win recording.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine
+
+    engine = AutoAlertEngine()
+
+    opt_alert = AutoAlert(
+        alert_id="aa-index-micro-scalp-midcpnifty-pe-13750-20261014",
+        alert_type="INDEX_MICRO_SCALP",
+        stage="IGNITED",
+        symbol="MIDCPNIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="MIDCPNIFTY 13750 PE Micro Breakout",
+        summary="Buy above 168.0, SL 158.0, T1 188.0",
+        ltp=168.0,
+        trigger_level=168.0,
+        target_level=188.0,
+        stop_loss=158.0,
+        confidence=95,
+        contract_symbol="NSE:MIDCPNIFTY26OCT13750PE",
+        strike=13750.0,
+        option_type="PE",
+        option_premium=168.0,
+        underlying_spot=13758.9,
+    )
+
+    # 1. Rogue price ₹1420.0 (8.45x entry) MUST be vetoed fail-closed
+    is_valid, reason = engine.validate_milestone_integrity(
+        opt_alert, cur_quote_ltp=1420.0, milestone="T1_ACHIEVED"
+    )
+    assert is_valid is False
+    assert "unit-scale mismatch" in reason.lower()
+
+    # 2. validate_milestone_integrity_for_target MUST ALSO veto
+    opt_alert.ltp = 1420.0
+    is_valid_tgt, reason_tgt = engine.validate_milestone_integrity_for_target(opt_alert, "T1")
+    assert is_valid_tgt is False
+    assert "unit-scale mismatch" in reason_tgt.lower()
+
+    # 3. Underlying spot leak ₹13,750.0 MUST be vetoed
+    is_valid_spot, reason_spot = engine.validate_milestone_integrity(
+        opt_alert, cur_quote_ltp=13750.0, milestone="T1_ACHIEVED"
+    )
+    assert is_valid_spot is False
+
+    # 4. Legitimate premium price ₹189.0 (>= T1 188.0) MUST pass
+    opt_alert.ltp = 189.0
+    is_valid_legit, reason_legit = engine.validate_milestone_integrity(
+        opt_alert, cur_quote_ltp=189.0, milestone="T1_ACHIEVED"
+    )
+    assert is_valid_legit is True

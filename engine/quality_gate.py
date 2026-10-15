@@ -549,8 +549,34 @@ def evaluate_institutional_quality_gate(
         or []
     )
 
-    if confidence >= 90 or len(confluences) >= 3:
-        conviction_tier = "APEX_CONFLUENCE"
+    # Evaluate Multi-Timeframe Structural Confluence Matrix (MTSCM 3-Tier Score)
+    mtscm_res = None
+    try:
+        from engine.mtscm import evaluate_mtscm
+
+        sym = getattr(alert, "symbol", "") or ""
+        ltp = float(getattr(alert, "ltp", 0.0) or 0.0)
+        direction = getattr(alert, "direction", "BULLISH") or "BULLISH"
+        m_dict = getattr(alert, "metrics", {}) or {}
+        if sym and ltp > 0:
+            mtscm_res = evaluate_mtscm(symbol=sym, ltp=ltp, direction=direction, metrics=m_dict)
+            verdict_metrics["mtscm"] = mtscm_res.to_dict()
+            verdict_metrics["mtscm_score"] = mtscm_res.total_score
+            verdict_metrics["mtscm_tier"] = mtscm_res.tier
+    except Exception:
+        pass
+
+    if (
+        confidence >= 90
+        or len(confluences) >= 3
+        or (mtscm_res and mtscm_res.tier == "APEX_CONFLUENCE")
+    ):
+        # Downgrade if MTSCM detects severe multi-timeframe structural conflict
+        if mtscm_res and mtscm_res.tier == "DEFENSIVE_VETO" and len(mtscm_res.headwinds) >= 2:
+            conviction_tier = "DEFINED_RISK_ONLY"
+            execution_mandate = "HEDGED_SPREAD_MANDATORY"
+        else:
+            conviction_tier = "APEX_CONFLUENCE"
     elif confidence >= 80 and execution_mandate == "STANDARD":
         conviction_tier = "HIGH_CONVICTION"
     elif confidence >= 70:

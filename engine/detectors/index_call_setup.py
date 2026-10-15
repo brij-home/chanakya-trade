@@ -28,6 +28,7 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from engine.alert_identity import generate_alert_id, canonical_alert_symbol
+from engine.alert_identity import get_session_phase_slot
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
 
@@ -52,6 +53,9 @@ _SETUP_ICONS = {
     "VCP_COILING": "🔴",  # Red dot = early warning, coiling before explosive move
     "DAY_HIGH_BREAKOUT": "🚀",
     "INTRADAY_CAPITULATION_REVERSAL": "🔥",
+    "VALUE_BASE_ACCUMULATION": "💎",
+    "ACCUMULATION_BOTTOM": "💎",
+    "PUT_WRITING_FLOOR": "🛡️",
 }
 
 
@@ -303,6 +307,12 @@ def detect_index_call_setup(
                 moneyness_bonus = 35.0  # 1-to-2 strike ITM powerhouse (Delta 0.58 to 0.70)
             elif dist_pts <= (step_val * 0.65):
                 moneyness_bonus = 25.0  # ATM sweet spot
+            elif (
+                c_strike > spot
+                and dist_pts <= (step_val * 1.15)
+                and lp >= (25.0 if clean_sym == "NIFTY" else 60.0)
+            ):
+                moneyness_bonus = 22.0  # OTM+1 High-Gamma Asymmetry sweet spot
             elif c_strike > spot:
                 moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 18.0)  # OTM penalty
         else:
@@ -311,6 +321,14 @@ def detect_index_call_setup(
             elif c_strike < spot and dist_pts <= (step_val * 1.35):
                 moneyness_bonus = (
                     20.0  # 1-strike ITM powerhouse (Delta ~0.58-0.65, zero time-decay trap)
+                )
+            elif (
+                c_strike > spot
+                and dist_pts <= (step_val * 1.15)
+                and lp >= (25.0 if clean_sym == "NIFTY" else 60.0)
+            ):
+                moneyness_bonus = (
+                    24.0  # OTM+1 High-Gamma Asymmetry sweet spot (high percentage torque)
                 )
             elif c_strike > spot:
                 # OTM penalty grows with distance to prevent selecting low-delta decay traps
@@ -321,7 +339,7 @@ def detect_index_call_setup(
         elif clean_sym in ("MIDCPNIFTY", "FINNIFTY"):
             ideal_prem = 45.0
         else:  # NIFTY, BANKNIFTY
-            ideal_prem = 140.0 if clean_sym == "NIFTY" else 300.0
+            ideal_prem = 100.0 if clean_sym == "NIFTY" else 240.0
         prem_dist = abs(lp - ideal_prem) / ideal_prem if lp > 0 else 2.0
         return (
             moneyness_bonus
@@ -365,6 +383,18 @@ def detect_index_call_setup(
     )
     ce_oi_change_sum = sum(
         int(getattr(c, "oi_change", 0) or 0) for c in chain if getattr(c, "option_type", "") == "CE"
+    )
+    pe_oi_change_sum = sum(
+        int(getattr(c, "oi_change", 0) or 0) for c in chain if getattr(c, "option_type", "") == "PE"
+    )
+    atm_pe = min(
+        [c for c in chain if getattr(c, "option_type", "") == "PE"],
+        key=lambda c: abs(getattr(c, "strike", 0.0) - spot),
+        default=None,
+    )
+    atm_pe_oi_chg = int(getattr(atm_pe, "oi_change", 0) or 0) if atm_pe else 0
+    is_put_writing_floor = (atm_pe_oi_chg > 500) or (
+        pe_oi_change_sum > 2000 and pe_oi_change_sum > ce_oi_change_sum
     )
     chain_pcr = (
         round(pe_oi_total / max(1, ce_oi_total), 2)
@@ -461,9 +491,19 @@ def detect_index_call_setup(
         ).startswith("HBCM_TEST_PASSTHROUGH")
         if has_hbcm_quotes:
             if not hbcm_res.confluence_pass:
-                # Institutional Grounding Invariant: Never bypass HBCM if heavyweights are net bearish!
-                # If >= 3 heavyweights are bearish or bears outnumber bulls, the index locomotive tide is bearish.
-                if hbcm_res.bearish_count >= 3:
+                bull_wt = sum(
+                    float(c.get("weight_pct", 0.0) or 0.0)
+                    for c in (hbcm_res.constituents or [])
+                    if c.get("posture") == "BULLISH"
+                )
+                bear_wt = sum(
+                    float(c.get("weight_pct", 0.0) or 0.0)
+                    for c in (hbcm_res.constituents or [])
+                    if c.get("posture") == "BEARISH"
+                )
+
+                # Institutional Grounding Invariant: Never bypass HBCM if 4 or 5 heavyweights are bearish!
+                if hbcm_res.bearish_count >= 4:
                     logger.info(
                         f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Majority of heavyweights are bearish "
                         f"({hbcm_res.bearish_count}/5 bears). HBCM bypass strictly forbidden."
@@ -471,12 +511,12 @@ def detect_index_call_setup(
                     return []
 
                 # If market breadth bypassed via strong V-bottom bounce (price action voted)
-                # and at least 3 heavyweights are already bullish or net heavyweights bullish:
+                # and at least 2 heavyweights are already bullish or net heavyweights bullish by weight:
                 _v_bottom_hbcm_pass = _breadth_bypassed and (
                     hbcm_res.bullish_count >= 3
                     or (
-                        hbcm_res.bullish_count > hbcm_res.bearish_count
-                        and hbcm_res.bullish_count >= 2
+                        hbcm_res.bullish_count >= 2
+                        and (bull_wt >= bear_wt or hbcm_res.bullish_count > hbcm_res.bearish_count)
                     )
                 )
                 # Fix #4 (P1): Explosive Momentum HBCM Bypass
@@ -501,9 +541,15 @@ def detect_index_call_setup(
                     and not getattr(hbcm_res, "all_bearish", False)
                 )
                 if not (_v_bottom_hbcm_pass or _explosive_momentum_hbcm_pass or _roc_hbcm_pass):
-                    logger.info(
-                        f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: {hbcm_res.rejection_reason}"
-                    )
+                    if hbcm_res.bearish_count >= 3:
+                        logger.info(
+                            f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Majority of heavyweights are bearish "
+                            f"({hbcm_res.bearish_count}/5 bears). HBCM bypass strictly forbidden."
+                        )
+                    else:
+                        logger.info(
+                            f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: {hbcm_res.rejection_reason}"
+                        )
                     return []
                 else:
                     _bypass_reason = (
@@ -625,7 +671,7 @@ def detect_index_call_setup(
         and ((day_high - day_low) / max(1.0, spot)) >= 0.003
     ):
         dh_headroom_pct = (day_high - spot) / spot * 100.0
-        if dh_headroom_pct < 0.30 and not is_breakout_momentum:
+        if dh_headroom_pct < 0.15 and not is_breakout_momentum:
             logger.debug(
                 f"[IndexCallSetup] Suppressed CE: Spot ₹{spot:,.1f} is within {dh_headroom_pct:.2f}% of Day High ₹{day_high:,.1f} (Headroom Truncated)"
             )
@@ -668,6 +714,14 @@ def detect_index_call_setup(
             "max_call_oi_strike": max_call_oi_strike,
             "oi_unwind": max_ce_oi_change,
             "spot": spot,
+        }
+
+    if is_put_writing_floor:
+        signals.append("PUT_WRITING_FLOOR")
+        signal_tags["put_writing_floor"] = {
+            "atm_pe_oi_change": atm_pe_oi_chg,
+            "pe_oi_change_sum": pe_oi_change_sum,
+            "ce_oi_change_sum": ce_oi_change_sum,
         }
 
     # 5m Trend Structure Alignment: Detect sustained bearish momentum
@@ -922,6 +976,35 @@ def detect_index_call_setup(
         max_reclaim_envelope = (
             0.25 if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX") else 0.18
         )
+        # Descending Flush Guard (Symmetric to Ascending Bounce Guard in Put Detector):
+        # If spot is plunging down strongly from Day High towards VWAP with red candle momentum,
+        # it is a dump / bull trap / supply flush, NOT a safe VWAP reclaim.
+        _is_recent_flush = False
+        if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 2:
+            try:
+                col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                col_h = "high" if "high" in active_ohlcv.columns else "High"
+                last_b = active_ohlcv.iloc[-1]
+                prev_b = active_ohlcv.iloc[-2]
+                if float(last_b[col_c]) < float(last_b[col_o]) or float(last_b[col_h]) < float(
+                    prev_b[col_h]
+                ):
+                    _is_recent_flush = True
+            except Exception:
+                pass
+
+        _flush_from_dh_pct = (
+            ((day_high - spot) / max(1.0, day_high) * 100.0)
+            if (day_high and day_high > 0 and spot < day_high)
+            else 0.0
+        )
+        _is_descending_flush_from_high = (
+            _flush_from_dh_pct >= 0.15
+            and _is_recent_flush
+            and ((day_high - spot) > (spot - (day_low or spot)))
+        )
+
         has_candle_reclaim = True
         if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
             try:
@@ -944,6 +1027,7 @@ def detect_index_call_setup(
         if (
             day_low_vs_vwap >= -0.1
             and (0.03 <= vwap_reclaim_pct <= max_reclaim_envelope)
+            and not _is_descending_flush_from_high
             and has_candle_reclaim
         ):
             signals.append("VWAP_RECLAIM")
@@ -1275,6 +1359,48 @@ def detect_index_call_setup(
                     except Exception as e_tpb:
                         logger.debug(f"[IndexCallSetup] Trend pullback check error: {e_tpb}")
 
+                # 8c. Value Base Accumulation (Pre-Inflection Demand Coiling at Base)
+                # Catches mid-morning (11:00-12:45 IST) accumulation where price stabilizes above support/VWAP
+                # with contracting range and prints higher lows before afternoon expansion.
+                if (
+                    len(active_ohlcv) >= 6
+                    and not is_opening_buffer
+                    and "VALUE_BASE_ACCUMULATION" not in signals
+                    and dtime(11, 0) <= curr_time <= dtime(12, 45)
+                ):
+                    try:
+                        recent_lows = active_ohlcv[col_l].iloc[-4:].values
+                        recent_closes = active_ohlcv[col_c].iloc[-4:].values
+                        # Spot is holding above VWAP or within 0.25% of VWAP / PDL support
+                        holds_support = (effective_vwap > 0 and spot >= effective_vwap * 0.998) or (
+                            prev_day_low and prev_day_low > 0 and spot >= prev_day_low * 0.998
+                        )
+                        # Higher low or stable base across last 3 bars (not making new session lows)
+                        is_stable_base = (recent_lows[-1] >= recent_lows[0] * 0.999) and (
+                            recent_closes[-1] >= recent_closes[0]
+                        )
+                        # Last bar green or strong lower wick
+                        curr_candle_rng = max(
+                            0.1, float(active_ohlcv[col_h].iloc[-1]) - float(recent_lows[-1])
+                        )
+                        lower_wick = float(recent_closes[-1]) - float(recent_lows[-1])
+                        is_demand_absorption = (lower_wick / curr_candle_rng >= 0.40) or (
+                            recent_closes[-1] >= float(active_ohlcv[col_o].iloc[-1])
+                        )
+
+                        if holds_support and is_stable_base and is_demand_absorption:
+                            signals.append("VALUE_BASE_ACCUMULATION")
+                            signal_tags["value_base_accumulation"] = {
+                                "support_anchor": "VWAP"
+                                if (effective_vwap > 0 and spot >= effective_vwap * 0.998)
+                                else "PDL",
+                                "base_low": round(float(min(recent_lows)), 2),
+                                "spot": spot,
+                                "window": "11:00-12:45 IST",
+                            }
+                    except Exception as e_vba:
+                        logger.debug(f"[IndexCallSetup] Value base accumulation error: {e_vba}")
+
         except Exception as e_ohlcv:
             logger.debug(f"[IndexCallSetup] OHLCV analysis error for {underlying}: {e_ohlcv}")
 
@@ -1286,7 +1412,38 @@ def detect_index_call_setup(
         if -0.15 <= dh_dist_pct <= 0.50 and (
             spot >= (effective_vwap * 0.998) if effective_vwap > 0 else True
         ):
-            if is_breakout_momentum or (active_ohlcv is not None and len(active_ohlcv) >= 3):
+            # Wyckoff Upthrust Rejection Wick Filter:
+            # If the latest 5m candle has a long upper rejection wick (>= 35% of total candle range),
+            # this breakout is an institutional liquidity sweep / bull trap (UTAD). Do NOT enter CE into an upthrust!
+            has_rejection_wick_upthrust = False
+            upper_wick_pct = 0.0
+            if (
+                active_ohlcv is not None
+                and hasattr(active_ohlcv, "iloc")
+                and len(active_ohlcv) >= 1
+            ):
+                try:
+                    col_h = "high" if "high" in active_ohlcv.columns else "High"
+                    col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                    col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                    col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                    last_b = active_ohlcv.iloc[-1]
+                    b_h = float(last_b[col_h])
+                    b_l = float(last_b[col_l])
+                    b_c = float(last_b[col_c])
+                    b_o = float(last_b[col_o])
+                    b_rng = max(0.1, b_h - b_l)
+                    upper_wick_pct = (b_h - max(b_c, b_o)) / b_rng * 100.0
+                    if upper_wick_pct >= 35.0:
+                        has_rejection_wick_upthrust = True
+                except Exception:
+                    pass
+            if has_rejection_wick_upthrust:
+                logger.info(
+                    f"[IndexCallSetup] Suppressed DAY_HIGH_BREAKOUT on {clean_sym}: Upper rejection wick "
+                    f"({upper_wick_pct:.1f}%) detected on breakout bar. Wyckoff upthrust bull trap active."
+                )
+            elif is_breakout_momentum or (active_ohlcv is not None and len(active_ohlcv) >= 3):
                 signals.append("DAY_HIGH_BREAKOUT")
                 signal_tags["day_high_breakout"] = {
                     "day_high": day_high,
@@ -1411,6 +1568,81 @@ def detect_index_call_setup(
         except Exception as e_thrust:
             logger.debug(f"[IndexCallSetup] Thrust check error: {e_thrust}")
 
+    # ── 11. ACCUMULATION_BOTTOM (Mid-Session Oversold VWAP Exhaustion + Session-Low Demand Absorption) ────
+    # Symmetrical counterpart to DISTRIBUTION_TOP in the put detector:
+    # Market flushed strongly (spot >= 1.0% below VWAP), hit session floor (within 0.20% of
+    # day low), and the last 5m bar shows institutional demand absorption with a hammer / lower wick.
+    # Bypasses is_5m_bear_trend and gives high-conviction early entry at major capitulation bottoms.
+    if day_low and day_low > 0 and not is_opening_buffer and "ACCUMULATION_BOTTOM" not in signals:
+        spot_at_dl_pct = (spot - day_low) / max(1.0, spot) * 100.0  # distance above day low
+        vwap_oversold = bool(
+            effective_vwap > 0 and spot < effective_vwap * 0.990
+        )  # >= 1.0% below VWAP
+
+        has_accumulation_bar = False
+        _accum_bar_tags: dict[str, Any] = {}
+        if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 3:
+            try:
+                col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                col_h = "high" if "high" in active_ohlcv.columns else "High"
+                col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                col_v = "volume" if "volume" in active_ohlcv.columns else "Volume"
+                last_b = active_ohlcv.iloc[-1]
+                b_c = float(last_b[col_c])
+                b_o = float(last_b[col_o])
+                b_h = float(last_b[col_h])
+                b_l = float(last_b[col_l])
+                b_v = float(last_b[col_v])
+                b_rng = max(0.1, b_h - b_l)
+                lower_wick_pct = (min(b_c, b_o) - b_l) / b_rng * 100.0
+                close_pos_pct = (b_c - b_l) / b_rng * 100.0  # close in top = buying absorption
+                avg_vol = (
+                    float(active_ohlcv[col_v].iloc[:-1].mean()) if len(active_ohlcv) > 1 else b_v
+                )
+                rvol = round(b_v / max(1.0, avg_vol), 2)
+                # Absorption candle: close > open (bullish bar) AND significant lower wick (>= 35%)
+                # OR: close in top 30% of bar with elevated volume (climactic capitulation absorption)
+                is_absorption_bar = b_c > b_o and lower_wick_pct >= 35.0
+                is_high_vol_accumulation = rvol >= 1.4 and close_pos_pct >= 70.0
+                has_accumulation_bar = is_absorption_bar or is_high_vol_accumulation
+                _accum_bar_tags = {
+                    "lower_wick_pct": round(lower_wick_pct, 1),
+                    "close_pos_pct": round(close_pos_pct, 1),
+                    "rvol": rvol,
+                    "is_absorption_bar": is_absorption_bar,
+                    "is_high_vol_accumulation": is_high_vol_accumulation,
+                }
+            except Exception as _e_accum:
+                logger.debug(f"[IndexCallSetup] ACCUMULATION_BOTTOM bar check error: {_e_accum}")
+
+        if (
+            0.0 <= spot_at_dl_pct <= 0.20  # within 0.20% above day low
+            and vwap_oversold
+            and has_accumulation_bar
+        ):
+            vwap_oversold_pct = (
+                round((1 - spot / effective_vwap) * 100, 2) if effective_vwap > 0 else 0.0
+            )
+            signals.append("ACCUMULATION_BOTTOM")
+            signal_tags["accumulation_bottom"] = {
+                "day_low": round(day_low, 2),
+                "spot": round(spot, 2),
+                "dl_proximity_pct": round(spot_at_dl_pct, 3),
+                "vwap": round(effective_vwap, 2) if effective_vwap > 0 else None,
+                "vwap_oversold_pct": vwap_oversold_pct,
+                "roc_deceleration": roc_metric.is_decelerating_down,
+                "roc_1": roc_metric.roc_1,
+                "roc_2": roc_metric.roc_2,
+                **_accum_bar_tags,
+            }
+            logger.info(
+                f"[IndexCallSetup] ACCUMULATION_BOTTOM detected on {clean_sym}: "
+                f"Spot ₹{spot:,.1f} within {spot_at_dl_pct:.3f}% of Day Low ₹{day_low:,.1f}, "
+                f"VWAP oversold -{vwap_oversold_pct:.2f}% (₹{effective_vwap:,.1f}), "
+                f"absorption bar confirmed ({_accum_bar_tags}), ROC deceleration down={roc_metric.is_decelerating_down}."
+            )
+
     if not signals:
         return []
 
@@ -1427,6 +1659,7 @@ def detect_index_call_setup(
             "FAILED_DAY_LOW_BREAKDOWN" in signals
             or "INTRADAY_CAPITULATION_REVERSAL" in signals
             or "PDL_DEMAND_REJECTION" in signals
+            or "ACCUMULATION_BOTTOM" in signals
         )
         adaptive_decision = evaluate_index_adaptive_regime(
             underlying=clean_sym,
@@ -1526,6 +1759,8 @@ def detect_index_call_setup(
         "DAY_HIGH_BREAKOUT": 12,
         "INSTITUTIONAL_EXPANSION_THRUST": 16,
         "SHORT_SQUEEZE_UNWIND": 16,
+        "PUT_WRITING_FLOOR": 8,
+        "ACCUMULATION_BOTTOM": 16,
     }
     confidence = base_confidence
     for sig in signals:
@@ -1534,6 +1769,8 @@ def detect_index_call_setup(
     if pchange >= 10.0:
         confidence += 6
     if roc_metric.is_accelerating_up and roc_metric.is_meaningful_up:
+        confidence += 5
+    if "ACCUMULATION_BOTTOM" in signals and roc_metric.is_decelerating_down:
         confidence += 5
     if cand_ce_oi_roc >= 15.0:
         confidence += 3
@@ -1615,6 +1852,15 @@ def detect_index_call_setup(
         "BANKEX": 95.0,
     }.get(clean_sym, 35.0)
 
+    min_intraday_opt_risk = {
+        "NIFTY": 10.5,
+        "BANKNIFTY": 28.0,
+        "FINNIFTY": 12.5,
+        "MIDCPNIFTY": 8.0,
+        "SENSEX": 38.0,
+        "BANKEX": 38.0,
+    }.get(clean_sym, 10.0)
+
     if opt_ltp > 0:
         calc_risk = max(1.0, opt_ltp - sl_premium)
         if calc_risk > max_intraday_opt_risk:
@@ -1626,6 +1872,19 @@ def detect_index_call_setup(
             t3_premium = round(opt_ltp + (calc_risk * 5.5), 1)
             rr_str = "1:2.0"
             net_rr_str = "1:2.0"
+        else:
+            # Enforce minimum stop-loss distance floor (10.5 pts for Nifty, 28 pts BankNifty, etc.)
+            # Bounded by 35% of premium to avoid over-risking on cheap OTM contracts
+            effective_min_risk = min(opt_ltp * 0.35, min_intraday_opt_risk)
+            if calc_risk < effective_min_risk:
+                calc_risk = effective_min_risk
+                sl_premium = round(max(0.5, opt_ltp - calc_risk), 1)
+                t0_5_premium = round(opt_ltp + (calc_risk * 1.0), 1)
+                t1_premium = round(opt_ltp + (calc_risk * 2.0), 1)
+                t2_premium = round(opt_ltp + (calc_risk * 3.5), 1)
+                t3_premium = round(opt_ltp + (calc_risk * 5.5), 1)
+                rr_str = "1:2.0"
+                net_rr_str = "1:2.0"
 
     friction_pts = (
         opt_plan.get("friction_pts", round(opt_ltp * 0.012 + 0.35, 2))
@@ -1783,6 +2042,14 @@ def detect_index_call_setup(
             f"Optimal Entry Zone: ₹{opt_ltp:,.1f}–₹{round(opt_ltp * 1.03, 1):,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%). "
             f"DO NOT CHASE above ₹{round(opt_ltp * 1.08, 1):,.1f} — wait for volume confirmation candle."
         )
+    elif "VALUE_BASE_ACCUMULATION" in signals:
+        vba = signal_tags.get("value_base_accumulation", {})
+        headline = f"💎 PRE-INFLECTION VALUE BASE ACCUMULATION: {clean_sym} {int(strike)} CE"
+        summary = (
+            f"Pre-Inflection Value Base Accumulation: Spot (₹{spot:,.1f}) holding stable demand base at {vba.get('support_anchor', 'VWAP')} "
+            f"(Base Low: ₹{vba.get('base_low', 0):,.1f}) during 11:00-12:45 IST absorption lull. Tight invalidation stop with high R:R runway. "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
     elif "TREND_PULLBACK_RECLAIM" in signals:
         tpb = signal_tags.get("trend_pullback", {})
         headline = f"📈 TREND PULLBACK RECLAIM: {clean_sym} {int(strike)} CE"
@@ -1796,6 +2063,25 @@ def detect_index_call_setup(
         summary = (
             f"Spot (₹{spot:,.1f}) breaking out through Session High (₹{dhb.get('day_high', 0):,.1f}) with bullish momentum. "
             f"Spot holding above VWAP (₹{effective_vwap:,.1f}) with CE volume expansion ({volume:,} contracts, {vol_oi_ratio:.1f}x Vol/OI, +{pchange:.1f}%). "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "ACCUMULATION_BOTTOM" in signals:
+        ab_tags = signal_tags.get("accumulation_bottom", {})
+        headline = f"💎 ACCUMULATION BOTTOM REVERSAL: {clean_sym} {int(strike)} CE"
+        summary = (
+            f"Mid-session capitulation floor absorption: Spot ₹{ab_tags.get('spot', spot):,.1f} "
+            f"tested Day Low ₹{ab_tags.get('day_low', 0):,.1f} ({ab_tags.get('dl_proximity_pct', 0):.3f}% above) "
+            f"while VWAP oversold -{ab_tags.get('vwap_oversold_pct', 0):.2f}% (VWAP ₹{ab_tags.get('vwap', effective_vwap):,.1f}). "
+            f"Demand absorption bar confirmed: {ab_tags.get('lower_wick_pct', 0):.0f}% lower wick, close top-{ab_tags.get('close_pos_pct', 0):.0f}% of bar, "
+            f"RVOL {ab_tags.get('rvol', 0):.1f}x. Institutional bottom accumulation detected. "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "PUT_WRITING_FLOOR" in signals:
+        pwf = signal_tags.get("put_writing_floor", {})
+        headline = f"🛡️ PUT WRITING FLOOR SUPPORT: {clean_sym} {int(strike)} CE"
+        summary = (
+            f"Active Put Writing Floor detected: Writers aggressively building support below (ATM PE OI +{pwf.get('atm_pe_oi_change', 0):,} contracts, total PE OI change +{pwf.get('pe_oi_change_sum', 0):,}). "
+            f"Underlying spot ₹{spot:,.1f} supported by heavy floor building. "
             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
         )
     else:
@@ -1822,6 +2108,23 @@ def detect_index_call_setup(
     now_time = now_dt.time()
     is_low_vix_range = bool(vix_val is not None and vix_val < 13.0)
     is_midday_chop_window = bool(dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 65)
+    # Coiling Escape Hatch: VCP, double-bottom, VWAP reclaim, and capitulation reversal signals
+    # ARE the pre-expansion coiling patterns — they should fire DURING the midday lull, not be
+    # suppressed by it. Low velocity is expected in coiling; it is the defining characteristic.
+    _COILING_SIGNALS = {
+        "VCP_COILING",
+        "DOUBLE_BOTTOM_BREAKOUT",
+        "VWAP_RECLAIM",
+        "INTRADAY_CAPITULATION_REVERSAL",
+        "FAILED_DAY_LOW_BREAKDOWN",
+        "INTRADAY_CAPITULATION_BOTTOM",
+        "ACCUMULATION_BOTTOM",
+    }
+    is_midday_coiling_escape = is_midday_chop_window and bool(
+        any(s in _COILING_SIGNALS for s in signals)
+    )
+    # Only apply chop gate to non-coiling signals; coiling signals bypass the gate
+    is_midday_chop_window = is_midday_chop_window and not is_midday_coiling_escape
     is_chop_regime = (
         is_midday_chop_window
         or is_low_vix_range
@@ -2002,6 +2305,9 @@ def detect_index_call_setup(
         # Naked option buying during this window suffers severe theta drag and mean-reversion whipsaws.
         is_0dte_midday_trap = is_0dte and (dtime(11, 30) <= now_time <= dtime(14, 0))
 
+        # 0DTE Late Session Expiration: Post 14:30 IST on expiry day, naked options face catastrophic terminal theta collapse.
+        is_0dte_late_session = is_0dte and (now_time >= dtime(14, 30))
+
         if is_low_vix_range:
             pref_veh = "SPREAD_ONLY"
             spread_guidance = (
@@ -2013,6 +2319,12 @@ def detect_index_call_setup(
             spread_guidance = (
                 f"⚠️ HIGH-VIX REGIME (India VIX {vix_val:.1f} >= 18.0): High IV crush risk on naked options; "
                 "execute defined-risk Bull Call Spread or Deep ITM only."
+            )
+        elif is_0dte_late_session:
+            pref_veh = "SPREAD_ONLY"
+            spread_guidance = (
+                "⚠️ 0DTE LATE SESSION THETA COLLAPSE (post 14:30 IST): Naked option buying strictly prohibited on expiry day; "
+                "execute defined-risk Bull Call Spread only to eliminate terminal theta bleed."
             )
         elif is_0dte_midday_trap:
             pref_veh = "SPREAD_ONLY"
@@ -2091,6 +2403,7 @@ def detect_index_call_setup(
                 or is_high_iv_risk
                 or is_midday_chop_window
                 or is_0dte_midday_trap
+                or is_0dte_late_session
                 or is_call_wall_collision
                 or is_long_dated_monthly
             )
@@ -2098,10 +2411,12 @@ def detect_index_call_setup(
         )
 
     # ── Optimal Trade Entry (OTE) & No-Chase Guard ───────────────
-    if (is_low_vix_range or is_0dte_midday_trap or is_call_wall_collision) and not hedge_plan:
+    if (
+        is_low_vix_range or is_0dte_midday_trap or is_0dte_late_session or is_call_wall_collision
+    ) and not hedge_plan:
         logger.info(
             f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: "
-            f"{'Imminent Call Wall Collision' if is_call_wall_collision else ('0DTE Midday Theta Trap' if is_0dte_midday_trap else 'Low-VIX range-bound regime')} without viable hedged spread."
+            f"{'Imminent Call Wall Collision' if is_call_wall_collision else ('0DTE Late Session Expiration' if is_0dte_late_session else ('0DTE Midday Theta Trap' if is_0dte_midday_trap else 'Low-VIX range-bound regime'))} without viable hedged spread."
         )
         return []
 
@@ -2145,8 +2460,63 @@ def detect_index_call_setup(
     else:
         annotated_hl = headline
 
+    is_breakout_type = bool(
+        is_breakout_momentum
+        or is_institutional_thrust
+        or any(
+            s in signals
+            for s in (
+                "DAY_HIGH_BREAKOUT",
+                "CAMARILLA_H4_BREAKOUT",
+                "VWAP_BREAKOUT",
+                "BREAKOUT_RETEST_EXPANSION",
+                "MOMENTUM_EXPANSION",
+            )
+        )
+    )
+
+    if "VALUE_BASE_ACCUMULATION" in signals:
+        exec_trigger_str = f"LIMIT_IN_OTE_ZONE_₹{entry_range_str}"
+        conf_rule_str = "LIMIT_ON_PULLBACK_OTE"
+        exec_notes_str = (
+            f"Value Base Accumulation: Place LIMIT order in OTE zone ({entry_range_str}) on absorption retest. "
+            f"Do not wait for breakout bar; risk is mathematically defined below base at ₹{sl_premium:,.1f}."
+        )
+    elif any(
+        s in signals
+        for s in (
+            "PDL_DEMAND_REJECTION",
+            "CPR_DEMAND_BOUNCE",
+            "TREND_PULLBACK_RECLAIM",
+            "DEMAND_ZONE_SWEEP",
+        )
+    ):
+        exec_trigger_str = f"LIMIT_ON_PULLBACK_₹{entry_range_str}"
+        conf_rule_str = "LIMIT_ON_PULLBACK_OTE"
+        exec_notes_str = (
+            f"Pullback/Bounce Execution: Enter on limit or demand rejection in OTE zone ({entry_range_str}). "
+            f"Invalidation stop anchored at ₹{sl_premium:,.1f}."
+        )
+    elif is_breakout_type:
+        exec_trigger_str = f"ABOVE_₹{opt_ltp:,.1f}_ON_1M_CLOSE" if opt_ltp else "ON_BREAKOUT_CLOSE"
+        conf_rule_str = "1_MIN_CANDLE_CLOSE_MANDATORY"
+        exec_notes_str = (
+            f"Breakout Execution: Wait for confirmed 1-minute candle close above ₹{opt_ltp:,.1f} before market entry. "
+            "Never chase unconfirmed intraday spike wicks."
+            if opt_ltp
+            else "Wait for candle confirmation."
+        )
+    else:
+        exec_trigger_str = f"ABOVE_₹{opt_ltp:,.1f}_ON_1M_CLOSE" if opt_ltp else "ON_TRIGGER"
+        conf_rule_str = "1_MIN_CANDLE_CLOSE_MANDATORY"
+        exec_notes_str = f"Enter on confirmation above ₹{opt_ltp:,.1f}."
+
     alert = AutoAlert(
-        alert_id=generate_alert_id(clean_sym, "INDEX_CALL_SETUP", variant=f"ce-{int(strike)}"),
+        alert_id=generate_alert_id(
+            clean_sym,
+            "INDEX_CALL_SETUP",
+            variant=f"ce-{int(strike)}-{get_session_phase_slot(now_dt)}",
+        ),
         alert_type="INDEX_CALL_SETUP",
         stage=stage,
         symbol=clean_sym,
@@ -2271,6 +2641,9 @@ def detect_index_call_setup(
             "entry_range": entry_range_str,
             "no_chase": f"DO NOT CHASE above ₹{no_chase_lvl:,.1f}",
             "impulse_trigger_level": round(opt_ltp * 1.01, 2) if opt_ltp > 0 else spot,
+            "execution_trigger": exec_trigger_str,
+            "confirmation_rule": conf_rule_str,
+            "execution_notes": exec_notes_str,
             "target_0_5": f"₹{t0_5_premium:,.2f}" if t0_5_premium else None,
             "target_1": f"₹{t1_premium:,.2f}",
             "target": f"₹{t1_premium:,.2f} (+{t1_pct:.0f}%)",
@@ -2283,7 +2656,13 @@ def detect_index_call_setup(
             "max_loss_rupees": max_loss_rupees,
             "max_loss_capped": max_loss_rupees,
             "profit_rule": (
-                f"Scale Blueprint: Book 50% at T1 (₹{t1_premium:,.1f}) & move SL to Cost/Breakeven (Zero Risk). "
+                f"Scale Blueprint: At T0.5 (₹{t0_5_premium:,.1f}) scale 35-50% & move SL to Cost (+0.25R profit floor). "
+                f"At T1 (₹{t1_premium:,.1f}) book balance to 75% total & trail SL to +0.50R. "
+                f"Leave 25% runner trailing on 5m 9-EMA."
+            )
+            if t0_5_premium
+            else (
+                f"Scale Blueprint: Book 50% at T1 (₹{t1_premium:,.1f}) & move SL to Cost/Breakeven (+0.25R floor). "
                 f"Book 25% at T2 (₹{t2_premium:,.1f}). Leave 25% runner trailing on 5m 9-EMA."
             ),
             "when_to_wait": (
@@ -2294,9 +2673,10 @@ def detect_index_call_setup(
                 "ote_limit_zone": entry_range_str,
                 "no_chase_boundary": f"₹{no_chase_lvl:,.1f}",
                 "rule": "Never chase market orders if price > No Chase. Wait for limit retest or cancel.",
-                "t1_scale": "50% off + Move SL to Breakeven",
-                "t2_scale": "25% off",
-                "runner_trail": "25% position trailed via 5m 9-EMA close",
+                "t0_5_scale": "Scale 35-50% off + Move SL to Cost (+0.25R floor)",
+                "t1_scale": "Scale to 75% off + Trail SL to +0.50R floor",
+                "t2_scale": "Scale runner to moonshot target",
+                "runner_trail": "Trailing via 5m 9-EMA close",
             },
             "fast_scalp": (
                 opt_plan.get("fast_scalp")

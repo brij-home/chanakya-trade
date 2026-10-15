@@ -179,6 +179,15 @@ class FreeIndexRouter:
                 or getattr(alert, "contract_symbol", None)
                 or opt_p.get("contract_symbol")
                 or plan.get("contract")
+                or getattr(alert, "alert_type", "")
+                in (
+                    "INDEX_CALL_SETUP",
+                    "INDEX_PUT_SETUP",
+                    "OPTIONS_MOMENTUM",
+                    "GAMMA_BLAST",
+                )
+                or "-ce-" in getattr(alert, "alert_id", "").lower()
+                or "-pe-" in getattr(alert, "alert_id", "").lower()
             )
 
             # 1. Option Stop Loss distance check
@@ -190,6 +199,8 @@ class FreeIndexRouter:
             prem_sl = (
                 opt_p.get("sl_premium")
                 or opt_p.get("stop_loss")
+                or getattr(alert, "option_stop_loss", None)
+                or getattr(alert, "tactical_sl", None)
                 or (getattr(alert, "stop_loss", None) if is_opt else None)
             )
             if is_opt and prem_e is not None and prem_sl is not None:
@@ -214,6 +225,10 @@ class FreeIndexRouter:
             spot_sl_val = (
                 plan.get("spot_stop_loss")
                 or plan.get("underlying_sl")
+                or getattr(alert, "structural_spot_sl", None)
+                or getattr(alert, "underlying_sl", None)
+                or getattr(alert, "spot_invalidation_anchor", None)
+                or (getattr(alert, "metrics", {}) or {}).get("spot_invalidation_anchor")
                 or (getattr(alert, "stop_loss", None) if not is_opt else None)
             )
             if spot_p > 0 and spot_sl_val is not None:

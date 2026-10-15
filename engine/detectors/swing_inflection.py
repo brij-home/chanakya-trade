@@ -174,12 +174,24 @@ def _format_swing_inflection_alert(
         f"🎯 {clean_sym} [{setup.archetype_label}] {timing_badge} "
         f"(Conviction {setup.inflection_score}/100)"
     )
-    catalyst_txt = setup.catalyst_summary or "High-growth volume coiling"
+    import re
+
+    # Filter out sector from confluences since sector has its own authoritative line and metrics
+    clean_confluences = [
+        c
+        for c in (setup.confluence_factors or [])
+        if not re.search(r"\bSector\b", str(c), re.IGNORECASE)
+    ]
+    confluences_str = (
+        ", ".join(clean_confluences[:3]) if clean_confluences else "Technical Inflection"
+    )
+    forensic_str = "CLEAN" if setup.forensic_safe else "AUDIT_FLAG"
+
+    # Clean factual rationale: omit archetype/timing (already in headline) and sector (already in Sec: line)
     summary = (
-        f"{setup.suggested_action or 'Swing candidate'} | {catalyst_txt} | "
-        f"Weinstein: {setup.weinstein_stage} | Sector: {setup.sector} "
-        f"(Tailwind: {setup.sector_tailwind_score}/100) | Forensic: {'CLEAN' if setup.forensic_safe else 'AUDIT_FLAG'} | "
-        f"R:R 1:{rr_ratio:.1f} (Risk ₹{risk_pts:,.1f}, Reward ₹{reward_pts:,.1f})."
+        f"Confluences: {confluences_str} | "
+        f"Turnover: ₹{setup.turnover_20d_cr:.1f} Cr | "
+        f"Forensic: {forensic_str}"
     )
 
     # 5. Deterministic Alert ID (Rule 17)

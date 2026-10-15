@@ -38,6 +38,7 @@ import pandas as pd
 
 from engine.alert_identity import canonical_alert_symbol
 from engine.precursor_radar import classify_symbol_segment, get_scan_universe
+from engine.dynamic_risk import resolve_price_tier
 
 
 logger = logging.getLogger("chanakya.asymmetric_radar")
@@ -109,7 +110,9 @@ def _enforce_monotonic_trade_levels(
     3. Guarantees Stop-Loss sits strictly outside the recommended entry range.
     Returns: (sl_price, risk_pts, t1_price, t2_price, moonshot_price, rr_ratio, entry_range)
     """
-    min_noise_buffer = max(1.0, round(max(1.2 * atr, ltp * 0.018), 2))
+    price_tier = resolve_price_tier(ltp)
+    abs_risk_floor = price_tier.abs_min_risk_pts
+    min_noise_buffer = max(abs_risk_floor, round(max(1.2 * atr, ltp * 0.018), 2))
     is_bullish = direction.upper() in ("BULLISH", "BUY", "LONG")
 
     if is_bullish:
@@ -123,11 +126,11 @@ def _enforce_monotonic_trade_levels(
         moonshot = round(max(target_moonshot, t2 + 2.0 * risk_pts, ltp + 6.0 * risk_pts), 2)
 
         # Entry range: lower bound must be STRICTLY above sl_price
-        entry_lower = round(max(sl_price + max(0.5, 0.20 * atr), ltp * 0.995), 1)
-        entry_upper = round(max(entry_lower + 1.0, ltp * 1.008), 1)
+        entry_lower = round(max(sl_price + max(abs_risk_floor * 0.5, 0.20 * atr), ltp * 0.995), 1)
+        entry_upper = round(max(entry_lower + abs_risk_floor, ltp * 1.008), 1)
         entry_range = f"₹{entry_lower:,.1f} – ₹{entry_upper:,.1f}"
 
-        rr_ratio = round((t2 - ltp) / max(0.1, risk_pts), 1)
+        rr_ratio = round((t2 - ltp) / max(0.01, risk_pts), 1)
     else:
         raw_risk = raw_sl - ltp if raw_sl > 0 else min_noise_buffer
         risk_pts = round(max(raw_risk, min_noise_buffer), 2)
@@ -153,11 +156,11 @@ def _enforce_monotonic_trade_levels(
             2,
         )
 
-        entry_upper = round(min(sl_price - max(0.5, 0.20 * atr), ltp * 1.005), 1)
-        entry_lower = round(min(entry_upper - 1.0, ltp * 0.992), 1)
+        entry_upper = round(min(sl_price - max(abs_risk_floor * 0.5, 0.20 * atr), ltp * 1.005), 1)
+        entry_lower = round(min(entry_upper - abs_risk_floor, ltp * 0.992), 1)
         entry_range = f"₹{entry_lower:,.1f} – ₹{entry_upper:,.1f}"
 
-        rr_ratio = round((ltp - t2) / max(0.1, risk_pts), 1)
+        rr_ratio = round((ltp - t2) / max(0.01, risk_pts), 1)
 
     return sl_price, risk_pts, t1, t2, moonshot, rr_ratio, entry_range
 
@@ -729,7 +732,7 @@ class AsymmetricOpportunityRadar:
         atr = _compute_atr(df, ltp)
         base_floor = min(float(np.min(lows[-3:])), ema10[-1])
         raw_sl = round(min(base_floor * 0.995, ltp * 0.985), 2)
-        raw_risk = max(1.0, ltp - raw_sl)
+        raw_risk = max(resolve_price_tier(ltp).abs_min_risk_pts, ltp - raw_sl)
         raw_t1 = round(ltp + 2.0 * raw_risk, 2)
         raw_t2 = round(ltp + 4.0 * raw_risk, 2)
         raw_moonshot = round(ltp + 6.5 * raw_risk, 2)
@@ -924,7 +927,7 @@ class AsymmetricOpportunityRadar:
         # Asymmetric risk levels
         atr = _compute_atr(df, ltp)
         raw_sl = round(vwap * 0.985 if vwap > 0 else ltp * 0.982, 2)
-        raw_risk = max(1.0, ltp - raw_sl)
+        raw_risk = max(resolve_price_tier(ltp).abs_min_risk_pts, ltp - raw_sl)
         raw_t1 = round(ltp + 2.0 * raw_risk, 2)
         raw_t2 = round(ltp + 4.2 * raw_risk, 2)
         raw_moonshot = round(ltp + 7.0 * raw_risk, 2)
@@ -1113,7 +1116,7 @@ class AsymmetricOpportunityRadar:
         # Use lows[-2] if available to avoid unconfirmed current forming intraday bar
         ref_low = float(lows[-2]) if len(lows) >= 2 else float(lows[-1])
         raw_sl = round(min(ref_low * 0.992, cur_ema200 * 0.985), 2)
-        raw_risk = max(1.0, ltp - raw_sl)
+        raw_risk = max(resolve_price_tier(ltp).abs_min_risk_pts, ltp - raw_sl)
         raw_t1 = round(max(cur_sma50, ltp + 2.0 * raw_risk), 2)
         raw_t2 = round(ltp + 4.0 * raw_risk, 2)
         raw_moonshot = round(ltp + 6.0 * raw_risk, 2)
@@ -1708,8 +1711,10 @@ class AsymmetricOpportunityRadar:
         atr = _compute_atr(df, ltp)
 
         # Stop-loss anchored strictly above the sweep high wick with safety buffer
-        raw_sl = round(cur_high + max(0.5, 0.20 * atr), 2)
-        raw_risk = max(1.0, raw_sl - ltp)
+        raw_sl = round(
+            cur_high + max(resolve_price_tier(ltp).abs_min_risk_pts * 0.5, 0.20 * atr), 2
+        )
+        raw_risk = max(resolve_price_tier(ltp).abs_min_risk_pts, raw_sl - ltp)
 
         # Targets: T1 = 50% dealing range equilibrium, T2 = Range Low
         range_eq = round(swing_low + (cur_high - swing_low) * 0.50, 2)

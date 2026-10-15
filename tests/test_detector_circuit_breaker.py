@@ -205,3 +205,43 @@ def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
         detector_circuit_breaker.reset_detector(test_type)
         with engine._lock:
             engine._alerts = [a for a in engine._alerts if a.symbol != test_sym]
+
+
+def test_historical_losses_decay_to_probation_on_new_session(temp_breaker):
+    """Losses from a previous calendar day do NOT halt the detector on day T; it enters PROBATION."""
+    from engine.detector_circuit_breaker import TradeOutcome
+
+    # Inject 5 losses with yesterday's timestamp
+    for i in range(5):
+        record = TradeOutcome(
+            alert_id=f"yest-{i}",
+            symbol="NIFTY",
+            alert_type="OLD_LOSER",
+            outcome="LOSS",
+            realized_r=-1.0,
+            timestamp="2026-10-10 10:00:00 IST",
+        )
+        temp_breaker._history.setdefault("OLD_LOSER", []).append(record)
+
+    metrics = temp_breaker.get_metrics("OLD_LOSER")
+    # Because today_consecutive_losses == 0, it does not HALT; enters PROBATION with 0.75x multiplier
+    assert metrics.status == "PROBATION"
+    assert metrics.confidence_multiplier == 0.75
+
+    allowed, mult, msg = temp_breaker.evaluate_alert_allowed("OLD_LOSER")
+    assert allowed is True
+    assert mult == 0.75
+    assert "probation" in msg.lower()
+
+
+def test_get_all_metrics_and_reset_all(temp_breaker):
+    """Verifies get_all_metrics dictionary and reset_all clearing."""
+    temp_breaker.record_outcome("a1", "SBIN", "DET_A", "WIN", 1.5)
+    temp_breaker.record_outcome("b1", "TCS", "DET_B", "LOSS", -1.0)
+
+    all_m = temp_breaker.get_all_metrics()
+    assert "DET_A" in all_m
+    assert "DET_B" in all_m
+
+    temp_breaker.reset_all()
+    assert len(temp_breaker.get_all_metrics()) == 0

@@ -79,6 +79,13 @@ report_path = generate_html_tear_sheet(
 3. **Timezone Normalization**: All input OHLCV DataFrames must have tz-naive DatetimeIndex (`df.index.tz_localize(None)`). Never mix tz-aware and tz-naive timestamps.
 4. **Deterministic Tests**: Always pass synthetic OHLCV data in unit tests — no network calls to Yahoo Finance or brokers.
 5. **Cache Reuse**: Historical OHLCV cached via SQLite `analysis_cache` (15min TTL). Reuse across strategy iterations.
+6. **Realistic Institutional Transaction Costs & October 2026 Mandate**:
+   - All backtests (both vectorized and event-driven) must incorporate realistic statutory transaction costs via [`engine.charges.calculate_charges`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/charges.py): post-October 2024 STT rates (Futures 0.02%, Options Premium 0.10%), exchange turnover charges, SEBI fees, stamp duty, and 18% GST.
+   - Derivative strategies must strictly use canonical lot sizes from [`market.instruments.STANDARD_LOT_SIZES`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/instruments.py) (Nifty 65, BankNifty 30, Sensex 20), NEVER legacy pre-2024 lot sizes (50, 25, 15).
+   - Zero frictionless backtests — strategies that do not survive realistic statutory drag must be rejected.
+7. **Dynamic Price-Tier Slippage & Timeframe-Adaptive Stops**:
+   - Slippage models and minimum stops must dynamically scale using [`engine.dynamic_risk.resolve_price_tier(ltp)`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/dynamic_risk.py) and `clamp_dynamic_risk(...)`.
+   - Never use arbitrary fixed 1-point stops (`max(1.0, ...)`) or flat basis-point slippage that fails on high-ticket or micro-cap instruments. Adaptive timeframe multipliers (`INTRADAY` $0.35\times-1.50\times$, `SWING_SHORT` $0.80\times-2.20\times$, `SWING_MID` $1.20\times-3.50\times$, `POSITIONAL` $1.80\times-5.00\times$) are mandatory.
 
 ---
 

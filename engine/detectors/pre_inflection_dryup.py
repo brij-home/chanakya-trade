@@ -116,7 +116,10 @@ def detect_pre_inflection_dryup(
         # Invalidation Stop: Placed just below the tight consolidation base low
         base_low = round(float(np.min(lows[-15:])), 2)
         sl = round(min(ltp * 0.975, base_low * 0.995), 2)
-        risk_pts = max(1.0, round(ltp - sl, 2))
+        from engine.dynamic_risk import resolve_price_tier
+
+        abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
+        risk_pts = max(abs_risk_floor, round(ltp - sl, 2))
 
         target_1 = round(ltp + 2.0 * risk_pts, 2)
         target_2 = round(ltp + 4.0 * risk_pts, 2)

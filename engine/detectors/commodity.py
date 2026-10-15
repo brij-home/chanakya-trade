@@ -971,7 +971,18 @@ def detect_commodity_breakouts(
 
         if smc_report is not None:
             if smc_report.confirmation_confirmed and smc_report.confirmation_candle:
-                smc_tags.append(f"Confirmed: {smc_report.confirmation_candle}")
+                cand_name = str(smc_report.confirmation_candle).strip()
+                has_wick_tag = any(
+                    "shooting star" in t.lower()
+                    or "rejection wick" in t.lower()
+                    or "pin bar" in t.lower()
+                    for t in smc_tags
+                )
+                if not (
+                    has_wick_tag
+                    and any(k in cand_name.lower() for k in ("pin bar", "shooting star", "hammer"))
+                ):
+                    smc_tags.append(f"Confirmed: {cand_name}")
 
             if smc_report.divergence_type and smc_report.divergence_bias:
                 div_bias = smc_report.divergence_bias
@@ -1518,10 +1529,7 @@ def detect_commodity_breakouts(
             smc_tags.append("Eagle: Trend Expansion")
         if adaptive_decision.tiger.mandate == "MOMENTUM_EXPANSION":
             smc_tags.append("Tiger: Institutional Thrust")
-        if adaptive_decision.sniper:
-            smc_tags.append(
-                f"Sniper OTE ₹{adaptive_decision.sniper.entry_zone_min:,.1f}–₹{adaptive_decision.sniper.entry_zone_max:,.1f}"
-            )
+        # Note: Sniper OTE is omitted from smc_tags here to prevent redundancy with the dedicated '🎯 Sniper OTE Bracket:' line.
 
         confluence_str = (
             " + ".join(smc_tags) if smc_tags else "Donchian Breakout + VWAP Confirmation"

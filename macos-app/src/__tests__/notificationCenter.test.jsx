@@ -48,6 +48,43 @@ describe('Notification Center & Store Invariants', () => {
     expect(item.read).toBe(false)
   })
 
+  it('rejects payloads with missing, empty, or UNKNOWN symbol', () => {
+    expect(normalizeNotification(null)).toBeNull()
+    expect(normalizeNotification({})).toBeNull()
+    expect(normalizeNotification({ symbol: 'UNKNOWN' })).toBeNull()
+    expect(normalizeNotification({ symbol: '' })).toBeNull()
+    expect(normalizeNotification({ symbol: '—' })).toBeNull()
+    expect(normalizeNotification({ alert: { symbol: 'UNKNOWN' } })).toBeNull()
+  })
+
+  it('defensively unwraps nested .alert or .data payloads', () => {
+    const wrappedEvent = {
+      type: 'alert_created',
+      event_type: 'ALERT_CREATED',
+      alert: {
+        alert_id: 'aa-wrapped-infy-1',
+        symbol: 'NSE:INFY',
+        direction: 'BULLISH',
+        alert_type: 'ORB_BREAKOUT',
+        stage: 'IGNITED',
+        ltp: 1890,
+      },
+    }
+    const item = normalizeNotification(wrappedEvent)
+    expect(item).not.toBeNull()
+    expect(item.id).toBe('aa-wrapped-infy-1')
+    expect(item.symbol).toBe('INFY')
+    expect(item.direction).toBe('BULLISH')
+    expect(item.alert_type).toBe('ORB_BREAKOUT')
+  })
+
+  it('does not add notification when symbol is UNKNOWN or invalid', () => {
+    const store = useNotificationStore.getState()
+    store.addNotification({ symbol: 'UNKNOWN', alert_id: 'bad-1' })
+    store.addNotification({ id: 'bad-2' })
+    expect(useNotificationStore.getState().notifications.length).toBe(0)
+  })
+
   it('adds notification and increments unread count', () => {
     const store = useNotificationStore.getState()
     expect(store.unreadCount).toBe(0)

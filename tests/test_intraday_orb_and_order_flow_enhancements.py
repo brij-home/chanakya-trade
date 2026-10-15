@@ -108,9 +108,11 @@ def test_detect_opening_range_breakout_bullish():
     assert alert.direction == "BULLISH"
     assert alert.trigger_level == 6060.0
     assert alert.stop_loss == 6020.0  # Midpoint of 6060 and 5980
-    assert alert.target_level == 6140.0  # +1.0x Range (6060 + 80)
-    assert alert.metrics["target_2"] == 6220.0  # +2.0x Range (6060 + 160)
-    assert alert.metrics["target_3"] == 6340.0  # +3.5x Range (6060 + 280)
+    assert (
+        alert.target_level == 6174.0
+    )  # max(orb_high + 1.0x Range, ltp + 1.8 * risk_pts = 6075 + 99)
+    assert alert.metrics["target_2"] == 6251.0  # max(6060 + 160, 6075 + 3.2 * 55)
+    assert alert.metrics["target_3"] == 6350.0  # max(6060 + 280, 6075 + 5.0 * 55)
     assert alert.no_chase_boundary == 6088.0  # 6060 + 0.35 * 80
     assert alert.confidence >= 80
 
@@ -135,8 +137,10 @@ def test_detect_opening_range_breakdown_bearish():
     assert alert.direction == "BEARISH"
     assert alert.trigger_level == 5980.0
     assert alert.stop_loss == 6020.0  # Midpoint
-    assert alert.target_level == 5900.0  # -1.0x Range (5980 - 80)
-    assert alert.metrics["target_2"] == 5820.0  # -2.0x Range (5980 - 160)
+    assert (
+        alert.target_level == 5880.0
+    )  # min(orb_low - 1.0x Range, ltp - 1.8 * risk_pts = 5970 - 90)
+    assert alert.metrics["target_2"] == 5810.0  # min(5980 - 160, 5970 - 3.2 * 50)
     assert alert.confidence >= 80
 
 
