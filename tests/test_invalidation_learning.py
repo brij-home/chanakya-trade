@@ -167,7 +167,7 @@ def test_auto_alert_engine_records_post_mortem_on_live_invalidation(tmp_path, mo
     live_alert = AutoAlert(
         alert_id="live-mankind-1",
         alert_type="PATTERN_COILING",
-        stage="EARLY_WARNING",
+        stage="TRIGGERED",
         symbol="MANKIND",
         exchange="NSE",
         direction="BULLISH",
@@ -180,6 +180,7 @@ def test_auto_alert_engine_records_post_mortem_on_live_invalidation(tmp_path, mo
         is_live=True,
         environment="LIVE",
         is_invalidated=False,
+        triggered_at="2026-10-15 09:16:00 IST",
     )
     engine._alerts.append(live_alert)
 

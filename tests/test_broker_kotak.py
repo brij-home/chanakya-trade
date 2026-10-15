@@ -62,8 +62,10 @@ def test_kotak_profile():
     assert profile.broker == "KOTAK"
 
 
-def test_kotak_missing_credentials_fails_closed():
-    broker = KotakNeoAPI()
+def test_kotak_missing_credentials_fails_closed(monkeypatch):
+    monkeypatch.delenv("KOTAK_CONSUMER_KEY", raising=False)
+    monkeypatch.delenv("KOTAK_CONSUMER_SECRET", raising=False)
+    broker = KotakNeoAPI(consumer_key="", consumer_secret="")
     with pytest.raises(RuntimeError, match="Consumer Key and Consumer Secret are required"):
         broker.complete_login()
     assert broker.is_authenticated() is False

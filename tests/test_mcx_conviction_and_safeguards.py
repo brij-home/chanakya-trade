@@ -1595,6 +1595,7 @@ def test_naturalgas_anti_fomo_overbought_rsi_guard(monkeypatch):
     from unittest.mock import patch, MagicMock
 
     mock_quote = MagicMock()
+    mock_quote.force_live_eval = True
     mock_quote.symbol = "MCX:NATURALGAS"
     mock_quote.last_price = 301.5
     mock_quote.ltp = 301.5
@@ -1648,6 +1649,7 @@ def test_commodity_detector_henry_hub_veto(monkeypatch):
     from engine.detectors.commodity import detect_commodity_breakouts
 
     mock_quote = MagicMock()
+    mock_quote.force_live_eval = True
     mock_quote.symbol = "MCX:NATURALGAS"
     mock_quote.last_price = 295.0
     mock_quote.ltp = 295.0
