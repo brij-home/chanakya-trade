@@ -20,6 +20,11 @@ import pandas as pd
 # ── Interval aliases ─────────────────────────────────────────
 
 INTERVAL_MAP = {
+    "5s": "5s",
+    "10s": "10s",
+    "15s": "15s",
+    "30s": "30s",
+    "45s": "45s",
     "1m": "minute",
     "3m": "3minute",
     "5m": "5minute",
@@ -44,10 +49,12 @@ import threading
 from collections import OrderedDict
 
 _df_memory_cache_lock = threading.Lock()
-MAX_MEMORY_DFS = 2048  # Scaled for 24 GB RAM hardware (~500 stocks across multiple timeframes)
+MAX_MEMORY_DFS = (
+    8192  # Optimized for 24 GB RAM hardware (~8,000 DataFrames across all symbols & timeframes)
+)
 _df_memory_cache: OrderedDict[str, tuple[float, pd.DataFrame]] = OrderedDict()
-_DF_TTL_SECONDS = 300.0  # 5 minutes in-memory cache for daily
-_INTRADAY_TTL_SECONDS = 60.0  # 60s in-memory cache for intraday (5m, 15m)
+_DF_TTL_SECONDS = 3600.0  # 1 hour in-memory cache for daily EOD history (immutable past bars)
+_INTRADAY_TTL_SECONDS = 300.0  # 5 minutes in-memory cache for intraday (5m, 15m) bars
 
 
 def clear_df_memory_cache() -> int:
@@ -129,7 +136,14 @@ def get_ohlcv(
     now_ts = time.time()
 
     # Tier 1: Instant In-Memory DataFrame Cache (0.1ms latency)
-    ttl_limit = _DF_TTL_SECONDS if kite_interval == "day" else _INTRADAY_TTL_SECONDS
+    is_seconds = str(kite_interval).lower().endswith("s") and kite_interval != "day"
+    if is_seconds:
+        ttl_limit = 5.0
+        days = min(days, 25)
+    elif kite_interval == "day":
+        ttl_limit = _DF_TTL_SECONDS
+    else:
+        ttl_limit = _INTRADAY_TTL_SECONDS
     is_live_request = (as_of is None) and (
         (not from_date and not to_date)
         or (

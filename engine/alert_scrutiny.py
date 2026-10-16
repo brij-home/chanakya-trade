@@ -108,7 +108,7 @@ class AlertScrutinyAuditor:
         self.max_intraday_risk_pct = max_intraday_risk_pct
         self._cache: dict[str, tuple[float, ScrutinyResult]] = {}
         self._cache_lock = threading.Lock()
-        self._cache_ttl = 90.0  # 90s in-memory scrutiny cache to prevent rate-limit flooding
+        self._cache_ttl = 180.0  # 180s (3m) in-memory scrutiny cache to prevent rate-limit flooding (Invariant 15)
 
     # ── Tier 1: Deterministic Mathematical Sanity Gate ───────────────────────
 
@@ -1356,6 +1356,79 @@ class AlertScrutinyAuditor:
                     f"Capitulation Exhaustion: Spot is extended {spot_vwap_pct:.2f}% below VWAP (<-{max_ext:.2f}% threshold); wait for relief bounce",
                     flags,
                 )
+
+        # 7d. Institutional TBT 50-Depth Micro-Structure & Iceberg Wall Gate:
+        # If candidate setup has live 50-depth TBT telemetry:
+        # 1. Reject setups trading straight into a massive resting Iceberg Ask/Bid wall within <= 0.20% headroom
+        # 2. Reject setups with severe adverse Order Book Imbalance (OBI-50 <= -0.40 on BUY or >= +0.40 on SELL)
+        try:
+            from market.fyers_tbt_manager import FyersTbtManager, resolve_tradable_tbt_symbol
+
+            tbt_mgr = FyersTbtManager()
+            depth = None
+            if tbt_mgr.is_connected:
+                candidate_keys = [
+                    resolve_tradable_tbt_symbol(alert.symbol),
+                    resolve_tradable_tbt_symbol(clean_sym),
+                    alert.symbol,
+                    clean_sym,
+                ]
+                for k in candidate_keys:
+                    if k:
+                        d = tbt_mgr.get_50_depth(k)
+                        if d and d.get("status") != "UNAVAILABLE":
+                            depth = d
+                            break
+
+                if depth and depth.get("status") != "UNAVAILABLE":
+                    obi_50 = float(depth.get("obi_50", 0.0) or 0.0)
+                    ltp_d = float(depth.get("ltp", 0.0) or 0.0)
+                    if is_bull_setup and not is_bear_setup:
+                        # Adverse order book imbalance
+                        if obi_50 <= -0.40:
+                            flags["adverse_tbt_imbalance"] = True
+                            return (
+                                False,
+                                f"TBT Order Book Imbalance Veto: Severe ask pressure overhead (OBI-50: {obi_50:+.2f}). Heavy institutional supply on 50-depth book.",
+                                flags,
+                            )
+                        # Resting iceberg ask walls
+                        ask_walls = depth.get("ask_walls", [])
+                        if ask_walls and ltp_d > 0:
+                            closest_wall = ask_walls[0]["price"]
+                            wall_headroom_pct = ((closest_wall - ltp_d) / ltp_d) * 100.0
+                            if 0.0 < wall_headroom_pct <= 0.20:
+                                wall_qty = ask_walls[0]["qty"]
+                                flags["trap_immediate_resistance"] = True
+                                return (
+                                    False,
+                                    f"TBT Iceberg Wall Veto: Massive resting ask wall ({wall_qty:,} contracts at ₹{closest_wall:,.1f}, only {wall_headroom_pct:.2f}% headroom). High rejection risk.",
+                                    flags,
+                                )
+                    elif is_bear_setup and not is_bull_setup:
+                        # Adverse order book imbalance
+                        if obi_50 >= 0.40:
+                            flags["adverse_tbt_imbalance"] = True
+                            return (
+                                False,
+                                f"TBT Order Book Imbalance Veto: Severe bid absorption beneath (OBI-50: {obi_50:+.2f}). Heavy institutional demand on 50-depth book.",
+                                flags,
+                            )
+                        # Resting iceberg bid walls
+                        bid_walls = depth.get("bid_walls", [])
+                        if bid_walls and ltp_d > 0:
+                            closest_wall = bid_walls[0]["price"]
+                            wall_headroom_pct = ((ltp_d - closest_wall) / ltp_d) * 100.0
+                            if 0.0 < wall_headroom_pct <= 0.20:
+                                wall_qty = bid_walls[0]["qty"]
+                                flags["trap_immediate_support"] = True
+                                return (
+                                    False,
+                                    f"TBT Iceberg Wall Veto: Massive resting bid wall ({wall_qty:,} contracts at ₹{closest_wall:,.1f}, only {wall_headroom_pct:.2f}% headroom). High bounce risk.",
+                                    flags,
+                                )
+        except Exception as e:
+            logger.debug(f"[AlertScrutiny] TBT depth microstructure evaluation passed through: {e}")
 
         # 8. Climax / Overbought Exhaustion Filter:
         # Prevent buying the top of a parabolic blow-off or shorting the very bottom of a capitulation
@@ -2833,8 +2906,14 @@ class AlertScrutinyAuditor:
 
         if cvd_div and isinstance(cvd_div, str):
             cvd_upper = cvd_div.upper()
-            is_call_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
-            is_put_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+            is_call_opt = (
+                atype in ("OPTIONS_MOMENTUM", "INDEX_CALL_SETUP", "INDEX_MICRO_SCALP")
+                or getattr(alert, "option_type", "") == "CE"
+            )
+            is_put_opt = (
+                atype in ("OPTIONS_MOMENTUM", "INDEX_PUT_SETUP")
+                or getattr(alert, "option_type", "") == "PE"
+            )
 
             # Long breakout into Bearish Exhaustion / Limit Sell Absorption
             if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
@@ -2870,10 +2949,12 @@ class AlertScrutinyAuditor:
                 c_ratio = float(cvd_ratio_val)
                 flags["cvd_ratio"] = c_ratio
                 is_call_opt = (
-                    atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+                    atype in ("OPTIONS_MOMENTUM", "INDEX_CALL_SETUP", "INDEX_MICRO_SCALP")
+                    or getattr(alert, "option_type", "") == "CE"
                 )
                 is_put_opt = (
-                    atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+                    atype in ("OPTIONS_MOMENTUM", "INDEX_PUT_SETUP")
+                    or getattr(alert, "option_type", "") == "PE"
                 )
                 if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
                     if 0 < c_ratio < 0.50:
@@ -3551,7 +3632,7 @@ class AlertScrutinyAuditor:
         Falls back defensively to deterministic quantitative scrutiny if LLM is unavailable.
         Uses in-memory TTL cache (90s) to prevent LLM rate limit exhaustion during rapid scanning loops.
         """
-        # Step 0: Check In-Memory TTL Cache
+        # Step 0: Check In-Memory TTL Cache (AGENTS.md Invariant 15 & 17)
         sym = getattr(alert, "symbol", "") or (
             alert.get("symbol", "") if isinstance(alert, dict) else ""
         )
@@ -3567,20 +3648,12 @@ class AlertScrutinyAuditor:
         strike = getattr(alert, "strike", None) or (
             alert.get("strike", None) if isinstance(alert, dict) else None
         )
-        ltp = float(
-            getattr(alert, "ltp", 0.0)
-            or (alert.get("ltp", 0.0) if isinstance(alert, dict) else 0.0)
-            or 0.0
-        )
-        trig = float(
-            getattr(alert, "trigger_level", 0.0)
-            or (alert.get("trigger_level", 0.0) if isinstance(alert, dict) else 0.0)
-            or 0.0
-        )
 
-        cache_key = (
-            f"{sym}:{atype}:{direction}:{contract}:{strike}:{round(ltp, 1)}:{round(trig, 1)}"
-        )
+        # Use canonical symbol and stable setup attributes (never volatile price ticks)
+        from engine.alert_identity import canonical_alert_symbol
+
+        canonical_sym = canonical_alert_symbol(sym)
+        cache_key = f"{canonical_sym}:{atype}:{direction}:{contract or 'SPOT'}:{strike or '0'}"
         now = time.time()
         with self._cache_lock:
             if cache_key in self._cache:
@@ -3646,13 +3719,28 @@ class AlertScrutinyAuditor:
         confidence = float(getattr(alert, "confidence", 80.0) or 80.0)
         if confidence < min_score:
             logger.info(
-                f"[AlertScrutiny] Adaptive Regime Gate: {sym} ({atype}) confidence {confidence:.0f} "
+                f"[AlertScrutiny] Adaptive Regime Gate: {canonical_sym} ({atype}) confidence {confidence:.0f} "
                 f"< adaptive min_score {min_score} (regime: VIX compressed or Nifty ORB-trapped). "
                 f"Falling back to quantitative audit."
             )
             return _commit_cache(self._generate_quantitative_fallback(alert, flags))
 
-        # Step 2: Tier 2 AI Chief Risk Officer Scrutiny (min_score passed for adaptive regime)
+        # Step 1.6: 4-Stage Zero-Token Pre-LLM Conviction Gate (Invariant 15)
+        # Highly confident setups (confidence >= 85) with positive EV are approved quantitatively
+        # without wasting LLM token budgets on obvious A+ setups.
+        ev_r = float(pred_dossier.get("expected_value_r") or 0.0)
+        if confidence >= 85 and ev_r >= 1.5:
+            logger.info(
+                f"[AlertScrutiny] Zero-Token High-Conviction Fast Track: {canonical_sym} ({atype}) "
+                f"confidence {confidence:.0f} >= 85, EV {ev_r:.1f}R. Approved quantitatively."
+            )
+            quant_high = self._generate_quantitative_fallback(alert, flags)
+            quant_high.status = "APPROVED"
+            quant_high.score = int(round(confidence))
+            quant_high.auditor_model = "QUANT_HIGH_CONVICTION"
+            return _commit_cache(quant_high)
+
+        # Step 2: Tier 2 AI Chief Risk Officer Scrutiny (borderline setups needing adversary audit)
         try:
             llm_result = self._execute_fast_llm_scrutiny(
                 alert, flags, timeout=timeout, min_score=min_score
@@ -3780,7 +3868,7 @@ class AlertScrutinyAuditor:
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
                 enable_tools=False,
-                max_tokens=1200,
+                max_tokens=300,
             )
             return str(resp or "").strip()
 

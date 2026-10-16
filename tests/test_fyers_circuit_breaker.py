@@ -81,5 +81,47 @@ def test_circuit_breaker_guards_fyers_api(monkeypatch):
         assert history == []
         assert mock_fyers_client.history.call_count == 0
     finally:
-        # Reset circuit breaker
+        # Reset circuit breaker and rate gate
         cb.record_success()
+        try:
+            from market.fyers_rate_gate import get_fyers_rate_gate
+
+            get_fyers_rate_gate().reset_daily_quota(requests=0)
+        except Exception:
+            pass
+
+
+def test_circuit_breaker_trips_on_plan_limit_360():
+    cb = FyersCircuitBreaker(cooldown_sec=60.0)
+    cb.record_failure(
+        status_code=-360,
+        error_message="Rate limit exceeded (10 req/s or 200 req/min)",
+    )
+    assert cb.state == CircuitState.OPEN
+    assert cb.is_tripped() is True
+    diag = cb.get_diagnostics()
+    assert diag["cooldown_seconds"] == 60.0
+    assert "Fyers REST Rate Limit" in diag["last_trip_reason"]
+
+
+def test_circuit_breaker_trips_on_daily_quota_limit():
+    cb = FyersCircuitBreaker(cooldown_sec=60.0)
+    assert not cb.is_daily_quota_exhausted
+
+    cb.record_failure(
+        status_code=429,
+        error_message="You've reached the Standard plan limit of 5,000 requests/day. Upgrade to Prime for higher API limits.",
+    )
+    assert cb.state == CircuitState.OPEN
+    assert cb.is_tripped() is True
+    assert cb.is_daily_quota_exhausted is True
+
+    diag = cb.get_diagnostics()
+    assert diag["daily_quota_exhausted"] is True
+    assert diag["cooldown_seconds"] >= 60.0
+    assert "Daily Quota Limit Exceeded" in diag["last_trip_reason"]
+
+    # Manual reset clears daily quota flag
+    cb.reset()
+    assert cb.state == CircuitState.CLOSED
+    assert cb.is_daily_quota_exhausted is False

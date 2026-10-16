@@ -516,7 +516,7 @@ def test_predatory_lifecycle_handshake_banks_runner_for_confirmed_reversal(monke
     """
     engine = AutoAlertEngine()
     engine._alerts.clear()
-    monkeypatch.setattr(engine, "_save", lambda: None)
+    monkeypatch.setattr(engine, "_save", lambda *args, **kwargs: None)
 
     monkeypatch.setattr(
         "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
@@ -604,7 +604,7 @@ def test_predatory_lifecycle_handshake_blocks_non_derisked_trade(monkeypatch):
     """
     engine = AutoAlertEngine()
     engine._alerts.clear()
-    monkeypatch.setattr(engine, "_save", lambda: None)
+    monkeypatch.setattr(engine, "_save", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
         lambda *args, **kwargs: None,

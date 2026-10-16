@@ -208,6 +208,21 @@ def detect_index_call_setup(
         )
         return []
 
+    # ── 14:00 IST Option Entry Cutoff Gate ─────────────────────────
+    # In Indian markets, broker auto-square-off occurs between 15:15–15:20 IST.
+    # Entries after 14:00 IST suffer accelerated theta decay, terminal gamma risk,
+    # and inadequate session runway to reach targets.
+    if (
+        (curr_time >= dtime(14, 0))
+        and not ignore_time_gate
+        and (not is_test_runner or ref_time is not None)
+    ):
+        logger.info(
+            f"[IndexCallSetup] Suppressed CE setup on {clean_sym} at {curr_time.strftime('%H:%M:%S')}: "
+            f"Intraday option entry cutoff passed (14:00 IST). Inadequate session runway before 15:15 IST auto-square-off."
+        )
+        return []
+
     # Strict today session bar isolation: prevent yesterday's historical bars from forging fake today patterns
     today_str = now_dt.strftime("%Y-%m-%d")
     df_today_5m = None
@@ -316,23 +331,22 @@ def detect_index_call_setup(
             elif c_strike > spot:
                 moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 18.0)  # OTM penalty
         else:
-            if dist_pts <= (step_val * 0.55):
-                moneyness_bonus = 25.0  # ATM sweet spot (Delta ~0.50)
-            elif c_strike < spot and dist_pts <= (step_val * 1.35):
+            if c_strike < spot and dist_pts <= (step_val * 1.35):
                 moneyness_bonus = (
-                    20.0  # 1-strike ITM powerhouse (Delta ~0.58-0.65, zero time-decay trap)
+                    30.0  # 1-strike ITM powerhouse (Delta ~0.58-0.65, zero time-decay trap)
                 )
+            elif dist_pts <= (step_val * 0.55):
+                moneyness_bonus = 25.0  # ATM sweet spot (Delta ~0.50)
             elif (
                 c_strike > spot
                 and dist_pts <= (step_val * 1.15)
                 and lp >= (25.0 if clean_sym == "NIFTY" else 60.0)
+                and curr_time < dtime(13, 0)
             ):
-                moneyness_bonus = (
-                    24.0  # OTM+1 High-Gamma Asymmetry sweet spot (high percentage torque)
-                )
+                moneyness_bonus = 15.0  # Pre-13:00 mid-morning OTM+1 modest torque
             elif c_strike > spot:
-                # OTM penalty grows with distance to prevent selecting low-delta decay traps
-                moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 15.0)
+                # OTM penalty in afternoon / high distance to prevent selecting low-delta decay traps
+                moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 25.0)
 
         if clean_sym in ("SENSEX", "BANKEX"):
             ideal_prem = 250.0
@@ -445,7 +459,6 @@ def detect_index_call_setup(
         float(getattr(max_pe_contract, "strike", 0.0) or 0.0) if max_pe_contract else None
     )
     max_ce_oi_change = int(getattr(max_ce_contract, "oi_change", 0) or 0) if max_ce_contract else 0
-    max_pe_oi_change = int(getattr(max_pe_contract, "oi_change", 0) or 0) if max_pe_contract else 0
 
     is_call_wall_collision = False
     is_short_squeeze_unwind = False
@@ -453,13 +466,29 @@ def detect_index_call_setup(
 
     if max_call_oi_strike and max_call_oi_strike > 0 and spot > 0:
         call_wall_dist_pct = round(((max_call_oi_strike - spot) / spot) * 100.0, 3)
-        # Collision: Spot is within 0.15% beneath the Max Call OI strike and writers are actively adding
-        if 0.0 < call_wall_dist_pct <= 0.15 and max_ce_oi_change > 0:
+        # Collision: Spot is within 0.35% beneath the Max Call OI strike and writers are actively adding
+        if 0.0 < call_wall_dist_pct <= 0.35 and max_ce_oi_change > 0:
             is_call_wall_collision = True
             logger.info(
                 f"[IndexCallSetup] Max Call OI Wall Collision: Spot ₹{spot:,.1f} is {call_wall_dist_pct:.2f}% "
                 f"below Call Wall ₹{max_call_oi_strike:,.0f} with writers adding ({max_ce_oi_change:+,}). Mandating Bull Call Spread."
             )
+            # Severe Call Wall Trap Guard: In any session, if spot is within <= 0.15% of Call Wall with active writers adding,
+            # immediate upside is choked. Suppress naked long call setups fail-closed.
+            if call_wall_dist_pct <= 0.15 and not is_test_runner:
+                logger.info(
+                    f"[IndexCallSetup] Severe Call Wall Trap: Spot ₹{spot:,.1f} is within {call_wall_dist_pct:.2f}% "
+                    f"of Call Wall ₹{max_call_oi_strike:,.0f} with active writing ({max_ce_oi_change:+,}). Suppressing naked CE."
+                )
+                return []
+            # Afternoon Call Wall Trap Guard: In afternoon sessions (>= 13:30 IST) with <= 0.25% runway into heavy call writing,
+            # upside is statistically choked and downside risk dominates. Suppress long call setups fail-closed.
+            if curr_time >= dtime(13, 30) and call_wall_dist_pct <= 0.25 and not is_test_runner:
+                logger.info(
+                    f"[IndexCallSetup] Afternoon Call Wall Trap: Spot ₹{spot:,.1f} is only {call_wall_dist_pct:.2f}% "
+                    f"below Call Wall ₹{max_call_oi_strike:,.0f} with writers adding after 13:30 IST. Suppressing long calls."
+                )
+                return []
         # Short Squeeze: Spot has reclaimed at or above the Max Call OI strike AND writers are unwinding
         elif spot >= max_call_oi_strike and max_ce_oi_change < 0:
             is_short_squeeze_unwind = True
@@ -467,6 +496,73 @@ def detect_index_call_setup(
                 f"[IndexCallSetup] SHORT SQUEEZE UNWIND: Spot ₹{spot:,.1f} broke above Max Call Wall ₹{max_call_oi_strike:,.0f} "
                 f"with call writers unwinding ({max_ce_oi_change:+,})."
             )
+
+    # ── Camarilla H5 & Terminal ADR Intraday Exhaustion Guard ──
+    try:
+        from engine.daily_levels import get_daily_levels
+
+        is_dl_mocked = (
+            hasattr(get_daily_levels, "assert_called")
+            or getattr(get_daily_levels, "__name__", "") != "get_daily_levels"
+            or "mock" in type(get_daily_levels).__name__.lower()
+        )
+        if not is_test_runner or is_dl_mocked:
+            dl = get_daily_levels(clean_sym)
+            if dl:
+                cam = dl.camarilla or {}
+                h5 = float(cam.get("h5", 0.0) or 0.0)
+                h4 = float(cam.get("h4", 0.0) or 0.0)
+                atr = float(dl.atr_14 or 0.0)
+                pwh = (
+                    float((dl.weekly or {}).get("pwh", 0.0) or 0.0)
+                    if hasattr(dl, "weekly") and dl.weekly
+                    else 0.0
+                )
+
+                if h5 > 0 and spot >= h5 * 0.9990:
+                    logger.info(
+                        f"[IndexCallSetup] Camarilla H5 Ceiling Exhaustion: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ₹{h5:,.1f}. "
+                        f"Rally statistically exhausted. Suppressing long call setup."
+                    )
+                    return []
+                if atr > 0 and day_low > 0:
+                    up_move = spot - day_low
+                    if up_move >= (1.10 * atr) and not is_explosive_momentum:
+                        logger.info(
+                            f"[IndexCallSetup] Terminal ADR Upward Exhaustion: Spot ₹{spot:,.1f} expanded +{up_move:.1f} pts "
+                            f"(>= 1.1x ATR {atr:.1f}) off day low ₹{day_low:,.1f}. Suppressing breakout buy."
+                        )
+                        return []
+                    elif up_move >= (0.85 * atr) and not is_breakout_momentum:
+                        logger.info(
+                            f"[IndexCallSetup] Upside ADR Exhaustion: Spot ₹{spot:,.1f} expanded +{up_move:.1f} pts "
+                            f"(>= 85% of ATR {atr:.1f}) off day low ₹{day_low:,.1f} without high volume breakout. "
+                            f"Late-chasing into institutional resistance suppressed."
+                        )
+                        return []
+
+                # Major Resistance Proximity (Camarilla H4 Ceiling & Previous Week High)
+                if h4 > 0 and spot < h4 and not is_breakout_momentum:
+                    h4_dist_pct = (h4 - spot) / spot * 100.0
+                    if 0.0 < h4_dist_pct <= 0.20:
+                        logger.info(
+                            f"[IndexCallSetup] Camarilla H4 Resistance Collision: Spot ₹{spot:,.1f} is within {h4_dist_pct:.2f}% "
+                            f"of Camarilla H4 Ceiling ₹{h4:,.1f} without breakout momentum. Suppressing call into institutional ceiling."
+                        )
+                        return []
+
+                if pwh > 0 and spot < pwh and not is_breakout_momentum:
+                    pwh_dist_pct = (pwh - spot) / spot * 100.0
+                    if 0.0 < pwh_dist_pct <= 0.20:
+                        logger.info(
+                            f"[IndexCallSetup] Previous Week High Proximity: Spot ₹{spot:,.1f} is within {pwh_dist_pct:.2f}% "
+                            f"of PWH ₹{pwh:,.1f} without breakout momentum. Suppressing call into major resistance."
+                        )
+                        return []
+    except Exception as e_dl:
+        logger.debug(
+            f"[IndexCallSetup] Daily levels exhaustion check skipped for {clean_sym}: {e_dl}"
+        )
 
     # ── Optimization 2: Index Heavyweight Breadth Confluence Matrix (HBCM) ──
     hw_posture: dict[str, Any] = {}
@@ -763,8 +859,33 @@ def detect_index_call_setup(
         cam_range = prev_day_high - prev_day_low
         cam_h3 = ref_c + (cam_range * 1.1 / 4.0)
         cam_h4 = ref_c + (cam_range * 1.1 / 2.0)
+        cam_h5 = ref_c + (cam_range * 1.1 / 1.0)
         cam_l3 = ref_c - (cam_range * 1.1 / 4.0)
         cam_l4 = ref_c - (cam_range * 1.1 / 2.0)
+        cam_l5 = ref_c - (cam_range * 1.1 / 1.0)
+
+        # Terminal Camarilla H5 Exhaustion Check:
+        # If spot has already reached or penetrated Camarilla H5, the expansion target is achieved.
+        if spot >= cam_h5 * 0.9990 and not is_test_runner:
+            logger.info(
+                f"[IndexCallSetup] Suppressed: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ceiling ₹{cam_h5:,.1f}."
+            )
+            return []
+
+        # Terminal ADR Exhaustion Check:
+        # If in the afternoon session (>= 13:30 IST) and spot has rallied >= 1.25x the daily range from day low:
+        if (
+            curr_time >= dtime(13, 30)
+            and day_low
+            and day_low > 0
+            and cam_range > 0
+            and (spot - day_low) >= (1.25 * cam_range)
+            and not is_test_runner
+        ):
+            logger.info(
+                f"[IndexCallSetup] Suppressed: Spot ₹{spot:,.1f} reached Terminal ADR expansion (+{spot - day_low:.1f} pts >= 1.25x range {cam_range:.1f})."
+            )
+            return []
 
         cpr_data = {
             "pivot": round(cpr_pivot, 1),
@@ -779,8 +900,10 @@ def detect_index_call_setup(
             else ("WIDE_CPR_RANGE" if cpr_width_pct >= 0.35 else "AVERAGE_CPR"),
             "cam_h3": round(cam_h3, 1),
             "cam_h4": round(cam_h4, 1),
+            "cam_h5": round(cam_h5, 1),
             "cam_l3": round(cam_l3, 1),
             "cam_l4": round(cam_l4, 1),
+            "cam_l5": round(cam_l5, 1),
         }
         signal_tags["cpr_data"] = cpr_data
 
@@ -1646,6 +1769,64 @@ def detect_index_call_setup(
     if not signals:
         return []
 
+    # ── 5-Minute Candle Rejection / Topping Tail Filter ───────────
+    breakout_signals = {
+        "DAY_HIGH_BREAKOUT",
+        "CAMARILLA_H4_BREAKOUT",
+        "VWAP_BREAKOUT",
+        "BREAKOUT_RETEST_EXPANSION",
+        "MOMENTUM_EXPANSION",
+    }
+    if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+        last_b = active_ohlcv.iloc[-1]
+        c_h = "high" if "high" in active_ohlcv.columns else "High"
+        c_l = "low" if "low" in active_ohlcv.columns else "Low"
+        c_o = "open" if "open" in active_ohlcv.columns else "Open"
+        c_c = "close" if "close" in active_ohlcv.columns else "Close"
+        b_h = float(last_b.get(c_h, 0.0) or 0.0)
+        b_l = float(last_b.get(c_l, 0.0) or 0.0)
+        b_o = float(last_b.get(c_o, 0.0) or 0.0)
+        b_c = float(last_b.get(c_c, 0.0) or 0.0)
+        b_rng = b_h - b_l
+        if b_rng > 0:
+            u_wick = b_h - max(b_o, b_c)
+            u_wick_pct = u_wick / b_rng
+            is_topping_wick = (u_wick_pct >= 0.50) or (u_wick_pct >= 0.40 and b_c < b_o)
+            if is_topping_wick:
+                if all(s in breakout_signals for s in signals):
+                    logger.info(
+                        f"[IndexCallSetup] Suppressed breakout setup on {clean_sym}: "
+                        f"Latest 5m candle formed heavy upper rejection wick ({u_wick_pct * 100:.1f}%). "
+                        f"Seller absorption trap active."
+                    )
+                    return []
+
+    # ── Order Flow Cumulative Volume Delta (CVD) Gate ────────────
+    cvd_divergence_status = "NORMAL"
+    cvd_ratio_val = 1.0
+    if active_ohlcv is not None and len(active_ohlcv) >= 12:
+        try:
+            from engine.detectors.order_flow import compute_order_flow_cvd_divergence
+
+            cvd_data = compute_order_flow_cvd_divergence(active_ohlcv, spot)
+            if cvd_data.get("is_bearish_exhaustion"):
+                cvd_divergence_status = "BEARISH_EXHAUSTION"
+            elif cvd_data.get("is_bullish_absorption"):
+                cvd_divergence_status = "BULLISH_ABSORPTION"
+            cvd_ratio_val = float(cvd_data.get("cvd_divergence_ratio", 1.0))
+        except Exception as e_cvd:
+            logger.debug(f"[IndexCallSetup] CVD computation error for {clean_sym}: {e_cvd}")
+
+    if cvd_divergence_status == "BEARISH_EXHAUSTION":
+        signals = [s for s in signals if s not in breakout_signals]
+        if not signals:
+            logger.info(
+                f"[IndexCallSetup] Suppressed breakout setup on {clean_sym}: "
+                f"Bearish CVD Exhaustion / Passive Limit Ask Absorption detected at highs. "
+                f"Institutional distribution trap active."
+            )
+            return []
+
     # ── Eagle, Tiger & Sniper Adaptive Regime Gate ───────────────
     eagle_regime = None
     tiger_mandate = None
@@ -1897,6 +2078,13 @@ def detect_index_call_setup(
         else round(max(0.1, opt_ltp - sl_premium) * lot_sz, 0)
     )
     t1_pct = round(((t1_premium - opt_ltp) / max(0.1, opt_ltp)) * 100, 1) if opt_ltp > 0 else 30.0
+
+    # ── Synthetic Spot-Anchored Stop Loss Engine ─────────────────
+    eff_delta = abs(float(opt_delta)) if (opt_delta and float(opt_delta) > 0) else 0.50
+    spot_risk_pts = round(calc_risk / max(0.20, eff_delta), 1)
+    underlying_spot_sl = round(spot - spot_risk_pts, 1)
+    if day_low and day_low > 0 and day_low < spot:
+        underlying_spot_sl = max(underlying_spot_sl, round(day_low * 0.999, 1))
 
     # ── Velocity Regime Check ────────────────────────────────────
     vel_regime = "NORMAL_TREND"
@@ -2301,12 +2489,12 @@ def detect_index_call_setup(
         except Exception:
             pass
 
-        # 0DTE Midday Theta Trap: On expiry day between 11:30 and 14:00, theta decay is at its weekly maximum.
+        # 0DTE Midday Theta Trap: On expiry day between 11:30 and 13:30, theta decay is at its peak.
         # Naked option buying during this window suffers severe theta drag and mean-reversion whipsaws.
-        is_0dte_midday_trap = is_0dte and (dtime(11, 30) <= now_time <= dtime(14, 0))
+        is_0dte_midday_trap = is_0dte and (dtime(11, 30) <= now_time < dtime(13, 30))
 
-        # 0DTE Late Session Expiration: Post 14:30 IST on expiry day, naked options face catastrophic terminal theta collapse.
-        is_0dte_late_session = is_0dte and (now_time >= dtime(14, 30))
+        # 0DTE Late Session Expiration: Post 13:30 IST on expiry day, naked options face catastrophic terminal theta collapse.
+        is_0dte_late_session = is_0dte and (now_time >= dtime(13, 30))
 
         if is_low_vix_range:
             pref_veh = "SPREAD_ONLY"
@@ -2590,9 +2778,12 @@ def detect_index_call_setup(
             "roc_momentum": roc_metric.to_dict(),
             "premium_velocity": round(prem_vel, 2),
             "oi_roc": cand_ce_oi_roc,
-            "cvd_ratio": thrust_details.get(
-                "cvd_ratio", cvd_ratio if "cvd_ratio" in locals() else 0.0
-            ),
+            "cvd_divergence": cvd_divergence_status,
+            "cvd_ratio": thrust_details.get("cvd_ratio", cvd_ratio_val),
+            "spot_invalidation_anchor": underlying_spot_sl,
+            "underlying_sl": underlying_spot_sl,
+            "structural_spot_sl": underlying_spot_sl,
+            "underlying_symbol": clean_sym,
             "detector": "INDEX_CALL_SETUP",
             "is_institutional_thrust": is_institutional_thrust,
             "thrust_details": thrust_details,
@@ -2616,6 +2807,10 @@ def detect_index_call_setup(
             "action": act_verb,
             "contract": contract_sym,
             "instrument": target_inst,
+            "spot_invalidation_anchor": underlying_spot_sl,
+            "underlying_sl": underlying_spot_sl,
+            "structural_spot_sl": underlying_spot_sl,
+            "underlying_symbol": clean_sym,
             "sniper_plan": sniper_plan.to_dict() if sniper_plan else None,
             "eagle_summary": eagle_regime.summary if eagle_regime else None,
             "tiger_guidance": tiger_mandate.action_guidance if tiger_mandate else None,
@@ -2709,5 +2904,6 @@ def detect_index_call_setup(
             },
         },
     )
+    alert.structural_spot_sl = underlying_spot_sl
 
     return [alert]

@@ -27,15 +27,31 @@ from market.source_tracker import record_source, warn_fallback
 logger = logging.getLogger("chanakya.market.options")
 
 _CHAIN_CACHE: dict[str, tuple[float, list[OptionsContract]]] = {}
+_CHAIN_CACHE_LOCK = threading.Lock()
+_IN_FLIGHT_CHAIN_LOCK = threading.Lock()
+_IN_FLIGHT_CHAIN_EVENTS: dict[str, tuple[threading.Event, list[Any]]] = {}
 _CHAIN_CACHE_TTL_DEFAULT = 180.0  # Off-market hours fallback
-_CHAIN_CACHE_TTL_LIVE = 15.0  # 15s during live market hours for real-time gamma/OI shifts
+_CHAIN_CACHE_TTL_LIVE = (
+    30.0  # 30s during live market hours (balances gamma/OI precision with broker rate limits)
+)
 _CHAIN_CACHE_TTL_SCRAPER = 30.0  # 30s for scraper fallback
+_CHAIN_CACHE_TTL_EMPTY = 60.0  # 60s negative cache when options chain is empty or broker is tripped
 _EXPIRIES_CACHE: dict[str, tuple[float, list[str]]] = {}
 _EXPIRIES_CACHE_TTL = 300.0  # 5 minutes cache for expiry dates
 
 
-def get_chain_cache_ttl(is_broker: bool = True) -> float:
-    """Returns dynamic cache TTL: 15s live broker / 30s scraper during market hours (NSE, NFO, MCX), 180s when closed."""
+def get_chain_cache_ttl(is_broker: bool = True, is_empty: bool = False) -> float:
+    """Returns dynamic cache TTL: 15s live broker / 30s scraper, 60s negative cache, 180s when closed."""
+    if is_empty:
+        try:
+            from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+
+            if get_fyers_circuit_breaker().is_tripped():
+                return _CHAIN_CACHE_TTL_EMPTY
+        except Exception:
+            pass
+        return 30.0
+
     try:
         from market.calendar import is_market_open
 
@@ -50,7 +66,7 @@ _SNAPSHOT_CACHE: dict[
     str, tuple[float, tuple[list[OptionsContract], Optional[float], list[str], dict[str, Any]]]
 ] = {}
 _SNAPSHOT_LOCK = threading.Lock()
-_SNAPSHOT_TTL = 3.0  # 3.0-second coalescing cache
+_SNAPSHOT_TTL = 15.0  # 15.0-second coalescing cache to protect broker rate limit and API quota
 
 _STRIKE_BASELINE_OI: dict[str, int] = {}
 _BASELINE_DATE: Optional[str] = None
@@ -204,103 +220,160 @@ def get_options_chain(
 
     cache_key = f"{clean_sym}:{expiry or 'nearest'}"
     now = time.time()
-    if cache_key in _CHAIN_CACHE:
-        cached_at, cached_chain = _CHAIN_CACHE[cache_key]
-        ttl = get_chain_cache_ttl(is_broker=True) if cached_chain else 15.0
-        if (now - cached_at) < ttl:
-            return cached_chain
+    with _CHAIN_CACHE_LOCK:
+        if cache_key in _CHAIN_CACHE:
+            cached_at, cached_chain = _CHAIN_CACHE[cache_key]
+            ttl = get_chain_cache_ttl(is_broker=True, is_empty=not bool(cached_chain))
+            if (now - cached_at) < ttl:
+                return cached_chain
 
-    # Tier 1: data broker (live broker feed)
+    # Single-Flight: Coalesce concurrent requests for the exact same underlying option chain
+    is_leader = False
+    with _IN_FLIGHT_CHAIN_LOCK:
+        if cache_key in _IN_FLIGHT_CHAIN_EVENTS:
+            evt, box = _IN_FLIGHT_CHAIN_EVENTS[cache_key]
+        else:
+            evt = threading.Event()
+            box = [None]
+            _IN_FLIGHT_CHAIN_EVENTS[cache_key] = (evt, box)
+            is_leader = True
+
+    if not is_leader:
+        evt.wait(timeout=6.0)
+        with _CHAIN_CACHE_LOCK:
+            if cache_key in _CHAIN_CACHE:
+                return _CHAIN_CACHE[cache_key][1]
+        if box[0] is not None:
+            return box[0]
+
+    chain_result: list[OptionsContract] = []
     try:
-        chain = get_data_broker().get_options_chain(underlying, expiry)
-        record_source("options", "broker")
-        if chain and any(float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in chain):
-            chain = enrich_options_chain_deltas(chain, underlying, expiry)
-            _CHAIN_CACHE[cache_key] = (now, chain)
-            return chain
-    except Exception as e:
-        warn_fallback("options", str(e), "commodity_black76" if is_commodity else "nse_scraper")
-
-    # Tier 2: For MCX commodities, build Black-76 theoretical option chain from live futures quote
-    if is_commodity:
+        # If broker circuit breaker is currently OPEN, skip Tier 1 broker attempt
+        broker_available = True
         try:
-            from market.quotes import get_ltp
-            from engine.greeks_manager import build_commodity_option_chain_synthetic
+            from market.fyers_circuit_breaker import get_fyers_circuit_breaker
 
-            fut_ltp = get_ltp(f"MCX:{clean_sym}") or get_ltp(clean_sym) or 0.0
-            if fut_ltp > 0:
-                chain = build_commodity_option_chain_synthetic(
-                    clean_sym, futures_price=fut_ltp, expiry_date=expiry
-                )
-                if chain:
-                    record_source("options", "black_76_synthetic")
-                    _CHAIN_CACHE[cache_key] = (now, chain)
+            if get_fyers_circuit_breaker().is_tripped():
+                broker_available = False
+        except Exception:
+            pass
+
+        # Tier 1: data broker (live broker feed)
+        if broker_available:
+            try:
+                chain = get_data_broker().get_options_chain(underlying, expiry)
+                record_source("options", "broker")
+                if chain and any(float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in chain):
+                    chain = enrich_options_chain_deltas(chain, underlying, expiry)
+                    with _CHAIN_CACHE_LOCK:
+                        _CHAIN_CACHE[cache_key] = (time.time(), chain)
+                    chain_result = chain
                     return chain
-        except Exception as e:
-            warn_fallback("options", str(e), "none")
+            except Exception as e:
+                warn_fallback(
+                    "options", str(e), "commodity_black76" if is_commodity else "nse_scraper"
+                )
 
-        _CHAIN_CACHE[cache_key] = (now, [])
-        return []
-
-    # Tier 3: NSE public scraper for equities and indices
-    chain = nse_get_options_chain(underlying, expiry)
-    if chain:
-        chain = enrich_options_chain_deltas(chain, underlying, expiry)
-        record_source("options", "nse_scraper")
-        _CHAIN_CACHE[cache_key] = (now, chain)
-        return chain
-
-    # Tier 4: Synthetic chain ONLY in explicit Mock/Demo mode (never during LIVE/PAPER trading with real brokers)
-    import os
-
-    try:
-        from brokers.session import get_data_broker_key
-
-        broker_key = get_data_broker_key()
-    except Exception:
-        broker_key = ""
-
-    trading_mode = os.environ.get("TRADING_MODE", "").upper()
-    allow_synthetic = (
-        broker_key == "mock" or trading_mode in ("DEMO", "PAPER", "SIMULATE", "") or not broker_key
-    )
-    if allow_synthetic:
-        if clean_sym in ("SENSEX", "BANKEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
+        # Tier 2: For MCX commodities, build Black-76 theoretical option chain from live futures quote
+        if is_commodity:
             try:
                 from market.quotes import get_ltp
+                from engine.greeks_manager import build_commodity_option_chain_synthetic
 
-                idx_spot = get_ltp(
-                    f"BSE:{clean_sym}" if clean_sym in ("SENSEX", "BANKEX") else f"NSE:{clean_sym}"
-                ) or get_ltp(clean_sym)
-                if not idx_spot or idx_spot <= 0:
-                    _ANCHOR_SPOTS = {
-                        "NIFTY": 25000.0,
-                        "BANKNIFTY": 52500.0,
-                        "FINNIFTY": 24000.0,
-                        "MIDCPNIFTY": 13000.0,
-                        "SENSEX": 82000.0,
-                        "BANKEX": 58000.0,
-                    }
-                    idx_spot = _ANCHOR_SPOTS.get(clean_sym, 0.0)
-                if idx_spot and idx_spot > 0:
-                    chain = build_index_synthetic_option_chain(
-                        clean_sym, spot=idx_spot, expiry=expiry
+                fut_ltp = get_ltp(f"MCX:{clean_sym}") or get_ltp(clean_sym) or 0.0
+                if fut_ltp > 0:
+                    chain = build_commodity_option_chain_synthetic(
+                        clean_sym, futures_price=fut_ltp, expiry_date=expiry
                     )
                     if chain:
-                        record_source(
-                            "options",
-                            "index_synthetic_bfo"
-                            if clean_sym in ("SENSEX", "BANKEX")
-                            else "index_synthetic_nfo",
-                        )
-                        _CHAIN_CACHE[cache_key] = (now, chain)
+                        record_source("options", "black_76_synthetic")
+                        with _CHAIN_CACHE_LOCK:
+                            _CHAIN_CACHE[cache_key] = (time.time(), chain)
+                        chain_result = chain
                         return chain
-            except Exception:
-                pass
+            except Exception as e:
+                warn_fallback("options", str(e), "none")
 
-    record_source("options", "none")
-    _CHAIN_CACHE[cache_key] = (now, [])
-    return []
+            with _CHAIN_CACHE_LOCK:
+                _CHAIN_CACHE[cache_key] = (time.time(), [])
+            chain_result = []
+            return []
+
+        # Tier 3: NSE public scraper for equities and indices
+        chain = nse_get_options_chain(underlying, expiry)
+        if chain:
+            chain = enrich_options_chain_deltas(chain, underlying, expiry)
+            record_source("options", "nse_scraper")
+            with _CHAIN_CACHE_LOCK:
+                _CHAIN_CACHE[cache_key] = (time.time(), chain)
+            chain_result = chain
+            return chain
+
+        # Tier 4: Synthetic chain ONLY in explicit Mock/Demo mode (never during LIVE/PAPER trading with real brokers)
+        import os
+
+        try:
+            from brokers.session import get_data_broker_key
+
+            broker_key = get_data_broker_key()
+        except Exception:
+            broker_key = ""
+
+        trading_mode = os.environ.get("TRADING_MODE", "").upper()
+        allow_synthetic = (
+            broker_key == "mock"
+            or trading_mode in ("DEMO", "PAPER", "SIMULATE", "")
+            or not broker_key
+        )
+        if allow_synthetic:
+            if clean_sym in ("SENSEX", "BANKEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
+                try:
+                    from market.quotes import get_ltp
+
+                    idx_spot = get_ltp(
+                        f"BSE:{clean_sym}"
+                        if clean_sym in ("SENSEX", "BANKEX")
+                        else f"NSE:{clean_sym}"
+                    ) or get_ltp(clean_sym)
+                    if not idx_spot or idx_spot <= 0:
+                        _ANCHOR_SPOTS = {
+                            "NIFTY": 25000.0,
+                            "BANKNIFTY": 52500.0,
+                            "FINNIFTY": 24000.0,
+                            "MIDCPNIFTY": 13000.0,
+                            "SENSEX": 82000.0,
+                            "BANKEX": 58000.0,
+                        }
+                        idx_spot = _ANCHOR_SPOTS.get(clean_sym, 0.0)
+                    if idx_spot and idx_spot > 0:
+                        chain = build_index_synthetic_option_chain(
+                            clean_sym, spot=idx_spot, expiry=expiry
+                        )
+                        if chain:
+                            record_source(
+                                "options",
+                                "index_synthetic_bfo"
+                                if clean_sym in ("SENSEX", "BANKEX")
+                                else "index_synthetic_nfo",
+                            )
+                            with _CHAIN_CACHE_LOCK:
+                                _CHAIN_CACHE[cache_key] = (time.time(), chain)
+                            chain_result = chain
+                            return chain
+                except Exception:
+                    pass
+
+        record_source("options", "none")
+        with _CHAIN_CACHE_LOCK:
+            _CHAIN_CACHE[cache_key] = (time.time(), [])
+        chain_result = []
+        return []
+    finally:
+        if is_leader:
+            box[0] = chain_result
+            with _IN_FLIGHT_CHAIN_LOCK:
+                _IN_FLIGHT_CHAIN_EVENTS.pop(cache_key, None)
+            evt.set()
 
 
 def build_index_synthetic_option_chain(

@@ -421,7 +421,22 @@ class TradeLifecycleManager:
                 alert, "stop_loss", None
             ):
                 alert.initial_stop_loss = alert.stop_loss
-            alert.stop_loss = eval_res.recommended_stop
+
+            rec_stop = eval_res.recommended_stop
+            if eval_res.new_milestone in ("T1_ACHIEVED", "T0_5_ACHIEVED", "BREAKEVEN_LOCKED"):
+                ref_entry = float(
+                    alert.option_premium
+                    if is_alert_option_premium_level(alert)
+                    else (alert.trigger_level or alert.entry_price or 0.0)
+                )
+                if ref_entry > 0:
+                    dir_str = str(getattr(alert, "direction", "BULLISH")).upper()
+                    if dir_str == "BEARISH" and not is_alert_option_premium_level(alert):
+                        rec_stop = min(rec_stop, ref_entry)
+                    else:
+                        rec_stop = max(rec_stop, ref_entry)
+
+            alert.stop_loss = rec_stop
             alert.last_trail_alert_time = now_ts
             if alert.actionable_plan:
                 if (

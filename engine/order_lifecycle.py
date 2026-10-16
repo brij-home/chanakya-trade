@@ -913,6 +913,15 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                         (d["status"], d["broker_order_id"], now_iso, order_id),
                     )
                     conn.commit()
+
+                if d["status"] == "OPEN":
+                    try:
+                        from market.fyers_tbt_manager import FyersTbtManager
+
+                        FyersTbtManager().register_in_flight(d["symbol"])
+                    except Exception:
+                        pass
+
                 _record_order_event(
                     order_id,
                     "BROKER_RESPONSE",
@@ -935,6 +944,14 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                         (d["status"], d["rejection_reason"], now_iso, order_id),
                     )
                     conn.commit()
+
+                try:
+                    from market.fyers_tbt_manager import FyersTbtManager
+
+                    FyersTbtManager().unregister_in_flight(d["symbol"])
+                except Exception:
+                    pass
+
                 _record_order_event(
                     order_id,
                     "BROKER_REJECTED",
@@ -1284,6 +1301,14 @@ def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
             )
             conn.commit()
 
+        if d["status"] == "OPEN":
+            try:
+                from market.fyers_tbt_manager import FyersTbtManager
+
+                FyersTbtManager().register_in_flight(d["symbol"])
+            except Exception:
+                pass
+
         _record_order_event(
             oid,
             "BROKER_RESPONSE" if d["status"] != "UNKNOWN_FREEZE" else "UNKNOWN_FREEZE",
@@ -1454,7 +1479,7 @@ def sync_execution_orders() -> dict[str, Any]:
     with _get_orders_db() as conn:
         conn.row_factory = sqlite3.Row
         known_rows = conn.execute(
-            "SELECT order_id, broker_order_id, status FROM orders_ledger WHERE broker_order_id IS NOT NULL"
+            "SELECT order_id, broker_order_id, status, symbol FROM orders_ledger WHERE broker_order_id IS NOT NULL"
         ).fetchall()
         known_ids = {str(row["broker_order_id"]) for row in known_rows}
         for row in known_rows:
@@ -1467,6 +1492,16 @@ def sync_execution_orders() -> dict[str, Any]:
                     "UPDATE orders_ledger SET status = ?, updated_at = ? WHERE order_id = ?",
                     (new_status, datetime.now(timezone.utc).isoformat(), row["order_id"]),
                 )
+                if new_status in ("CANCELLED", "REJECTED", "EXPIRED"):
+                    try:
+                        from market.fyers_tbt_manager import FyersTbtManager
+
+                        sym = str(row["symbol"]) if "symbol" in row.keys() else None
+                        if sym:
+                            FyersTbtManager().unregister_in_flight(sym)
+                    except Exception:
+                        pass
+
                 events_to_record.append(
                     (
                         str(row["order_id"]),

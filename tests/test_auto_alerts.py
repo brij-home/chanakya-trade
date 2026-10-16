@@ -1707,7 +1707,9 @@ def test_three_day_alert_retention_across_all_groups(tmp_path, monkeypatch):
         target_level=1720.0,
         stop_loss=1630.0,
         created_at=day1_str,
+        time_horizon="INTRADAY",
     )
+    alert_prior_ew._force_test_expiry = True
 
     # 6. Historical setup for same symbol (TCS) from Day 2 in archive
     alert_tcs_day2 = AutoAlert(
@@ -1740,6 +1742,7 @@ def test_three_day_alert_retention_across_all_groups(tmp_path, monkeypatch):
 
     # Trigger full maintenance cycle (_load -> reap -> sanitize -> deduplicate -> prune)
     engine._load()
+    engine.reap_expired_alerts()
 
     remaining_ids = {a.alert_id for a in engine._alerts}
 

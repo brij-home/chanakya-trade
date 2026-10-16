@@ -47,6 +47,7 @@ Register these redirect URIs in your broker developer consoles:
 from __future__ import annotations
 
 from typing import Any, Optional
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -767,7 +768,6 @@ async def telemetry_health():
       - Active broker data and execution assignments
       - Trading mode and safety gate status
     """
-    from datetime import datetime, timezone
     from engine.memory_guard import get_memory_status
     from market.quotes import _QUOTE_CACHE, _quote_cache_lock
     from brokers.session import get_data_broker_key, get_execution_broker_key
@@ -840,7 +840,6 @@ async def api_fyers_budget():
     """
 
     def _collect():
-        from datetime import datetime, timezone
         from market.fyers_rate_gate import get_fyers_rate_gate
         from market.fyers_circuit_breaker import get_fyers_circuit_breaker
         from market.ws_subscription_manager import get_ws_subscription_manager
@@ -872,6 +871,39 @@ async def api_fyers_budget():
 
     data = await asyncio.to_thread(_collect)
     return JSONResponse(data)
+
+
+@app.post("/api/diagnostics/fyers-recalibrate", tags=["System"])
+async def api_fyers_recalibrate(plan: str = "PRIME", reset_exhaustion: bool = True):
+    """
+    Recalibrate Fyers rate gate and circuit breaker to PRIME (500k req/day) or STANDARD (5k req/day).
+    Optionally clears existing daily exhaustion to immediately resume full live market queries.
+    """
+
+    def _do():
+        from market.fyers_rate_gate import get_fyers_rate_gate
+        from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+
+        gate = get_fyers_rate_gate()
+        gate.recalibrate(plan=plan)
+        if reset_exhaustion:
+            gate.reset_daily_quota(requests=0)
+            get_fyers_circuit_breaker().reset()
+
+        return {
+            "status": "SUCCESS",
+            "plan": gate.plan,
+            "max_per_sec": gate._max_per_sec,
+            "max_per_min": gate._max_per_min,
+            "max_per_day": gate._max_per_day,
+            "quotes_chunk_size": gate.quotes_chunk_size,
+            "data_socket_symbols": gate.data_socket_symbols,
+            "tbt_socket_symbols": gate.tbt_socket_symbols,
+            "circuit_breaker_state": get_fyers_circuit_breaker().state.value,
+        }
+
+    res = await asyncio.to_thread(_do)
+    return JSONResponse(res)
 
 
 # ── P0-B: Canonical Mode Endpoint ────────────────────────────────────────────
@@ -1023,6 +1055,120 @@ async def get_system_diagnostics():
             "telemetry": telem_summary,
             "preflight": preflight_rep.to_dict(),
         }
+    )
+
+
+@app.get("/api/system/health-hub", tags=["Observability", "Operations"])
+async def get_system_health_hub(
+    priority: Optional[str] = None,
+    component: Optional[str] = None,
+    limit: int = 100,
+):
+    """
+    Unified Operations & Maintenance Health Hub (OpsDeck) API.
+    Consolidates:
+      - Multi-tier prioritized incidents (P0 Critical, P1 High, P2 Medium, P3 Info)
+      - Fyers Circuit Breaker live state, cooldown countdown, and trip reasons
+      - WebSocket Subscription Manager capacity & metrics (5,000 symbol limit)
+      - Broker connectivity & authentication status
+      - Data Provider freshness & SLO latency metrics
+      - System vitals (Memory guard, SSD storage allocations)
+      - Actionable engineering recommendations
+    """
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+    from market.ws_subscription_manager import get_ws_subscription_manager
+    from engine.telemetry import (
+        get_incident_counts,
+        get_prioritized_incidents,
+        get_telemetry_summary,
+    )
+    from engine.observability import get_registry
+    from engine.memory_guard import get_memory_status
+    from engine.maintenance import get_storage_breakdown
+
+    cb_diag = get_fyers_circuit_breaker().get_diagnostics()
+    ws_diag = get_ws_subscription_manager().get_diagnostics()
+    broker_statuses = _compute_status()
+    obs_reg = get_registry()
+    provider_health = obs_reg.get_provider_health()
+    slo_report = obs_reg.get_slo_report()
+    telem_summary = get_telemetry_summary()
+    incident_counts = get_incident_counts()
+    incidents = get_prioritized_incidents(limit=limit, priority=priority, component=component)
+    mem_status = get_memory_status().to_dict()
+    storage_bd = await asyncio.to_thread(get_storage_breakdown)
+
+    # Compute single truth overall health status
+    if incident_counts.get("P0", 0) > 0 or cb_diag.get("state") == "OPEN":
+        overall_status = "CRITICAL"
+    elif (
+        incident_counts.get("P1", 0) > 0
+        or cb_diag.get("state") == "HALF_OPEN"
+        or provider_health.get("overall_health") == "DEGRADED"
+        or slo_report.get("overall_status") == "BREACHED"
+    ):
+        overall_status = "DEGRADED"
+    else:
+        overall_status = "HEALTHY"
+
+    return JSONResponse(
+        {
+            "overall_status": overall_status,
+            "incident_counts": incident_counts,
+            "circuit_breaker": cb_diag,
+            "websocket": ws_diag,
+            "brokers": broker_statuses,
+            "provider_health": provider_health,
+            "slo_report": slo_report,
+            "telemetry_summary": telem_summary,
+            "incidents": incidents,
+            "memory": mem_status,
+            "storage": storage_bd.to_dict(),
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+@app.post("/api/maintenance/circuit-breaker/reset", tags=["Maintenance", "Operations"])
+async def reset_circuit_breaker_endpoint():
+    """Manually reset the Fyers API circuit breaker to CLOSED state."""
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+
+    cb = get_fyers_circuit_breaker()
+    cb.reset()
+    return JSONResponse(
+        {
+            "status": "SUCCESS",
+            "message": "Circuit breaker manually reset to CLOSED",
+            "diagnostics": cb.get_diagnostics(),
+        }
+    )
+
+
+@app.post("/api/maintenance/circuit-breaker/probe", tags=["Maintenance", "Operations"])
+async def probe_circuit_breaker_endpoint():
+    """Manually transition the Fyers API circuit breaker to HALF_OPEN to permit immediate probe call."""
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+
+    cb = get_fyers_circuit_breaker()
+    cb.probe()
+    return JSONResponse(
+        {
+            "status": "SUCCESS",
+            "message": "Circuit breaker set to HALF_OPEN for probing",
+            "diagnostics": cb.get_diagnostics(),
+        }
+    )
+
+
+@app.post("/api/maintenance/incidents/clear", tags=["Maintenance", "Operations"])
+async def clear_incidents_endpoint():
+    """Clear in-memory and disk telemetry error logs."""
+    from engine.telemetry import clear_telemetry
+
+    clear_telemetry()
+    return JSONResponse(
+        {"status": "SUCCESS", "message": "Telemetry incidents cleared successfully"}
     )
 
 
@@ -4023,7 +4169,6 @@ def get_compounder_lifecycle(
       - mode='STAGE_2_COMPOUNDER': ZERO 2R profit booking, base pivot breakeven, 50-SMA trail, +30% pyramiding signal
       - mode='GENERATIONAL': 200-SMA / 40-week trail
     """
-    from datetime import datetime
     from zoneinfo import ZoneInfo
     from engine.alert_identity import canonical_alert_symbol
     from engine.trade_lifecycle import audit_position_lifecycle

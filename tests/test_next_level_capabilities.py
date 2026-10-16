@@ -12,7 +12,15 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from analysis.gex import get_gex_analysis, compute_gex_at_strike, find_gex_flip, classify_gex_regime
+from analysis.gex import (
+    get_gex_analysis,
+    compute_gex_at_strike,
+    compute_vex_at_strike,
+    _bs_vanna,
+    _bs_charm,
+    find_gex_flip,
+    classify_gex_regime,
+)
 from analysis.order_flow import analyze_order_flow, OrderFlowSnapshot
 from engine.position_sizer import calculate_volatility_risk_parity_size, PositionSizeResult
 from brokers.fyers import FyersAPI
@@ -47,8 +55,30 @@ def test_gex_core_math():
     assert classify_gex_regime(5.0) == "NEUTRAL"
 
 
+def test_gex_second_order_vanna_and_charm_math():
+    """Verify Black-Scholes Vanna, Charm, and Rupee VEX calculations."""
+    spot = 24500.0
+    strike = 24500.0
+    dte_days = 2
+    iv = 14.0
+
+    vanna = _bs_vanna(spot, strike, dte_days, iv)
+    assert isinstance(vanna, float)
+
+    charm_ce = _bs_charm(spot, strike, dte_days, iv, is_call=True)
+    charm_pe = _bs_charm(spot, strike, dte_days, iv, is_call=False)
+    assert isinstance(charm_ce, float)
+    assert isinstance(charm_pe, float)
+
+    # Rupee VEX calculation
+    call_vex = compute_vex_at_strike(oi=50000, vanna=0.0002, spot=spot, lot_size=25, is_call=True)
+    put_vex = compute_vex_at_strike(oi=50000, vanna=0.0002, spot=spot, lot_size=25, is_call=False)
+    assert call_vex < 0  # Short call dealer exposure is -vanna
+    assert put_vex > 0  # Short put dealer exposure is +vanna
+
+
 def test_gex_full_analysis():
-    """Verify end-to-end institutional GEX output."""
+    """Verify end-to-end institutional GEX and VEX output."""
     res = get_gex_analysis("NIFTY")
     assert res is not None
     assert "status" in res
@@ -56,6 +86,8 @@ def test_gex_full_analysis():
         assert res["spot"] > 0
         assert res["regime"] in ("POSITIVE", "NEGATIVE", "NEUTRAL")
         assert "total_net_gex_cr" in res
+        assert "total_net_vex_cr" in res
+        assert "vanna_bias" in res
         assert "strikes" in res
         assert len(res["strikes"]) > 0
         assert "volatility_acceleration_zones" in res

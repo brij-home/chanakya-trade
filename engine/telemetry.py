@@ -61,9 +61,39 @@ class TelemetryEvent:
     details: dict[str, Any] = field(default_factory=dict)
     severity: str = "INFO"  # "INFO", "WARNING", "ERROR", "CRITICAL"
     incident_id: Optional[str] = None
+    priority: str = "P3"  # "P0", "P1", "P2", "P3"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def derive_priority(event_type: str, component: str, severity: str, reason: str) -> str:
+    """Classify incident into institutional priority levels P0 (Critical) to P3 (Info)."""
+    sev = (severity or "INFO").upper()
+    comp = (component or "").upper()
+    rsn = (reason or "").upper()
+
+    if (
+        sev == "CRITICAL"
+        or "ORDER" in comp
+        or "EXECUTION" in comp
+        or "FREEZE" in rsn
+        or "CIRCUIT" in rsn
+        or "LOCKOUT" in rsn
+    ):
+        return "P0"
+    if sev in ("ERROR", "WARNING") and (
+        sev == "ERROR"
+        or event_type in (EVENT_LLM_COOLDOWN, EVENT_DATA_FALLBACK, EVENT_QUANT_FALLBACK)
+        or "RATE LIMIT" in rsn
+        or "429" in rsn
+        or "TIMEOUT" in rsn
+        or "-360" in rsn
+    ):
+        return "P1"
+    if sev == "WARNING" or event_type == EVENT_API_RETRY or "LATENCY" in rsn or "DEGRADED" in rsn:
+        return "P2"
+    return "P3"
 
 
 # ── In-Memory Ring Buffer & File Persistence ────────────────────────────────
@@ -137,6 +167,7 @@ def record_event(
     details: Optional[dict[str, Any]] = None,
     severity: str = "INFO",
     incident_id: Optional[str] = None,
+    priority: Optional[str] = None,
 ) -> TelemetryEvent:
     """
     Record a fallback, failover, or exception event.
@@ -144,6 +175,7 @@ def record_event(
     Thread-safe, size-rotated disk append with in-memory ring buffer.
     """
     clean_details = sanitize_sensitive_data(details or {})
+    resolved_priority = priority or derive_priority(event_type, component, severity, reason)
     event = TelemetryEvent(
         event_type=event_type,
         component=component,
@@ -152,6 +184,7 @@ def record_event(
         details=clean_details,
         severity=severity,
         incident_id=incident_id,
+        priority=resolved_priority,
     )
 
     with _lock:
@@ -163,6 +196,21 @@ def record_event(
                 f.write(json.dumps(event.to_dict()) + "\n")
         except Exception:
             # Observability logging should never crash the caller
+            pass
+
+    # Real-time SSE dispatch for critical/high priority incidents
+    if resolved_priority in ("P0", "P1"):
+        try:
+            from web.sse import event_bus
+
+            event_bus.publish_sync(
+                "system",
+                {
+                    "type": "system_incident",
+                    "incident": event.to_dict(),
+                },
+            )
+        except Exception:
             pass
 
     return event
@@ -313,6 +361,39 @@ def get_telemetry_summary() -> dict[str, Any]:
         "recommendations": recommendations,
         "recent_fallbacks": [ev.to_dict() for ev in reversed(events[-10:])],
     }
+
+
+def get_prioritized_incidents(
+    limit: int = 100,
+    priority: Optional[str] = None,
+    component: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Return incidents matching priority and component filters, sorted newest first."""
+    with _lock:
+        events = list(_events_buffer)
+
+    events.reverse()
+    results = []
+    for ev in events:
+        if priority and ev.priority != priority.upper():
+            continue
+        if component and component.lower() not in ev.component.lower():
+            continue
+        results.append(ev.to_dict())
+        if len(results) >= limit:
+            break
+    return results
+
+
+def get_incident_counts() -> dict[str, int]:
+    """Return counts of events segregated by priority level."""
+    with _lock:
+        events = list(_events_buffer)
+    counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
+    for ev in events:
+        p = getattr(ev, "priority", "P3")
+        counts[p] = counts.get(p, 0) + 1
+    return counts
 
 
 def clear_telemetry() -> None:

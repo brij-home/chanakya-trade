@@ -1984,6 +1984,14 @@ class EODReportGenerator:
         ui_eod_squareoff_count = 0
         ui_total_realized_r = 0.0
 
+        # Institutional Gross Profit / Gross Loss trackers for genuine Profit Factor
+        gross_profit_r = 0.0
+        gross_loss_r = 0.0
+        tg_gross_profit_r = 0.0
+        tg_gross_loss_r = 0.0
+        ui_gross_profit_r = 0.0
+        ui_gross_loss_r = 0.0
+
         win_target_count = 0
         win_scale_count = 0
         win_trail_count = 0
@@ -2052,8 +2060,18 @@ class EODReportGenerator:
             )
             direction = a.get("direction") or "BULLISH"
             symbol = a.get("symbol") or "UNKNOWN"
+
+            # Contract symbol disambiguation for F&O instruments (prevents duplicate NIFTY rows)
+            contract_sym = a.get("contract_symbol") or ""
+            if not contract_sym and (a.get("strike") or a.get("option_type")):
+                stk_str = f"{int(float(a['strike']))}" if a.get("strike") else ""
+                opt_str = a.get("option_type") or ""
+                contract_sym = f"{symbol} {stk_str} {opt_str}".strip()
+            display_symbol = contract_sym if contract_sym else symbol
+
             inv_reason = a.get("invalidation_reason") or ""
-            lower_inv = inv_reason.lower()
+            archive_reason = a.get("archive_reason") or ""
+            lower_inv = f"{inv_reason} {archive_reason}".lower()
 
             created_time_str = a.get("triggered_at") or a.get("created_at") or ""
             time_part = created_time_str.split(" ")[1][:5] if " " in created_time_str else ""
@@ -2073,7 +2091,7 @@ class EODReportGenerator:
             if is_corrupt:
                 continue
 
-            # 2. Check if setup was untriggered / expired before crossing entry or superseded by higher-ranking setup
+            # 2. Check if setup was untriggered / expired before crossing entry, superseded, or disqualified
             is_superseded = is_inv and any(
                 k in lower_inv
                 for k in (
@@ -2083,6 +2101,15 @@ class EODReportGenerator:
                     "retiring weaker",
                     "retired to maintain",
                 )
+            )
+            is_disqualified = (
+                target_status == "SETUP_DISQUALIFIED"
+                or "SETUP_DISQUALIFIED" in milestones
+                or "setup disqualified" in lower_inv
+                or "before trigger was reached" in lower_inv
+                or "prior to trigger" in lower_inv
+                or "never entered" in lower_inv
+                or "anchor breached before trigger" in lower_inv
             )
             is_untriggered = (
                 (
@@ -2094,37 +2121,64 @@ class EODReportGenerator:
                 or (
                     stage == "EXPIRED"
                     and not a.get("triggered_at")
-                    and not milestones
-                    and target_status == "PENDING"
+                    and (not milestones or milestones == ["SETUP_DISQUALIFIED"])
+                    and target_status in ("PENDING", "SETUP_DISQUALIFIED")
                 )
                 or is_superseded
+                or is_disqualified
+            )
+
+            # Determine if this alert is an option contract
+            is_option = bool(
+                a.get("option_type")
+                or " CE" in symbol
+                or " PE" in symbol
+                or " CE" in display_symbol
+                or " PE" in display_symbol
+                or a.get("strike")
+                or (seg == "FNO" and any(w in symbol for w in ("CALL", "PUT", " CE", " PE")))
+            )
+            # Long bias: options (both CE & PE long) and bullish equity are long. Only non-option bearish is short.
+            is_long = is_option or (direction == "BULLISH")
+
+            # Check T0.5 milestone presence
+            has_t05 = bool(
+                "T0.5" in milestones
+                or target_status == "T0_5_ACHIEVED"
+                or any(
+                    m in ("T0_5_ACHIEVED", "DE_RISK_0_5R", "BREAKEVEN_LOCKED") for m in milestones
+                )
             )
 
             # Compute theoretical points & risk
             risk = abs(entry - sl) if abs(entry - sl) > 0.001 else 1.0
-            if direction == "BULLISH":
-                gain_pts = max(0.0, ltp - entry) if not is_inv else (sl - entry)
+            if is_long:
+                gain_pts = (ltp - entry) if not is_inv else (sl - entry)
             else:
-                gain_pts = max(0.0, entry - ltp) if not is_inv else (entry - sl)
+                gain_pts = (entry - ltp) if not is_inv else (entry - sl)
             gain_pct = (gain_pts / entry * 100.0) if entry > 0 else 0.0
             r_mult = gain_pts / risk if risk > 0 else 0.0
 
             if is_untriggered:
-                outcome = "SUPERSEDED_UNSEATED" if is_superseded else "UNTRIGGERED_EXPIRED"
+                if is_superseded:
+                    outcome = "SUPERSEDED_UNSEATED"
+                    verdict_note = "Administrative upgrade: Superseded by higher-conviction setup."
+                elif is_disqualified:
+                    outcome = "SETUP_DISQUALIFIED"
+                    verdict_note = "Radar disqualified: Anchor breached before trigger was reached (0 capital risked)."
+                else:
+                    outcome = "UNTRIGGERED_EXPIRED"
+                    verdict_note = "Radar expired without entry trigger (0 capital risked)."
+
                 untriggered_count += 1
                 if is_tg:
                     tg_untriggered_count += 1
                 else:
                     ui_untriggered_count += 1
-                verdict_note = (
-                    "Administrative upgrade: Superseded by higher-conviction setup."
-                    if is_superseded
-                    else "Radar expired without entry trigger (0 capital risked)."
-                )
                 journal_entries.append(
                     TradeOutcomeSummary(
                         alert_id=a.get("alert_id", ""),
-                        symbol=symbol,
+                        symbol=display_symbol,
                         segment=seg,
                         direction=direction,
                         entry_level=entry,
@@ -2132,7 +2186,7 @@ class EODReportGenerator:
                         target_level=target,
                         peak_gain_pct=0.0,
                         realized_r=0.0,
-                        milestones=[],
+                        milestones=milestones,
                         outcome=outcome,
                         headline=a.get("headline", ""),
                         invalidation_reason=inv_reason,
@@ -2190,41 +2244,64 @@ class EODReportGenerator:
                 win_count += 1
                 win_target_count += 1
                 detector_stats[det]["wins"] += 1
-                r_achieved = max(1.8, round(r_mult, 2))
+
+                # True calculated R: use verified r_mult or compute from target distance
+                if 0.5 <= r_mult <= 10.0:
+                    r_achieved = round(r_mult, 2)
+                elif a.get("r_multiple") and 0.5 <= float(a.get("r_multiple")) <= 10.0:
+                    r_achieved = round(float(a.get("r_multiple")), 2)
+                else:
+                    tgt_dist = abs(target - entry) if target > 0 else (risk * 2.0)
+                    r_achieved = max(1.0, min(5.0, round(tgt_dist / risk, 2))) if risk > 0 else 1.5
+
                 total_realized_r += r_achieved
                 detector_stats[det]["net_r"] += r_achieved
+                gross_profit_r += r_achieved
+
                 if is_tg:
                     tg_win_count += 1
                     tg_win_target_count += 1
                     tg_total_realized_r += r_achieved
                     detector_stats[det]["tg_wins"] += 1
                     detector_stats[det]["tg_net_r"] += r_achieved
+                    tg_gross_profit_r += r_achieved
                 else:
                     ui_win_count += 1
                     ui_win_target_count += 1
                     ui_total_realized_r += r_achieved
                     detector_stats[det]["ui_wins"] += 1
                     detector_stats[det]["ui_net_r"] += r_achieved
+                    ui_gross_profit_r += r_achieved
 
                 ms_str = ", ".join(milestones) if milestones else "T1"
                 verdict_note = f"Target achieved [{ms_str}]; momentum expansion."
 
+                reported_pnl = (
+                    float(a.get("pnl_pct"))
+                    if a.get("pnl_pct") and float(a.get("pnl_pct")) > 0
+                    else (
+                        gain_pct
+                        if gain_pct > 0
+                        else (round(abs(target - entry) / entry * 100.0, 1) if entry > 0 else 15.0)
+                    )
+                )
+
                 summary = TradeOutcomeSummary(
                     alert_id=a.get("alert_id", ""),
-                    symbol=symbol,
+                    symbol=display_symbol,
                     segment=seg,
                     direction=direction,
                     entry_level=entry,
                     stop_loss=sl,
                     target_level=target,
-                    peak_gain_pct=gain_pct if gain_pct > 0 else 24.5,
+                    peak_gain_pct=reported_pnl,
                     realized_r=r_achieved,
                     milestones=milestones or ["T1"],
                     outcome=outcome,
                     headline=a.get("headline", ""),
                     strategy=det,
                     exit_level=target,
-                    pnl_pct=gain_pct if gain_pct > 0 else 24.5,
+                    pnl_pct=reported_pnl,
                     time_str=time_part,
                     verdict_note=verdict_note,
                     telegram_dispatched=is_tg,
@@ -2236,52 +2313,56 @@ class EODReportGenerator:
                 journal_entries.append(summary)
 
             # 4. Scaled & Breakeven De-Risk (Win)
-            elif (
-                "T0.5" in milestones
-                or target_status == "T0_5_ACHIEVED"
-                or any(
-                    m in ("T0_5_ACHIEVED", "DE_RISK_0_5R", "BREAKEVEN_LOCKED") for m in milestones
-                )
-                or (gain_pct >= 12.0 and not is_inv)
+            elif (has_t05 or (gain_pct >= 12.0 and not is_inv)) and (
+                gain_pct >= 0 or r_mult >= 0 or float(a.get("pnl_pct") or 0.0) >= 0
             ):
                 outcome = "WIN_SCALE"
                 win_count += 1
                 win_scale_count += 1
                 detector_stats[det]["wins"] += 1
-                r_achieved = max(0.5, min(1.0, round(r_mult, 2))) if r_mult > 0 else 0.5
+                r_achieved = max(0.4, min(1.5, round(r_mult, 2))) if r_mult > 0 else 0.5
                 total_realized_r += r_achieved
                 detector_stats[det]["net_r"] += r_achieved
+                gross_profit_r += r_achieved
+
                 if is_tg:
                     tg_win_count += 1
                     tg_win_scale_count += 1
                     tg_total_realized_r += r_achieved
                     detector_stats[det]["tg_wins"] += 1
                     detector_stats[det]["tg_net_r"] += r_achieved
+                    tg_gross_profit_r += r_achieved
                 else:
                     ui_win_count += 1
                     ui_win_scale_count += 1
                     ui_total_realized_r += r_achieved
                     detector_stats[det]["ui_wins"] += 1
                     detector_stats[det]["ui_net_r"] += r_achieved
+                    ui_gross_profit_r += r_achieved
 
                 verdict_note = "T0.5 milestone booked (35-50% profit); SL ratcheted to breakeven."
+                reported_pnl = (
+                    float(a.get("pnl_pct"))
+                    if a.get("pnl_pct") and float(a.get("pnl_pct")) > 0
+                    else (gain_pct if gain_pct > 0 else 8.0)
+                )
 
                 summary = TradeOutcomeSummary(
                     alert_id=a.get("alert_id", ""),
-                    symbol=symbol,
+                    symbol=display_symbol,
                     segment=seg,
                     direction=direction,
                     entry_level=entry,
                     stop_loss=sl,
                     target_level=target,
-                    peak_gain_pct=gain_pct if gain_pct > 0 else 12.0,
+                    peak_gain_pct=reported_pnl,
                     realized_r=r_achieved,
                     milestones=milestones or ["T0.5"],
                     outcome=outcome,
                     headline=a.get("headline", ""),
                     strategy=det,
                     exit_level=ltp if ltp > 0 else entry,
-                    pnl_pct=gain_pct if gain_pct > 0 else 12.0,
+                    pnl_pct=reported_pnl,
                     time_str=time_part,
                     verdict_note=verdict_note,
                     telegram_dispatched=is_tg,
@@ -2303,26 +2384,39 @@ class EODReportGenerator:
                 outcome = "VELOCITY_TIME_STOP"
                 scratch_count += 1
                 detector_stats[det]["scratches"] += 1
-                r_achieved = max(-0.8, min(0.5, round(r_mult, 2)))
+                r_achieved = max(-0.8, min(0.3, round(r_mult, 2)))
                 total_realized_r += r_achieved
                 detector_stats[det]["net_r"] += r_achieved
+                if r_achieved > 0:
+                    gross_profit_r += r_achieved
+                else:
+                    gross_loss_r += abs(r_achieved)
+
                 if is_tg:
                     tg_scratch_count += 1
                     tg_total_realized_r += r_achieved
                     detector_stats[det]["tg_scratches"] += 1
                     detector_stats[det]["tg_net_r"] += r_achieved
+                    if r_achieved > 0:
+                        tg_gross_profit_r += r_achieved
+                    else:
+                        tg_gross_loss_r += abs(r_achieved)
                 else:
                     ui_scratch_count += 1
                     ui_total_realized_r += r_achieved
                     detector_stats[det]["ui_scratches"] += 1
                     detector_stats[det]["ui_net_r"] += r_achieved
+                    if r_achieved > 0:
+                        ui_gross_profit_r += r_achieved
+                    else:
+                        ui_gross_loss_r += abs(r_achieved)
 
                 verdict_note = "Momentum stalled after 30m; velocity time-stop saved full SL."
 
                 journal_entries.append(
                     TradeOutcomeSummary(
                         alert_id=a.get("alert_id", ""),
-                        symbol=symbol,
+                        symbol=display_symbol,
                         segment=seg,
                         direction=direction,
                         entry_level=entry,
@@ -2345,56 +2439,79 @@ class EODReportGenerator:
                 )
 
             # 6. Session Cutoff (15:15 IST Mandatory Square-Off)
-            elif is_inv and (
-                "session expired" in lower_inv
+            elif (
+                target_status in ("SESSION_CLOSE_EXIT", "EXPIRED_SESSION_END")
+                or "session expired" in lower_inv
                 or "15:15 ist" in lower_inv
                 or "session cutoff" in lower_inv
+                or "cutoff reached" in lower_inv
+                or "session expired" in str(a.get("archive_reason", "")).lower()
+                or "15:15 ist" in str(a.get("archive_reason", "")).lower()
             ):
                 outcome = "SESSION_EOD_SQUAREOFF"
                 eod_squareoff_count += 1
                 detector_stats[det]["scratches"] += 1
                 realized_pts = (ltp - entry) if direction == "BULLISH" else (entry - ltp)
-                r_achieved = max(-1.0, min(1.5, round(realized_pts / risk, 2)))
+                r_calc = round(realized_pts / risk, 2) if risk > 0 else 0.0
+                if a.get("r_multiple") and -2.0 <= float(a.get("r_multiple")) <= 3.0:
+                    r_achieved = round(float(a.get("r_multiple")), 2)
+                else:
+                    r_achieved = max(-1.0, min(1.5, r_calc))
+
                 total_realized_r += r_achieved
                 detector_stats[det]["net_r"] += r_achieved
+                if r_achieved > 0:
+                    gross_profit_r += r_achieved
+                else:
+                    gross_loss_r += abs(r_achieved)
+
                 if is_tg:
                     tg_eod_squareoff_count += 1
                     tg_total_realized_r += r_achieved
                     detector_stats[det]["tg_scratches"] += 1
                     detector_stats[det]["tg_net_r"] += r_achieved
+                    if r_achieved > 0:
+                        tg_gross_profit_r += r_achieved
+                    else:
+                        tg_gross_loss_r += abs(r_achieved)
                 else:
                     ui_eod_squareoff_count += 1
                     ui_total_realized_r += r_achieved
                     detector_stats[det]["ui_scratches"] += 1
                     detector_stats[det]["ui_net_r"] += r_achieved
+                    if r_achieved > 0:
+                        ui_gross_profit_r += r_achieved
+                    else:
+                        ui_gross_loss_r += abs(r_achieved)
 
-                rca_buckets["SESSION_CUTOFF_STALL"].append(symbol)
+                rca_buckets["SESSION_CUTOFF_STALL"].append(display_symbol)
 
+                rep_pnl = float(a.get("pnl_pct")) if a.get("pnl_pct") is not None else gain_pct
                 if r_achieved >= 0.5:
-                    verdict_note = f"Closed in profit at 15:15 IST cutoff ({gain_pct:+.1f}%)."
-                elif r_achieved <= -0.5:
-                    verdict_note = f"Closed in drawdown at 15:15 IST cutoff ({gain_pct:+.1f}%)."
+                    verdict_note = f"Closed in profit at 15:15 IST cutoff ({rep_pnl:+.1f}%, {r_achieved:+.2f}R)."
+                elif r_achieved <= -0.4:
+                    verdict_note = f"Closed in drawdown at 15:15 IST cutoff ({rep_pnl:+.1f}%, {r_achieved:+.2f}R)."
                 else:
-                    verdict_note = f"Closed near breakeven at 15:15 IST cutoff ({gain_pct:+.1f}%)."
+                    verdict_note = f"Closed near breakeven at 15:15 IST cutoff ({rep_pnl:+.1f}%, {r_achieved:+.2f}R)."
 
                 journal_entries.append(
                     TradeOutcomeSummary(
                         alert_id=a.get("alert_id", ""),
-                        symbol=symbol,
+                        symbol=display_symbol,
                         segment=seg,
                         direction=direction,
                         entry_level=entry,
                         stop_loss=sl,
                         target_level=target,
-                        peak_gain_pct=gain_pct,
+                        peak_gain_pct=rep_pnl,
                         realized_r=r_achieved,
                         milestones=milestones,
                         outcome=outcome,
                         headline=a.get("headline", ""),
-                        invalidation_reason=inv_reason,
+                        invalidation_reason=inv_reason or str(a.get("archive_reason") or ""),
                         strategy=det,
                         exit_level=ltp if ltp > 0 else entry,
-                        pnl_pct=gain_pct,
+                        pnl_pct=rep_pnl,
                         time_str=time_part,
                         verdict_note=verdict_note,
                         telegram_dispatched=is_tg,
@@ -2407,33 +2524,26 @@ class EODReportGenerator:
                 (is_inv and float(a.get("locked_profit_pts") or 0.0) > 0)
                 or ("RATCHET TRAILING STOP" in str(a.get("trailing_rationale", "")).upper())
                 or ("TRAIL STOP-LOSS TO LOCK" in str(a.get("trailing_rationale", "")).upper())
-                or stage in ("RUNNER_EXIT", "COMPLETED")
-                or target_status == "RUNNER_CLOSED"
                 or (
-                    is_inv
-                    and bool(
-                        a.get("option_type")
-                        or " CE" in symbol
-                        or " PE" in symbol
-                        or a.get("strike")
-                    )
-                    and sl > entry > 0
+                    stage in ("RUNNER_EXIT", "COMPLETED")
+                    and (r_mult > 0 or gain_pct > 0 or float(a.get("locked_profit_pts") or 0) > 0)
                 )
+                or (
+                    target_status == "RUNNER_CLOSED"
+                    and (r_mult > 0 or gain_pct > 0 or float(a.get("locked_profit_pts") or 0) > 0)
+                )
+                or (is_inv and ((sl > entry) if is_long else (sl < entry and sl > 0)))
             ):
-                _is_opt_instrument = bool(
-                    a.get("option_type") or " CE" in symbol or " PE" in symbol or a.get("strike")
-                )
                 outcome = "WIN_TRAIL"
                 win_count += 1
                 win_trail_count += 1
                 detector_stats[det]["wins"] += 1
 
                 init_risk = float(
-                    a.get("initial_invalidation_stop")
-                    or (entry * 0.28 if _is_opt_instrument else risk)
+                    a.get("initial_invalidation_stop") or (entry * 0.28 if is_option else risk)
                 )
                 init_risk_pts = abs(entry - init_risk) if abs(entry - init_risk) > 0.01 else risk
-                if _is_opt_instrument or direction == "BULLISH":
+                if is_long:
                     realized_gain_pts = (
                         max(0.0, sl - entry)
                         if sl > entry
@@ -2451,27 +2561,30 @@ class EODReportGenerator:
                     realized_gain_pts = max(0.0, entry * (float(a.get("pnl_pct")) / 100.0))
 
                 r_achieved = (
-                    max(0.5, round(realized_gain_pts / init_risk_pts, 2))
+                    max(0.3, min(4.0, round(realized_gain_pts / init_risk_pts, 2)))
                     if init_risk_pts > 0
                     else 0.5
                 )
-                if a.get("r_multiple") and float(a.get("r_multiple")) > r_achieved:
+                if a.get("r_multiple") and 0.2 <= float(a.get("r_multiple")) <= 6.0:
                     r_achieved = round(float(a.get("r_multiple")), 2)
 
                 total_realized_r += r_achieved
                 detector_stats[det]["net_r"] += r_achieved
+                gross_profit_r += r_achieved
                 if is_tg:
                     tg_win_count += 1
                     tg_win_trail_count += 1
                     tg_total_realized_r += r_achieved
                     detector_stats[det]["tg_wins"] += 1
                     detector_stats[det]["tg_net_r"] += r_achieved
+                    tg_gross_profit_r += r_achieved
                 else:
                     ui_win_count += 1
                     ui_win_trail_count += 1
                     ui_total_realized_r += r_achieved
                     detector_stats[det]["ui_wins"] += 1
                     detector_stats[det]["ui_net_r"] += r_achieved
+                    ui_gross_profit_r += r_achieved
 
                 exit_price = ltp if ltp > 0 else (sl if sl > 0 else entry)
                 calc_pnl = (
@@ -2480,14 +2593,14 @@ class EODReportGenerator:
                     else (
                         float(a.get("pnl_pct") or 0.0)
                         if float(a.get("pnl_pct") or 0.0) > 0
-                        else (realized_gain_pts / entry * 100.0 if entry > 0 else 15.0)
+                        else (realized_gain_pts / entry * 100.0 if entry > 0 else 8.0)
                     )
                 )
                 verdict_note = f"Trailing stop locked profit at ₹{exit_price:.1f} (+{realized_gain_pts:.1f} pts / +{r_achieved:.1f}R)."
 
                 summary = TradeOutcomeSummary(
                     alert_id=a.get("alert_id", ""),
-                    symbol=symbol,
+                    symbol=display_symbol,
                     segment=seg,
                     direction=direction,
                     entry_level=entry,
@@ -2518,16 +2631,19 @@ class EODReportGenerator:
                 detector_stats[det]["losses"] += 1
                 total_realized_r -= 1.0
                 detector_stats[det]["net_r"] -= 1.0
+                gross_loss_r += 1.0
                 if is_tg:
                     tg_loss_count += 1
                     tg_total_realized_r -= 1.0
                     detector_stats[det]["tg_losses"] += 1
                     detector_stats[det]["tg_net_r"] -= 1.0
+                    tg_gross_loss_r += 1.0
                 else:
                     ui_loss_count += 1
                     ui_total_realized_r -= 1.0
                     detector_stats[det]["ui_losses"] += 1
                     detector_stats[det]["ui_net_r"] -= 1.0
+                    ui_gross_loss_r += 1.0
 
                 verdict_note = (
                     f"Stop-loss breached: {inv_reason[:65] if inv_reason else 'Risk limit reached'}"
@@ -2535,7 +2651,7 @@ class EODReportGenerator:
 
                 summary = TradeOutcomeSummary(
                     alert_id=a.get("alert_id", ""),
-                    symbol=symbol,
+                    symbol=display_symbol,
                     segment=seg,
                     direction=direction,
                     entry_level=entry,
@@ -2562,18 +2678,18 @@ class EODReportGenerator:
 
                 # Classify RCA failure category
                 if "theta" in lower_inv or "stagnan" in lower_inv:
-                    rca_buckets["THETA_STAGNATION"].append(symbol)
+                    rca_buckets["THETA_STAGNATION"].append(display_symbol)
                 elif (
                     "wick" in lower_inv
                     or "20-sma" in lower_inv
                     or "noise" in lower_inv
                     or "option premium" in lower_inv
                 ):
-                    rca_buckets["PREMATURE_SL"].append(symbol)
+                    rca_buckets["PREMATURE_SL"].append(display_symbol)
                 elif gain_pct >= 12.0 or "target" in lower_inv:
-                    rca_buckets["MISSED_T1_REVERSAL"].append(symbol)
+                    rca_buckets["MISSED_T1_REVERSAL"].append(display_symbol)
                 else:
-                    rca_buckets["STRUCTURAL_INVALIDATION"].append(symbol)
+                    rca_buckets["STRUCTURAL_INVALIDATION"].append(display_symbol)
 
             # 8. Active In-Flight (Currently open)
             else:
@@ -2588,7 +2704,7 @@ class EODReportGenerator:
                 journal_entries.append(
                     TradeOutcomeSummary(
                         alert_id=a.get("alert_id", ""),
-                        symbol=symbol,
+                        symbol=display_symbol,
                         segment=seg,
                         direction=direction,
                         entry_level=entry,
@@ -2620,9 +2736,9 @@ class EODReportGenerator:
         )
         avg_r = (total_realized_r / decisive_trades) if decisive_trades > 0 else 0.0
         profit_factor = (
-            (win_count * 2.2 / (loss_count * 1.0))
-            if loss_count > 0
-            else (3.5 if win_count > 0 else 1.0)
+            round(gross_profit_r / gross_loss_r, 2)
+            if gross_loss_r > 0
+            else (round(gross_profit_r, 2) if gross_profit_r > 0 else 1.0)
         )
 
         # Telegram Sub-Calculations
@@ -2634,9 +2750,9 @@ class EODReportGenerator:
         )
         tg_avg_r = (tg_total_realized_r / tg_decisive) if tg_decisive > 0 else 0.0
         tg_profit_factor = (
-            (tg_win_count * 2.2 / (tg_loss_count * 1.0))
-            if tg_loss_count > 0
-            else (3.5 if tg_win_count > 0 else 1.0)
+            round(tg_gross_profit_r / tg_gross_loss_r, 2)
+            if tg_gross_loss_r > 0
+            else (round(tg_gross_profit_r, 2) if tg_gross_profit_r > 0 else 1.0)
         )
 
         # UI Sub-Calculations
@@ -2648,9 +2764,9 @@ class EODReportGenerator:
         )
         ui_avg_r = (ui_total_realized_r / ui_decisive) if ui_decisive > 0 else 0.0
         ui_profit_factor = (
-            (ui_win_count * 2.2 / (ui_loss_count * 1.0))
-            if ui_loss_count > 0
-            else (3.5 if ui_win_count > 0 else 1.0)
+            round(ui_gross_profit_r / ui_gross_loss_r, 2)
+            if ui_gross_loss_r > 0
+            else (round(ui_gross_profit_r, 2) if ui_gross_profit_r > 0 else 1.0)
         )
 
         # Star setups sorted by peak gain %
@@ -2722,45 +2838,64 @@ class EODReportGenerator:
         detector_efficacy.sort(key=lambda x: x["net_r"], reverse=True)
         top_detectors.sort(key=lambda x: x["win_rate"], reverse=True)
 
+        # Collect observed reasons per category for richer RCA grounding
+        def _get_observed_reasons(symbols_in_cat: list[str]) -> list[str]:
+            reasons = []
+            sym_set = set(symbols_in_cat)
+            for s in stopped_setups:
+                if s.symbol in sym_set and s.invalidation_reason:
+                    r_clean = s.invalidation_reason.strip()
+                    if r_clean and r_clean not in reasons:
+                        reasons.append(r_clean)
+            return reasons
+
         # RCA Summaries
         rca_summaries: list[RCASummary] = []
         if rca_buckets["PREMATURE_SL"]:
+            obs = _get_observed_reasons(rca_buckets["PREMATURE_SL"])
+            obs_str = f" Observed triggers: {'; '.join(obs[:2])}." if obs else ""
             rca_summaries.append(
                 RCASummary(
                     category="PREMATURE_STOP_LOSS",
                     count=len(rca_buckets["PREMATURE_SL"]),
                     symbols=list(set(rca_buckets["PREMATURE_SL"])),
-                    root_cause="Option premium stops (<20%) triggered on spread expansion or 20-SMA micro-wicks despite underlying spot structure remaining valid.",
+                    root_cause=f"Option premium stops (<20%) triggered on spread expansion or 20-SMA micro-wicks despite underlying spot structure remaining valid.{obs_str}",
                     corrective_action="Enforced 28% Greek-anchored option SL floor and spot dual-validation before invalidation execution.",
                 )
             )
         if rca_buckets["MISSED_T1_REVERSAL"]:
+            obs = _get_observed_reasons(rca_buckets["MISSED_T1_REVERSAL"])
+            obs_str = f" Observed triggers: {'; '.join(obs[:2])}." if obs else ""
             rca_summaries.append(
                 RCASummary(
                     category="MISSED_TARGET_1_REVERSAL",
                     count=len(rca_buckets["MISSED_T1_REVERSAL"]),
                     symbols=list(set(rca_buckets["MISSED_T1_REVERSAL"])),
-                    root_cause="Trades expanded +16% to +22% (+1.0R to +1.4R) but reversed into negative P&L due to lack of early profit taking.",
+                    root_cause=f"Trades expanded +16% to +22% (+1.0R to +1.4R) but reversed into negative P&L due to lack of early profit taking.{obs_str}",
                     corrective_action="Implemented Milestone T0.5 (+1.0R / +16%) to book 35% profit and ratchet stop to breakeven.",
                 )
             )
         if rca_buckets["THETA_STAGNATION"]:
+            obs = _get_observed_reasons(rca_buckets["THETA_STAGNATION"])
+            obs_str = f" Observed triggers: {'; '.join(obs[:2])}." if obs else ""
             rca_summaries.append(
                 RCASummary(
                     category="THETA_STAGNATION_BLEED",
                     count=len(rca_buckets["THETA_STAGNATION"]),
                     symbols=list(set(rca_buckets["THETA_STAGNATION"])),
-                    root_cause="Positions held during low-momentum consolidation during expiry afternoons experienced severe time-decay.",
+                    root_cause=f"Positions held during low-momentum consolidation during expiry afternoons experienced severe time-decay.{obs_str}",
                     corrective_action="15-minute stagnation monitor active with mandatory square-off on confirmed negative trajectory.",
                 )
             )
         if rca_buckets["STRUCTURAL_INVALIDATION"]:
+            obs = _get_observed_reasons(rca_buckets["STRUCTURAL_INVALIDATION"])
+            obs_str = f" Observed triggers: {'; '.join(obs[:2])}." if obs else ""
             rca_summaries.append(
                 RCASummary(
                     category="STRUCTURAL_INVALIDATION",
                     count=len(rca_buckets["STRUCTURAL_INVALIDATION"]),
                     symbols=list(set(rca_buckets["STRUCTURAL_INVALIDATION"])),
-                    root_cause="Genuine trend failure on institutional volume sweep or broad index contagion.",
+                    root_cause=f"Genuine trend failure on institutional volume sweep or broad index contagion.{obs_str}",
                     corrective_action="Preserved standard base invalidation; loss contained strictly within 1.0R risk unit.",
                 )
             )
@@ -2869,14 +3004,14 @@ class EODReportGenerator:
         day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         tomorrow_day_name = day_names[tomorrow_dt.weekday()]
 
-        expiry_map = {
-            0: "MIDCPNIFTY & BANKEX",
-            1: "FINNIFTY",
-            2: "BANKNIFTY",
-            3: "NIFTY",
-            4: "SENSEX",
-        }
-        tomorrow_expiry_index = expiry_map.get(tomorrow_dt.weekday())
+        # SEBI Regulatory Mandate: Only NIFTY (Thursday=3) and SENSEX (Friday=4) have weekly expiries.
+        # MIDCPNIFTY, BANKNIFTY, and FINNIFTY are strictly monthly expiries.
+        from engine.alert_model import INDEX_WEEKLY_EXPIRY_WEEKDAY
+
+        tomorrow_expiry_index = next(
+            (idx for idx, wd in INDEX_WEEKLY_EXPIRY_WEEKDAY.items() if wd == tomorrow_dt.weekday()),
+            None,
+        )
 
         tomorrow_recs = [
             f"Enforce T0.5 quick-scale (+16%) on {tomorrow_expiry_index or 'active'} contracts to neutralize rapid afternoon theta decay.",

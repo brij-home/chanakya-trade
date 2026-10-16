@@ -566,3 +566,52 @@ def test_cmd_ping_all_dispatches_heartbeats(monkeypatch):
     reply_text = update.message.reply_text.call_args[0][0]
     assert "MULTI-CHANNEL HEARTBEAT AUDIT RESULTS" in reply_text
     assert "Delivered" in reply_text
+
+
+def test_alert_repository_preserves_telegram_root_message_id(tmp_path):
+    """Regression test: AlertRepository.load() must deserialize telegram_root_message_id and telegram_message_id."""
+    from engine.alert_model import AutoAlert
+    from engine.storage.alert_repository import AlertRepository
+
+    test_file = tmp_path / "auto_alerts.json"
+    repo = AlertRepository(target_file_fn=lambda: test_file)
+
+    alert = AutoAlert(
+        alert_id="aa-test-mrpl-threading-20261015",
+        alert_type="INTRADAY_BREAKDOWN_SPARK",
+        stage="IGNITED",
+        symbol="MRPL",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="MRPL Breakdown",
+        summary="Test summary",
+        ltp=173.08,
+        trigger_level=173.08,
+        target_level=152.90,
+        stop_loss=183.18,
+        telegram_dispatched=True,
+        telegram_root_message_id=1490,
+        telegram_message_id=1491,
+    )
+
+    repo.save([alert])
+    loaded = repo.load()
+
+    assert len(loaded) == 1
+    loaded_alert = loaded[0]
+    assert loaded_alert.telegram_root_message_id == 1490
+    assert loaded_alert.telegram_message_id == 1491
+
+
+def test_record_signal_message_id_overwrite_behavior():
+    """Verify that updates do not overwrite original root message anchor when overwrite=False."""
+    record_signal_message_id("SIG_MRPL_15OCT_1046", 1490, chat_id="-1003524867091")
+    assert get_signal_message_id("SIG_MRPL_15OCT_1046", chat_id="-1003524867091") == 1490
+
+    # Dispatching update with overwrite=False must NOT displace root anchor 1490
+    record_signal_message_id("SIG_MRPL_15OCT_1046", 1684, chat_id="-1003524867091", overwrite=False)
+    assert get_signal_message_id("SIG_MRPL_15OCT_1046", chat_id="-1003524867091") == 1490
+
+    # Explicit overwrite=True updates the anchor
+    record_signal_message_id("SIG_MRPL_15OCT_1046", 9999, chat_id="-1003524867091", overwrite=True)
+    assert get_signal_message_id("SIG_MRPL_15OCT_1046", chat_id="-1003524867091") == 9999

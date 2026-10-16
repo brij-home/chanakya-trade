@@ -30,10 +30,13 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import webbrowser
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from rich.console import Console
 from rich.panel import Panel
@@ -1032,7 +1035,7 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
 
 
 def _start_websocket(broker: BrokerAPI) -> None:
-    """Start WebSocket for real-time quotes (Fyers, m.Stock, or Kotak Neo)."""
+    """Start WebSocket for real-time quotes (Fyers, m.Stock, Shoonya, or Kotak Neo)."""
     if (
         os.environ.get("CHANAKYA_TESTING") == "1"
         or "PYTEST_CURRENT_TEST" in os.environ
@@ -1040,8 +1043,10 @@ def _start_websocket(broker: BrokerAPI) -> None:
     ):
         return
     try:
+        broker_name = getattr(broker, "name", "").lower()
         broker_cls_name = broker.__class__.__name__
-        if getattr(broker, "name", "") == "kotak" or broker_cls_name == "KotakNeoAPI":
+
+        if broker_name == "kotak" or broker_cls_name == "KotakNeoAPI":
             from market.kotak_websocket import kotak_ws
 
             kotak_ws.start(
@@ -1052,7 +1057,7 @@ def _start_websocket(broker: BrokerAPI) -> None:
             )
             return
 
-        if getattr(broker, "name", "") == "mstock":
+        if broker_name == "mstock":
             from market.mstock_websocket import mstock_ws
 
             api_key = getattr(broker, "_api_key", "")
@@ -1061,19 +1066,33 @@ def _start_websocket(broker: BrokerAPI) -> None:
                 mstock_ws.start(api_key=api_key, access_token=token)
             return
 
-        from market.websocket import ws_manager
-        from market.fyers_order_stream import fyers_order_stream
-        from market.fyers_tbt_manager import fyers_tbt_manager
+        if broker_name == "shoonya" and hasattr(broker, "start_websocket"):
+            broker.start_websocket()
+            return
 
-        # Access Fyers internal token and app_id
-        token = getattr(broker, "_access_token", "")
-        app_id = getattr(broker, "_app_id", "")
-        if token and app_id:
-            ws_manager.start(access_token=token, app_id=app_id)
-            fyers_order_stream.start(access_token=token, app_id=app_id)
-            fyers_tbt_manager.start(access_token=token, app_id=app_id)
-    except Exception:
-        pass  # Status shown in REPL toolbar
+        if broker_name == "fyers" or broker_cls_name == "FyersAPI":
+            from market.websocket import ws_manager
+            from market.fyers_order_stream import fyers_order_stream
+            from market.fyers_tbt_manager import fyers_tbt_manager
+            from market.ws_subscription_manager import get_ws_subscription_manager
+
+            # Access Fyers internal token and app_id
+            token = getattr(broker, "_access_token", "")
+            app_id = getattr(broker, "_app_id", "")
+            if token and app_id:
+                ws_manager.start(access_token=token, app_id=app_id)
+                fyers_order_stream.start(access_token=token, app_id=app_id)
+                fyers_tbt_manager.start(access_token=token, app_id=app_id)
+                get_ws_subscription_manager().seed_active_derivatives(ws_client=ws_manager)
+            return
+
+        logger.debug(
+            f"[Session] No dedicated WebSocket streamer for broker: {broker_name or broker_cls_name}"
+        )
+    except Exception as exc:
+        logger.warning(
+            f"[Session] Failed to start WebSocket for broker {getattr(broker, 'name', '')}: {exc}"
+        )
 
 
 def _print_welcome(broker: BrokerAPI, role: str = "primary") -> None:

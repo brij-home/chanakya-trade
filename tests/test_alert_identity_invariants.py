@@ -32,6 +32,10 @@ def test_canonical_alert_symbol_prefixes():
     assert canonical_alert_symbol("RELIANCE.NS") == "RELIANCE"
     assert canonical_alert_symbol("TCS.BO") == "TCS"
     assert canonical_alert_symbol("^NSEI") == "NSEI"
+    assert canonical_alert_symbol("NSE:RELIANCE-EQ") == "RELIANCE"
+    assert canonical_alert_symbol("NSE:NIFTY50-INDEX") == "NIFTY"
+    assert canonical_alert_symbol("NSE:NIFTYBANK-INDEX") == "BANKNIFTY"
+    assert canonical_alert_symbol("NSE:INDIAVIX-INDEX") == "INDIAVIX"
     assert canonical_alert_symbol("  nse:infy  ") == "INFY"
     assert canonical_alert_symbol("") == ""
 

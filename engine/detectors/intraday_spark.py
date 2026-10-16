@@ -309,8 +309,12 @@ def detect_intraday_mover_sparks(
                 risk_pts = max(min_risk, round(ltp - tp.invalidation_stop, 2))
                 sl_price = round(ltp - risk_pts, 2)
                 t1_price = max(tp.target_1, round(ltp + 1.5 * risk_pts, 2))
-                t2_price = max(tp.target_2, round(ltp + 2.5 * risk_pts, 2))
-                t3_price = max(tp.target_3, round(ltp + 4.0 * risk_pts, 2))
+                t2_price = max(
+                    tp.target_2, round(max(ltp + 2.5 * risk_pts, t1_price + 1.0 * risk_pts), 2)
+                )
+                t3_price = max(
+                    tp.target_3, round(max(ltp + 4.0 * risk_pts, t2_price + 1.5 * risk_pts), 2)
+                )
                 rr_str = f"1:{round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
                 tp_dict["invalidation_stop"] = sl_price
@@ -445,8 +449,14 @@ def detect_intraday_mover_sparks(
                 risk_pts = max(min_risk, round(tp.invalidation_stop - ltp, 2))
                 sl_price = round(ltp + risk_pts, 2)
                 t1_price = min(tp.target_1, round(max(0.05, ltp - 1.5 * risk_pts), 2))
-                t2_price = min(tp.target_2, round(max(0.05, ltp - 2.5 * risk_pts), 2))
-                t3_price = min(tp.target_3, round(max(0.05, ltp - 4.0 * risk_pts), 2))
+                t2_price = min(
+                    tp.target_2,
+                    round(max(0.05, min(ltp - 2.5 * risk_pts, t1_price - 1.0 * risk_pts)), 2),
+                )
+                t3_price = min(
+                    tp.target_3,
+                    round(max(0.05, min(ltp - 4.0 * risk_pts, t2_price - 1.5 * risk_pts)), 2),
+                )
                 rr_str = f"1:{round(abs(ltp - t1_price) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
                 tp_dict["invalidation_stop"] = sl_price

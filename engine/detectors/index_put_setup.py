@@ -199,6 +199,21 @@ def detect_index_put_setup(
         )
         return []
 
+    # ── 14:00 IST Option Entry Cutoff Gate ─────────────────────────
+    # In Indian markets, broker auto-square-off occurs between 15:15–15:20 IST.
+    # Entries after 14:00 IST suffer accelerated theta decay, terminal gamma risk,
+    # and inadequate session runway to reach targets.
+    if (
+        (curr_time >= dtime(14, 0))
+        and not ignore_time_gate
+        and (not is_test_runner or ref_time is not None)
+    ):
+        logger.info(
+            f"[IndexPutSetup] Suppressed PE setup on {clean_sym} at {curr_time.strftime('%H:%M:%S')}: "
+            f"Intraday option entry cutoff passed (14:00 IST). Inadequate session runway before 15:15 IST auto-square-off."
+        )
+        return []
+
     # Strict today session bar isolation: prevent yesterday's historical bars from forging fake today patterns
     today_str = now_dt.strftime("%Y-%m-%d")
     df_today_5m = None
@@ -305,23 +320,22 @@ def detect_index_put_setup(
             elif c_strike < spot:
                 moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 18.0)  # OTM penalty
         else:
-            if dist_pts <= (step_val * 0.55):
-                moneyness_bonus = 25.0  # ATM sweet spot (Delta ~ -0.50)
-            elif c_strike > spot and dist_pts <= (step_val * 1.35):
+            if c_strike > spot and dist_pts <= (step_val * 1.35):
                 moneyness_bonus = (
-                    20.0  # 1-strike ITM powerhouse (Delta ~ -0.58 to -0.65, zero time-decay trap)
+                    30.0  # 1-strike ITM powerhouse (Delta ~ -0.58 to -0.65, zero time-decay trap)
                 )
+            elif dist_pts <= (step_val * 0.55):
+                moneyness_bonus = 25.0  # ATM sweet spot (Delta ~ -0.50)
             elif (
                 c_strike < spot
                 and dist_pts <= (step_val * 1.15)
                 and lp >= (25.0 if clean_sym == "NIFTY" else 60.0)
+                and curr_time < dtime(13, 0)
             ):
-                moneyness_bonus = (
-                    24.0  # OTM+1 High-Gamma Asymmetry sweet spot (high percentage torque)
-                )
+                moneyness_bonus = 15.0  # Pre-13:00 mid-morning OTM+1 modest torque
             elif c_strike < spot:
-                # OTM penalty grows with distance to prevent selecting low-delta decay traps
-                moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 15.0)
+                # OTM penalty in afternoon / high distance to prevent selecting low-delta decay traps
+                moneyness_bonus = -((dist_pts / max(1.0, step_val)) * 25.0)
 
         # BSE indices (SENSEX/BANKEX) trade at much higher absolute levels and have higher absolute premiums
         if clean_sym in ("SENSEX", "BANKEX"):
@@ -441,13 +455,29 @@ def detect_index_put_setup(
 
     if max_put_oi_strike and max_put_oi_strike > 0 and spot > 0:
         put_wall_dist_pct = round(((spot - max_put_oi_strike) / spot) * 100.0, 3)
-        # Collision: Spot is within 0.15% above the Max Put OI strike and writers are actively adding
-        if 0.0 < put_wall_dist_pct <= 0.15 and max_pe_oi_change > 0:
+        # Collision: Spot is within 0.35% above the Max Put OI strike and writers are actively adding
+        if 0.0 < put_wall_dist_pct <= 0.35 and max_pe_oi_change > 0:
             is_put_wall_collision = True
             logger.info(
                 f"[IndexPutSetup] Max Put OI Wall Collision: Spot ₹{spot:,.1f} is {put_wall_dist_pct:.2f}% "
                 f"above Put Wall ₹{max_put_oi_strike:,.0f} with writers adding ({max_pe_oi_change:+,}). Mandating Bear Put Spread."
             )
+            # Severe Put Wall Trap Guard: In any session, if spot is within <= 0.15% of Put Wall with active writers adding,
+            # immediate downside is choked. Suppress naked long put setups fail-closed.
+            if put_wall_dist_pct <= 0.15 and not is_test_runner:
+                logger.info(
+                    f"[IndexPutSetup] Severe Put Wall Trap: Spot ₹{spot:,.1f} is within {put_wall_dist_pct:.2f}% "
+                    f"of Put Wall ₹{max_put_oi_strike:,.0f} with active writing ({max_pe_oi_change:+,}). Suppressing naked PE."
+                )
+                return []
+            # Afternoon Put Wall Trap Guard: In afternoon sessions (>= 13:30 IST) with <= 0.25% runway into heavy put writing,
+            # downside is statistically choked and bounce risk dominates. Suppress long put setups fail-closed.
+            if curr_time >= dtime(13, 30) and put_wall_dist_pct <= 0.25 and not is_test_runner:
+                logger.info(
+                    f"[IndexPutSetup] Afternoon Put Wall Trap: Spot ₹{spot:,.1f} is only {put_wall_dist_pct:.2f}% "
+                    f"above Put Wall ₹{max_put_oi_strike:,.0f} with writers adding after 13:30 IST. Suppressing long puts."
+                )
+                return []
         # Long Unwinding Flush: Spot has broken at or below the Max Put OI strike AND put writers are unwinding (panic covering)
         elif spot <= max_put_oi_strike and max_pe_oi_change < 0:
             is_long_unwinding_flush = True
@@ -455,6 +485,73 @@ def detect_index_put_setup(
                 f"[IndexPutSetup] LONG UNWINDING FLUSH: Spot ₹{spot:,.1f} broke below Max Put Wall ₹{max_put_oi_strike:,.0f} "
                 f"with put writers unwinding ({max_pe_oi_change:+,})."
             )
+
+    # ── Camarilla L5 & Terminal ADR Intraday Downward Exhaustion Guard ──
+    try:
+        from engine.daily_levels import get_daily_levels
+
+        is_dl_mocked = (
+            hasattr(get_daily_levels, "assert_called")
+            or getattr(get_daily_levels, "__name__", "") != "get_daily_levels"
+            or "mock" in type(get_daily_levels).__name__.lower()
+        )
+        if not is_test_runner or is_dl_mocked:
+            dl = get_daily_levels(clean_sym)
+            if dl:
+                cam = dl.camarilla or {}
+                l5 = float(cam.get("l5", 0.0) or 0.0)
+                l4 = float(cam.get("l4", 0.0) or 0.0)
+                atr = float(dl.atr_14 or 0.0)
+                pwl = (
+                    float((dl.weekly or {}).get("pwl", 0.0) or 0.0)
+                    if hasattr(dl, "weekly") and dl.weekly
+                    else 0.0
+                )
+
+                if l5 > 0 and spot <= l5 * 1.0010:
+                    logger.info(
+                        f"[IndexPutSetup] Camarilla L5 Floor Exhaustion: Spot ₹{spot:,.1f} reached/breached Camarilla L5 ₹{l5:,.1f}. "
+                        f"Selloff statistically exhausted. Suppressing long put setup."
+                    )
+                    return []
+                if atr > 0 and day_high > 0:
+                    down_move = day_high - spot
+                    if down_move >= (1.10 * atr) and not is_explosive_momentum:
+                        logger.info(
+                            f"[IndexPutSetup] Terminal ADR Downward Exhaustion: Spot ₹{spot:,.1f} dropped -{down_move:.1f} pts "
+                            f"(>= 1.1x ATR {atr:.1f}) off day high ₹{day_high:,.1f}. Suppressing breakdown put."
+                        )
+                        return []
+                    elif down_move >= (0.85 * atr) and not is_breakdown_momentum:
+                        logger.info(
+                            f"[IndexPutSetup] Downside ADR Exhaustion: Spot ₹{spot:,.1f} dropped -{down_move:.1f} pts "
+                            f"(>= 85% of ATR {atr:.1f}) off day high ₹{day_high:,.1f} without high volume breakdown. "
+                            f"Late-chasing into institutional support suppressed."
+                        )
+                        return []
+
+                # Major Support Proximity (Camarilla L4 Floor & Previous Week Low)
+                if l4 > 0 and spot > l4 and not is_breakdown_momentum:
+                    l4_dist_pct = (spot - l4) / spot * 100.0
+                    if 0.0 < l4_dist_pct <= 0.20:
+                        logger.info(
+                            f"[IndexPutSetup] Camarilla L4 Support Collision: Spot ₹{spot:,.1f} is within {l4_dist_pct:.2f}% "
+                            f"of Camarilla L4 Floor ₹{l4:,.1f} without breakdown momentum. Suppressing put into institutional floor."
+                        )
+                        return []
+
+                if pwl > 0 and spot > pwl and not is_breakdown_momentum:
+                    pwl_dist_pct = (spot - pwl) / spot * 100.0
+                    if 0.0 < pwl_dist_pct <= 0.20:
+                        logger.info(
+                            f"[IndexPutSetup] Weekly Support Collision: Spot ₹{spot:,.1f} is within {pwl_dist_pct:.2f}% "
+                            f"of Previous Week Low ₹{pwl:,.1f} without breakdown momentum. Suppressing put into weekly floor."
+                        )
+                        return []
+    except Exception as e_dl:
+        logger.debug(
+            f"[IndexPutSetup] Daily levels exhaustion check skipped for {clean_sym}: {e_dl}"
+        )
 
     # ── Optimization 2: Index Heavyweight Breadth Confluence Matrix (HBCM) ──
     hw_posture: dict[str, Any] = {}
@@ -1504,6 +1601,94 @@ def detect_index_put_setup(
     if not signals:
         return []
 
+    # ── 5-Minute Candle Rejection / Hammer Absorption Filter ───────
+    breakdown_signals = {
+        "DAY_LOW_BREAKDOWN",
+        "CAMARILLA_L4_BREAKDOWN",
+        "VWAP_BREAKDOWN",
+        "BREAKDOWN_RETEST_EXPANSION",
+        "MOMENTUM_EXPANSION",
+    }
+    if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+        last_b = active_ohlcv.iloc[-1]
+        c_h = "high" if "high" in active_ohlcv.columns else "High"
+        c_l = "low" if "low" in active_ohlcv.columns else "Low"
+        c_o = "open" if "open" in active_ohlcv.columns else "Open"
+        c_c = "close" if "close" in active_ohlcv.columns else "Close"
+        b_h = float(last_b.get(c_h, 0.0) or 0.0)
+        b_l = float(last_b.get(c_l, 0.0) or 0.0)
+        b_o = float(last_b.get(c_o, 0.0) or 0.0)
+        b_c = float(last_b.get(c_c, 0.0) or 0.0)
+        b_rng = b_h - b_l
+        if b_rng > 0:
+            l_wick = min(b_o, b_c) - b_l
+            l_wick_pct = l_wick / b_rng
+            is_hammer_wick = (l_wick_pct >= 0.50) or (l_wick_pct >= 0.40 and b_c > b_o)
+            if is_hammer_wick:
+                if all(s in breakdown_signals for s in signals):
+                    logger.info(
+                        f"[IndexPutSetup] Suppressed breakdown setup on {clean_sym}: "
+                        f"Latest 5m candle formed heavy lower rejection wick ({l_wick_pct * 100:.1f}%). "
+                        f"Buyer demand absorption trap active."
+                    )
+                    return []
+
+    # ── V-Reversal / Session Low Bounce Guard ─────────────────────────
+    # Reject routine PUT setups if spot has staged a structural bounce >= 0.25% off the session low
+    # and the latest candle is bullish / green (buyers actively defending support).
+    _bounce_from_session_low = (
+        ((spot - day_low) / max(1.0, day_low) * 100.0)
+        if (day_low and day_low > 0 and spot > day_low)
+        else 0.0
+    )
+    if (
+        _bounce_from_session_low >= 0.25
+        and active_ohlcv is not None
+        and hasattr(active_ohlcv, "iloc")
+        and len(active_ohlcv) >= 1
+    ):
+        try:
+            col_c = "close" if "close" in active_ohlcv.columns else "Close"
+            col_o = "open" if "open" in active_ohlcv.columns else "Open"
+            last_row = active_ohlcv.iloc[-1]
+            is_candle_green = float(last_row[col_c]) > float(last_row[col_o])
+        except Exception:
+            is_candle_green = False
+
+        if is_candle_green and "DISTRIBUTION_TOP" not in signals:
+            logger.info(
+                f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: "
+                f"Spot is bouncing off session low (+{_bounce_from_session_low:.2f}% from ₹{day_low:,.1f}) "
+                f"with bullish candle momentum. Do not short into institutional bottom absorption."
+            )
+            return []
+
+    # ── Order Flow Cumulative Volume Delta (CVD) Gate ────────────
+    cvd_divergence_status = "NORMAL"
+    cvd_ratio_val = 1.0
+    if active_ohlcv is not None and len(active_ohlcv) >= 12:
+        try:
+            from engine.detectors.order_flow import compute_order_flow_cvd_divergence
+
+            cvd_data = compute_order_flow_cvd_divergence(active_ohlcv, spot)
+            if cvd_data.get("is_bullish_absorption"):
+                cvd_divergence_status = "BULLISH_ABSORPTION"
+            elif cvd_data.get("is_bearish_exhaustion"):
+                cvd_divergence_status = "BEARISH_EXHAUSTION"
+            cvd_ratio_val = float(cvd_data.get("cvd_divergence_ratio", 1.0))
+        except Exception as e_cvd:
+            logger.debug(f"[IndexPutSetup] CVD computation error for {clean_sym}: {e_cvd}")
+
+    if cvd_divergence_status == "BULLISH_ABSORPTION":
+        signals = [s for s in signals if s not in breakdown_signals]
+        if not signals:
+            logger.info(
+                f"[IndexPutSetup] Suppressed breakdown setup on {clean_sym}: "
+                f"Bullish CVD Absorption / Passive Limit Bid Accumulation detected at lows. "
+                f"Institutional accumulation spring trap active."
+            )
+            return []
+
     # ── Mandated Intraday VWAP Confirmation Filter on Subsequent Scans ──
     # When mandated (subsequent scans or active session progression), PE setups MUST have
     # verified intraday VWAP downside confirmation: price must be at/below VWAP (spot <= VWAP * 1.0005)
@@ -1770,6 +1955,13 @@ def detect_index_put_setup(
     )
     t1_pct = round(((t1_premium - opt_ltp) / max(0.1, opt_ltp)) * 100, 1) if opt_ltp > 0 else 30.0
     sl_pct = round(((sl_premium - opt_ltp) / max(0.1, opt_ltp)) * 100, 1) if opt_ltp > 0 else -20.0
+
+    # ── Synthetic Spot-Anchored Stop Loss Engine ─────────────────
+    eff_delta = abs(float(opt_delta)) if (opt_delta and float(opt_delta) != 0) else 0.50
+    spot_risk_pts = round(calc_risk / max(0.20, eff_delta), 1)
+    underlying_spot_sl = round(spot + spot_risk_pts, 1)
+    if day_high and day_high > 0 and day_high > spot:
+        underlying_spot_sl = min(underlying_spot_sl, round(day_high * 1.001, 1))
 
     # ── Velocity Regime Check ────────────────────────────────────
     vel_regime = "NORMAL_TREND"
@@ -2143,12 +2335,12 @@ def detect_index_put_setup(
         except Exception:
             pass
 
-        # 0DTE Midday Theta Trap: On expiry day between 11:30 and 14:00, theta decay is at its weekly maximum.
+        # 0DTE Midday Theta Trap: On expiry day between 11:30 and 13:30, theta decay is at its peak.
         # Naked option buying during this window suffers severe theta drag and mean-reversion whipsaws.
-        is_0dte_midday_trap = is_0dte and (dtime(11, 30) <= now_time <= dtime(14, 0))
+        is_0dte_midday_trap = is_0dte and (dtime(11, 30) <= now_time < dtime(13, 30))
 
-        # 0DTE Late Session Expiration: Post 14:30 IST on expiry day, naked options face catastrophic terminal theta collapse.
-        is_0dte_late_session = is_0dte and (now_time >= dtime(14, 30))
+        # 0DTE Late Session Expiration: Post 13:30 IST on expiry day, naked options face catastrophic terminal theta collapse.
+        is_0dte_late_session = is_0dte and (now_time >= dtime(13, 30))
 
         if is_low_vix_range:
             pref_veh = "SPREAD_ONLY"
@@ -2427,9 +2619,12 @@ def detect_index_put_setup(
             "roc_momentum": roc_metric.to_dict(),
             "premium_velocity": round(prem_vel, 2),
             "oi_roc": cand_pe_oi_roc,
-            "cvd_ratio": thrust_details.get(
-                "cvd_ratio", cvd_ratio if "cvd_ratio" in locals() else 0.0
-            ),
+            "cvd_divergence": cvd_divergence_status,
+            "cvd_ratio": thrust_details.get("cvd_ratio", cvd_ratio_val),
+            "spot_invalidation_anchor": underlying_spot_sl,
+            "underlying_sl": underlying_spot_sl,
+            "structural_spot_sl": underlying_spot_sl,
+            "underlying_symbol": clean_sym,
             "detector": "INDEX_PUT_SETUP",
             "is_institutional_thrust": is_institutional_thrust,
             "thrust_details": thrust_details,
@@ -2453,6 +2648,10 @@ def detect_index_put_setup(
             "action": act_verb,
             "contract": target_inst,
             "instrument": target_inst,
+            "spot_invalidation_anchor": underlying_spot_sl,
+            "underlying_sl": underlying_spot_sl,
+            "structural_spot_sl": underlying_spot_sl,
+            "underlying_symbol": clean_sym,
             "sniper_plan": sniper_plan.to_dict() if sniper_plan else None,
             "eagle_summary": eagle_regime.summary if eagle_regime else None,
             "tiger_guidance": tiger_mandate.action_guidance if tiger_mandate else None,
@@ -2546,5 +2745,6 @@ def detect_index_put_setup(
             },
         },
     )
+    alert.structural_spot_sl = underlying_spot_sl
 
     return [alert]

@@ -1341,7 +1341,7 @@ class AutoAlert:
                 "POSITIONAL",
                 "MULTIBAGGER",
             )
-            if self.stage in ("EARLY_WARNING", "STALK", "PRIMED") and not is_multi_session:
+            if self.stage in ("EARLY_WARNING", "STALK", "PRIMED"):
                 exch = (self.exchange or "NSE").upper()
                 seg = (getattr(self, "segment", "") or "").upper()
                 is_crypto = (
@@ -1355,13 +1355,14 @@ class AutoAlert:
                         return True
                 elif created_dt.date() < now.date():
                     return True
-                elif (
-                    th in ("SCALP", "INTRADAY_SCALP_ONLY")
-                    and (now - created_dt).total_seconds() >= 1800
-                ):
-                    return True
-                elif th == "INTRADAY" and (now - created_dt).total_seconds() >= 3600:
-                    return True
+                elif not is_multi_session:
+                    if (
+                        th in ("SCALP", "INTRADAY_SCALP_ONLY")
+                        and (now - created_dt).total_seconds() >= 1800
+                    ):
+                        return True
+                    elif th == "INTRADAY" and (now - created_dt).total_seconds() >= 3600:
+                        return True
 
             # 2d. Swing, Positional, and Multibagger Trading-Session Shelf-Life:
             # Strictly counts market TRADING DAYS, excluding weekends and official trading holidays.
@@ -1838,5 +1839,42 @@ class AutoAlert:
         from dataclasses import fields
 
         valid_keys = {f.name for f in fields(cls)}
-        clean_kwargs = {k: v for k, v in d.items() if k in valid_keys}
+        d_copy = dict(d)
+        d_copy["alert_id"] = str(d_copy.get("alert_id") or "")
+        d_copy["alert_type"] = str(d_copy.get("alert_type") or "GENERAL")
+        d_copy["stage"] = str(d_copy.get("stage") or "EARLY_WARNING")
+        d_copy["symbol"] = str(d_copy.get("symbol") or "")
+        d_copy["exchange"] = str(d_copy.get("exchange") or "NSE")
+        d_copy["direction"] = str(d_copy.get("direction") or "NEUTRAL")
+        d_copy["headline"] = str(d_copy.get("headline") or "")
+        d_copy["summary"] = str(d_copy.get("summary") or "")
+        try:
+            d_copy["ltp"] = float(d_copy.get("ltp") or 0.0)
+        except (ValueError, TypeError):
+            d_copy["ltp"] = 0.0
+        try:
+            d_copy["trigger_level"] = float(d_copy.get("trigger_level") or 0.0)
+        except (ValueError, TypeError):
+            d_copy["trigger_level"] = 0.0
+        try:
+            d_copy["target_level"] = float(d_copy.get("target_level") or 0.0)
+        except (ValueError, TypeError):
+            d_copy["target_level"] = 0.0
+        try:
+            d_copy["stop_loss"] = float(d_copy.get("stop_loss") or 0.0)
+        except (ValueError, TypeError):
+            d_copy["stop_loss"] = 0.0
+
+        if d_copy.get("telegram_root_message_id") is not None:
+            try:
+                d_copy["telegram_root_message_id"] = int(d_copy["telegram_root_message_id"])
+            except (ValueError, TypeError):
+                d_copy["telegram_root_message_id"] = None
+        if d_copy.get("telegram_message_id") is not None:
+            try:
+                d_copy["telegram_message_id"] = int(d_copy["telegram_message_id"])
+            except (ValueError, TypeError):
+                d_copy["telegram_message_id"] = None
+
+        clean_kwargs = {k: v for k, v in d_copy.items() if k in valid_keys}
         return cls(**clean_kwargs)

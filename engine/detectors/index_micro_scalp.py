@@ -86,6 +86,31 @@ def detect_index_micro_scalp(
             )
             return []
 
+        # Wide CPR Range-Chop Guard:
+        # If daily CPR is wide (width >= 0.35%) and spot is trapped between Camarilla L3 and H3,
+        # 1-minute directional breakouts suffer high false-breakout rates and theta chop.
+        try:
+            from engine.daily_levels import get_daily_levels
+
+            dl = get_daily_levels(clean_sym)
+            if dl:
+                cpr = dl.cpr or {}
+                cam = dl.camarilla or {}
+                is_wide_cpr = cpr.get("is_wide", False) or (
+                    float(cpr.get("width_pct", 0.0) or 0.0) >= 0.35
+                )
+                cam_h3 = float(cam.get("h3", 0.0) or 0.0)
+                cam_l3 = float(cam.get("l3", 0.0) or 0.0)
+                if is_wide_cpr and cam_h3 > 0 and cam_l3 > 0 and (cam_l3 <= spot <= cam_h3):
+                    logger.debug(
+                        f"[IndexMicroScalp] Wide CPR chop zone active for {clean_sym} "
+                        f"(Spot ₹{spot:,.1f} trapped between L3 ₹{cam_l3:,.1f} and H3 ₹{cam_h3:,.1f}). "
+                        f"1m micro-scalp breakout suppressed to avoid range chop."
+                    )
+                    return []
+        except Exception as e_dl:
+            logger.debug(f"[IndexMicroScalp] Wide CPR check skipped for {clean_sym}: {e_dl}")
+
     is_bse = clean_sym in ("SENSEX", "BANKEX")
     opt_exchange = "BFO" if is_bse else "NFO"
     effective_vwap = vwap if (vwap and vwap > 0) else spot
@@ -229,30 +254,44 @@ def detect_index_micro_scalp(
                 if not is_spot_flushing and c_pch < 12.0 and c_vol_oi < 1.5:
                     continue
             elif c_opt == "CE":
-                # Dead-Cat Bounce Guard: Reject Calls if spot is flushing off highs, below VWAP, or printing red candles
+                # Dynamic V-Reversal / Bottom Bounce Engine:
+                # If spot has staged a structural bounce >= 0.28% off session low with bullish momentum,
+                # permit the CE micro-breakout even if spot began below VWAP or is off the morning high!
+                is_v_reversal_thrust = (
+                    spot_chg_from_low >= 0.28 and is_recent_momentum_bullish
+                ) or (
+                    effective_vwap > 0
+                    and spot >= effective_vwap * 0.9995
+                    and is_recent_momentum_bullish
+                )
+                if not is_v_reversal_thrust:
+                    if (
+                        is_spot_flushing
+                        or spot_chg_from_high >= 0.25
+                        or is_recent_momentum_bearish
+                        or (effective_vwap > 0 and spot < effective_vwap * 0.9980)
+                    ):
+                        continue
                 if (
-                    is_spot_flushing
-                    or spot_chg_from_high >= 0.25
-                    or is_recent_momentum_bearish
-                    or (effective_vwap > 0 and spot < effective_vwap * 0.9995)
+                    not is_spot_surging
+                    and not is_v_reversal_thrust
+                    and c_pch < 12.0
+                    and c_vol_oi < 1.5
                 ):
-                    continue
-                if not is_spot_surging and c_pch < 12.0 and c_vol_oi < 1.5:
                     continue
 
             # Check option price action momentum
             # Micro-Trigger calculation:
             # 1. Trigger level: slightly above current LTP or rounded to resistance level
             # 2. Stop Loss: 8% to 11% below trigger (10-14 pts on NIFTY, 25-40 pts on BANKNIFTY)
-            risk_pts = (
-                max(10.0, min(16.0, c_ltp * 0.09))
-                if clean_sym in ("NIFTY", "FINNIFTY")
-                else (
-                    max(5.0, min(10.0, c_ltp * 0.10))
-                    if clean_sym == "MIDCPNIFTY"
-                    else max(22.0, min(42.0, c_ltp * 0.09))
-                )
+            pct_risk = 0.09 if clean_sym in ("NIFTY", "FINNIFTY", "MIDCPNIFTY") else 0.085
+            min_risk = (
+                6.0
+                if clean_sym == "MIDCPNIFTY"
+                else (10.0 if clean_sym in ("NIFTY", "FINNIFTY") else 24.0)
             )
+            # Remove artificial upper cap that produced razor-thin (<5%) noise stops on high-ticket premiums
+            risk_pts = max(min_risk, round(c_ltp * pct_risk, 1))
 
             # Check micro-breakout condition
             trigger_level = round(c_ltp, 1)

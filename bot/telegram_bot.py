@@ -1937,7 +1937,7 @@ def get_telegram_destinations() -> dict[str, Any]:
 _THREADS_FILE = Path(__file__).parent.parent / "data" / "telegram_threads.json"
 _signal_message_map: dict[str, int] = {}
 _signal_map_lock = threading.Lock()
-_MAX_SIGNAL_MAP_SIZE = 1000
+_MAX_SIGNAL_MAP_SIZE = 5000
 _threads_loaded = False
 
 
@@ -2016,6 +2016,7 @@ def record_signal_message_id(
     message_id: int,
     chat_id: Optional[str] = None,
     alert_id: Optional[str] = None,
+    overwrite: bool = True,
 ) -> None:
     """Record Telegram message_id for a signal to thread future milestone/trailing updates."""
     if not (signal_id or alert_id) or not message_id:
@@ -2044,9 +2045,12 @@ def record_signal_message_id(
             for k in list(_signal_message_map.keys())[:200]:
                 _signal_message_map.pop(k, None)
         for k in keys_to_index:
-            _signal_message_map[k] = int(message_id)
+            if overwrite or k not in _signal_message_map:
+                _signal_message_map[k] = int(message_id)
             if clean_chat:
-                _signal_message_map[f"{clean_chat}:{k}"] = int(message_id)
+                ck = f"{clean_chat}:{k}"
+                if overwrite or ck not in _signal_message_map:
+                    _signal_message_map[ck] = int(message_id)
     try:
         _save_threads()
     except Exception:
@@ -2083,7 +2087,9 @@ def format_telegram_push_payload(
       3. Audio / Tone Differentiator: sets disable_notification=True for minor trailing ratchets or silent alerts.
       4. Explicit Lifecycle State: enforces top-level delivery when is_update is False.
     """
-    target_chat_id = (chat_id or "").strip() or _load_chat_id()
+    target_chat_id = (
+        str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else _load_chat_id()
+    )
 
     # Topic/thread parsing: support "chat_id:thread_id" syntax
     if target_chat_id and ":" in str(target_chat_id):
@@ -2300,7 +2306,11 @@ def send_push(
                             keys_to_record.add(t)
                         for k in keys_to_record:
                             record_signal_message_id(
-                                k, msg_id, chat_id=target_chat_id, alert_id=alert_id
+                                k,
+                                msg_id,
+                                chat_id=target_chat_id,
+                                alert_id=alert_id,
+                                overwrite=not bool(is_update),
                             )
                         if on_success and callable(on_success):
                             try:
@@ -2328,7 +2338,11 @@ def send_push(
                                 keys_to_record.add(t)
                             for k in keys_to_record:
                                 record_signal_message_id(
-                                    k, msg_id, chat_id=target_chat_id, alert_id=alert_id
+                                    k,
+                                    msg_id,
+                                    chat_id=target_chat_id,
+                                    alert_id=alert_id,
+                                    overwrite=not bool(is_update),
                                 )
                             if on_success and callable(on_success):
                                 try:

@@ -633,10 +633,26 @@ class MarketTickerStream:
         now_ts = time.time()
         now_iso = datetime.now(timezone.utc).isoformat()
         ws_active = self.is_ws_alive()
+        try:
+            from market.calendar import get_current_ist_session
+
+            sess = get_current_ist_session()
+            equity_open = bool(sess.get("equity_nfo", False))
+        except Exception:
+            equity_open = True
 
         # 1. Ribbon Tickers (NIFTY, BANKNIFTY, SENSEX, FINNIFTY, INDIA VIX, CRUDEOIL, GOLD, SILVER, BTC)
-        # Skip heavy REST fetch if WebSockets are actively streaming Indian market data, unless forced or periodic fallback
-        if force_ribbon or not ws_active:
+        # Skip heavy REST fetch if WebSockets are actively streaming Indian market data,
+        # or if equity markets are closed and we already have cached ribbon data (unless explicitly forced)
+        has_valid_ribbon = bool(
+            getattr(self, "_cached_ribbon_tickers", None)
+            and any(t.get("ltp", 0.0) > 0 for t in self._cached_ribbon_tickers)
+        )
+        should_refresh_ribbon = force_ribbon or (
+            not ws_active and (equity_open or not has_valid_ribbon)
+        )
+
+        if should_refresh_ribbon:
             try:
                 ribbon = compute_ribbon_tickers()
                 self._cached_ribbon_tickers = ribbon
@@ -757,10 +773,29 @@ class MarketTickerStream:
                 try:
                     now = time.time()
                     ws_active = self.is_ws_alive()
-                    # When WS is active: refresh macro every 15s, ribbon reconcile every 60s
-                    # When WS is inactive: poll ribbon every 6s, macro every 10s to prevent REST thread starvation
-                    ribbon_interval = 6.0 if not ws_active else 60.0
-                    macro_interval = 15.0 if ws_active else 10.0
+                    try:
+                        from market.calendar import get_current_ist_session
+
+                        sess = get_current_ist_session()
+                        equity_open = bool(sess.get("equity_nfo", False))
+                    except Exception:
+                        equity_open = True
+
+                    # Adaptive intervals based on stream state and market session:
+                    # Active market:
+                    #   - WS active: ribbon reconcile every 60s, macro every 15s
+                    #   - WS inactive: fast ribbon poll every 6s, macro every 10s
+                    # Off-market (closed session):
+                    #   - ribbon reconcile every 120s (static prices, zero rate-limit waste)
+                    #   - macro refresh every 30s (GIFT Nifty / Commodities / Crypto)
+                    if equity_open:
+                        ribbon_interval = 60.0 if ws_active else 6.0
+                        macro_interval = 15.0 if ws_active else 10.0
+                    else:
+                        has_cached_ribbon = bool(getattr(self, "_cached_ribbon_tickers", None))
+                        ribbon_interval = 120.0 if has_cached_ribbon else 10.0
+                        macro_interval = 30.0
+
                     need_ribbon = (now - last_ribbon_reconcile) >= ribbon_interval
                     need_macro = (now - last_macro_fetch) >= macro_interval
 

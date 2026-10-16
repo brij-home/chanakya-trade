@@ -19,6 +19,8 @@ import { useToastStore } from './hooks/useToast'
 import NotificationBell from './components/Notifications/NotificationBell'
 import NotificationDetailModal from './components/Notifications/NotificationDetailModal'
 import { useNotificationStore } from './store/notificationStore'
+import SystemHealthPill from './components/Common/SystemHealthPill'
+import OpsDrawer from './components/Common/OpsDrawer'
 
 // ── Lazy-loaded Workspace Views (Code-Split Chunks) ─────────────────────────
 const TerminalView = lazy(() => import('./components/Views/TerminalView'))
@@ -31,7 +33,9 @@ const PortfolioView = lazy(() => import('./components/Views/PortfolioView'))
 const JournalView = lazy(() => import('./components/Views/JournalView'))
 const AlertsView = lazy(() => import('./components/Views/AlertsView'))
 const BacktestStudioView = lazy(() => import('./components/Views/BacktestStudioView'))
+const OpsDeckView = lazy(() => import('./components/Views/OpsDeckView'))
 const OnboardingWizard = lazy(() => import('./components/Onboarding/OnboardingWizard'))
+
 
 // ── Lazy-loaded Heavyweight Modals (Loaded on Demand) ────────────────────────
 const CommandPalette = lazy(() => import('./components/Modals/CommandPalette'))
@@ -135,6 +139,7 @@ export default function App() {
   const [isTopOppsOpen, setIsTopOppsOpen] = useState(false)
   const [sectorDrilldown, setSectorDrilldown] = useState({ isOpen: false, sector: null })
   const [showHotkeyRef, setShowHotkeyRef] = useState(false)
+  const [isOpsDrawerOpen, setIsOpsDrawerOpen] = useState(false)
 
   // Per-view context state (passed to ContextBar and synchronized with global selectedSymbol)
   const [ctxSymbol, setCtxSymbol] = useState(selectedSymbol || 'NIFTY')
@@ -159,7 +164,9 @@ export default function App() {
       setIsTopOppsOpen(false)
       setSectorDrilldown({ isOpen: false, sector: null })
       setIsOrderTicketOpen(false)
+      setIsOpsDrawerOpen(false)
     }
+
     window.addEventListener('open-sector-drilldown', onOpenSector)
     window.addEventListener('open-top-opportunities', onOpenTop)
     window.addEventListener('close-all-modals', onCloseModals)
@@ -270,15 +277,57 @@ export default function App() {
     return () => clearTimeout(safetyTimer)
   }, []) // eslint-disable-line
 
-  // ── System Status: Single SSE stream replaces 3 polling intervals ───────────
-  // Handles: broker status (was 8s poll), app mode (was one-shot fetch), pilot (was 15s poll)
-  // Falls back to REST polling if /api/system/stream is unavailable.
+  // ── System Status & Incident Stream ─────────────────────────────────────────
+  // Handles broker status, mode, pilot safety, circuit breaker trips, and prioritized incidents
   const handleSystemMessage = useCallback((payload) => {
-    if (!payload || payload.type !== 'system_status') return
-    if (payload.broker_statuses) setBrokerStatuses(payload.broker_statuses)
-    if (payload.mode) setAppMode(payload.mode)
-    if (payload.pilot !== undefined) setPilotSafety(payload.pilot)
+    if (!payload) return
+
+    if (payload.type === 'system_status') {
+      if (payload.broker_statuses) setBrokerStatuses(payload.broker_statuses)
+      if (payload.mode) setAppMode(payload.mode)
+      if (payload.pilot !== undefined) setPilotSafety(payload.pilot)
+      return
+    }
+
+    if (payload.type === 'fyers_circuit_breaker_tripped') {
+      window.dispatchEvent(new CustomEvent('fyers-circuit-breaker-tripped', { detail: payload }))
+      useToastStore.getState().addToast({
+        title: '🚨 Fyers Circuit Breaker Tripped',
+        message: `${payload.reason || 'Rate limit / network lockout'}. Cooldown: ${payload.cooldown_seconds || 60}s`,
+        type: 'error',
+        duration: 8000,
+      })
+      playAlertChime()
+      return
+    }
+
+    if (payload.type === 'fyers_circuit_breaker_recovered') {
+      window.dispatchEvent(new CustomEvent('fyers-circuit-breaker-recovered', { detail: payload }))
+      useToastStore.getState().addToast({
+        title: '⚡ Fyers Circuit Breaker Recovered',
+        message: 'Fyers API returned to normal CLOSED operating state.',
+        type: 'success',
+        duration: 5000,
+      })
+      return
+    }
+
+    if (payload.type === 'system_incident') {
+      window.dispatchEvent(new CustomEvent('system-incident', { detail: payload }))
+      const inc = payload.incident
+      if (inc && (inc.priority === 'P0' || inc.priority === 'P1')) {
+        useToastStore.getState().addToast({
+          title: `${inc.priority === 'P0' ? '🚨 P0 CRITICAL' : '⚠️ P1 HIGH'}: ${inc.component || 'System'}`,
+          message: inc.reason || inc.action_taken || 'System anomaly detected',
+          type: inc.priority === 'P0' ? 'error' : 'warning',
+          duration: 7000,
+        })
+        if (inc.priority === 'P0') playAlertChime()
+      }
+      return
+    }
   }, [setBrokerStatuses, setAppMode])
+
 
   useSSEStream(systemStreamUrl, {
     onMessage: handleSystemMessage,
@@ -507,7 +556,9 @@ export default function App() {
           'k': () => setIsCommandPaletteOpen((v) => !v),
           'o': () => setIsTopOppsOpen((v) => !v),
           't': () => setIsOrderTicketOpen((v) => !v),
+          'm': () => setActiveView('ops'),
         }
+
         const key = e.key.toLowerCase()
         if (handlers[key]) {
           e.preventDefault()
@@ -659,9 +710,13 @@ export default function App() {
           <NotificationBell onOpenOrderTicket={handleOpenOrderTicket} />
 
           <ThemeToggle theme={theme} toggle={toggleTheme} />
-          <StatusDot />
+          <SystemHealthPill
+            onOpenDrawer={() => setIsOpsDrawerOpen((v) => !v)}
+            onOpenOpsDeck={() => setActiveView('ops')}
+          />
         </div>
       </div>
+
 
       {/* ── Tier 2: Persistent Multi-Asset Live Ticker Ribbon ─────────── */}
       <div className="px-2 py-0.5 bg-surface border-b border-border/30 flex-shrink-0 overflow-hidden">
@@ -762,8 +817,10 @@ export default function App() {
               {activeView === 'journal'    && <JournalView />}
               {activeView === 'alerts'     && <AlertsView onOpenOrderTicket={handleOpenOrderTicket} />}
               {activeView === 'backtest'   && <BacktestStudioView onOpenOrderTicket={handleOpenOrderTicket} />}
+              {activeView === 'ops'        && <OpsDeckView />}
               {activeView === 'settings'   && <SettingsPanel onClose={() => setActiveView('terminal')} />}
             </Suspense>
+
           </ErrorBoundary>
         </div>
       </div>
@@ -820,9 +877,20 @@ export default function App() {
       {/* ── Hotkey Reference Overlay (premium panel) ─────────────────────── */}
       <HotkeyPanel open={showHotkeyRef} onClose={() => setShowHotkeyRef(false)} />
 
+      {/* ── Operations & Health Triage Drawer ─────────────────────────────── */}
+      <OpsDrawer
+        isOpen={isOpsDrawerOpen}
+        onClose={() => setIsOpsDrawerOpen(false)}
+        onOpenOpsDeck={() => {
+          setIsOpsDrawerOpen(false)
+          setActiveView('ops')
+        }}
+      />
+
       {/* ── Toast Notifications ──────────────────────────────────────────── */}
       <ToastContainer />
     </div>
+
   )
 }
 
@@ -918,7 +986,9 @@ function HotkeyReference({ onClose }) {
     { key: '^6', desc: 'Portfolio Doctor' },
     { key: '^7', desc: 'Alerts Manager' },
     { key: '^8', desc: 'Trade Journal' },
+    { key: '^M', desc: 'OpsDeck & Health Hub' },
     { key: '5 ', desc: '5m timeframe' },
+
     { key: '1 ', desc: '15m timeframe' },
     { key: 'D ', desc: '1D timeframe' },
     { key: 'Esc', desc: 'Close active modal' },

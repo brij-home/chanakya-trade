@@ -13,6 +13,7 @@ import pytest
 from datetime import datetime, timedelta
 from brokers.fyers import (
     _parse_expiry_from_fyers_symbol,
+    format_fyers_option_symbol,
     round_price_to_tick,
     validate_lot_qty,
     round_qty_to_lot,
@@ -58,6 +59,43 @@ class TestFyersExpiryParsing:
         """Invalid or malformed symbol returns empty string."""
         assert _parse_expiry_from_fyers_symbol("INVALID_SYMBOL") == ""
         assert _parse_expiry_from_fyers_symbol("") == ""
+
+
+class TestFyersOptionSymbolBuilder:
+    """Test Fyers weekly and monthly option symbol construction."""
+
+    def test_build_monthly_options(self):
+        # 30 April 2026 is last Thursday -> APR
+        sym = format_fyers_option_symbol("NIFTY", "2026-04-30", 22100, "CE")
+        assert sym == "NSE:NIFTY26APR22100CE"
+        # 29 October 2026 is last Thursday -> OCT
+        sym_oct = format_fyers_option_symbol("NIFTY", "2026-10-29", 24000, "PE")
+        assert sym_oct == "NSE:NIFTY26OCT24000PE"
+
+    def test_build_weekly_options(self):
+        # 8 October 2026 is weekly Thursday -> O08
+        sym = format_fyers_option_symbol("NIFTY", "2026-10-08", 24000, "CE")
+        assert sym == "NSE:NIFTY26O0824000CE"
+        # 12 November 2026 is weekly Thursday -> N12
+        sym_nov = format_fyers_option_symbol("NIFTY", "2026-11-12", 24000, "CE")
+        assert sym_nov == "NSE:NIFTY26N1224000CE"
+        # 24 December 2026 is weekly Thursday -> D24
+        sym_dec = format_fyers_option_symbol("NIFTY", "2026-12-24", 24000, "PE")
+        assert sym_dec == "NSE:NIFTY26D2424000PE"
+        # 7 April 2026 -> 407
+        sym_apr = format_fyers_option_symbol("NIFTY", "2026-04-07", 22100, "CE")
+        assert sym_apr == "NSE:NIFTY2640722100CE"
+
+    def test_build_sensex_options(self):
+        # 9 October 2026 is weekly Friday on BSE -> BSE:SENSEX26O0981500CE
+        sym_bse = format_fyers_option_symbol("SENSEX", "2026-10-09", 81500, "CE")
+        assert sym_bse == "BSE:SENSEX26O0981500CE"
+
+    def test_round_trip_parse_build(self):
+        """Builder and parser are mathematically reversible."""
+        original_date = "2026-10-08"
+        sym = format_fyers_option_symbol("NIFTY", original_date, 24000, "CE")
+        assert _parse_expiry_from_fyers_symbol(sym) == original_date
 
 
 class TestPrecisionOrderUtilities:
@@ -112,8 +150,8 @@ class TestFyersRateLimiter:
         for _ in range(5):
             limiter.acquire()
         t1 = datetime.now()
-        # 5 calls within max_per_sec=10 should execute immediately (< 50ms)
-        assert (t1 - t0).total_seconds() < 0.2
+        # 5 calls spaced by leaky bucket min_interval (0.1s each) should complete within ~0.5s (< 0.6s)
+        assert (t1 - t0).total_seconds() < 0.6
 
 
 class TestFyersHistoricalChunking:

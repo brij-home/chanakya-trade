@@ -23,14 +23,52 @@ from __future__ import annotations
 
 import heapq
 import itertools
+import json
 import logging
+import os
 import threading
 import time
 from collections import deque
+from datetime import datetime
 from enum import IntEnum
+from pathlib import Path
 from typing import Any, Optional
 
+from config.constants import IST_ZONE as IST
+
 logger = logging.getLogger(__name__)
+
+
+def _get_quota_file() -> Path:
+    base = os.environ.get("TRADING_PLATFORM_HOME")
+    if base:
+        return Path(base) / "fyers_daily_quota.json"
+    return Path.home() / ".trading_platform" / "fyers_daily_quota.json"
+
+
+_QUOTA_FILE = _get_quota_file()
+
+# Institutional presets for Fyers API tiers
+FYERS_PLAN_PRESETS: dict[str, dict[str, Any]] = {
+    "PRIME": {
+        "max_per_sec": 8.0,  # Official limit: 10 req/s (20% institutional cushion to prevent micro-burst trips)
+        "max_per_min": 360.0,  # Official limit: 500 req/min (140 req/min headroom)
+        "max_per_day": 480_000.0,  # Official limit: 500,000 req/day (20k emergency buffer)
+        "order_emergency_cap": 498_000.0,
+        "quotes_chunk_size": 1000,  # Official limit: 1,000 symbols/request
+        "data_socket_symbols": 5000,
+        "tbt_socket_symbols": 15,
+    },
+    "STANDARD": {
+        "max_per_sec": 4.0,  # Official limit: 5 req/s (20% cushion)
+        "max_per_min": 40.0,  # Official limit: 50 req/min (20% cushion)
+        "max_per_day": 4500.0,  # Official limit: 5,000 req/day
+        "order_emergency_cap": 4950.0,
+        "quotes_chunk_size": 50,  # Official limit: 50 symbols/request
+        "data_socket_symbols": 50,
+        "tbt_socket_symbols": 1,
+    },
+}
 
 
 class FyersCallCategory(IntEnum):
@@ -46,16 +84,31 @@ class FyersCallCategory(IntEnum):
 class UnifiedFyersRateGate:
     """
     Thread-safe prioritized rate limiter and budget governor for Fyers API calls.
-    Guarantees that order execution is never blocked behind high-volume quote or history fetches.
+    Supports dynamic tier calibration for Fyers Prime (500k req/day, 500 req/min, 10 req/s, 1000 symbols/req)
+    and Fyers Standard (5k req/day, 50 req/min, 5 req/s, 50 symbols/req).
     """
 
     def __init__(
         self,
-        max_per_sec: float = 8.0,
-        max_per_min: float = 160.0,
+        plan: Optional[str] = None,
+        max_per_sec: Optional[float] = None,
+        max_per_min: Optional[float] = None,
+        max_per_day: Optional[float] = None,
     ) -> None:
-        self._max_per_sec = float(max_per_sec)
-        self._max_per_min = float(max_per_min)
+        selected_plan = (plan or os.environ.get("FYERS_PLAN", "PRIME")).upper()
+        if selected_plan not in FYERS_PLAN_PRESETS:
+            selected_plan = "PRIME"
+        self._plan = selected_plan
+        preset = FYERS_PLAN_PRESETS[selected_plan]
+
+        self._max_per_sec = float(max_per_sec if max_per_sec is not None else preset["max_per_sec"])
+        self._max_per_min = float(max_per_min if max_per_min is not None else preset["max_per_min"])
+        self._max_per_day = float(max_per_day if max_per_day is not None else preset["max_per_day"])
+        self._order_emergency_cap = float(preset["order_emergency_cap"])
+        self._quotes_chunk_size = int(preset["quotes_chunk_size"])
+        self._data_socket_symbols = int(preset["data_socket_symbols"])
+        self._tbt_socket_symbols = int(preset["tbt_socket_symbols"])
+
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
 
@@ -74,6 +127,109 @@ class UnifiedFyersRateGate:
         self._peak_minute_count: int = 0
         self._started_at: float = time.time()
 
+        # Daily cumulative quota tracking (resets at 00:00:00 IST)
+        self._today_str: str = datetime.now(IST).strftime("%Y-%m-%d")
+        self._daily_requests: int = 0
+        self._daily_by_category: dict[FyersCallCategory, int] = {c: 0 for c in FyersCallCategory}
+        self._last_warn_time: float = 0.0
+        self._last_dispatch_ts: float = 0.0
+        self._load_daily_quota()
+
+    @property
+    def plan(self) -> str:
+        return self._plan
+
+    @property
+    def quotes_chunk_size(self) -> int:
+        return self._quotes_chunk_size
+
+    @property
+    def data_socket_symbols(self) -> int:
+        return self._data_socket_symbols
+
+    @property
+    def tbt_socket_symbols(self) -> int:
+        return self._tbt_socket_symbols
+
+    def recalibrate(self, plan: str = "PRIME") -> None:
+        """Dynamically switch between PRIME and STANDARD operational limits."""
+        plan_upper = plan.upper()
+        if plan_upper not in FYERS_PLAN_PRESETS:
+            raise ValueError(
+                f"Unknown Fyers plan: {plan}. Supported: {list(FYERS_PLAN_PRESETS.keys())}"
+            )
+        preset = FYERS_PLAN_PRESETS[plan_upper]
+        with self._lock:
+            self._plan = plan_upper
+            self._max_per_sec = preset["max_per_sec"]
+            self._max_per_min = preset["max_per_min"]
+            self._max_per_day = preset["max_per_day"]
+            self._order_emergency_cap = preset["order_emergency_cap"]
+            self._quotes_chunk_size = preset["quotes_chunk_size"]
+            self._data_socket_symbols = preset["data_socket_symbols"]
+            self._tbt_socket_symbols = preset["tbt_socket_symbols"]
+            logger.info(
+                f"[FyersRateGate] Recalibrated to {plan_upper}: {self._max_per_sec} req/s, "
+                f"{self._max_per_min} req/min, {self._max_per_day:,.0f} req/day, "
+                f"{self._quotes_chunk_size} symbols/batch"
+            )
+
+    def reset_daily_quota(self, requests: int = 0) -> None:
+        """Reset the persisted daily quota counter (e.g. after purchasing Prime)."""
+        with self._lock:
+            self._daily_requests = requests
+            self._save_daily_quota()
+            logger.info(
+                f"[FyersRateGate] Daily request counter set to {requests} / {int(self._max_per_day):,}"
+            )
+
+    def _load_daily_quota(self) -> None:
+        """Load persisted daily request count to survive service restarts."""
+        try:
+            if _QUOTA_FILE.exists():
+                data = json.loads(_QUOTA_FILE.read_text(encoding="utf-8"))
+                if data.get("date") == self._today_str:
+                    self._daily_requests = int(data.get("requests", 0))
+                else:
+                    self._daily_requests = 0
+                    self._save_daily_quota()
+        except Exception as exc:
+            logger.debug("[FyersRateGate] Daily quota load error: %s", exc)
+            self._daily_requests = 0
+
+    def _save_daily_quota(self) -> None:
+        """Atomically persist daily counter to disk."""
+        try:
+            _QUOTA_FILE.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "date": self._today_str,
+                "requests": self._daily_requests,
+                "last_updated": datetime.now(IST).isoformat(),
+            }
+            tmp_path = _QUOTA_FILE.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+            tmp_path.replace(_QUOTA_FILE)
+        except Exception:
+            pass
+
+    def record_external_exhaustion(self) -> None:
+        """Explicitly record that Fyers returned 429 daily limit reached."""
+        with self._lock:
+            self._daily_requests = max(self._daily_requests, int(self._max_per_day) + 500)
+            self._save_daily_quota()
+
+    def _check_and_rollover_day(self) -> None:
+        """Rollover daily counter if calendar day in IST has changed."""
+        now_day = datetime.now(IST).strftime("%Y-%m-%d")
+        if now_day != self._today_str:
+            self._today_str = now_day
+            self._daily_requests = 0
+            self._daily_by_category = {c: 0 for c in FyersCallCategory}
+            self._save_daily_quota()
+            logger.info(
+                "[FyersRateGate] Daily request counter reset for new calendar session: %s", now_day
+            )
+
     def _purge_stale_timestamps(self, now: float) -> None:
         """Evict records older than 60.0 seconds from the sliding window."""
         cutoff = now - 60.0
@@ -81,17 +237,21 @@ class UnifiedFyersRateGate:
             self._sliding_window.popleft()
 
     def _calculate_sleep_needed(self, now: float) -> float:
-        """Calculate minimum sleep needed to satisfy 1-sec and 60-sec caps."""
-        # Check 1-second window
+        """Calculate minimum sleep needed to satisfy 1-sec, 60-sec caps, and leaky bucket inter-request spacing."""
+        # 1. Leaky bucket inter-request spacing to eliminate sub-second multi-thread spikes
+        min_interval = 1.0 / max(self._max_per_sec, 1.0)
+        time_since_last = now - self._last_dispatch_ts
+        sleep_sec = max(0.0, min_interval - time_since_last)
+
+        # 2. Check 1-second rolling window
         sec_cutoff = now - 1.0
         recent_sec = [t for t, _ in self._sliding_window if t >= sec_cutoff]
-        sleep_sec = 0.0
         if len(recent_sec) >= self._max_per_sec:
             # Must wait until oldest entry in current 1s window ages out
             oldest_in_sec = recent_sec[0]
             sleep_sec = max(sleep_sec, 1.0 - (now - oldest_in_sec) + 0.005)
 
-        # Check 60-second window
+        # 3. Check 60-second rolling window
         if len(self._sliding_window) >= self._max_per_min:
             oldest_in_min = self._sliding_window[0][0]
             sleep_sec = max(sleep_sec, 60.0 - (now - oldest_in_min) + 0.02)
@@ -107,7 +267,7 @@ class UnifiedFyersRateGate:
         Acquire permission to dispatch a Fyers API request.
         Blocks until capacity is available under sliding window constraints.
         Higher priority categories jump ahead in the wait queue.
-        Returns True if acquired, False if timed out.
+        Returns True if acquired, False if timed out or rejected due to daily quota.
         """
         event = threading.Event()
         start_wait = time.time()
@@ -115,6 +275,34 @@ class UnifiedFyersRateGate:
         waiter_entry = (int(category), tie_breaker, category, event)
 
         with self._lock:
+            self._check_and_rollover_day()
+
+            # Enforce daily cumulative budget limits
+            if category != FyersCallCategory.ORDER and self._daily_requests >= self._max_per_day:
+                now_w = time.time()
+                if now_w - self._last_warn_time > 60.0:
+                    self._last_warn_time = now_w
+                    logger.warning(
+                        "[FyersRateGate] Daily soft quota reached (%d/%d reqs). Rejecting %s "
+                        "to preserve remaining budget for ORDER execution.",
+                        self._daily_requests,
+                        int(self._max_per_day),
+                        category.name,
+                    )
+                return False
+
+            if (
+                category == FyersCallCategory.ORDER
+                and self._daily_requests >= self._order_emergency_cap
+            ):
+                logger.critical(
+                    "[FyersRateGate] Fyers daily emergency order budget reached (%d/%d reqs). "
+                    "Halting order dispatch to avoid broker freeze.",
+                    self._daily_requests,
+                    int(self._order_emergency_cap),
+                )
+                return False
+
             # If no one is waiting and there is immediate capacity, grant immediately
             now = time.time()
             self._purge_stale_timestamps(now)
@@ -122,7 +310,11 @@ class UnifiedFyersRateGate:
 
             if not self._waiters and sleep_needed <= 0.0:
                 self._sliding_window.append((now, category))
+                self._last_dispatch_ts = now
                 self._total_requests[category] += 1
+                self._daily_requests += 1
+                self._daily_by_category[category] += 1
+                self._save_daily_quota()
                 if len(self._sliding_window) > self._peak_minute_count:
                     self._peak_minute_count = len(self._sliding_window)
                 return True
@@ -146,7 +338,11 @@ class UnifiedFyersRateGate:
                         # Success: pop ourselves and record consumption
                         heapq.heappop(self._waiters)
                         self._sliding_window.append((now, category))
+                        self._last_dispatch_ts = now
                         self._total_requests[category] += 1
+                        self._daily_requests += 1
+                        self._daily_by_category[category] += 1
+                        self._save_daily_quota()
                         elapsed_wait = now - start_wait
                         self._total_throttle_seconds += elapsed_wait
                         if len(self._sliding_window) > self._peak_minute_count:
@@ -205,9 +401,24 @@ class UnifiedFyersRateGate:
             for _, _, cat, _ in self._waiters:
                 waiting_by_tier[cat.name] += 1
 
+            daily_by_cat: dict[str, int] = {
+                cat.name: cnt for cat, cnt in self._daily_by_category.items()
+            }
+            daily_remaining = max(0, int(self._max_per_day - self._daily_requests))
+            is_daily_exhausted = bool(self._daily_requests >= self._max_per_day)
+
             return {
+                "plan": self._plan,
+                "quotes_chunk_size": self._quotes_chunk_size,
+                "data_socket_symbols": self._data_socket_symbols,
+                "tbt_socket_symbols": self._tbt_socket_symbols,
                 "max_per_sec": self._max_per_sec,
                 "max_per_min": self._max_per_min,
+                "max_per_day": self._max_per_day,
+                "daily_requests": self._daily_requests,
+                "daily_budget_remaining": daily_remaining,
+                "daily_quota_exhausted": is_daily_exhausted,
+                "daily_requests_by_tier": daily_by_cat,
                 "requests_last_sec": reqs_last_sec,
                 "requests_last_min": reqs_last_min,
                 "remaining_min_budget": remaining_min_tokens,
@@ -221,9 +432,13 @@ class UnifiedFyersRateGate:
                 "requests_last_min_by_tier": by_category_last_min,
                 "total_requests_by_tier": by_category_total,
                 "uptime_seconds": round(now - self._started_at, 1),
-                "status": "HEALTHY"
-                if utilization_pct < 85.0
-                else ("WARNING" if utilization_pct < 95.0 else "SATURATED"),
+                "status": "EXHAUSTED"
+                if is_daily_exhausted
+                else (
+                    "HEALTHY"
+                    if utilization_pct < 85.0
+                    else ("WARNING" if utilization_pct < 95.0 else "SATURATED")
+                ),
             }
 
 

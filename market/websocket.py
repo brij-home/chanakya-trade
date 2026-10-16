@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import threading
 import time
 from dataclasses import dataclass
@@ -45,18 +46,22 @@ logger = logging.getLogger(__name__)
 
 # ── Default symbols to subscribe ─────────────────────────────
 
-DEFAULT_SYMBOLS = [
-    "NSE:NIFTY50-INDEX",
-    "NSE:NIFTYBANK-INDEX",
-    "NSE:FINNIFTY-INDEX",
-    "NSE:MIDCPNIFTY-INDEX",
-    "BSE:SENSEX-INDEX",
-    "NSE:INDIAVIX-INDEX",
-    "MCX:CRUDEOIL",
-    "MCX:NATURALGAS",
-    "MCX:GOLD",
-    "MCX:SILVER",
-]
+try:
+    from market.ws_subscription_manager import CORE_BASE_SYMBOLS as DEFAULT_SYMBOLS
+except Exception:
+    DEFAULT_SYMBOLS = [
+        "NSE:NIFTY50-INDEX",
+        "NSE:NIFTYBANK-INDEX",
+        "NSE:FINNIFTY-INDEX",
+        "NSE:MIDCPNIFTY-INDEX",
+        "BSE:SENSEX-INDEX",
+        "BSE:BANKEX-INDEX",
+        "NSE:INDIAVIX-INDEX",
+        "MCX:CRUDEOIL",
+        "MCX:NATURALGAS",
+        "MCX:GOLD",
+        "MCX:SILVER",
+    ]
 
 # Map our instrument format to Fyers WebSocket format
 _SYMBOL_MAP = {
@@ -107,11 +112,10 @@ def _to_ws_symbol(instrument: str) -> str:
 
     if ":" in instrument:
         exch, sym = instrument.split(":", 1)
-        # Already in Fyers format (has -EQ, -INDEX, etc.)
-        if "-" in sym:
-            return instrument
-
         sym_upper = sym.upper().strip()
+        # Already in Fyers format (has -EQ, -INDEX, etc.)
+        if sym_upper.endswith(("-EQ", "-INDEX", "-BE", "-SM", "-BZ", "-GB")):
+            return f"{exch.upper()}:{sym_upper}"
 
         # Check full map with constructed key
         map_key = f"{exch.upper()}:{sym_upper}"
@@ -125,6 +129,9 @@ def _to_ws_symbol(instrument: str) -> str:
 
         return f"{exch}:{sym}-EQ"
     return f"NSE:{instrument}-EQ"
+
+
+from market.ws_subscription_manager import is_valid_ws_symbol
 
 
 @dataclass
@@ -163,10 +170,47 @@ class WebSocketManager:
         self._subscribed: set[str] = set()
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
+        self._dispatch_queue: queue.Queue[Optional[Tick]] = queue.Queue(maxsize=32768)
+        self._dispatch_thread: Optional[threading.Thread] = None
+        self._running = False
 
     @property
     def connected(self) -> bool:
         return self._connected
+
+    def _ensure_dispatcher_running(self) -> None:
+        """Starts background tick fan-out worker to ensure callbacks never stall the socket."""
+        if self._dispatch_thread is None or not self._dispatch_thread.is_alive():
+            self._running = True
+            self._dispatch_thread = threading.Thread(
+                target=self._run_dispatch_worker, daemon=True, name="WsTickDispatcher"
+            )
+            self._dispatch_thread.start()
+
+    def _run_dispatch_worker(self) -> None:
+        """Asynchronously dispatches incoming ticks to registered listeners without stalling the socket thread."""
+        while self._running:
+            try:
+                tick = self._dispatch_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if tick is None:
+                break
+            # Ingest into MarketMatrix for ultra-low latency RAM stats and live candle weaving
+            try:
+                from engine.market_matrix import get_market_matrix
+
+                get_market_matrix().on_tick(tick)
+            except Exception as e_mm:
+                logger.debug(f"[WebSocket] MarketMatrix ingestion error: {e_mm}")
+
+            with self._lock:
+                callbacks = list(self._callbacks)
+            for cb in callbacks:
+                try:
+                    cb(tick)
+                except Exception as e:
+                    logger.debug(f"[WebSocket] Listener error: {e}")
 
     def start(self, access_token: str, app_id: str) -> None:
         """
@@ -177,6 +221,8 @@ class WebSocketManager:
             logger.info("WebSocket already connected")
             return
 
+        self._running = True
+        self._ensure_dispatcher_running()
         self._access_token = access_token
         self._app_id = app_id
 
@@ -191,13 +237,31 @@ class WebSocketManager:
 
         if self._connected:
             logger.info("WebSocket connected")
-            # Auto-subscribe to default symbols
-            self.subscribe(DEFAULT_SYMBOLS)
+            # Auto-subscribe to default symbols & restore manager subscriptions
+            try:
+                from market.ws_subscription_manager import get_ws_subscription_manager
+
+                get_ws_subscription_manager().on_ws_connected(self)
+            except Exception as e_sub:
+                logger.warning(f"[WebSocket] Error calling ws_subscription_manager: {e_sub}")
+                self.subscribe(DEFAULT_SYMBOLS)
         else:
             logger.warning("WebSocket connection timed out — will use REST fallback")
 
     def stop(self, timeout: float = 1.0) -> None:
         """Disconnect the WebSocket and gracefully shut down without blocking."""
+        self._running = False
+        try:
+            self._dispatch_queue.put_nowait(None)
+        except Exception:
+            pass
+        if self._dispatch_thread and self._dispatch_thread.is_alive():
+            try:
+                self._dispatch_thread.join(timeout=timeout)
+            except Exception:
+                pass
+        self._dispatch_thread = None
+
         ws_to_close = self._ws
         self._connected = False
         self._ws = None
@@ -240,7 +304,7 @@ class WebSocketManager:
             self._thread.join(timeout=timeout)
         self._thread = None
 
-    def subscribe(self, symbols: list[str]) -> None:
+    def subscribe(self, symbols: list[str], record_in_manager: bool = True) -> None:
         """Subscribe to symbols for real-time ticks."""
         if not self._ws or not self._connected:
             return
@@ -260,8 +324,8 @@ class WebSocketManager:
         if not filtered:
             return
 
-        # Convert to Fyers format
-        ws_symbols = [_to_ws_symbol(s) for s in filtered]
+        # Convert to Fyers format and filter malformed symbols
+        ws_symbols = [s for s in (_to_ws_symbol(x) for x in filtered) if is_valid_ws_symbol(s)]
         new_symbols = [s for s in ws_symbols if s not in self._subscribed]
 
         if not new_symbols:
@@ -271,12 +335,13 @@ class WebSocketManager:
             self._ws.subscribe(new_symbols)
             self._subscribed.update(new_symbols)
             logger.info(f"Subscribed to {len(new_symbols)} symbols")
-            try:
-                from market.ws_subscription_manager import get_ws_subscription_manager
+            if record_in_manager:
+                try:
+                    from market.ws_subscription_manager import get_ws_subscription_manager
 
-                get_ws_subscription_manager().add_subscriptions(new_symbols)
-            except Exception as exc:
-                logger.warning(f"[WebSocket] Could not persist subscription update: {exc}")
+                    get_ws_subscription_manager().add_subscriptions(new_symbols)
+                except Exception as exc:
+                    logger.warning(f"[WebSocket] Could not persist subscription update: {exc}")
         except Exception as e:
             logger.error(f"Subscribe failed: {e}", exc_info=True)
 
@@ -307,7 +372,10 @@ class WebSocketManager:
 
     def on_tick(self, callback: Callable[[Tick], None]) -> None:
         """Register a callback that fires on every tick. Used by alerts."""
-        self._callbacks.append(callback)
+        with self._lock:
+            if callback not in self._callbacks:
+                self._callbacks.append(callback)
+        self._ensure_dispatcher_running()
 
     def get_all_ticks(self) -> dict[str, Tick]:
         """Get all cached ticks."""
@@ -359,6 +427,31 @@ class WebSocketManager:
         if args:
             err = args[0]
             logger.debug(f"WebSocket error: {err}")
+            # Purge invalid_symbols reported by Fyers broker SDK
+            if isinstance(err, dict):
+                invalid_syms = err.get("invalid_symbols")
+                if invalid_syms and isinstance(invalid_syms, list):
+                    try:
+                        from market.ws_subscription_manager import get_ws_subscription_manager
+
+                        get_ws_subscription_manager().remove_invalid_symbols(invalid_syms)
+                    except Exception:
+                        pass
+            elif isinstance(err, str) and "invalid_symbols" in err:
+                try:
+                    import re
+                    import ast
+
+                    m = re.search(r"invalid_symbols['\"]\s*:\s*(\[[^\]]+\])", err)
+                    if m:
+                        parsed_syms = ast.literal_eval(m.group(1))
+                        if parsed_syms:
+                            from market.ws_subscription_manager import get_ws_subscription_manager
+
+                            get_ws_subscription_manager().remove_invalid_symbols(parsed_syms)
+                except Exception:
+                    pass
+
             err_str = str(err).lower()
             if "token is expired" in err_str or "code': -99" in err_str or 'code": -99' in err_str:
                 logger.warning(
@@ -407,6 +500,18 @@ class WebSocketManager:
                 if not isinstance(data, dict):
                     continue
 
+                # Broker error feedback handling
+                if data.get("s") == "error" and data.get("invalid_symbols"):
+                    invalid_syms = data.get("invalid_symbols")
+                    if isinstance(invalid_syms, list):
+                        try:
+                            from market.ws_subscription_manager import get_ws_subscription_manager
+
+                            get_ws_subscription_manager().remove_invalid_symbols(invalid_syms)
+                        except Exception:
+                            pass
+                    continue
+
                 symbol = data.get("symbol", data.get("n", ""))
                 if not symbol:
                     continue
@@ -436,10 +541,13 @@ class WebSocketManager:
                         if "-" in clean:
                             self._ticks[clean.split("-")[0]] = tick
 
-                # Fire callbacks
-                for cb in self._callbacks:
+                # Fire callbacks asynchronously via bounded queue to decouple WS thread
+                try:
+                    self._dispatch_queue.put_nowait(tick)
+                except queue.Full:
                     try:
-                        cb(tick)
+                        _ = self._dispatch_queue.get_nowait()
+                        self._dispatch_queue.put_nowait(tick)
                     except Exception:
                         pass
 
