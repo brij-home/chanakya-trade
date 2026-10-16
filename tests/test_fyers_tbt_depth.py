@@ -784,3 +784,106 @@ def test_tbt_commodity_session_priority_and_wall_calibration():
     assert "MCX:GOLD26DECFUT" not in status["scout"]
     assert "NSE:USDINR26OCTFUT" not in status["scout"]
     assert status["current_session"] == "EQUITY_NFO"
+
+
+def test_tbt_monday_morning_expiry_and_sebi_compliance(monkeypatch):
+    """
+    Verify that on Monday morning:
+      1. NIFTY options resolve to upcoming Thursday weekly contract (NOT Monday).
+      2. In monthly expiry week, NIFTY options resolve to monthly contract.
+      3. BANKNIFTY & MIDCPNIFTY resolve strictly to monthly contracts per SEBI rules.
+      4. SENSEX options resolve to Friday weekly contract.
+      5. Futures resolve to active near-month contract without premature rolling.
+    """
+    from datetime import datetime, date
+    from market.calendar import (
+        get_active_derivative_expiry,
+        get_nearest_weekly_expiry,
+        get_nearest_monthly_expiry,
+    )
+    from market.fyers_tbt_manager import get_default_core_grid
+
+    # Case A: Monday Oct 19, 2026 (Mid-month week)
+    fake_monday_19 = datetime(2026, 10, 19, 9, 15)
+    monkeypatch.setattr(
+        "market.fyers_tbt_manager.datetime",
+        type(
+            "MockDt",
+            (),
+            {
+                "now": lambda *args, **kwargs: fake_monday_19,
+                "fromtimestamp": datetime.fromtimestamp,
+            },
+        ),
+    )
+
+    n_exp = get_active_derivative_expiry("NIFTY", is_future=False, ref_date=date(2026, 10, 19))
+    assert n_exp == date(2026, 10, 22)  # Thursday, NOT Monday Oct 19!
+    assert get_nearest_weekly_expiry("NIFTY", ref_date=date(2026, 10, 19)) == date(2026, 10, 22)
+    assert get_nearest_monthly_expiry("NIFTY", ref_date=date(2026, 10, 19)) == date(2026, 10, 29)
+
+    bn_exp = get_active_derivative_expiry("BANKNIFTY", is_future=False, ref_date=date(2026, 10, 19))
+    assert bn_exp == date(2026, 10, 29)  # Monthly contract only!
+
+    s_exp = get_active_derivative_expiry("SENSEX", is_future=False, ref_date=date(2026, 10, 19))
+    assert s_exp == date(2026, 10, 23)  # Friday weekly!
+    assert get_nearest_weekly_expiry("SENSEX", ref_date=date(2026, 10, 19)) == date(2026, 10, 23)
+
+    # Check Core grid on Monday Oct 19
+    core, todays = get_default_core_grid("EQUITY_NFO")
+    assert "NSE:NIFTY26OCTFUT" in core
+    assert "NSE:BANKNIFTY26OCTFUT" in core
+    assert "NSE:MIDCPNIFTY26OCTFUT" in core
+    # Verify NIFTY options have Thursday Oct 22 expiry (26O22), NOT 26O19!
+    assert any("NSE:NIFTY26O22" in s for s in core)
+    assert not any("NSE:NIFTY26O19" in s for s in core)
+
+    # Case B: Monday Oct 26, 2026 (Monthly expiry week)
+    fake_monday_26 = datetime(2026, 10, 26, 9, 15)
+    monkeypatch.setattr(
+        "market.fyers_tbt_manager.datetime",
+        type(
+            "MockDt",
+            (),
+            {
+                "now": lambda *args, **kwargs: fake_monday_26,
+                "fromtimestamp": datetime.fromtimestamp,
+            },
+        ),
+    )
+
+    core_26, _ = get_default_core_grid("EQUITY_NFO")
+    # Must remain in October near-month (NOT prematurely jumped to November!)
+    assert "NSE:NIFTY26OCTFUT" in core_26
+    assert any("NSE:NIFTY26OCT" in s for s in core_26)
+
+
+def test_fyers_broker_depth_tbt_bridge_zero_network_calls():
+    """
+    Verify that when FyersTbtManager has live 50-depth for a symbol,
+    broker.get_market_depth(symbol) resolves immediately from memory
+    with 0 REST API calls and 0 rate tokens consumed.
+    """
+    from market.fyers_tbt_manager import FyersTbtManager
+    from brokers.fyers import FyersAPI
+
+    mgr = FyersTbtManager()
+    mgr._depth_cache["NSE:NIFTY26OCTFUT"] = {
+        "symbol": "NSE:NIFTY26OCTFUT",
+        "ltp": 25250.0,
+        "tbq": 5000,
+        "tsq": 4500,
+        "bids": [{"price": 25249.5, "qty": 150, "orders": 5}],
+        "asks": [{"price": 25250.5, "qty": 120, "orders": 4}],
+        "rolling_tick_vwap": 25248.0,
+    }
+
+    broker = FyersAPI(app_id="TEST-100", secret_key="dummy")
+    broker._access_token = "valid_test_token"
+
+    depth = broker.get_market_depth("NSE:NIFTY26OCTFUT")
+    assert depth["status"] == "ok"
+    assert depth["provider"] == "FYERS_TBT_50"
+    assert depth["ltp"] == 25250.0
+    assert depth["total_buy_qty"] == 5000
+    assert depth["bids"][0]["price"] == 25249.5

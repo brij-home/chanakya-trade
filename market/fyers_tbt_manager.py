@@ -37,8 +37,9 @@ MAX_SCOUT_SLOTS = 10  # Elastic scout capacity: uses all unallocated slots up to
 
 def _resolve_index_future(index_name: str) -> str:
     """Resolve spot index name to the active near-month tradable Index Future."""
+    from market.calendar import get_active_derivative_expiry
+
     now = datetime.now()
-    target_dt = now if now.day <= 24 else now + timedelta(days=10)
     name = index_name.upper().replace(" ", "").replace("-INDEX", "")
     if name in ("NIFTY50", "NIFTY_50"):
         name = "NIFTY"
@@ -50,7 +51,10 @@ def _resolve_index_future(index_name: str) -> str:
         name = "MIDCPNIFTY"
 
     prefix = "BSE" if name in ("SENSEX", "BANKEX") else "NSE"
-    return f"{prefix}:{name}{target_dt.strftime('%y%b').upper()}FUT"
+    exp_date = get_active_derivative_expiry(
+        name, is_future=True, ref_date=now.date(), ref_time=now.time()
+    )
+    return f"{prefix}:{name}{exp_date.strftime('%y%b').upper()}FUT"
 
 
 def _tbt_symbol_priority(
@@ -213,10 +217,12 @@ def get_default_core_grid(
         else:
             session = get_market_session()
 
+    from market.calendar import get_active_derivative_expiry
+    from brokers.fyers import format_fyers_option_symbol
+    from market.quotes import get_ltp
+
     now = datetime.now()
-    weekday = now.weekday()
-    target_dt = now if now.day <= 24 else now + timedelta(days=10)
-    month_suffix = target_dt.strftime("%y%b").upper()
+    cur_time = ref_time or now.time()
 
     if session in ("EQUITY_NFO", "OFF_MARKET"):
         # Daytime: Primary Index Futures in user's priority order:
@@ -228,62 +234,70 @@ def get_default_core_grid(
         core = [nifty_fut, banknifty_fut, midcp_fut]
 
         focus = (primary_focus or "").upper() if primary_focus else None
-        from market.quotes import get_ltp
 
         if focus == "MIDCPNIFTY":
+            m_exp = get_active_derivative_expiry(
+                "MIDCPNIFTY", is_future=False, ref_date=now.date(), ref_time=cur_time
+            )
             m_spot = get_ltp("NSE:MIDCPNIFTY-INDEX") or 13200.0
             m_atm = int(round(m_spot / 25.0) * 25)
             core.extend(
                 [
-                    f"NSE:MIDCPNIFTY{month_suffix}{m_atm}CE",
-                    f"NSE:MIDCPNIFTY{month_suffix}{m_atm}PE",
-                    f"NSE:MIDCPNIFTY{month_suffix}{m_atm + 25}CE",
-                    f"NSE:MIDCPNIFTY{month_suffix}{m_atm - 25}PE",
+                    format_fyers_option_symbol("MIDCPNIFTY", m_exp, m_atm, "CE"),
+                    format_fyers_option_symbol("MIDCPNIFTY", m_exp, m_atm, "PE"),
+                    format_fyers_option_symbol("MIDCPNIFTY", m_exp, m_atm + 25, "CE"),
+                    format_fyers_option_symbol("MIDCPNIFTY", m_exp, m_atm - 25, "PE"),
                 ]
             )
         elif focus == "BANKNIFTY":
+            bn_exp = get_active_derivative_expiry(
+                "BANKNIFTY", is_future=False, ref_date=now.date(), ref_time=cur_time
+            )
             bn_spot = get_ltp("NSE:NIFTYBANK-INDEX") or 52000.0
             bn_atm = int(round(bn_spot / 100.0) * 100)
             core.extend(
                 [
-                    f"NSE:BANKNIFTY{month_suffix}{bn_atm}CE",
-                    f"NSE:BANKNIFTY{month_suffix}{bn_atm}PE",
-                    f"NSE:BANKNIFTY{month_suffix}{bn_atm + 100}CE",
-                    f"NSE:BANKNIFTY{month_suffix}{bn_atm - 100}PE",
+                    format_fyers_option_symbol("BANKNIFTY", bn_exp, bn_atm, "CE"),
+                    format_fyers_option_symbol("BANKNIFTY", bn_exp, bn_atm, "PE"),
+                    format_fyers_option_symbol("BANKNIFTY", bn_exp, bn_atm + 100, "CE"),
+                    format_fyers_option_symbol("BANKNIFTY", bn_exp, bn_atm - 100, "PE"),
                 ]
             )
         elif focus == "SENSEX":
             s_fut = _resolve_index_future("SENSEX")
+            s_exp = get_active_derivative_expiry(
+                "SENSEX", is_future=False, ref_date=now.date(), ref_time=cur_time
+            )
             s_spot = get_ltp("BSE:SENSEX-INDEX") or 81500.0
             s_atm = int(round(s_spot / 100.0) * 100)
             core.extend(
                 [
                     s_fut,
-                    f"BSE:SENSEX{month_suffix}{s_atm}CE",
-                    f"BSE:SENSEX{month_suffix}{s_atm}PE",
-                    f"BSE:SENSEX{month_suffix}{s_atm + 100}CE",
-                    f"BSE:SENSEX{month_suffix}{s_atm - 100}PE",
+                    format_fyers_option_symbol("SENSEX", s_exp, s_atm, "CE"),
+                    format_fyers_option_symbol("SENSEX", s_exp, s_atm, "PE"),
+                    format_fyers_option_symbol("SENSEX", s_exp, s_atm + 100, "CE"),
+                    format_fyers_option_symbol("SENSEX", s_exp, s_atm - 100, "PE"),
                 ]
             )
         else:
             # Default Balanced mode: NIFTY ATM CE & PE (plus wings if NIFTY focused or Thursday 0DTE)
+            n_exp = get_active_derivative_expiry(
+                "NIFTY", is_future=False, ref_date=now.date(), ref_time=cur_time
+            )
             n_spot = get_ltp("NSE:NIFTY50-INDEX") or 25000.0
             n_atm = int(round(n_spot / 50.0) * 50)
-            from brokers.fyers import format_fyers_option_symbol
-
-            # On Thursday (NIFTY weekly expiry), use today's exact expiry date; otherwise near-month date
-            exp_date = now.date() if weekday == 3 else target_dt
             core.extend(
                 [
-                    format_fyers_option_symbol("NIFTY", exp_date, n_atm, "CE"),
-                    format_fyers_option_symbol("NIFTY", exp_date, n_atm, "PE"),
+                    format_fyers_option_symbol("NIFTY", n_exp, n_atm, "CE"),
+                    format_fyers_option_symbol("NIFTY", n_exp, n_atm, "PE"),
                 ]
             )
-            if focus == "NIFTY" or weekday == 3:
+            # Expand wings if explicitly focused on NIFTY or if today is NIFTY expiry day
+            if focus == "NIFTY" or n_exp == now.date():
                 core.extend(
                     [
-                        format_fyers_option_symbol("NIFTY", exp_date, n_atm + 50, "CE"),
-                        format_fyers_option_symbol("NIFTY", exp_date, n_atm - 50, "PE"),
+                        format_fyers_option_symbol("NIFTY", n_exp, n_atm + 50, "CE"),
+                        format_fyers_option_symbol("NIFTY", n_exp, n_atm - 50, "PE"),
                     ]
                 )
 
@@ -291,32 +305,28 @@ def get_default_core_grid(
         # Only ONE benchmark index derivative contract per exchange offers weekly options:
         #   - NSE: NIFTY (Thursday = 3)
         #   - BSE: SENSEX (Friday = 4)
-        # MIDCPNIFTY, BANKNIFTY, and FINNIFTY trade strictly MONTHLY expiries.
         # On Monday-Wednesday, there are NO weekly index expiries — slots remain 100% free for Elastic Scouts.
-        weekly_expiry_map = {3: "NIFTY", 4: "SENSEX"}
-        target_name = weekly_expiry_map.get(weekday)
         todays_exp: list[str] = []
-        if target_name:
-            # On Thursday (NIFTY 0DTE Expiry), NIFTY is already in daytime Core with ATM ± 1 wings.
-            # Leave todays_exp empty, freeing all remaining slots for Elastic Scouts.
-            if target_name != "NIFTY":
-                # SENSEX (Friday): SENSEX is not in daytime Core, so allocate its 0DTE slots cleanly
-                exp_fut = _resolve_index_future(target_name)
-                todays_exp.append(exp_fut)
-                try:
-                    s_val = get_ltp(exp_fut) or 81500.0
-                    step = 100
-                    atm_val = int(round(s_val / float(step)) * step)
-                    from brokers.fyers import format_fyers_option_symbol
+        s_weekly_exp = get_active_derivative_expiry(
+            "SENSEX", is_future=False, ref_date=now.date(), ref_time=cur_time
+        )
 
-                    todays_exp.extend(
-                        [
-                            format_fyers_option_symbol("SENSEX", now.date(), atm_val, "CE"),
-                            format_fyers_option_symbol("SENSEX", now.date(), atm_val, "PE"),
-                        ]
-                    )
-                except Exception:
-                    pass
+        # Check if today is active 0DTE expiry for SENSEX (or NIFTY if not already in core)
+        if s_weekly_exp == now.date() and focus != "SENSEX":
+            exp_fut = _resolve_index_future("SENSEX")
+            todays_exp.append(exp_fut)
+            try:
+                s_val = get_ltp(exp_fut) or get_ltp("BSE:SENSEX-INDEX") or 81500.0
+                step = 100
+                atm_val = int(round(s_val / float(step)) * step)
+                todays_exp.extend(
+                    [
+                        format_fyers_option_symbol("SENSEX", s_weekly_exp, atm_val, "CE"),
+                        format_fyers_option_symbol("SENSEX", s_weekly_exp, atm_val, "PE"),
+                    ]
+                )
+            except Exception:
+                pass
 
         # Strict Single-Writer Invariant: eliminate any duplicate between core and todays_exp
         todays_exp = [s for s in todays_exp if s not in core]
@@ -428,8 +438,12 @@ class FyersTbtManager:
 
     def start(self, access_token: str, app_id: str) -> None:
         """Start Fyers TBT WebSocket connection in a background thread."""
-        if self._connected:
+        if self._connected and self._access_token == access_token:
             return
+
+        if self._connected and self._access_token != access_token:
+            logger.info("[TbtManager] Restarting Fyers TBT socket with renewed access token")
+            self.stop()
 
         self._access_token = access_token
         self._app_id = app_id
@@ -445,6 +459,12 @@ class FyersTbtManager:
             self._guardian_thread.start()
 
         logger.info("Fyers 50-Depth TBT Socket background thread started")
+
+    def update_token(self, access_token: str, app_id: Optional[str] = None) -> None:
+        """Update access token and reconnect if changed."""
+        app = app_id or self._app_id
+        if self._access_token != access_token or not self._connected:
+            self.start(access_token=access_token, app_id=app)
 
     def stop(self, timeout: float = 1.0) -> None:
         """Gracefully disconnect the TBT WebSocket and stop sentinel without blocking."""
@@ -496,7 +516,7 @@ class FyersTbtManager:
                     curr_session = self._current_session
 
                 # Auto-switch whenever market session boundary is crossed (never blocked by stale focus)
-                if curr_session != "AUTO" and active_session != curr_session:
+                if curr_session != active_session:
                     logger.info(
                         f"[TbtManager] Market session boundary detected: '{curr_session}' -> '{active_session}'. "
                         f"Auto-rotating TBT slots to {'MCX commodities' if active_session == 'COMMODITY_CDS' else 'Index futures & options'}."

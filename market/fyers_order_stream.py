@@ -39,17 +39,23 @@ class FyersOrderStreamManager:
 
     def start(self, access_token: str, app_id: str = "") -> None:
         """Start the Fyers Order WebSocket in a background daemon thread."""
-        if self._connected:
+        target_token = (
+            f"{app_id}:{access_token}" if app_id and ":" not in access_token else access_token
+        )
+        if self._connected and self._access_token == target_token:
             return
 
-        # Fyers Order WebSocket expects access_token in the format f"{app_id}:{token}"
-        if app_id and ":" not in access_token:
-            self._access_token = f"{app_id}:{access_token}"
-        else:
-            self._access_token = access_token
+        if self._connected and self._access_token != target_token:
+            logger.info("[OrderStream] Restarting order socket with renewed access token")
+            self.stop()
 
+        self._access_token = target_token
         self._thread = threading.Thread(target=self._connect, daemon=True)
         self._thread.start()
+
+    def update_token(self, access_token: str, app_id: str = "") -> None:
+        """Update access token and reconnect if changed."""
+        self.start(access_token=access_token, app_id=app_id)
 
     def stop(self, timeout: float = 1.0) -> None:
         """Gracefully disconnect the Order WebSocket without blocking."""

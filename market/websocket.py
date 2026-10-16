@@ -217,9 +217,13 @@ class WebSocketManager:
         Start the WebSocket connection in a background thread.
         Call this after successful broker login.
         """
-        if self._connected:
+        if self._connected and self._access_token == access_token:
             logger.info("WebSocket already connected")
             return
+
+        if self._connected and self._access_token != access_token:
+            logger.info("[WebSocket] Restarting market data socket with renewed access token")
+            self.stop()
 
         self._running = True
         self._ensure_dispatcher_running()
@@ -247,6 +251,12 @@ class WebSocketManager:
                 self.subscribe(DEFAULT_SYMBOLS)
         else:
             logger.warning("WebSocket connection timed out — will use REST fallback")
+
+    def update_token(self, access_token: str, app_id: Optional[str] = None) -> None:
+        """Update access token and reconnect if changed."""
+        app = app_id or self._app_id
+        if self._access_token != access_token or not self._connected:
+            self.start(access_token=access_token, app_id=app)
 
     def stop(self, timeout: float = 1.0) -> None:
         """Disconnect the WebSocket and gracefully shut down without blocking."""

@@ -697,6 +697,27 @@ class FyersAPI(BrokerAPI):
                 }
             )
         )
+        # Instantly propagate renewed token to background streaming sockets
+        try:
+            from market.fyers_tbt_manager import fyers_tbt_manager
+
+            fyers_tbt_manager.update_token(access_token=token, app_id=self._app_id)
+        except Exception:
+            pass
+
+        try:
+            from market.websocket import ws_manager
+
+            ws_manager.update_token(access_token=token, app_id=self._app_id)
+        except Exception:
+            pass
+
+        try:
+            from market.fyers_order_stream import fyers_order_stream
+
+            fyers_order_stream.update_token(access_token=token, app_id=self._app_id)
+        except Exception:
+            pass
 
     # ── Auth ──────────────────────────────────────────────────
 
@@ -1311,7 +1332,61 @@ class FyersAPI(BrokerAPI):
             }
             with self._depth_cache_lock:
                 self._depth_cache[symbol] = (now_mono, unavail_res)
-            return unavail_res
+        # Zero-latency L3 TBT stream bridge: check Fyers TBT Manager 50-Depth first (0 REST calls)
+        try:
+            from market.fyers_tbt_manager import FyersTbtManager
+
+            tbt = FyersTbtManager()
+            with tbt._depth_lock:
+                tbt_obj = (
+                    tbt._depth_cache.get(symbol)
+                    or tbt._depth_cache.get(fyers_sym)
+                    or tbt._depth_cache.get(symbol.split(":")[-1])
+                )
+            if tbt_obj and (tbt_obj.get("bids") or tbt_obj.get("asks")):
+                bids = [
+                    {"price": b["price"], "volume": b["qty"], "orders": b["orders"]}
+                    for b in tbt_obj.get("bids", [])[:5]
+                ]
+                asks = [
+                    {"price": a["price"], "volume": a["qty"], "orders": a["orders"]}
+                    for a in tbt_obj.get("asks", [])[:5]
+                ]
+                tbq = int(tbt_obj.get("tbq", 0))
+                tsq = int(tbt_obj.get("tsq", 0))
+                ratio = round(tbq / max(tsq, 1), 3) if tsq > 0 else 1.0
+                ltp_val = float(tbt_obj.get("ltp", 0.0))
+                depth_res = {
+                    "status": "ok",
+                    "market_data_state": "LIVE",
+                    "symbol": symbol,
+                    "fyers_symbol": fyers_sym,
+                    "bids": bids,
+                    "asks": asks,
+                    "total_buy_qty": tbq,
+                    "total_sell_qty": tsq,
+                    "bid_ask_ratio": ratio,
+                    "order_book_imbalance_ratio": ratio,
+                    "atp": float(tbt_obj.get("rolling_tick_vwap") or ltp_val),
+                    "upper_circuit": 0.0,
+                    "lower_circuit": 0.0,
+                    "ltp": ltp_val,
+                    "open": ltp_val,
+                    "high": ltp_val,
+                    "low": ltp_val,
+                    "close": ltp_val,
+                    "volume": tbq + tsq,
+                    "oi": 0,
+                    "pdoi": 0,
+                    "oi_pct_change": 0.0,
+                    "provider": "FYERS_TBT_50",
+                }
+                with self._depth_cache_lock:
+                    self._depth_cache[symbol] = (now_mono, depth_res)
+                return depth_res
+        except Exception as e_tbt:
+            logger.debug(f"[FyersAPI] TBT depth cache check error: {e_tbt}")
+
         try:
             _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
             data = fyers.depth({"symbol": fyers_sym, "ohlcv_flag": 1})

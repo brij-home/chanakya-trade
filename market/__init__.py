@@ -14,6 +14,9 @@ from market.calendar import (
     get_trading_minutes_elapsed,
     get_adjusted_expiry_date,
     get_trading_days_elapsed,
+    get_nearest_weekly_expiry,
+    get_nearest_monthly_expiry,
+    get_active_derivative_expiry,
 )
 
 __all__ = [
@@ -25,4 +28,7 @@ __all__ = [
     "get_trading_minutes_elapsed",
     "get_adjusted_expiry_date",
     "get_trading_days_elapsed",
+    "get_nearest_weekly_expiry",
+    "get_nearest_monthly_expiry",
+    "get_active_derivative_expiry",
 ]

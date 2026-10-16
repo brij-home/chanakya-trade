@@ -892,6 +892,11 @@ def get_ltp(instrument: str) -> float:
         return quotes[canon].last_price
     if instrument in quotes and quotes[instrument].last_price > 0:
         return quotes[instrument].last_price
+    # Fallback to previous session close during pre-market / off-market if last_price is unpopulated
+    if canon in quotes and getattr(quotes[canon], "close", 0.0) > 0:
+        return float(quotes[canon].close)
+    if instrument in quotes and getattr(quotes[instrument], "close", 0.0) > 0:
+        return float(quotes[instrument].close)
     return 0.0
 
 
