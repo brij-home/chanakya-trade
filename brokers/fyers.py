@@ -1290,10 +1290,13 @@ class FyersAPI(BrokerAPI):
                     get_fyers_circuit_breaker().record_failure(
                         status_code=code, error_message=err_msg
                     )
-                return {
+                unavail_res = {
                     "status": "UNAVAILABLE",
                     "message": err_msg,
                 }
+                with self._depth_cache_lock:
+                    self._depth_cache[symbol] = (now_mono, unavail_res)
+                return unavail_res
             d = data.get("d", {}).get(fyers_sym, {})
             bids = d.get("bids", d.get("bid", []))
             asks = d.get("asks", d.get("ask", []))

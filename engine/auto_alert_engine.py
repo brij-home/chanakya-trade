@@ -11663,7 +11663,13 @@ class AutoAlertEngine:
             except Exception as e_loop:
                 logger.warning(f"[AutoAlertEngine] HF Index/MCX scan loop error: {e_loop}")
 
-            self._stop_event.wait(interval)
+            # Relax polling when neither daytime index nor evening golden hours are active
+            idx_sleep = (
+                interval
+                if (is_active_index_window or is_golden_hours_window)
+                else max(interval, 30.0)
+            )
+            self._stop_event.wait(idx_sleep)
 
     def _run_loop(self, interval: int) -> None:
         last_cleanup_time = 0.0
@@ -11851,7 +11857,21 @@ class AutoAlertEngine:
             except Exception as e:
                 logger.warning(f"[AutoAlertEngine] Error in poll cycle: {e}")
 
-            if self._stop_event.wait(timeout=interval):
+            # Dynamic Infra Throttling (Preserve Daytime Edge, Low-Power Post-15:30):
+            # - Daytime (09:15-15:30 IST): Fast scan (interval, typically 15-30s).
+            # - Evening (15:30-23:30 IST): Commodity/CDS low-power mode (max 45s).
+            # - Night / Weekend (23:30-08:30 IST): Quiescent sleep mode (120s).
+            try:
+                if session.get("equity_nfo", False):
+                    loop_sleep = float(interval)
+                elif session.get("commodity", False) or session.get("currency", False):
+                    loop_sleep = max(float(interval), 45.0)
+                else:
+                    loop_sleep = max(float(interval), 120.0)
+            except Exception:
+                loop_sleep = float(interval)
+
+            if self._stop_event.wait(timeout=loop_sleep):
                 break
 
     # ── Query API ───────────────────────────────────────────────

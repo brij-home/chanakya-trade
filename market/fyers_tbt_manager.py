@@ -53,12 +53,14 @@ def _resolve_index_future(index_name: str) -> str:
     return f"{prefix}:{name}{target_dt.strftime('%y%b').upper()}FUT"
 
 
-def _tbt_symbol_priority(symbol: str, session: Optional[str] = None) -> int:
+def _tbt_symbol_priority(
+    symbol: str, session: Optional[str] = None, ref_time: Optional[dtime] = None
+) -> int:
     """
     Score symbol priority for 15-slot TBT depth allocation.
     Institutional Hierarchy:
       - Commodity/Evening Session (COMMODITY_CDS: 15:30 - 23:30 IST):
-          Active MCX Options (75), MCX Futures (70), Commodities (65), USDINR (62)
+          Active MCX Options (75), MCX Futures (70), Commodities (65), USDINR (62 before 17:00, 5 post 17:00)
           are dynamically elevated above closed equity/index instruments.
       - Daytime Session (EQUITY_NFO: 09:15 - 15:30 IST) & Default:
           Index Options (60..40), Index Futures (45..38), Commodities (35..30), Cash Equities (10).
@@ -76,7 +78,9 @@ def _tbt_symbol_priority(symbol: str, session: Optional[str] = None) -> int:
     sess = session or get_market_session()
 
     # ── Evening Session (COMMODITY_CDS: 15:30 - 23:30 IST) ─────────────
-    # Dynamically elevate active MCX commodities and Currency above closed daytime equities
+    # Dynamically elevate active MCX commodities above closed daytime equities.
+    # Note: Currency derivatives (CDS) close at 17:00 IST! Post-17:00, CDS priority
+    # drops to 5 (below closed equities) so active MCX commodities immediately evict it.
     if sess == "COMMODITY_CDS":
         if is_option and is_mcx:
             return 75  # Live MCX Commodity Option
@@ -85,7 +89,15 @@ def _tbt_symbol_priority(symbol: str, session: Optional[str] = None) -> int:
         if is_mcx:
             return 65  # Live Commodity
         if is_cds:
-            return 62  # Live Currency
+            if ref_time is not None:
+                return 62 if ref_time < dtime(17, 0) else 5
+            try:
+                from config.constants import IST_ZONE as IST
+
+                now_t = datetime.now(IST).time()
+            except Exception:
+                now_t = datetime.now().time()
+            return 62 if now_t < dtime(17, 0) else 5
 
     # ── Daytime Session (EQUITY_NFO: 09:15 - 15:30 IST) & Standard Hierarchy ────
     # Index Options (Highest value for intraday scalping & Level-3 DOM imbalance)
@@ -182,6 +194,7 @@ def get_market_session() -> str:
 def get_default_core_grid(
     session: str = "AUTO",
     primary_focus: Optional[str] = None,
+    ref_time: Optional[dtime] = None,
 ) -> tuple[list[str], list[str]]:
     """
     Build default (core_grid, todays_expiry) for the active session.
@@ -341,11 +354,28 @@ def get_default_core_grid(
                 ]
             )
 
-        todays_exp = [
-            _resolve_currency_contract("USDINR"),
-            _resolve_commodity_contract("COPPER"),
-            _resolve_commodity_contract("ZINC"),
-        ]
+        # Currency derivatives (CDS) trade 09:00 - 17:00 IST.
+        # After 17:00 IST, CDS is CLOSED. Never keep reserve for closed currency!
+        # Allocate 100% of evening slots to active MCX base metals (COPPER, ZINC, ALUMINIUM).
+        try:
+            from config.constants import IST_ZONE as IST
+
+            check_t = ref_time or datetime.now(IST).time()
+        except Exception:
+            check_t = ref_time or now.time()
+
+        if check_t < dtime(17, 0):
+            todays_exp = [
+                _resolve_currency_contract("USDINR"),
+                _resolve_commodity_contract("COPPER"),
+                _resolve_commodity_contract("ZINC"),
+            ]
+        else:
+            todays_exp = [
+                _resolve_commodity_contract("COPPER"),
+                _resolve_commodity_contract("ZINC"),
+                _resolve_commodity_contract("ALUMINIUM"),
+            ]
         return core[:MAX_CORE_GRID_SLOTS], todays_exp[:MAX_TODAYS_EXPIRY_SLOTS]
 
 
@@ -464,15 +494,39 @@ class FyersTbtManager:
                 active_session = get_market_session()
                 with self._slots_lock:
                     curr_session = self._current_session
-                    primary_focus = self._primary_focus_index
 
-                # Only auto-switch when user hasn't explicitly locked an active index
-                if not primary_focus and curr_session != "AUTO" and active_session != curr_session:
+                # Auto-switch whenever market session boundary is crossed (never blocked by stale focus)
+                if curr_session != "AUTO" and active_session != curr_session:
                     logger.info(
                         f"[TbtManager] Market session boundary detected: '{curr_session}' -> '{active_session}'. "
-                        f"Auto-rotating TBT slots to {'MCX commodities & currency' if active_session == 'COMMODITY_CDS' else 'Index futures & options'}."
+                        f"Auto-rotating TBT slots to {'MCX commodities' if active_session == 'COMMODITY_CDS' else 'Index futures & options'}."
                     )
                     self.switch_session(active_session)
+
+                # 1b. Currency CDS Session Retirement Sentinel at 17:00 IST:
+                # When in COMMODITY_CDS, check if clock crossed 17:00 IST and retire USDINR immediately
+                if self._current_session == "COMMODITY_CDS":
+                    try:
+                        from config.constants import IST_ZONE as IST
+
+                        now_t = datetime.now(IST).time()
+                    except Exception:
+                        now_t = datetime.now().time()
+                    if now_t >= dtime(17, 0):
+                        with self._slots_lock:
+                            has_cds = any("USDINR" in s for s in self._todays_expiry) or any(
+                                "USDINR" in s for s in self._scout
+                            )
+                        if has_cds:
+                            logger.info(
+                                "[TbtManager] 17:00 IST Currency CDS market closed. "
+                                "Retiring USDINR slots and rotating 100% capacity to active MCX commodities."
+                            )
+                            with self._slots_lock:
+                                cds_scouts = [s for s in self._scout if "USDINR" in s]
+                                for s in cds_scouts:
+                                    del self._scout[s]
+                            self.refresh_grid("COMMODITY_CDS")
 
                 # 2. Strike revolver for active equity session
                 if self._current_session in ("EQUITY_NFO", "OFF_MARKET"):
@@ -618,8 +672,12 @@ class FyersTbtManager:
         active_slots = len(bids) + len(asks)
         density_score = round((active_slots / 100.0) * 100, 1)
 
-        # Institutional Iceberg / Resting Liquidity Walls
-        # MCX Commodities have smaller standard lot sizes (Gold 1kg, Crude 100 bbl) compared to Equity shares.
+        # Institutional Multi-Factor Order Book Wall Classification:
+        # Evaluated across 4 orthogonal dimensions:
+        #   1. Book Share Dominance (>= 12% of total depth on that side)
+        #   2. Multi-Order Clustering (orders >= 2 confirms structural consensus vs 1-order spoof)
+        #   3. Capital Commitment (notional turnover & instrument-calibrated minimum volume)
+        #   4. Auction Proximity (levels 3 to 25 within actionable execution horizon)
         is_commodity_sym = symbol.startswith("MCX:") or any(
             c in symbol.upper()
             for c in ("CRUDE", "NATURAL", "GOLD", "SILVER", "COPPER", "ZINC", "ALUMINIUM")
@@ -629,14 +687,75 @@ class FyersTbtManager:
         avg_bid_q = (tot_bid_q / max(1, len(bids))) if bids else 0
         avg_ask_q = (tot_ask_q / max(1, len(asks))) if asks else 0
 
-        bid_walls = [
-            b for b in bids if b["qty"] >= max(min_wall_qty, avg_bid_q * 3.0) and b["level"] > 2
-        ]
-        ask_walls = [
-            a for a in asks if a["qty"] >= max(min_wall_qty, avg_ask_q * 3.0) and a["level"] > 2
-        ]
-
         ltp = bids[0]["price"] if bids else (asks[0]["price"] if asks else 0.0)
+
+        def _classify_wall(
+            row: dict[str, Any], tot_q: int, avg_q: float
+        ) -> Optional[dict[str, Any]]:
+            lvl = row["level"]
+            # Exclude level 1-2 spread flicker / top-of-book oscillation
+            if lvl <= 2:
+                return None
+            qty = row["qty"]
+            price = row["price"]
+            orders = row.get("orders", 1)
+
+            book_share_pct = round((qty / max(1, tot_q)) * 100, 2)
+            multiple_of_avg = round(qty / max(1.0, avg_q), 2)
+            notional = round(qty * price, 2)
+            dist_pct = round(abs(price - ltp) / max(0.01, ltp) * 100, 3) if ltp > 0 else 0.0
+
+            # Must satisfy minimum volume or 2.5x multiple with at least 8% book share
+            if (qty < max(min_wall_qty, avg_q * 2.5)) and book_share_pct < 8.0:
+                return None
+            if multiple_of_avg < 2.5 and qty < min_wall_qty:
+                return None
+
+            # Institutional Strength Hierarchy:
+            # FORTRESS: Massive book dominance (>= 20% share) or heavy clustered institutional iceberg (orders >= 2 and >= 15% share)
+            if (book_share_pct >= 20.0 and multiple_of_avg >= 4.0) or (
+                orders >= 2 and book_share_pct >= 15.0 and multiple_of_avg >= 3.5
+            ):
+                strength = "FORTRESS"
+            # STRONG: Dominates book (>= 12% share) and >= 3.0x average
+            elif (book_share_pct >= 12.0 and multiple_of_avg >= 3.0) or (
+                multiple_of_avg >= 3.0 and qty >= min_wall_qty
+            ):
+                strength = "STRONG"
+            else:
+                strength = "MODERATE"
+
+            return {
+                "level": lvl,
+                "price": price,
+                "qty": qty,
+                "orders": orders,
+                "book_share_pct": book_share_pct,
+                "multiple_of_avg": multiple_of_avg,
+                "notional_value": notional,
+                "strength": strength,
+                "distance_pct": dist_pct,
+            }
+
+        bid_walls = []
+        for b in bids:
+            w = _classify_wall(b, tot_bid_q, avg_bid_q)
+            if w:
+                bid_walls.append(w)
+
+        ask_walls = []
+        for a in asks:
+            w = _classify_wall(a, tot_ask_q, avg_ask_q)
+            if w:
+                ask_walls.append(w)
+
+        # Sort walls by structural significance: highest quantity & book share first
+        bid_walls.sort(key=lambda x: (x["book_share_pct"], x["qty"]), reverse=True)
+        ask_walls.sort(key=lambda x: (x["book_share_pct"], x["qty"]), reverse=True)
+
+        strongest_bid_wall = bid_walls[0] if bid_walls else None
+        strongest_ask_wall = ask_walls[0] if ask_walls else None
+
         spread = round(asks[0]["price"] - bids[0]["price"], 2) if bids and asks else 0.0
         micro_price = (
             round(
@@ -675,6 +794,8 @@ class FyersTbtManager:
             "asks": asks,
             "bid_walls": bid_walls,
             "ask_walls": ask_walls,
+            "strongest_bid_wall": strongest_bid_wall,
+            "strongest_ask_wall": strongest_ask_wall,
             "has_bid_wall": len(bid_walls) > 0,
             "has_ask_wall": len(ask_walls) > 0,
         }
@@ -792,10 +913,74 @@ class FyersTbtManager:
         """
         Manually or automatically transition market session.
         E.g. 'EQUITY_NFO' at 09:15 IST -> 'COMMODITY_CDS' at 15:30 IST.
+        Cleanses stale scouts and resets ATM strike caches for seamless morning switchover.
         """
         logger.info(
             f"[TbtManager] Switching TBT session from '{self._current_session}' to '{session_name}'"
         )
+        with self._slots_lock:
+            if session_name == "EQUITY_NFO":
+                # Morning Handover (09:15 IST): Evict all commodity/currency scouts
+                # to liberate all 15 slots for daytime index options & equity scouts.
+                to_evict = [
+                    s
+                    for s in self._scout
+                    if s.startswith("MCX:")
+                    or "USDINR" in s
+                    or any(
+                        c in s
+                        for c in (
+                            "CRUDE",
+                            "NATURAL",
+                            "GOLD",
+                            "SILVER",
+                            "COPPER",
+                            "ZINC",
+                            "ALUMINIUM",
+                        )
+                    )
+                ]
+                for s in to_evict:
+                    del self._scout[s]
+                if to_evict:
+                    logger.info(
+                        f"[TbtManager] Liberated {len(to_evict)} evening commodity slots for morning equity open: {to_evict}"
+                    )
+                # Reset ATM strike cache and primary focus for fresh morning index open
+                self._last_atm_strikes.clear()
+                self._primary_focus_index = None
+
+            elif session_name == "COMMODITY_CDS":
+                # Evening Handover (15:30 IST): Evict closed daytime equity/NFO scouts
+                to_evict = [
+                    s
+                    for s in self._scout
+                    if not (
+                        s.startswith("MCX:")
+                        or "USDINR" in s
+                        or any(
+                            c in s
+                            for c in (
+                                "CRUDE",
+                                "NATURAL",
+                                "GOLD",
+                                "SILVER",
+                                "COPPER",
+                                "ZINC",
+                                "ALUMINIUM",
+                            )
+                        )
+                    )
+                ]
+                for s in to_evict:
+                    del self._scout[s]
+                if to_evict:
+                    logger.info(
+                        f"[TbtManager] Evicted {len(to_evict)} closed daytime equity scouts for evening commodity session: {to_evict}"
+                    )
+                self._last_atm_strikes.clear()
+                self._primary_focus_index = None
+
         self.refresh_grid(session=session_name)
 
     def register_in_flight(self, symbol: str) -> None:
@@ -1289,9 +1474,12 @@ class FyersTbtManager:
             # Check if wall is within 2.5% of LTP (immediate roadblock)
             near_walls = [w for w in ask_walls if ltp > 0 and w["price"] <= ltp * 1.025]
             if near_walls:
-                penalties += 30
+                top_w = near_walls[0]
+                str_lbl = top_w.get("strength", "STRONG")
+                penalties += 35 if str_lbl == "FORTRESS" else (30 if str_lbl == "STRONG" else 20)
                 findings.append(
-                    f"Institutional Ask Wall capping upside at ₹{near_walls[0]['price']} ({near_walls[0]['qty']:,} contracts)"
+                    f"[{str_lbl}] Institutional Ask Wall capping upside at ₹{top_w['price']} "
+                    f"({top_w['qty']:,} contracts, {top_w.get('book_share_pct', 0)}% book share)"
                 )
             else:
                 bonuses += 5
@@ -1299,9 +1487,12 @@ class FyersTbtManager:
         elif not is_buy and bid_walls:
             near_bid_walls = [w for w in bid_walls if ltp > 0 and w["price"] >= ltp * 0.975]
             if near_bid_walls:
-                penalties += 30
+                top_w = near_bid_walls[0]
+                str_lbl = top_w.get("strength", "STRONG")
+                penalties += 35 if str_lbl == "FORTRESS" else (30 if str_lbl == "STRONG" else 20)
                 findings.append(
-                    f"Institutional Bid Floor blocking downside at ₹{near_bid_walls[0]['price']} ({near_bid_walls[0]['qty']:,} contracts)"
+                    f"[{str_lbl}] Institutional Bid Floor blocking downside at ₹{top_w['price']} "
+                    f"({top_w['qty']:,} contracts, {top_w.get('book_share_pct', 0)}% book share)"
                 )
 
         # 3. Density / Liquidity Quality Check

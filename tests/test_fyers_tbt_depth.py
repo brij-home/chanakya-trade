@@ -696,19 +696,26 @@ def test_options_chain_single_flight_coalescing():
 
 def test_tbt_commodity_session_priority_and_wall_calibration():
     """Verify that during COMMODITY_CDS session, commodities enjoy highest priority and custom wall calibration."""
+    from datetime import time as dtime
     from market.fyers_tbt_manager import (
         _tbt_symbol_priority,
         resolve_tradable_tbt_symbol,
+        get_default_core_grid,
         FyersTbtManager,
     )
 
-    # 1. Evening Priority Hierarchy: MCX Options (75) > MCX Futures (70) > Commodities (65) > USDINR (62) > Equity (<=60)
+    # 1. Evening Priority Hierarchy: MCX Options (75) > MCX Futures (70) > Commodities (65) > USDINR (62 before 17:00, 5 post 17:00) > Equity (<=60)
     p_crude_opt = _tbt_symbol_priority("MCX:CRUDEOIL26OCT9550CE", session="COMMODITY_CDS")
     p_crude_fut = _tbt_symbol_priority("MCX:CRUDEOIL26OCTFUT", session="COMMODITY_CDS")
     p_gold_fut = _tbt_symbol_priority("MCX:GOLD26DECFUT", session="COMMODITY_CDS")
     p_ng_fut = _tbt_symbol_priority("MCX:NATURALGAS26OCTFUT", session="COMMODITY_CDS")
     p_comm_generic = _tbt_symbol_priority("MCX:CRUDEOIL", session="COMMODITY_CDS")
-    p_cds_fut = _tbt_symbol_priority("NSE:USDINR26OCTFUT", session="COMMODITY_CDS")
+    p_cds_fut_pre_17 = _tbt_symbol_priority(
+        "NSE:USDINR26OCTFUT", session="COMMODITY_CDS", ref_time=dtime(16, 0)
+    )
+    p_cds_fut_post_17 = _tbt_symbol_priority(
+        "NSE:USDINR26OCTFUT", session="COMMODITY_CDS", ref_time=dtime(17, 30)
+    )
     p_nifty_opt = _tbt_symbol_priority("NSE:NIFTY26OCT25000CE", session="COMMODITY_CDS")
 
     assert p_crude_opt == 75
@@ -716,16 +723,26 @@ def test_tbt_commodity_session_priority_and_wall_calibration():
     assert p_gold_fut == 70
     assert p_ng_fut == 70
     assert p_comm_generic == 65
-    assert p_cds_fut == 62
-    assert p_crude_opt > p_crude_fut > p_comm_generic > p_cds_fut > p_nifty_opt
+    assert p_cds_fut_pre_17 == 62
+    assert p_cds_fut_post_17 == 5  # Retired post 17:00 IST
+    assert p_crude_opt > p_crude_fut > p_comm_generic > p_cds_fut_pre_17 > p_nifty_opt
+    assert p_cds_fut_post_17 < p_nifty_opt  # Post-17:00 CDS is lowest priority and easily evicted
 
-    # 2. Tradable symbol resolution for commodity generic and -FUT formats
+    # 2. Grid Currency Retirement Post 17:00 IST
+    _, exp_pre_17 = get_default_core_grid(session="COMMODITY_CDS", ref_time=dtime(16, 0))
+    assert any("USDINR" in s for s in exp_pre_17)
+
+    _, exp_post_17 = get_default_core_grid(session="COMMODITY_CDS", ref_time=dtime(17, 30))
+    assert not any("USDINR" in s for s in exp_post_17)
+    assert any("ALUMINIUM" in s for s in exp_post_17)  # 100% capacity given to MCX metals
+
+    # 3. Tradable symbol resolution for commodity generic and -FUT formats
     assert "MCX:CRUDEOIL" in resolve_tradable_tbt_symbol("MCX:CRUDEOIL-FUT")
     assert "FUT" in resolve_tradable_tbt_symbol("MCX:CRUDEOIL-FUT")
     assert "MCX:GOLD" in resolve_tradable_tbt_symbol("GOLD")
     assert "MCX:NATURALGAS" in resolve_tradable_tbt_symbol("NATURALGAS")
 
-    # 3. Commodity Iceberg Wall Calibration
+    # 4. Institutional Multi-Factor Order Book Wall Classification
     mgr = FyersTbtManager()
 
     class MockCommodityDepth:
@@ -735,14 +752,35 @@ def test_tbt_commodity_session_priority_and_wall_calibration():
             self.timestamp = 1727900000
             self.bidprice = [6500.0 - (i * 1.0) for i in range(50)]
             self.askprice = [6501.0 + (i * 1.0) for i in range(50)]
-            # Normal bids 3 lots each, but level 5 has a 30-lot wall
+            # Normal bids 3 lots each, but level 5 has a 30-lot wall (orders=3, book share=15%)
             self.bidqty = [30 if i == 4 else 3 for i in range(50)]
             self.askqty = [25 if i == 7 else 3 for i in range(50)]
-            self.bidordn = [1] * 50
-            self.askordn = [1] * 50
+            self.bidordn = [3 if i == 4 else 1 for i in range(50)]
+            self.askordn = [2 if i == 7 else 1 for i in range(50)]
 
     parsed = mgr._parse_depth_object("MCX:CRUDEOIL26OCTFUT", MockCommodityDepth())
-    # 30-lot wall (avg ~3.5 lots) must be identified for MCX without requiring 2,500 lots!
     assert parsed["has_bid_wall"] is True
     assert parsed["has_ask_wall"] is True
     assert any(b["level"] == 5 and b["qty"] == 30 for b in parsed["bid_walls"])
+    # Verify institutional multi-factor attributes
+    wall_5 = next(b for b in parsed["bid_walls"] if b["level"] == 5)
+    assert wall_5["book_share_pct"] > 10.0
+    assert wall_5["multiple_of_avg"] > 3.0
+    assert wall_5["orders"] == 3
+    assert wall_5["strength"] in ("FORTRESS", "STRONG")
+    assert parsed["strongest_bid_wall"] is not None
+    assert parsed["strongest_bid_wall"]["level"] == 5
+
+    # 5. Morning Session Auto-Switchover and Scout Liberation
+    with mgr._slots_lock:
+        mgr._scout["MCX:CRUDEOIL26OCTFUT"] = 12345.0
+        mgr._scout["MCX:GOLD26DECFUT"] = 12346.0
+        mgr._scout["NSE:USDINR26OCTFUT"] = 12347.0
+
+    mgr.switch_session("EQUITY_NFO")
+    status = mgr.get_active_slots_status()
+    # All evening commodity scouts must be evicted on morning transition to EQUITY_NFO
+    assert "MCX:CRUDEOIL26OCTFUT" not in status["scout"]
+    assert "MCX:GOLD26DECFUT" not in status["scout"]
+    assert "NSE:USDINR26OCTFUT" not in status["scout"]
+    assert status["current_session"] == "EQUITY_NFO"
