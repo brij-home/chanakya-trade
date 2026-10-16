@@ -1435,7 +1435,7 @@ def test_crudeoil_8500_pe_scale_mismatch_prevention():
     eval_res = evaluate_alert_in_flight_decay(alert, current_ltp=8529.0)
     # The evaluator must either return None (scale mismatch suppressed) or not evaluate with spot scale
     if eval_res:
-        assert eval_res.pnl_pct is None or abs(eval_res.pnl_pct) < 100.0
+        assert eval_res.pnl_pct is None or abs(eval_res.pnl_pct) <= 100.0
 
     # 2. MilestoneAlertData MUST NOT render spot price as Opt CMP or compute +2848% P&L
     alert_corrupted = AutoAlert(

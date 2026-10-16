@@ -1353,10 +1353,10 @@ class AutoAlert:
                 if is_crypto:
                     if (now - created_dt).total_seconds() >= 14400:
                         return True
-                elif created_dt.date() < now.date():
-                    return True
                 elif not is_multi_session:
-                    if (
+                    if created_dt.date() < now.date():
+                        return True
+                    elif (
                         th in ("SCALP", "INTRADAY_SCALP_ONLY")
                         and (now - created_dt).total_seconds() >= 1800
                     ):

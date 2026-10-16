@@ -424,10 +424,11 @@ class TradeLifecycleManager:
 
             rec_stop = eval_res.recommended_stop
             if eval_res.new_milestone in ("T1_ACHIEVED", "T0_5_ACHIEVED", "BREAKEVEN_LOCKED"):
+                opt_prem = getattr(alert, "option_premium", None)
                 ref_entry = float(
-                    alert.option_premium
-                    if is_alert_option_premium_level(alert)
-                    else (alert.trigger_level or alert.entry_price or 0.0)
+                    opt_prem
+                    if (is_alert_option_premium_level(alert) and opt_prem is not None)
+                    else (alert.trigger_level or getattr(alert, "entry_price", None) or 0.0)
                 )
                 if ref_entry > 0:
                     dir_str = str(getattr(alert, "direction", "BULLISH")).upper()

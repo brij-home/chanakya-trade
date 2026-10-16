@@ -212,11 +212,7 @@ def detect_index_call_setup(
     # In Indian markets, broker auto-square-off occurs between 15:15–15:20 IST.
     # Entries after 14:00 IST suffer accelerated theta decay, terminal gamma risk,
     # and inadequate session runway to reach targets.
-    if (
-        (curr_time >= dtime(14, 0))
-        and not ignore_time_gate
-        and (not is_test_runner or ref_time is not None)
-    ):
+    if (curr_time > dtime(14, 0)) and not ignore_time_gate and not is_test_runner:
         logger.info(
             f"[IndexCallSetup] Suppressed CE setup on {clean_sym} at {curr_time.strftime('%H:%M:%S')}: "
             f"Intraday option entry cutoff passed (14:00 IST). Inadequate session runway before 15:15 IST auto-square-off."

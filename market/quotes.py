@@ -666,69 +666,70 @@ def get_quote(
 
     missing = [i for i in canonical_instruments if i not in result]
 
-    # 2. Try WebSocket cache (instant)
-    if missing:
+    # 2. Fast Streaming Caches (WebSocket, TBT 50-Depth, Crypto Stream)
+    if not bypass_cache and missing:
+        # 2.1. Try WebSocket cache (instant)
         ws_quotes = _ws_quotes(missing, correlation_id=correlation_id)
         result.update(ws_quotes)
         missing = [i for i in canonical_instruments if i not in result]
 
-    # 2.2. Try Fyers 50-Level Depth TBT Cache (0.01ms top-of-book resolution)
-    if missing:
-        try:
-            from market.fyers_tbt_manager import FyersTbtManager
-
-            tbt = FyersTbtManager()
-            for m_inst in missing:
-                depth_obj = tbt.get_depth(m_inst)
-                if depth_obj and depth_obj.get("ltp", 0.0) > 0:
-                    ltp = float(depth_obj.get("ltp") or 0.0)
-                    bids = depth_obj.get("bids", [])
-                    asks = depth_obj.get("asks", [])
-                    bid_p = float(bids[0]["price"]) if bids else ltp
-                    ask_p = float(asks[0]["price"]) if asks else ltp
-                    q = Quote(
-                        symbol=m_inst,
-                        last_price=ltp,
-                        open=ltp,
-                        high=ltp,
-                        low=ltp,
-                        close=ltp,
-                        volume=int(depth_obj.get("tbq", 0) + depth_obj.get("tsq", 0)),
-                        change=0.0,
-                        change_pct=0.0,
-                        bid=bid_p,
-                        ask=ask_p,
-                        vwap=float(depth_obj.get("rolling_tick_vwap") or ltp),
-                        source="STREAM",
-                        provider="FYERS_TBT_50",
-                        data_state="LIVE",
-                    )
-                    result[m_inst] = q
-                    with _quote_cache_lock:
-                        _QUOTE_CACHE[m_inst] = (now_wall, q)
-            missing = [i for i in canonical_instruments if i not in result]
-        except Exception as e_tbt:
-            logger.debug(f"[quotes] TBT depth cache check error: {e_tbt}")
-
-    # 2.5. Try 24x7 Crypto Stream (instant in-memory Binance ticks)
-    if missing:
-        crypto_missing = [
-            i
-            for i in missing
-            if i.startswith("CRYPTO:")
-            or any(i.replace("CRYPTO:", "") == s for s in _CRYPTO_SYMBOLS)
-        ]
-        if crypto_missing:
+        # 2.2. Try Fyers 50-Level Depth TBT Cache (0.01ms top-of-book resolution)
+        if missing:
             try:
-                from market.crypto_stream import crypto_stream
+                from market.fyers_tbt_manager import FyersTbtManager
 
-                for c_inst in crypto_missing:
-                    q = crypto_stream.get_quote(c_inst)
-                    if q and getattr(q, "last_price", 0.0) > 0:
-                        result[c_inst] = q
+                tbt = FyersTbtManager()
+                for m_inst in missing:
+                    depth_obj = tbt.get_depth(m_inst)
+                    if depth_obj and depth_obj.get("ltp", 0.0) > 0:
+                        ltp = float(depth_obj.get("ltp") or 0.0)
+                        bids = depth_obj.get("bids", [])
+                        asks = depth_obj.get("asks", [])
+                        bid_p = float(bids[0]["price"]) if bids else ltp
+                        ask_p = float(asks[0]["price"]) if asks else ltp
+                        q = Quote(
+                            symbol=m_inst,
+                            last_price=ltp,
+                            open=ltp,
+                            high=ltp,
+                            low=ltp,
+                            close=ltp,
+                            volume=int(depth_obj.get("tbq", 0) + depth_obj.get("tsq", 0)),
+                            change=0.0,
+                            change_pct=0.0,
+                            bid=bid_p,
+                            ask=ask_p,
+                            vwap=float(depth_obj.get("rolling_tick_vwap") or ltp),
+                            source="STREAM",
+                            provider="FYERS_TBT_50",
+                            data_state="LIVE",
+                        )
+                        result[m_inst] = q
+                        with _quote_cache_lock:
+                            _QUOTE_CACHE[m_inst] = (now_wall, q)
                 missing = [i for i in canonical_instruments if i not in result]
-            except Exception:
-                pass
+            except Exception as e_tbt:
+                logger.debug(f"[quotes] TBT depth cache check error: {e_tbt}")
+
+        # 2.5. Try 24x7 Crypto Stream (instant in-memory Binance ticks)
+        if missing:
+            crypto_missing = [
+                i
+                for i in missing
+                if i.startswith("CRYPTO:")
+                or any(i.replace("CRYPTO:", "") == s for s in _CRYPTO_SYMBOLS)
+            ]
+            if crypto_missing:
+                try:
+                    from market.crypto_stream import crypto_stream
+
+                    for c_inst in crypto_missing:
+                        q = crypto_stream.get_quote(c_inst)
+                        if q and getattr(q, "last_price", 0.0) > 0:
+                            result[c_inst] = q
+                    missing = [i for i in canonical_instruments if i not in result]
+                except Exception:
+                    pass
 
     # 3. Coalesced external fetch (Broker REST -> Options -> yfinance -> Futures)
     if missing and not ws_only:
