@@ -53,22 +53,41 @@ def _resolve_index_future(index_name: str) -> str:
     return f"{prefix}:{name}{target_dt.strftime('%y%b').upper()}FUT"
 
 
-def _tbt_symbol_priority(symbol: str) -> int:
+def _tbt_symbol_priority(symbol: str, session: Optional[str] = None) -> int:
     """
     Score symbol priority for 15-slot TBT depth allocation.
     Institutional Hierarchy:
-      - Index Options (NIFTY > BANKNIFTY > MIDCPNIFTY > SENSEX > FINNIFTY): 60..40
-      - Index Futures (NIFTY > BANKNIFTY > MIDCPNIFTY > SENSEX): 45..38
-      - Commodity/Currency Derivatives (MCX Crude, Gold, USDINR): 35..30
-      - Stock Options/Futures: 25..20
-      - Cash Equities: 10
+      - Commodity/Evening Session (COMMODITY_CDS: 15:30 - 23:30 IST):
+          Active MCX Options (75), MCX Futures (70), Commodities (65), USDINR (62)
+          are dynamically elevated above closed equity/index instruments.
+      - Daytime Session (EQUITY_NFO: 09:15 - 15:30 IST) & Default:
+          Index Options (60..40), Index Futures (45..38), Commodities (35..30), Cash Equities (10).
     """
     if not symbol:
         return 0
     s = symbol.upper().strip()
     is_option = s.endswith("CE") or s.endswith("PE")
     is_fut = s.endswith("FUT")
+    is_mcx = s.startswith("MCX:") or any(
+        c in s for c in ("CRUDE", "NATURAL", "GOLD", "SILVER", "COPPER", "ZINC", "ALUMINIUM")
+    )
+    is_cds = s.startswith("NSE:USDINR") or "USDINR" in s
 
+    sess = session or get_market_session()
+
+    # ── Evening Session (COMMODITY_CDS: 15:30 - 23:30 IST) ─────────────
+    # Dynamically elevate active MCX commodities and Currency above closed daytime equities
+    if sess == "COMMODITY_CDS":
+        if is_option and is_mcx:
+            return 75  # Live MCX Commodity Option
+        if is_fut and is_mcx:
+            return 70  # Live MCX Commodity Future
+        if is_mcx:
+            return 65  # Live Commodity
+        if is_cds:
+            return 62  # Live Currency
+
+    # ── Daytime Session (EQUITY_NFO: 09:15 - 15:30 IST) & Standard Hierarchy ────
     # Index Options (Highest value for intraday scalping & Level-3 DOM imbalance)
     if is_option:
         if "NIFTY" in s and "BANK" not in s and "MID" not in s and "FIN" not in s:
@@ -81,7 +100,7 @@ def _tbt_symbol_priority(symbol: str) -> int:
             return 45  # SENSEX Option
         if "FINNIFTY" in s:
             return 40  # FINNIFTY Option
-        if s.startswith("MCX:") or any(c in s for c in ("CRUDE", "NATURAL", "GOLD", "SILVER")):
+        if is_mcx:
             return 35  # Commodity Option
         return 25  # Stock Option
 
@@ -95,12 +114,12 @@ def _tbt_symbol_priority(symbol: str) -> int:
             return 40  # MIDCPNIFTY Future
         if "SENSEX" in s:
             return 38  # SENSEX Future
-        if s.startswith("MCX:") or s.startswith("NSE:USDINR") or "CRUDE" in s:
+        if is_mcx or is_cds:
             return 32  # Commodity / Currency Future
         return 20  # Stock Future
 
     # Commodities / Currencies
-    if s.startswith("MCX:") or "USDINR" in s:
+    if is_mcx or is_cds:
         return 30
 
     # Cash Equities
@@ -600,12 +619,22 @@ class FyersTbtManager:
         density_score = round((active_slots / 100.0) * 100, 1)
 
         # Institutional Iceberg / Resting Liquidity Walls
-        # Flag any level with quantity >= 3x the average level and >= 2,500 shares
+        # MCX Commodities have smaller standard lot sizes (Gold 1kg, Crude 100 bbl) compared to Equity shares.
+        is_commodity_sym = symbol.startswith("MCX:") or any(
+            c in symbol.upper()
+            for c in ("CRUDE", "NATURAL", "GOLD", "SILVER", "COPPER", "ZINC", "ALUMINIUM")
+        )
+        min_wall_qty = 10 if is_commodity_sym else 2500
+
         avg_bid_q = (tot_bid_q / max(1, len(bids))) if bids else 0
         avg_ask_q = (tot_ask_q / max(1, len(asks))) if asks else 0
 
-        bid_walls = [b for b in bids if b["qty"] >= max(2500, avg_bid_q * 3.0) and b["level"] > 2]
-        ask_walls = [a for a in asks if a["qty"] >= max(2500, avg_ask_q * 3.0) and a["level"] > 2]
+        bid_walls = [
+            b for b in bids if b["qty"] >= max(min_wall_qty, avg_bid_q * 3.0) and b["level"] > 2
+        ]
+        ask_walls = [
+            a for a in asks if a["qty"] >= max(min_wall_qty, avg_ask_q * 3.0) and a["level"] > 2
+        ]
 
         ltp = bids[0]["price"] if bids else (asks[0]["price"] if asks else 0.0)
         spread = round(asks[0]["price"] - bids[0]["price"], 2) if bids and asks else 0.0

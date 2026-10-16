@@ -692,3 +692,57 @@ def test_options_chain_single_flight_coalescing():
 
         # But broker get_options_chain must have been called EXACTLY ONCE (single-flight coalesced)
         assert call_count == 1
+
+
+def test_tbt_commodity_session_priority_and_wall_calibration():
+    """Verify that during COMMODITY_CDS session, commodities enjoy highest priority and custom wall calibration."""
+    from market.fyers_tbt_manager import (
+        _tbt_symbol_priority,
+        resolve_tradable_tbt_symbol,
+        FyersTbtManager,
+    )
+
+    # 1. Evening Priority Hierarchy: MCX Options (75) > MCX Futures (70) > Commodities (65) > USDINR (62) > Equity (<=60)
+    p_crude_opt = _tbt_symbol_priority("MCX:CRUDEOIL26OCT9550CE", session="COMMODITY_CDS")
+    p_crude_fut = _tbt_symbol_priority("MCX:CRUDEOIL26OCTFUT", session="COMMODITY_CDS")
+    p_gold_fut = _tbt_symbol_priority("MCX:GOLD26DECFUT", session="COMMODITY_CDS")
+    p_ng_fut = _tbt_symbol_priority("MCX:NATURALGAS26OCTFUT", session="COMMODITY_CDS")
+    p_comm_generic = _tbt_symbol_priority("MCX:CRUDEOIL", session="COMMODITY_CDS")
+    p_cds_fut = _tbt_symbol_priority("NSE:USDINR26OCTFUT", session="COMMODITY_CDS")
+    p_nifty_opt = _tbt_symbol_priority("NSE:NIFTY26OCT25000CE", session="COMMODITY_CDS")
+
+    assert p_crude_opt == 75
+    assert p_crude_fut == 70
+    assert p_gold_fut == 70
+    assert p_ng_fut == 70
+    assert p_comm_generic == 65
+    assert p_cds_fut == 62
+    assert p_crude_opt > p_crude_fut > p_comm_generic > p_cds_fut > p_nifty_opt
+
+    # 2. Tradable symbol resolution for commodity generic and -FUT formats
+    assert "MCX:CRUDEOIL" in resolve_tradable_tbt_symbol("MCX:CRUDEOIL-FUT")
+    assert "FUT" in resolve_tradable_tbt_symbol("MCX:CRUDEOIL-FUT")
+    assert "MCX:GOLD" in resolve_tradable_tbt_symbol("GOLD")
+    assert "MCX:NATURALGAS" in resolve_tradable_tbt_symbol("NATURALGAS")
+
+    # 3. Commodity Iceberg Wall Calibration
+    mgr = FyersTbtManager()
+
+    class MockCommodityDepth:
+        def __init__(self):
+            self.tbq = 200
+            self.tsq = 150
+            self.timestamp = 1727900000
+            self.bidprice = [6500.0 - (i * 1.0) for i in range(50)]
+            self.askprice = [6501.0 + (i * 1.0) for i in range(50)]
+            # Normal bids 3 lots each, but level 5 has a 30-lot wall
+            self.bidqty = [30 if i == 4 else 3 for i in range(50)]
+            self.askqty = [25 if i == 7 else 3 for i in range(50)]
+            self.bidordn = [1] * 50
+            self.askordn = [1] * 50
+
+    parsed = mgr._parse_depth_object("MCX:CRUDEOIL26OCTFUT", MockCommodityDepth())
+    # 30-lot wall (avg ~3.5 lots) must be identified for MCX without requiring 2,500 lots!
+    assert parsed["has_bid_wall"] is True
+    assert parsed["has_ask_wall"] is True
+    assert any(b["level"] == 5 and b["qty"] == 30 for b in parsed["bid_walls"])

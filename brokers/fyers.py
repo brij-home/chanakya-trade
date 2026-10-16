@@ -363,7 +363,7 @@ def _resolve_commodity_contract(symbol: str) -> str:
     import datetime as dt
 
     now = dt.datetime.now()
-    clean = symbol.upper().replace("MCX:", "").strip()
+    clean = symbol.upper().replace("MCX:", "").replace("-FUT", "").replace("_FUT", "").strip()
 
     # CRUDEOIL: monthly, expires ~19th of each month
     if clean in ("CRUDEOIL", "CRUDEOILM"):
