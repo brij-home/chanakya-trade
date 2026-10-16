@@ -184,7 +184,9 @@ class AutoAlert:
     in_flight_warning_at: Optional[str] = None
     mtf_confluence: Optional[str] = None
     vix_regime: Optional[str] = None
-    time_horizon: str = "INTRADAY"  # "SCALP" | "INTRADAY" | "SWING_SHORT" | "SWING_MID" | "LONG_TERM" | "POSITIONAL" | "MULTIBAGGER" | "ROLLING_24H"
+    time_horizon: Optional[str] = (
+        None  # "SCALP" | "INTRADAY" | "SWING_SHORT" | "SWING_MID" | "LONG_TERM" | "POSITIONAL" | "MULTIBAGGER" | "ROLLING_24H"
+    )
     eta_label: Optional[str] = None
     setup_style: str = "CONTINUATION"  # "CONTINUATION" | "REVERSAL"
     entry_type: str = "BREAKOUT_STOP"  # "BREAKOUT_STOP" | "LIMIT_ON_PULLBACK" | "MARKET_NOW"
@@ -491,8 +493,8 @@ class AutoAlert:
 
             self.expiry_type = classify_expiry_type(self.expiry_date, self.symbol)
 
-        # Auto-infer horizon if default
-        if self.time_horizon == "INTRADAY":
+        # Auto-infer horizon if not explicitly specified
+        if not self.time_horizon:
             atype = (self.alert_type or "").upper()
             if atype == "MULTIBAGGER":
                 self.time_horizon = "MULTIBAGGER"
@@ -539,6 +541,8 @@ class AutoAlert:
                 "INTRADAY_BREAKDOWN_SPARK",
                 "INDEX_CONTAGION",
             ):
+                self.time_horizon = "INTRADAY"
+            else:
                 self.time_horizon = "INTRADAY"
 
         # Auto-derive or sanitize ETA label

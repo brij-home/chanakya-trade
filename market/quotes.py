@@ -711,25 +711,25 @@ def get_quote(
             except Exception as e_tbt:
                 logger.debug(f"[quotes] TBT depth cache check error: {e_tbt}")
 
-        # 2.5. Try 24x7 Crypto Stream (instant in-memory Binance ticks)
-        if missing:
-            crypto_missing = [
-                i
-                for i in missing
-                if i.startswith("CRYPTO:")
-                or any(i.replace("CRYPTO:", "") == s for s in _CRYPTO_SYMBOLS)
-            ]
-            if crypto_missing:
-                try:
-                    from market.crypto_stream import crypto_stream
+    # 2.5. Try 24x7 Crypto Stream (instant in-memory Binance ticks)
+    if missing:
+        crypto_missing = [
+            i
+            for i in missing
+            if i.startswith("CRYPTO:")
+            or any(i.replace("CRYPTO:", "") == s for s in _CRYPTO_SYMBOLS)
+        ]
+        if crypto_missing:
+            try:
+                from market.crypto_stream import crypto_stream
 
-                    for c_inst in crypto_missing:
-                        q = crypto_stream.get_quote(c_inst)
-                        if q and getattr(q, "last_price", 0.0) > 0:
-                            result[c_inst] = q
-                    missing = [i for i in canonical_instruments if i not in result]
-                except Exception:
-                    pass
+                for c_inst in crypto_missing:
+                    q = crypto_stream.get_quote(c_inst)
+                    if q and getattr(q, "last_price", 0.0) > 0:
+                        result[c_inst] = q
+                missing = [i for i in canonical_instruments if i not in result]
+            except Exception:
+                pass
 
     # 3. Coalesced external fetch (Broker REST -> Options -> yfinance -> Futures)
     if missing and not ws_only:
