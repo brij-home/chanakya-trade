@@ -463,6 +463,12 @@ def _to_fyers_symbol(instrument: str) -> str:
     if sym_upper.endswith(("-INDEX", "-EQ", "-BE", "-SM", "-BZ", "-GB")):
         return f"{exch_upper}:{sym_upper}"
 
+    # Crypto / Non-Fyers Assets
+    if exch_upper in ("BINANCE", "CRYPTO", "COINBASE", "BYBIT") or sym_upper.endswith(
+        ("USDT", "USDC")
+    ):
+        return f"{exch_upper}:{sym_upper}"
+
     # MCX Commodities
     if exch_upper == "MCX" or sym_upper in (
         "GOLD",
@@ -1113,6 +1119,11 @@ class FyersAPI(BrokerAPI):
         fyers_symbols = []
         key_map: dict[str, list[str]] = {}  # fyers_symbol → list of original instrument keys
         for inst in instruments:
+            clean_inst = str(inst).upper().strip()
+            if clean_inst.startswith(
+                ("BINANCE:", "CRYPTO:", "COINBASE:", "BYBIT:")
+            ) or clean_inst.endswith(("USDT", "USDC")):
+                continue
             fyers_sym = _to_fyers_symbol(inst)
             fyers_symbols.append(fyers_sym)
             key_map.setdefault(fyers_sym, []).append(inst)
@@ -1269,7 +1280,27 @@ class FyersAPI(BrokerAPI):
             return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
         if get_fyers_circuit_breaker().is_tripped():
             return {"status": "UNAVAILABLE", "message": "Circuit breaker OPEN"}
+        clean_upper = symbol.upper().strip()
+        if clean_upper.startswith(
+            ("BINANCE:", "CRYPTO:", "COINBASE:", "BYBIT:")
+        ) or clean_upper.endswith(("USDT", "USDC")):
+            unavail_res = {
+                "status": "UNAVAILABLE",
+                "message": f"Instrument {symbol} is not supported on Fyers DOM",
+            }
+            with self._depth_cache_lock:
+                self._depth_cache[symbol] = (now_mono, unavail_res)
+            return unavail_res
+
         fyers_sym = _to_fyers_symbol(symbol)
+        if "-INDEX" in fyers_sym:
+            unavail_res = {
+                "status": "UNAVAILABLE",
+                "message": "Spot index instruments do not have market depth",
+            }
+            with self._depth_cache_lock:
+                self._depth_cache[symbol] = (now_mono, unavail_res)
+            return unavail_res
         try:
             _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
             data = fyers.depth({"symbol": fyers_sym, "ohlcv_flag": 1})

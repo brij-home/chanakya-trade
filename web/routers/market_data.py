@@ -1196,6 +1196,15 @@ async def post_fyers_tbt_subscribe_endpoint(req: dict[str, Any]):
     return {"status": "ok", "subscribed": symbols}
 
 
+@router.get("/api/fyers/tbt-status", tags=["Fyers 50-Depth TBT"])
+async def get_fyers_tbt_status_endpoint():
+    """Returns real-time 15-slot allocation and status of Fyers TBT depth engine."""
+    from market.fyers_tbt_manager import fyers_tbt_manager
+
+    status = await asyncio.to_thread(fyers_tbt_manager.get_active_slots_status)
+    return {"status": "ok", "data": status}
+
+
 @router.get("/api/market/symbol/search", tags=["Symbol Master"])
 async def search_symbols_endpoint(q: str, limit: int = 10):
     """Fast token-free symbol search across public Fyers master."""
