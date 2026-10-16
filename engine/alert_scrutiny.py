@@ -1367,16 +1367,13 @@ class AlertScrutinyAuditor:
             tbt_mgr = FyersTbtManager()
             depth = None
             if tbt_mgr.is_connected:
-                candidate_keys = [
-                    resolve_tradable_tbt_symbol(alert.symbol),
-                    resolve_tradable_tbt_symbol(clean_sym),
-                    alert.symbol,
-                    clean_sym,
-                ]
-                for k in candidate_keys:
-                    if k:
-                        d = tbt_mgr.get_50_depth(k)
-                        if d and d.get("status") != "UNAVAILABLE":
+                tradable_sym = resolve_tradable_tbt_symbol(
+                    alert.symbol
+                ) or resolve_tradable_tbt_symbol(clean_sym)
+                for sym_cand in (tradable_sym, alert.symbol, clean_sym):
+                    if sym_cand and not depth:
+                        d = tbt_mgr.get_50_depth(sym_cand)
+                        if d and d.get("status") not in ("UNAVAILABLE", None):
                             depth = d
                             break
 

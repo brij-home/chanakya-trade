@@ -1143,6 +1143,8 @@ class FyersAPI(BrokerAPI):
             try:
                 if not rate_gate_acquired:
                     _fyers_rate_limiter.acquire(category=category)
+                else:
+                    rate_gate_acquired = False
                 data = fyers.quotes({"symbols": ",".join(chunk)})
                 if isinstance(data, dict) and (
                     data.get("code") in (-15, -16, -99, 401)
@@ -1272,7 +1274,16 @@ class FyersAPI(BrokerAPI):
         with self._depth_cache_lock:
             if symbol in self._depth_cache:
                 ts, cached_res = self._depth_cache[symbol]
-                if (now_mono - ts) < self._depth_cache_ttl:
+                effective_ttl = self._depth_cache_ttl
+                try:
+                    from market.calendar import is_market_open
+
+                    exch = symbol.split(":")[0] if ":" in symbol else "NSE"
+                    if not is_market_open(exch):
+                        effective_ttl = 300.0
+                except Exception:
+                    pass
+                if (now_mono - ts) < effective_ttl:
                     return cached_res
 
         fyers = self._get_fyers()

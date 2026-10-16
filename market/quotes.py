@@ -655,7 +655,9 @@ def get_quote(
                             from market.calendar import is_market_open
 
                             exch = inst.split(":")[0] if ":" in inst else "NSE"
-                            if exch in ("NSE", "BSE") and not is_market_open(exch):
+                            if exch in ("NSE", "BSE", "NFO", "BFO", "CDS") and not is_market_open(
+                                exch
+                            ):
                                 effective_ttl = 300.0
                         except Exception:
                             pass
