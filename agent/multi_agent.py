@@ -40,6 +40,10 @@ Key design choices:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("agent.multi_agent")
+
 
 import json
 import os
@@ -56,13 +60,13 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
 from rich.console import Console
 from rich.table import Table
@@ -614,8 +618,8 @@ class FundamentalAnalyst(BaseAnalyst):
                     key_points=points,
                     data=data,
                 )
-        except Exception:
-            pass  # yfinance unavailable — try Perplexity
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
         # ── Tier 2: Perplexity Finance (optional, requires key) ───
         try:
@@ -644,8 +648,8 @@ class FundamentalAnalyst(BaseAnalyst):
                 key_points=points,
                 data={"perplexity_finance": result.summary},
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
         # ── Total failure ─────────────────────────────────────────
         return AnalystReport(
@@ -931,8 +935,8 @@ class NewsMacroAnalyst(BaseAnalyst):
                                 else ""
                             )
                         )
-            except Exception:
-                pass  # finance search is always best-effort
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
             # ── Generic web search (Exa / Perplexity Sonar) — best-effort (#149) ──
             # Runs when Exa key is set; supplements finance_search with broader web.
@@ -961,8 +965,8 @@ class NewsMacroAnalyst(BaseAnalyst):
                         ]
                         data["web_search_text"] = format_search_results(web_results)
                         points.append(f"Web search: {len(web_results)} live articles found")
-            except Exception:
-                pass  # web search is always best-effort
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
             # ── Sentiment analysis ───────────────────────────────
 
@@ -1123,14 +1127,18 @@ class NewsMacroAnalyst(BaseAnalyst):
             elif upper.startswith("SCORE:"):
                 try:
                     score = float(line.split(":", 1)[1].strip().rstrip("%"))
-                except (ValueError, IndexError):
-                    pass
+                except (ValueError, IndexError) as e_suppressed:
+                    logger.debug(
+                        f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             elif upper.startswith("CONFIDENCE:"):
                 try:
                     confidence = int(line.split(":", 1)[1].strip().rstrip("%"))
-                except (ValueError, IndexError):
-                    pass
+                except (ValueError, IndexError) as e_suppressed:
+                    logger.debug(
+                        f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             elif line.startswith("- ") or line.startswith("* "):
                 points.append(line.lstrip("-* ").strip())
@@ -1193,8 +1201,8 @@ class SentimentAnalyst(BaseAnalyst):
                     score += 25
                 elif flow.signal in ("BEARISH", "NEUTRAL_TO_BEARISH"):
                     score -= 25
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
             # Market breadth
             try:
@@ -1210,8 +1218,8 @@ class SentimentAnalyst(BaseAnalyst):
                         score -= 15
                     else:
                         points.append(f"Breadth: Neutral ({ad:.1f} A/D)" if ad else "Breadth: N/A")
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
             # PCR for the symbol (options sentiment)
             try:
@@ -1225,8 +1233,8 @@ class SentimentAnalyst(BaseAnalyst):
                     elif pcr and pcr < 0.7:
                         points.append(f"PCR: {pcr:.2f} (bullish sentiment)")
                         score += 15
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
             verdict = "BULLISH" if score > 15 else "BEARISH" if score < -15 else "NEUTRAL"
             confidence = min(abs(int(score)) + 30, 100)
@@ -1371,8 +1379,8 @@ class SectorRotationAnalyst(BaseAnalyst):
                             points.append(
                                 f"{clean_sym}'s sector ({sec_display}) is flat today: {chg:+.1f}%"
                             )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
             verdict = "BULLISH" if score >= 15 else "BEARISH" if score <= -15 else "NEUTRAL"
             confidence = max(35, min(90, abs(int(score)) + 40))
@@ -1443,8 +1451,8 @@ class RiskAnalyst(BaseAnalyst):
                     if existing:
                         points.append(f"Already holding {symbol} — check concentration risk")
                     data["has_existing_position"] = bool(existing)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
             # Risk sizing
             capital = int(float(os.environ.get("TOTAL_CAPITAL", "200000")))
@@ -1617,8 +1625,8 @@ class MultiAgentAnalyzer:
                 if self.progress_callback:
                     self.progress_callback({"type": "synthesis_text", "text": blocked_msg})
                 return blocked_msg
-        except Exception:
-            pass  # risk gate is non-critical — proceed without it on failure
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
         # ── CLI context prompt (#113) ─────────────────────────
         if getattr(self, "context_prompt_callback", None):
@@ -1626,8 +1634,8 @@ class MultiAgentAnalyzer:
                 _ctx = self.context_prompt_callback()
                 if _ctx and _ctx.strip():
                     self.user_hints.put(_ctx.strip())
-            except Exception:
-                pass  # prompt failed, continue without context
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
         # ── Phase 2: Bull/Bear Debate (or fast-path) ────────
         if self.progress_callback:
@@ -1721,8 +1729,8 @@ class MultiAgentAnalyzer:
             )
             if self.verbose:
                 console.print(f"[dim]  Stored to trade memory (ID: {record.id})[/dim]")
-        except Exception:
-            pass  # memory storage is non-critical
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
         # ── Phase 5: Risk Management Team — 3 Perspectives ────
         self.last_trade_plans = {}
@@ -1739,8 +1747,8 @@ class MultiAgentAnalyzer:
             self.last_trade_plans = all_plans
             if any(p for p in all_plans.values()):
                 TraderAgent.print_all_plans(all_plans)
-        except Exception:
-            pass  # trade plan generation is non-critical
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
         # Print timing summary
         total = analyst_time + debate_time + risk_debate_time + synthesis_time
@@ -1851,8 +1859,8 @@ class MultiAgentAnalyzer:
                         if kp:
                             summary += " | " + "; ".join(kp[:2])
                         pad.append(r.analyst, summary)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
         return reports
 
@@ -2743,8 +2751,8 @@ class MultiAgentAnalyzer:
             conditions_context = trade_memory.get_context_for_conditions(vix=vix_val)
             if conditions_context and "No past trades" not in conditions_context:
                 memory_context = memory_context + "\n\n" + conditions_context
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
         # Patterns: active India-specific patterns
         pattern_context = ""
@@ -2752,8 +2760,8 @@ class MultiAgentAnalyzer:
             from engine.patterns import get_pattern_context
 
             pattern_context = get_pattern_context()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.multi_agent] Non-fatal exception suppressed: {e_suppressed}")
 
         # Build debate section with full multi-round context
         debate_text = (

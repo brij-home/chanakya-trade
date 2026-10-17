@@ -4,6 +4,7 @@ tests/test_observability_p3a.py
 P3-A unit tests: Structured Observability, SLO Metrics, and Provider Health.
 """
 
+import time
 import pytest
 from engine.observability import (
     new_correlation_id,
@@ -268,3 +269,48 @@ def test_correlation_id_in_response_headers(client):
     assert "x-correlation-id" in res.headers
     cid = res.headers["x-correlation-id"]
     assert len(cid) > 10  # Non-trivial ID
+
+
+def test_idle_fallback_provider_does_not_falsely_degrade_health(obs, monkeypatch):
+    """An idle fallback provider (like yfinance) with 0 errors does not falsely degrade system health."""
+    monkeypatch.setattr("brokers.session.get_data_broker_key", lambda: "fyers")
+    monkeypatch.setattr("market.calendar.is_market_open", lambda exch: True)
+
+    obs.record_provider_success("fyers")
+    obs.record_provider_success("yfinance")
+
+    # Simulate yfinance having succeeded 800 seconds ago while fyers is fresh
+    obs._provider_freshness["yfinance"].last_success_at = time.time() - 800.0
+
+    health = obs.get_provider_health()
+    assert health["providers"]["fyers"]["health"] == "HEALTHY"
+    assert health["providers"]["yfinance"]["health"] == "HEALTHY"
+    assert health["overall_health"] == "HEALTHY"
+
+
+def test_active_primary_broker_stale_when_market_open(obs, monkeypatch):
+    """Active primary broker is flagged stale if no ticks arrive in >120s during open market."""
+    monkeypatch.setattr("brokers.session.get_data_broker_key", lambda: "fyers")
+    monkeypatch.setattr("market.calendar.is_market_open", lambda exch: True)
+
+    obs.record_provider_success("fyers")
+    obs._provider_freshness["fyers"].last_success_at = time.time() - 150.0
+
+    health = obs.get_provider_health()
+    assert health["providers"]["fyers"]["is_stale"] is True
+    assert health["providers"]["fyers"]["health"] == "DEGRADED"
+    assert health["overall_health"] == "DEGRADED"
+
+
+def test_active_primary_broker_not_stale_when_market_closed(obs, monkeypatch):
+    """Active broker is not falsely flagged stale when markets are closed."""
+    monkeypatch.setattr("brokers.session.get_data_broker_key", lambda: "fyers")
+    monkeypatch.setattr("market.calendar.is_market_open", lambda exch: False)
+
+    obs.record_provider_success("fyers")
+    obs._provider_freshness["fyers"].last_success_at = time.time() - 3600.0
+
+    health = obs.get_provider_health()
+    assert health["providers"]["fyers"]["is_stale"] is False
+    assert health["providers"]["fyers"]["health"] == "HEALTHY"
+    assert health["overall_health"] == "HEALTHY"

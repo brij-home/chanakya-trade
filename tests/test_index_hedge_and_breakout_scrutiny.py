@@ -242,7 +242,7 @@ def test_orb_breakout_rr_ratio_valid():
 # ── Test 4: Index Call Setup Generates Hedged Spread (Bull Call Spread) ────────
 
 
-def test_index_call_setup_generates_hedge_plan():
+def test_index_call_setup_generates_hedge_plan(monkeypatch):
     """detect_index_call_setup must produce a complete defined-risk BULL_CALL_SPREAD hedge_plan."""
     spot = 56500.0
     chain = [
@@ -255,6 +255,34 @@ def test_index_call_setup_generates_hedge_plan():
     ]
     df_5m = _make_dummy_ohlcv(bars=12, trend="UP", base_price=56300.0)
 
+    from engine.hbcm import HBCMResult
+
+    mock_hbcm = HBCMResult(
+        index_symbol="BANKNIFTY",
+        direction_tested="BULLISH",
+        confluence_pass=True,
+        bullish_count=4,
+        bearish_count=1,
+        neutral_count=0,
+        total_heavyweights=5,
+        total_weight_represented_pct=82.0,
+        summary="HBCM_TEST_PASSTHROUGH",
+        as_of="10:00:00 IST",
+    )
+    monkeypatch.setattr("engine.hbcm.evaluate_hbcm", lambda *args, **kwargs: mock_hbcm)
+    monkeypatch.setattr(
+        "market.indices.get_heavyweights_posture",
+        lambda sym: {
+            "underlying": sym,
+            "all_bearish": False,
+            "all_bullish": True,
+            "bull_count": 4,
+            "bear_count": 1,
+            "heavyweights": [],
+            "summary": "ALL_BULLISH",
+        },
+    )
+
     alerts = detect_index_call_setup(
         underlying="BANKNIFTY",
         spot=spot,
@@ -265,6 +293,7 @@ def test_index_call_setup_generates_hedge_plan():
         prev_day_high=56200.0,
         prev_day_low=55900.0,
         ohlcv_5m=df_5m,
+        ignore_time_gate=True,
     )
     assert len(alerts) >= 1
     alert = alerts[0]
@@ -289,7 +318,7 @@ def test_index_call_setup_generates_hedge_plan():
 # ── Test 5: Index Put Setup Generates Hedged Spread (Bear Put Spread) ──────────
 
 
-def test_index_put_setup_generates_hedge_plan():
+def test_index_put_setup_generates_hedge_plan(monkeypatch):
     """detect_index_put_setup must produce a complete defined-risk BEAR_PUT_SPREAD hedge_plan."""
     spot = 56250.0
     chain = [
@@ -312,6 +341,7 @@ def test_index_put_setup_generates_hedge_plan():
         prev_day_high=56700.0,
         prev_day_low=56400.0,
         ohlcv_5m=df_5m,
+        ignore_time_gate=True,
     )
     assert len(alerts) >= 1
     alert = alerts[0]
@@ -586,6 +616,7 @@ def test_nifty_call_setup_spread_width_at_least_100_pts(monkeypatch):
         prev_day_high=22600.0,
         prev_day_low=22500.0,
         ohlcv_5m=df_5m,
+        ignore_time_gate=True,
     )
     assert len(alerts) >= 1
     hedge = alerts[0].actionable_plan["hedge_plan"]

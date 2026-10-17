@@ -57,8 +57,39 @@ class TradeLifecycleManager:
                 or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
             )
             is_payoff_upward = not is_option_seller
+
+            # Scale Sanity Gate (Invariants 10 & 23):
+            # Guard against unit-scale cross-contamination (e.g. comparing spot price ₹1,420 or underlying ₹13,750 against option premium ₹168)
+            ref_entry = float(
+                alert.option_premium
+                or (alert.actionable_plan or {}).get("trade_plan", {}).get("entry_price")
+                or alert.trigger_level
+                or 0.0
+            )
+            if ref_entry > 0:
+                ratio = cur_ltp / ref_entry
+                if ratio > 3.5 or ratio < 0.10:
+                    return (
+                        False,
+                        f"Option premium unit-scale mismatch: cur_ltp={cur_ltp:,.2f} vs expected entry={ref_entry:,.2f} (ratio={ratio:.2f}x)",
+                    )
+
+            spot_ref = getattr(alert, "underlying_spot", None)
+            if spot_ref and spot_ref > 0 and abs(cur_ltp - spot_ref) / spot_ref < 0.15:
+                return (
+                    False,
+                    f"Spot price contamination detected in option premium: cur_ltp={cur_ltp:,.2f} matches spot={spot_ref:,.2f}",
+                )
         else:
             is_payoff_upward = dir_str not in ("BEARISH", "SELL", "SHORT")
+            ref_entry = float(alert.trigger_level or alert.ltp or 0.0)
+            if ref_entry > 0:
+                ratio = cur_ltp / ref_entry
+                if ratio > 2.5 or ratio < 0.40:
+                    return (
+                        False,
+                        f"Equity/spot price scale mismatch: cur_ltp={cur_ltp:,.2f} vs expected entry={ref_entry:,.2f} (ratio={ratio:.2f}x)",
+                    )
 
         def _extract_num(val: Any) -> Optional[float]:
             if val is None:
@@ -218,8 +249,38 @@ class TradeLifecycleManager:
                 or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
             )
             is_payoff_upward = not is_option_seller
+
+            # Scale Sanity Gate (Invariants 10 & 23):
+            ref_entry = float(
+                alert.option_premium
+                or (alert.actionable_plan or {}).get("trade_plan", {}).get("entry_price")
+                or alert.trigger_level
+                or 0.0
+            )
+            if ref_entry > 0:
+                ratio = cur_ltp / ref_entry
+                if ratio > 3.5 or ratio < 0.10:
+                    return (
+                        False,
+                        f"Option premium unit-scale mismatch: cur_ltp={cur_ltp:,.2f} vs expected entry={ref_entry:,.2f} (ratio={ratio:.2f}x)",
+                    )
+
+            spot_ref = getattr(alert, "underlying_spot", None)
+            if spot_ref and spot_ref > 0 and abs(cur_ltp - spot_ref) / spot_ref < 0.15:
+                return (
+                    False,
+                    f"Spot price contamination detected in option premium: cur_ltp={cur_ltp:,.2f} matches spot={spot_ref:,.2f}",
+                )
         else:
             is_payoff_upward = dir_str not in ("BEARISH", "SELL", "SHORT")
+            ref_entry = float(alert.trigger_level or alert.ltp or 0.0)
+            if ref_entry > 0:
+                ratio = cur_ltp / ref_entry
+                if ratio > 2.5 or ratio < 0.40:
+                    return (
+                        False,
+                        f"Equity/spot price scale mismatch: cur_ltp={cur_ltp:,.2f} vs expected entry={ref_entry:,.2f} (ratio={ratio:.2f}x)",
+                    )
 
         def _extract_num(val: Any) -> Optional[float]:
             if val is None:
@@ -360,7 +421,23 @@ class TradeLifecycleManager:
                 alert, "stop_loss", None
             ):
                 alert.initial_stop_loss = alert.stop_loss
-            alert.stop_loss = eval_res.recommended_stop
+
+            rec_stop = eval_res.recommended_stop
+            if eval_res.new_milestone in ("T1_ACHIEVED", "T0_5_ACHIEVED", "BREAKEVEN_LOCKED"):
+                opt_prem = getattr(alert, "option_premium", None)
+                ref_entry = float(
+                    opt_prem
+                    if (is_alert_option_premium_level(alert) and opt_prem is not None)
+                    else (alert.trigger_level or getattr(alert, "entry_price", None) or 0.0)
+                )
+                if ref_entry > 0:
+                    dir_str = str(getattr(alert, "direction", "BULLISH")).upper()
+                    if dir_str == "BEARISH" and not is_alert_option_premium_level(alert):
+                        rec_stop = min(rec_stop, ref_entry)
+                    else:
+                        rec_stop = max(rec_stop, ref_entry)
+
+            alert.stop_loss = rec_stop
             alert.last_trail_alert_time = now_ts
             if alert.actionable_plan:
                 if (
@@ -379,6 +456,14 @@ class TradeLifecycleManager:
                             alert.actionable_plan["option_plan"]["sl_premium"]
                         )
                     alert.actionable_plan["option_plan"]["sl_premium"] = eval_res.recommended_stop
+
+        if getattr(eval_res, "recommended_spot_stop", None):
+            alert.trailing_spot_sl = eval_res.recommended_spot_stop
+            if alert.metrics is None or not isinstance(alert.metrics, dict):
+                alert.metrics = {}
+            alert.metrics["spot_invalidation_anchor"] = eval_res.recommended_spot_stop
+            if alert.actionable_plan and isinstance(alert.actionable_plan, dict):
+                alert.actionable_plan["underlying_sl"] = eval_res.recommended_spot_stop
 
         alert.trailing_rationale = eval_res.trailing_rationale
         alert.locked_profit_pts = eval_res.locked_profit_pts
@@ -428,6 +513,21 @@ class TradeLifecycleManager:
                         alert.actionable_plan["free_roll_active"] = True
                         alert.actionable_plan["stop_loss"] = eval_res.recommended_stop
 
+                    # Institutional OMS ratchet: update resting broker stop-loss orders to breakeven
+                    try:
+                        from engine.order_lifecycle import ratchet_stop_loss_on_milestone
+
+                        if eval_res.recommended_stop:
+                            ratchet_stop_loss_on_milestone(
+                                symbol=alert.symbol,
+                                new_stop_loss=float(eval_res.recommended_stop),
+                                milestone="T1_ACHIEVED",
+                            )
+                    except Exception as e_ratchet:
+                        logger.warning(
+                            f"[TradeLifecycleManager] Could not ratchet broker SL for {alert.symbol}: {e_ratchet}"
+                        )
+
                 try:
                     from engine.learning_engine import pattern_learning_engine
 
@@ -453,12 +553,18 @@ class TradeLifecycleManager:
                         or (alert.actionable_plan or {}).get("instrument_type") == "OPTION"
                     )
                     if is_opt_trade:
+                        # Prioritize immutable entry levels over mutable live fields (alert.option_premium is updated on live ticks)
+                        plan_dict = alert.actionable_plan or {}
+                        trade_plan = (
+                            plan_dict.get("trade_plan", {}) if isinstance(plan_dict, dict) else {}
+                        )
+                        metrics_dict = alert.metrics or {}
                         trade_entry = float(
-                            alert.option_premium
-                            or (alert.actionable_plan or {})
-                            .get("trade_plan", {})
-                            .get("entry_price")
-                            or alert.trigger_level
+                            alert.trigger_level
+                            or plan_dict.get("trigger_level")
+                            or trade_plan.get("entry_price")
+                            or metrics_dict.get("entry_premium")
+                            or alert.option_premium
                             or cur_disp_p
                         )
                     else:
@@ -482,7 +588,9 @@ class TradeLifecycleManager:
                     try:
                         from engine.detector_circuit_breaker import detector_circuit_breaker
 
-                        cb_outcome = "WIN" if outcome_str == "WIN" else "LOSS"
+                        cb_outcome = (
+                            "WIN" if (outcome_str.startswith("WIN") or r_mult > 0) else "LOSS"
+                        )
                         detector_circuit_breaker.record_outcome(
                             alert_id=alert.alert_id,
                             symbol=alert.symbol,

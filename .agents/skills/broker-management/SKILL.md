@@ -63,8 +63,9 @@ Fyers (data) → Zerodha/Angel One (execution) → yfinance (fallback) → Mock 
 4. **Authoritative Symbol Master Validation**:
    - Symbols must be verified against official daily exchange masters via [`market.symbol_master.validate_symbol()`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/symbol_master.py) before dispatch.
    - Prevents `-300 Invalid Symbol` rejections and guarantees canonical lot sizes and tick sizes.
-5. **Decimal Tick-Size Quantization**:
+5. **Decimal Tick-Size Quantization & 1-Paisa NSE/BSE Equity Rule**:
    - Limit and stop prices must be rounded via [`brokers.fyers.round_price_to_tick()`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/fyers.py) using `Decimal` arithmetic.
+   - Cash equity symbols trading under ₹250 trade in 1-paisa ticks (`eff_tick = 0.01`), while stocks $\ge ₹250$ and all F&O derivatives trade in 5-paise ticks (`eff_tick = 0.05`). Resolve dynamically via [`engine.dynamic_risk.resolve_price_tier(ltp).tick_size`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/dynamic_risk.py).
    - Eliminates IEEE 754 floating point drift (e.g. `805.0500000000001`) that causes broker `-50 Invalid Parameter` rejections.
 6. **Broker Rate-Limit Defense (The 3-Strike Invariant)**:
    - FYERS API v3 enforces: 10 req/s, 200 req/min, 100k req/day.
@@ -77,6 +78,9 @@ Fyers (data) → Zerodha/Angel One (execution) → yfinance (fallback) → Mock 
 9. **Credential Safety**: Never commit API keys, TOTP secrets, or tokens. Use OS keychain via `config.credentials`.
 10. **Graceful Degradation**: Always fall back through the broker chain → `yfinance` → Mock when live brokers are disconnected.
 11. **Connection Lifecycle**: Wrap `httpx.Client` in `with` context managers to prevent TCP socket leaks.
+12. **October 2026 Instrument Master & Zero Hardcoding Invariant**:
+   - All broker adapters must resolve contract metadata, lot sizes, tick sizes, and instrument segments exclusively from [`market.instruments.STANDARD_LOT_SIZES`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/instruments.py) and [`market.symbol_master`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/symbol_master.py).
+   - Hardcoding broker security tokens, legacy pre-2024 lot sizes (Nifty 50/25, BankNifty 15), or arbitrary fallbacks in broker adapters is strictly prohibited.
 
 ---
 

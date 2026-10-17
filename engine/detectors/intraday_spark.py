@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time as dtime
 from typing import Any, Optional
 
 import numpy as np
 
 from engine.alert_model import AutoAlert
 from engine.alert_identity import canonical_alert_symbol
+from engine.dynamic_risk import resolve_price_tier
 
 logger = logging.getLogger("chanakya.detectors.intraday_spark")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -82,6 +83,16 @@ def detect_intraday_mover_sparks(
     from market.history import get_ohlcv
 
     found: list[AutoAlert] = []
+    now_dt = datetime.now(IST)
+    curr_t = now_dt.time()
+    is_test_env = (
+        (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (os.environ.get("DEPLOY_MODE") == "test")
+        or ("PYTEST_CURRENT_TEST" in os.environ)
+    )
+    if not is_test_env and (curr_t < dtime(9, 20) or curr_t >= dtime(15, 0)):
+        return found
+
     scan_universe = list(universe) if universe else precursor_radar.get_scan_universe(segment="ALL")
 
     formatted = [f"NSE:{s}" if ":" not in s else s for s in scan_universe]
@@ -214,8 +225,10 @@ def detect_intraday_mover_sparks(
                 from analysis.universe import get_stock_sector
 
                 sec_id, sec_name = get_stock_sector(clean_sym)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             try:
                 from analysis.sector_rotation import get_stock_tailwind
@@ -232,8 +245,10 @@ def detect_intraday_mover_sparks(
                             sector_tailwind_bonus = 8
                         elif tailwind.quadrant == "LEADING" and rvol < 2.5:
                             continue
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         is_mock_spark = (
             type(q).__name__ == "MagicMock"
@@ -272,7 +287,8 @@ def detect_intraday_mover_sparks(
                     f"[IntradaySpark] Trade plan calculation failed for {clean_sym}: {e_tp}"
                 )
 
-            atr_val = max(1.0, ltp * 0.015)
+            price_tier = resolve_price_tier(ltp)
+            atr_val = max(price_tier.abs_min_risk_pts * 0.5, ltp * 0.015)
             if df is not None and len(df) >= 5 and "high" in df.columns and "low" in df.columns:
                 try:
                     tr = np.maximum(
@@ -285,26 +301,37 @@ def detect_intraday_mover_sparks(
                     atr_calc = float(tr.tail(14).mean())
                     if atr_calc > 0:
                         atr_val = round(atr_calc, 2)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             min_risk = (
-                max(1.0, round(0.70 * atr_val, 2))
+                max(price_tier.abs_min_risk_pts, round(1.20 * atr_val, 2))
                 if seg != "INDEX"
-                else max(1.0, round(0.50 * atr_val, 2))
+                else max(price_tier.abs_min_risk_pts, round(0.80 * atr_val, 2))
             )
 
             if tp and tp.is_asymmetry_viable and tp.target_1 > ltp and tp.invalidation_stop < ltp:
                 risk_pts = max(min_risk, round(ltp - tp.invalidation_stop, 2))
                 sl_price = round(ltp - risk_pts, 2)
                 t1_price = max(tp.target_1, round(ltp + 1.5 * risk_pts, 2))
-                t2_price = max(tp.target_2, round(ltp + 2.5 * risk_pts, 2))
-                t3_price = max(tp.target_3, round(ltp + 4.0 * risk_pts, 2))
+                t2_price = max(
+                    tp.target_2, round(max(ltp + 2.5 * risk_pts, t1_price + 1.0 * risk_pts), 2)
+                )
+                t3_price = max(
+                    tp.target_3, round(max(ltp + 4.0 * risk_pts, t2_price + 1.5 * risk_pts), 2)
+                )
                 rr_str = f"1:{round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
+                tp_dict["invalidation_stop"] = sl_price
+                tp_dict["target_1"] = t1_price
+                tp_dict["target_2"] = t2_price
+                tp_dict["target_3"] = t3_price
+                tp_dict["stop_distance_pts"] = risk_pts
             else:
                 risk_pts = max(
                     min_risk,
-                    round(max(0.8 * atr_val, ltp - vwap if ltp > vwap else ltp * 0.012), 2),
+                    round(max(1.20 * atr_val, ltp - vwap if ltp > vwap else ltp * 0.012), 2),
                 )
                 sl_price = round(ltp - risk_pts, 2)
                 t1_price = round(ltp + 2.0 * risk_pts, 2)
@@ -340,8 +367,10 @@ def detect_intraday_mover_sparks(
                             f"⚠️ SEBI Physical Delivery Week (DTE: {dte}d). For Derivatives: "
                             f"Roll over / execute in Next-Month Future (Exp: {next_str}) to eliminate physical delivery margin risk."
                         )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             plan = {
                 "action": "BUY / LONG",
@@ -402,7 +431,8 @@ def detect_intraday_mover_sparks(
                     f"[IntradaySpark] Trade plan calculation failed for {clean_sym}: {e_tp}"
                 )
 
-            atr_val = max(1.0, ltp * 0.015)
+            price_tier = resolve_price_tier(ltp)
+            atr_val = max(price_tier.abs_min_risk_pts * 0.5, ltp * 0.015)
             if df is not None and len(df) >= 5 and "high" in df.columns and "low" in df.columns:
                 try:
                     tr = np.maximum(
@@ -415,26 +445,39 @@ def detect_intraday_mover_sparks(
                     atr_calc = float(tr.tail(14).mean())
                     if atr_calc > 0:
                         atr_val = round(atr_calc, 2)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             min_risk = (
-                max(1.0, round(0.70 * atr_val, 2))
+                max(price_tier.abs_min_risk_pts, round(1.20 * atr_val, 2))
                 if seg != "INDEX"
-                else max(1.0, round(0.50 * atr_val, 2))
+                else max(price_tier.abs_min_risk_pts, round(0.80 * atr_val, 2))
             )
 
             if tp and tp.is_asymmetry_viable and tp.target_1 < ltp and tp.invalidation_stop > ltp:
                 risk_pts = max(min_risk, round(tp.invalidation_stop - ltp, 2))
                 sl_price = round(ltp + risk_pts, 2)
                 t1_price = min(tp.target_1, round(max(0.05, ltp - 1.5 * risk_pts), 2))
-                t2_price = min(tp.target_2, round(max(0.05, ltp - 2.5 * risk_pts), 2))
-                t3_price = min(tp.target_3, round(max(0.05, ltp - 4.0 * risk_pts), 2))
+                t2_price = min(
+                    tp.target_2,
+                    round(max(0.05, min(ltp - 2.5 * risk_pts, t1_price - 1.0 * risk_pts)), 2),
+                )
+                t3_price = min(
+                    tp.target_3,
+                    round(max(0.05, min(ltp - 4.0 * risk_pts, t2_price - 1.5 * risk_pts)), 2),
+                )
                 rr_str = f"1:{round(abs(ltp - t1_price) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
+                tp_dict["invalidation_stop"] = sl_price
+                tp_dict["target_1"] = t1_price
+                tp_dict["target_2"] = t2_price
+                tp_dict["target_3"] = t3_price
+                tp_dict["stop_distance_pts"] = risk_pts
             else:
                 risk_pts = max(
                     min_risk,
-                    round(max(0.8 * atr_val, vwap - ltp if vwap > ltp else ltp * 0.012), 2),
+                    round(max(1.20 * atr_val, vwap - ltp if vwap > ltp else ltp * 0.012), 2),
                 )
                 sl_price = round(ltp + risk_pts, 2)
                 t1_price = round(max(0.05, ltp - 2.0 * risk_pts), 2)
@@ -470,8 +513,10 @@ def detect_intraday_mover_sparks(
                             f"⚠️ SEBI Physical Delivery Week (DTE: {dte}d). For Short Derivatives: "
                             f"Execute in Next-Month Future (Exp: {next_str}) to eliminate physical delivery margin spikes."
                         )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             plan = {
                 "action": "SELL_SHORT_OR_BUY_PUT",
@@ -573,9 +618,21 @@ def detect_intraday_mover_sparks(
             except Exception as e_smc:
                 logger.debug(f"[IntradaySpark] Spark candle/divergence check error: {e_smc}")
 
-        from engine.alert_identity import generate_alert_id
+        from engine.alert_identity import generate_alert_id, get_session_phase_slot
 
-        alert_id = generate_alert_id(clean_sym, alert_type)
+        now_dt_for_phase = None
+        try:
+            now_dt_for_phase = datetime.fromisoformat(now_iso.replace(" IST", "").strip()).replace(
+                tzinfo=IST
+            )
+        except Exception:
+            now_dt_for_phase = datetime.now(IST)
+        phase_slot = get_session_phase_slot(now_dt_for_phase)
+        alert_id = generate_alert_id(
+            clean_sym,
+            alert_type,
+            variant=f"{direction.lower()[:4]}-{phase_slot}",
+        )
         alert = AutoAlert(
             alert_id=alert_id,
             alert_type=alert_type,

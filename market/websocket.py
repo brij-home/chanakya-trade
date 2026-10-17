@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import threading
 import time
 from dataclasses import dataclass
@@ -45,18 +46,22 @@ logger = logging.getLogger(__name__)
 
 # ── Default symbols to subscribe ─────────────────────────────
 
-DEFAULT_SYMBOLS = [
-    "NSE:NIFTY50-INDEX",
-    "NSE:NIFTYBANK-INDEX",
-    "NSE:FINNIFTY-INDEX",
-    "NSE:MIDCPNIFTY-INDEX",
-    "BSE:SENSEX-INDEX",
-    "NSE:INDIAVIX-INDEX",
-    "MCX:CRUDEOIL",
-    "MCX:NATURALGAS",
-    "MCX:GOLD",
-    "MCX:SILVER",
-]
+try:
+    from market.ws_subscription_manager import CORE_BASE_SYMBOLS as DEFAULT_SYMBOLS
+except Exception:
+    DEFAULT_SYMBOLS = [
+        "NSE:NIFTY50-INDEX",
+        "NSE:NIFTYBANK-INDEX",
+        "NSE:FINNIFTY-INDEX",
+        "NSE:MIDCPNIFTY-INDEX",
+        "BSE:SENSEX-INDEX",
+        "BSE:BANKEX-INDEX",
+        "NSE:INDIAVIX-INDEX",
+        "MCX:CRUDEOIL",
+        "MCX:NATURALGAS",
+        "MCX:GOLD",
+        "MCX:SILVER",
+    ]
 
 # Map our instrument format to Fyers WebSocket format
 _SYMBOL_MAP = {
@@ -94,8 +99,8 @@ def _to_ws_symbol(instrument: str) -> str:
         from brokers.fyers import _to_fyers_symbol
 
         return _to_fyers_symbol(instrument)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}")
 
     # Direct map lookup
     if instrument in _SYMBOL_MAP:
@@ -107,11 +112,10 @@ def _to_ws_symbol(instrument: str) -> str:
 
     if ":" in instrument:
         exch, sym = instrument.split(":", 1)
-        # Already in Fyers format (has -EQ, -INDEX, etc.)
-        if "-" in sym:
-            return instrument
-
         sym_upper = sym.upper().strip()
+        # Already in Fyers format (has -EQ, -INDEX, etc.)
+        if sym_upper.endswith(("-EQ", "-INDEX", "-BE", "-SM", "-BZ", "-GB")):
+            return f"{exch.upper()}:{sym_upper}"
 
         # Check full map with constructed key
         map_key = f"{exch.upper()}:{sym_upper}"
@@ -125,6 +129,9 @@ def _to_ws_symbol(instrument: str) -> str:
 
         return f"{exch}:{sym}-EQ"
     return f"NSE:{instrument}-EQ"
+
+
+from market.ws_subscription_manager import is_valid_ws_symbol
 
 
 @dataclass
@@ -163,20 +170,63 @@ class WebSocketManager:
         self._subscribed: set[str] = set()
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
+        self._dispatch_queue: queue.Queue[Optional[Tick]] = queue.Queue(maxsize=32768)
+        self._dispatch_thread: Optional[threading.Thread] = None
+        self._running = False
 
     @property
     def connected(self) -> bool:
         return self._connected
+
+    def _ensure_dispatcher_running(self) -> None:
+        """Starts background tick fan-out worker to ensure callbacks never stall the socket."""
+        if self._dispatch_thread is None or not self._dispatch_thread.is_alive():
+            self._running = True
+            self._dispatch_thread = threading.Thread(
+                target=self._run_dispatch_worker, daemon=True, name="WsTickDispatcher"
+            )
+            self._dispatch_thread.start()
+
+    def _run_dispatch_worker(self) -> None:
+        """Asynchronously dispatches incoming ticks to registered listeners without stalling the socket thread."""
+        while self._running:
+            try:
+                tick = self._dispatch_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if tick is None:
+                break
+            # Ingest into MarketMatrix for ultra-low latency RAM stats and live candle weaving
+            try:
+                from engine.market_matrix import get_market_matrix
+
+                get_market_matrix().on_tick(tick)
+            except Exception as e_mm:
+                logger.debug(f"[WebSocket] MarketMatrix ingestion error: {e_mm}")
+
+            with self._lock:
+                callbacks = list(self._callbacks)
+            for cb in callbacks:
+                try:
+                    cb(tick)
+                except Exception as e:
+                    logger.debug(f"[WebSocket] Listener error: {e}")
 
     def start(self, access_token: str, app_id: str) -> None:
         """
         Start the WebSocket connection in a background thread.
         Call this after successful broker login.
         """
-        if self._connected:
+        if self._connected and self._access_token == access_token:
             logger.info("WebSocket already connected")
             return
 
+        if self._connected and self._access_token != access_token:
+            logger.info("[WebSocket] Restarting market data socket with renewed access token")
+            self.stop()
+
+        self._running = True
+        self._ensure_dispatcher_running()
         self._access_token = access_token
         self._app_id = app_id
 
@@ -191,13 +241,37 @@ class WebSocketManager:
 
         if self._connected:
             logger.info("WebSocket connected")
-            # Auto-subscribe to default symbols
-            self.subscribe(DEFAULT_SYMBOLS)
+            # Auto-subscribe to default symbols & restore manager subscriptions
+            try:
+                from market.ws_subscription_manager import get_ws_subscription_manager
+
+                get_ws_subscription_manager().on_ws_connected(self)
+            except Exception as e_sub:
+                logger.warning(f"[WebSocket] Error calling ws_subscription_manager: {e_sub}")
+                self.subscribe(DEFAULT_SYMBOLS)
         else:
             logger.warning("WebSocket connection timed out — will use REST fallback")
 
+    def update_token(self, access_token: str, app_id: Optional[str] = None) -> None:
+        """Update access token and reconnect if changed."""
+        app = app_id or self._app_id
+        if self._access_token != access_token or not self._connected:
+            self.start(access_token=access_token, app_id=app)
+
     def stop(self, timeout: float = 1.0) -> None:
         """Disconnect the WebSocket and gracefully shut down without blocking."""
+        self._running = False
+        try:
+            self._dispatch_queue.put_nowait(None)
+        except Exception as e_suppressed:
+            logger.debug(f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}")
+        if self._dispatch_thread and self._dispatch_thread.is_alive():
+            try:
+                self._dispatch_thread.join(timeout=timeout)
+            except Exception as e_suppressed:
+                logger.debug(f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}")
+        self._dispatch_thread = None
+
         ws_to_close = self._ws
         self._connected = False
         self._ws = None
@@ -218,19 +292,25 @@ class WebSocketManager:
                             if lock:
                                 with lock:
                                     cond.notify_all()
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                     # Close underlying websocket
                     ws_obj = getattr(ws_to_close, "_FyersDataSocket__ws_object", None)
                     if ws_obj and hasattr(ws_obj, "close"):
                         try:
                             ws_obj.close()
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                     # Clear reference so ping thread exits its while loop
                     setattr(ws_to_close, "_FyersDataSocket__ws_object", None)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             t = threading.Thread(target=_close, daemon=True)
             t.start()
@@ -240,7 +320,7 @@ class WebSocketManager:
             self._thread.join(timeout=timeout)
         self._thread = None
 
-    def subscribe(self, symbols: list[str]) -> None:
+    def subscribe(self, symbols: list[str], record_in_manager: bool = True) -> None:
         """Subscribe to symbols for real-time ticks."""
         if not self._ws or not self._connected:
             return
@@ -260,8 +340,8 @@ class WebSocketManager:
         if not filtered:
             return
 
-        # Convert to Fyers format
-        ws_symbols = [_to_ws_symbol(s) for s in filtered]
+        # Convert to Fyers format and filter malformed symbols
+        ws_symbols = [s for s in (_to_ws_symbol(x) for x in filtered) if is_valid_ws_symbol(s)]
         new_symbols = [s for s in ws_symbols if s not in self._subscribed]
 
         if not new_symbols:
@@ -271,12 +351,13 @@ class WebSocketManager:
             self._ws.subscribe(new_symbols)
             self._subscribed.update(new_symbols)
             logger.info(f"Subscribed to {len(new_symbols)} symbols")
-            try:
-                from market.ws_subscription_manager import get_ws_subscription_manager
+            if record_in_manager:
+                try:
+                    from market.ws_subscription_manager import get_ws_subscription_manager
 
-                get_ws_subscription_manager().add_subscriptions(new_symbols)
-            except Exception as exc:
-                logger.warning(f"[WebSocket] Could not persist subscription update: {exc}")
+                    get_ws_subscription_manager().add_subscriptions(new_symbols)
+                except Exception as exc:
+                    logger.warning(f"[WebSocket] Could not persist subscription update: {exc}")
         except Exception as e:
             logger.error(f"Subscribe failed: {e}", exc_info=True)
 
@@ -288,8 +369,8 @@ class WebSocketManager:
         try:
             self._ws.unsubscribe(ws_symbols)
             self._subscribed -= set(ws_symbols)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}")
 
     def get_tick(self, instrument: str) -> Optional[Tick]:
         """
@@ -307,7 +388,10 @@ class WebSocketManager:
 
     def on_tick(self, callback: Callable[[Tick], None]) -> None:
         """Register a callback that fires on every tick. Used by alerts."""
-        self._callbacks.append(callback)
+        with self._lock:
+            if callback not in self._callbacks:
+                self._callbacks.append(callback)
+        self._ensure_dispatcher_running()
 
     def get_all_ticks(self) -> dict[str, Tick]:
         """Get all cached ticks."""
@@ -359,6 +443,35 @@ class WebSocketManager:
         if args:
             err = args[0]
             logger.debug(f"WebSocket error: {err}")
+            # Purge invalid_symbols reported by Fyers broker SDK
+            if isinstance(err, dict):
+                invalid_syms = err.get("invalid_symbols")
+                if invalid_syms and isinstance(invalid_syms, list):
+                    try:
+                        from market.ws_subscription_manager import get_ws_subscription_manager
+
+                        get_ws_subscription_manager().remove_invalid_symbols(invalid_syms)
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}"
+                        )
+            elif isinstance(err, str) and "invalid_symbols" in err:
+                try:
+                    import re
+                    import ast
+
+                    m = re.search(r"invalid_symbols['\"]\s*:\s*(\[[^\]]+\])", err)
+                    if m:
+                        parsed_syms = ast.literal_eval(m.group(1))
+                        if parsed_syms:
+                            from market.ws_subscription_manager import get_ws_subscription_manager
+
+                            get_ws_subscription_manager().remove_invalid_symbols(parsed_syms)
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+
             err_str = str(err).lower()
             if "token is expired" in err_str or "code': -99" in err_str or 'code": -99' in err_str:
                 logger.warning(
@@ -407,6 +520,20 @@ class WebSocketManager:
                 if not isinstance(data, dict):
                     continue
 
+                # Broker error feedback handling
+                if data.get("s") == "error" and data.get("invalid_symbols"):
+                    invalid_syms = data.get("invalid_symbols")
+                    if isinstance(invalid_syms, list):
+                        try:
+                            from market.ws_subscription_manager import get_ws_subscription_manager
+
+                            get_ws_subscription_manager().remove_invalid_symbols(invalid_syms)
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+                    continue
+
                 symbol = data.get("symbol", data.get("n", ""))
                 if not symbol:
                     continue
@@ -436,12 +563,46 @@ class WebSocketManager:
                         if "-" in clean:
                             self._ticks[clean.split("-")[0]] = tick
 
-                # Fire callbacks
-                for cb in self._callbacks:
+                # Update live BisectDepthBook in RAM
+                try:
+                    from market.order_book import get_depth_book
+
+                    clean_sym = symbol.split(":", 1)[1] if ":" in symbol else symbol
+                    if "-" in clean_sym:
+                        clean_sym = clean_sym.split("-")[0]
+                    clean_sym = clean_sym.strip().upper()
+
+                    book = get_depth_book(clean_sym)
+                    b_raw = data.get("bids") or (data.get("depth", {}).get("buy", []))
+                    a_raw = data.get("asks") or (data.get("depth", {}).get("sell", []))
+                    if b_raw or a_raw:
+                        book.batch_update(b_raw or [], a_raw or [])
+                    elif tick.bid > 0 and tick.ask > 0:
+                        book.update_level(
+                            "BUY", tick.bid, max(1, tick.volume // 10 if tick.volume else 1)
+                        )
+                        book.update_level(
+                            "SELL", tick.ask, max(1, tick.volume // 10 if tick.volume else 1)
+                        )
+
+                    if tick.ltp > 0:
+                        book.record_tick(
+                            price=tick.ltp, volume=tick.volume or 1, timestamp=tick.timestamp
+                        )
+                except Exception as e_book:
+                    logger.debug(f"Failed updating BisectDepthBook for {symbol}: {e_book}")
+
+                # Fire callbacks asynchronously via bounded queue to decouple WS thread
+                try:
+                    self._dispatch_queue.put_nowait(tick)
+                except queue.Full:
                     try:
-                        cb(tick)
-                    except Exception:
-                        pass
+                        _ = self._dispatch_queue.get_nowait()
+                        self._dispatch_queue.put_nowait(tick)
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
         except Exception as e:
             logger.debug(f"Tick parse error: {e}")

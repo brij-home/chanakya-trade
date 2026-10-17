@@ -22,6 +22,10 @@ Install for PDF: pip install fpdf2
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.output")
+
 
 import os
 import re
@@ -195,8 +199,8 @@ def export_to_pdf(
         import shutil
 
         shutil.copy2(str(filepath), str(archive_path))
-    except Exception:
-        pass  # archiving is best-effort, never fail the main export
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.output] Non-fatal exception suppressed: {e_suppressed}")
 
     return str(filepath)
 
@@ -268,8 +272,8 @@ def clear_exports(older_than_days: int = 30) -> int:
             try:
                 f.unlink()
                 deleted += 1
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.output] Non-fatal exception suppressed: {e_suppressed}")
     return deleted
 
 

@@ -19,12 +19,17 @@ Margin simulation:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.paper")
+
 
 import json
 import uuid
 from copy import deepcopy
 from datetime import datetime, date
 from pathlib import Path
+from typing import Optional
 
 from brokers.base import (
     BrokerAPI,
@@ -88,8 +93,8 @@ class PaperBroker(BrokerAPI):
                 for k, v in DEFAULT_STATE.items():
                     data.setdefault(k, deepcopy(v))
                 return data
-            except (json.JSONDecodeError, KeyError):
-                pass
+            except (json.JSONDecodeError, KeyError) as e_suppressed:
+                logger.debug(f"[engine.paper] Non-fatal exception suppressed: {e_suppressed}")
         state = deepcopy(DEFAULT_STATE)
         state["cash"] = capital
         target_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -240,6 +245,32 @@ class PaperBroker(BrokerAPI):
                 self._save()
                 return True
         return False
+
+    def modify_order(
+        self,
+        order_id: str,
+        price: Optional[float] = None,
+        qty: Optional[int] = None,
+        trigger_price: Optional[float] = None,
+        order_type: Optional[str] = None,
+    ) -> OrderResponse:
+        for o in self._state["orders"]:
+            if o["order_id"] == order_id and o["status"] == "OPEN":
+                if price is not None:
+                    o["price"] = float(price)
+                if trigger_price is not None:
+                    o["trigger_price"] = float(trigger_price)
+                if qty is not None:
+                    o["quantity"] = int(qty)
+                if order_type is not None:
+                    o["order_type"] = str(order_type)
+                self._save()
+                return OrderResponse(
+                    order_id=order_id, status="OPEN", message="Paper order modified"
+                )
+        return OrderResponse(
+            order_id=order_id, status="REJECTED", message="Order not found or not OPEN"
+        )
 
     # ── Market data (delegate to market layer) ────────────────
 

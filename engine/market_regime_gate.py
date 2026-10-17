@@ -73,8 +73,8 @@ def _fetch_ad_ratio() -> Optional[float]:
             ad = cached.get("ad_ratio")
             if ad and float(ad) > 0:
                 return float(ad)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.market_regime_gate] Non-fatal exception suppressed: {e_suppressed}")
 
     # 3. Tertiary: Fallback to tool registry or active quote
     try:
@@ -87,8 +87,8 @@ def _fetch_ad_ratio() -> Optional[float]:
                 ad = result.get("ad_ratio") or result.get("advance_decline_ratio")
                 if ad is not None:
                     return float(ad)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.market_regime_gate] Non-fatal exception suppressed: {e_suppressed}")
 
     try:
         from market.quotes import get_quote
@@ -103,8 +103,8 @@ def _fetch_ad_ratio() -> Optional[float]:
             declines = getattr(q_obj, "declines", None) or getattr(q_obj, "decline", None)
             if advances and declines and float(declines) > 0:
                 return float(advances) / float(declines)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.market_regime_gate] Non-fatal exception suppressed: {e_suppressed}")
 
     return None
 

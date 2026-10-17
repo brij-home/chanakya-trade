@@ -12,82 +12,81 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from engine.alert_preferences import AlertPreferences, AlertPreferencesManager
+from engine.alert_preferences import alert_preferences
 from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
 
 def test_telegram_conviction_gate_filters_noise(tmp_path):
     """Verifies that AutoAlertEngine suppresses alerts below 92% on Telegram."""
-    test_pref_file = tmp_path / "test_prefs.json"
+    orig_conf = getattr(alert_preferences.telegram, "min_confidence", 85)
+    alert_preferences.update_preferences({"telegram": {"min_confidence": 92}})
 
-    mgr = AlertPreferencesManager()
-    mgr._pref_file = test_pref_file
-    mgr._preferences = AlertPreferences()
-    mgr.update_preferences({"telegram": {"min_confidence": 92}})
-
-    # Low-conviction / marginal setup (e.g. 85% confidence)
-    marginal_alert = AutoAlert(
-        alert_id="opt-marginal-1",
-        alert_type="OPTIONS_MOMENTUM",
-        stage="IGNITED",
-        symbol="RELIANCE",
-        contract_symbol="RELIANCE1240CE",
-        exchange="NFO",
-        direction="BULLISH",
-        headline="RELIANCE Marginal Call",
-        summary="Marginal setup",
-        ltp=15.0,
-        trigger_level=15.0,
-        target_level=22.0,
-        stop_loss=11.0,
-        confidence=85,  # Below 92% institutional Telegram bar
-    )
-
-    # High-conviction institutional setup (e.g. 95% confidence)
-    elite_alert = AutoAlert(
-        alert_id="opt-elite-1",
-        alert_type="OPTIONS_MOMENTUM",
-        stage="IGNITED",
-        symbol="BHARTIARTL",
-        contract_symbol="BHARTIARTL1860PE",
-        exchange="NFO",
-        direction="BEARISH",
-        headline="BHARTIARTL Elite Put Surge",
-        summary="Elite institutional breakdown",
-        ltp=25.0,
-        trigger_level=25.0,
-        target_level=35.0,
-        stop_loss=20.0,
-        confidence=95,  # Above 92% institutional Telegram bar
-    )
-
-    engine = AutoAlertEngine()
-    engine._dispatched_milestones.clear()
-    engine._dispatch_cooldowns.clear()
-
-    # Mock telegram notify
-    dispatched_msgs = []
-
-    def mock_tg(msg, chat_id=None):
-        dispatched_msgs.append((msg, chat_id))
-
-    with (
-        patch("engine.alerts._telegram_notify", side_effect=mock_tg),
-        patch("engine.alerts._is_market_hours", return_value=True),
-    ):
-        # Dispatch marginal alert -> Must be suppressed on Telegram!
-        engine._dispatch(marginal_alert)
-        assert len(dispatched_msgs) == 0, (
-            "Marginal alert (<92% confidence) should NOT be dispatched to Telegram!"
+    try:
+        # Low-conviction / marginal setup (e.g. 85% confidence)
+        marginal_alert = AutoAlert(
+            alert_id="opt-marginal-1",
+            alert_type="OPTIONS_MOMENTUM",
+            stage="IGNITED",
+            symbol="RELIANCE",
+            contract_symbol="RELIANCE1240CE",
+            exchange="NFO",
+            direction="BULLISH",
+            headline="RELIANCE Marginal Call",
+            summary="Marginal setup",
+            ltp=15.0,
+            trigger_level=15.0,
+            target_level=22.0,
+            stop_loss=11.0,
+            confidence=85,  # Below 92% institutional Telegram bar
         )
-        assert marginal_alert.telegram_dispatched is False
 
-        # Dispatch elite alert -> Must be permitted to Telegram!
-        engine._dispatch(elite_alert)
-        assert len(dispatched_msgs) == 1, (
-            "Elite alert (>=92% confidence) MUST be dispatched to Telegram!"
+        # High-conviction institutional setup (e.g. 95% confidence)
+        elite_alert = AutoAlert(
+            alert_id="opt-elite-1",
+            alert_type="OPTIONS_MOMENTUM",
+            stage="IGNITED",
+            symbol="BHARTIARTL",
+            contract_symbol="BHARTIARTL1860PE",
+            exchange="NFO",
+            direction="BEARISH",
+            headline="BHARTIARTL Elite Put Surge",
+            summary="Elite institutional breakdown",
+            ltp=25.0,
+            trigger_level=25.0,
+            target_level=35.0,
+            stop_loss=20.0,
+            confidence=95,  # Above 92% institutional Telegram bar
         )
-        assert elite_alert.telegram_dispatched is True
+
+        engine = AutoAlertEngine()
+        engine._dispatched_milestones.clear()
+        engine._dispatch_cooldowns.clear()
+
+        # Mock telegram notify
+        dispatched_msgs = []
+
+        def mock_tg(msg, chat_id=None):
+            dispatched_msgs.append((msg, chat_id))
+
+        with (
+            patch("engine.alerts._telegram_notify", side_effect=mock_tg),
+            patch("engine.alerts._is_market_hours", return_value=True),
+        ):
+            # Dispatch marginal alert -> Must be suppressed on Telegram!
+            engine._dispatch(marginal_alert)
+            assert len(dispatched_msgs) == 0, (
+                "Marginal alert (<92% confidence) should NOT be dispatched to Telegram!"
+            )
+            assert marginal_alert.telegram_dispatched is False
+
+            # Dispatch elite alert -> Must be permitted to Telegram!
+            engine._dispatch(elite_alert)
+            assert len(dispatched_msgs) == 1, (
+                "Elite alert (>=92% confidence) MUST be dispatched to Telegram!"
+            )
+            assert elite_alert.telegram_dispatched is True
+    finally:
+        alert_preferences.update_preferences({"telegram": {"min_confidence": orig_conf}})
 
 
 def test_telegram_pacing_throttle_blocks_rapid_bursts(tmp_path):

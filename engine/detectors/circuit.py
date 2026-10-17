@@ -37,8 +37,10 @@ def detect_circuit_proximity(
 
     # If within 1.5% of upper circuit ceiling and gaining strongly
     if 0.1 <= dist_to_uc_pct <= 1.5 and day_chg_pct >= (circuit_band_pct * 0.7):
-        # Model structural continuation targets (circuit lock momentum carrying into next session)
-        risk_pts = max(1.0, round(ltp * 0.015, 2))
+        from engine.dynamic_risk import resolve_price_tier
+
+        abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
+        risk_pts = max(abs_risk_floor, round(ltp * 0.015, 2))
         sl_price = round(ltp - risk_pts, 2)
         t1_price = round(upper_circuit + (1.8 * risk_pts), 2)
         t2_price = round(upper_circuit + (3.2 * risk_pts), 2)

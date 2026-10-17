@@ -348,8 +348,8 @@ class KotakNeoAPI(BrokerAPI):
         if TOKEN_FILE.exists():
             try:
                 TOKEN_FILE.unlink()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.kotak] Non-fatal exception suppressed: {e_suppressed}")
 
     def _save_token(self) -> None:
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -390,8 +390,8 @@ class KotakNeoAPI(BrokerAPI):
             self._user_name = d.get("name", "")
             self._user_email = d.get("email", "")
             self._token_saved_at = saved_at
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.kotak] Non-fatal exception suppressed: {e_suppressed}")
 
     def _req_headers(self) -> dict[str, str]:
         """Headers required for authenticated Kotak Neo REST calls."""

@@ -30,6 +30,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.earnings")
+
 
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -217,8 +221,8 @@ def get_earnings_calendar(
             raw = _fetch_earnings_date_nse(sym)
             if raw and raw != "TBD":
                 nse_date = date.fromisoformat(raw)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.earnings] Non-fatal exception suppressed: {e_suppressed}")
 
         if nse_date and nse_date >= today:
             # NSE returned a genuine upcoming date — use it
@@ -242,8 +246,8 @@ def get_earnings_calendar(
                 result_dt = datetime.strptime(entry.result_date, "%d-%b-%Y").date()
                 if (result_dt - today).days > days_ahead:
                     continue
-            except ValueError:
-                pass  # TBD — include anyway
+            except ValueError as e_suppressed:
+                logger.debug(f"[market.earnings] Non-fatal exception suppressed: {e_suppressed}")
 
         entries.append(entry)
 
@@ -313,8 +317,8 @@ def _fetch_earnings_date_nse(symbol: str) -> Optional[str]:
                     purpose = (m.get("bm_purpose", "") or "").lower()
                     if "financial result" in purpose or "quarterly" in purpose:
                         return m.get("bm_date", "TBD")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.earnings] Non-fatal exception suppressed: {e_suppressed}")
     return None
 
 
@@ -361,8 +365,8 @@ def predict_earnings_surprise(symbol: str) -> dict:
                 f"RSI {snap.rsi:.0f} — oversold, positive surprise could trigger sharp rally"
             )
             bullish_count += 1
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.earnings] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. IV rank (market expectation)
     iv_data = get_pre_earnings_iv(symbol)

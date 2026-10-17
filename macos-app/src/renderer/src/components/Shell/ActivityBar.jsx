@@ -63,7 +63,9 @@ const UTILITY_ITEMS = [
   { id: 'portfolio',  icon: '📈', label: 'Portfolio Doctor',      shortcut: '^6' },
   { id: 'alerts',     icon: '🔔', label: 'Alerts Manager',        shortcut: '^7' },
   { id: 'journal',    icon: '📋', label: 'Trade Journal',         shortcut: '^8' },
+  { id: 'ops',        icon: '🛠️', label: 'OpsDeck & System Health', shortcut: '^M' },
 ]
+
 
 function ActivityBarIcon({ item, isActive, onClick, badge }) {
   const accent = item.accentColor || 'var(--color-gold)'

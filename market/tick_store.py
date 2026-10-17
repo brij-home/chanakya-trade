@@ -70,8 +70,8 @@ class TickArchive:
             self._running = False
         try:
             self._queue.put_nowait(None)  # Sentinel to unblock queue.get()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.tick_store] Non-fatal exception suppressed: {e_suppressed}")
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=timeout)
         with self._lock:
@@ -165,12 +165,14 @@ class TickArchive:
                     conn.execute("DELETE FROM raw_market_ticks WHERE received_at < ?", (cutoff,))
                     try:
                         conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[market.tick_store] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 conn.commit()
-        except Exception:
+        except Exception as e_suppressed:
             # Archival is diagnostic; the live path remains available if disk is full or locked.
-            pass
+            logger.debug(f"[market.tick_store] Non-fatal exception suppressed: {e_suppressed}")
         finally:
             with self._lock:
                 self._started = False
@@ -178,8 +180,10 @@ class TickArchive:
             if conn is not None:
                 try:
                     conn.close()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.tick_store] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
 
 def prune_tick_archive(retention_days: Optional[int] = None, max_rows: int = 500_000) -> int:
@@ -208,14 +212,14 @@ def prune_tick_archive(retention_days: Optional[int] = None, max_rows: int = 500
         conn.commit()
         if deleted > 0:
             conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.tick_store] Non-fatal exception suppressed: {e_suppressed}")
     finally:
         if conn is not None:
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.tick_store] Non-fatal exception suppressed: {e_suppressed}")
     return deleted
 
 

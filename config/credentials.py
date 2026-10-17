@@ -22,6 +22,10 @@ Keys are stored as:   keyring.get_password("chanakya-trade", "KITE_API_KEY")
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("config.credentials")
+
 
 import os
 import sys
@@ -32,13 +36,13 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[config.credentials] Non-fatal exception suppressed: {e_suppressed}")
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[config.credentials] Non-fatal exception suppressed: {e_suppressed}")
 
 from rich.console import Console
 from rich.prompt import Prompt, Confirm
@@ -252,8 +256,14 @@ def _is_placeholder(val: str) -> bool:
         val_lower.startswith("your_")
         or val_lower.endswith("_here")
         or "your_" in val_lower
-        or "xxxx-100" in val_lower
-        or val_lower in ("your_openrouter_api_key_here", "sk-or-v1-your-key-here", "sk-or-v1-xxx")
+        or val_lower.startswith("test_key")
+        or val_lower
+        in (
+            "your_openrouter_api_key_here",
+            "sk-or-v1-your-key-here",
+            "sk-or-v1-xxx",
+            "test_key_123",
+        )
     )
 
 
@@ -279,15 +289,15 @@ def get_credential(
     """
     display = label or key
 
-    # 1. Keychain
+    # 1. Environment variable / .env (explicit value in .env or shell always wins)
+    value = os.environ.get(key, "").strip()
+    if value and not _is_placeholder(value):
+        return value
+
+    # 2. Keychain fallback
     value = _kr_get(key)
     if value and not _is_placeholder(value):
         os.environ[key] = value  # inject so rest of code sees it via os.environ
-        return value
-
-    # 2. Environment variable / .env (already loaded by dotenv)
-    value = os.environ.get(key, "").strip()
-    if value and not _is_placeholder(value):
         return value
 
     # If not required, never prompt interactively
@@ -331,8 +341,8 @@ def get_credential(
                     console.print(
                         "  [yellow]Could not save to keychain — keyring unavailable.[/yellow]\n"
                     )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[config.credentials] Non-fatal exception suppressed: {e_suppressed}")
 
     os.environ[key] = value
     return value

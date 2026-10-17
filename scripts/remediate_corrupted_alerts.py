@@ -119,6 +119,8 @@ if os.path.exists(pattern_outcomes_path):
         if out in ("WIN_T1", "WIN_T2", "WIN_TARGET"):
             if "comm-copper" in aid or sym.upper() == "COPPER":
                 is_false_win = True
+            elif "midcpnifty-pe-13750" in aid:
+                is_false_win = True
             elif en > 0 and (ex / en > 5.0 or ex / en < 0.2):
                 is_false_win = True
 

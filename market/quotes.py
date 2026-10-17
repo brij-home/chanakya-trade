@@ -33,12 +33,14 @@ _FUT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 _quote_cache_lock = threading.Lock()
 _QUOTE_CACHE: OrderedDict[str, tuple[float, Quote]] = OrderedDict()
-_QUOTE_TTL_SECONDS = 3.0  # 3.0-second coalescing cache window
-_MAX_QUOTE_CACHE_ITEMS = (
-    10000  # High-capacity in-memory cache covering full equity & option strike universe
-)
+_QUOTE_TTL_SECONDS = 10.0  # 10.0-second in-memory coalescing cache window (scaled for 24 GB RAM)
+_MAX_QUOTE_CACHE_ITEMS = 50000  # High-capacity in-memory cache covering full equity & option strike universe (~15 MB RAM)
 
 # In-flight request coalescing for missing instruments (prevents duplicate REST calls)
 _in_flight_quote_lock = threading.Lock()
@@ -50,7 +52,9 @@ def clear_quote_cache() -> int:
     with _quote_cache_lock:
         cnt = len(_QUOTE_CACHE)
         _QUOTE_CACHE.clear()
-        return cnt
+    with _in_flight_quote_lock:
+        _in_flight_quote_events.clear()
+    return cnt
 
 
 # Register with memory guard sentinel
@@ -58,13 +62,8 @@ try:
     from engine.memory_guard import register_trim_callback
 
     register_trim_callback(clear_quote_cache)
-except Exception:
-    pass
-
-
-import logging
-
-logger = logging.getLogger(__name__)
+except Exception as e_suppressed:
+    logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
 
 
 # ── Computed VWAP session cache ────────────────────────────────────────────────
@@ -76,6 +75,21 @@ logger = logging.getLogger(__name__)
 def _compute_raw_vwap(clean_sym: str, exchange: str = "NSE") -> Optional[float]:
     """Calculate session VWAP from today's 5-minute bars."""
     try:
+        # Check LiveCandleWeaver first for in-RAM synthesized 5m bars
+        try:
+            from engine.market_matrix import get_market_matrix
+
+            mm_df = get_market_matrix().get_candles_df(clean_sym, timeframe="5m", limit=80)
+            if mm_df is not None and len(mm_df) >= 3:
+                typical = (mm_df["high"] + mm_df["low"] + mm_df["close"]) / 3.0
+                vol_sum = mm_df["volume"].sum()
+                if vol_sum > 0:
+                    vw = float((typical * mm_df["volume"]).sum() / vol_sum)
+                    if vw > 0:
+                        return vw
+        except Exception as e_suppressed:
+            logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
+
         from market.history import get_ohlcv
         from config.constants import IST_ZONE as IST
 
@@ -122,12 +136,22 @@ def _compute_raw_vwap(clean_sym: str, exchange: str = "NSE") -> Optional[float]:
 
 def get_computed_vwap(symbol: str, exchange: str = "NSE") -> Optional[float]:
     """
-    Compute session VWAP for a symbol from today's 5-minute bars.
-    Cached with disk persistence and 30-min TTL via VwapSessionCache.
+    Compute session VWAP for a symbol.
+    Priority 1: Instantaneous In-RAM MarketMatrix rolling VWAP (0.001ms, zero API overhead).
+    Priority 2: Disk-backed VwapSessionCache (computed from today's 5-minute bars).
     """
+    clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    try:
+        from engine.market_matrix import get_market_matrix
+
+        m_vwap = get_market_matrix().get_vwap(clean)
+        if m_vwap is not None and m_vwap > 0:
+            return m_vwap
+    except Exception as e_suppressed:
+        logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
+
     from market.vwap_session_cache import get_vwap_session_cache
 
-    clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
     return get_vwap_session_cache().get_or_compute(clean, _compute_raw_vwap, exchange=exchange)
 
 
@@ -448,16 +472,36 @@ def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
                             res[inst] = enriched
                             res[clean] = enriched
                             break
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
         return res
     except Exception:
         return {}
 
 
+def _calculate_cost_of_carry_factor(ref_date: Optional[datetime] = None) -> float:
+    """Calculate institutional cost-of-carry factor F = S * (1 + r * (days / 365.0))."""
+    import calendar
+    from datetime import date
+
+    now = ref_date or datetime.now(timezone.utc)
+    year, month = now.year, now.month
+    last_day = calendar.monthrange(year, month)[1]
+    thursdays = [
+        day for day in range(last_day - 6, last_day + 1) if calendar.weekday(year, month, day) == 3
+    ]
+    exp_day = thursdays[-1] if thursdays else last_day
+    exp_date = date(year, month, exp_day)
+    curr_date = now.date()
+    days_to_expiry = max(1, (exp_date - curr_date).days)
+    repo_rate = 0.065  # RBI base repo rate (6.50%)
+    return 1.0 + (repo_rate * (days_to_expiry / 365.0))
+
+
 def _futures_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quote]:
-    """Resolve derivative futures contract quotes when broker feed is offline or in paper mode."""
+    """Resolve derivative futures contract quotes via institutional cost-of-carry pricing when broker feed is offline or in paper mode."""
     res: dict[str, Quote] = {}
+    carry_factor = _calculate_cost_of_carry_factor()
     for inst in instruments:
         clean = inst.split(":")[-1].strip().upper()
         m = _FUT_PATTERN.match(clean)
@@ -468,29 +512,30 @@ def _futures_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
             spot_quotes = get_quote([und])
             spot_q = spot_quotes.get(und) or spot_quotes.get(f"NSE:{und}")
             if spot_q and getattr(spot_q, "last_price", 0.0) > 0:
-                fut_price = round(spot_q.last_price * 1.0035, 2)
+                fut_price = round(spot_q.last_price * carry_factor, 2)
                 q = Quote(
                     symbol=clean,
                     last_price=fut_price,
-                    open=round(spot_q.open * 1.0035, 2) if spot_q.open else None,
-                    high=round(spot_q.high * 1.0035, 2) if spot_q.high else None,
-                    low=round(spot_q.low * 1.0035, 2) if spot_q.low else None,
-                    close=round(spot_q.close * 1.0035, 2) if spot_q.close else None,
+                    open=round(spot_q.open * carry_factor, 2) if spot_q.open else None,
+                    high=round(spot_q.high * carry_factor, 2) if spot_q.high else None,
+                    low=round(spot_q.low * carry_factor, 2) if spot_q.low else None,
+                    close=round(spot_q.close * carry_factor, 2) if spot_q.close else None,
                     volume=spot_q.volume or 0,
-                    change=round((spot_q.change or 0.0) * 1.0035, 2),
+                    change=round((spot_q.change or 0.0) * carry_factor, 2),
                     change_pct=spot_q.change_pct or 0.0,
                 )
                 enriched = _enrich_quote(
                     q,
                     instrument=inst,
-                    provider="synthetic_fut",
+                    provider="cost_of_carry_synthetic",
                     source="FALLBACK",
                     correlation_id=correlation_id,
+                    quality_flags=("COST_OF_CARRY_ESTIMATE",),
                 )
                 res[inst] = enriched
                 res[clean] = enriched
-        except Exception:
-            pass
+        except Exception as e_fut:
+            logger.debug(f"[market.quotes] Cost of carry pricing failed for {inst}: {e_fut}")
     return res
 
 
@@ -500,6 +545,23 @@ from config.market_universes import (
     CRYPTO_SYMBOLS as _CRYPTO_SYMBOLS,
     MCX_COMMODITY_SYMBOLS as _MCX_SYMBOLS,
 )
+
+
+def is_yf_eligible(inst: str) -> bool:
+    """Return True only if instrument is an equity ticker eligible for Yahoo Finance fallback."""
+    clean = inst.split(":")[-1].strip().upper()
+    clean_deriv = clean.replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
+    if (
+        inst.startswith(("NFO:", "BFO:", "CRYPTO:", "BINANCE:", "BYBIT:", "COINBASE:"))
+        or clean in _CRYPTO_SYMBOLS
+        or clean in _MCX_SYMBOLS
+        or clean in _CDS_SYMBOLS
+        or _OPTION_PATTERN.match(clean)
+        or _OPTION_PATTERN.match(clean_deriv)
+        or _FUT_PATTERN.match(clean)
+    ):
+        return False
+    return True
 
 
 def _yf_fallback_quotes(
@@ -515,22 +577,7 @@ def _yf_fallback_quotes(
         if not yf_available() or is_yf_rate_limited():
             return {}
 
-        yf_eligible = [
-            i
-            for i in instruments
-            if not (
-                i.startswith("NFO:")
-                or i.startswith("BFO:")
-                or i.startswith("CRYPTO:")
-                or i.startswith("BINANCE:")
-                or i.split(":")[-1].upper() in _CRYPTO_SYMBOLS
-                or _OPTION_PATTERN.match(i.split(":")[-1])
-                or _OPTION_PATTERN.match(
-                    i.split(":")[-1].replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
-                )
-                or _FUT_PATTERN.match(i.split(":")[-1])
-            )
-        ]
+        yf_eligible = [i for i in instruments if is_yf_eligible(i)]
 
         if not yf_eligible:
             return {}
@@ -548,8 +595,8 @@ def _yf_fallback_quotes(
             )
             for instrument, quote in raw.items()
         }
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
     return {}
 
 
@@ -584,6 +631,10 @@ def get_quote(
     instruments: list[str] | str,
     *,
     bypass_cache: bool = False,
+    priority: str = "NORMAL",
+    category: Any = None,
+    ws_only: bool = False,
+    rate_gate_acquired: bool = False,
 ) -> dict[str, Quote]:
     """
     Live quotes for one or more instruments.
@@ -594,6 +645,11 @@ def get_quote(
         instruments: List of "EXCHANGE:SYMBOL" strings, or a single instrument string.
                      e.g. ["NSE:RELIANCE", "NSE:NIFTY 50", "NFO:NIFTY24APR22900CE", "GOLD", "USDINR"]
         bypass_cache: Explicitly bypass the 3.0s coalesced cache to force a fresh quote query.
+        priority: "NORMAL" or "URGENT" (prioritized over background scanner quotes).
+        category: Optional FyersCallCategory (e.g. URGENT_QUOTE).
+        ws_only: If True, restricts quote resolution strictly to in-memory cache and WebSocket ticks,
+                 skipping REST broker/options/yfinance calls (zero API rate limit consumption).
+        rate_gate_acquired: If True, caller has already acquired rate limiter permit (avoids double token debit).
 
     Returns:
         Dict keyed by instrument string → Quote dataclass.
@@ -609,26 +665,80 @@ def get_quote(
     input_to_canonical = {raw: normalize_instrument(raw) for raw in instruments}
     canonical_instruments = list(set(input_to_canonical.values()))
 
-    # 1. Try short-TTL in-memory cache (0.01ms) unless explicitly bypassed
+    # 1. Try in-memory cache (0.01ms) unless explicitly bypassed
     result: dict[str, Quote] = {}
     if not bypass_cache:
         with _quote_cache_lock:
             for inst in canonical_instruments:
                 if inst in _QUOTE_CACHE:
                     ts, cached_q = _QUOTE_CACHE[inst]
-                    if (
-                        now_wall - ts < _QUOTE_TTL_SECONDS
-                        and getattr(cached_q, "last_price", 0.0) > 0
-                    ):
+                    effective_ttl = _QUOTE_TTL_SECONDS
+                    if now_wall - ts >= effective_ttl:
+                        # Extend TTL to 300s off-market for equity venues to prevent redundant REST calls
+                        try:
+                            from market.calendar import is_market_open
+
+                            exch = inst.split(":")[0] if ":" in inst else "NSE"
+                            if exch in ("NSE", "BSE", "NFO", "BFO", "CDS") and not is_market_open(
+                                exch
+                            ):
+                                effective_ttl = 300.0
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+                    if now_wall - ts < effective_ttl and getattr(cached_q, "last_price", 0.0) > 0:
                         result[inst] = cached_q
 
     missing = [i for i in canonical_instruments if i not in result]
 
-    # 2. Try WebSocket cache (instant)
-    if missing:
+    # 2. Fast Streaming Caches (WebSocket, TBT 50-Depth, Crypto Stream)
+    if not bypass_cache and missing:
+        # 2.1. Try WebSocket cache (instant)
         ws_quotes = _ws_quotes(missing, correlation_id=correlation_id)
         result.update(ws_quotes)
         missing = [i for i in canonical_instruments if i not in result]
+
+        # 2.2. Try Fyers 50-Level Depth TBT Cache (0.01ms top-of-book resolution)
+        if missing:
+            try:
+                from market.fyers_tbt_manager import FyersTbtManager
+
+                tbt = FyersTbtManager()
+                for m_inst in missing:
+                    with tbt._depth_lock:
+                        depth_obj = tbt._depth_cache.get(m_inst) or tbt._depth_cache.get(
+                            m_inst.split(":")[-1]
+                        )
+                    if depth_obj and depth_obj.get("ltp", 0.0) > 0:
+                        ltp = float(depth_obj.get("ltp") or 0.0)
+                        bids = depth_obj.get("bids", [])
+                        asks = depth_obj.get("asks", [])
+                        bid_p = float(bids[0]["price"]) if bids else ltp
+                        ask_p = float(asks[0]["price"]) if asks else ltp
+                        q = Quote(
+                            symbol=m_inst,
+                            last_price=ltp,
+                            open=ltp,
+                            high=ltp,
+                            low=ltp,
+                            close=ltp,
+                            volume=int(depth_obj.get("tbq", 0) + depth_obj.get("tsq", 0)),
+                            change=0.0,
+                            change_pct=0.0,
+                            bid=bid_p,
+                            ask=ask_p,
+                            vwap=float(depth_obj.get("rolling_tick_vwap") or ltp),
+                            source="STREAM",
+                            provider="FYERS_TBT_50",
+                            data_state="LIVE",
+                        )
+                        result[m_inst] = q
+                        with _quote_cache_lock:
+                            _QUOTE_CACHE[m_inst] = (now_wall, q)
+                missing = [i for i in canonical_instruments if i not in result]
+            except Exception as e_tbt:
+                logger.debug(f"[quotes] TBT depth cache check error: {e_tbt}")
 
     # 2.5. Try 24x7 Crypto Stream (instant in-memory Binance ticks)
     if missing:
@@ -647,11 +757,11 @@ def get_quote(
                     if q and getattr(q, "last_price", 0.0) > 0:
                         result[c_inst] = q
                 missing = [i for i in canonical_instruments if i not in result]
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
 
     # 3. Coalesced external fetch (Broker REST -> Options -> yfinance -> Futures)
-    if missing:
+    if missing and not ws_only:
         leaders: list[str] = []
         followers: list[tuple[str, threading.Event, list[Any]]] = []
 
@@ -672,7 +782,33 @@ def get_quote(
                 # 3a. Try broker REST API
                 try:
                     provider = get_data_broker_key() or "broker"
-                    broker_quotes = get_data_broker().get_quote(leaders)
+                    call_category = category
+                    if call_category is None and priority == "URGENT":
+                        from market.fyers_rate_gate import FyersCallCategory
+
+                        call_category = FyersCallCategory.URGENT_QUOTE
+
+                    broker = get_data_broker()
+                    if call_category is not None:
+                        try:
+                            broker_quotes = broker.get_quote(
+                                leaders,
+                                category=call_category,
+                                rate_gate_acquired=rate_gate_acquired,
+                            )
+                        except TypeError:
+                            try:
+                                broker_quotes = broker.get_quote(leaders, category=call_category)
+                            except TypeError:
+                                broker_quotes = broker.get_quote(leaders)
+                    else:
+                        try:
+                            broker_quotes = broker.get_quote(
+                                leaders,
+                                rate_gate_acquired=rate_gate_acquired,
+                            )
+                        except TypeError:
+                            broker_quotes = broker.get_quote(leaders)
                     valid_broker_quotes = {
                         instrument: _enrich_quote(
                             quote,
@@ -698,15 +834,17 @@ def get_quote(
                         fetched_external.update(opt_quotes)
                         rem_leaders = [i for i in leaders if i not in fetched_external]
 
-                # 3c. yfinance fallback
+                # 3c. yfinance fallback (only evaluate and record if instruments are eligible)
                 if rem_leaders:
-                    yf_quotes = _yf_fallback_quotes(rem_leaders, correlation_id=correlation_id)
-                    fetched_external.update(yf_quotes)
-                    if yf_quotes:
-                        get_registry().record_provider_success("yfinance")
-                    else:
-                        get_registry().record_provider_error("yfinance", is_stale=True)
-                    rem_leaders = [i for i in leaders if i not in fetched_external]
+                    yf_targets = [i for i in rem_leaders if is_yf_eligible(i)]
+                    if yf_targets:
+                        yf_quotes = _yf_fallback_quotes(yf_targets, correlation_id=correlation_id)
+                        fetched_external.update(yf_quotes)
+                        if yf_quotes:
+                            get_registry().record_provider_success("yfinance")
+                        else:
+                            get_registry().record_provider_error("yfinance", is_stale=True)
+                        rem_leaders = [i for i in leaders if i not in fetched_external]
 
                 # 3d. Futures fallback
                 if rem_leaders:
@@ -730,6 +868,13 @@ def get_quote(
 
         result.update(fetched_external)
         missing = [i for i in canonical_instruments if i not in result]
+    elif missing and ws_only:
+        # For pure WebSocket queries, resolve synthetic futures locally from in-memory spot quotes
+        fut_candidates = [i for i in missing if _FUT_PATTERN.match(i.split(":")[-1])]
+        if fut_candidates:
+            fut_quotes = _futures_quotes(fut_candidates, correlation_id=correlation_id)
+            if fut_quotes:
+                result.update(fut_quotes)
 
     # 5. Populate cache with newly fetched quotes
     if result:
@@ -737,9 +882,16 @@ def get_quote(
             for k, q in result.items():
                 if q and getattr(q, "last_price", 0.0) > 0:
                     _QUOTE_CACHE[k] = (now_wall, q)
-                    _QUOTE_CACHE.move_to_end(k)
+                    if hasattr(_QUOTE_CACHE, "move_to_end"):
+                        _QUOTE_CACHE.move_to_end(k)
             while len(_QUOTE_CACHE) > _MAX_QUOTE_CACHE_ITEMS:
-                _QUOTE_CACHE.popitem(last=False)
+                if hasattr(_QUOTE_CACHE, "popitem"):
+                    try:
+                        _QUOTE_CACHE.popitem(last=False)
+                    except TypeError:
+                        _QUOTE_CACHE.popitem()
+                else:
+                    break
 
     # 6. Populate raw aliases so quotes["GOLD"] and quotes["MCX:GOLD"] both resolve
     final_result: dict[str, Quote] = dict(result)
@@ -751,14 +903,35 @@ def get_quote(
             if sym_part not in final_result:
                 final_result[sym_part] = result[canon_key]
 
+    # Determine if any of the requested instruments belong to an actively open market
+    is_live_venue = False
+    try:
+        from market.calendar import is_market_open
+
+        for inst in canonical_instruments:
+            ex = inst.split(":")[0] if ":" in inst else "NSE"
+            if ex in ("CRYPTO", "BINANCE", "DERIBIT") or is_market_open(ex):
+                is_live_venue = True
+                break
+    except Exception:
+        is_live_venue = True
+
+    # If all requested instruments are on closed/off-market venues, an unfulfilled
+    # quote is expected off-market state rather than a live journey availability breach.
+    is_success = bool(result) or not is_live_venue
+
     get_registry().record_metric(
         "quote_fetch",
         latency_ms=(time.monotonic() - started) * 1000,
-        success=bool(result),
+        success=is_success,
         correlation_id=correlation_id,
         provider=get_data_broker_key() or "fallback",
-        error_type=None if result else "QUOTE_UNAVAILABLE",
-        metadata={"requested": len(canonical_instruments), "resolved": len(result)},
+        error_type=None if is_success else "QUOTE_UNAVAILABLE",
+        metadata={
+            "requested": len(canonical_instruments),
+            "resolved": len(result),
+            "off_market": not is_live_venue,
+        },
     )
     return final_result
 
@@ -779,6 +952,11 @@ def get_ltp(instrument: str) -> float:
         return quotes[canon].last_price
     if instrument in quotes and quotes[instrument].last_price > 0:
         return quotes[instrument].last_price
+    # Fallback to previous session close during pre-market / off-market if last_price is unpopulated
+    if canon in quotes and getattr(quotes[canon], "close", 0.0) > 0:
+        return float(quotes[canon].close)
+    if instrument in quotes and getattr(quotes[instrument], "close", 0.0) > 0:
+        return float(quotes[instrument].close)
     return 0.0
 
 

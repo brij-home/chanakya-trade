@@ -59,8 +59,10 @@ class FreeIndexRouter:
             pref_id = alert_preferences.get_free_index_chat_id()
             if pref_id:
                 return pref_id
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.free_index_router] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         # In live production runtime, default to the canonical Free Index Channel ID.
         # In test environments (CHANAKYA_TESTING=1), return None unless explicitly set.
@@ -179,6 +181,15 @@ class FreeIndexRouter:
                 or getattr(alert, "contract_symbol", None)
                 or opt_p.get("contract_symbol")
                 or plan.get("contract")
+                or getattr(alert, "alert_type", "")
+                in (
+                    "INDEX_CALL_SETUP",
+                    "INDEX_PUT_SETUP",
+                    "OPTIONS_MOMENTUM",
+                    "GAMMA_BLAST",
+                )
+                or "-ce-" in getattr(alert, "alert_id", "").lower()
+                or "-pe-" in getattr(alert, "alert_id", "").lower()
             )
 
             # 1. Option Stop Loss distance check
@@ -190,6 +201,8 @@ class FreeIndexRouter:
             prem_sl = (
                 opt_p.get("sl_premium")
                 or opt_p.get("stop_loss")
+                or getattr(alert, "option_stop_loss", None)
+                or getattr(alert, "tactical_sl", None)
                 or (getattr(alert, "stop_loss", None) if is_opt else None)
             )
             if is_opt and prem_e is not None and prem_sl is not None:
@@ -204,8 +217,10 @@ class FreeIndexRouter:
                                 f"Option SL distance ({opt_risk:.1f} pts) exceeds intraday ceiling ({max_opt_sl_pts:.1f} pts)"
                             )
                             return False
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.free_index_router] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # 2. Spot Stop Loss distance check
             spot_p = float(
@@ -214,6 +229,10 @@ class FreeIndexRouter:
             spot_sl_val = (
                 plan.get("spot_stop_loss")
                 or plan.get("underlying_sl")
+                or getattr(alert, "structural_spot_sl", None)
+                or getattr(alert, "underlying_sl", None)
+                or getattr(alert, "spot_invalidation_anchor", None)
+                or (getattr(alert, "metrics", {}) or {}).get("spot_invalidation_anchor")
                 or (getattr(alert, "stop_loss", None) if not is_opt else None)
             )
             if spot_p > 0 and spot_sl_val is not None:
@@ -227,8 +246,10 @@ class FreeIndexRouter:
                                 f"Spot SL distance ({spot_risk:.1f} pts) exceeds intraday ceiling ({max_spot_sl_pts:.1f} pts)"
                             )
                             return False
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.free_index_router] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             return True
         except Exception as e:

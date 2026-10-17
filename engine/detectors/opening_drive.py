@@ -38,6 +38,30 @@ except Exception:
     IST = timezone(timedelta(hours=5, minutes=30))
 
 
+def _calculate_5m_atr(df: Any, period: int = 14) -> float:
+    """Calculate 5-minute ATR to establish dynamic Brownian noise floor."""
+    try:
+        if df is None or len(df) < 1:
+            return 0.0
+        col_h = "high" if "high" in df.columns else "High"
+        col_l = "low" if "low" in df.columns else "Low"
+        col_c = "close" if "close" in df.columns else "Close"
+        high = df[col_h]
+        low = df[col_l]
+        if len(df) == 1:
+            return float(high.iloc[0] - low.iloc[0])
+        close = df[col_c]
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr_series = tr.rolling(window=min(len(tr), period), min_periods=1).mean()
+        val = float(atr_series.iloc[-1])
+        return val if val > 0 and not pd.isna(val) else 0.0
+    except Exception:
+        return 0.0
+
+
 def detect_opening_drive(
     symbol: str,
     df_5m: pd.DataFrame,
@@ -62,11 +86,30 @@ def detect_opening_drive(
         now_dt = now_dt.replace(tzinfo=IST)
     else:
         now_dt = now_dt.astimezone(IST)
+    clean_sym = canonical_alert_symbol(symbol)
+    is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+    is_heavyweight = clean_sym in (
+        "RELIANCE",
+        "HDFCBANK",
+        "ICICIBANK",
+        "INFY",
+        "TCS",
+        "SBIN",
+        "AXISBANK",
+        "KOTAKBANK",
+        "TATASTEEL",
+        "LT",
+        "BHARTIARTL",
+        "ITC",
+    )
 
     curr_t = now_dt.time()
     if not ignore_time_gate:
-        # Opening drive forms in first 30 mins (09:15:05 to 09:45 IST)
-        if curr_t < dtime(9, 15, 5) or curr_t > dtime(9, 45):
+        # Opening drive forms in first 30 mins:
+        # Indices: 09:15:05 to 09:45 IST
+        # Equities/Stocks: 09:17:00 to 09:45 IST (requires 2 minutes for uncrossing auction volatility to settle)
+        min_start_t = dtime(9, 15, 5) if is_index else dtime(9, 17, 0)
+        if curr_t < min_start_t or curr_t > dtime(9, 45):
             return None
 
     # Filter df to today's bars
@@ -89,23 +132,6 @@ def detect_opening_drive(
 
     if bar_open <= 0 or bar_range <= 0:
         return None
-
-    clean_sym = canonical_alert_symbol(symbol)
-    is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
-    is_heavyweight = clean_sym in (
-        "RELIANCE",
-        "HDFCBANK",
-        "ICICIBANK",
-        "INFY",
-        "TCS",
-        "SBIN",
-        "AXISBANK",
-        "KOTAKBANK",
-        "TATASTEEL",
-        "LT",
-        "BHARTIARTL",
-        "ITC",
-    )
 
     range_pct = (bar_range / bar_open) * 100.0
     # Mega-cap heavyweights and indices have lower percentage volatility than midcaps;
@@ -200,10 +226,31 @@ def detect_opening_drive(
     direction = "BULLISH" if is_bull_drive else "BEARISH"
     vol_desc = "Locomotives Aligned" if is_index else f"RVOL {rvol_val:.1f}x"
 
+    # ── Minimum Stop-Loss Distance Floor (1.2x ATR / 20.5 pts) ───────────
+    # Prevents Brownian noise micro-whipsaws on tight 1st 5-minute bar openings.
+    # Calibrated index floors: Nifty 20.5 pts, BankNifty 55.0 pts, FinNifty 25.0 pts, MidcpNifty 16.0 pts, Sensex 75.0 pts.
+    atr_5m = _calculate_5m_atr(df_5m)
+    atr_floor = round(1.20 * atr_5m, 2) if atr_5m > 0 else 0.0
+    index_min_floors = {
+        "NIFTY": 20.5,
+        "BANKNIFTY": 55.0,
+        "FINNIFTY": 25.0,
+        "MIDCPNIFTY": 16.0,
+        "SENSEX": 75.0,
+        "BANKEX": 75.0,
+    }
+    base_floor = index_min_floors.get(clean_sym, round(ltp * 0.0035, 2))
+    min_sl_floor = max(base_floor, atr_floor)
+
     # Stop Loss is strictly anchored to the opening drive extreme + 0.15% noise buffer
+    # with minimum distance floor of 1.2x ATR (20.5 pts for Nifty) enforced.
     if is_bull_drive:
-        sl_price = round(bar_low * 0.998, 2)
-        risk_pts = max(0.5, ltp - sl_price)
+        raw_sl = round(bar_low * 0.998, 2)
+        if (ltp - raw_sl) < min_sl_floor:
+            sl_price = round(ltp - min_sl_floor, 2)
+        else:
+            sl_price = raw_sl
+        risk_pts = max(min_sl_floor, ltp - sl_price)
         t1_price = round(ltp + 2.5 * risk_pts, 2)
         t2_price = round(ltp + 4.5 * risk_pts, 2)
         t3_price = round(ltp + 7.0 * risk_pts, 2)
@@ -215,8 +262,12 @@ def detect_opening_drive(
             f"Holding strictly above VWAP. NO CHASE above ₹{no_chase_lvl:,.1f}."
         )
     else:
-        sl_price = round(bar_high * 1.002, 2)
-        risk_pts = max(0.5, sl_price - ltp)
+        raw_sl = round(bar_high * 1.002, 2)
+        if (raw_sl - ltp) < min_sl_floor:
+            sl_price = round(ltp + min_sl_floor, 2)
+        else:
+            sl_price = raw_sl
+        risk_pts = max(min_sl_floor, sl_price - ltp)
         t1_price = round(ltp - 2.5 * risk_pts, 2)
         t2_price = round(ltp - 4.5 * risk_pts, 2)
         t3_price = round(ltp - 7.0 * risk_pts, 2)
@@ -233,101 +284,54 @@ def detect_opening_drive(
     rr_ratio = round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)
     rr_str = f"1:{rr_ratio:.1f}"
 
-    # Resolve Option Contract if available (F&O stocks or Indices)
-    opt_contract_sym = None
-    opt_ltp = None
-    opt_sl = None
-    opt_t1 = None
-    opt_t2 = None
-    opt_runner = None
-    opt_no_chase = None
-    opt_strike = None
-    opt_type = "CE" if is_bull_drive else "PE"
-    lot_sz = None
-
+    # ── Pro-Gap & Daily Reference Levels Integration ──────────────
+    gap_type = None
+    cpr_regime = None
+    confidence_score = 92
     try:
-        from market.options import get_options_chain
-        from engine.position_sizer import get_lot_size
+        from engine.daily_levels import DailyLevelsStore
 
-        lot_sz = get_lot_size(clean_sym)
-        if is_index or (lot_sz and lot_sz > 1):
-            raw_chain = get_options_chain(clean_sym)
-        else:
-            raw_chain = []
-        contracts = (
-            raw_chain.contracts
-            if hasattr(raw_chain, "contracts")
-            else (raw_chain if isinstance(raw_chain, list) else [])
-        )
-        if contracts:
-            matching = [
-                c
-                for c in contracts
-                if getattr(c, "option_type", "").upper() == opt_type
-                and getattr(c, "last_price", 0) > 0
-            ]
-            if matching:
-                matching.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - ltp))
-                chosen = matching[0]
-                opt_contract_sym = chosen.symbol
-                opt_ltp = float(chosen.last_price)
-                opt_strike = float(chosen.strike)
-                opt_expiry = getattr(chosen, "expiry", None)
-                opt_plan = None
-                try:
-                    from engine.trade_plan import calculate_option_execution_plan
+        store = DailyLevelsStore()
+        dl = store.get_levels(clean_sym, compute_if_missing=False)
+        if dl:
+            gap_type = (dl.pre_open or {}).get("gap_type")
+            cpr_regime = (dl.cpr or {}).get("regime")
+            if gap_type in ("PRO_GAP_UP", "PRO_GAP_DOWN"):
+                if (is_bull_drive and gap_type == "PRO_GAP_UP") or (
+                    is_bear_drive and gap_type == "PRO_GAP_DOWN"
+                ):
+                    confidence_score = 96
+            if cpr_regime and "NARROW" in cpr_regime:
+                confidence_score = max(confidence_score, 94)
+    except Exception as e_dl:
+        logger.debug(f"[OpeningDrive] Daily levels lookup error for {clean_sym}: {e_dl}")
 
-                    opt_plan = calculate_option_execution_plan(
-                        trade_plan=None,
-                        option_type=opt_type,
-                        strike=opt_strike,
-                        expiry=str(opt_expiry) if opt_expiry else "",
-                        option_ltp=opt_ltp,
-                        lot_size=lot_sz,
-                        spot=ltp,
-                        contract_symbol=opt_contract_sym,
-                    )
-                except Exception:
-                    opt_plan = None
+    # ── Option Resolution via Unified VIX-Aware Resolver ──────────
+    from engine.option_resolver import resolve_option_contract
 
-                if opt_plan:
-                    opt_sl = float(opt_plan["sl_premium"])
-                    opt_t1 = float(opt_plan["t1_premium"])
-                    opt_t2 = float(
-                        opt_plan.get("t2_premium")
-                        or round(opt_ltp * (1.32 if is_index else 1.42), 2)
-                    )
-                    opt_runner = float(
-                        opt_plan.get("t3_premium")
-                        or round(opt_ltp * (1.55 if is_index else 1.70), 2)
-                    )
-                    opt_no_chase = round(opt_ltp * 1.04, 2)
-                else:
-                    opt_sl = round(max(0.1, opt_ltp * (0.85 if is_index else 0.80)), 2)
-                    opt_risk = max(0.5, opt_ltp - opt_sl)
-                    opt_t1 = round(opt_ltp + (2.0 * opt_risk), 2)
-                    opt_t2 = round(opt_ltp + (3.5 * opt_risk), 2)
-                    opt_runner = round(opt_ltp + (5.5 * opt_risk), 2)
-                    opt_no_chase = round(opt_ltp * 1.04, 2)
-    except Exception as e:
-        logger.debug(f"[OpeningDrive] Option lookup failed for {clean_sym}: {e}")
+    resolved_opt = resolve_option_contract(
+        symbol=clean_sym,
+        spot=ltp,
+        direction=direction,
+        underlying_sl=sl_price,
+        underlying_target=t1_price,
+        prefer_options=is_index,
+    )
 
-    # Fallback option estimation for Indices if broker chain failed
-    if is_index and (not opt_contract_sym or not opt_ltp):
-        step = 100 if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX") else 50
-        opt_strike = round(ltp / step) * step
-        opt_contract_sym = f"{clean_sym} {int(opt_strike)} {opt_type}"
-        opt_ltp = round(max(25.0, ltp * 0.007), 1)
-        opt_sl = round(opt_ltp * 0.85, 1)
-        opt_risk = max(1.0, opt_ltp - opt_sl)
-        opt_t1 = round(opt_ltp + (2.0 * opt_risk), 1)
-        opt_t2 = round(opt_ltp + (3.5 * opt_risk), 1)
-        opt_runner = round(opt_ltp + (5.5 * opt_risk), 1)
-        opt_no_chase = round(opt_ltp * 1.04, 1)
+    has_opt = resolved_opt is not None and resolved_opt.entry_premium > 0
+    opt_contract_sym = resolved_opt.contract_symbol if has_opt else None
+    opt_ltp = resolved_opt.entry_premium if has_opt else None
+    opt_sl = resolved_opt.sl_premium if has_opt else None
+    opt_t1 = resolved_opt.t1_premium if has_opt else None
+    opt_t2 = resolved_opt.t2_premium if has_opt else None
+    opt_runner = resolved_opt.t3_premium if has_opt else None
+    opt_strike = resolved_opt.strike if has_opt else None
+    opt_type = resolved_opt.option_type if has_opt else ("CE" if is_bull_drive else "PE")
+    lot_sz = resolved_opt.lot_size if has_opt else 1
+    resolved_exp = resolved_opt.expiry if has_opt else None
+    opt_no_chase = round(opt_ltp * 1.04, 2) if has_opt else None
 
-    has_opt = bool(opt_contract_sym and opt_ltp and (is_index or opt_ltp > 0))
     resolved_no_chase = round(opt_no_chase if has_opt else no_chase_lvl, 2)
-
     action_str = f"BUY {opt_type}" if has_opt else ("BUY" if is_bull_drive else "SELL_SHORT")
     rec_entry = f"₹{opt_ltp:,.2f}" if has_opt else f"₹{ltp:,.1f}"
     rec_sl = f"₹{opt_sl:,.1f}" if has_opt else f"₹{sl_price:,.1f}"
@@ -351,10 +355,18 @@ def detect_opening_drive(
         "no_chase_boundary": f"₹{resolved_no_chase:,.1f}",
         "risk_reward": rr_str,
         "asymmetric_rr": f"1:{max(3.0, rr_ratio):.1f}",
+        "underlying_symbol": clean_sym,
         "underlying_spot": f"₹{ltp:,.1f}",
         "underlying_sl": f"₹{sl_price:,.1f}",
+        "spot_invalidation_anchor": f"₹{sl_price:,.1f}",
+        "tactical_sl": rec_sl if has_opt else None,
+        "structural_spot_sl": f"₹{sl_price:,.1f}" if has_opt else None,
+        "disaster_stop_floor": f"₹{round(opt_ltp * 0.68, 2):,.2f}" if has_opt else None,
         "underlying_target": f"₹{t1_price:,.1f}",
         "underlying_target_3": f"₹{t3_price:,.1f}",
+        "execution_style_mandate": (
+            resolved_opt.execution_style_mandate if has_opt else "STANDARD"
+        ),
         "opening_drive_bar": {
             "open": bar_open,
             "high": bar_high,
@@ -385,13 +397,51 @@ def detect_opening_drive(
             "t3_premium": opt_runner,
             "no_chase_boundary": opt_no_chase,
             "lot_size": lot_sz,
-            "expiry": opt_expiry if "opt_expiry" in locals() else None,
-            "expiry_date": opt_expiry if "opt_expiry" in locals() else None,
+            "expiry": resolved_exp,
+            "expiry_date": resolved_exp,
         }
+        if resolved_opt and resolved_opt.spread_details:
+            act_plan["hedged_spread"] = resolved_opt.spread_details
+            act_plan["strategy_type"] = resolved_opt.strategy_type
 
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
-    alert_seg = "FNO_INDEX" if is_index else ("FNO_STOCK" if lot_sz else "EQUITY")
-    resolved_exp = opt_expiry if (has_opt and "opt_expiry" in locals()) else None
+    alert_seg = "FNO_INDEX" if is_index else ("FNO_STOCK" if lot_sz > 1 else "EQUITY")
+
+    metrics_dict: dict[str, Any] = {
+        "setup": "OPENING_DRIVE",
+        "open_pattern": "OPEN_EQUALS_LOW" if is_bull_drive else "OPEN_EQUALS_HIGH",
+        "opening_range_pct": round(range_pct, 2),
+        "rvol": rvol_val,
+        "bar_open": bar_open,
+        "bar_high": bar_high,
+        "bar_low": bar_low,
+        "bar_close": bar_close,
+        "no_chase_boundary": resolved_no_chase,
+        "target_1": opt_t1 if has_opt else t1_price,
+        "target_2": opt_t2 if has_opt else t2_price,
+        "target_3": opt_runner if has_opt else t3_price,
+        # Synthetic Spot Stop Loss Anchors
+        "spot_invalidation_anchor": sl_price,
+        "underlying_sl": sl_price,
+        "underlying_symbol": clean_sym,
+        "underlying_spot": ltp,
+    }
+
+    if rvol_val >= 1.5:
+        metrics_dict["decoupler_status"] = "VERIFIED_DECOUPLER"
+
+    if has_opt and resolved_opt:
+        metrics_dict["strategy_type"] = resolved_opt.strategy_type
+        metrics_dict["vix_regime"] = resolved_opt.vix_regime
+        metrics_dict["india_vix"] = resolved_opt.vix_value
+        metrics_dict["execution_style_mandate"] = resolved_opt.execution_style_mandate
+        if resolved_opt.spread_details:
+            metrics_dict["hedged_spread"] = resolved_opt.spread_details
+
+    if gap_type:
+        metrics_dict["gap_type"] = gap_type
+    if cpr_regime:
+        metrics_dict["cpr_regime"] = cpr_regime
 
     return AutoAlert(
         alert_id=generate_alert_id(
@@ -418,23 +468,10 @@ def detect_opening_drive(
         underlying_spot=ltp,
         lot_size=lot_sz,
         segment=alert_seg,
-        confidence=92,  # Opening drive with volume is top-tier institutional setup
+        confidence=confidence_score,
         created_at=now_iso,
         is_live=True,
         environment="LIVE",
-        metrics={
-            "setup": "OPENING_DRIVE",
-            "open_pattern": "OPEN_EQUALS_LOW" if is_bull_drive else "OPEN_EQUALS_HIGH",
-            "opening_range_pct": round(range_pct, 2),
-            "rvol": rvol_val,
-            "bar_open": bar_open,
-            "bar_high": bar_high,
-            "bar_low": bar_low,
-            "bar_close": bar_close,
-            "no_chase_boundary": resolved_no_chase,
-            "target_1": opt_t1 if has_opt else t1_price,
-            "target_2": opt_t2 if has_opt else t2_price,
-            "target_3": opt_runner if has_opt else t3_price,
-        },
+        metrics=metrics_dict,
         actionable_plan=act_plan,
     )

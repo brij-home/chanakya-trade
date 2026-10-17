@@ -279,7 +279,7 @@ class BrokerAPI(ABC):
     # ── Market Data ───────────────────────────────────────────
 
     @abstractmethod
-    def get_quote(self, instruments: list[str]) -> dict[str, Quote]:
+    def get_quote(self, instruments: list[str], **kwargs: Any) -> dict[str, Quote]:
         """
         Return live quotes for a list of instruments.
         Instrument format: "EXCHANGE:SYMBOL" e.g. "NSE:RELIANCE"
@@ -316,6 +316,20 @@ class BrokerAPI(ABC):
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a pending order. Returns True on success."""
         ...
+
+    def modify_order(
+        self,
+        order_id: str,
+        price: Optional[float] = None,
+        qty: Optional[int] = None,
+        trigger_price: Optional[float] = None,
+        order_type: Optional[str] = None,
+    ) -> OrderResponse:
+        """
+        Modify an active pending/resting order on the broker.
+        Subclasses with order modification capabilities should override this.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support order modification")
 
     # ── Historical Data ────────────────────────────────────────
 

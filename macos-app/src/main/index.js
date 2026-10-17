@@ -64,7 +64,7 @@ async function bootstrapAndStart() {
 
   // Fast-path: If sidecar is ALREADY running on PORT (e.g. launched manually or background service), use it!
   try {
-    const isAlreadyAlive = await waitForReady(PORT, 1200)
+    const isAlreadyAlive = await waitForReady(PORT, 5000)
     if (isAlreadyAlive) {
       console.log(`[sidecar] Server already active on port ${PORT}`)
       _readyPort = PORT

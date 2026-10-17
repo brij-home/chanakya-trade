@@ -26,6 +26,10 @@ Output: ranked list of StrategyResult dataclasses.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.strategy")
+
 
 import os
 from dataclasses import dataclass
@@ -384,8 +388,8 @@ def get_atm_data(symbol: str, spot: float) -> tuple[float, float, float, int]:
         )
         if ce_prem and pe_prem:
             return ce_prem, pe_prem, atm, lot
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.strategy] Non-fatal exception suppressed: {e_suppressed}")
 
     # Fallback: approximate from spot and assumed 15% IV / 30 DTE
     import math
@@ -406,7 +410,7 @@ def _default_lot(symbol: str) -> int:
         ls = get_lot_size(symbol)
         if ls and ls > 1:
             return ls
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.strategy] Non-fatal exception suppressed: {e_suppressed}")
     lots = {"NIFTY": 65, "BANKNIFTY": 30, "FINNIFTY": 65, "MIDCPNIFTY": 120}
     return lots.get(symbol.upper(), 1)

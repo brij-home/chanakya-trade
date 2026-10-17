@@ -15,6 +15,8 @@ Main entry points:
 
 from __future__ import annotations
 
+import dataclasses
+import logging
 import math
 import re
 import threading
@@ -23,6 +25,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 # In-memory snapshot cache (5-minute TTL)
@@ -149,6 +153,10 @@ class FundamentalSnapshot:
     score: int = 0
     verdict: str = "NEUTRAL"
     summary: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        """Convert snapshot to dictionary for persistence and serialization."""
+        return dataclasses.asdict(self)
 
 
 # ── Screener.in fetch ────────────────────────────────────────
@@ -471,8 +479,8 @@ def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
                         f"Earnings on {next_earnings} — expect volatility",
                     )
                 )
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Payout ratio (59j) ────────────────────────────────────
     payout = parsed.get("payout_ratio")
@@ -622,21 +630,21 @@ def _extract_eps_acceleration(
                 r4 = float(q_inc.loc[rev_row].iloc[4])
                 if not _is_nan(r0) and not _is_nan(r4) and abs(r4) > 0:
                     rev_q1 = round(((r0 - r4) / abs(r4)) * 100.0, 1)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
 
     # Fallback to ticker.info keys if statement was unavailable or lacked 5 quarters
     if eps_q1 is None and info.get("earningsQuarterlyGrowth") is not None:
         try:
             eps_q1 = round(float(info["earningsQuarterlyGrowth"]) * 100.0, 1)
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
 
     if rev_q1 is None and info.get("revenueQuarterlyGrowth") is not None:
         try:
             rev_q1 = round(float(info["revenueQuarterlyGrowth"]) * 100.0, 1)
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
 
     eps_acc = (eps_q1 - eps_q2) if (eps_q1 is not None and eps_q2 is not None) else None
     sepa = bool(
@@ -899,8 +907,8 @@ def _fetch_yfinance(symbol: str, fast: bool = False) -> dict:
                             if int_exp and not _is_nan(int_exp) and int_exp > 0:
                                 interest_coverage_computed = round(ebit / int_exp, 1)
                             break
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
 
         roe_final = roe_computed or (round(roe_raw * 100, 1) if roe_raw else None)
         cr = locals().get("current_ratio_computed") or info.get("currentRatio")
@@ -923,8 +931,8 @@ def _fetch_yfinance(symbol: str, fast: bool = False) -> dict:
                 fcf_raw = cf.loc["Free Cash Flow"].iloc[0]
                 if fcf_raw and not _is_nan(fcf_raw):
                     fcf = round(fcf_raw / 1e7, 1)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
 
         analyst_count = info.get("numberOfAnalystOpinions")
         analyst_rating = info.get("recommendationKey")
@@ -953,8 +961,8 @@ def _fetch_yfinance(symbol: str, fast: bool = False) -> dict:
                         entry["profit_cr"] = round(net_p / 1e7, 1)
                     if len(entry) > 1:
                         quarterly.append(entry)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
 
         res = {
             "name": info.get("longName") or info.get("shortName") or symbol,
@@ -1050,8 +1058,8 @@ def _extract_earnings_date(ticker) -> Optional[str]:
             if isinstance(dates, list) and dates:
                 return str(dates[0])
             return str(dates) if dates else None
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
     return None
 
 
@@ -1112,8 +1120,10 @@ def _parse_shareholding_xbrl(xbrl_text: str, quarter: str = "") -> dict:
         if tag == "ShareholdingAsAPercentageOfTotalNumberOfShares" and ctx in context_map:
             try:
                 result[context_map[ctx]] = round(float(elem.text) * 100, 2)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if tag == "WhetherAnySharesHeldByPromotersAreEncumberedUnderPledged" and ctx == "MainI":
             result["pledged"] = elem.text.lower() == "true" if elem.text else False
@@ -1257,8 +1267,8 @@ def analyse(symbol: str, fast: bool = False, **_kwargs) -> FundamentalSnapshot:
             with _fund_cache_lock:
                 _fund_cache[sym_upper] = (now_ts, snap)
             return snap
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
 
     # Tier 3: Persistent SQLite analysis_cache (24-hour TTL)
     cache = _get_analysis_cache()
@@ -1270,8 +1280,10 @@ def analyse(symbol: str, fast: bool = False, **_kwargs) -> FundamentalSnapshot:
                 with _fund_cache_lock:
                     _fund_cache[sym_upper] = (now_ts, snap)
                 return snap
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
     parsed = None
 
@@ -1284,8 +1296,8 @@ def analyse(symbol: str, fast: bool = False, **_kwargs) -> FundamentalSnapshot:
         try:
             raw = _fetch_screener(symbol)
             parsed = _parse_screener(raw)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
 
         # 2. yfinance — either primary source or supplement for missing Screener fields
         yf_data = _fetch_yfinance(symbol, fast=False)
@@ -1491,15 +1503,15 @@ def analyse(symbol: str, fast: bool = False, **_kwargs) -> FundamentalSnapshot:
             cache.save_macro(
                 f"fund_snap_{sym_upper}", _snapshot_to_dict(snapshot), ttl_minutes=1440
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
 
     try:
         from engine.eod_store import save_fundamentals
 
         save_fundamentals(sym_upper, _snapshot_to_dict(snapshot))
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.fundamental] Non-fatal exception suppressed: {e_suppressed}")
 
     return snapshot
 
@@ -1762,3 +1774,16 @@ def score_fundamentals(symbol: str) -> FundamentalsScore:
         data_quality=data_quality,
         quarter=quarter,
     )
+
+
+def get_fundamental_snapshot(symbol: str, fast: bool = True) -> Optional[dict[str, Any]]:
+    """Fetch fundamental analysis for symbol and return as a clean dictionary for storage/caching."""
+    try:
+        snap = analyse(symbol, fast=fast)
+        if snap:
+            if hasattr(snap, "as_dict"):
+                return snap.as_dict()
+            return dataclasses.asdict(snap)
+    except Exception as e:
+        logger.warning(f"[fundamental] Failed to get fundamental snapshot for {symbol}: {e}")
+    return None

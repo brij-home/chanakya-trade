@@ -116,8 +116,10 @@ class SQLiteConnectionPool:
                 if self._closed:
                     try:
                         conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.db_pool] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 else:
                     try:
                         # Return to pool
@@ -126,8 +128,10 @@ class SQLiteConnectionPool:
                         # Safety fallback if pool is full
                         try:
                             conn.close()
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.db_pool] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         with self._lock:
                             self._created = max(0, self._created - 1)
 
@@ -139,6 +143,6 @@ class SQLiteConnectionPool:
                 try:
                     conn = self._pool.get_nowait()
                     conn.close()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[engine.db_pool] Non-fatal exception suppressed: {e_suppressed}")
             self._created = 0

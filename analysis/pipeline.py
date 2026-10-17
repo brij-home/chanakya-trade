@@ -14,6 +14,10 @@ Key properties:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.pipeline")
+
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -264,8 +268,10 @@ def _run_parallel(
                             "error": report.error,
                         }
                     )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[analysis.pipeline] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
     return reports
 
@@ -307,6 +313,6 @@ def _run_sequential(
                         "error": r.error,
                     }
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[analysis.pipeline] Non-fatal exception suppressed: {e_suppressed}")
     return reports

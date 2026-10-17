@@ -13,6 +13,10 @@ Returns data in the institutional OptionsContract schema with real bids, asks, d
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.nse_scraper")
+
 
 import logging
 import threading
@@ -142,13 +146,13 @@ def _nse_expiry_to_iso(nse_date: str) -> str:
     try:
         # Standard NSE text format: 08-Sep-2026
         return datetime.strptime(nse_date, "%d-%b-%Y").strftime("%Y-%m-%d")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.nse_scraper] Non-fatal exception suppressed: {e_suppressed}")
     try:
         # Alternative numeric format: 08-09-2026
         return datetime.strptime(nse_date, "%d-%m-%Y").strftime("%Y-%m-%d")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.nse_scraper] Non-fatal exception suppressed: {e_suppressed}")
     return nse_date
 
 

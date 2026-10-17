@@ -71,20 +71,20 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
 from rich.console import Console
 from dotenv import load_dotenv
 
 from agent.prompts import build_system_prompt
 from agent.tools import build_registry, ToolRegistry
-from config.credentials import get_credential, load_all
+from config.credentials import get_credential, load_all, _is_placeholder
 
 # Ensure .env and OS keychain credentials are fully loaded
 if not os.environ.get("CHANAKYA_TESTING"):
@@ -98,12 +98,10 @@ console = Console(legacy_windows=False)
 
 ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-7"
 OPENAI_DEFAULT_MODEL = "gpt-4o"
-GEMINI_DEFAULT_MODEL = "gemini-3.8-flash,gemini-3.7-flash"
+GEMINI_DEFAULT_MODEL = "gemini-3.6-flash,gemini-3.5-flash-lite"
 OLLAMA_DEFAULT_MODEL = "llama3.3"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
-GROQ_DEFAULT_MODEL = (
-    "qwen/qwen3.8-27b,openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.6-27b,groq/compound-mini"
-)
+GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b,openai/gpt-oss-120b,openai/gpt-oss-20b"
 
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
 OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-chat"
@@ -206,6 +204,13 @@ def _retry_api_call(fn, *args, max_retries: int = 2, initial_delay: float = 0.5,
                     "quota exceeded",
                 )
             )
+            is_rate_limit = any(
+                term in err_str
+                for term in ("429", "resource_exhausted", "rate limit", "tpm", "quota exceeded")
+            )
+            # On rate limits (429/TPM), fail fast so multi-key pool rotates to next key immediately
+            if is_rate_limit:
+                raise last_err
             if is_transient and attempt < max_retries - 1:
                 retry_match = re.search(r"retry in\s+([\d\.]+)\s*s", err_str) or re.search(
                     r"retrydelay['\":\s]+(\d+)", err_str
@@ -316,8 +321,8 @@ class CascadingLLMProvider(LLMProvider):
                         details={"from_provider": prov.provider_name},
                         severity="INFO",
                     )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
                 continue
 
         if last_exc:
@@ -553,6 +558,10 @@ class OpenAIProvider(LLMProvider):
             self._pool_lock = threading.Lock()
             self._client = self._clients[0]
             self._base_url = resolved_base
+            self._last_call_time: float = 0.0
+            self._min_interval: float = (
+                0.25  # 250ms spacing between outbound calls to prevent burst rate limits
+            )
         except ImportError:
             raise RuntimeError(
                 "openai package not installed. Run: pip install openai\n"
@@ -601,7 +610,49 @@ class OpenAIProvider(LLMProvider):
             )
             return earliest_idx, self._clients[earliest_idx]
 
-    def _mark_key_cooldown(self, key_idx: int, cooldown_seconds: float = 45.0) -> None:
+    def _pace_request(self) -> None:
+        """Enforce minimal leaky-bucket spacing between outbound calls to prevent burst spikes."""
+        with self._pool_lock:
+            now = time.time()
+            elapsed = now - self._last_call_time
+            if elapsed < self._min_interval:
+                time.sleep(self._min_interval - elapsed)
+            self._last_call_time = time.time()
+
+    def _parse_retry_after(self, err_str: str, default: float = 6.0) -> float:
+        """Extract exact reset duration from rate-limit response (e.g. '134ms' or '1.488s') instead of rigid 45s."""
+        import re
+
+        ms_m = re.search(
+            r"(?:try again in|retry in|reset in|retrydelay['\":\s]+)\s*([0-9\.]+)\s*ms",
+            err_str,
+            re.IGNORECASE,
+        )
+        if ms_m:
+            try:
+                return max(0.4, float(ms_m.group(1)) / 1000.0 + 0.2)
+            except ValueError as e_suppressed:
+                logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
+
+        s_m = re.search(
+            r"(?:try again in|retry in|retry after|reset in)\s*([0-9\.]+)\s*(?:s|sec|seconds)?",
+            err_str,
+            re.IGNORECASE,
+        )
+        if s_m:
+            try:
+                val = float(s_m.group(1))
+                if val > 0:
+                    return max(0.5, min(val + 0.3, 30.0))
+            except ValueError as e_suppressed:
+                logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
+
+        if any(term in err_str for term in ("daily", "per day", "rpd", "quota exceeded")):
+            return 60.0
+
+        return default
+
+    def _mark_key_cooldown(self, key_idx: int, cooldown_seconds: float = 6.0) -> None:
         """Mark a specific key index as temporarily in cooldown."""
         with self._pool_lock:
             self._client_cooldowns[key_idx] = time.time() + cooldown_seconds
@@ -725,7 +776,8 @@ class OpenAIProvider(LLMProvider):
                         kwargs["max_tokens"] = max_tokens
                     if extra_body:
                         kwargs["extra_body"] = extra_body
-                    r = _retry_api_call(client.chat.completions.create, **kwargs)
+                    self._pace_request()
+                    r = client.chat.completions.create(**kwargs)
                     choice = r.choices[0]
                     if getattr(choice, "finish_reason", None) == "length":
                         logger.warning(
@@ -745,6 +797,38 @@ class OpenAIProvider(LLMProvider):
                     return msg.content or "", tcs
                 except Exception as e:
                     err_str = str(e).lower()
+                    # If request payload / context length exceeds model limit, fail over immediately to next model candidate
+                    if any(
+                        s in err_str
+                        for s in (
+                            "413",
+                            "request too large",
+                            "payload too large",
+                            "context length",
+                            "maximum context length",
+                            "input tokens per minute",
+                            "itpm",
+                            "on tokens per minute (tpm): limit",
+                        )
+                    ):
+                        try:
+                            from engine.telemetry import EVENT_LLM_FAILOVER, record_event
+
+                            record_event(
+                                event_type=EVENT_LLM_FAILOVER,
+                                component="openai_provider",
+                                action_taken=f"Context ceiling/TPM exceeded for {current_model}; failing over to next candidate model",
+                                reason=err_str[:120],
+                                details={"failed_model": current_model, "base_url": self._base_url},
+                                severity="WARNING",
+                            )
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+                        last_exc = e
+                        break
+
                     if any(
                         r in err_str
                         for r in (
@@ -757,20 +841,27 @@ class OpenAIProvider(LLMProvider):
                             "quota",
                         )
                     ):
-                        self._mark_key_cooldown(client_idx, cooldown_seconds=45.0)
+                        cooldown_sec = self._parse_retry_after(err_str, default=6.0)
+                        self._mark_key_cooldown(client_idx, cooldown_seconds=cooldown_sec)
                         try:
                             from engine.telemetry import record_event, EVENT_LLM_COOLDOWN
 
                             record_event(
                                 event_type=EVENT_LLM_COOLDOWN,
                                 component="openai_provider",
-                                action_taken=f"Marked API key #{client_idx + 1} on 45s cooldown",
+                                action_taken=f"Marked API key #{client_idx + 1} on {cooldown_sec:.1f}s cooldown",
                                 reason=err_str[:120],
-                                details={"model": current_model, "key_index": client_idx},
-                                severity="WARNING",
+                                details={
+                                    "model": current_model,
+                                    "key_index": client_idx,
+                                    "cooldown_seconds": cooldown_sec,
+                                },
+                                severity="INFO" if self.is_pool_available() else "WARNING",
                             )
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         if self.is_pool_available():
                             continue
                         last_exc = e
@@ -798,8 +889,10 @@ class OpenAIProvider(LLMProvider):
                                 details={"failed_model": current_model, "base_url": self._base_url},
                                 severity="WARNING",
                             )
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         last_exc = e
                         break
 
@@ -810,10 +903,7 @@ class OpenAIProvider(LLMProvider):
                             "tool_call",
                             "parallel tool",
                             "tools at once",
-                            "400",
-                            "413",
                             "not supported",
-                            "request too large",
                         )
                     ):
                         try:
@@ -883,7 +973,8 @@ class OpenAIProvider(LLMProvider):
                         kwargs["max_tokens"] = max_tokens
                     if extra_body:
                         kwargs["extra_body"] = extra_body
-                    stream = _retry_api_call(client.chat.completions.create, **kwargs)
+                    self._pace_request()
+                    stream = client.chat.completions.create(**kwargs)
                     text = ""
                     tc_acc: dict[int, dict] = {}
                     finish_reason = None
@@ -929,6 +1020,38 @@ class OpenAIProvider(LLMProvider):
                     return text, tcs
                 except Exception as e:
                     err_str = str(e).lower()
+                    # If request payload / context length exceeds model limit, fail over immediately to next model candidate
+                    if any(
+                        s in err_str
+                        for s in (
+                            "413",
+                            "request too large",
+                            "payload too large",
+                            "context length",
+                            "maximum context length",
+                            "input tokens per minute",
+                            "itpm",
+                            "on tokens per minute (tpm): limit",
+                        )
+                    ):
+                        try:
+                            from engine.telemetry import EVENT_LLM_FAILOVER, record_event
+
+                            record_event(
+                                event_type=EVENT_LLM_FAILOVER,
+                                component="openai_provider",
+                                action_taken=f"Context ceiling/TPM exceeded for {current_model}; failing over to next candidate model",
+                                reason=err_str[:120],
+                                details={"failed_model": current_model, "base_url": self._base_url},
+                                severity="WARNING",
+                            )
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+                        last_exc = e
+                        break
+
                     if any(
                         r in err_str
                         for r in (
@@ -941,20 +1064,27 @@ class OpenAIProvider(LLMProvider):
                             "quota",
                         )
                     ):
-                        self._mark_key_cooldown(client_idx, cooldown_seconds=45.0)
+                        cooldown_sec = self._parse_retry_after(err_str, default=6.0)
+                        self._mark_key_cooldown(client_idx, cooldown_seconds=cooldown_sec)
                         try:
                             from engine.telemetry import record_event, EVENT_LLM_COOLDOWN
 
                             record_event(
                                 event_type=EVENT_LLM_COOLDOWN,
                                 component="openai_provider",
-                                action_taken=f"Marked API key #{client_idx + 1} on 45s cooldown",
+                                action_taken=f"Marked API key #{client_idx + 1} on {cooldown_sec:.1f}s cooldown",
                                 reason=err_str[:120],
-                                details={"model": current_model, "key_index": client_idx},
-                                severity="WARNING",
+                                details={
+                                    "model": current_model,
+                                    "key_index": client_idx,
+                                    "cooldown_seconds": cooldown_sec,
+                                },
+                                severity="INFO" if self.is_pool_available() else "WARNING",
                             )
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         if self.is_pool_available():
                             continue
                         last_exc = e
@@ -982,8 +1112,10 @@ class OpenAIProvider(LLMProvider):
                                 details={"failed_model": current_model, "base_url": self._base_url},
                                 severity="WARNING",
                             )
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         last_exc = e
                         break
 
@@ -994,10 +1126,7 @@ class OpenAIProvider(LLMProvider):
                             "tool_call",
                             "parallel tool",
                             "tools at once",
-                            "400",
-                            "413",
                             "not supported",
-                            "request too large",
                         )
                     ):
                         try:
@@ -1695,8 +1824,8 @@ class ClaudeCLIProvider(LLMProvider):
                     try:
                         proc.kill()
                         proc.wait(timeout=2)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         except FileNotFoundError:
             return (
@@ -2058,8 +2187,8 @@ class OpenAISubscriptionProvider(LLMProvider):
                         parts = chunk.get("message", {}).get("content", {}).get("parts", [])
                         if parts:
                             text = parts[-1]
-                    except json.JSONDecodeError:
-                        pass
+                    except json.JSONDecodeError as e_suppressed:
+                        logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
             console.print(text, highlight=False)
             return text
@@ -2072,6 +2201,73 @@ class OpenAISubscriptionProvider(LLMProvider):
 
 # ── Gemini provider (API key) ──────────────────────────────────
 
+_cached_gemini_models: list[str] = []
+_cached_gemini_models_time: float = 0.0
+_GEMINI_MODELS_CACHE_TTL = 3600.0 * 6  # 6-hour in-memory cache
+
+
+def discover_available_gemini_models(api_key: str | None = None) -> list[str]:
+    """
+    Dynamically discover active Gemini models from Google's live Generative Language API.
+    Caches results for 6 hours so overhead is negligible.
+    Prioritizes active modern flash / fast models:
+      1. gemini-3.6-flash, gemini-3.5-flash-lite, gemini-3.5-flash
+      2. gemini-flash-latest, gemini-flash-lite-latest
+      3. Other discovered active flash models
+    Falls back gracefully to modern defaults if offline or isolated.
+    """
+    global _cached_gemini_models, _cached_gemini_models_time
+    now = time.time()
+    if _cached_gemini_models and (now - _cached_gemini_models_time) < _GEMINI_MODELS_CACHE_TTL:
+        return list(_cached_gemini_models)
+
+    raw_key = (
+        api_key or os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+    )
+    key = raw_key.split(",")[0].strip() if raw_key else ""
+    if not key or _is_placeholder(key):
+        return ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"]
+
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=key)
+        discovered = []
+        for m in client.models.list():
+            actions = getattr(m, "supported_actions", []) or []
+            if "generateContent" in actions:
+                name = m.name.replace("models/", "").strip()
+                discovered.append(name)
+
+        if discovered:
+            preferred_order = [
+                "gemini-3.6-flash",
+                "gemini-3.5-flash-lite",
+                "gemini-3.5-flash",
+                "gemini-flash-latest",
+                "gemini-flash-lite-latest",
+                "gemini-3.7-flash",
+                "gemini-3.8-flash",
+            ]
+            ranked = [p for p in preferred_order if p in discovered]
+            for d in discovered:
+                if "flash" in d and d not in ranked and "tts" not in d and "image" not in d:
+                    ranked.append(d)
+            if ranked:
+                _cached_gemini_models = ranked
+                _cached_gemini_models_time = now
+                logger.info(
+                    f"[GeminiProvider] Dynamically discovered {len(ranked)} active Gemini models: {ranked[:4]}"
+                )
+                return list(ranked)
+    except Exception as e:
+        logger.debug(f"[GeminiProvider] Dynamic model discovery failed: {e}; using modern defaults")
+
+    fallback = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"]
+    _cached_gemini_models = fallback
+    _cached_gemini_models_time = now
+    return list(fallback)
+
 
 class GeminiProvider(LLMProvider):
     """
@@ -2079,9 +2275,9 @@ class GeminiProvider(LLMProvider):
 
     Access modes:
       - Free / paid API key from Google AI Studio (aistudio.google.com)
-      - GEMINI_API_KEY in .env
+      - GEMINI_API_KEY in .env (supports multiple comma-separated keys for pool rotation)
 
-    Models: gemini-3.8-flash, gemini-3.7-flash
+    Models: gemini-3.6-flash, gemini-3.5-flash-lite, dynamically evaluated from live API.
 
     Tool calling: uses Gemini's native function calling protocol.
 
@@ -2126,6 +2322,8 @@ class GeminiProvider(LLMProvider):
             self._client_cooldowns: dict[int, float] = {}
             self._pool_lock = threading.Lock()
             self._tools_schema = self._build_gemini_tools()
+            self._last_call_time: float = 0.0
+            self._min_interval: float = 0.5  # 500ms spacing between outbound calls
         except ImportError:
             raise RuntimeError(
                 "google-genai package not installed.\n"
@@ -2172,7 +2370,49 @@ class GeminiProvider(LLMProvider):
             )
             return earliest_idx, self._clients[earliest_idx]
 
-    def _mark_key_cooldown(self, key_idx: int, cooldown_seconds: float = 45.0) -> None:
+    def _pace_request(self) -> None:
+        """Enforce minimal pacing between Gemini outbound calls."""
+        with self._pool_lock:
+            now = time.time()
+            elapsed = now - self._last_call_time
+            if elapsed < self._min_interval:
+                time.sleep(self._min_interval - elapsed)
+            self._last_call_time = time.time()
+
+    def _parse_retry_after(self, err_str: str, default: float = 8.0) -> float:
+        """Extract exact reset duration from Gemini rate-limit response."""
+        import re
+
+        ms_m = re.search(
+            r"(?:try again in|retry in|reset in|retrydelay['\":\s]+)\s*([0-9\.]+)\s*ms",
+            err_str,
+            re.IGNORECASE,
+        )
+        if ms_m:
+            try:
+                return max(0.4, float(ms_m.group(1)) / 1000.0 + 0.2)
+            except ValueError as e_suppressed:
+                logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
+
+        s_m = re.search(
+            r"(?:try again in|retry in|retry after|reset in)\s*([0-9\.]+)\s*(?:s|sec|seconds)?",
+            err_str,
+            re.IGNORECASE,
+        )
+        if s_m:
+            try:
+                val = float(s_m.group(1))
+                if val > 0:
+                    return max(1.0, min(val + 0.5, 30.0))
+            except ValueError as e_suppressed:
+                logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
+
+        if any(term in err_str for term in ("daily", "per day", "rpd", "quota exceeded")):
+            return 60.0
+
+        return default
+
+    def _mark_key_cooldown(self, key_idx: int, cooldown_seconds: float = 8.0) -> None:
         """Mark a specific key index as temporarily in cooldown."""
         with self._pool_lock:
             self._client_cooldowns[key_idx] = time.time() + cooldown_seconds
@@ -2228,17 +2468,15 @@ class GeminiProvider(LLMProvider):
         chat_session = None
 
         configured_models = [m.strip() for m in active_model_str.split(",") if m.strip()]
+        discovered_live_models = discover_available_gemini_models(
+            api_key=self._api_keys[0] if getattr(self, "_api_keys", None) else None
+        )
         candidate_models = []
-        for m in configured_models + ["gemini-3.8-flash", "gemini-3.7-flash"]:
-            if m not in candidate_models and m not in (
-                "gemini-2.5-flash",
-                "gemini-2.0-flash",
-                "gemini-1.5-flash",
-                "gemini-1.5-flash-latest",
-            ):
+        for m in configured_models + discovered_live_models:
+            if m not in candidate_models and m:
                 candidate_models.append(m)
         if not candidate_models:
-            candidate_models = ["gemini-3.8-flash", "gemini-3.7-flash"]
+            candidate_models = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"]
         active_model = candidate_models[0]
 
         def _create_session(client_obj, model_name):
@@ -2266,6 +2504,7 @@ class GeminiProvider(LLMProvider):
 
         for _ in range(MAX_TOOL_ROUNDS):
             try:
+                self._pace_request()
                 response = _retry_api_call(chat_session.send_message, current_input)
             except Exception as e:
                 err_str = str(e).lower()
@@ -2306,7 +2545,8 @@ class GeminiProvider(LLMProvider):
                     )
                 )
                 if is_fallback_candidate:
-                    self._mark_key_cooldown(client_idx, cooldown_seconds=45.0)
+                    cooldown_sec = self._parse_retry_after(err_str, default=8.0)
+                    self._mark_key_cooldown(client_idx, cooldown_seconds=cooldown_sec)
 
                     try:
                         from engine.telemetry import (
@@ -2318,13 +2558,17 @@ class GeminiProvider(LLMProvider):
                         record_event(
                             event_type=EVENT_LLM_COOLDOWN,
                             component="gemini_provider",
-                            action_taken=f"Marked API key #{client_idx + 1} on 45s cooldown",
+                            action_taken=f"Marked API key #{client_idx + 1} on {cooldown_sec:.1f}s cooldown",
                             reason=err_str[:120],
-                            details={"model": active_model, "key_index": client_idx},
-                            severity="WARNING",
+                            details={
+                                "model": active_model,
+                                "key_index": client_idx,
+                                "cooldown_seconds": cooldown_sec,
+                            },
+                            severity="INFO" if self.is_pool_available() else "WARNING",
                         )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
                     # 1. Try other keys in the pool first for the current model
                     key_recovered = False
@@ -2349,11 +2593,13 @@ class GeminiProvider(LLMProvider):
                                         details={"new_key_index": next_idx, "model": active_model},
                                         severity="INFO",
                                     )
-                                except Exception:
-                                    pass
+                                except Exception as e_suppressed:
+                                    logger.debug(
+                                        f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                                    )
                                 break
                             except Exception:
-                                self._mark_key_cooldown(next_idx, cooldown_seconds=45.0)
+                                self._mark_key_cooldown(next_idx, cooldown_seconds=cooldown_sec)
                                 continue
 
                     if key_recovered:
@@ -2388,8 +2634,10 @@ class GeminiProvider(LLMProvider):
                                             },
                                             severity="WARNING",
                                         )
-                                    except Exception:
-                                        pass
+                                    except Exception as e_suppressed:
+                                        logger.debug(
+                                            f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                                        )
                                     break
                                 except Exception:
                                     continue
@@ -2633,8 +2881,6 @@ def _build_custom_openai_provider(
             "qwen/qwen3.8-27b",
             "openai/gpt-oss-120b",
             "openai/gpt-oss-20b",
-            "qwen/qwen3.6-27b",
-            "groq/compound-mini",
         ]
         models_list = [m.strip() for m in mdl.split(",") if m.strip()]
         for fb in fallbacks:
@@ -2809,8 +3055,8 @@ def _clear_saved_provider() -> None:
         from config.credentials import _kr_set
 
         _kr_set("AI_PROVIDER", "")  # blank it — falsy, so load_all() won't set os.environ
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
     os.environ.pop("AI_PROVIDER", None)
 
 
@@ -3083,8 +3329,8 @@ class TradingAgent:
                 f"\n[dim]🤖  AI: {self._provider.provider_name}[/dim]",
                 highlight=False,
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Public API ────────────────────────────────────────────
 
@@ -3098,8 +3344,8 @@ class TradingAgent:
         try:
             console.print()
             console.rule("[bold cyan]Agent[/bold cyan]", style="cyan dim")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             response = self._provider.chat(
@@ -3122,8 +3368,8 @@ class TradingAgent:
                     reason=str(exc)[:120],
                     severity="WARNING",
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
             response = self._fallback_chat(user_message, str(exc))
 
         self._history.append(_assistant_msg(response))
@@ -3131,8 +3377,8 @@ class TradingAgent:
         try:
             console.rule(style="cyan dim")
             console.print()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         return response
 
@@ -3320,8 +3566,8 @@ class TradingAgent:
             if model:
                 _kr_set("AI_MODEL", model)
                 os.environ["AI_MODEL"] = model
-        except Exception:
-            pass  # keychain unavailable — in-session switch still worked
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         console.print(
             f"[green]✓ Switched to {self._provider.provider_name}[/green]"
@@ -3492,8 +3738,8 @@ def _print_tool_call(name: str, args: dict) -> None:
                 f"  [dim cyan]>  {name}({args_str})[/dim cyan]",
                 highlight=False,
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
 
 # ── Dual LLM routing helpers (#91) ────────────────────────────
@@ -3529,7 +3775,13 @@ def get_deep_provider(
         )
         or _default_model(deep_prov)
     )
-    return get_provider(provider=deep_prov, model=deep_model, registry=registry)
+    primary = get_provider(provider=deep_prov, model=deep_model, registry=registry)
+    reg = registry or build_registry()
+    system = build_system_prompt()
+    fallbacks = _build_fallback_fast_providers(deep_prov, reg, system)
+    if fallbacks:
+        return CascadingLLMProvider([primary] + fallbacks)
+    return primary
 
 
 def _build_fallback_fast_providers(
@@ -3553,11 +3805,11 @@ def _build_fallback_fast_providers(
             gem_model = (
                 os.environ.get("GEMINI_FAST_MODEL")
                 or os.environ.get("GEMINI_MODEL")
-                or "gemini-3.8-flash,gemini-3.7-flash"
+                or GEMINI_DEFAULT_MODEL
             )
             fallbacks.append(GeminiProvider(gem_model, registry, system))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
     # NVIDIA NIM fallback
     if exclude_prov != PROVIDER_NVIDIA and _has("NVIDIA_API_KEY"):
@@ -3565,8 +3817,8 @@ def _build_fallback_fast_providers(
             p = _build_custom_openai_provider(PROVIDER_NVIDIA, None, registry, system)
             if p:
                 fallbacks.append(p)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
     # OpenRouter fallback
     if exclude_prov != PROVIDER_OPENROUTER and _has("OPENROUTER_API_KEY"):
@@ -3574,8 +3826,8 @@ def _build_fallback_fast_providers(
             p = _build_custom_openai_provider(PROVIDER_OPENROUTER, None, registry, system)
             if p:
                 fallbacks.append(p)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
     # Groq fallback if primary was something else
     if exclude_prov != PROVIDER_GROQ and _has("GROQ_API_KEY"):
@@ -3583,8 +3835,8 @@ def _build_fallback_fast_providers(
             p = _build_custom_openai_provider(PROVIDER_GROQ, None, registry, system)
             if p:
                 fallbacks.append(p)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
     return fallbacks
 

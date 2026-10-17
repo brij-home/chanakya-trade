@@ -9,6 +9,10 @@ Dolly Khanna, Porinju Veliyath) and Tier-1 Institutional Mutual Funds / FIIs.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.whale_tracker")
+
 
 from datetime import datetime, timezone
 from typing import Any
@@ -209,8 +213,8 @@ def get_whale_flows(
         dyn_deals = fetch_nse_bulk_block_deals()
         for d in dyn_deals:
             all_deals.append(d.to_dict())
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.whale_tracker] Non-fatal exception suppressed: {e_suppressed}")
 
     # Attempt dynamic quote enrichment for whale symbols
     live_quotes: dict[str, float] = {}

@@ -29,6 +29,10 @@ Launch:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("ui.app")
+
 
 import os
 from datetime import datetime
@@ -301,8 +305,8 @@ class TradingTUI(App):
             from agent.core import get_agent
 
             get_agent()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[ui.app] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Input handling ────────────────────────────────────────
 
@@ -422,8 +426,8 @@ class TradingTUI(App):
             self.query_one("#portfolio-widget", PortfolioWidget).refresh_data()
             self.query_one("#forensic-widget", ForensicWidget).refresh_data("RELIANCE")
             self.query_one("#risk-widget", RiskMeterWidget).refresh_data()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[ui.app] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Actions (keyboard shortcuts) ──────────────────────────
 

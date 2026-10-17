@@ -227,13 +227,17 @@ def parse_contract_announcement_text(
     if months_match:
         try:
             exec_months = int(months_match.group(1))
-        except ValueError:
-            pass
+        except ValueError as e_suppressed:
+            logger.debug(
+                f"[analysis.order_book_catalyst] Non-fatal exception suppressed: {e_suppressed}"
+            )
     elif years_match:
         try:
             exec_months = int(years_match.group(1)) * 12
-        except ValueError:
-            pass
+        except ValueError as e_suppressed:
+            logger.debug(
+                f"[analysis.order_book_catalyst] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # 4. Compute Order Impact Ratio
     rev = annual_revenue_cr or 1000.0

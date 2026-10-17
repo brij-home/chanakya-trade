@@ -15,6 +15,10 @@ simultaneously connected brokers (e.g. Zerodha + Groww).
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.portfolio")
+
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
@@ -289,8 +293,8 @@ def _build_position_rows(
                 delta = g.delta * p.quantity
                 theta = g.theta * p.quantity
                 vega = g.vega * p.quantity
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.portfolio] Non-fatal exception suppressed: {e_suppressed}")
 
         rows.append(
             PositionRow(
@@ -695,8 +699,8 @@ def audit_portfolio_health(
                     recs.append(
                         f"Forensic Red Flag on {sym}: {', '.join(flags_list)}. Review fundamental health or consider exit."
                     )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.portfolio] Non-fatal exception suppressed: {e_suppressed}")
 
     if not recs:
         recs.append(

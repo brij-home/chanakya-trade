@@ -17,6 +17,10 @@ Data is synced from trade_memory on demand (lazy, no background threads).
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.search")
+
 
 import sqlite3
 import threading
@@ -75,8 +79,8 @@ class AnalysisSearch:
                 try:
                     conn.execute("PRAGMA journal_mode=WAL")
                     conn.execute("PRAGMA synchronous=NORMAL")
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[engine.search] Non-fatal exception suppressed: {e_suppressed}")
                 self._conn = conn
                 self._init_schema()
             return self._conn
@@ -87,8 +91,8 @@ class AnalysisSearch:
             if self._conn is not None:
                 try:
                     self._conn.close()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[engine.search] Non-fatal exception suppressed: {e_suppressed}")
                 self._conn = None
 
     def _init_schema(self) -> None:

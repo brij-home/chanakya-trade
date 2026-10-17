@@ -42,6 +42,10 @@ REPL command:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("agent.harness")
+
 
 import os
 from datetime import date
@@ -110,8 +114,8 @@ def _build_trader_context() -> str:
     try:
         profile = _get_connected_broker().get_profile()
         broker_name = profile.broker
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[agent.harness] Non-fatal exception suppressed: {e_suppressed}")
 
     memory_lines = ""
     try:
@@ -120,8 +124,8 @@ def _build_trader_context() -> str:
         trades = get_recent_trades(limit=5)
         if trades:
             memory_lines = "\n## Recent Trades\n" + "\n".join(f"- {t}" for t in trades)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[agent.harness] Non-fatal exception suppressed: {e_suppressed}")
 
     return f"""# TRADER CONTEXT
 Generated: {date.today().isoformat()}
@@ -361,8 +365,8 @@ def clear_history(history_file: Path | None = None) -> None:
     try:
         if path.exists():
             path.write_text("", encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[agent.harness] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def _load_history(

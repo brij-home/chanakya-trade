@@ -15,6 +15,10 @@ until implemented. This scaffold documents the mapping layer.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("brokers.dhan")
+
 
 import os
 from typing import Optional
@@ -145,8 +149,8 @@ class DhanBroker(BrokerAPI):
         if hasattr(self, "_session") and self._session is not None:
             try:
                 self._session.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.dhan] Non-fatal exception suppressed: {e_suppressed}")
 
     def close(self) -> None:
         """Alias for logout to conform to standard resource close protocol."""

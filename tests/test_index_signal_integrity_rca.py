@@ -504,3 +504,322 @@ def test_zero_superseding_and_high_quality_concurrent_sharing():
     assert engine.record_alert(conflicting_finnifty) is False, (
         "Multi-Index Coherence Guard must suppress conflicting BULLISH call while benchmark PE is active without reversal"
     )
+
+
+# ── 8. Predatory Lifecycle Handshake: Bank De-risked Runner on Reversal ───────────
+def test_predatory_lifecycle_handshake_banks_runner_for_confirmed_reversal(monkeypatch):
+    """
+    When a morning CE index trade has de-risked (e.g. stage='DE_RISK_0_5R' or 'T1_ACHIEVED'),
+    an afternoon confirmed structural reversal PE setup (e.g. DOUBLE_TOP_BREAKDOWN + CALL_WRITING_CEILING)
+    must bank the runner gracefully as RUNNER_EXIT (TARGET_ACHIEVED) and allow the PE reversal setup
+    to dispatch cleanly without directional quarantine lockout.
+    """
+    engine = AutoAlertEngine()
+    engine._alerts.clear()
+    monkeypatch.setattr(engine, "_save", lambda *args, **kwargs: None)
+
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+        lambda *args, **kwargs: (True, "", {}),
+    )
+    from engine.detector_circuit_breaker import detector_circuit_breaker
+
+    monkeypatch.setattr(
+        detector_circuit_breaker, "evaluate_alert_allowed", lambda *args, **kwargs: (True, 1.0, "")
+    )
+
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    today_slug = datetime.now(IST).strftime("%Y%m%d")
+
+    morning_ce = AutoAlert(
+        alert_id=f"aa-index-call-setup-banknifty-ce-56500-{today_slug}",
+        alert_type="INDEX_CALL_SETUP",
+        stage="DE_RISK_0_5R",
+        symbol="BANKNIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Bank Nifty Call Setup",
+        summary="Morning breakout reached +0.5R, stop trailed to breakeven",
+        ltp=250.0,
+        trigger_level=250.0,
+        target_level=450.0,
+        stop_loss=150.0,
+        confidence=90,
+        environment="LIVE",
+        is_live=True,
+        underlying_spot=56500.0,
+        created_at=f"{today_str} 09:25:00 IST",
+    )
+    assert engine.record_alert(morning_ce) is True
+
+    # Incoming structural top reversal PE setup after 15 minutes
+    afternoon_pe = AutoAlert(
+        alert_id=f"aa-index-put-setup-banknifty-pe-56400-{today_slug}",
+        alert_type="INDEX_PUT_SETUP",
+        stage="CONFIRMED",
+        symbol="BANKNIFTY",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="Bank Nifty Supply Rejection",
+        summary="Double Top Breakdown at Day High with Call Writing Ceiling",
+        ltp=220.0,
+        trigger_level=220.0,
+        target_level=400.0,
+        stop_loss=130.0,
+        confidence=92,
+        environment="LIVE",
+        is_live=True,
+        underlying_spot=56420.0,
+        created_at=f"{today_str} 11:15:00 IST",
+        metrics={
+            "signals": [
+                "DOUBLE_TOP_BREAKDOWN",
+                "CALL_WRITING_CEILING",
+                "DAY_HIGH_SUPPLY_REJECTION",
+            ],
+            "spot": 56420.0,
+        },
+    )
+
+    accepted = engine.record_alert(afternoon_pe)
+    assert accepted is True, (
+        "Confirmed structural reversal must be accepted via predatory lifecycle handshake"
+    )
+
+    # Verify the morning runner was banked gracefully
+    assert morning_ce.is_active is False
+    assert morning_ce.stage == "RUNNER_EXIT"
+    assert morning_ce.target_status == "TARGET_ACHIEVED"
+    assert "Runner banked" in (morning_ce.invalidation_reason or "")
+
+
+def test_predatory_lifecycle_handshake_blocks_non_derisked_trade(monkeypatch):
+    """
+    When an active trade has NOT de-risked (e.g. stage='CONFIRMED') and is not failing,
+    conflicting opposing alerts must be blocked to protect trader capital against whiplash.
+    """
+    engine = AutoAlertEngine()
+    engine._alerts.clear()
+    monkeypatch.setattr(engine, "_save", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+        lambda *args, **kwargs: (True, "", {}),
+    )
+    from engine.detector_circuit_breaker import detector_circuit_breaker
+
+    monkeypatch.setattr(
+        detector_circuit_breaker, "evaluate_alert_allowed", lambda *args, **kwargs: (True, 1.0, "")
+    )
+
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    today_slug = datetime.now(IST).strftime("%Y%m%d")
+
+    active_ce = AutoAlert(
+        alert_id=f"aa-index-call-setup-nifty-ce-22600-{today_slug}",
+        alert_type="INDEX_CALL_SETUP",
+        stage="CONFIRMED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Nifty Call",
+        summary="Active trade in flight",
+        ltp=180.0,
+        trigger_level=180.0,
+        target_level=300.0,
+        stop_loss=120.0,
+        confidence=88,
+        environment="LIVE",
+        is_live=True,
+        underlying_spot=22620.0,
+        created_at=f"{today_str} 10:00:00 IST",
+    )
+    assert engine.record_alert(active_ce) is True
+
+    opposing_pe = AutoAlert(
+        alert_id=f"aa-index-put-setup-nifty-pe-22600-{today_slug}",
+        alert_type="INDEX_PUT_SETUP",
+        stage="CONFIRMED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="Nifty Put",
+        summary="Minor pullback without structural breakdown",
+        ltp=160.0,
+        trigger_level=160.0,
+        target_level=260.0,
+        stop_loss=110.0,
+        confidence=75,
+        environment="LIVE",
+        is_live=True,
+        underlying_spot=22615.0,
+        created_at=f"{today_str} 10:05:00 IST",
+        metrics={"signals": ["PULLBACK"]},
+    )
+
+    accepted = engine.record_alert(opposing_pe)
+    assert accepted is False, "Active non-derisked trade must block opposing whiplash"
+
+
+# ── 9. Benchmark Lead-Lag Divergence Decoupling ──────────────────────────────────
+def test_benchmark_lead_lag_divergence_allows_decoupled_secondary_put(monkeypatch):
+    """
+    When primary benchmark NIFTY 50 is mildly green (+0.15% and above VWAP),
+    secondary indices like BANKNIFTY that demonstrate lead-lag divergence decoupling
+    (trading <= own VWAP or retreated >= 0.30% from day high) must be allowed to scan
+    and fire PE alerts, while indices still locked in bullish lockstep are suppressed.
+    """
+    engine = AutoAlertEngine()
+    engine._watched_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+
+    class MockQuote:
+        def __init__(self, last_price, vwap, change_pct, high=0.0, low=0.0):
+            self.last_price = last_price
+            self.ltp = last_price
+            self.vwap = vwap
+            self.change_pct = change_pct
+            self.high = high or last_price
+            self.low = low or (last_price * 0.99)
+            self.prev_close = last_price / (1.0 + change_pct / 100.0)
+
+    quotes_map = {
+        "NSE:NIFTY": MockQuote(last_price=22510.0, vwap=22480.0, change_pct=0.15, high=22520.0),
+        "NSE:BANKNIFTY": MockQuote(
+            last_price=56200.0, vwap=56300.0, change_pct=-0.40, high=56550.0, low=56180.0
+        ),  # Decoupled: spot < vwap and retreated 0.62% from high
+        "NSE:FINNIFTY": MockQuote(
+            last_price=24500.0, vwap=24450.0, change_pct=0.14, high=24505.0, low=24400.0
+        ),  # Not decoupled: spot > vwap, chg +0.14% in lockstep with Nifty
+    }
+
+    mock_pe_alert = AutoAlert(
+        alert_id="aa-index-put-setup-test-pe-20261013",
+        alert_type="INDEX_PUT_SETUP",
+        stage="CONFIRMED",
+        symbol="BANKNIFTY",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="PE Setup",
+        summary="Supply rejection",
+        ltp=150.0,
+        trigger_level=150.0,
+        target_level=250.0,
+        stop_loss=100.0,
+        confidence=90,
+        environment="TEST",
+        metrics={"signals": ["DAY_HIGH_SUPPLY_REJECTION", "CALL_WRITING_CEILING"]},
+    )
+
+    evaluated_symbols = []
+
+    def mock_detect(underlying, **kwargs):
+        evaluated_symbols.append(underlying)
+        return [mock_pe_alert]
+
+    monkeypatch.setattr("engine.auto_alert_engine.detect_index_put_setup", mock_detect)
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym: [{"dummy": 1}])
+    monkeypatch.setattr(engine, "record_alert", lambda a: True)
+    monkeypatch.setenv("ENFORCE_TEST_REGIME", "1")
+
+    _found = engine.scan_index_put_setups(quotes_map=quotes_map)
+    # BANKNIFTY decoupled -> evaluated!
+    assert "BANKNIFTY" in evaluated_symbols, (
+        "Decoupled BANKNIFTY must be scanned for puts despite green Nifty"
+    )
+    # FINNIFTY in lockstep -> suppressed by lead-lag benchmark gate!
+    assert "FINNIFTY" not in evaluated_symbols, (
+        "Lockstep FINNIFTY must be suppressed by benchmark gate"
+    )
+
+
+# ── 10. Two-Stage Reversal Confirmation Above VWAP ──────────────────────────────
+def test_two_stage_reversal_confirmation_above_vwap(monkeypatch):
+    """
+    On subsequent put scans when spot is trading above VWAP:
+    1. A setup with verified Stage 1 top supply rejection (DOUBLE_TOP_BREAKDOWN) and >= 0.20% retreat
+       from session high is confirmed and tagged reversal_stage='STAGE_1_TOP_REVERSAL'.
+    2. A routine setup without VWAP breakdown or top supply retreat is filtered out.
+    """
+    engine = AutoAlertEngine()
+    engine._watched_indices = ["NIFTY"]
+
+    class MockQuote:
+        def __init__(self, last_price, vwap, high):
+            self.last_price = last_price
+            self.ltp = last_price
+            self.vwap = vwap
+            self.high = high
+            self.low = vwap * 0.99
+            self.change_pct = 0.05
+            self.prev_close = vwap
+
+    # Spot is 22,550, VWAP is 22,500, Day High is 22,620 (spot has retreated (22620 - 22550)/22620 = 0.31% >= 0.20%)
+    quotes_map = {"NSE:NIFTY": MockQuote(last_price=22550.0, vwap=22500.0, high=22620.0)}
+
+    top_reversal_alert = AutoAlert(
+        alert_id="aa-index-put-setup-nifty-top-20261013",
+        alert_type="INDEX_PUT_SETUP",
+        stage="CONFIRMED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="Stage 1 Supply Rejection",
+        summary="Double Top Breakdown at Day High",
+        ltp=120.0,
+        trigger_level=120.0,
+        target_level=200.0,
+        stop_loss=80.0,
+        confidence=94,
+        environment="TEST",
+        metrics={
+            "signals": ["DOUBLE_TOP_BREAKDOWN", "DAY_HIGH_SUPPLY_REJECTION", "CALL_WRITING_CEILING"]
+        },
+    )
+
+    routine_alert = AutoAlert(
+        alert_id="aa-index-put-setup-nifty-routine-20261013",
+        alert_type="INDEX_PUT_SETUP",
+        stage="CONFIRMED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="Routine PE",
+        summary="Drift above VWAP",
+        ltp=110.0,
+        trigger_level=110.0,
+        target_level=150.0,
+        stop_loss=90.0,
+        confidence=80,
+        environment="TEST",
+        metrics={"signals": ["TREND_PULLBACK"]},  # No top reversal signal and no VWAP breakdown
+    )
+
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym: [{"dummy": 1}])
+    monkeypatch.setattr(engine, "record_alert", lambda a: True)
+    engine._index_put_scan_counts["NIFTY"] = 2  # mark as subsequent scan
+
+    # Scenario 1: Top Reversal Alert
+    monkeypatch.setattr(
+        "engine.auto_alert_engine.detect_index_put_setup",
+        lambda *args, **kwargs: [top_reversal_alert],
+    )
+    found_top = engine.scan_index_put_setups(quotes_map=quotes_map)
+    assert len(found_top) == 1
+    assert found_top[0].metrics.get("reversal_stage") == "STAGE_1_TOP_REVERSAL"
+
+    # Scenario 2: Routine Alert without top reversal or VWAP breakdown
+    monkeypatch.setattr(
+        "engine.auto_alert_engine.detect_index_put_setup",
+        lambda *args, **kwargs: [routine_alert],
+    )
+    found_routine = engine.scan_index_put_setups(quotes_map=quotes_map)
+    assert len(found_routine) == 0, (
+        "Routine PE above VWAP without top supply rejection or VWAP breakdown must be filtered"
+    )

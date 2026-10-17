@@ -46,6 +46,7 @@ import pandas as pd
 
 logger = logging.getLogger("chanakya.trade_plan")
 from config.constants import IST_ZONE as IST
+from engine.dynamic_risk import resolve_price_tier
 
 
 @dataclass
@@ -251,8 +252,8 @@ def calculate_trade_plan(
             q = get_live_quote(clean_sym)
             if q and getattr(q, "ltp", None) and q.ltp > 0:
                 ltp = float(q.ltp)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.trade_plan] Non-fatal exception suppressed: {e_suppressed}")
 
     if ltp <= 0:
         # Fallback to index approximation if completely disconnected
@@ -365,11 +366,13 @@ def calculate_trade_plan(
             logger.debug("Options chain fetch error: %s", e)
 
     # Volatility buffer for invalidation (prevents wick-hunting stop outs)
-    vol_buffer = max(1.0, 0.15 * atr)
+    price_tier = resolve_price_tier(ltp)
+    vol_buffer = max(price_tier.abs_min_risk_pts * 0.5, 0.15 * atr)
 
     # ── Timeframe Calibration Architecture ─────────────────────────────────────
     # Standardize timeframe into canonical profiles:
     # INTRADAY (15m–60m session scalp), SWING_SHORT (2–5 days), SWING_MID (1–4 weeks), POSITIONAL (1–6 months)
+    is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
     raw_tf = (timeframe or "INTRADAY").strip().upper()
     if raw_tf in ("5M", "15M", "60M", "HOUR", "SESSION", "SCALP", "INTRADAY"):
         tf = "INTRADAY"
@@ -412,7 +415,6 @@ def calculate_trade_plan(
         except Exception:
             session_decay_factor = 1.0
 
-        is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
         if is_index:
             effective_atr = 0.20 * atr
             min_stop_mult = 0.20
@@ -492,6 +494,23 @@ def calculate_trade_plan(
                 )
             )
 
+        min_stop_distance = max(
+            price_tier.abs_min_risk_pts
+            if tf == "INTRADAY"
+            else (price_tier.abs_min_risk_pts * 2.0),
+            min_stop_mult * effective_atr,
+        )
+        if is_index and tf == "INTRADAY":
+            index_min_stop_floor = {
+                "NIFTY": 20.5,
+                "BANKNIFTY": 55.0,
+                "FINNIFTY": 25.0,
+                "MIDCPNIFTY": 16.0,
+                "SENSEX": 75.0,
+                "BANKEX": 75.0,
+            }.get(clean_sym, 20.5)
+            min_stop_distance = max(min_stop_distance, index_min_stop_floor)
+
         if candidates:
             # Pick the highest valid support anchor that is below LTP with reasonable risk
             valid_candidates = [c for c in candidates if c[0] < ltp]
@@ -499,24 +518,21 @@ def calculate_trade_plan(
                 # Prefer the most protective support anchor (closest to LTP without being inside noise)
                 valid_candidates.sort(key=lambda c: c[0], reverse=True)
                 invalidation_stop, sl_rationale = valid_candidates[0]
-                # Guard against too-tight stops (minimum noise floor scaled to timeframe)
-                min_stop_distance = max(
-                    1.0 if tf == "INTRADAY" else 2.0, min_stop_mult * effective_atr
-                )
                 if (ltp - invalidation_stop) < min_stop_distance:
                     invalidation_stop = ltp - min_stop_distance
-                    sl_rationale = f"{sl_rationale} [Enforced {min_stop_mult:.2f}× effective ATR minimum noise floor]"
+                    sl_rationale = f"{sl_rationale} [Enforced {min_stop_distance:,.1f} pts minimum noise floor]"
             else:
-                invalidation_stop = ltp - (1.0 * effective_atr)
+                invalidation_stop = ltp - max(min_stop_distance, 1.0 * effective_atr)
                 sl_rationale = f"{effective_atr / atr:.2f}× ATR dynamic volatility floor (no structural support strictly below spot)"
         else:
-            invalidation_stop = ltp - (1.0 * effective_atr)
+            invalidation_stop = ltp - max(min_stop_distance, 1.0 * effective_atr)
             sl_rationale = f"{effective_atr / atr:.2f}× ATR dynamic volatility floor (no structural demand blocks identified)"
 
-        # Guard against too-wide stops (capped at max_stop_mult × effective ATR)
-        if (ltp - invalidation_stop) > (max_stop_mult * effective_atr):
-            invalidation_stop = ltp - (max_stop_mult * effective_atr)
-            sl_rationale = f"{sl_rationale} [Capped at {tf} maximum risk boundary ({(max_stop_mult * effective_atr) / atr:.2f}× Daily ATR)]"
+        # Guard against too-wide stops (capped at max_stop_mult × effective ATR, never below min_stop_distance)
+        max_allowed_stop = max(min_stop_distance, max_stop_mult * effective_atr)
+        if (ltp - invalidation_stop) > max_allowed_stop:
+            invalidation_stop = ltp - max_allowed_stop
+            sl_rationale = f"{sl_rationale} [Capped at {tf} maximum risk boundary ({max_allowed_stop / atr:.2f}× Daily ATR)]"
 
         # Guard against invalidation stop violating spot boundary
         if invalidation_stop >= ltp:
@@ -526,7 +542,7 @@ def calculate_trade_plan(
             invalidation_stop = ltp - (1.0 * effective_atr)
             sl_rationale = "Dynamic volatility floor (geometric guardrail enforced)"
 
-        stop_distance_pts = max(1.0, ltp - invalidation_stop)
+        stop_distance_pts = max(price_tier.abs_min_risk_pts, ltp - invalidation_stop)
     else:
         # SHORT direction
         candidates: list[tuple[float, str]] = []
@@ -555,28 +571,43 @@ def calculate_trade_plan(
                 )
             )
 
+        min_stop_distance = max(
+            price_tier.abs_min_risk_pts
+            if tf == "INTRADAY"
+            else (price_tier.abs_min_risk_pts * 2.0),
+            min_stop_mult * effective_atr,
+        )
+        if is_index and tf == "INTRADAY":
+            index_min_stop_floor = {
+                "NIFTY": 20.5,
+                "BANKNIFTY": 55.0,
+                "FINNIFTY": 25.0,
+                "MIDCPNIFTY": 16.0,
+                "SENSEX": 75.0,
+                "BANKEX": 75.0,
+            }.get(clean_sym, 20.5)
+            min_stop_distance = max(min_stop_distance, index_min_stop_floor)
+
         if candidates:
             valid_candidates = [c for c in candidates if c[0] > ltp]
             if valid_candidates:
                 valid_candidates.sort(key=lambda c: c[0])
                 invalidation_stop, sl_rationale = valid_candidates[0]
-                min_stop_distance = max(
-                    1.0 if tf == "INTRADAY" else 2.0, min_stop_mult * effective_atr
-                )
                 if (invalidation_stop - ltp) < min_stop_distance:
                     invalidation_stop = ltp + min_stop_distance
-                    sl_rationale = f"{sl_rationale} [Enforced {min_stop_mult:.2f}× effective ATR minimum noise floor]"
+                    sl_rationale = f"{sl_rationale} [Enforced {min_stop_distance:,.1f} pts minimum noise floor]"
             else:
-                invalidation_stop = ltp + (1.0 * effective_atr)
+                invalidation_stop = ltp + max(min_stop_distance, 1.0 * effective_atr)
                 sl_rationale = f"{effective_atr / atr:.2f}× ATR dynamic volatility ceiling"
         else:
-            invalidation_stop = ltp + (1.0 * effective_atr)
+            invalidation_stop = ltp + max(min_stop_distance, 1.0 * effective_atr)
             sl_rationale = f"{effective_atr / atr:.2f}× ATR dynamic volatility ceiling"
 
-        # Guard against too-wide stops
-        if (invalidation_stop - ltp) > (max_stop_mult * effective_atr):
-            invalidation_stop = ltp + (max_stop_mult * effective_atr)
-            sl_rationale = f"{sl_rationale} [Capped at {tf} maximum risk boundary ({(max_stop_mult * effective_atr) / atr:.2f}× Daily ATR)]"
+        # Guard against too-wide stops (capped at max_stop_mult × effective ATR, never below min_stop_distance)
+        max_allowed_stop = max(min_stop_distance, max_stop_mult * effective_atr)
+        if (invalidation_stop - ltp) > max_allowed_stop:
+            invalidation_stop = ltp + max_allowed_stop
+            sl_rationale = f"{sl_rationale} [Capped at {tf} maximum risk boundary ({max_allowed_stop / atr:.2f}× Daily ATR)]"
 
         # Guard against invalidation stop violating spot boundary
         if invalidation_stop <= ltp:
@@ -586,7 +617,7 @@ def calculate_trade_plan(
             invalidation_stop = ltp + (1.0 * effective_atr)
             sl_rationale = "Dynamic volatility ceiling (geometric guardrail enforced)"
 
-        stop_distance_pts = max(1.0, invalidation_stop - ltp)
+        stop_distance_pts = max(price_tier.abs_min_risk_pts, invalidation_stop - ltp)
 
     stop_distance_pct = (stop_distance_pts / ltp) * 100.0
 
@@ -706,7 +737,7 @@ def calculate_trade_plan(
 
         # Strict monotonic invariant: T3 > T2 > T1 > Entry
         if target_3 <= target_2:
-            target_3 = target_2 + max(1.0, stop_distance_pts * 1.5)
+            target_3 = target_2 + max(price_tier.abs_min_risk_pts, stop_distance_pts * 1.5)
             t3_rationale = f"Runner extension enforced: T3 must exceed T2 (₹{target_2:,.2f})"
 
         t3_distance_pts = target_3 - ltp
@@ -839,7 +870,7 @@ def calculate_trade_plan(
 
         # Strict monotonic invariant: T3 < T2 < T1 < Entry (SHORT)
         if target_3 >= target_2:
-            target_3 = target_2 - max(1.0, stop_distance_pts * 1.5)
+            target_3 = target_2 - max(price_tier.abs_min_risk_pts, stop_distance_pts * 1.5)
             t3_rationale = f"Runner extension enforced: T3 must be below T2 (₹{target_2:,.2f})"
 
         target_3 = max(0.05, target_3)
@@ -932,13 +963,13 @@ def calculate_trade_plan(
                         f"Intraday Range Exhaustion: {adr_consumed:.0f}% of daily ADR consumed. "
                         f"Continuation expectancy severely degraded; high probability of mean-reversion trap."
                     )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.trade_plan] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── 8. Dynamic Velocity-Derived ETA Engine ─────────────────────────────────
     # In Indian markets, 1 trading day = 375 minutes (09:15 to 15:30 IST) = 75 five-minute bars
     # Intra-day 5-minute ATR ≈ Daily ATR / sqrt(75) ≈ Daily ATR / 8.66
-    atr_5m = max(1.0, atr / 8.66)
+    atr_5m = max(price_tier.abs_min_risk_pts * 0.1, atr / 8.66)
 
     # Diurnal time-of-day velocity scalar for Indian trading sessions (09:15 to 15:30 IST):
     # - 09:15-10:15 (mins 555-615): Opening drive impulse & morning discovery (1.70x velocity)
@@ -1036,7 +1067,7 @@ def calculate_trade_plan(
     # ── 9. Options Theta Drag & Structural Recommendation ─────────────────────
     # Standard ATM Nifty Option Theta ≈ 0.08% of spot per day ≈ ₹15 to ₹20 per lot/day
     # Daily theta in underlying points:
-    daily_theta_pts = max(1.0, (atr * 0.08))
+    daily_theta_pts = max(0.01, (atr * 0.08))
     # Theta loss across ETA window:
     estimated_theta_drag_pts = round(daily_theta_pts * (eta_t1_minutes / 375.0), 2)
     # Expected option delta gain ≈ 0.50 * t1_distance_pts
@@ -1052,8 +1083,8 @@ def calculate_trade_plan(
         is_stock_phys_week = is_monthly_physical_expiry_week(
             exp_d.strftime("%Y-%m-%d"), symbol=clean_sym, ref_dt=now
         )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.trade_plan] Non-fatal exception suppressed: {e_suppressed}")
 
     if is_stock_phys_week:
         options_recommended_structure = "DEFINED_RISK_SPREAD"
@@ -1209,7 +1240,7 @@ def calculate_option_execution_plan(
     strike: float = 0.0,
     expiry: str = "",  # ISO date "YYYY-MM-DD"
     option_ltp: float = 0.0,  # Current option premium (LTP)
-    lot_size: int = 25,
+    lot_size: Optional[int] = None,
     expiry_type: str = "WEEKLY",  # "WEEKLY" | "MONTHLY" | "DAILY" | "QUARTERLY"
     spot: Optional[float] = None,
     contract_symbol: Optional[str] = None,
@@ -1231,6 +1262,12 @@ def calculate_option_execution_plan(
     Returns a dict with option price estimates at SL, T1, T2, T3, plus
     Rupee P&L per lot at each milestone and institutional statutory friction.
     """
+    clean_contract = (contract_symbol or getattr(trade_plan, "symbol", "") or "").upper()
+    if lot_size is None or lot_size <= 0:
+        from engine.position_sizer import get_lot_size as _gls
+
+        lot_size = _gls(clean_contract) or 1
+
     entry_spot = (
         spot
         if (spot is not None and spot > 0)

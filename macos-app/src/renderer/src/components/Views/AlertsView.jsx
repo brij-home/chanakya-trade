@@ -56,9 +56,19 @@ import {
  */
 
 function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
-  if (!prevAlerts || prevAlerts.length === 0) {
+  const sanitize = (list) =>
+    (list || []).filter((a) => {
+      if (!a || typeof a !== 'object') return false
+      const sym = String(a.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
+      return Boolean(sym && sym !== 'UNKNOWN' && sym !== '—')
+    })
+
+  const safePrev = sanitize(prevAlerts)
+  const safeFresh = sanitize(freshAlerts)
+
+  if (!safePrev || safePrev.length === 0) {
     const seen = new Set()
-    return freshAlerts.filter((a) => {
+    return safeFresh.filter((a) => {
       const id = a.alert_id || a.id
       if (!id || seen.has(id)) return false
       seen.add(id)
@@ -68,19 +78,19 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
 
   // Deduplicate freshAlerts by alert_id first
   const freshMap = new Map()
-  for (const a of freshAlerts) {
+  for (const a of safeFresh) {
     const id = a.alert_id || a.id
     if (id && !freshMap.has(id)) {
       freshMap.set(id, a)
     }
   }
 
-  let hasChanges = false
+  let hasChanges = safePrev.length !== prevAlerts.length
   const updatedExisting = []
   const seenIds = new Set()
 
   // 1. Update existing items in-place preserving their exact position & identity
-  for (const oldItem of prevAlerts) {
+  for (const oldItem of safePrev) {
     const id = oldItem.alert_id || oldItem.id
     if (!id || seenIds.has(id)) {
       hasChanges = true // Drop duplicate in prev
@@ -1085,7 +1095,7 @@ function InstitutionalTradeInspector({
 }) {
   const [selectedLots, setSelectedLots] = useState(1)
   const cleanSym = alert?.symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase()
-  const lotSize = INDEX_LOT_SIZES[cleanSym] || alert?.lot_size || alert?.metrics?.lot_size || 1
+  const lotSize = alert?.lot_size || alert?.metrics?.lot_size || alert?.option_plan?.lot_size || INDEX_LOT_SIZES[cleanSym] || 1
   const ltpNum = alert?.option_premium ? Number(alert.option_premium) : (alert?.ltp ? Number(alert.ltp) : 0)
   const marginEst = Math.round(selectedLots * lotSize * (ltpNum || 100))
   const isInvalidated = alert?.is_invalidated || alert?.stage === 'INVALIDATED'
@@ -1182,7 +1192,8 @@ const ManualAlertCard = memo(function ManualAlertCard({ alert, onRemove, onAnaly
   const style = TYPE_STYLE[alert.alert_type] || { icon: '🔔', color: 'var(--color-sapphire)' }
   const provenance = resolveAlertProvenance(alert)
   const isTest = provenance.isTest
-  const isInvalidated = alert.is_invalidated
+  const isDisqualified = alert?.target_status === 'SETUP_DISQUALIFIED' || alert?.stage === 'SETUP_DISQUALIFIED' || (alert?.has_triggered === false && alert?.is_invalidated)
+  const isInvalidated = alert.is_invalidated && !isDisqualified
   const alertTime = alert.timestamp || alert.triggered_at || alert.invalidated_at || alert.created_at || ''
   const timeShort = alertTime.includes(' ') ? alertTime.split(' ').slice(-2).join(' ') : alertTime
 
@@ -1190,8 +1201,8 @@ const ManualAlertCard = memo(function ManualAlertCard({ alert, onRemove, onAnaly
     <article
       className="rounded-2xl p-4 space-y-3 transition-all duration-150"
       style={{
-        background: isInvalidated ? 'rgba(255,79,123,0.06)' : 'var(--color-panel)',
-        border: isInvalidated ? '1px solid rgba(255,79,123,0.4)' : '1px solid var(--color-border)',
+        background: isDisqualified ? 'rgba(148, 163, 184, 0.06)' : isInvalidated ? 'rgba(255,79,123,0.06)' : 'var(--color-panel)',
+        border: isDisqualified ? '1px solid rgba(148, 163, 184, 0.3)' : isInvalidated ? '1px solid rgba(255,79,123,0.4)' : '1px solid var(--color-border)',
       }}
     >
       <div className="flex items-start gap-3">
@@ -1199,7 +1210,7 @@ const ManualAlertCard = memo(function ManualAlertCard({ alert, onRemove, onAnaly
           className="w-10 h-10 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
           style={{ background: `${style.color}18`, border: `1px solid ${style.color}33` }}
         >
-          {isInvalidated ? '🛑' : style.icon}
+          {isDisqualified ? '🚫' : isInvalidated ? '🛑' : style.icon}
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -1216,6 +1227,11 @@ const ManualAlertCard = memo(function ManualAlertCard({ alert, onRemove, onAnaly
               >
                 {alert.alert_type}
               </span>
+              {isDisqualified && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-slate-500/20 text-slate-300 border border-slate-500/40">
+                  🚫 CANCELLED
+                </span>
+              )}
               {isInvalidated && (
                 <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
                   ❌ INVALIDATED
@@ -1268,6 +1284,11 @@ const ManualAlertCard = memo(function ManualAlertCard({ alert, onRemove, onAnaly
             </div>
           )}
 
+          {isDisqualified && alert.invalidation_reason && (
+            <p className="text-xs mt-1 text-slate-400 font-medium">
+              Reason: {alert.invalidation_reason}
+            </p>
+          )}
           {isInvalidated && alert.invalidation_reason && (
             <p className="text-xs mt-1 text-rose-400 font-medium">
               Reason: {alert.invalidation_reason}
@@ -1417,7 +1438,12 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     try {
       const storeItems = useNotificationStore.getState().notifications || []
       const autoFromStore = storeItems.filter(
-        (n) => n.alert_type && !['PRICE', 'TECHNICAL', 'CONDITIONAL'].includes(n.alert_type) && !isTestOrSimAlert(n)
+        (n) => {
+          if (!n || !n.alert_type) return false
+          if (['PRICE', 'TECHNICAL', 'CONDITIONAL'].includes(n.alert_type) || isTestOrSimAlert(n)) return false
+          const sym = String(n.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
+          return Boolean(sym && sym !== 'UNKNOWN' && sym !== '—')
+        }
       )
       return autoFromStore
     } catch (_) {
@@ -1783,7 +1809,12 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   useEffect(() => {
     if (!storeNotifications || storeNotifications.length === 0) return
     const autoFromStore = storeNotifications.filter(
-      (n) => n.alert_type && !['PRICE', 'TECHNICAL', 'CONDITIONAL'].includes(n.alert_type) && !isTestOrSimAlert(n)
+      (n) => {
+        if (!n || !n.alert_type) return false
+        if (['PRICE', 'TECHNICAL', 'CONDITIONAL'].includes(n.alert_type) || isTestOrSimAlert(n)) return false
+        const sym = String(n.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
+        return Boolean(sym && sym !== 'UNKNOWN' && sym !== '—')
+      }
     )
     if (autoFromStore.length > 0) {
       setAutoAlerts((prev) => mergeAlertsInPlace(prev, autoFromStore))
@@ -1798,7 +1829,11 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     const handleLiveAlert = (event) => {
       const detail = event.detail
       if (!detail) return
-      const newAlert = detail.alert || detail
+      const rawAlert = detail.alert || detail.data || detail
+      if (!rawAlert || typeof rawAlert !== 'object') return
+      const sym = String(rawAlert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
+      if (!sym || sym === 'UNKNOWN' || sym === '—') return
+      const newAlert = (detail.alert || detail.data) ? { ...(detail.alert || detail.data), ...detail } : detail
       if (!newAlert || (!newAlert.alert_id && !newAlert.id && !newAlert.symbol)) return
 
       if (newAlert.alert_type === 'PRICE' || newAlert.alert_type === 'TECHNICAL' || newAlert.alert_type === 'CONDITIONAL') {
@@ -2524,6 +2559,10 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const filteredAutoAlerts = useMemo(() => {
     const seenIds = new Set()
     let results = autoAlerts.filter((a) => {
+      if (!a || typeof a !== 'object') return false
+      const sym = String(a.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
+      if (!sym || sym === 'UNKNOWN' || sym === '—') return false
+
       const id = a.alert_id || a.id
       if (id) {
         if (seenIds.has(id)) return false
@@ -2686,7 +2725,8 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const groupedAutoAlerts = useMemo(() => {
     const symbolGroups = new Map()
     for (const alt of filteredAutoAlerts) {
-      const clean = alt.symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase() || 'UNKNOWN'
+      const clean = alt.symbol?.replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
+      if (!clean || clean === 'UNKNOWN' || clean === '—') continue
       const subKey = alt.strike || alt.contract_symbol || alt.derivative_type || ''
       const key = `${clean}:${alt.alert_type || ''}:${subKey}`
       if (!symbolGroups.has(key)) {

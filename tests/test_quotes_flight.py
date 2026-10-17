@@ -54,6 +54,7 @@ def test_in_flight_quotes_coalescing():
     with (
         patch("market.quotes.get_data_broker", return_value=mock_broker),
         patch("market.quotes.get_data_broker_key", return_value="fyers"),
+        patch("market.quotes._ws_quotes", return_value={}),
     ):
         threads = [threading.Thread(target=worker) for _ in range(6)]
         for t in threads:

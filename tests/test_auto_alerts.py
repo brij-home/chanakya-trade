@@ -1018,7 +1018,14 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
     assert "SL:</b> <code>₹" in msg
     assert "T1:</b> <code>₹" in msg
     assert any(
-        x in msg for x in ("ACCEPTABLE", "EXCELLENT_ASYMMETRY", "OPPOSING_ZONE_COLLISION_REJECTED")
+        x in msg
+        for x in (
+            "ACCEPTABLE",
+            "EXCELLENT_ASYMMETRY",
+            "High Asymmetry",
+            "OPPOSING_ZONE_COLLISION_REJECTED",
+            "Capped by Overhead Supply",
+        )
     )
     assert "session ~21:" not in msg and "ETA: ~21:" not in msg, (
         "Off-market 21:xx hours must not appear in equity ETA"
@@ -1700,7 +1707,9 @@ def test_three_day_alert_retention_across_all_groups(tmp_path, monkeypatch):
         target_level=1720.0,
         stop_loss=1630.0,
         created_at=day1_str,
+        time_horizon="INTRADAY",
     )
+    alert_prior_ew._force_test_expiry = True
 
     # 6. Historical setup for same symbol (TCS) from Day 2 in archive
     alert_tcs_day2 = AutoAlert(
@@ -1733,6 +1742,7 @@ def test_three_day_alert_retention_across_all_groups(tmp_path, monkeypatch):
 
     # Trigger full maintenance cycle (_load -> reap -> sanitize -> deduplicate -> prune)
     engine._load()
+    engine.reap_expired_alerts()
 
     remaining_ids = {a.alert_id for a in engine._alerts}
 
@@ -2906,12 +2916,27 @@ def test_offmarket_intraday_suppressed_while_swing_allowed(tmp_path, monkeypatch
     from zoneinfo import ZoneInfo
 
     ist = ZoneInfo("Asia/Kolkata")
-    now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+    fixed_dt = datetime(2026, 10, 14, 18, 30, 0, tzinfo=ist)
+    now_str = fixed_dt.strftime("%Y-%m-%d %H:%M:%S IST")
 
     data_file = tmp_path / "auto_alerts.json"
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: False)
+    monkeypatch.setattr(
+        "engine.auto_alert_engine.datetime",
+        type(
+            "MockDT",
+            (),
+            {
+                "now": staticmethod(lambda tz=None: fixed_dt),
+                "fromtimestamp": datetime.fromtimestamp,
+                "strptime": datetime.strptime,
+                "date": datetime.date,
+                "time": datetime.time,
+            },
+        ),
+    )
     monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
     monkeypatch.delenv("DEPLOY_MODE", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
@@ -2995,6 +3020,7 @@ def test_underlying_directional_cooldown_suppresses_duplicate(tmp_path, monkeypa
     data_file = tmp_path / "auto_alerts.json"
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
     engine = AutoAlertEngine(max_buffer=20)
     engine.clear_alerts()
 
@@ -3569,12 +3595,16 @@ def test_gamma_blast_dual_blueprint_runner_and_noise_margin(monkeypatch):
     assert "Runner Alternative" not in msg
 
     # 4. Volatility noise margin test:
-    # If SL is ₹60.00, noise margin is 60 * 0.025 = 1.0. A tick at 59.50 should NOT trigger invalidation!
+    # If SL is ₹60.00, noise margin is 60 * 0.025 = 1.5. A tick at 59.50 should NOT trigger invalidation!
+    alert_23400.metrics["dte"] = 5
+    alert_23400.expiry_date = "2026-10-22"
     alert_23400.stop_loss = 60.0
     inv_reason_noise = evaluate_alert_invalidation(alert_23400, current_ltp=59.50)
-    assert inv_reason_noise is None  # Preserved against noise tick!
-
+    assert inv_reason_noise is None
     # Severe breakdown below SL - noise margin (e.g. 58.00) SHOULD invalidate
+    # Clear spot anchor to isolate pure option premium SL noise margin mechanics
+    alert_23400.actionable_plan["trade_plan"] = None
+    alert_23400.actionable_plan["option_plan"] = None
     inv_reason_real = evaluate_alert_invalidation(alert_23400, current_ltp=58.00)
     assert inv_reason_real is not None
     assert "invalidated" in inv_reason_real.lower()

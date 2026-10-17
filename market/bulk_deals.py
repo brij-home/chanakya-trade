@@ -17,6 +17,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.bulk_deals")
+
 
 import io
 from dataclasses import dataclass
@@ -241,8 +245,8 @@ def get_block_deals() -> list[Deal]:
         if session:
             try:
                 session.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.bulk_deals] Non-fatal exception suppressed: {e_suppressed}")
 
 
 # ── Bulk deals ───────────────────────────────────────────────
@@ -392,8 +396,8 @@ def get_bulk_deals(days: int = 5, symbol: Optional[str] = None) -> list[Deal]:
         if session:
             try:
                 session.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.bulk_deals] Non-fatal exception suppressed: {e_suppressed}")
 
 
 # ── Display ──────────────────────────────────────────────────

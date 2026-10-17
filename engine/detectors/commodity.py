@@ -337,8 +337,10 @@ def detect_commodity_breakouts(
                 c_ago = float(df_5m.iloc[-4]["close"])
                 if c_ago > 0:
                     roc_15m = round(((ltp - c_ago) / c_ago * 100), 2)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.commodity] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Compute Relative Volume (RVOL) early against 20-bar rolling average
         if df_5m is not None and len(df_5m) >= 20:
@@ -966,12 +968,25 @@ def detect_commodity_breakouts(
                     smc_tags.append("Bullish Engulfing Expansion")
                 elif is_bearish and (c_c < c_o) and (p_c > p_o) and (c_c <= p_o) and (c_o >= p_c):
                     smc_tags.append("Bearish Engulfing Expansion")
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.commodity] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if smc_report is not None:
             if smc_report.confirmation_confirmed and smc_report.confirmation_candle:
-                smc_tags.append(f"Confirmed: {smc_report.confirmation_candle}")
+                cand_name = str(smc_report.confirmation_candle).strip()
+                has_wick_tag = any(
+                    "shooting star" in t.lower()
+                    or "rejection wick" in t.lower()
+                    or "pin bar" in t.lower()
+                    for t in smc_tags
+                )
+                if not (
+                    has_wick_tag
+                    and any(k in cand_name.lower() for k in ("pin bar", "shooting star", "hammer"))
+                ):
+                    smc_tags.append(f"Confirmed: {cand_name}")
 
             if smc_report.divergence_type and smc_report.divergence_bias:
                 div_bias = smc_report.divergence_bias
@@ -1426,8 +1441,10 @@ def detect_commodity_breakouts(
                             dte = (exp_date - _date.today()).days
                             if dte <= 5:
                                 dte_warning = f"⚠️ THETA RISK: Only {dte} DTE — rapid premium decay."
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.detectors.commodity] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                     opt_prem = float(getattr(closest_opt, "last_price", 0.0))
                     opt_risk = round(max(1.0, min(opt_prem * 0.35, risk_pts * 0.52)), 1)
@@ -1518,10 +1535,7 @@ def detect_commodity_breakouts(
             smc_tags.append("Eagle: Trend Expansion")
         if adaptive_decision.tiger.mandate == "MOMENTUM_EXPANSION":
             smc_tags.append("Tiger: Institutional Thrust")
-        if adaptive_decision.sniper:
-            smc_tags.append(
-                f"Sniper OTE ₹{adaptive_decision.sniper.entry_zone_min:,.1f}–₹{adaptive_decision.sniper.entry_zone_max:,.1f}"
-            )
+        # Note: Sniper OTE is omitted from smc_tags here to prevent redundancy with the dedicated '🎯 Sniper OTE Bracket:' line.
 
         confluence_str = (
             " + ".join(smc_tags) if smc_tags else "Donchian Breakout + VWAP Confirmation"

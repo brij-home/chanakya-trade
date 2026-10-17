@@ -546,6 +546,7 @@ def test_eod_session_scorecard_and_review(monkeypatch):
         symbol="INFY",
         stage="INVALIDATED",
         is_invalidated=True,
+        triggered_at="2026-10-14 10:00:00 IST",
         ltp=1500.0,
         trigger_level=1520.0,
         stop_loss=1500.0,
@@ -827,3 +828,278 @@ def test_mstock_quote_mapping_never_cross_contaminates_unmatched_tokens():
     quotes = api.get_quote(["NSE:NIFTY 50"])
     assert "NSE:NIFTY 50" not in quotes
     assert "NIFTY 50" not in quotes
+
+
+def test_pre_squareoff_advisory_suppressed_on_non_trading_days(monkeypatch):
+    """Pre-squareoff advisory must NEVER dispatch on weekends or trading holidays in live environments."""
+    from engine.auto_alert_engine import AutoAlertEngine
+    from datetime import datetime
+    from config.constants import IST
+
+    engine = AutoAlertEngine()
+    engine.clear_alerts()
+
+    # Add an active intraday alert
+    alert = make_alert(
+        alert_id="aa-weekend-test-01",
+        symbol="RELIANCE",
+        ltp=3000.0,
+        trigger_level=3000.0,
+        stop_loss=2950.0,
+        target_level=3050.0,
+        time_horizon="INTRADAY",
+        is_live=True,
+    )
+    engine._alerts.append(alert)
+
+    sent_msgs = []
+    monkeypatch.setattr("bot.telegram_bot.send_message", lambda msg, **kw: sent_msgs.append(msg))
+
+    # Simulate non-test live runner on a Saturday (2026-10-17) at 15:12 IST
+    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
+    monkeypatch.delenv("DEPLOY_MODE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    sat_dt = datetime(2026, 10, 17, 15, 12, tzinfo=IST)
+    with monkeypatch.context() as m:
+        m.setattr(
+            "engine.auto_alert_engine.datetime",
+            type("MockDT", (), {"now": staticmethod(lambda tz=None: sat_dt)}),
+        )
+        res = engine.check_session_closing_warning()
+        assert res is None
+        assert len(sent_msgs) == 0
+
+
+def test_pre_squareoff_advisory_excludes_swing_and_prior_days(monkeypatch):
+    """Pre-squareoff advisory must NEVER include multi-session swing setups or prior-calendar-day alerts."""
+    from engine.auto_alert_engine import AutoAlertEngine
+    from datetime import datetime
+    from config.constants import IST
+
+    engine = AutoAlertEngine()
+    engine.clear_alerts()
+
+    now_dt = datetime.now(IST)
+    today_str = now_dt.strftime("%Y-%m-%d")
+
+    # 1. Multi-session swing setup (e.g. SQUEEZE_BREAKOUT with SWING_MID)
+    swing_alert = make_alert(
+        alert_id="aa-swing-test-01",
+        symbol="VBL",
+        alert_type="SQUEEZE_BREAKOUT",
+        time_horizon="SWING_MID",
+        created_at=f"{today_str} 10:00:00 IST",
+        is_live=True,
+    )
+    # 2. Prior-calendar-day alert
+    prior_alert = make_alert(
+        alert_id="aa-prior-day-test-01",
+        symbol="DLF",
+        alert_type="INTRADAY_EQUITY",
+        time_horizon="INTRADAY",
+        created_at="2026-10-15 10:00:00 IST",
+        is_live=True,
+    )
+    # 3. Legitimate current-session intraday alert
+    valid_intra = make_alert(
+        alert_id="aa-valid-intra-01",
+        symbol="TCS",
+        alert_type="INTRADAY_EQUITY",
+        time_horizon="INTRADAY",
+        created_at=f"{today_str} 10:00:00 IST",
+        is_live=True,
+    )
+    engine._alerts.extend([swing_alert, prior_alert, valid_intra])
+
+    sent_msgs = []
+    monkeypatch.setattr("bot.telegram_bot.send_message", lambda msg, **kw: sent_msgs.append(msg))
+
+    # Allow test runner to simulate equity window
+    res = engine.check_session_closing_warning(force=True, market="EQUITY")
+    assert res is not None
+    assert res["equity_open_count"] == 1
+    symbols_in_report = [p["symbol"] for p in res["positions"]]
+    assert "TCS" in symbols_in_report
+    assert "VBL" not in symbols_in_report
+    assert "DLF" not in symbols_in_report
+
+
+def test_eod_session_review_suppressed_on_weekends_and_holidays(monkeypatch):
+    """EOD session scorecard must be skipped when the market was closed (weekends/holidays)."""
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_postmortem_runner import run_eod_alert_postmortems
+    from datetime import datetime
+    from config.constants import IST
+
+    engine = AutoAlertEngine()
+    engine.clear_alerts()
+
+    # Saturday date
+    sat_dt = datetime(2026, 10, 17, 15, 36, tzinfo=IST)
+    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
+    monkeypatch.delenv("DEPLOY_MODE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            "engine.auto_alert_engine.datetime",
+            type("MockDT", (), {"now": staticmethod(lambda tz=None: sat_dt)}),
+        )
+        res = engine.check_eod_session_review(force=False)
+        assert res is None
+
+    # Directly in postmortem runner without force
+    with monkeypatch.context() as m:
+        m.setattr(
+            "engine.alert_postmortem_runner.datetime",
+            type("MockDT", (), {"now": staticmethod(lambda tz=None: sat_dt)}),
+        )
+        rep = run_eod_alert_postmortems(auto_engine=engine, force=False, broadcast=False)
+        assert rep["status"] == "SKIPPED_WEEKEND_OR_HOLIDAY"
+
+
+def test_get_latest_trading_day_resolution():
+    """Verify get_latest_trading_day resolves weekends, pre-market, and active market correctly."""
+    from market.calendar import get_latest_trading_day
+    from datetime import datetime, date
+    from config.constants import IST
+
+    # 1. Friday post-market (Oct 16, 2026 16:00 IST) -> Friday Oct 16
+    fri_eod = datetime(2026, 10, 16, 16, 0, tzinfo=IST)
+    assert get_latest_trading_day(fri_eod) == date(2026, 10, 16)
+
+    # 2. Saturday midday (Oct 17, 2026 12:00 IST) -> Friday Oct 16
+    sat_noon = datetime(2026, 10, 17, 12, 0, tzinfo=IST)
+    assert get_latest_trading_day(sat_noon) == date(2026, 10, 16)
+
+    # 3. Sunday evening (Oct 18, 2026 20:00 IST) -> Friday Oct 16
+    sun_eve = datetime(2026, 10, 18, 20, 0, tzinfo=IST)
+    assert get_latest_trading_day(sun_eve) == date(2026, 10, 16)
+
+    # 4. Monday pre-market (Oct 19, 2026 08:30 IST) -> Friday Oct 16 (session has not opened)
+    mon_pre = datetime(2026, 10, 19, 8, 30, tzinfo=IST)
+    assert get_latest_trading_day(mon_pre) == date(2026, 10, 16)
+
+    # 5. Monday active market (Oct 19, 2026 09:30 IST) -> Monday Oct 19
+    mon_active = datetime(2026, 10, 19, 9, 30, tzinfo=IST)
+    assert get_latest_trading_day(mon_active) == date(2026, 10, 19)
+
+
+def test_swing_inflection_alert_deterministic_across_weekend():
+    """Formatting a swing alert on Saturday vs Sunday must yield identical session_date and alert_id."""
+    from engine.detectors.swing_inflection import _format_swing_inflection_alert
+    from analysis.inflection_scanner import InflectionSetup
+    from datetime import datetime
+    from config.constants import IST
+
+    setup = InflectionSetup(
+        symbol="SHYAMMETL",
+        name="Shyam Metalics",
+        sector="METALS",
+        sector_icon="⛏️",
+        ltp=850.0,
+        day_change_pct=2.5,
+        inflection_score=88,
+        primary_archetype="STAGE_1_TO_2_EXPANSION",
+        archetype_label="Stage 1 to 2 Base Expansion",
+        timing_state="PULLBACK_RETEST",
+        timing_label="Pullback Retest",
+        weinstein_stage="STAGE_2_MARKUP",
+        vcp_detected=True,
+        vcp_tightness_pct=2.1,
+        vcp_pivot_price=850.0,
+        squeeze_state="COILING",
+        squeeze_duration=5,
+        rvol_20d=2.2,
+        trend_template_passed=8,
+        sector_tailwind_score=85,
+        rrg_quadrant="LEADING",
+        forensic_safe=True,
+        smc_regime="BULLISH",
+        smc_setup="DEMAND_OB_RETEST",
+        entry_price=850.0,
+        stop_loss=810.0,
+        target_1=930.0,
+        target_2=990.0,
+        target_moonshot=1100.0,
+        risk_reward_ratio=2.5,
+        risk_pts=40.0,
+        reward_pts=80.0,
+        confluence_factors=["Minervini Stage 2", "VCP Pivot"],
+        turnover_20d_cr=12.5,
+    )
+
+    sat_dt = datetime(2026, 10, 17, 11, 30, tzinfo=IST)
+    sun_dt = datetime(2026, 10, 18, 16, 45, tzinfo=IST)
+
+    alert_sat = _format_swing_inflection_alert(setup, session_dt=sat_dt, mkt_open=False)
+    alert_sun = _format_swing_inflection_alert(setup, session_dt=sun_dt, mkt_open=False)
+
+    # Both must anchor to Friday 2026-10-16
+    assert "20261016" in alert_sat.alert_id
+    assert alert_sat.alert_id == alert_sun.alert_id
+    assert alert_sat.symbol == "SHYAMMETL"
+
+
+def test_multi_session_swing_alert_suppresses_duplicate_and_survives_calendar_roll():
+    """Multi-session swing setups must never be retired as 'prior session' or duplicated across days."""
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+
+    engine = AutoAlertEngine()
+    engine.clear_alerts()
+
+    # Alert created on Friday
+    friday_alert = AutoAlert(
+        alert_id="aa-stage-1-to-2-expansion-shyammetl-pull-20261016",
+        symbol="SHYAMMETL",
+        alert_type="STAGE_1_TO_2_EXPANSION",
+        direction="BULLISH",
+        stage="PRIMED",
+        time_horizon="SWING_MID",
+        headline="🎯 SHYAMMETL Pullback Retest",
+        summary="Stage 1-to-2 breakout pullback retest",
+        ltp=850.0,
+        trigger_level=850.0,
+        stop_loss=810.0,
+        target_level=930.0,
+        created_at="2026-10-16 16:00:00 IST",
+        confidence=85,
+        is_live=True,
+        environment="LIVE",
+        exchange="NSE",
+    )
+
+    # 1. Record on Friday
+    ok1 = engine.record_alert(friday_alert)
+    assert ok1 is True
+    assert len(engine._alerts) == 1
+
+    # 2. Duplicate candidate on Saturday
+    dup_candidate = AutoAlert(
+        alert_id="aa-stage-1-to-2-expansion-shyammetl-pull-20261016",
+        symbol="SHYAMMETL",
+        alert_type="STAGE_1_TO_2_EXPANSION",
+        direction="BULLISH",
+        stage="PRIMED",
+        time_horizon="SWING_MID",
+        headline="🎯 SHYAMMETL Pullback Retest",
+        summary="Stage 1-to-2 breakout pullback retest",
+        ltp=850.0,
+        trigger_level=850.0,
+        stop_loss=810.0,
+        target_level=930.0,
+        created_at="2026-10-17 11:00:00 IST",
+        confidence=85,
+        is_live=True,
+        environment="LIVE",
+        exchange="NSE",
+    )
+
+    ok2 = engine.record_alert(dup_candidate)
+    assert ok2 is False, "Duplicate EOD alert must be suppressed"
+    assert len(engine._alerts) == 1
+    # Original alert must NOT be marked EXPIRED
+    assert engine._alerts[0].stage == "PRIMED"
+    assert engine._alerts[0].is_archived is False

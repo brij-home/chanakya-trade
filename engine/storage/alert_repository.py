@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -68,6 +69,7 @@ class AlertRepository:
 
     def __init__(self, target_file_fn=None) -> None:
         self._custom_file_fn = target_file_fn
+        self._io_lock = threading.Lock()
 
     def get_target_file(self) -> Path:
         if self._custom_file_fn is not None:
@@ -79,66 +81,98 @@ class AlertRepository:
         Atomically saves alerts to disk via PID-tagged temporary file replacement
         and dual-writes to the SQLite WAL alert store.
         """
-        try:
-            target_path = self.get_target_file()
-            base_prod = Path.home() / ".trading_platform" / "auto_alerts.json"
-            is_test_env = bool(
-                os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
-            )
-
-            # Invariant: Never pollute default production storage during tests unless redirected to sandbox/tmp
-            if (
-                is_test_env
-                and target_path == base_prod
-                and not os.environ.get("TRADING_PLATFORM_DATA")
-            ):
-                return
-
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            from engine.data_sanctity import assert_production_data_sanctity
-
-            if not is_test_env:
-                filtered_alerts = [
-                    a for a in alerts if assert_production_data_sanctity(a, "AlertRepository")
-                ]
-            else:
-                filtered_alerts = list(alerts)
-
-            data = [a.to_dict() for a in filtered_alerts]
-            alerts_snapshot = list(filtered_alerts)
-
-            # Atomic persistence: write to sibling PID-tagged temp file then atomic replace
-            payload = json.dumps(data, indent=2)
-            temp_path = target_path.with_name(
-                f"{target_path.name}.tmp.{os.getpid()}_{time.time_ns()}"
-            )
+        with self._io_lock:
             try:
-                temp_path.write_text(payload, encoding="utf-8")
-                for attempt in range(4):
+                target_path = self.get_target_file()
+                base_prod = Path.home() / ".trading_platform" / "auto_alerts.json"
+                is_test_env = bool(
+                    os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+                )
+
+                # Invariant: Never pollute default production storage during tests unless redirected to sandbox/tmp
+                if (
+                    is_test_env
+                    and target_path == base_prod
+                    and not os.environ.get("TRADING_PLATFORM_DATA")
+                ):
+                    return
+
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                from engine.data_sanctity import assert_production_data_sanctity
+
+                if not is_test_env:
+                    filtered_alerts = [
+                        a for a in alerts if assert_production_data_sanctity(a, "AlertRepository")
+                    ]
+                else:
+                    filtered_alerts = list(alerts)
+
+                data = []
+                alerts_snapshot = []
+                for a in filtered_alerts:
                     try:
-                        os.replace(temp_path, target_path)
-                        break
-                    except PermissionError:
-                        if attempt == 3:
-                            target_path.write_text(payload, encoding="utf-8")
-                        else:
-                            time.sleep(0.04)
-            finally:
-                if temp_path.exists():
-                    temp_path.unlink(missing_ok=True)
+                        data.append(a.to_dict())
+                        alerts_snapshot.append(a)
+                    except Exception as err:
+                        logger.error(
+                            f"[AlertRepository] Failed to serialize alert {getattr(a, 'id', 'UNKNOWN')} "
+                            f"({getattr(a, 'symbol', 'UNKNOWN')}): {err}",
+                            exc_info=True,
+                        )
 
-            # Dual-write to institutional SQLite WAL alert store (skip under test harness)
-            if not (
-                "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("CHANAKYA_TESTING") == "1"
-            ):
+                # Primary durability: Commit to institutional SQLite WAL alert store first
+                if not (
+                    "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("CHANAKYA_TESTING") == "1"
+                ):
+                    try:
+                        from engine.sqlite_store import alert_sqlite_store
+
+                        alert_sqlite_store.save_alerts_batch(alerts_snapshot)
+                    except Exception as e_sql:
+                        logger.warning(f"[AlertRepository] SQLite store save error: {e_sql}")
+
+                # Secondary snapshot: write to sibling PID-tagged temp file then atomic replace for human-readable JSON
+                if is_test_env:
+                    payload = json.dumps(data, indent=2)
+                else:
+                    payload = json.dumps(data, separators=(",", ":"))
+                temp_path = target_path.with_name(
+                    f"{target_path.name}.tmp.{os.getpid()}_{time.time_ns()}"
+                )
                 try:
-                    from engine.sqlite_store import alert_sqlite_store
+                    temp_path.write_text(payload, encoding="utf-8")
+                    for attempt in range(4):
+                        try:
+                            os.replace(temp_path, target_path)
+                            break
+                        except PermissionError:
+                            if attempt == 3:
+                                target_path.write_text(payload, encoding="utf-8")
+                            else:
+                                time.sleep(0.04)
+                finally:
+                    if temp_path.exists():
+                        temp_path.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(f"[AlertRepository] save error: {e}")
 
-                    alert_sqlite_store.save_alerts_batch(alerts_snapshot)
-                except Exception as e_sql:
-                    logger.warning(f"[AlertRepository] SQLite store save error: {e_sql}")
-        except Exception as e:
-            logger.warning(f"[AlertRepository] save error: {e}")
+    def save_single_alert(self, alert: AutoAlert) -> None:
+        """
+        Microsecond row-level ACID upsert directly into SQLite WAL store.
+        Bypasses monolithic full-array JSON serialization on the high-frequency tick path.
+        """
+        is_test_env = bool(
+            os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+        )
+        if not is_test_env:
+            try:
+                from engine.sqlite_store import alert_sqlite_store
+
+                alert_sqlite_store.save_alert(alert)
+            except Exception as e_sql:
+                logger.warning(
+                    f"[AlertRepository] Failed row-level SQLite upsert for {getattr(alert, 'alert_id', 'UNKNOWN')}: {e_sql}"
+                )
 
     def load(self) -> list[AutoAlert]:
         """
@@ -161,8 +195,10 @@ class AlertRepository:
                             f"{target_path.name}.corrupt.{int(time.time())}"
                         )
                         os.replace(target_path, backup_path)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
         if not data:
             is_test_env = (
@@ -198,79 +234,7 @@ class AlertRepository:
                 if aid:
                     seen_ids.add(aid)
                 try:
-                    alerts.append(
-                        AutoAlert(
-                            alert_id=d.get("alert_id", ""),
-                            alert_type=d.get("alert_type", "GENERAL"),
-                            stage=d.get("stage", "EARLY_WARNING"),
-                            symbol=d.get("symbol", ""),
-                            exchange=d.get("exchange", "NSE"),
-                            direction=d.get("direction", "NEUTRAL"),
-                            headline=d.get("headline", ""),
-                            summary=d.get("summary", ""),
-                            ltp=float(d.get("ltp") or 0.0),
-                            trigger_level=float(d.get("trigger_level") or 0.0),
-                            target_level=float(d.get("target_level") or 0.0),
-                            stop_loss=float(d.get("stop_loss") or 0.0),
-                            strike=d.get("strike"),
-                            option_type=d.get("option_type"),
-                            contract_symbol=d.get("contract_symbol"),
-                            metrics=d.get("metrics", {}),
-                            actionable_plan=d.get("actionable_plan", {}),
-                            confidence=int(d.get("confidence") or 75),
-                            created_at=d.get("created_at", ""),
-                            read=d.get("read", False),
-                            is_live=d.get("is_live", True),
-                            environment=d.get("environment", "LIVE"),
-                            is_invalidated=d.get("is_invalidated", False),
-                            invalidation_reason=d.get("invalidation_reason"),
-                            invalidated_at=d.get("invalidated_at"),
-                            achieved_milestones=d.get("achieved_milestones", []),
-                            target_status=d.get("target_status", "PENDING"),
-                            should_trail=d.get("should_trail", False),
-                            trailing_decision=d.get("trailing_decision"),
-                            trailing_stop=d.get("trailing_stop"),
-                            trailing_rationale=d.get("trailing_rationale"),
-                            locked_profit_pts=d.get("locked_profit_pts"),
-                            locked_profit_pct=d.get("locked_profit_pct"),
-                            last_trail_alert_time=d.get("last_trail_alert_time"),
-                            is_archived=bool(d.get("is_archived", False)),
-                            archived_at=d.get("archived_at"),
-                            archive_reason=d.get("archive_reason"),
-                            expiry_date=d.get("expiry_date"),
-                            expiry_type=d.get("expiry_type"),
-                            underlying_spot=d.get("underlying_spot"),
-                            option_premium=d.get("option_premium"),
-                            market_status=d.get("market_status", "SESSION_CLOSED"),
-                            lot_size=d.get("lot_size"),
-                            segment=d.get("segment", ""),
-                            signal_ref=d.get("signal_ref"),
-                            r_multiple=d.get("r_multiple"),
-                            pnl_pct=d.get("pnl_pct"),
-                            updated_at=d.get("updated_at"),
-                            triggered_at=d.get("triggered_at"),
-                            original_call_time=d.get("original_call_time") or d.get("created_at"),
-                            in_flight_warning_sent=bool(d.get("in_flight_warning_sent", False)),
-                            in_flight_warning_reason=d.get("in_flight_warning_reason"),
-                            in_flight_warning_at=d.get("in_flight_warning_at"),
-                            mtf_confluence=d.get("mtf_confluence"),
-                            vix_regime=d.get("vix_regime"),
-                            time_horizon=d.get("time_horizon", "INTRADAY"),
-                            eta_label=d.get("eta_label"),
-                            setup_style=d.get("setup_style", "CONTINUATION"),
-                            entry_type=d.get("entry_type", "BREAKOUT_STOP"),
-                            no_chase_boundary=d.get("no_chase_boundary"),
-                            telegram_dispatched=bool(d.get("telegram_dispatched", False)),
-                            dispatched_channels=list(d.get("dispatched_channels", [])),
-                            telegram_suppression_reason=d.get("telegram_suppression_reason"),
-                            trace_id=d.get("trace_id"),
-                            quant_snapshot=d.get("quant_snapshot"),
-                            initial_stop_loss=d.get("initial_stop_loss"),
-                            update_count=int(d.get("update_count") or 0),
-                            telegram_update_count=int(d.get("telegram_update_count") or 0),
-                            audit_trail=list(d.get("audit_trail", [])),
-                        )
-                    )
+                    alerts.append(AutoAlert.from_dict(d))
                 except Exception as item_err:
                     logger.warning(
                         f"[AlertRepository] Failed to deserialize alert {aid}: {item_err}"
@@ -314,8 +278,10 @@ class AlertRepository:
                         from engine.learning_engine import pattern_learning_engine
 
                         pattern_learning_engine.clear_symbol_lockout(a.symbol)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
         if rehab_count > 0:
             self.save(alerts)
@@ -417,10 +383,14 @@ class AlertRepository:
                                     exp_dt = datetime.strptime(exp_str, fmt).date()
                                     dte = (exp_dt - datetime.now(IST).date()).days
                                     break
-                                except ValueError:
-                                    pass
-                        except Exception:
-                            pass
+                                except ValueError as e_suppressed:
+                                    logger.debug(
+                                        f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
+                                    )
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
                     if oi < 15000:
                         purged += 1
@@ -459,22 +429,63 @@ class AlertRepository:
                         )
                         continue
 
-            # 4. Session Rollover Sanity: Archive unignited EARLY_WARNING alerts from prior calendar days
+            # 4. Session Rollover Sanity: Archive unignited radar setups & past-session intraday trades
             ts_date = None
             if a.created_at:
                 clean_ts = a.created_at.replace(" IST", "").strip()[:10]
                 try:
                     ts_date = datetime.strptime(clean_ts, "%Y-%m-%d").date()
-                except ValueError:
-                    pass
-            if ts_date and ts_date < datetime.now(IST).date():
-                if a.stage == "EARLY_WARNING":
-                    a.stage = "EXPIRED"
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+            today_d = datetime.now(IST).date()
+            if ts_date and ts_date < today_d:
+                is_swing = (getattr(a, "time_horizon", "") or "").upper() in (
+                    "SWING_SHORT",
+                    "SWING_MID",
+                    "SWING",
+                    "POSITIONAL",
+                    "LONG_TERM",
+                    "MULTIBAGGER",
+                )
+                # 4a. Prior-session untriggered setups (EARLY_WARNING, STALK, PRIMED, ACTIONABLE)
+                if not a.is_archived and a.stage in (
+                    "EARLY_WARNING",
+                    "STALK",
+                    "PRIMED",
+                    "ACTIONABLE",
+                ):
+                    age_days = (today_d - ts_date).days
+                    # Swing radar setups get up to 2 days before expiring; intraday radar setups expire next day
+                    if not is_swing or age_days >= 2:
+                        a.stage = "EXPIRED"
+                        a.is_archived = True
+                        a.is_invalidated = True
+                        a.target_status = "SETUP_DISQUALIFIED"
+                        exp_reason = f"Prior-session {a.stage} setup expired without triggering"
+                        a.archive_reason = a.archive_reason or exp_reason
+                        a.invalidation_reason = a.invalidation_reason or exp_reason
+                        surviving.append(a)
+                        continue
+
+                # 4b. Prior-session intraday trades: cannot carry over across overnight gaps
+                is_intraday = (
+                    getattr(a, "time_horizon", "") or ""
+                ).upper() == "INTRADAY" or a.alert_type in (
+                    "GAMMA_BLAST",
+                    "OPTIONS_MOMENTUM",
+                    "OPENING_DRIVE_IGNITION",
+                    "AFTERNOON_THRUST",
+                    "MICRO_SCALP",
+                )
+                if not a.is_archived and is_intraday:
+                    a.stage = "COMPLETED"
                     a.is_archived = True
-                    a.is_invalidated = True
-                    exp_reason = "Prior-session early warning expired without triggering"
+                    a.is_active = False
+                    a.target_status = "SESSION_CLOSE_EXIT"
+                    exp_reason = "Intraday position auto-settled at prior session close"
                     a.archive_reason = a.archive_reason or exp_reason
-                    a.invalidation_reason = a.invalidation_reason or exp_reason
                     surviving.append(a)
                     continue
 

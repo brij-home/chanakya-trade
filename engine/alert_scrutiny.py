@@ -108,7 +108,7 @@ class AlertScrutinyAuditor:
         self.max_intraday_risk_pct = max_intraday_risk_pct
         self._cache: dict[str, tuple[float, ScrutinyResult]] = {}
         self._cache_lock = threading.Lock()
-        self._cache_ttl = 90.0  # 90s in-memory scrutiny cache to prevent rate-limit flooding
+        self._cache_ttl = 180.0  # 180s (3m) in-memory scrutiny cache to prevent rate-limit flooding (Invariant 15)
 
     # ── Tier 1: Deterministic Mathematical Sanity Gate ───────────────────────
 
@@ -154,8 +154,10 @@ class AlertScrutinyAuditor:
                     is_data_valid, val_reason = res[0], res[1]
                     if not is_data_valid:
                         return False, f"Signal Data Integrity Veto: {val_reason}", flags
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # 0.5. Closed-Loop Detector Degradation Circuit Breaker Enforcement
         raw_atype = str(getattr(alert, "alert_type", "") or "")
@@ -228,39 +230,49 @@ class AlertScrutinyAuditor:
             is_option_premium_levels = False
 
         # 2. Geometric Level Coherence
+        entry_anchor = float(
+            getattr(alert, "trigger_level", None) or getattr(alert, "entry_price", None) or 0.0
+        )
+        if entry_anchor <= 0.0:
+            entry_anchor = ltp
+
         if is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY"):
             # For equity long OR long option premium (Call or Put buyer):
-            if sl >= ltp:
-                return False, f"Inverted Stop-Loss: SL (Rs.{sl:,.2f}) >= LTP (Rs.{ltp:,.2f})", flags
-            if t1 <= ltp:
+            if sl >= entry_anchor:
                 return (
                     False,
-                    f"Inverted Target: Target (Rs.{t1:,.2f}) <= LTP (Rs.{ltp:,.2f})",
+                    f"Inverted Stop-Loss: SL (Rs.{sl:,.2f}) >= Entry (Rs.{entry_anchor:,.2f})",
                     flags,
                 )
-            risk_pts = ltp - sl
-            reward_pts = t1 - ltp
+            if t1 <= entry_anchor:
+                return (
+                    False,
+                    f"Inverted Target: Target (Rs.{t1:,.2f}) <= Entry (Rs.{entry_anchor:,.2f})",
+                    flags,
+                )
+            risk_pts = entry_anchor - sl
+            reward_pts = t1 - entry_anchor
 
         elif direction in ("BEARISH", "SHORT", "SELL"):
             # For cash equity short or futures short:
-            if sl <= ltp:
+            if sl <= entry_anchor:
                 return (
                     False,
-                    f"Inverted Bearish Stop-Loss: SL (Rs.{sl:,.2f}) <= LTP (Rs.{ltp:,.2f})",
+                    f"Inverted Bearish Stop-Loss: SL (Rs.{sl:,.2f}) <= Entry (Rs.{entry_anchor:,.2f})",
                     flags,
                 )
-            if t1 >= ltp:
+            if t1 >= entry_anchor:
                 return (
                     False,
-                    f"Inverted Bearish Target: Target (Rs.{t1:,.2f}) >= LTP (Rs.{ltp:,.2f})",
+                    f"Inverted Bearish Target: Target (Rs.{t1:,.2f}) >= Entry (Rs.{entry_anchor:,.2f})",
                     flags,
                 )
-            risk_pts = sl - ltp
-            reward_pts = ltp - t1
+            risk_pts = sl - entry_anchor
+            reward_pts = entry_anchor - t1
         else:
             # NEUTRAL or non-directional (e.g. straddle range)
-            risk_pts = abs(ltp - sl)
-            reward_pts = abs(t1 - ltp)
+            risk_pts = abs(entry_anchor - sl)
+            reward_pts = abs(t1 - entry_anchor)
 
         flags["level_coherence"] = True
 
@@ -285,7 +297,7 @@ class AlertScrutinyAuditor:
             max_risk = 3.5
         else:
             max_risk = self.max_intraday_risk_pct
-        risk_pct = (risk_pts / ltp) * 100.0 if ltp > 0 else 0.0
+        risk_pct = (risk_pts / entry_anchor) * 100.0 if entry_anchor > 0 else 0.0
         if risk_pct > max_risk:
             return (
                 False,
@@ -463,13 +475,39 @@ class AlertScrutinyAuditor:
         flags["risk_within_bounds"] = True
 
         # 3e. Universal Falcon & Cheetah Single-Stock Equity Adaptive Regime Gate
-        # Eliminates consolidation false breakouts and whipsaw traps in cash equities
+        # Eliminates consolidation false breakouts and whipsaw traps in cash equities & stock options
+        metrics_d = getattr(alert, "metrics", {}) or {}
+        target_eval_sym = None
+        target_eval_spot = ltp
+
         if (
             not is_option_premium_levels
             and clean_sym not in COMMODITY_MIN_SL_FLOORS
             and clean_sym not in INDEX_MIN_SL_FLOORS
         ):
-            metrics_d = getattr(alert, "metrics", {}) or {}
+            target_eval_sym = clean_sym
+            target_eval_spot = ltp
+        elif is_option_premium_levels or atype == "OPTIONS_MOMENTUM":
+            try:
+                from engine.synthetic_sl import extract_underlying_symbol
+
+                cand_und = extract_underlying_symbol(alert)
+                if (
+                    cand_und
+                    and cand_und not in COMMODITY_MIN_SL_FLOORS
+                    and cand_und not in INDEX_MIN_SL_FLOORS
+                ):
+                    target_eval_sym = cand_und
+                    target_eval_spot = float(
+                        (metrics_d or {}).get("underlying_ltp")
+                        or (metrics_d or {}).get("spot")
+                        or (metrics_d or {}).get("underlying_spot")
+                        or 0.0
+                    )
+            except Exception:
+                target_eval_sym = None
+
+        if target_eval_sym:
             is_breakout_candidate = (
                 atype
                 in (
@@ -485,9 +523,11 @@ class AlertScrutinyAuditor:
                     "INTRADAY_MOVER_SPARK",
                     "VOLUME_EXPANSION",
                     "SPARK",
+                    "OPTIONS_MOMENTUM",
                 )
                 or "BREAKOUT" in atype
                 or "ORB" in atype
+                or "MOMENTUM" in atype
             )
             if is_breakout_candidate:
                 try:
@@ -498,12 +538,14 @@ class AlertScrutinyAuditor:
                         try:
                             clean_ts = str(alert.created_at).replace(" IST", "").strip()
                             ref_dt = datetime.fromisoformat(clean_ts).replace(tzinfo=IST)
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
                     decision = evaluate_equity_adaptive_regime(
-                        symbol=clean_sym,
-                        spot=ltp,
+                        symbol=target_eval_sym,
+                        spot=target_eval_spot,
                         ref_time=ref_dt,
                         metrics=metrics_d if isinstance(metrics_d, dict) else None,
                     )
@@ -532,9 +574,14 @@ class AlertScrutinyAuditor:
                         )
                         if rvol_val < cheetah.min_required_rvol and not is_thrust and not has_sweep:
                             flags["equity_regime_valid"] = False
+                            item_lbl = (
+                                f"Underlying stock {target_eval_sym}"
+                                if target_eval_sym != clean_sym
+                                else clean_sym
+                            )
                             return (
                                 False,
-                                f"Falcon Chop Trap Veto: {clean_sym} in severe consolidation chop "
+                                f"Falcon Chop Trap Veto: {item_lbl} in severe consolidation chop "
                                 f"(CHOP {falcon.chop_index:.1f} >= 61.8 or ADX {falcon.adx_14:.1f} < 20.0). "
                                 f"Routine breakouts have high failure rate; preserve capital. "
                                 f"Mandate institutional thrust (RVOL {rvol_val:.2f}x < {cheetah.min_required_rvol:.1f}x) "
@@ -601,8 +648,10 @@ class AlertScrutinyAuditor:
                 if isinstance(opt_p, dict) and opt_p.get("t2_premium"):
                     try:
                         t2_val = float(opt_p["t2_premium"])
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 if t2_val is None and "target_2" in plan:
                     raw_t2 = plan["target_2"]
                     if isinstance(raw_t2, (int, float)):
@@ -612,23 +661,29 @@ class AlertScrutinyAuditor:
                         if clean_t2:
                             try:
                                 t2_val = float(clean_t2)
-                            except ValueError:
-                                pass
+                            except ValueError as e_suppressed:
+                                logger.debug(
+                                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                 if t2_val is None:
                     tp_dict = plan.get("trade_plan")
                     if isinstance(tp_dict, dict) and tp_dict.get("target_2"):
                         try:
                             t2_val = float(tp_dict["target_2"])
-                        except (ValueError, TypeError):
-                            pass
+                        except (ValueError, TypeError) as e_suppressed:
+                            logger.debug(
+                                f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
             if t2_val is None:
                 metrics = getattr(alert, "metrics", {}) or {}
                 if isinstance(metrics, dict) and metrics.get("t2_premium"):
                     try:
                         t2_val = float(metrics["t2_premium"])
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
             if t2_val is not None and risk_pts > 0 and rr_ratio >= 1.0:
                 if is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY"):
@@ -689,8 +744,10 @@ class AlertScrutinyAuditor:
                     )
                     if is_rollover:
                         flags["rollover_protected"] = True
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # 4d. MCX High-Impact Scheduled Inventory Blackout Gate
         if clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI"):
@@ -715,8 +772,10 @@ class AlertScrutinyAuditor:
                         alert_dt = datetime.fromisoformat(
                             clean_ts.replace("Z", "+00:00")
                         ).astimezone(IST)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if not alert_dt:
                 alert_dt = datetime.now(IST)
 
@@ -811,8 +870,10 @@ class AlertScrutinyAuditor:
                                 f"Global Macro Divergence: Henry Hub Natural Gas surging +{ng_c:.2f}% disallows domestic MCX shorts.",
                                 flags,
                             )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # 4f. Obstacle Runway Gate (Eliminate Stuck Signals hitting immediate brick walls)
         # Verifies that Target 1 is not obstructed by an immediate heavy resistance / Max OI wall
@@ -849,21 +910,67 @@ class AlertScrutinyAuditor:
                             f"[AlertScrutiny] Obstacle Runway Trap: {clean_sym} Bearish setup obstructed by floor at ₹{nearest_obs:.1f} (only {obs_dist:.1f} pts away vs {risk_pts:.1f} pts risk)"
                         )
 
-            # Reward-to-Obstacle (R:Obs >= 1.5R) Headroom Gate:
-            # Rejects setups where nearest major structural obstacle (Daily 200-EMA, Supply/Demand OB,
-            # or explicit resistance) truncates available runway before Target 1.
-            nearest_res = (
-                metrics.get("nearest_resistance")
-                or metrics.get("daily_200_ema")
-                or metrics.get("overhead_resistance")
-                or metrics.get("supply_order_block")
-            )
-            nearest_sup = (
-                metrics.get("nearest_support")
-                or metrics.get("daily_200_ema_sup")
-                or metrics.get("underlying_support")
-                or metrics.get("demand_order_block")
-            )
+            # Reward-to-Obstacle (R:Obs >= 2.0R) Structural Headroom Gate:
+            # Rejects setups where nearest major structural obstacle (Daily 200/50-EMA, Supply/Demand OB,
+            # Options Call/Put OI Wall, PDH/PDL, or Value Area VAH/VAL) truncates available runway before Target 1 (+2.0R).
+            overhead_candidates = [
+                metrics.get("nearest_resistance"),
+                metrics.get("overhead_resistance"),
+                metrics.get("daily_200_ema"),
+                metrics.get("daily_50_ema"),
+                metrics.get("supply_order_block"),
+                metrics.get("call_oi_wall"),
+                metrics.get("highest_call_oi"),
+                metrics.get("call_wall"),
+                metrics.get("max_pain_strike"),
+                metrics.get("pdh"),
+                metrics.get("prior_day_high"),
+                metrics.get("d_vah"),
+                metrics.get("vah"),
+            ]
+            underlying_candidates = [
+                metrics.get("nearest_support"),
+                metrics.get("underlying_support"),
+                metrics.get("daily_200_ema_sup"),
+                metrics.get("daily_50_ema_sup"),
+                metrics.get("demand_order_block"),
+                metrics.get("put_oi_wall"),
+                metrics.get("highest_put_oi"),
+                metrics.get("put_wall"),
+                metrics.get("max_pain_strike"),
+                metrics.get("pdl"),
+                metrics.get("prior_day_low"),
+                metrics.get("d_val"),
+                metrics.get("val"),
+            ]
+
+            valid_res = []
+            for oc in overhead_candidates:
+                if oc is not None:
+                    try:
+                        f_oc = float(oc)
+                        if f_oc > ltp:
+                            valid_res.append(f_oc)
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
+
+            valid_sup = []
+            for uc in underlying_candidates:
+                if uc is not None:
+                    try:
+                        f_uc = float(uc)
+                        if 0 < f_uc < ltp:
+                            valid_sup.append(f_uc)
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
+
+            nearest_res = min(valid_res) if valid_res else None
+            nearest_sup = max(valid_sup) if valid_sup else None
+
             is_intentional_breakout = (
                 atype
                 in (
@@ -876,46 +983,44 @@ class AlertScrutinyAuditor:
                 or "BREAKOUT" in atype
                 or "BREAKDOWN" in atype
             )
-            if is_bull and nearest_res:
-                try:
-                    res_f = float(nearest_res)
-                    if res_f > ltp and risk_pts > 0:
-                        obs_dist = res_f - ltp
-                        r_obs = obs_dist / risk_pts
-                        if (
-                            r_obs < 1.50
-                            and obs_dist < (0.85 * reward_pts)
-                            and not (is_intentional_breakout and abs(ltp - res_f) / ltp < 0.005)
-                        ):
-                            flags["obstacle_runway_clear"] = False
-                            flags["trap_immediate_resistance"] = True
-                            return (
-                                False,
-                                f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{res_f:,.1f} provides only {r_obs:.2f}R headroom (< 1.50R required). Insufficient runway to achieve asymmetric Target 1.",
-                                flags,
-                            )
-                except (ValueError, TypeError):
-                    pass
-            elif not is_bull and nearest_sup:
-                try:
-                    sup_f = float(nearest_sup)
-                    if sup_f < ltp and risk_pts > 0:
-                        obs_dist = ltp - sup_f
-                        r_obs = obs_dist / risk_pts
-                        if (
-                            r_obs < 1.50
-                            and obs_dist < (0.85 * reward_pts)
-                            and not (is_intentional_breakout and abs(ltp - sup_f) / ltp < 0.005)
-                        ):
-                            flags["obstacle_runway_clear"] = False
-                            flags["trap_immediate_support"] = True
-                            return (
-                                False,
-                                f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{sup_f:,.1f} provides only {r_obs:.2f}R headroom (< 1.50R required). Insufficient runway to achieve asymmetric Target 1.",
-                                flags,
-                            )
-                except (ValueError, TypeError):
-                    pass
+            if is_bull and nearest_res is not None:
+                res_f = float(nearest_res)
+                if res_f > ltp and risk_pts > 0:
+                    obs_dist = res_f - ltp
+                    r_obs = obs_dist / risk_pts
+                    flags["nearest_obstacle"] = res_f
+                    flags["r_obs"] = round(r_obs, 2)
+                    if (
+                        r_obs < 2.00
+                        and obs_dist < (0.90 * reward_pts)
+                        and not (is_intentional_breakout and abs(ltp - res_f) / ltp < 0.005)
+                    ):
+                        flags["obstacle_runway_clear"] = False
+                        flags["trap_immediate_resistance"] = True
+                        return (
+                            False,
+                            f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{res_f:,.1f} provides only {r_obs:.2f}R headroom (< 2.00R required). Insufficient runway to achieve asymmetric Target 1.",
+                            flags,
+                        )
+            elif not is_bull and nearest_sup is not None:
+                sup_f = float(nearest_sup)
+                if sup_f < ltp and risk_pts > 0:
+                    obs_dist = ltp - sup_f
+                    r_obs = obs_dist / risk_pts
+                    flags["nearest_obstacle"] = sup_f
+                    flags["r_obs"] = round(r_obs, 2)
+                    if (
+                        r_obs < 2.00
+                        and obs_dist < (0.90 * reward_pts)
+                        and not (is_intentional_breakout and abs(ltp - sup_f) / ltp < 0.005)
+                    ):
+                        flags["obstacle_runway_clear"] = False
+                        flags["trap_immediate_support"] = True
+                        return (
+                            False,
+                            f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{sup_f:,.1f} provides only {r_obs:.2f}R headroom (< 2.00R required). Insufficient runway to achieve asymmetric Target 1.",
+                            flags,
+                        )
 
             # 4g. Volume Profile Airspace Clearance (LVN vs HVN Congestion Check)
             # Identifies whether Target 1 enters clean Low Volume Node (LVN) airspace or risks stalling at Volume POC
@@ -928,8 +1033,10 @@ class AlertScrutinyAuditor:
                         flags["hvn_congestion_risk"] = True
                     else:
                         flags["lvn_vacuum_clear"] = True
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             elif metrics.get("is_lvn_vacuum"):
                 flags["lvn_vacuum_clear"] = True
 
@@ -984,8 +1091,10 @@ class AlertScrutinyAuditor:
                             f"Deep OTM Index Option: Strike {stk:,.0f} is {dist_pct * 100:.2f}% away from spot {spt:,.1f} (>1.2% theta decay trap)",
                             flags,
                         )
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         # 6b. Order Book Bid-Ask Spread & Exit Liquidity Gate:
         # Veto illiquid contracts with wide bid-ask spread (> 2.5% for index, > 4.5% for stock options)
         # or contracts with zero bid (total lack of exit liquidity).
@@ -1004,8 +1113,10 @@ class AlertScrutinyAuditor:
                                 f"Zero Bid Liquidity Veto: Contract has Ask ₹{a_f:,.2f} but ₹0.00 Bid. Complete lack of exit liquidity.",
                                 flags,
                             )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if spread_pct is not None:
                 max_spr = 2.5 if is_index_sym else 4.5
                 if spread_pct > max_spr:
@@ -1089,8 +1200,8 @@ class AlertScrutinyAuditor:
                     f"Learning Engine Lockout Active: {lock_reason}",
                     flags,
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}")
 
         # 7b. Opposing Major Zone Collision Gate (Truncated Headroom):
         # Prevent buying right beneath a major overhead supply zone (PDH/Day High) or shorting right above major demand (PDL/Day Low)
@@ -1244,8 +1355,10 @@ class AlertScrutinyAuditor:
         if isinstance(metrics_dict, dict) and metrics_dict.get("spot_to_vwap_pct") is not None:
             try:
                 spot_vwap_pct = float(metrics_dict["spot_to_vwap_pct"])
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if spot_vwap_pct is None:
             m_vwap = float(
                 (metrics_dict.get("vwap") if isinstance(metrics_dict, dict) else 0.0) or 0.0
@@ -1274,6 +1387,76 @@ class AlertScrutinyAuditor:
                     flags,
                 )
 
+        # 7d. Institutional TBT 50-Depth Micro-Structure & Iceberg Wall Gate:
+        # If candidate setup has live 50-depth TBT telemetry:
+        # 1. Reject setups trading straight into a massive resting Iceberg Ask/Bid wall within <= 0.20% headroom
+        # 2. Reject setups with severe adverse Order Book Imbalance (OBI-50 <= -0.40 on BUY or >= +0.40 on SELL)
+        try:
+            from market.fyers_tbt_manager import FyersTbtManager, resolve_tradable_tbt_symbol
+
+            tbt_mgr = FyersTbtManager()
+            depth = None
+            if tbt_mgr.is_connected:
+                tradable_sym = resolve_tradable_tbt_symbol(
+                    alert.symbol
+                ) or resolve_tradable_tbt_symbol(clean_sym)
+                for sym_cand in (tradable_sym, alert.symbol, clean_sym):
+                    if sym_cand and not depth:
+                        d = tbt_mgr.get_50_depth(sym_cand)
+                        if d and d.get("status") not in ("UNAVAILABLE", None):
+                            depth = d
+                            break
+
+                if depth and depth.get("status") != "UNAVAILABLE":
+                    obi_50 = float(depth.get("obi_50", 0.0) or 0.0)
+                    ltp_d = float(depth.get("ltp", 0.0) or 0.0)
+                    if is_bull_setup and not is_bear_setup:
+                        # Adverse order book imbalance
+                        if obi_50 <= -0.40:
+                            flags["adverse_tbt_imbalance"] = True
+                            return (
+                                False,
+                                f"TBT Order Book Imbalance Veto: Severe ask pressure overhead (OBI-50: {obi_50:+.2f}). Heavy institutional supply on 50-depth book.",
+                                flags,
+                            )
+                        # Resting iceberg ask walls
+                        ask_walls = depth.get("ask_walls", [])
+                        if ask_walls and ltp_d > 0:
+                            closest_wall = ask_walls[0]["price"]
+                            wall_headroom_pct = ((closest_wall - ltp_d) / ltp_d) * 100.0
+                            if 0.0 < wall_headroom_pct <= 0.20:
+                                wall_qty = ask_walls[0]["qty"]
+                                flags["trap_immediate_resistance"] = True
+                                return (
+                                    False,
+                                    f"TBT Iceberg Wall Veto: Massive resting ask wall ({wall_qty:,} contracts at ₹{closest_wall:,.1f}, only {wall_headroom_pct:.2f}% headroom). High rejection risk.",
+                                    flags,
+                                )
+                    elif is_bear_setup and not is_bull_setup:
+                        # Adverse order book imbalance
+                        if obi_50 >= 0.40:
+                            flags["adverse_tbt_imbalance"] = True
+                            return (
+                                False,
+                                f"TBT Order Book Imbalance Veto: Severe bid absorption beneath (OBI-50: {obi_50:+.2f}). Heavy institutional demand on 50-depth book.",
+                                flags,
+                            )
+                        # Resting iceberg bid walls
+                        bid_walls = depth.get("bid_walls", [])
+                        if bid_walls and ltp_d > 0:
+                            closest_wall = bid_walls[0]["price"]
+                            wall_headroom_pct = ((ltp_d - closest_wall) / ltp_d) * 100.0
+                            if 0.0 < wall_headroom_pct <= 0.20:
+                                wall_qty = bid_walls[0]["qty"]
+                                flags["trap_immediate_support"] = True
+                                return (
+                                    False,
+                                    f"TBT Iceberg Wall Veto: Massive resting bid wall ({wall_qty:,} contracts at ₹{closest_wall:,.1f}, only {wall_headroom_pct:.2f}% headroom). High bounce risk.",
+                                    flags,
+                                )
+        except Exception as e:
+            logger.debug(f"[AlertScrutiny] TBT depth microstructure evaluation passed through: {e}")
+
         # 8. Climax / Overbought Exhaustion Filter:
         # Prevent buying the top of a parabolic blow-off or shorting the very bottom of a capitulation
         rsi_val = None
@@ -1283,13 +1466,17 @@ class AlertScrutinyAuditor:
                     try:
                         rsi_val = float(metrics_dict[k])
                         break
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
         if rsi_val is None and hasattr(alert, "rsi") and alert.rsi is not None:
             try:
                 rsi_val = float(alert.rsi)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if rsi_val is not None and rsi_val > 0:
             is_put_option = (
@@ -1360,8 +1547,10 @@ class AlertScrutinyAuditor:
                                 f"Mean Reversion Risk: Extended {dist_from_ema / atr_f:.1f}x ATR from 20-EMA (₹{ema20_f:,.1f}) without structural base",
                                 flags,
                             )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         # 10. Multi-Timeframe (15m) Trend Alignment Gate:
         # Reject 5m counter-trend scalps if higher timeframe (15m) is in conflicting structural markdown/markup,
@@ -1442,8 +1631,10 @@ class AlertScrutinyAuditor:
                             f"Slippage Hazard Veto: Bid-Ask Spread ({spread_pct * 100:.2f}%) exceeds institutional threshold ({max_spread * 100:.1f}%) [Bid: Rs.{b:,.2f}, Ask: Rs.{a:,.2f}]",
                             flags,
                         )
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         flags["spread_valid"] = True
 
         # 12. Stock Option Illiquidity Gate:
@@ -1540,8 +1731,10 @@ class AlertScrutinyAuditor:
                                         alert_dt = datetime.fromisoformat(
                                             clean_ts.replace("Z", "+00:00")
                                         )
-                            except Exception:
-                                pass
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                         if not alert_dt:
                             alert_dt = datetime.now(IST)
                         elif alert_dt.tzinfo is None:
@@ -1569,8 +1762,10 @@ class AlertScrutinyAuditor:
                                 f"Stock Option Illiquidity Trap: Strike Daily Volume ({contracts_vol:,.0f}) < {min_vol} contracts (Illiquid execution trap)",
                                 flags,
                             )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         flags["liquidity_valid"] = True
 
         # 13. Midday Lunch Lull RVOL Expansion Filter (11:30 - 13:15 IST):
@@ -1603,8 +1798,10 @@ class AlertScrutinyAuditor:
                             alert_dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S")
                         except ValueError:
                             alert_dt = datetime.fromisoformat(clean_ts.replace("Z", "+00:00"))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if not alert_dt:
                 alert_dt = datetime.now(IST)
             elif alert_dt.tzinfo is None:
@@ -1634,8 +1831,10 @@ class AlertScrutinyAuditor:
                                 f"Midday False Breakout Trap: Breakout attempted during lunch lull (11:30-13:15 IST) with low relative volume (RVOL {rvol_f:.2f}x < 1.8x). Mandate institutional volume expansion.",
                                 flags,
                             )
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
         flags["midday_rvol_valid"] = True
 
         # 14. Macro Benchmark Gravitational Veto (NIFTY 50 Intraday Regime Alignment):
@@ -1726,8 +1925,10 @@ class AlertScrutinyAuditor:
                                         (n_ltp < n_vwap) if n_vwap > 0 else (n_chg < 0)
                                     )
                                     break
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # Live fallback if cache lookup was empty
             if nifty_change is None and not is_test_runner:
@@ -1742,8 +1943,10 @@ class AlertScrutinyAuditor:
                         n_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
                         nifty_change = float(nq.change_pct)
                         nifty_below_vwap = (n_ltp < n_vwap) if n_vwap > 0 else (nifty_change < 0)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             if nifty_change is None and not is_test_runner:
                 try:
@@ -1757,8 +1960,10 @@ class AlertScrutinyAuditor:
                             if getattr(idx_snap, "vwap", 0.0) > 0
                             else (nifty_change < 0)
                         )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             if nifty_change is not None:
                 try:
@@ -1805,7 +2010,9 @@ class AlertScrutinyAuditor:
 
                     # Explicit decoupler tag from upstream scan engine (highest precedence)
                     upstream_decoupler_tag = str(
-                        (metrics_dict or {}).get("decoupler_status", "") or ""
+                        getattr(alert, "decoupler_status", "")
+                        or (metrics_dict or {}).get("decoupler_status", "")
+                        or ""
                     ).upper()
                     is_upstream_decoupler = upstream_decoupler_tag == "VERIFIED_DECOUPLER"
 
@@ -1847,8 +2054,41 @@ class AlertScrutinyAuditor:
                         and (sec_rs_val >= 0.80 or sec_chg_val >= 0.20 or rvol_val >= 2.0)
                     )
 
+                    is_opening_drive_decoupler = bool(
+                        (
+                            atype in ("OPENING_DRIVE", "OPENING_DRIVE_IGNITION")
+                            or (metrics_dict or {}).get("setup") == "OPENING_DRIVE"
+                        )
+                        and (
+                            (metrics_dict or {}).get("open_pattern")
+                            in ("OPEN_EQUALS_LOW", "OPEN_LOW")
+                            or (metrics_dict or {}).get("open_low_matched") is True
+                        )
+                        and (
+                            rvol_val >= 1.5
+                            or float((metrics_dict or {}).get("rvol", 0.0) or 0.0) >= 1.5
+                        )
+                        and (
+                            spot_chg >= 0.4
+                            or float((metrics_dict or {}).get("day_change_pct", 0.0) or 0.0) >= 0.4
+                            or float((metrics_dict or {}).get("opening_range_pct", 0.0) or 0.0)
+                            >= 0.35
+                        )
+                    )
+
+                    is_high_rvol_breakout_decoupler = bool(
+                        rvol_val >= 2.0
+                        and (
+                            float((metrics_dict or {}).get("range_pct", 0.0) or 0.0) >= 0.8
+                            or spot_chg >= 0.8
+                            or float((metrics_dict or {}).get("day_change_pct", 0.0) or 0.0) >= 0.8
+                        )
+                    )
+
                     is_verified_decoupler = bool(
                         is_upstream_decoupler
+                        or is_opening_drive_decoupler
+                        or is_high_rvol_breakout_decoupler
                         or is_defensive_leader
                         or is_options_surge_decoupler
                         or is_equity_momentum_decoupler
@@ -1887,7 +2127,23 @@ class AlertScrutinyAuditor:
                         )
                     ) and is_nifty_markup:
                         is_short_breakdown_decoupler = bool(
-                            rrg_quad == "LAGGING"
+                            is_upstream_decoupler
+                            or rrg_quad == "LAGGING"
+                            or (
+                                (
+                                    atype in ("OPENING_DRIVE", "OPENING_DRIVE_IGNITION")
+                                    or (metrics_dict or {}).get("setup") == "OPENING_DRIVE"
+                                )
+                                and (
+                                    (metrics_dict or {}).get("open_pattern")
+                                    in ("OPEN_EQUALS_HIGH", "OPEN_HIGH")
+                                    or (metrics_dict or {}).get("open_high_matched") is True
+                                )
+                                and (
+                                    rvol_val >= 1.5
+                                    or float((metrics_dict or {}).get("rvol", 0.0) or 0.0) >= 1.5
+                                )
+                            )
                             or (
                                 vol_oi_val >= 2.0
                                 and opt_vol >= 3000
@@ -1909,8 +2165,10 @@ class AlertScrutinyAuditor:
                             if isinstance(metrics_dict, dict):
                                 metrics_dict["decoupler_status"] = "VERIFIED_DECOUPLER"
 
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         flags["macro_regime_aligned"] = True
         flags.setdefault("benchmark_regime_valid", True)
 
@@ -1950,8 +2208,10 @@ class AlertScrutinyAuditor:
                                 n_vwap = float(getattr(q_obj, "vwap", 0.0) or 0.0)
                                 n_chg = float(getattr(q_obj, "change_pct", 0.0) or 0.0)
                                 break
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             is_index_bearish = (
                 direction in ("BEARISH", "SHORT", "SELL")
@@ -2174,8 +2434,10 @@ class AlertScrutinyAuditor:
                                 f"Locomotive Tug-of-War Veto: {pol.summary} Naked directional options in low-vol chop (VIX {vix_val:.1f}) suffer rapid theta decay; mandate defined-risk spread.",
                                 flags,
                             )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # Heavyweight Breadth Confluence Matrix (HBCM) Gate for Index setups:
             hbcm_meta = metrics_dict.get("hbcm") if isinstance(metrics_dict, dict) else None
@@ -2307,8 +2569,10 @@ class AlertScrutinyAuditor:
                 try:
                     clean_ts = alert.created_at.replace(" IST", "").strip()
                     alert_dt = datetime.fromisoformat(clean_ts).replace(tzinfo=IST)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             enforce_friday = os.environ.get("ENFORCE_TEST_FRIDAY_GATE") == "1"
             if (
@@ -2353,8 +2617,10 @@ class AlertScrutinyAuditor:
             try:
                 clean_ts = str(alert.created_at).replace(" IST", "").strip()
                 alert_time = datetime.fromisoformat(clean_ts).time()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if alert_time is None:
             alert_time = datetime.now(IST).time()
 
@@ -2420,8 +2686,10 @@ class AlertScrutinyAuditor:
                         f"Parabolic Velocity Climax: Asset expanded {m_val:.1f}x ATR over last 3 bars without consolidation. Disallow market chase; mandate limit order on 20-EMA/VWAP pullback.",
                         flags,
                     )
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         flags["velocity_sustainable"] = True
 
         # 16. Intraday Sector Relative Performance / Breadth Sanity Gate:
@@ -2477,8 +2745,10 @@ class AlertScrutinyAuditor:
                                 f"Intraday Sector Tailwind Veto: Parent sector outperforming NIFTY by +{sec_rs_f:.2f}% intraday (strong institutional bid). Disallow short breakdown into surging sector tailwinds.",
                                 flags,
                             )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         flags["sector_aligned"] = True
 
         # 17. Order Book Level-2 Depth Imbalance Gate:
@@ -2608,8 +2878,42 @@ class AlertScrutinyAuditor:
                                     f"Developing Value Area Rejection: Price (₹{ltp:,.1f}) is trading above intraday Value Area High (₹{dh:,.1f}). Mandate price acceptance below value area before short entry.",
                                     flags,
                                 )
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
+
+        # Auction Market Theory: Developing POC Directional Migration Check
+        poc_mig = None
+        if isinstance(metrics_dict, dict):
+            poc_mig = (
+                metrics_dict.get("poc_migration")
+                or metrics_dict.get("developing_poc_migration")
+                or (metrics_dict.get("volume_profile") or {}).get("poc_migration")
+            )
+        if poc_mig and isinstance(poc_mig, str):
+            poc_mig_upper = poc_mig.upper()
+            flags["poc_migration"] = poc_mig_upper
+            is_call_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+            is_put_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+            if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
+                if poc_mig_upper in ("DESCENDING", "STAGNANT_LOW"):
+                    flags["poc_acceptance_valid"] = False
+                    return (
+                        False,
+                        f"Developing POC Stagnation Veto: Price pushing to highs, but developing Point of Control (d-POC) is {poc_mig_upper}. "
+                        f"Auction Market Theory indicates lack of institutional value migration. High false breakout risk.",
+                        flags,
+                    )
+            elif (direction in ("BEARISH", "SHORT", "SELL") or is_put_opt) and not is_call_opt:
+                if poc_mig_upper in ("ASCENDING", "STAGNANT_HIGH"):
+                    flags["poc_acceptance_valid"] = False
+                    return (
+                        False,
+                        f"Developing POC Stagnation Veto: Price breaking down to lows, but developing Point of Control (d-POC) is {poc_mig_upper}. "
+                        f"Auction Market Theory indicates lack of institutional value migration lower. High bear trap risk.",
+                        flags,
+                    )
         flags["poc_acceptance_valid"] = True
 
         # 19. Momentum Divergence Exhaustion Trap Gate:
@@ -2667,8 +2971,14 @@ class AlertScrutinyAuditor:
 
         if cvd_div and isinstance(cvd_div, str):
             cvd_upper = cvd_div.upper()
-            is_call_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
-            is_put_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+            is_call_opt = (
+                atype in ("OPTIONS_MOMENTUM", "INDEX_CALL_SETUP", "INDEX_MICRO_SCALP")
+                or getattr(alert, "option_type", "") == "CE"
+            )
+            is_put_opt = (
+                atype in ("OPTIONS_MOMENTUM", "INDEX_PUT_SETUP")
+                or getattr(alert, "option_type", "") == "PE"
+            )
 
             # Long breakout into Bearish Exhaustion / Limit Sell Absorption
             if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
@@ -2692,6 +3002,47 @@ class AlertScrutinyAuditor:
                         f"Breakdown is a bear trap / Wyckoff spring accumulation.",
                         flags,
                     )
+
+        # Also check CVD Delta Aggression Ratio if present
+        cvd_ratio_val = None
+        if isinstance(metrics_dict, dict):
+            cvd_ratio_val = metrics_dict.get("cvd_ratio") or metrics_dict.get(
+                "cvd_divergence_ratio"
+            )
+        if cvd_ratio_val is not None:
+            try:
+                c_ratio = float(cvd_ratio_val)
+                flags["cvd_ratio"] = c_ratio
+                is_call_opt = (
+                    atype in ("OPTIONS_MOMENTUM", "INDEX_CALL_SETUP", "INDEX_MICRO_SCALP")
+                    or getattr(alert, "option_type", "") == "CE"
+                )
+                is_put_opt = (
+                    atype in ("OPTIONS_MOMENTUM", "INDEX_PUT_SETUP")
+                    or getattr(alert, "option_type", "") == "PE"
+                )
+                if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
+                    if 0 < c_ratio < 0.50:
+                        flags["cvd_flow_valid"] = False
+                        return (
+                            False,
+                            f"Order Flow CVD Exhaustion Veto: Seller volume delta outpaces buyers (CVD Ratio {c_ratio:.2f}x < 0.50x). "
+                            f"Disallow long breakout into aggressive institutional selling pressure.",
+                            flags,
+                        )
+                elif (direction in ("BEARISH", "SHORT", "SELL") or is_put_opt) and not is_call_opt:
+                    if 0 < c_ratio < 0.50:
+                        flags["cvd_flow_valid"] = False
+                        return (
+                            False,
+                            f"Order Flow CVD Absorption Veto: Buyer volume delta outpaces sellers (CVD Ratio {c_ratio:.2f}x < 0.50x). "
+                            f"Disallow short breakdown into aggressive institutional buying accumulation.",
+                            flags,
+                        )
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         flags["cvd_flow_valid"] = True
 
         # 20. ADR (Average Daily Range) Exhaustion Gate:
@@ -2742,8 +3093,10 @@ class AlertScrutinyAuditor:
                                 f"ADR Exhaustion Trap: Asset has consumed {c_pct:.1f}% of its 14-day Average Daily Range (₹{float(adr_val):,.1f}); entry at day's low lacks expansion runway for Target 1.",
                                 flags,
                             )
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         flags["adr_exhaustion_valid"] = True
 
         # 21. Circuit Limit Headroom Gate (Cash Equities & Price Bands):
@@ -3172,8 +3525,8 @@ class AlertScrutinyAuditor:
             cb_summary = cb_m.to_dict()
             if cb_m.sample_count >= 5:
                 p_win = max(0.40, min(0.85, cb_m.win_rate))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}")
 
         # Friction drag (bid-ask slippage + STT/exchange transaction fees)
         is_fno = bool(
@@ -3200,6 +3553,12 @@ class AlertScrutinyAuditor:
             or getattr(alert, "rvol", 1.0)
             or 1.0
         )
+        cvd_ratio = float(
+            flags.get("cvd_ratio", 0.0)
+            or metrics.get("cvd_ratio", 0.0)
+            or metrics.get("cvd_divergence_ratio", 0.0)
+            or 1.0
+        )
         has_ob = bool(
             metrics.get("order_block")
             or metrics.get("bullish_ob")
@@ -3214,7 +3573,58 @@ class AlertScrutinyAuditor:
         poc_clear = flags.get("lvn_vacuum_clear", True) and not flags.get(
             "hvn_congestion_risk", False
         )
-        is_elephant_footprint = (rvol_val >= 1.8) or has_ob or has_fvg
+        is_elephant_footprint = (
+            (rvol_val >= 1.8 and cvd_ratio >= 1.5) or (rvol_val >= 2.0) or has_ob or has_fvg
+        )
+
+        # 7. 🏛️ CROSS-DESK CALIBRATION & PREDATORY STRIKE CLOCK
+        now_time = datetime.now(IST).time()
+        if dtime(9, 20) <= now_time <= dtime(10, 45):
+            strike_zone = "MORNING_EXPANSION_KILL_ZONE"
+            is_kz = True
+            timing_eff = 98
+            clock_action = "Prime expansion window: Maximum institutional follow-through."
+        elif dtime(11, 30) <= now_time <= dtime(12, 45):
+            strike_zone = "LUNCHTIME_CHOP_ZONE"
+            is_kz = False
+            timing_eff = 65
+            clock_action = "Midday turnover vacuum: High chop trap probability; selective sizing."
+        elif dtime(12, 45) <= now_time <= dtime(13, 45):
+            strike_zone = "EUROPEAN_OPEN_INFLECTION"
+            is_kz = True
+            timing_eff = 90
+            clock_action = "European session open: Trap inversion & trend resumption inflection."
+        elif dtime(13, 45) <= now_time <= dtime(15, 15):
+            strike_zone = "AFTERNOON_GAMMA_POWER_HOUR"
+            is_kz = True
+            timing_eff = 96
+            clock_action = "Power Hour: Gamma blasts & institutional index settlement drive."
+        else:
+            strike_zone = "OFF_PEAK_AUCTION"
+            is_kz = False
+            timing_eff = 75
+            clock_action = "Standard execution: Strict trigger validation required."
+
+        nifty_posture = "BALANCED"
+        if nifty_c is not None:
+            if float(nifty_c) <= -0.50:
+                nifty_posture = "LIQUIDATION_DUMP"
+            elif float(nifty_c) >= 0.50:
+                nifty_posture = "MARKUP_RALLY"
+
+        hbcm_valid = flags.get("heavyweight_confluence_valid", True)
+        if not hbcm_valid:
+            cd_status = "HBCM_CONTRADICTION_HOLD"
+            cd_summary = "Constituent heavyweights contradict setup direction; waiting for locomotive alignment."
+        elif not is_eagle_aligned:
+            cd_status = "INDEX_HEADWIND_THROTTLED"
+            cd_summary = f"Primary benchmark NIFTY ({nifty_c}%) in liquidation; equity long throttled unless decoupled."
+        elif is_kz:
+            cd_status = "OPTIMAL_KILL_ZONE_EXECUTION"
+            cd_summary = f"Prime {strike_zone} active with verified cross-desk alignment ({timing_eff}% efficiency)."
+        else:
+            cd_status = "STANDARD_CROSS_DESK_CALIBRATED"
+            cd_summary = "Cross-desk inter-market parameters calibrated and approved."
 
         return {
             "status": "APPROVED_PREDATORY_SANCTIONED",
@@ -3264,9 +3674,22 @@ class AlertScrutinyAuditor:
                 "seat": "🐘 ELEPHANT",
                 "status": "INSTITUTIONAL_FOOTPRINT" if is_elephant_footprint else "STANDARD",
                 "rvol": rvol_val,
+                "cvd_ratio": round(cvd_ratio, 2),
                 "poc_clear": poc_clear,
                 "has_order_block": has_ob,
                 "has_fair_value_gap": has_fvg,
+            },
+            "cross_desk": {
+                "seat": "🏛️ CROSS-DESK CALIBRATION",
+                "status": cd_status,
+                "summary": cd_summary,
+                "nifty_posture": nifty_posture,
+                "nifty_change_pct": nifty_c,
+                "hbcm_aligned": hbcm_valid,
+                "strike_clock_zone": strike_zone,
+                "kill_zone_active": is_kz,
+                "strike_clock_efficiency": timing_eff,
+                "clock_action": clock_action,
             },
         }
 
@@ -3278,7 +3701,7 @@ class AlertScrutinyAuditor:
         Falls back defensively to deterministic quantitative scrutiny if LLM is unavailable.
         Uses in-memory TTL cache (90s) to prevent LLM rate limit exhaustion during rapid scanning loops.
         """
-        # Step 0: Check In-Memory TTL Cache
+        # Step 0: Check In-Memory TTL Cache (AGENTS.md Invariant 15 & 17)
         sym = getattr(alert, "symbol", "") or (
             alert.get("symbol", "") if isinstance(alert, dict) else ""
         )
@@ -3294,20 +3717,12 @@ class AlertScrutinyAuditor:
         strike = getattr(alert, "strike", None) or (
             alert.get("strike", None) if isinstance(alert, dict) else None
         )
-        ltp = float(
-            getattr(alert, "ltp", 0.0)
-            or (alert.get("ltp", 0.0) if isinstance(alert, dict) else 0.0)
-            or 0.0
-        )
-        trig = float(
-            getattr(alert, "trigger_level", 0.0)
-            or (alert.get("trigger_level", 0.0) if isinstance(alert, dict) else 0.0)
-            or 0.0
-        )
 
-        cache_key = (
-            f"{sym}:{atype}:{direction}:{contract}:{strike}:{round(ltp, 1)}:{round(trig, 1)}"
-        )
+        # Use canonical symbol and stable setup attributes (never volatile price ticks)
+        from engine.alert_identity import canonical_alert_symbol
+
+        canonical_sym = canonical_alert_symbol(sym)
+        cache_key = f"{canonical_sym}:{atype}:{direction}:{contract or 'SPOT'}:{strike or '0'}"
         now = time.time()
         with self._cache_lock:
             if cache_key in self._cache:
@@ -3373,13 +3788,28 @@ class AlertScrutinyAuditor:
         confidence = float(getattr(alert, "confidence", 80.0) or 80.0)
         if confidence < min_score:
             logger.info(
-                f"[AlertScrutiny] Adaptive Regime Gate: {sym} ({atype}) confidence {confidence:.0f} "
+                f"[AlertScrutiny] Adaptive Regime Gate: {canonical_sym} ({atype}) confidence {confidence:.0f} "
                 f"< adaptive min_score {min_score} (regime: VIX compressed or Nifty ORB-trapped). "
                 f"Falling back to quantitative audit."
             )
             return _commit_cache(self._generate_quantitative_fallback(alert, flags))
 
-        # Step 2: Tier 2 AI Chief Risk Officer Scrutiny (min_score passed for adaptive regime)
+        # Step 1.6: 4-Stage Zero-Token Pre-LLM Conviction Gate (Invariant 15)
+        # Highly confident setups (confidence >= 85) with positive EV are approved quantitatively
+        # without wasting LLM token budgets on obvious A+ setups.
+        ev_r = float(pred_dossier.get("expected_value_r") or 0.0)
+        if confidence >= 85 and ev_r >= 1.5:
+            logger.info(
+                f"[AlertScrutiny] Zero-Token High-Conviction Fast Track: {canonical_sym} ({atype}) "
+                f"confidence {confidence:.0f} >= 85, EV {ev_r:.1f}R. Approved quantitatively."
+            )
+            quant_high = self._generate_quantitative_fallback(alert, flags)
+            quant_high.status = "APPROVED"
+            quant_high.score = int(round(confidence))
+            quant_high.auditor_model = "QUANT_HIGH_CONVICTION"
+            return _commit_cache(quant_high)
+
+        # Step 2: Tier 2 AI Chief Risk Officer Scrutiny (borderline setups needing adversary audit)
         try:
             llm_result = self._execute_fast_llm_scrutiny(
                 alert, flags, timeout=timeout, min_score=min_score
@@ -3452,8 +3882,10 @@ class AlertScrutinyAuditor:
                 full_json = json_candidate[: end_idx + 1]
                 try:
                     return json.loads(full_json)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # If truncated or malformed, attempt bracket and quote repair
             repaired = json_candidate
@@ -3465,8 +3897,10 @@ class AlertScrutinyAuditor:
                 repaired += "}"
             try:
                 return json.loads(repaired)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Resilient field extraction (works even when JSON is cut off mid-sentence)
         data: dict[str, Any] = {}
@@ -3485,8 +3919,10 @@ class AlertScrutinyAuditor:
         if sm:
             try:
                 data["score"] = int(sm.group(1))
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         return data
 
@@ -3507,7 +3943,7 @@ class AlertScrutinyAuditor:
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
                 enable_tools=False,
-                max_tokens=1200,
+                max_tokens=300,
             )
             return str(resp or "").strip()
 
@@ -3611,8 +4047,10 @@ class AlertScrutinyAuditor:
                     us10y_s = f"US 10Y: {snap.us_10y or 'N/A'}%"
                     usdinr_s = f"USD/INR: ₹{snap.usdinr or 'N/A'}"
                     macro_ctx = f"{dxy_s} | {brent_s} | {gold_s} | {us10y_s} | {usdinr_s}"
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             return f"""You are a senior commodity macro trader and CRO at an institutional MCX desk.
 Perform strict pre-dispatch scrutiny of this LIVE MCX commodity momentum alert:
@@ -3679,8 +4117,8 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
             regime_ctx = (
                 f"{r_obj.regime} (India VIX {r_obj.vix:.1f}, Trend {r_obj.trend_score:.1f})"
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}")
 
         # 2. SMC & Market Structure Vector
         smc_features = []

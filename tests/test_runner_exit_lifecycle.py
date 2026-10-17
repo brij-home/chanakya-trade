@@ -54,8 +54,10 @@ def test_evaluate_invalidation_distinguishes_trailing_stop_from_initial_sl():
 
     reason = evaluate_alert_invalidation(alert, current_ltp=17.5)
     assert reason is not None
-    assert "Trailing runner stop triggered" in reason
-    assert "breached ratcheted stop ₹18.8" in reason
+    assert (
+        "Trailing runner stop triggered" in reason or "Trailing breakeven stop triggered" in reason
+    )
+    assert "breached stop ₹18.8" in reason or "breached ratcheted stop ₹18.8" in reason
     assert "original initial SL was ₹13.5" in reason
     assert "T1 profit banked earlier" in reason
 

@@ -14,6 +14,10 @@ Calculates institutional cost-basis anchors and standard deviation volatility en
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.anchored_vwap")
+
 
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
@@ -189,7 +193,7 @@ def detect_structural_anchors(df: pd.DataFrame) -> list[AnchoredVWAPResult]:
                     res_catalyst = compute_anchored_vwap(df, abs_spike_idx, "HIGH_VOLUME_CATALYST")
                     if res_catalyst:
                         results.append(res_catalyst)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.anchored_vwap] Non-fatal exception suppressed: {e_suppressed}")
 
     return results

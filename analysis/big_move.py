@@ -19,6 +19,10 @@ Features:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.big_move")
+
 
 import sys
 from dataclasses import asdict, dataclass, field
@@ -29,8 +33,8 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.big_move] Non-fatal exception suppressed: {e_suppressed}")
 
 import numpy as np
 import pandas as pd

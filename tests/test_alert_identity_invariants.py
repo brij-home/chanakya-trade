@@ -32,6 +32,10 @@ def test_canonical_alert_symbol_prefixes():
     assert canonical_alert_symbol("RELIANCE.NS") == "RELIANCE"
     assert canonical_alert_symbol("TCS.BO") == "TCS"
     assert canonical_alert_symbol("^NSEI") == "NSEI"
+    assert canonical_alert_symbol("NSE:RELIANCE-EQ") == "RELIANCE"
+    assert canonical_alert_symbol("NSE:NIFTY50-INDEX") == "NIFTY"
+    assert canonical_alert_symbol("NSE:NIFTYBANK-INDEX") == "BANKNIFTY"
+    assert canonical_alert_symbol("NSE:INDIAVIX-INDEX") == "INDIAVIX"
     assert canonical_alert_symbol("  nse:infy  ") == "INFY"
     assert canonical_alert_symbol("") == ""
 
@@ -139,3 +143,45 @@ def test_all_detectors_use_canonical_identity():
     assert not violations, "Banned alert identity patterns detected in detectors:\n" + "\n".join(
         violations
     )
+
+
+def test_auto_alert_market_status_resolution():
+    """Verify AutoAlert automatically resolves market_status for LIVE environment."""
+    from unittest.mock import patch
+
+    # 1. LIVE alert during open market -> market_status="LIVE"
+    with patch("market.calendar.is_market_open", return_value=True):
+        alert_live = AutoAlert(
+            alert_id="aa-test-live-20260926",
+            alert_type="INDEX_MICRO_SCALP",
+            stage="IGNITED",
+            symbol="BANKNIFTY",
+            exchange="NFO",
+            direction="BULLISH",
+            trigger_level=55000.0,
+            ltp=55000.0,
+            stop_loss=54800.0,
+            target_level=55400.0,
+            headline="Test live",
+            summary="Test summary",
+            environment="LIVE",
+        )
+        assert alert_live.market_status == "LIVE"
+
+    # 2. EOD_SCAN alert -> market_status="SESSION_CLOSED"
+    alert_eod = AutoAlert(
+        alert_id="aa-test-eod-20260926",
+        alert_type="STAGE_1_TO_2_EXPANSION",
+        stage="STALK",
+        symbol="ZYDUSLIFE",
+        exchange="NSE",
+        direction="BULLISH",
+        trigger_level=1000.0,
+        ltp=1000.0,
+        stop_loss=980.0,
+        target_level=1050.0,
+        headline="Test eod",
+        summary="Test summary",
+        environment="EOD_SCAN",
+    )
+    assert alert_eod.market_status == "SESSION_CLOSED"

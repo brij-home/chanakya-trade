@@ -23,6 +23,10 @@ Docs: https://upstox.com/developer/api-documentation/
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("brokers.upstox")
+
 
 import json
 import time
@@ -83,8 +87,8 @@ class UpstoxAPI(BrokerAPI):
                 if time.time() - ts < TOKEN_EXPIRY:
                     self._access_token = data.get("access_token", "")
                     self._token_ts = ts
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.upstox] Non-fatal exception suppressed: {e_suppressed}")
 
     def _save_token(self, token: str) -> None:
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -197,8 +201,8 @@ class UpstoxAPI(BrokerAPI):
         self._profile = None
         try:
             TOKEN_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.upstox] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Profile & Funds ───────────────────────────────────────
 

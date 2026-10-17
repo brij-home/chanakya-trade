@@ -25,6 +25,9 @@ description: >-
 - [9. Alert Identity & Deduplication Invariants](#9-alert-identity--deduplication-invariants)
 - [10. Institutional RCA-First Debugging Protocol](#10-institutional-rca-first-debugging-protocol)
 - [11. Testing & Invariant Verification](#11-testing--invariant-verification)
+- [12. Data Reliability & Honest Provenance](#12-data-reliability-honest-provenance--zero-silent-swallowing-standard)
+- [13. Detector Degradation Circuit Breakers](#13-detector-degradation-circuit-breakers--scrutiny-conviction-integrity)
+- [14. Tri-Directional Holistic Calibration & Universal Options Symmetry](#14-tri-directional-holistic-calibration--universal-options-symmetry-standard)
 <!-- /TOC -->
 
 ---
@@ -313,6 +316,12 @@ All alerts in ChanakyaTrade must strictly follow centralized determinism rules:
    - Statically validated via `tests/test_alert_identity_invariants.py`, which parses all files in `engine/detectors/*.py` to ensure zero banned patterns exist.
 6. **Channel Parity & Query Transparency**:
    - Telegram bot `/alerts` (`cmd_alerts`) must query both `auto_alert_engine.get_alerts(view_mode="ACTIVE")` and `alert_manager._alerts`, displaying live delivery status (`📱 TG SENT` vs `🔒 TG HELD`).
+7. **Dynamic Price-Tier Risk Clamping (Zero Hardcoded `max(1.0, ...)` Floors)**:
+   - Detectors MUST NEVER apply arbitrary static risk floors like `max(1.0, ...)` which distort low-ticket (sub-₹100) or high-ticket (>₹2,500) stocks.
+   - All risk boundaries MUST resolve from `engine.dynamic_risk.resolve_price_tier(ltp).abs_min_risk_pts` or `clamp_dynamic_risk(...)`.
+8. **SEBI Expiry Architecture & Zero Stale Weekly Expiries**:
+   - Detectors MUST resolve expiry metadata through `engine.alert_expiry.classify_expiry_type(...)`.
+   - Strictly NIFTY (Thursday) and SENSEX (Friday) have weekly contracts. All other indices (Bank Nifty, FinNifty, MidcpNifty) and stock derivatives are strictly monthly contracts.
 
 ---
 
@@ -388,5 +397,39 @@ When diagnosing alert storms, UI popup bursts, or unexpected state transitions:
    - Thesis stop-loss invalidations feed `outcome="LOSS"` into `detector_circuit_breaker.record_outcome(...)`.
 4. **Hermetic Test Isolation**:
    - `detector_circuit_breaker.reset_all()` must be invoked in test cleanup (configured autouse in `tests/conftest.py::sanitize_test_env`) so that failed test setups never bleed degraded states into unrelated test suites.
+
+---
+
+## 14. Tri-Directional Holistic Calibration & Universal Options Symmetry Standard
+
+1. **Universal Options Applicability (Index & Single-Stock Options)**:
+   - Structural and directional guards apply symmetrically to **all options** (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX, BANKEX, and Single-Stock F&O like RELIANCE, HDFCBANK, INFOSYS):
+     - **VWAP Regime Discipline**: Call buyers must be aligned with spot holding at/above VWAP; Put buyers must be aligned with spot holding at/below VWAP.
+     - **Scale Separation Invariant**: Option premium ticks must never be contaminated with spot index/equity prices ($\ge 1000\text{ pts}$ on sub-500 options) or stray outside a $0.15\times - 3.50\times$ ratio against entry.
+     - **Time & Theta Exhaustion**: 0DTE afternoon theta exhaustion guards (e.g. 14:15+ IST) apply across weekly index expirations and monthly stock options during expiry week.
+
+2. **Tri-Directional Cross-Regime Auditing (Zero Unilateral Patches)**:
+   - Whenever an issue, anomaly, or edge-case is investigated or modified on one directional bias, developers and agents MUST audit the opposing direction and the neutral regime before committing:
+     - **BEAR Patch (Put)**: If adding a Short-Squeeze Guard, Bear-Trap Filter, or Ascending Bounce Guard, immediately verify and update the **BULL** counterpart (Dead-Cat Bounce Guard, Bull-Trap Filter, Descending Flush Guard).
+     - **BULL Patch (Call)**: If adding a Momentum Reclaim or Gap-Up Filter, immediately verify the **BEAR** counterpart (Breakdown Rejection, Gap-Down Filter).
+     - **NEUTRAL Impact (Iron Condors / Spreads)**: Verify whether suppressing false directional breakouts cleanly transitions capital to defined-risk neutral strategies (`engine/detectors/defined_risk_neutral.py`) during consolidating regimes (ADX $<25$, VIX $\le 15$).
+
+3. **Temporal Momentum vs. Static Morning Extremes**:
+   - Never compute directional flush/rally solely against a static morning extreme (`day_high` or `day_low` from hours earlier).
+   - Invariants must evaluate **recent dynamic momentum** (last 2–3 candles, slope, green vs. red close, and relative distance between swing low and swing high) to prevent suppressing genuine structural V-bottoms or V-top reversals.
+
+4. **Tri-Directional Regression Test Mandate**:
+   - Every directional detector modification must be verified by automated tests covering:
+     - Case 1: Valid trending entry (passed).
+     - Case 2: Opposing counter-trend surge / flush (strictly suppressed).
+     - Case 3: Structural V-reversal with heavyweights or volume confirmation (allowed without false suppression).
+     - Case 4: Scale sanity and non-contamination under corrupted tick conditions.
+
+5. **Immutable Entry Anchoring & Persistence Quarantine**:
+   - **Entry Anchor Sanctity**: In `engine/alert_model.py` and `engine/alert_scrutiny.py`, stop-loss and target validity checks must anchor against immutable entry definitions (`trigger_level` or `entry_price`), never fluctuating live market ticks (`ltp`). Adverse live price drift before an exit transition must not cause false data sanctity rejections.
+   - **Defensive Serialization Quarantine**: `engine/storage/alert_repository.py` must isolate per-alert serialization errors via defensive `try / except` quarantine so that an isolated formatting bug never aborts atomic JSON persistence or SQLite ledger sync for the rest of the alerts.
+   - **Milestone Decoupling**: Target scaling milestones (e.g. `DE_RISK_0_5R` at +0.5R) must remain distinct from full breakeven locking (`T1_ACHIEVED` / `BREAKEVEN_LOCKED` at +2.0R) in `engine/alert_evaluator.py`, avoiding false breakeven gate warnings.
+
+
 
 

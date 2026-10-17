@@ -308,8 +308,10 @@ def get_crypto_options_summary(
             try:
                 exp_dt = datetime.strptime(c.expiry.upper(), "%d%b%y").replace(tzinfo=timezone.utc)
                 expiry_dates[c.expiry] = exp_dt
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.crypto_options] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
     # Chronologically sort future active expiries
     active_expiries = [
@@ -476,8 +478,8 @@ def get_crypto_options_snapshot(
 
             t = get_crypto_ticker(f"{curr}USDT")
             spot = float(t.get("price", 0.0))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.crypto_options] Non-fatal exception suppressed: {e_suppressed}")
         return (
             [],
             spot,
@@ -520,8 +522,8 @@ def get_crypto_options_snapshot(
         iso_exp = raw_exp
         try:
             iso_exp = datetime.strptime(raw_exp.upper(), "%d%b%y").strftime("%Y-%m-%d")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.crypto_options] Non-fatal exception suppressed: {e_suppressed}")
 
         contract = OptionsContract(
             symbol=inst_name,

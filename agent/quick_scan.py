@@ -20,6 +20,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("agent.quick_scan")
+
 
 import re
 import time
@@ -83,8 +87,8 @@ def _parse_quick_response(text: str) -> dict:
     if m:
         try:
             result["confidence"] = int(m.group(1))
-        except ValueError:
-            pass
+        except ValueError as e_suppressed:
+            logger.debug(f"[agent.quick_scan] Non-fatal exception suppressed: {e_suppressed}")
 
     # Reasons — lines starting with dash/bullet after REASON:
     reason_section = re.search(
@@ -112,8 +116,8 @@ def _parse_quick_response(text: str) -> dict:
         if m:
             try:
                 result[key] = float(m.group(1).replace(",", ""))
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[agent.quick_scan] Non-fatal exception suppressed: {e_suppressed}")
 
     return result
 
@@ -195,8 +199,8 @@ class QuickScanner:
                     registry.execute("technical_analyse", {"symbol": symbol, "exchange": exchange})
                     or {}
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.quick_scan] Non-fatal exception suppressed: {e_suppressed}")
         return {}
 
     def _gather_fundamental(self, symbol: str) -> dict:
@@ -205,8 +209,8 @@ class QuickScanner:
             registry = self._get_registry()
             if registry:
                 return registry.execute("fundamental_data", {"symbol": symbol}) or {}
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.quick_scan] Non-fatal exception suppressed: {e_suppressed}")
         return {}
 
     def _format_technical(self, data: dict) -> str:

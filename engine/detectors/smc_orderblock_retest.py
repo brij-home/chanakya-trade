@@ -70,8 +70,10 @@ def _compute_atr(df: pd.DataFrame, period: int = 14) -> float:
             val = float(atr_series.iloc[-1])
             if val > 0:
                 return round(val, 4)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[engine.detectors.smc_orderblock_retest] Non-fatal exception suppressed: {e_suppressed}"
+        )
     return 0.0
 
 
@@ -110,8 +112,8 @@ def _find_next_structural_target(
         else:
             t1 = round(entry + 2.5 * risk, 2)
             t1_rationale = "2.5R structural expansion (no opposing OB within range)"
-        t2 = round(entry + 4.5 * risk, 2)
-        runner = round(entry + 7.0 * risk, 2)
+        t2 = max(round(t1 + 2.0 * risk, 2), round(entry + 4.5 * risk, 2))
+        runner = max(round(t2 + 2.5 * risk, 2), round(entry + 7.0 * risk, 2))
     else:
         # Avoid immediate floor: filter demand OBs that are far enough to allow at least 1.5R
         candidates = [
@@ -128,8 +130,8 @@ def _find_next_structural_target(
         else:
             t1 = round(entry - 2.5 * risk, 2)
             t1_rationale = "2.5R structural expansion (no opposing OB within range)"
-        t2 = round(entry - 4.5 * risk, 2)
-        runner = round(entry - 7.0 * risk, 2)
+        t2 = min(round(t1 - 2.0 * risk, 2), round(entry - 4.5 * risk, 2))
+        runner = min(round(t2 - 2.5 * risk, 2), round(entry - 7.0 * risk, 2))
 
     return t1, t2, runner, t1_rationale
 

@@ -71,8 +71,10 @@ def _score_alert(alert: object, nifty_posture: str = "NEUTRAL") -> float:
                 days_to_exp = (exp_dt.date() - datetime.now(IST).date()).days
                 if 0 < days_to_exp <= 2:
                     expiry_bonus = 3.0
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.council_arbitrator] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # ── Macro Direction & Anti-Whipsaw Alignment ─────────────────
         bench_bonus = 0.0
@@ -166,8 +168,8 @@ def run_council_arbitration(engine: object) -> list:
 
         snap = get_market_snapshot()
         nifty_posture = snap.posture
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.council_arbitrator] Non-fatal exception suppressed: {e_suppressed}")
 
     scored = [(a, _score_alert(a, nifty_posture)) for a in candidates]
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -190,8 +192,10 @@ def run_council_arbitration(engine: object) -> list:
         action_plan["is_apex_sotd"] = True
         try:
             alert.is_apex_sotd = True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.council_arbitrator] Non-fatal exception suppressed: {e_suppressed}"
+            )
         action_plan["council_note"] = (
             "🏆 APEX SOTD #%d: Selected by Institutional Council arbitration (score %.1f). "
             "Benchmark: %s. Highest conviction setup in session." % (rank, score, nifty_posture)
@@ -216,8 +220,8 @@ def run_council_arbitration(engine: object) -> list:
 
     try:
         engine._save()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.council_arbitrator] Non-fatal exception suppressed: {e_suppressed}")
 
     with _arb_lock:
         _last_arb_at = now

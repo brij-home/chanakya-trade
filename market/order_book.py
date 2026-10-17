@@ -23,13 +23,44 @@ import bisect
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import logging
-from typing import Any, Optional
+import threading
+from typing import Any, Optional, Union
 
 from engine.ring_buffer import RollingTickBuffer
 
 logger = logging.getLogger("market.order_book")
 
 from config.constants import IST
+
+_DEPTH_BOOKS: dict[str, BisectDepthBook] = {}
+_DEPTH_LOCK = threading.Lock()
+
+
+def get_depth_book(symbol: str, max_depth: int = 50) -> BisectDepthBook:
+    """
+    Retrieve or initialize the high-frequency in-memory BisectDepthBook for a symbol.
+    Maintains L2/L3 order book state streamed directly via WebSocket feeds.
+    """
+    canonical = (
+        str(symbol)
+        .upper()
+        .replace(".NS", "")
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("NFO:", "")
+        .replace("MCX:", "")
+        .strip()
+    )
+    with _DEPTH_LOCK:
+        if canonical not in _DEPTH_BOOKS:
+            _DEPTH_BOOKS[canonical] = BisectDepthBook(max_depth=max_depth)
+        return _DEPTH_BOOKS[canonical]
+
+
+def clear_depth_books() -> None:
+    """Clear all registered in-memory depth books (primarily for test isolation)."""
+    with _DEPTH_LOCK:
+        _DEPTH_BOOKS.clear()
 
 
 @dataclass
@@ -344,25 +375,28 @@ class OrderBookSnapshot:
 
 def compute_order_book_metrics(
     symbol: str,
-    raw_depth: dict[str, Any],
+    raw_depth: Union[dict[str, Any], BisectDepthBook],
     ltp: float = 0.0,
     recent_trades_volume: Optional[float] = None,
     live_broker_connected: bool = False,
     provenance: str = "LIVE_BROKER_L2",
 ) -> OrderBookSnapshot:
     """
-    Computes institutional microstructure metrics from standard broker 5-depth or 20-depth dict:
-    raw_depth format:
+    Computes institutional microstructure metrics from standard broker 5-depth or 20-depth dict,
+    or directly from a live streaming BisectDepthBook instance.
+    raw_depth format (if dict):
       {
         "buy": [{"price": 100.5, "quantity": 500, "orders": 3}, ...],
         "sell": [{"price": 100.6, "quantity": 300, "orders": 2}, ...]
       }
     """
-    bids_raw = raw_depth.get("buy", []) or raw_depth.get("bids", [])
-    asks_raw = raw_depth.get("sell", []) or raw_depth.get("asks", [])
-
-    book = BisectDepthBook(max_depth=50)
-    book.batch_update(bids_raw, asks_raw)
+    if isinstance(raw_depth, BisectDepthBook):
+        book = raw_depth
+    else:
+        bids_raw = raw_depth.get("buy", []) or raw_depth.get("bids", [])
+        asks_raw = raw_depth.get("sell", []) or raw_depth.get("asks", [])
+        book = BisectDepthBook(max_depth=50)
+        book.batch_update(bids_raw, asks_raw)
 
     bids = [
         DepthLevel(
@@ -493,8 +527,8 @@ def compute_order_book_metrics(
 
 def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
     """
-    Fetches real-time quote depth for symbol from active broker integration or market engine.
-    Clearly marks whether live broker L2 feed is connected or falling back to synthetic tick L1.
+    Fetches real-time quote depth for symbol from in-memory stream, active broker integration, or market engine.
+    Prioritizes sub-millisecond in-memory streaming depth book populated by WebSocket ticks.
     """
     is_mcx = symbol.upper().startswith("MCX:")
     is_bse = symbol.upper().startswith("BSE:")
@@ -508,19 +542,33 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
     )
     query_sym = symbol if is_mcx else clean_sym
 
+    # 1. Fast in-memory check: Sub-millisecond live WebSocket streaming BisectDepthBook
+    cached_book = get_depth_book(clean_sym)
+    if cached_book.best_bid > 0 and cached_book.best_ask > 0:
+        stream_ltp = cached_book.rolling_tick_vwap or (
+            (cached_book.best_bid + cached_book.best_ask) / 2.0
+        )
+        return compute_order_book_metrics(
+            clean_sym,
+            cached_book,
+            ltp=stream_ltp,
+            live_broker_connected=True,
+            provenance="LIVE_STREAM_L2",
+        )
+
     try:
         from brokers.session import get_data_broker, get_execution_broker
 
         brk = None
         try:
             brk = get_data_broker()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.order_book] Non-fatal exception suppressed: {e_suppressed}")
         if not brk:
             try:
                 brk = get_execution_broker()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.order_book] Non-fatal exception suppressed: {e_suppressed}")
 
         if brk and hasattr(brk, "get_market_depth"):
             depth_dict = brk.get_market_depth(query_sym)
@@ -570,17 +618,18 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
                     live_broker_connected=False,
                     provenance="FEED_L1_DEPTH",
                 )
-            # Synthetic 1-level depth reconstruction from high/low/close if depth unavailable
-            bid_p = round(ltp * 0.9995, 2)
-            ask_p = round(ltp * 1.0005, 2)
-            synth_depth = {
-                "buy": [{"price": bid_p, "quantity": 1000, "orders": 5}],
-                "sell": [{"price": ask_p, "quantity": 1000, "orders": 5}],
-            }
-            return compute_order_book_metrics(
-                clean_sym,
-                synth_depth,
-                ltp,
+            # If no market depth available in quote, return an honest disconnected snapshot with last price
+            return OrderBookSnapshot(
+                symbol=clean_sym,
+                ltp=ltp,
+                spread=0.0,
+                spread_pct=0.0,
+                total_bid_qty=0,
+                total_ask_qty=0,
+                obi_5=0.0,
+                obi_weighted=0.0,
+                bias="BALANCED",
+                liquidity_status="THIN_BOOK",
                 live_broker_connected=False,
                 provenance="SYNTHETIC_L1_DISCONNECTED",
             )
@@ -601,3 +650,6 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
         live_broker_connected=False,
         provenance="DISCONNECTED",
     )
+
+
+fetch_order_book_metrics = analyze_symbol_order_book

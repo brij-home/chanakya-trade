@@ -12,6 +12,10 @@ Components:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.strategy_builder")
+
 
 import ast
 import importlib.util
@@ -91,8 +95,10 @@ class StrategyStore:
                     meta = json.load(f)
                 meta["has_code"] = (self.base_dir / f"{meta_file.stem}.py").exists()
                 strategies.append(meta)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.strategy_builder] Non-fatal exception suppressed: {e_suppressed}"
+                )
         return strategies
 
     def load_strategy(self, name: str):
@@ -514,8 +520,8 @@ def extract_strategy_payload(response: str) -> Optional[dict]:
                     break
         payload = json.loads(rest[start:end])
         return payload
-    except (json.JSONDecodeError, ValueError):
-        pass
+    except (json.JSONDecodeError, ValueError) as e_suppressed:
+        logger.debug(f"[engine.strategy_builder] Non-fatal exception suppressed: {e_suppressed}")
 
     # Fallback: try to extract code from markdown code block
     code_match = re.search(r"```python\s*\n(.*?)```", rest, re.DOTALL)

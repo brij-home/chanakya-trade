@@ -246,7 +246,7 @@ def test_postmortem_runner_preserves_active_multi_session_swing():
     active_swing = AutoAlert(
         alert_id="aa-swing-active-1",
         alert_type="STAGE_1_TO_2_EXPANSION",
-        stage="ACTIONABLE",
+        stage="IGNITED",
         symbol="APLAPOLLO",
         exchange="NSE",
         direction="BULLISH",
@@ -258,6 +258,7 @@ def test_postmortem_runner_preserves_active_multi_session_swing():
         target_level=1800.0,
         time_horizon="SWING",
         created_at=f"{today_str} 11:30:00 IST",
+        triggered_at=f"{today_str} 11:30:00 IST",
         is_invalidated=False,
         r_multiple=0.1,
     )
@@ -406,6 +407,47 @@ def test_falcon_cheetah_trending_momentum_expansion_passes(auditor: AlertScrutin
     assert flags["equity_regime_valid"] is True
 
 
+def test_falcon_cheetah_stock_option_severe_chop_veto(auditor: AlertScrutinyAuditor):
+    """
+    Falcon & Cheetah Single-Stock Options Invariant:
+    A call option momentum breakout on a single-stock (e.g. RELIANCE 3000 CE)
+    where the underlying stock is trapped in severe consolidation chop
+    (CHOP >= 61.8, ADX < 20.0) without institutional thrust must be strictly VETOED.
+    """
+    alert_opt_chop = AutoAlert(
+        alert_id="aa-stock-opt-chop-1",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NSE:RELIANCE24OCT3000CE",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Reliance 3000 CE Call Momentum",
+        summary="Call option breakout",
+        ltp=45.0,
+        trigger_level=45.0,
+        stop_loss=38.0,
+        target_level=65.0,
+        time_horizon="INTRADAY",
+        is_live=True,
+        environment="LIVE",
+        option_type="CE",
+        metrics={
+            "strike_price": 3000.0,
+            "underlying_symbol": "RELIANCE",
+            "underlying_ltp": 2980.0,
+            "atr": 4.5,
+            "chop_index": 68.5,  # Severe chop on underlying!
+            "adx_14": 15.2,  # Non-trending on underlying!
+            "rvol": 1.10,  # Insufficient thrust (< 2.2x)
+        },
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_opt_chop)
+    assert passed is False
+    assert "Falcon Chop Trap Veto" in reason
+    assert "Underlying stock RELIANCE" in reason
+    assert flags["equity_regime_valid"] is False
+
+
 def test_order_flow_cvd_bearish_exhaustion_absorption_veto(auditor: AlertScrutinyAuditor):
     """
     Order Flow CVD Delta Gate Invariant:
@@ -536,6 +578,42 @@ def test_reward_to_obstacle_headroom_veto(auditor: AlertScrutinyAuditor):
     passed_ok, reason_ok, flags_ok = auditor.verify_tier1_sanity(alert_clear)
     assert passed_ok is True
     assert reason_ok == ""
+
+
+def test_reward_to_obstacle_options_call_oi_wall_veto(auditor: AlertScrutinyAuditor):
+    """
+    Reward-to-Obstacle (R:Obs >= 2.0R) Options OI Wall Invariant:
+    A bullish setup where nearest Options Call OI Wall (or PDH/VAH) is at 1030
+    (providing only 30 pts / 20 pts risk = 1.50R headroom < 2.00R required)
+    must be strictly VETOED to avoid hitting institutional options supply walls.
+    """
+    alert_oi_wall = AutoAlert(
+        alert_id="aa-oi-wall-blocked-1",
+        alert_type="MOMENTUM",
+        stage="ACTIONABLE",
+        symbol="NSE:INFY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Infosys Momentum into Call Wall",
+        summary="Long into Call OI Wall",
+        ltp=1000.0,
+        trigger_level=1000.0,
+        stop_loss=980.0,
+        target_level=1060.0,
+        time_horizon="INTRADAY",
+        is_live=True,
+        environment="LIVE",
+        metrics={
+            "atr": 16.0,
+            "call_oi_wall": 1030.0,  # 30 pts headroom = 1.50R (< 2.00R required)!
+        },
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_oi_wall)
+    assert passed is False
+    assert "Truncated Obstacle Headroom Veto" in reason
+    assert "1.50R headroom" in reason
+    assert flags["obstacle_runway_clear"] is False
+    assert flags["r_obs"] == 1.50
 
 
 def test_parent_sector_rrg_lagging_quadrant_headwind_veto(

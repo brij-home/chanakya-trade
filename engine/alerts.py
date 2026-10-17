@@ -465,8 +465,8 @@ class AlertManager:
                     ws_manager.subscribe(symbols)
                 console.print("[dim]  Alerts: real-time via WebSocket[/dim]")
                 return
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alerts] Non-fatal exception suppressed: {e_suppressed}")
 
         # Fallback to polling
         self.start_polling(interval=60)
@@ -544,8 +544,8 @@ class AlertManager:
         if self._poller_thread and self._poller_thread.is_alive():
             try:
                 self._poller_thread.join(timeout=1.0)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alerts] Non-fatal exception suppressed: {e_suppressed}")
         self._poller_thread = None
 
     def check_alerts(self) -> list[Alert]:
@@ -561,8 +561,8 @@ class AlertManager:
                     alert.triggered = True
                     alert.triggered_at = datetime.now().isoformat(timespec="seconds")
                     triggered.append(alert)
-            except Exception:
-                pass  # Skip alerts that fail to evaluate (broker down, etc.)
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alerts] Non-fatal exception suppressed: {e_suppressed}")
         if triggered:
             self._save()
         return triggered
@@ -576,8 +576,8 @@ class AlertManager:
 
             if ws_manager.connected:
                 ws_manager.subscribe([f"{alert.exchange}:{alert.symbol}"])
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alerts] Non-fatal exception suppressed: {e_suppressed}")
 
     def _poll_loop(self, interval: int) -> None:
         while self._polling and not self._stop_event.is_set():
@@ -632,8 +632,8 @@ class AlertManager:
                             f"Breakdown alert below ₹{alert.threshold:,.2f} is invalidated."
                         )
                         invalidated.append(alert)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[engine.alerts] Non-fatal exception suppressed: {e_suppressed}")
 
         if invalidated:
             self._save()
@@ -795,8 +795,8 @@ class AlertManager:
                 )
             )
             print("\a", end="", flush=True)  # system bell
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alerts] Non-fatal exception suppressed: {e_suppressed}")
 
         # 2. macOS desktop notification
         _desktop_notify(
@@ -878,8 +878,8 @@ class AlertManager:
                     "environment": alert.environment,
                 },
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alerts] Non-fatal exception suppressed: {e_suppressed}")
 
     def _evaluate(self, alert: Alert) -> bool:
         """Check if an alert's condition is met right now."""
@@ -1172,8 +1172,8 @@ def _webhook_notify(alert: Alert, ltp: Optional[float] = None) -> None:
             )
             with urllib.request.urlopen(req, timeout=10) as _:
                 pass
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alerts] Non-fatal exception suppressed: {e_suppressed}")
 
     threading.Thread(target=_send, daemon=True).start()
 

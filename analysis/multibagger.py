@@ -29,6 +29,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.multibagger")
+
 
 from dataclasses import asdict, dataclass, field
 import os
@@ -498,8 +502,8 @@ def evaluate_long_term_horizon(
                     details["sepa_qualified"] = True
                     details["eps_q1_growth"] = getattr(snap, "eps_q1_growth", None)
                     details["eps_acceleration"] = getattr(snap, "eps_acceleration", None)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.multibagger] Non-fatal exception suppressed: {e_suppressed}")
 
     # 1. ROCE & ROE Check
     roce = details["roce_pct"]
@@ -517,8 +521,8 @@ def evaluate_long_term_horizon(
         from analysis.universe import get_stock_sector
 
         sec_id, _ = get_stock_sector(symbol)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.multibagger] Non-fatal exception suppressed: {e_suppressed}")
     is_financial = sec_id in ("banking", "finance", "financials")
     is_capital_intensive = sec_id in ("energy", "infra", "metals", "realty", "telecom")
 
@@ -821,16 +825,16 @@ def scan_multibagger_opportunity(
             align = get_stock_tailwind(clean_sym)
             sector = align.sector
             sector_tailwind = align.tailwind_score
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.multibagger] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             from analysis.forensic import audit_company_forensics
 
             f_audit = audit_company_forensics(clean_sym)
             forensic_safe = f_audit.overall_forensic_verdict in ("CLEAN_PASS", "MILD_WARNING")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.multibagger] Non-fatal exception suppressed: {e_suppressed}")
 
     # 5. Evaluate 3 Distinct Horizons
     st_score, st_verdict, st_details = evaluate_short_term_horizon(

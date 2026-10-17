@@ -53,15 +53,15 @@ from bot.alert_templates import (
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 try:
     from config.credentials import load_all as _load_keychain
 
     _load_keychain()
-except Exception:
-    pass
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+except Exception as e_suppressed:
+    logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
 # Suppress chatty third-party loggers at import time so they never
 # flood the REPL regardless of when the bot thread starts.
@@ -224,8 +224,8 @@ def _get_bot_token() -> str:
             from config.credentials import _kr_get
 
             token = _kr_get("TELEGRAM_BOT_TOKEN") or ""
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
     if not token:
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN not set.\n"
@@ -274,8 +274,8 @@ def _save_chat_id(chat_id: int) -> None:
         os.makedirs(os.path.dirname(_CHAT_ID_FILE), exist_ok=True)
         with open(_CHAT_ID_FILE, "w") as f:
             f.write(str(chat_id))
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def _load_chat_id() -> Optional[int]:
@@ -287,8 +287,8 @@ def _load_chat_id() -> Optional[int]:
         try:
             _chat_id = int(env_id)
             return _chat_id
-        except ValueError:
-            pass
+        except ValueError as e_suppressed:
+            logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
     try:
         from config.credentials import _kr_get
 
@@ -296,8 +296,8 @@ def _load_chat_id() -> Optional[int]:
         if kr_id:
             _chat_id = int(kr_id.strip())
             return _chat_id
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
     try:
         with open(_CHAT_ID_FILE) as f:
             _chat_id = int(f.read().strip())
@@ -1695,8 +1695,8 @@ def run_setup_wizard() -> None:
             from config.credentials import _kr_get
 
             token = _kr_get("TELEGRAM_BOT_TOKEN") or ""
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
     if token:
         console.print("  [green]✓ Token found in keychain/env[/green]")
@@ -1824,8 +1824,8 @@ def get_telegram_destinations() -> dict[str, Any]:
             from engine.alert_preferences import alert_preferences
 
             fno_chat_id = alert_preferences._preferences.fno_chat_id or ""
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
     if "-1004393392375" in fno_chat_id:
         fno_name = "Premium_Alpha_Vortex_FnO_Channel"
     elif "-5352373809" in fno_chat_id:
@@ -1840,8 +1840,8 @@ def get_telegram_destinations() -> dict[str, Any]:
             from engine.alert_preferences import alert_preferences
 
             fno_index_chat_id = alert_preferences._preferences.fno_index_chat_id or ""
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
     if not fno_index_chat_id:
         fno_index_chat_id = "-1004380788314"
 
@@ -1861,8 +1861,8 @@ def get_telegram_destinations() -> dict[str, Any]:
             from engine.alert_preferences import alert_preferences
 
             mcx_chat_id = alert_preferences._preferences.mcx_chat_id or ""
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
     if not mcx_chat_id:
         mcx_chat_id = "-1004320002599"
 
@@ -1879,8 +1879,8 @@ def get_telegram_destinations() -> dict[str, Any]:
             from engine.alert_preferences import alert_preferences
 
             equity_chat_id = alert_preferences._preferences.equity_chat_id or ""
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
     if not equity_chat_id:
         equity_chat_id = "-1003524867091"
 
@@ -1897,8 +1897,8 @@ def get_telegram_destinations() -> dict[str, Any]:
             from engine.alert_preferences import alert_preferences
 
             free_index_chat_id = alert_preferences._preferences.free_index_chat_id or ""
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
     if not free_index_chat_id:
         free_index_chat_id = "-1004298387260"
 
@@ -1937,7 +1937,7 @@ def get_telegram_destinations() -> dict[str, Any]:
 _THREADS_FILE = Path(__file__).parent.parent / "data" / "telegram_threads.json"
 _signal_message_map: dict[str, int] = {}
 _signal_map_lock = threading.Lock()
-_MAX_SIGNAL_MAP_SIZE = 1000
+_MAX_SIGNAL_MAP_SIZE = 5000
 _threads_loaded = False
 
 
@@ -1956,8 +1956,8 @@ def _load_threads_if_needed() -> None:
                         _signal_message_map.update(
                             {str(k): int(v) for k, v in data.items() if str(v).isdigit()}
                         )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
         _threads_loaded = True
 
 
@@ -1968,8 +1968,8 @@ def _save_threads() -> None:
             data = dict(_signal_message_map)
         with open(_THREADS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def get_signal_message_id(
@@ -2016,6 +2016,7 @@ def record_signal_message_id(
     message_id: int,
     chat_id: Optional[str] = None,
     alert_id: Optional[str] = None,
+    overwrite: bool = True,
 ) -> None:
     """Record Telegram message_id for a signal to thread future milestone/trailing updates."""
     if not (signal_id or alert_id) or not message_id:
@@ -2044,13 +2045,16 @@ def record_signal_message_id(
             for k in list(_signal_message_map.keys())[:200]:
                 _signal_message_map.pop(k, None)
         for k in keys_to_index:
-            _signal_message_map[k] = int(message_id)
+            if overwrite or k not in _signal_message_map:
+                _signal_message_map[k] = int(message_id)
             if clean_chat:
-                _signal_message_map[f"{clean_chat}:{k}"] = int(message_id)
+                ck = f"{clean_chat}:{k}"
+                if overwrite or ck not in _signal_message_map:
+                    _signal_message_map[ck] = int(message_id)
     try:
         _save_threads()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def clear_signal_message_ids() -> None:
@@ -2060,8 +2064,8 @@ def clear_signal_message_ids() -> None:
     try:
         if _THREADS_FILE.exists():
             _THREADS_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def format_telegram_push_payload(
@@ -2083,7 +2087,9 @@ def format_telegram_push_payload(
       3. Audio / Tone Differentiator: sets disable_notification=True for minor trailing ratchets or silent alerts.
       4. Explicit Lifecycle State: enforces top-level delivery when is_update is False.
     """
-    target_chat_id = (chat_id or "").strip() or _load_chat_id()
+    target_chat_id = (
+        str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else _load_chat_id()
+    )
 
     # Topic/thread parsing: support "chat_id:thread_id" syntax
     if target_chat_id and ":" in str(target_chat_id):
@@ -2300,15 +2306,23 @@ def send_push(
                             keys_to_record.add(t)
                         for k in keys_to_record:
                             record_signal_message_id(
-                                k, msg_id, chat_id=target_chat_id, alert_id=alert_id
+                                k,
+                                msg_id,
+                                chat_id=target_chat_id,
+                                alert_id=alert_id,
+                                overwrite=not bool(is_update),
                             )
                         if on_success and callable(on_success):
                             try:
                                 on_success(int(msg_id))
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}"
+                                )
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             elif parse_mode == "HTML":
                 # If HTML parsing fails due to any unescaped tags/characters, retry as plain text so the alert is never lost
                 clean_text = re.sub(r"<[^>]+>", "", message)
@@ -2328,15 +2342,23 @@ def send_push(
                                 keys_to_record.add(t)
                             for k in keys_to_record:
                                 record_signal_message_id(
-                                    k, msg_id, chat_id=target_chat_id, alert_id=alert_id
+                                    k,
+                                    msg_id,
+                                    chat_id=target_chat_id,
+                                    alert_id=alert_id,
+                                    overwrite=not bool(is_update),
                                 )
                             if on_success and callable(on_success):
                                 try:
                                     on_success(int(msg_id))
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
+                                except Exception as e_suppressed:
+                                    logger.debug(
+                                        f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}"
+                                    )
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 else:
                     logger.warning(
                         f"[TelegramPush] Telegram plaintext retry failed for chat {target_chat_id}: "
@@ -2379,8 +2401,8 @@ def push_execution_alert(report_dict: dict) -> None:
     try:
         msg = format_execution_alert_message(report_dict)
         send_push(msg, parse_mode="HTML")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def format_blast_alert(
@@ -2495,8 +2517,8 @@ def patch_alert_manager() -> None:
 
         alert_manager._notify = _patched_notify
         logger.debug("Alert manager patched for Telegram push notifications")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
 
 # ── Bot Runner ───────────────────────────────────────────────
@@ -2577,8 +2599,8 @@ def run_bot() -> None:
             if isinstance(_obj, _RichConsole):
                 if _obj._file is not None and not getattr(_obj._file, "_bot_patched", False):
                     _obj._file = _BotThreadFileWrapper(_obj._file)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
     # run_polling() registers OS signal handlers which only work on the main
     # thread. Use the lower-level async API instead — no signal handlers at all.
@@ -2613,8 +2635,8 @@ def run_bot() -> None:
         finally:
             try:
                 loop.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def run_bot_background() -> threading.Thread:

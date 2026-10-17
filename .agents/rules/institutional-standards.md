@@ -132,3 +132,24 @@
 
 - **Async Event Loop Purity**: Never execute synchronous database queries, SQLite audit transactions, pandas number-crunching, or broker network requests directly on the FastAPI asyncio event loop thread.
 - **Worker Thread Offloading**: Always wrap blocking operations with `await asyncio.to_thread(...)` to ensure smooth real-time SSE event publishing and WebSocket responsiveness.
+
+---
+
+## 15. "Right First Time" Contract Parity & Pre-Handoff Smoke Invariant
+
+- **Zero "Fantasy Mocking"**: Frontend test mocks must NEVER be invented from imagination. They must be validated against the exact dictionary returned by the backend serializer (or generated from real API responses). Mismatches between frontend expectation and backend reality are strictly unacceptable.
+- **Contract Parity Tests**: Every UI view that fetches backend data must have an automated contract parity test (`tests/test_api_ui_contracts.py`) verifying that 100% of the JSON keys referenced in JSX actually exist in the backend schema.
+- **Mandatory Pre-Handoff Smoke Protocol**: Before claiming a feature, bug fix, or integration is complete, the agent MUST:
+  1. Run targeted backend & frontend unit tests (`pytest` and `vitest`).
+  2. Execute a real live HTTP call against the running FastAPI daemon (`GET` and `POST`) to verify status 200 OK.
+  3. Verify secondary button actions (e.g. sync, reset, clear, purge) actually invoke valid backend methods without runtime exceptions or missing imports.
+  4. Never leave the user to discover broken buttons or missing card fields.
+
+---
+
+## 16. Temporal Anchoring & Knowledge Currency Standard
+
+- **Explicit Temporal Anchoring**: All analytical reasoning, quant strategy evaluations, macro commentaries, and backtest evaluations MUST be explicitly anchored to the current calendar date (`datetime.now(IST)` / system prompt anchor, e.g. `2026-10-17`).
+- **Zero Stale Regulatory / Structural Assumptions**: Never rely on stale pre-trained LLM memory for Indian market regulatory parameters (e.g. lot sizes, weekly expiry cycles, index derivatives frameworks, STT charges). Always resolve them from canonical exchange master feeds (`market/instruments.py`, `market/symbol_master.py`) or verify via live web search (`search_web`).
+- **Data Provenance Currency**: All market quotes, fundamentals, and forensic scores must carry verifiable timestamped provenance (`REAL/LIVE`, `OFF-MARKET/EOD as of YYYY-MM-DD`). If data is older than the staleness threshold, mark it explicitly as `DEGRADED` rather than presenting stale numbers as current.
+

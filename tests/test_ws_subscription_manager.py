@@ -59,3 +59,39 @@ def test_ws_subscription_manager_disk_restore_on_restart():
             mock_ws = MagicMock()
             mgr2.on_ws_connected(mock_ws)
             mock_ws.subscribe.assert_called_once_with(desired)
+
+
+def test_ws_subscription_manager_seed_active_derivatives():
+    from market.ws_subscription_manager import (
+        WsSubscriptionManager,
+        get_active_index_options_grid,
+        get_active_commodity_grid,
+    )
+
+    opt_grid = get_active_index_options_grid(num_strikes_per_side=4)
+    assert len(opt_grid) > 0
+    # Must include NIFTY, BANKNIFTY, MIDCPNIFTY, SENSEX
+    assert any("NIFTY" in s for s in opt_grid)
+    assert any("BANKNIFTY" in s for s in opt_grid)
+    assert any("MIDCPNIFTY" in s for s in opt_grid)
+    assert any("SENSEX" in s for s in opt_grid)
+    assert any(s.endswith("CE") for s in opt_grid)
+    assert any(s.endswith("PE") for s in opt_grid)
+
+    comm_grid = get_active_commodity_grid()
+    assert len(comm_grid) > 0
+    assert any("CRUDEOIL" in s for s in comm_grid)
+    assert any("GOLD" in s for s in comm_grid)
+    assert any("USDINR" in s for s in comm_grid)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        sub_file = Path(tmp_dir) / "sub.json"
+        with patch("market.ws_subscription_manager._get_cache_path", return_value=sub_file):
+            mgr = WsSubscriptionManager(max_subscriptions=5000)
+            mock_ws = MagicMock()
+            seeded = mgr.seed_active_derivatives(ws_client=mock_ws)
+            assert len(seeded) > 50
+            desired = mgr.get_all_desired_subscriptions()
+            # Verified that index options are now in desired subscriptions
+            assert any("NIFTY" in s and ("CE" in s or "PE" in s) for s in desired)
+            mock_ws.subscribe.assert_called_once()

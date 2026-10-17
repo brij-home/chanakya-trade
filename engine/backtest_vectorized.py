@@ -20,6 +20,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.backtest_vectorized")
+
 
 import math
 
@@ -59,8 +63,8 @@ def _fetch_ohlcv(symbol: str, period: str = "1y", exchange: str = "NSE") -> pd.D
             df = df.copy()
             df.columns = [c.lower() for c in df.columns]
             return df
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.backtest_vectorized] Non-fatal exception suppressed: {e_suppressed}")
 
     # Tier 2: yfinance fallback
     try:

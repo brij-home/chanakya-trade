@@ -107,8 +107,10 @@ def classify_market_regime(
                         if val > 0:
                             vix_val = val
                             break
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.regime_governor] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     if (vix_val is None or vix_val <= 0) and not is_test_env:
         try:
@@ -121,8 +123,10 @@ def classify_market_regime(
                 vix_val = float(v_raw.ltp)
             elif isinstance(v_raw, dict):
                 vix_val = float(v_raw.get("ltp") or v_raw.get("value") or 0.0)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.regime_governor] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     if vix_val is None or vix_val <= 0:
         vix_val = 13.5  # Neutral institutional baseline
@@ -194,8 +198,10 @@ def classify_market_regime(
                         if chg_pct >= 0.40:
                             is_benchmark_trending = True
                         break
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.regime_governor] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     is_midday_lull = (
         (dtime(11, 15) <= now_t <= dtime(13, 15)) and (vix_val < 16.0) and not is_benchmark_trending

@@ -207,8 +207,10 @@ def seed_historical_data(
             if progress_callback:
                 try:
                     progress_callback(done_count, len(targets_to_seed))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.historical_data_manager] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
     elapsed = round(time.time() - t0, 2)
     status = "SEED_COMPLETE" if not failed else "SEED_PARTIAL"

@@ -76,26 +76,34 @@ report = audit_company_forensics("RELIANCE")
 
 ---
 
-## 3. Position Sizing & Risk-Parity
+## 3. Position Sizing & Hierarchical Dynamic Risk Scaling
 
-[`engine/position_sizer.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/position_sizer.py)
+[`engine/dynamic_risk.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/dynamic_risk.py) & [`engine/position_sizer.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/position_sizer.py)
 
-| Model | Description |
+| Sizing & Risk Framework | Description |
 | :--- | :--- |
-| `atr_volatility` | Equalizes risk based on 1.5×ATR volatility stop |
-| `fixed_fractional` | Direct stop distance risk sizing |
-| `half_kelly` | Kelly criterion × 0.5 for stability |
+| `hierarchical_dynamic_risk` | 5-tier institutional model: Segment → Price Tier → Sector Beta → VIX Regime → Regulatory Guardrails |
+| `atr_volatility` | Timeframe-adaptive ATR volatility bounding (Intraday $0.35\times-1.50\times$, Swing $0.80\times-2.20\times$, Positional $1.80\times-5.00\times$) |
+| `fixed_fractional` | Direct structural stop distance sizing with circuit headroom haircut |
+| `half_kelly` | Half-Kelly criterion ($f^* \times 0.5$) for capital preservation |
 
-**F&O Lot Quantization**: Auto-rounds to standard lots (NIFTY 25, BANKNIFTY 15, FINNIFTY 25, MIDCPNIFTY 50, equity lots).
+**F&O Lot Quantization (Official October 2026 Canonical Master)**: Auto-resolves from `market.instruments.STANDARD_LOT_SIZES`:
+- Benchmark Indices: `NIFTY: 65`, `BANKNIFTY: 30`, `FINNIFTY: 60`, `MIDCPNIFTY: 120`, `SENSEX: 20`, `BANKEX: 30`.
+- All 219 NSE Single-Stock Derivatives: (including newly listed post-Nov 2024 additions: `SWIGGY: 1825`, `WAAREEENER: 175`, `HYUNDAI: 275`, `SUZLON: 12700`, etc.).
 
 ```python
-from engine.position_sizer import calculate_position_size
+from engine.dynamic_risk import calculate_hierarchical_position_size, clamp_dynamic_risk
 
-size = calculate_position_size(
-    symbol="INFY", entry_price=1500.0, stop_loss=1470.0,
-    capital=200000.0, max_risk_pct=1.5, sizing_model="atr_volatility",
+# 5-Tier Hierarchical Dynamic Position Sizing
+size = calculate_hierarchical_position_size(
+    symbol="INFY",
+    entry_price=1500.0,
+    stop_loss=1470.0,
+    capital=200000.0,
+    target_risk_pct=1.5,
+    timeframe="INTRADAY",
 )
-# size.shares, size.lots, size.capital_allocated, size.risk_amount
+# size["shares"], size["lots"], size["capital_allocated"], size["risk_amount"], size["price_tier"]
 ```
 
 ---

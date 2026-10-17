@@ -33,9 +33,9 @@ from config.constants import IST
 DEFAULT_WATCHED_INDICES = [
     "NIFTY",
     "BANKNIFTY",
-    "FINNIFTY",
     "MIDCPNIFTY",
     "SENSEX",
+    "FINNIFTY",
     "BANKEX",
 ]
 

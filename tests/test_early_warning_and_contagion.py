@@ -11,8 +11,7 @@ Unit & integration tests for institutional early-warning and precision timing im
 from __future__ import annotations
 
 from datetime import datetime
-from unittest.mock import patch
-from zoneinfo import ZoneInfo
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -26,7 +25,7 @@ from engine.detectors.gamma_blast import detect_gamma_blast, _STRIKE_OI_SNAPSHOT
 from engine.detectors.squeeze_breakout import detect_squeeze_breakout
 from engine.index_contagion import index_contagion_engine
 
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST
 
 
 class TestTimeOfDayRvol:
@@ -400,3 +399,175 @@ class TestContagionHolisticSanity:
         assert _INDEX_MAP["FINNIFTY"] == "NIFTY_FIN_SERVICE.NS"
         assert _INDEX_MAP["NIFTY FIN SERVICE"] == "NIFTY_FIN_SERVICE.NS"
         assert _INDEX_MAP.get("FINNIFTY") != "^CNXFIN"
+
+    def test_midcpnifty_contagion_evaluation(self):
+        """MIDCPNIFTY constituent synchronization triggers early warning for Midcap index."""
+        dt = datetime(2026, 10, 16, 10, 15, tzinfo=IST)
+        quotes = {
+            "NSE:NIFTY MID SELECT": Quote(
+                symbol="NIFTY MID SELECT",
+                last_price=13820.0,
+                vwap=13780.0,
+                change_pct=0.45,
+                high=13830.0,
+                low=13750.0,
+            ),
+            "NSE:PERSISTENT": Quote(
+                symbol="PERSISTENT",
+                last_price=5800.0,
+                vwap=5750.0,
+                change_pct=1.2,
+                volume=200_000,
+                high=5810.0,
+                low=5730.0,
+            ),
+            "NSE:FEDERALBNK": Quote(
+                symbol="FEDERALBNK",
+                last_price=210.0,
+                vwap=208.0,
+                change_pct=1.0,
+                volume=5_000_000,
+                high=210.5,
+                low=207.0,
+            ),
+            "NSE:DIXON": Quote(
+                symbol="DIXON",
+                last_price=15200.0,
+                vwap=15100.0,
+                change_pct=1.5,
+                volume=150_000,
+                high=15250.0,
+                low=15000.0,
+            ),
+            "NSE:POLYCAB": Quote(
+                symbol="POLYCAB",
+                last_price=7100.0,
+                vwap=7050.0,
+                change_pct=0.9,
+                volume=180_000,
+                high=7120.0,
+                low=7000.0,
+            ),
+            "NSE:COFORGE": Quote(
+                symbol="COFORGE",
+                last_price=8200.0,
+                vwap=8150.0,
+                change_pct=1.1,
+                volume=120_000,
+                high=8220.0,
+                low=8100.0,
+            ),
+            "NSE:AUBANK": Quote(
+                symbol="AUBANK",
+                last_price=640.0,
+                vwap=635.0,
+                change_pct=0.8,
+                volume=1_000_000,
+                high=642.0,
+                low=632.0,
+            ),
+            "NSE:HDFCAMC": Quote(
+                symbol="HDFCAMC",
+                last_price=4500.0,
+                vwap=4460.0,
+                change_pct=1.1,
+                volume=400_000,
+                high=4510.0,
+                low=4440.0,
+            ),
+            "NSE:ASHOKLEY": Quote(
+                symbol="ASHOKLEY",
+                last_price=230.0,
+                vwap=228.0,
+                change_pct=0.9,
+                volume=3_000_000,
+                high=231.0,
+                low=227.0,
+            ),
+        }
+        res = index_contagion_engine.evaluate_index("MIDCPNIFTY", quotes_map=quotes, ref_dt=dt)
+        assert res is not None
+        assert res.index_name == "MIDCPNIFTY"
+        assert res.bullish_weight_pct >= 68.0
+        assert res.alert is not None
+        assert res.alert.symbol == "MIDCPNIFTY"
+        assert res.alert.exchange == "NFO"
+
+    def test_sensex_contagion_evaluation(self):
+        """SENSEX constituent synchronization triggers early warning for BSE derivatives (BFO)."""
+        dt = datetime(2026, 10, 16, 10, 15, tzinfo=IST)
+        quotes = {
+            "BSE:SENSEX": Quote(
+                symbol="SENSEX",
+                last_price=82150.0,
+                vwap=82050.0,
+                change_pct=0.45,
+                high=82200.0,
+                low=81900.0,
+            ),
+            "NSE:HDFCBANK": Quote(
+                symbol="HDFCBANK",
+                last_price=1750.0,
+                vwap=1740.0,
+                change_pct=1.1,
+                volume=8_000_000,
+                high=1755.0,
+                low=1735.0,
+            ),
+            "NSE:RELIANCE": Quote(
+                symbol="RELIANCE",
+                last_price=3120.0,
+                vwap=3100.0,
+                change_pct=1.2,
+                volume=5_000_000,
+                high=3125.0,
+                low=3090.0,
+            ),
+            "NSE:ICICIBANK": Quote(
+                symbol="ICICIBANK",
+                last_price=1380.0,
+                vwap=1370.0,
+                change_pct=0.9,
+                volume=6_000_000,
+                high=1385.0,
+                low=1365.0,
+            ),
+            "NSE:INFY": Quote(
+                symbol="INFY",
+                last_price=1980.0,
+                vwap=1965.0,
+                change_pct=1.3,
+                volume=4_000_000,
+                high=1985.0,
+                low=1960.0,
+            ),
+            "NSE:TCS": Quote(
+                symbol="TCS",
+                last_price=4300.0,
+                vwap=4270.0,
+                change_pct=0.8,
+                volume=2_000_000,
+                high=4310.0,
+                low=4260.0,
+            ),
+            "NSE:LT": Quote(
+                symbol="LT",
+                last_price=3850.0,
+                vwap=3820.0,
+                change_pct=1.0,
+                volume=1_500_000,
+                high=3860.0,
+                low=3810.0,
+            ),
+        }
+        mock_dl = MagicMock()
+        mock_dl.camarilla = {"h5": 83500.0, "l5": 81000.0}
+        mock_dl.atr_14 = 650.0
+        with patch("engine.daily_levels.get_daily_levels", return_value=mock_dl):
+            res = index_contagion_engine.evaluate_index("SENSEX", quotes_map=quotes, ref_dt=dt)
+            assert res is not None
+            assert res.index_name == "SENSEX"
+            assert res.bullish_weight_pct >= 68.0
+            assert res.alert is not None
+            assert res.alert.symbol == "SENSEX"
+            assert res.alert.exchange == "BFO"

@@ -10,6 +10,10 @@ Intervals supported (Zerodha notation):
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.history")
+
 
 from datetime import datetime, timedelta
 from typing import Optional
@@ -20,6 +24,11 @@ import pandas as pd
 # ── Interval aliases ─────────────────────────────────────────
 
 INTERVAL_MAP = {
+    "5s": "5s",
+    "10s": "10s",
+    "15s": "15s",
+    "30s": "30s",
+    "45s": "45s",
     "1m": "minute",
     "3m": "3minute",
     "5m": "5minute",
@@ -44,10 +53,12 @@ import threading
 from collections import OrderedDict
 
 _df_memory_cache_lock = threading.Lock()
-MAX_MEMORY_DFS = 2048  # Scaled for 24 GB RAM hardware (~500 stocks across multiple timeframes)
+MAX_MEMORY_DFS = (
+    8192  # Optimized for 24 GB RAM hardware (~8,000 DataFrames across all symbols & timeframes)
+)
 _df_memory_cache: OrderedDict[str, tuple[float, pd.DataFrame]] = OrderedDict()
-_DF_TTL_SECONDS = 300.0  # 5 minutes in-memory cache for daily
-_INTRADAY_TTL_SECONDS = 60.0  # 60s in-memory cache for intraday (5m, 15m)
+_DF_TTL_SECONDS = 3600.0  # 1 hour in-memory cache for daily EOD history (immutable past bars)
+_INTRADAY_TTL_SECONDS = 300.0  # 5 minutes in-memory cache for intraday (5m, 15m) bars
 
 
 def clear_df_memory_cache() -> int:
@@ -63,8 +74,8 @@ try:
     from engine.memory_guard import register_trim_callback
 
     register_trim_callback(clear_df_memory_cache)
-except Exception:
-    pass
+except Exception as e_suppressed:
+    logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def get_ohlcv(
@@ -106,18 +117,18 @@ def get_ohlcv(
         if p.endswith("d"):
             try:
                 days = int(p[:-1])
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
         elif p.endswith("mo") or p.endswith("m"):
             try:
                 days = int(p.replace("mo", "").replace("m", "")) * 30
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
         elif p.endswith("y"):
             try:
                 days = int(p[:-1]) * 365
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
     # Normalize interval alias
     kite_interval = INTERVAL_MAP.get(interval, interval)
@@ -129,8 +140,23 @@ def get_ohlcv(
     now_ts = time.time()
 
     # Tier 1: Instant In-Memory DataFrame Cache (0.1ms latency)
-    ttl_limit = _DF_TTL_SECONDS if kite_interval == "day" else _INTRADAY_TTL_SECONDS
-    if not from_date and not to_date:
+    is_seconds = str(kite_interval).lower().endswith("s") and kite_interval != "day"
+    if is_seconds:
+        ttl_limit = 5.0
+        days = min(days, 25)
+    elif kite_interval == "day":
+        ttl_limit = _DF_TTL_SECONDS
+    else:
+        ttl_limit = _INTRADAY_TTL_SECONDS
+    is_live_request = (as_of is None) and (
+        (not from_date and not to_date)
+        or (
+            to_date is not None
+            and isinstance(to_date, datetime)
+            and abs((to_date - datetime.now(to_date.tzinfo or None)).total_seconds()) < 600
+        )
+    )
+    if is_live_request:
         with _df_memory_cache_lock:
             # 1a. Check exact cache key
             if cache_key in _df_memory_cache:
@@ -199,8 +225,8 @@ def get_ohlcv(
                             _df_memory_cache.popitem(last=False)
                         _df_memory_cache[cache_key] = (now_ts, res_df.copy())
                     return res_df
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
     # Tier 2: Fast SQLite analysis_cache for recent daily candles (15m TTL)
     raw = None
@@ -211,8 +237,8 @@ def get_ohlcv(
             cached_rows = cache_get(f"ohlcv_{cache_key}", namespace="history", max_age_seconds=900)
             if cached_rows and isinstance(cached_rows, list) and len(cached_rows) >= 10:
                 raw = cached_rows
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
     provider_name = "cache"
     snapshot_id: Optional[str] = None
@@ -234,8 +260,8 @@ def get_ohlcv(
                 raw = snapshot["rows"]
                 provider_name = snapshot["provider"]
                 snapshot_id = snapshot["snapshot_id"]
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
     # Tier 2.8: 24x7 Crypto Provider (Binance REST & Stream)
     is_crypto = (
@@ -276,8 +302,8 @@ def get_ohlcv(
                         }
                     )
                 provider_name = "binance"
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
     # Tier 3: explicit data-provider API → yfinance → disk cache.
     if not raw:
@@ -299,8 +325,8 @@ def get_ohlcv(
                 # Mock broker: use yfinance
                 raw = _yfinance_fallback(symbol, exchange, kite_interval, from_date, to_date)
                 provider_name = "yfinance"
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
     if not raw:
         raw = _yfinance_fallback(symbol, exchange, kite_interval, from_date, to_date)
@@ -320,8 +346,8 @@ def get_ohlcv(
             from engine.analysis_cache import cache_set
 
             cache_set(f"ohlcv_{cache_key}", raw, namespace="history", ttl_minutes=15)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
         # Persist an immutable local EOD snapshot for later reproducible runs.
         try:
@@ -342,8 +368,8 @@ def get_ohlcv(
                 if provider_name in {"yfinance", "disk_cache"}
                 else "VERIFIED",
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
     if not raw:
         empty_df = pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
@@ -399,8 +425,8 @@ def get_ohlcv(
             from engine.eod_store import save_ohlcv_batch
 
             save_ohlcv_batch({clean_sym: df.copy()})
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
     # Save into Tier 1 In-Memory Cache (bounded LRU max MAX_MEMORY_DFS)
     if not df.empty:
@@ -409,7 +435,7 @@ def get_ohlcv(
             while len(_df_memory_cache) >= MAX_MEMORY_DFS:
                 _df_memory_cache.popitem(last=False)
             _df_memory_cache[cache_key] = (now_ts, df.copy())
-            if kite_interval != "day" and days >= 2:
+            if kite_interval != "day":
                 _df_memory_cache[norm_intraday_key] = (now_ts, df.copy())
 
     return df

@@ -13,9 +13,14 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from engine.alert_identity import generate_alert_id, canonical_alert_symbol
+from engine.alert_identity import (
+    generate_alert_id,
+    canonical_alert_symbol,
+    get_session_phase_slot,
+)
 from engine.alert_model import AutoAlert
 from engine.option_resolver import resolve_option_contract, is_index_symbol
+from engine.dynamic_risk import resolve_price_tier
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -87,6 +92,12 @@ def _format_squeeze_alert(
     time_horizon: str = "SWING_SHORT",
 ) -> AutoAlert:
     clean_sym = canonical_alert_symbol(symbol)
+    now_dt = None
+    try:
+        now_dt = datetime.fromisoformat(now_iso.replace(" IST", "").strip()).replace(tzinfo=IST)
+    except Exception:
+        now_dt = datetime.now(IST)
+    phase_slot = get_session_phase_slot(now_dt)
     is_idx = is_index_symbol(clean_sym)
     opt_plan = (
         resolve_option_contract(
@@ -137,7 +148,7 @@ def _format_squeeze_alert(
             alert_id=generate_alert_id(
                 clean_sym,
                 "SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
-                variant=f"{opt_plan.option_type.lower()}-{int(opt_plan.strike)}",
+                variant=f"{opt_plan.option_type.lower()}-{int(opt_plan.strike)}-{phase_slot}",
             ),
             alert_type="SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
             stage=stage,
@@ -193,7 +204,7 @@ def _format_squeeze_alert(
         alert_id=generate_alert_id(
             symbol,
             "SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
-            variant=direction.lower()[:4],
+            variant=f"{direction.lower()[:4]}-{phase_slot}",
         ),
         alert_type="SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
         stage=stage,
@@ -310,14 +321,23 @@ def detect_squeeze_breakout(
             # 1. Opening Auction Discovery Freeze (09:15 - 09:25 IST)
             if now_dt.hour == 9 and now_dt.minute < 25:
                 return None
-            # 2. Midday Volume Lull (11:45 - 13:15 IST) - require high RVOL (>= 2.0x) to fire during lunch
+            # 2. Midday Volume Lull (11:45 - 13:15 IST)
+            # Two-tier gate: genuine TTM squeeze (BB inside Keltner) is the SETUP for the PM explosion
+            # and only needs moderate RVOL (>= 1.3x). Random non-squeeze moves during lunch need
+            # institutional confirmation (>= 2.0x RVOL) to avoid noise.
             if is_intraday and (
                 (now_dt.hour == 11 and now_dt.minute >= 45)
                 or (now_dt.hour == 12)
                 or (now_dt.hour == 13 and now_dt.minute < 15)
             ):
-                if rvol < 2.0:
-                    return None
+                if is_squeeze_on:
+                    # Genuine TTM squeeze active: lower RVOL threshold; will be tagged EARLY_WARNING
+                    if rvol < 1.3:
+                        return None
+                else:
+                    # No squeeze: require strong institutional RVOL to prevent midday noise
+                    if rvol < 2.0:
+                        return None
 
         # Compute 14-period ADX trend energy
         adx_val, adx_slope = compute_adx(df, period=14)
@@ -343,8 +363,10 @@ def detect_squeeze_breakout(
                 if candle_range > 0.01 and b_open > 0 and b_close > 0:
                     upper_wick_ratio = (b_high - max(b_open, b_close)) / candle_range
                     lower_wick_ratio = (min(b_open, b_close) - b_low) / candle_range
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.squeeze_breakout] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # ── EARLY WARNING (BULLISH): Coiled in squeeze, close below pivot high ───
         if (
@@ -375,13 +397,15 @@ def detect_squeeze_breakout(
                 sl = tp.invalidation_stop
                 if (ltp - sl) < 1.25 * atr20:
                     sl = round(ltp - 1.25 * atr20, 1)
+                abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 if target_2 <= target:
-                    target_2 = round(target + 1.5 * max(1.0, ltp - sl), 1)
+                    target_2 = round(target + 1.5 * max(abs_risk_floor, ltp - sl), 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:
+                abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 risk_pts = max(
-                    1.0,
+                    abs_risk_floor,
                     round(max(1.35 * atr20, (ltp - sma20) if ltp > sma20 else (ltp * 0.018)), 1),
                 )
                 sl = round(ltp - risk_pts, 1)
@@ -477,8 +501,10 @@ def detect_squeeze_breakout(
                         if n_vwap > 0 and n_ltp >= n_vwap:
                             # NIFTY is green and holding VWAP — suppress counter-trend breakdown trap!
                             return None
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.squeeze_breakout] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             tp = None
             try:
@@ -503,13 +529,15 @@ def detect_squeeze_breakout(
                 sl = tp.invalidation_stop
                 if (sl - ltp) < 1.25 * atr20:
                     sl = round(ltp + 1.25 * atr20, 1)
+                abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 if target_2 >= target:
-                    target_2 = round(target - 1.5 * max(1.0, sl - ltp), 1)
+                    target_2 = round(target - 1.5 * max(abs_risk_floor, sl - ltp), 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:
+                abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 risk_pts = max(
-                    1.0,
+                    abs_risk_floor,
                     round(max(1.35 * atr20, (sma20 - ltp) if sma20 > ltp else (ltp * 0.018)), 1),
                 )
                 sl = round(ltp + risk_pts, 1)
@@ -612,12 +640,16 @@ def detect_squeeze_breakout(
                 sl = tp.invalidation_stop
                 if (ltp - sl) < 1.25 * atr20:
                     sl = round(ltp - 1.25 * atr20, 1)
+                abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 if target_2 <= target:
-                    target_2 = round(target + 1.5 * max(1.0, ltp - sl), 1)
+                    target_2 = round(target + 1.5 * max(abs_risk_floor, ltp - sl), 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:
-                risk_pts = max(1.0, round(max(1.35 * atr20, ltp - pivot_high * 0.985), 1))
+                abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
+                risk_pts = max(
+                    abs_risk_floor, round(max(1.35 * atr20, ltp - pivot_high * 0.985), 1)
+                )
                 sl = round(ltp - risk_pts, 1)
                 target = round(ltp + 2.5 * risk_pts, 1)
                 target_2 = round(ltp + 4.0 * risk_pts, 1)
@@ -713,8 +745,10 @@ def detect_squeeze_breakout(
                         if n_vwap > 0 and n_ltp >= n_vwap:
                             # NIFTY is green and holding VWAP — suppress counter-trend breakdown trap!
                             return None
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.squeeze_breakout] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             tp = None
             try:
@@ -740,12 +774,14 @@ def detect_squeeze_breakout(
                 sl = tp.invalidation_stop
                 if (sl - ltp) < 1.25 * atr20:
                     sl = round(ltp + 1.25 * atr20, 1)
+                abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 if target_2 >= target:
-                    target_2 = round(target - 1.5 * max(1.0, sl - ltp), 1)
+                    target_2 = round(target - 1.5 * max(abs_risk_floor, sl - ltp), 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:
-                risk_pts = max(1.0, round(max(1.35 * atr20, pivot_low * 1.015 - ltp), 1))
+                abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
+                risk_pts = max(abs_risk_floor, round(max(1.35 * atr20, pivot_low * 1.015 - ltp), 1))
                 sl = round(ltp + risk_pts, 1)
                 target = round(ltp - 2.5 * risk_pts, 1)
                 target_2 = round(ltp - 4.0 * risk_pts, 1)

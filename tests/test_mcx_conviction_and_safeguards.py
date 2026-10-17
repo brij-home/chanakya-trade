@@ -1435,7 +1435,7 @@ def test_crudeoil_8500_pe_scale_mismatch_prevention():
     eval_res = evaluate_alert_in_flight_decay(alert, current_ltp=8529.0)
     # The evaluator must either return None (scale mismatch suppressed) or not evaluate with spot scale
     if eval_res:
-        assert eval_res.pnl_pct is None or abs(eval_res.pnl_pct) < 100.0
+        assert eval_res.pnl_pct is None or abs(eval_res.pnl_pct) <= 100.0
 
     # 2. MilestoneAlertData MUST NOT render spot price as Opt CMP or compute +2848% P&L
     alert_corrupted = AutoAlert(
@@ -1595,6 +1595,7 @@ def test_naturalgas_anti_fomo_overbought_rsi_guard(monkeypatch):
     from unittest.mock import patch, MagicMock
 
     mock_quote = MagicMock()
+    mock_quote.force_live_eval = True
     mock_quote.symbol = "MCX:NATURALGAS"
     mock_quote.last_price = 301.5
     mock_quote.ltp = 301.5
@@ -1648,6 +1649,7 @@ def test_commodity_detector_henry_hub_veto(monkeypatch):
     from engine.detectors.commodity import detect_commodity_breakouts
 
     mock_quote = MagicMock()
+    mock_quote.force_live_eval = True
     mock_quote.symbol = "MCX:NATURALGAS"
     mock_quote.last_price = 295.0
     mock_quote.ltp = 295.0

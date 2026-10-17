@@ -350,9 +350,8 @@ def test_eod_report_persistent_disk_lock(tmp_path, monkeypatch):
     lock_file = reports_dir / ".eod_dispatch_lock.json"
 
     from datetime import datetime
-    from zoneinfo import ZoneInfo
+    from config.constants import IST
 
-    IST = ZoneInfo("Asia/Kolkata")
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
 
     # Simulate that an EOD report was already generated & dispatched earlier today

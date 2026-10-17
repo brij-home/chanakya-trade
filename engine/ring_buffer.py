@@ -279,6 +279,8 @@ class RollingTickBuffer:
                 "total_volume": self._sum_v,
             }
 
+    stats = get_snapshot
+
     def quantile(self, q: float = 0.5) -> float:
         """Calculate quantile (e.g. 0.5 for median) of the current window."""
         with self._lock:

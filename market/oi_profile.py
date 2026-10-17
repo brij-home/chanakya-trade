@@ -12,6 +12,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.oi_profile")
+
 
 from typing import Optional
 
@@ -74,8 +78,8 @@ def get_oi_profile(underlying: str, expiry: Optional[str] = None) -> dict:
                 df = get_ohlcv(underlying, days=10)
                 if df is not None and not df.empty:
                     spot = float(df["close"].iloc[-1])
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.oi_profile] Non-fatal exception suppressed: {e_suppressed}")
         if not spot or spot <= 0:
             spot = 57500.0 if "BANK" in underlying else 24800.0 if "NIFTY" in underlying else 2500.0
 

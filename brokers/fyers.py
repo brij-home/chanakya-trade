@@ -200,9 +200,79 @@ def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str = "") -> str:
             d4 = int(date_part[2:])
             if 1 <= m4 <= 12 and 1 <= d4 <= 31:
                 return dt.date(year, m4, d4).strftime("%Y-%m-%d")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
     return ""
+
+
+_REVERSE_WEEKLY_MONTH_MAP = {
+    1: "1",
+    2: "2",
+    3: "3",
+    4: "4",
+    5: "5",
+    6: "6",
+    7: "7",
+    8: "8",
+    9: "9",
+    10: "O",
+    11: "N",
+    12: "D",
+}
+
+
+def format_fyers_option_symbol(
+    underlying: str,
+    expiry_date: Any,
+    strike: float | int,
+    option_type: str,
+) -> str:
+    """
+    Format canonical Fyers option symbol string matching Fyers API v3 specifications.
+    Distinguishes automatically between:
+      - Monthly contracts (NSE: last Thursday / BSE: last Friday) -> 3-letter month (e.g. 26OCT)
+      - Weekly contracts (NIFTY/SENSEX) -> single-char month + 2-digit day (e.g. 26O08)
+    """
+    import datetime as dt_mod
+    from calendar import monthrange
+
+    if isinstance(expiry_date, str):
+        try:
+            exp_d = dt_mod.date.fromisoformat(expiry_date)
+        except Exception:
+            exp_d = dt_mod.date.today()
+    elif isinstance(expiry_date, dt_mod.datetime):
+        exp_d = expiry_date.date()
+    elif isinstance(expiry_date, dt_mod.date):
+        exp_d = expiry_date
+    else:
+        exp_d = dt_mod.date.today()
+
+    clean_und = (
+        underlying.upper().replace("NSE:", "").replace("BSE:", "").replace("-INDEX", "").strip()
+    )
+    prefix = "BSE" if clean_und in ("SENSEX", "BANKEX") else "NSE"
+    yy = exp_d.strftime("%y")
+    opt = option_type.upper().strip()
+    strike_int = int(round(strike))
+
+    # Check if exp_d is monthly expiry
+    is_bse = prefix == "BSE"
+    days_in_month = monthrange(exp_d.year, exp_d.month)[1]
+    last_day = dt_mod.date(exp_d.year, exp_d.month, days_in_month)
+    target_weekday = 4 if is_bse else 3
+    while last_day.weekday() != target_weekday:
+        last_day -= dt_mod.timedelta(days=1)
+
+    is_monthly = exp_d == last_day
+
+    if is_monthly:
+        date_str = exp_d.strftime("%b").upper()
+    else:
+        m_char = _REVERSE_WEEKLY_MONTH_MAP.get(exp_d.month, str(exp_d.month))
+        date_str = f"{m_char}{exp_d.day:02d}"
+
+    return f"{prefix}:{clean_und}{yy}{date_str}{strike_int}{opt}"
 
 
 # ── Precision Order Utilities (Decimal Tick Rounding & Lot Validation) ─────────
@@ -269,6 +339,21 @@ class FyersRateLimiter:
 
 _fyers_rate_limiter = get_fyers_rate_gate()
 
+_last_cb_warn_times: dict[str, float] = {}
+
+
+def _warn_circuit_breaker_open(op: str, target: str = "") -> None:
+    now = time.time()
+    last = _last_cb_warn_times.get(op, 0.0)
+    if now - last >= 30.0:
+        _last_cb_warn_times[op] = now
+        tgt_str = f" for {target}" if target else ""
+        logger.warning(
+            f"[FyersAPI] Circuit breaker is OPEN. Suppressing {op}{tgt_str} (debounced 30s)."
+        )
+    else:
+        logger.debug(f"[FyersAPI] Circuit breaker is OPEN. Suppressing {op} for {target}.")
+
 
 def _resolve_commodity_contract(symbol: str) -> str:
     """
@@ -278,7 +363,7 @@ def _resolve_commodity_contract(symbol: str) -> str:
     import datetime as dt
 
     now = dt.datetime.now()
-    clean = symbol.upper().replace("MCX:", "").strip()
+    clean = symbol.upper().replace("MCX:", "").replace("-FUT", "").replace("_FUT", "").strip()
 
     # CRUDEOIL: monthly, expires ~19th of each month
     if clean in ("CRUDEOIL", "CRUDEOILM"):
@@ -375,8 +460,14 @@ def _to_fyers_symbol(instrument: str) -> str:
         return _FYERS_INDEX_MAP[s.upper()]
 
     # Already formatted with -INDEX, -EQ, etc.
-    if "-" in sym:
-        return f"{exch_upper}:{sym}"
+    if sym_upper.endswith(("-INDEX", "-EQ", "-BE", "-SM", "-BZ", "-GB")):
+        return f"{exch_upper}:{sym_upper}"
+
+    # Crypto / Non-Fyers Assets
+    if exch_upper in ("BINANCE", "CRYPTO", "COINBASE", "BYBIT") or sym_upper.endswith(
+        ("USDT", "USDC")
+    ):
+        return f"{exch_upper}:{sym_upper}"
 
     # MCX Commodities
     if exch_upper == "MCX" or sym_upper in (
@@ -471,8 +562,8 @@ class FyersAPI(BrokerAPI):
                 from pathlib import Path
 
                 load_dotenv(Path(__file__).parent.parent / ".env")
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
         app_id = (
             app_id
@@ -535,6 +626,9 @@ class FyersAPI(BrokerAPI):
         self._expiry_ts_cache: dict[str, tuple[float, str]] = {}
         self._screener_cache: dict[str, tuple[float, Any]] = {}
         self._screener_cache_lock = threading.Lock()
+        self._depth_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._depth_cache_lock = threading.Lock()
+        self._depth_cache_ttl: float = 5.0
         self.name: str = "fyers"
         self._load_token()
 
@@ -572,8 +666,8 @@ class FyersAPI(BrokerAPI):
                 dt_now.hour > 8 or (dt_now.hour == 8 and dt_now.minute >= 30)
             ):
                 return True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
         return False
 
     def _load_token(self) -> None:
@@ -589,8 +683,8 @@ class FyersAPI(BrokerAPI):
                 else:
                     self._access_token = ""
                     self._token_ts = 0.0
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
     def _save_token(self, token: str) -> None:
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -603,6 +697,27 @@ class FyersAPI(BrokerAPI):
                 }
             )
         )
+        # Instantly propagate renewed token to background streaming sockets
+        try:
+            from market.fyers_tbt_manager import fyers_tbt_manager
+
+            fyers_tbt_manager.update_token(access_token=token, app_id=self._app_id)
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
+
+        try:
+            from market.websocket import ws_manager
+
+            ws_manager.update_token(access_token=token, app_id=self._app_id)
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
+
+        try:
+            from market.fyers_order_stream import fyers_order_stream
+
+            fyers_order_stream.update_token(access_token=token, app_id=self._app_id)
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Auth ──────────────────────────────────────────────────
 
@@ -846,8 +961,8 @@ class FyersAPI(BrokerAPI):
             self._fyers = None
             try:
                 TOKEN_FILE.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
             if (
                 self._fy_id
@@ -897,15 +1012,15 @@ class FyersAPI(BrokerAPI):
             fyers = self._get_fyers()
             if fyers:
                 fyers.logout()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
         self._access_token = ""
         self._profile = None
         self._fyers = None
         try:
             TOKEN_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Profile & Funds ───────────────────────────────────────
 
@@ -1000,11 +1115,19 @@ class FyersAPI(BrokerAPI):
 
     # ── Quotes ────────────────────────────────────────────────
 
-    def get_quote(self, instruments: list[str] | str) -> dict[str, Quote]:
+    def get_quote(
+        self,
+        instruments: list[str] | str,
+        category: FyersCallCategory = FyersCallCategory.SCANNER_QUOTE,
+        rate_gate_acquired: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Quote]:
         """
         Get quotes. Instruments: ["NSE:RELIANCE", "NSE:NIFTY 50", "GOLD", "USDINR"]
         Fyers format: "NSE:RELIANCE-EQ", "NSE:NIFTY50-INDEX", "MCX:GOLD26OCTFUT"
         Batch chunking by 50 to honor Fyers API constraints.
+        Category supports prioritized queuing (e.g. URGENT_QUOTE vs SCANNER_QUOTE).
+        rate_gate_acquired: if True, caller has already acquired rate tokens (avoids double counting).
         """
         if isinstance(instruments, str):
             instruments = [instruments]
@@ -1017,6 +1140,11 @@ class FyersAPI(BrokerAPI):
         fyers_symbols = []
         key_map: dict[str, list[str]] = {}  # fyers_symbol → list of original instrument keys
         for inst in instruments:
+            clean_inst = str(inst).upper().strip()
+            if clean_inst.startswith(
+                ("BINANCE:", "CRYPTO:", "COINBASE:", "BYBIT:")
+            ) or clean_inst.endswith(("USDT", "USDC")):
+                continue
             fyers_sym = _to_fyers_symbol(inst)
             fyers_symbols.append(fyers_sym)
             key_map.setdefault(fyers_sym, []).append(inst)
@@ -1026,17 +1154,18 @@ class FyersAPI(BrokerAPI):
         result: dict[str, Quote] = {}
 
         if get_fyers_circuit_breaker().is_tripped():
-            logger.warning(
-                "[FyersAPI] Circuit breaker is OPEN. Fast-failing get_quote to protect Fyers account."
-            )
+            _warn_circuit_breaker_open("get_quote")
             return {}
 
-        # Chunk in batches of 50
-        CHUNK_SIZE = 50
+        # Chunk in batches up to plan limit (clamped to 300 symbols/request to prevent HTTP 414 URI Too Long)
+        CHUNK_SIZE = min(getattr(_fyers_rate_limiter, "quotes_chunk_size", 1000), 300)
         for i in range(0, len(unique_fyers_symbols), CHUNK_SIZE):
             chunk = unique_fyers_symbols[i : i + CHUNK_SIZE]
             try:
-                _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
+                if not rate_gate_acquired:
+                    _fyers_rate_limiter.acquire(category=category)
+                else:
+                    rate_gate_acquired = False
                 data = fyers.quotes({"symbols": ",".join(chunk)})
                 if isinstance(data, dict) and (
                     data.get("code") in (-15, -16, -99, 401)
@@ -1065,9 +1194,16 @@ class FyersAPI(BrokerAPI):
                         if isinstance(data, dict)
                         else "Invalid quotes response"
                     )
-                    if "429" in err_msg or "rate limit" in err_msg.lower():
+                    if (
+                        "429" in err_msg
+                        or "rate limit" in err_msg.lower()
+                        or "plan limit" in err_msg.lower()
+                        or "5,000 requests" in err_msg.lower()
+                        or (isinstance(data, dict) and data.get("code") in (-360, 429))
+                    ):
+                        code = data.get("code", 429) if isinstance(data, dict) else 429
                         get_fyers_circuit_breaker().record_failure(
-                            status_code=429, error_message=err_msg
+                            status_code=code, error_message=err_msg
                         )
                 else:
                     get_fyers_circuit_breaker().record_success()
@@ -1155,25 +1291,144 @@ class FyersAPI(BrokerAPI):
         """
         Level 2 Market Depth (5-level Order Book) + Circuit Limits + Official Exchange ATP (VWAP).
         """
-        fyers = self._get_fyers()
+        now_mono = time.monotonic()
+        with self._depth_cache_lock:
+            if symbol in self._depth_cache:
+                ts, cached_res = self._depth_cache[symbol]
+                effective_ttl = self._depth_cache_ttl
+                try:
+                    from market.calendar import is_market_open
+
+                    exch = symbol.split(":")[0] if ":" in symbol else "NSE"
+                    if not is_market_open(exch):
+                        effective_ttl = 300.0
+                except Exception as e_suppressed:
+                    logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
+                if (now_mono - ts) < effective_ttl:
+                    return cached_res
+
+        clean_upper = symbol.upper().strip()
+        if clean_upper.startswith(
+            ("BINANCE:", "CRYPTO:", "COINBASE:", "BYBIT:")
+        ) or clean_upper.endswith(("USDT", "USDC")):
+            unavail_res = {
+                "status": "UNAVAILABLE",
+                "message": f"Instrument {symbol} is not supported on Fyers DOM",
+            }
+            with self._depth_cache_lock:
+                self._depth_cache[symbol] = (now_mono, unavail_res)
+            return unavail_res
+
+        fyers_sym = _to_fyers_symbol(symbol)
+        if "-INDEX" in fyers_sym:
+            unavail_res = {
+                "status": "UNAVAILABLE",
+                "message": "Spot index instruments do not have market depth",
+            }
+            with self._depth_cache_lock:
+                self._depth_cache[symbol] = (now_mono, unavail_res)
+            return unavail_res
+
+        # Zero-latency L3 TBT stream bridge: check Fyers TBT Manager 50-Depth first (0 REST calls)
+        try:
+            from market.fyers_tbt_manager import FyersTbtManager
+
+            tbt = FyersTbtManager()
+            with tbt._depth_lock:
+                tbt_obj = (
+                    tbt._depth_cache.get(symbol)
+                    or tbt._depth_cache.get(fyers_sym)
+                    or tbt._depth_cache.get(symbol.split(":")[-1])
+                )
+            if tbt_obj and (tbt_obj.get("bids") or tbt_obj.get("asks")):
+                bids = [
+                    {"price": b["price"], "volume": b["qty"], "orders": b["orders"]}
+                    for b in tbt_obj.get("bids", [])[:5]
+                ]
+                asks = [
+                    {"price": a["price"], "volume": a["qty"], "orders": a["orders"]}
+                    for a in tbt_obj.get("asks", [])[:5]
+                ]
+                tbq = int(tbt_obj.get("tbq", 0))
+                tsq = int(tbt_obj.get("tsq", 0))
+                ratio = round(tbq / max(tsq, 1), 3) if tsq > 0 else 1.0
+                ltp_val = float(tbt_obj.get("ltp", 0.0))
+                depth_res = {
+                    "status": "ok",
+                    "market_data_state": "LIVE",
+                    "symbol": symbol,
+                    "fyers_symbol": fyers_sym,
+                    "bids": bids,
+                    "asks": asks,
+                    "total_buy_qty": tbq,
+                    "total_sell_qty": tsq,
+                    "bid_ask_ratio": ratio,
+                    "order_book_imbalance_ratio": ratio,
+                    "atp": float(tbt_obj.get("rolling_tick_vwap") or ltp_val),
+                    "upper_circuit": 0.0,
+                    "lower_circuit": 0.0,
+                    "ltp": ltp_val,
+                    "open": ltp_val,
+                    "high": ltp_val,
+                    "low": ltp_val,
+                    "close": ltp_val,
+                    "volume": tbq + tsq,
+                    "oi": 0,
+                    "pdoi": 0,
+                    "oi_pct_change": 0.0,
+                    "provider": "FYERS_TBT_50",
+                }
+                with self._depth_cache_lock:
+                    self._depth_cache[symbol] = (now_mono, depth_res)
+                return depth_res
+        except Exception as e_tbt:
+            logger.debug(f"[FyersAPI] TBT depth cache check error: {e_tbt}")
+
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"status": "UNAVAILABLE", "message": "Circuit breaker OPEN"}
+
+        try:
+            fyers = self._get_fyers()
+        except RuntimeError as e_sdk:
+            return {"status": "UNAVAILABLE", "message": str(e_sdk)}
+
         if not fyers:
             return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
-        fyers_sym = _to_fyers_symbol(symbol)
+
         try:
             _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
             data = fyers.depth({"symbol": fyers_sym, "ohlcv_flag": 1})
-            if data.get("s") != "ok":
-                return {
+            if not isinstance(data, dict) or data.get("s") != "ok":
+                err_msg = (
+                    str(data.get("message", "Error fetching market depth"))
+                    if isinstance(data, dict)
+                    else "Invalid depth response"
+                )
+                if (
+                    "429" in err_msg
+                    or "rate limit" in err_msg.lower()
+                    or "plan limit" in err_msg.lower()
+                    or "5,000 requests" in err_msg.lower()
+                    or (isinstance(data, dict) and data.get("code") in (-360, 429))
+                ):
+                    code = data.get("code", 429) if isinstance(data, dict) else 429
+                    get_fyers_circuit_breaker().record_failure(
+                        status_code=code, error_message=err_msg
+                    )
+                unavail_res = {
                     "status": "UNAVAILABLE",
-                    "message": data.get("message", "Error fetching market depth"),
+                    "message": err_msg,
                 }
+                with self._depth_cache_lock:
+                    self._depth_cache[symbol] = (now_mono, unavail_res)
+                return unavail_res
             d = data.get("d", {}).get(fyers_sym, {})
             bids = d.get("bids", d.get("bid", []))
             asks = d.get("asks", d.get("ask", []))
             total_buy = int(d.get("totalbuyqty", 0) or 0)
             total_sell = int(d.get("totalsellqty", 0) or 0)
             ratio = round(total_buy / max(total_sell, 1), 3) if total_sell > 0 else 1.0
-            return {
+            depth_res = {
                 "status": "ok",
                 "market_data_state": "LIVE",
                 "symbol": symbol,
@@ -1197,6 +1452,9 @@ class FyersAPI(BrokerAPI):
                 "pdoi": int(d.get("pdoi", 0) or 0),
                 "oi_pct_change": float(d.get("oipercent", 0.0) or 0.0),
             }
+            with self._depth_cache_lock:
+                self._depth_cache[symbol] = (now_mono, depth_res)
+            return depth_res
         except Exception as e:
             return {"status": "UNAVAILABLE", "error": str(e)}
 
@@ -1227,9 +1485,7 @@ class FyersAPI(BrokerAPI):
         if not fyers:
             return []
         if get_fyers_circuit_breaker().is_tripped():
-            logger.warning(
-                f"[FyersAPI] Circuit breaker is OPEN. Suppressing options chain for {underlying}."
-            )
+            _warn_circuit_breaker_open("options chain", underlying)
             return []
         try:
             fyers_sym = _to_fyers_symbol(underlying)
@@ -1253,6 +1509,24 @@ class FyersAPI(BrokerAPI):
 
             _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
             data = fyers.optionchain(params)
+            if not isinstance(data, dict) or data.get("s") != "ok":
+                err_msg = (
+                    str(data.get("message", "Fyers options chain error"))
+                    if isinstance(data, dict)
+                    else "Invalid options chain response"
+                )
+                if (
+                    "429" in err_msg
+                    or "rate limit" in err_msg.lower()
+                    or "plan limit" in err_msg.lower()
+                    or "5,000 requests" in err_msg.lower()
+                    or (isinstance(data, dict) and data.get("code") in (-360, 429))
+                ):
+                    code = data.get("code", 429) if isinstance(data, dict) else 429
+                    get_fyers_circuit_breaker().record_failure(
+                        status_code=code, error_message=err_msg
+                    )
+                return []
             payload = data.get("data", {})
             chain: list[OptionsContract] = []
 
@@ -1269,6 +1543,21 @@ class FyersAPI(BrokerAPI):
                 "expiry_data": payload.get("expiryData", []),
                 "indiavix": payload.get("indiavixData", {}).get("ltp"),
             }
+
+            # Proactively cache all expiry timestamps to eliminate exploratory API calls
+            now_ts = time.time()
+            all_dates = []
+            for item in payload.get("expiryData", []):
+                d_str = item.get("date", "")
+                exp_val = item.get("expiry")
+                if "-" in d_str and exp_val:
+                    d_parts = d_str.split("-")
+                    if len(d_parts) == 3:
+                        iso = f"{d_parts[2]}-{d_parts[1]}-{d_parts[0]}"
+                        self._expiry_ts_cache[f"{fyers_sym}:{iso}"] = (now_ts, str(exp_val))
+                        all_dates.append(iso)
+            if all_dates:
+                self._expiries_dates_cache[fyers_sym] = (now_ts, sorted(set(all_dates)))
 
             def _parse_greek_val(val: Any) -> Optional[float]:
                 if val is None or val == "":
@@ -1431,9 +1720,9 @@ class FyersAPI(BrokerAPI):
         chain = self.get_options_chain(underlying, expiry)
         meta = getattr(self, "_last_oc_metadata", {})
         spot = self.get_ltp(underlying)
-        expiries = self.get_expiries(underlying)
-        if not expiries and chain:
-            expiries = sorted({c.expiry for c in chain if c.expiry})
+        expiries = sorted({c.expiry for c in chain if c.expiry}) if chain else []
+        if not expiries:
+            expiries = self.get_expiries(underlying)
 
         source_info = {
             "provider": "fyers",
@@ -1947,9 +2236,7 @@ class FyersAPI(BrokerAPI):
         if not fyers:
             raise RuntimeError("Fyers broker not initialized or logged in")
         if get_fyers_circuit_breaker().is_tripped():
-            logger.warning(
-                f"[FyersAPI] Circuit breaker is OPEN. Suppressing historical data for {symbol}."
-            )
+            _warn_circuit_breaker_open("historical data", symbol)
             return []
 
         fyers_sym = _to_fyers_symbol(symbol)
@@ -1980,13 +2267,31 @@ class FyersAPI(BrokerAPI):
             "minute": "1",
             "1m": "1",
             "1minute": "1",
+            # Fyers API v3 Seconds resolutions (Prime & Standard)
+            "5s": "5S",
+            "5second": "5S",
+            "5seconds": "5S",
+            "10s": "10S",
+            "10second": "10S",
+            "10seconds": "10S",
+            "15s": "15S",
+            "15second": "15S",
+            "15seconds": "15S",
+            "30s": "30S",
+            "30second": "30S",
+            "30seconds": "30S",
+            "45s": "45S",
+            "45second": "45S",
+            "45seconds": "45S",
         }
         res_str = res_map.get(str(interval).lower(), "D")
 
         now = datetime.now()
         eff_to = to_date or now
         if not from_date:
-            if res_str in ("1", "2", "3", "5"):
+            if res_str.endswith("S"):
+                eff_from = eff_to - timedelta(days=2)
+            elif res_str in ("1", "2", "3", "5"):
                 eff_from = eff_to - timedelta(days=5)
             elif res_str in ("10", "15", "20", "30", "60"):
                 eff_from = eff_to - timedelta(days=45)
@@ -2017,6 +2322,10 @@ class FyersAPI(BrokerAPI):
                 chunks.append((curr_start, curr_end))
                 curr_start = curr_end + timedelta(days=1)
 
+        # Fyers continuous data flag: "1" for continuous futures series, "0" for non-continuous contracts (equities/options)
+        is_futures = fyers_sym.endswith("FUT") or "-FUT" in fyers_sym or "FUT" in fyers_sym
+        cont_flag = "1" if is_futures else "0"
+
         all_candles: list[list] = []
         for c_from, c_to in chunks:
             _fyers_rate_limiter.acquire(category=FyersCallCategory.HISTORICAL)
@@ -2026,7 +2335,7 @@ class FyersAPI(BrokerAPI):
                 "date_format": "1",
                 "range_from": c_from.strftime("%Y-%m-%d"),
                 "range_to": c_to.strftime("%Y-%m-%d"),
-                "cont_flag": "1",
+                "cont_flag": cont_flag,
             }
             try:
                 data = fyers.history(payload)
@@ -2052,6 +2361,37 @@ class FyersAPI(BrokerAPI):
                             data = fyers.history(payload)
                 if isinstance(data, dict) and data.get("s") == "ok":
                     all_candles.extend(data.get("candles", []))
+                elif isinstance(data, dict):
+                    err_msg = str(data.get("message", "History error"))
+                    if data.get("code") == -300 or "valid symbol" in err_msg.lower():
+                        # Fallback: For futures contracts, retry with Fyers continuous futures data flag (cont_flag="1")
+                        if is_futures and cont_flag == "0":
+                            payload["cont_flag"] = "1"
+                            try:
+                                retry_data = fyers.history(payload)
+                                if isinstance(retry_data, dict) and retry_data.get("s") == "ok":
+                                    all_candles.extend(retry_data.get("candles", []))
+                                    continue
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}"
+                                )
+
+                        logger.warning(
+                            f"[FyersAPI] Historical data not available for symbol '{fyers_sym}' (code -300). Contract may be expired or delisted: {err_msg}"
+                        )
+                        break  # Prevent wasteful rate limit consumption on non-existent/expired contracts
+                    if (
+                        "429" in err_msg
+                        or "rate limit" in err_msg.lower()
+                        or "plan limit" in err_msg.lower()
+                        or "5,000 requests" in err_msg.lower()
+                        or data.get("code") in (-360, 429)
+                    ):
+                        code = data.get("code", 429)
+                        get_fyers_circuit_breaker().record_failure(
+                            status_code=code, error_message=err_msg
+                        )
             except Exception as exc:
                 logger.warning(
                     f"[FyersAPI] Historical data fetch failed for {fyers_sym} ({res_str}, {c_from} to {c_to}): {exc}",
@@ -2085,6 +2425,32 @@ class FyersAPI(BrokerAPI):
                 }
             )
         return rows
+
+    def get_expired_fno_history(
+        self,
+        symbol: str,
+        exchange: str = "NFO",
+        interval: str = "day",
+        from_date: Optional[datetime] = None,
+        to_date: Optional[datetime] = None,
+    ) -> list[dict]:
+        """
+        Historical derivative contract retriever with expired contract resilience.
+        Per Fyers API v3 specifications, expired F&O contracts are unlisted from the active cluster
+        and return code -300. This method safely queries the broker and returns empty/logged records
+        without raising unhandled exceptions.
+        """
+        try:
+            return self.get_historical_data(
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                from_date=from_date,
+                to_date=to_date,
+            )
+        except Exception as e:
+            logger.warning(f"[FyersAPI] get_expired_fno_history failed for {symbol}: {e}")
+            return []
 
     # ── Advanced Institutional Orders & Screeners ─────────────
 
@@ -2539,8 +2905,8 @@ class FyersAPI(BrokerAPI):
                 margin_avail = float(
                     funds.available_margin or funds.equity_margin or funds.total_balance or 0.0
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
         # 3. Calculate statutory transaction charges across all orders
         total_brokerage = Decimal("0.00")

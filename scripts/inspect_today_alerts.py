@@ -3,6 +3,11 @@ scripts/inspect_today_alerts.py
 Inspects today's alerts (2026-09-22) and assesses market data for the session.
 """
 
+import logging
+
+logger = logging.getLogger("scripts.inspect_today_alerts")
+
+
 import json
 from engine.auto_alert_engine import AUTO_ALERTS_FILE
 
@@ -68,8 +73,10 @@ def main():
                 risk = abs(float(entry) - float(sl))
                 reward = abs(float(t1) - float(entry))
                 rr_str = f"1:{reward / risk:.2f}"
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[scripts.inspect_today_alerts] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         print(
             f"[{idx + 1}] {ts} | {sym} | {atype} | {action} | Entry: {entry} | SL: {sl} | T1: {t1} | T2: {t2} | RR: {rr_str} | Conf: {conf}%"

@@ -20,6 +20,10 @@ Provides:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.options_hedging")
+
 
 from dataclasses import dataclass
 from datetime import datetime, time as dtime
@@ -417,8 +421,8 @@ def build_defined_risk_hedge_plan(
                     f"⚠️ COUNTER-TREND WARNING: Broad Market Breadth is positive (Adv: {mb.advances} / Dec: {mb.declines}, "
                     f"A/D {mb.ad_ratio:.2f}). Bear Put Spreads face strong market bids; recommend Bull Call Spreads or 50% reduced sizing."
                 )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.options_hedging] Non-fatal exception suppressed: {e_suppressed}")
 
     # Strategy Selection:
     # Under high IV (VIX > 16.5), sell overpriced extrinsic premium via Credit Spreads.
@@ -524,15 +528,15 @@ def build_defined_risk_hedge_plan(
             exp_meta = get_expiry_metadata(expiry_date, None, clean_sym, None)
             if exp_meta and "dte" in exp_meta:
                 dte = max(0, int(exp_meta["dte"]))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.options_hedging] Non-fatal exception suppressed: {e_suppressed}")
 
         iv_val = max(0.10, (current_vix / 100.0) if current_vix else 0.14)
         long_delta = bs_delta(spot, strike, dte, iv_val, opt_type)
         short_delta = bs_delta(spot, sell_strike, dte, iv_val, opt_type)
         net_spread_delta = round(long_delta - short_delta, 2)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.options_hedging] Non-fatal exception suppressed: {e_suppressed}")
 
     strat_title = strat_name.replace("_", " ").title()
     desc = f"Buy {int(strike)} {opt_type} & Sell {int(sell_strike)} {opt_type} (Defined Risk / Capped Loss)"
@@ -611,8 +615,8 @@ def build_defined_risk_hedge_plan(
                     or "TAILWIND" in sec_intra
                 ):
                     stock_sector_warning = f"⚠️ SECTOR TAILWIND ({tw.sector} in {sec_q}): Shorting stock while parent sector is strong."
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.options_hedging] Non-fatal exception suppressed: {e_suppressed}")
 
     # Single-Stock Atomic Multi-Leg Execution Guard
     combo_execution_note = ""
@@ -789,8 +793,8 @@ def evaluate_spread_in_flight(
             sym = getattr(alert, "symbol", "")
             if sym:
                 spot = float(get_ltp(sym) or 0.0)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.options_hedging] Non-fatal exception suppressed: {e_suppressed}")
 
     if spot <= 0:
         return None

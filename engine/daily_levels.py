@@ -251,8 +251,8 @@ class DailyLevelsStore:
                 pwh = float(df_wk[col_h].iloc[-2])
                 pwl = float(df_wk[col_l].iloc[-2])
                 pwc = float(df_wk[col_c].iloc[-2])
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.daily_levels] Non-fatal exception suppressed: {e_suppressed}")
 
         # 4. CPR (Central Pivot Range) Calculation
         cpr_pivot = (pdh + pdl + pdc) / 3.0
@@ -544,9 +544,9 @@ class DailyLevelsStore:
 daily_levels_store = DailyLevelsStore()
 
 
-def get_daily_levels(symbol: str) -> Optional[DailyLevels]:
+def get_daily_levels(symbol: str, session_date: Optional[str] = None) -> Optional[DailyLevels]:
     """Public helper to get daily levels with L1 in-memory caching and L2 persistence."""
-    return daily_levels_store.get_levels(symbol)
+    return daily_levels_store.get_levels(symbol, session_date=session_date)
 
 
 def prime_daily_levels(symbols: Optional[list[str]] = None) -> dict[str, DailyLevels]:

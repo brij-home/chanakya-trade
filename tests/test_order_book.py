@@ -215,3 +215,51 @@ def test_bisect_depth_book_simulate_sweep():
     assert res3["filled_qty"] == 60
     assert res3["unfilled_qty"] == 40
     assert res3["is_fully_fillable"] is False
+
+
+def test_live_streaming_depth_book_registry():
+    """Verify in-memory live streaming BisectDepthBook wiring and priority."""
+    from market.order_book import (
+        get_depth_book,
+        clear_depth_books,
+        analyze_symbol_order_book,
+    )
+    from analysis.order_flow import analyze_order_flow
+
+    clear_depth_books()
+    sym = "TESTSYM"
+    book = get_depth_book(sym)
+    assert book is get_depth_book(sym)
+
+    # Populate streaming book (e.g. from m.Stock or Fyers WS tick)
+    book.batch_update(
+        bids=[
+            {"price": 500.0, "quantity": 1000, "orders": 5},
+            {"price": 499.5, "quantity": 800, "orders": 4},
+        ],
+        asks=[
+            {"price": 500.5, "quantity": 500, "orders": 2},
+            {"price": 501.0, "quantity": 600, "orders": 3},
+        ],
+    )
+    book.record_tick(price=500.25, volume=100)
+
+    # 1. analyze_symbol_order_book should immediately serve from RAM
+    snap = analyze_symbol_order_book(sym)
+    assert snap.provenance == "LIVE_STREAM_L2"
+    assert snap.live_broker_connected is True
+    assert snap.total_bid_qty == 1800
+    assert snap.total_ask_qty == 1100
+    assert snap.spread == 0.5
+    assert snap.best_bid == 500.0 if hasattr(snap, "best_bid") else True
+
+    # 2. analyze_order_flow should prioritize RAM stream
+    flow_snap = analyze_order_flow(sym)
+    assert flow_snap.market_state == "LIVE"
+    assert flow_snap.total_buy_qty == 1800
+    assert flow_snap.total_sell_qty == 1100
+    assert flow_snap.spread == 0.5
+    assert flow_snap.top_bids[0]["price"] == 500.0
+    assert flow_snap.top_asks[0]["price"] == 500.5
+
+    clear_depth_books()

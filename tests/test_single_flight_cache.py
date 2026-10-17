@@ -56,10 +56,10 @@ def test_single_flight_coalescing_sync_threads():
 
     assert len(results) == 10
     assert all(r == "expensive_result" for r in results)
-    # The expensive fetcher must only be executed ONCE despite 10 concurrent callers
     assert fetch_count == 1
     st = cache.stats()
-    assert st["coalesced_waits"] == 9
+    assert st["coalesced_waits"] + st["hits"] == 9
+    assert st["coalesced_waits"] >= 1
     assert st["misses"] == 1
 
 

@@ -319,9 +319,15 @@ def detect_options_momentum_breakouts(
                     )
                 )
                 if is_idx
-                else spot * 0.02
+                else max(
+                    spot * 0.025, 2.5 if spot < 100.0 else (5.0 if spot < 250.0 else spot * 0.02)
+                )
             )
-            min_opt_price = 2.5 if clean_sym in ("MIDCPNIFTY",) else (5.0 if is_idx else 1.5)
+            min_opt_price = (
+                2.5
+                if clean_sym in ("MIDCPNIFTY",)
+                else (5.0 if is_idx else (0.50 if spot < 100.0 else (1.0 if spot < 300.0 else 1.5)))
+            )
 
             atm_contracts = [
                 c
@@ -357,16 +363,20 @@ def detect_options_momentum_breakouts(
             df_5m = None
             try:
                 df_5m = get_ohlcv(clean_sym, exchange=exch, interval="5minute", days=2)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             if df_5m is not None and len(df_5m) >= 1:
                 try:
                     last_c = float(df_5m.iloc[-1].get("close", df_5m.iloc[-1].get("Close", 0.0)))
                     if last_c > 0 and abs(last_c - spot) / max(1.0, spot) > 0.02:
                         df_5m = None
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             if (not spot_vwap or spot_vwap <= 0) and df_5m is not None and len(df_5m) >= 2:
                 try:
@@ -383,8 +393,10 @@ def detect_options_momentum_breakouts(
                     cum_pv = np.cumsum(typical_price * vols)
                     if cum_vol[-1] > 0:
                         spot_vwap = float(cum_pv[-1] / cum_vol[-1])
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             upper_wick_ratio = 0.0
             lower_wick_ratio = 0.0
@@ -399,8 +411,10 @@ def detect_options_momentum_breakouts(
                     candle_range = max(0.01, b_high - b_low)
                     upper_wick_ratio = (b_high - max(b_open, b_close)) / candle_range
                     lower_wick_ratio = (min(b_open, b_close) - b_low) / candle_range
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             for c in atm_contracts:
                 vol = getattr(c, "volume", 0)
@@ -429,8 +443,10 @@ def detect_options_momentum_breakouts(
                                 continue
                             if opt_type == "PE" and strike < (spot * 0.998):
                                 continue
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                 max_dte = 8 if clean_sym in ("NIFTY",) else 45
                 if expiry_date:
@@ -445,8 +461,10 @@ def detect_options_momentum_breakouts(
                                 continue
                         if exp_dt and (exp_dt - now_dt.date()).days > max_dte:
                             continue
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                 if is_opening_drive:
                     min_vol_oi = 0.60 if is_idx else 1.00
@@ -472,8 +490,10 @@ def detect_options_momentum_breakouts(
                         is_physical_expiry_week = is_monthly_physical_expiry_week(
                             str(expiry_date), symbol=clean_sym, ref_dt=now_dt
                         )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                 if is_physical_expiry_week and not is_next_month_routed:
                     logger.debug(
@@ -506,8 +526,9 @@ def detect_options_momentum_breakouts(
                         continue
                     if spot_open and spot_open > 0 and spot > spot_open * 1.005:
                         continue
-                    if spot_vwap and spot_vwap > 0 and spot > spot_vwap * 1.007:
-                        continue
+                    if is_idx:
+                        if spot_vwap and spot_vwap > 0 and spot > spot_vwap:
+                            continue
                     else:
                         if spot_vwap and spot_vwap > 0 and spot > spot_vwap * 0.9995:
                             continue
@@ -612,8 +633,10 @@ def detect_options_momentum_breakouts(
                                 f"Put Writer Capitulation: OI shedding {oi_chg_pct:.1f}% "
                                 f"({oi_chg_f:,.0f} contracts unwound) — long liquidation cascade active"
                             )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                 # Extreme Idiosyncratic Catalyst Escape Hatch:
                 # Allows stock options to fire even if parent sector is not supportive,
@@ -914,12 +937,16 @@ def detect_options_momentum_breakouts(
                             f"[OptionsBreakout] Volume profile error for {clean_sym}: {e_vp}"
                         )
 
-                from engine.alert_identity import generate_alert_id
+                from engine.alert_identity import (
+                    generate_alert_id,
+                    get_session_phase_slot,
+                )
 
+                phase_slot = get_session_phase_slot(now_dt)
                 alert_id = generate_alert_id(
                     clean_sym,
                     "OPTIONS_MOMENTUM",
-                    variant=f"{opt_type.lower()}-{int(strike)}",
+                    variant=f"{opt_type.lower()}-{int(strike)}-{phase_slot}",
                 )
 
                 tp = None
@@ -1165,8 +1192,10 @@ def detect_options_momentum_breakouts(
                     iv_est = (vix_val / 100.0) if (vix_val and vix_val > 0) else 0.15
                     opt_iv = round(iv_est, 4)
                     opt_delta = round(bs_delta(spot, strike, dte_days, iv_est, opt_type), 4)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 alert = AutoAlert(
                     alert_id=alert_id,
@@ -1424,7 +1453,12 @@ def detect_options_momentum_breakouts(
         is_stock = not alert.symbol.startswith(
             ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
         )
-        if is_stock and (recent_options_count + len(found)) >= 3:
+        _opt_pacing_limit = int(os.environ.get("OPTIONS_MOMENTUM_STOCK_PACING", "0"))
+        if (
+            _opt_pacing_limit > 0
+            and is_stock
+            and (recent_options_count + len(found)) >= _opt_pacing_limit
+        ):
             if (
                 alert.confidence < 88
                 and alert.metrics.get("decoupler_status") != "VERIFIED_DECOUPLER"

@@ -22,6 +22,10 @@ Every blocked order MUST surface a kill switch block reason.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.kill_switch")
+
 
 import json
 import threading
@@ -112,8 +116,8 @@ class KillSwitchRegistry:
                 "active_switches": [r.to_dict() for r in self._active.values() if r.active],
             }
             self._state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        except Exception:
-            pass  # Never crash the caller
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.kill_switch] Non-fatal exception suppressed: {e_suppressed}")
 
     def _audit(self, event: str, record: KillSwitchRecord, metadata: dict | None = None) -> None:
         """Append an audit event to the JSONL audit log."""
@@ -127,8 +131,8 @@ class KillSwitchRegistry:
             }
             with self._audit_file.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.kill_switch] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Public API ─────────────────────────────────────────────────────────────
 

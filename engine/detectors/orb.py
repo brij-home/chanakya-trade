@@ -39,6 +39,7 @@ import pandas as pd
 from engine.alert_model import AutoAlert
 from engine.alert_identity import canonical_alert_symbol
 from engine.option_resolver import resolve_option_contract, is_index_symbol
+from engine.dynamic_risk import resolve_price_tier
 
 logger = logging.getLogger("chanakya.detectors.orb")
 
@@ -317,11 +318,15 @@ def detect_opening_range_breakout(
             calc_atr = float(tr.rolling(14).mean().iloc[-1])
             if calc_atr > 0 and not np.isnan(calc_atr):
                 atr_val = round(calc_atr, 2)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.detectors.orb] Non-fatal exception suppressed: {e_suppressed}")
 
-    # Ensure stop loss is not within intraday spread/noise chop (at least 0.25x ATR or 0.4% spot)
-    min_orb_risk = max(1.0, round(max(0.25 * atr_val, ltp * 0.004), 2))
+    # Dynamic price-proportional risk floor to prevent low-priced (< ₹100) stocks from having distorted large stops
+    price_tier = resolve_price_tier(ltp)
+    abs_min_risk = price_tier.abs_min_risk_pts
+    pct_floor = 0.0055 if ltp >= 2500 else 0.008
+    atr_factor = 0.25 if ltp >= 2500 else 0.35
+    min_orb_risk = max(abs_min_risk, round(max(atr_factor * atr_val, ltp * pct_floor), 2))
 
     stage_val = "PRIMED" if is_primed else "IGNITED"
     if is_primed:
@@ -334,26 +339,26 @@ def detect_opening_range_breakout(
             if is_bull_setup
             else round(max(orb_mid, trigger_level + min_orb_risk), 2)
         )
+        risk_pts = max(abs_min_risk, round(abs(trigger_level - stop_loss), 2))
         target_1 = (
-            round(orb_high + (1.0 * orb_range), 2)
+            round(max(orb_high + (1.0 * orb_range), trigger_level + (1.8 * risk_pts)), 2)
             if is_bull_setup
-            else round(orb_low - (1.0 * orb_range), 2)
+            else round(min(orb_low - (1.0 * orb_range), trigger_level - (1.8 * risk_pts)), 2)
         )
         target_2 = (
-            round(orb_high + (2.0 * orb_range), 2)
+            round(max(orb_high + (2.0 * orb_range), trigger_level + (3.2 * risk_pts)), 2)
             if is_bull_setup
-            else round(orb_low - (2.0 * orb_range), 2)
+            else round(min(orb_low - (2.0 * orb_range), trigger_level - (3.2 * risk_pts)), 2)
         )
         target_3 = (
-            round(orb_high + (3.5 * orb_range), 2)
+            round(max(orb_high + (3.5 * orb_range), trigger_level + (5.0 * risk_pts)), 2)
             if is_bull_setup
-            else round(orb_low - (3.5 * orb_range), 2)
+            else round(min(orb_low - (3.5 * orb_range), trigger_level - (5.0 * risk_pts)), 2)
         )
         no_chase_lvl = max_bull_chase if is_bull_setup else max_bear_chase
         entry_min = orb_high if is_bull_setup else max_bear_chase
         entry_max = max_bull_chase if is_bull_setup else orb_low
-        risk_pts = max(1.0, round(abs(trigger_level - stop_loss), 2))
-        rr_ratio = round(abs(target_1 - trigger_level) / max(0.1, risk_pts), 1)
+        rr_ratio = round(abs(target_1 - trigger_level) / max(0.01, risk_pts), 1)
         headline = f"🎯 [ORB PRIMED] {symbol} Coiling Near Range {'High ₹' + str(orb_high) if is_bull_setup else 'Low ₹' + str(orb_low)} (Spot ₹{ltp:,.1f})"
         summary = (
             f"Pre-breakout early warning: {symbol} is coiling within 0.35% of 15m Range {'High ₹' + str(orb_high) if is_bull_setup else 'Low ₹' + str(orb_low)}. "
@@ -368,14 +373,14 @@ def detect_opening_range_breakout(
         alert_type = "ORB_BREAKOUT"
         trigger_level = orb_high
         stop_loss = round(min(orb_mid, trigger_level - min_orb_risk), 2)
-        risk_pts = max(1.0, round(ltp - stop_loss, 2))
-        target_1 = round(orb_high + (1.0 * orb_range), 2)
-        target_2 = round(orb_high + (2.0 * orb_range), 2)
-        target_3 = round(orb_high + (3.5 * orb_range), 2)
+        risk_pts = max(abs_min_risk, round(ltp - stop_loss, 2))
+        target_1 = round(max(orb_high + (1.0 * orb_range), ltp + (1.8 * risk_pts)), 2)
+        target_2 = round(max(orb_high + (2.0 * orb_range), ltp + (3.2 * risk_pts)), 2)
+        target_3 = round(max(orb_high + (3.5 * orb_range), ltp + (5.0 * risk_pts)), 2)
         no_chase_lvl = max_bull_chase
-        entry_min = round(max(stop_loss + 0.5, ltp * 0.998), 1)
-        entry_max = round(min(target_1 - 0.5, no_chase_lvl), 1)
-        rr_ratio = round((target_1 - ltp) / max(0.1, risk_pts), 1)
+        entry_min = round(max(stop_loss + abs_min_risk, ltp * 0.998), 2)
+        entry_max = round(min(target_1 - abs_min_risk, no_chase_lvl), 2)
+        rr_ratio = round((target_1 - ltp) / max(0.01, risk_pts), 1)
         headline = (
             f"⚡ ORB-15 BREAKOUT: {symbol} at ₹{ltp:,.1f} (Crossed Range High ₹{orb_high:,.1f})"
         )
@@ -392,14 +397,14 @@ def detect_opening_range_breakout(
         alert_type = "ORB_BREAKDOWN"
         trigger_level = orb_low
         stop_loss = round(max(orb_mid, trigger_level + min_orb_risk), 2)
-        risk_pts = max(1.0, round(stop_loss - ltp, 2))
-        target_1 = round(orb_low - (1.0 * orb_range), 2)
-        target_2 = round(orb_low - (2.0 * orb_range), 2)
-        target_3 = round(orb_low - (3.5 * orb_range), 2)
+        risk_pts = max(abs_min_risk, round(stop_loss - ltp, 2))
+        target_1 = round(min(orb_low - (1.0 * orb_range), ltp - (1.8 * risk_pts)), 2)
+        target_2 = round(min(orb_low - (2.0 * orb_range), ltp - (3.2 * risk_pts)), 2)
+        target_3 = round(min(orb_low - (3.5 * orb_range), ltp - (5.0 * risk_pts)), 2)
         no_chase_lvl = max_bear_chase
-        entry_max = round(min(stop_loss - 0.5, ltp * 1.002), 1)
-        entry_min = round(max(target_1 + 0.5, no_chase_lvl), 1)
-        rr_ratio = round((ltp - target_1) / max(0.1, risk_pts), 1)
+        entry_max = round(min(stop_loss - abs_min_risk, ltp * 1.002), 2)
+        entry_min = round(max(target_1 + abs_min_risk, no_chase_lvl), 2)
+        rr_ratio = round((ltp - target_1) / max(0.01, risk_pts), 1)
         headline = f"⚡ ORB-15 BREAKDOWN: {symbol} at ₹{ltp:,.1f} (Broke Range Low ₹{orb_low:,.1f})"
         summary = (
             f"15-min Opening Range Breakdown confirmed! Low ₹{orb_low:,.1f} breached with "

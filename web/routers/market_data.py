@@ -72,8 +72,10 @@ async def get_market_regime():
                 "active_detectors": gov.active_detectors,
                 "summary": gov.summary,
             }
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         return {
             "status": "ok",
@@ -191,8 +193,8 @@ async def run_mover_autopsy(payload: Optional[dict] = None):
                 "traps_filtered": autopsy.traps_filtered,
             },
         )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}")
 
     return {"status": "ok", "data": autopsy.to_dict()}
 
@@ -259,8 +261,8 @@ async def run_asymmetric_opportunities_scan(payload: Optional[dict] = None):
                 "top_opportunity": opps[0].symbol if opps else None,
             },
         )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}")
 
     return {"status": "ok", "data": [o.to_dict() for o in opps]}
 
@@ -300,13 +302,15 @@ async def get_market_depth_endpoint(symbol: str):
     brk = None
     try:
         brk = get_data_broker()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}")
     if not brk:
         try:
             brk = get_execution_broker()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     if brk and hasattr(brk, "get_market_depth"):
         depth = await asyncio.to_thread(brk.get_market_depth, clean)
@@ -1196,6 +1200,15 @@ async def post_fyers_tbt_subscribe_endpoint(req: dict[str, Any]):
     return {"status": "ok", "subscribed": symbols}
 
 
+@router.get("/api/fyers/tbt-status", tags=["Fyers 50-Depth TBT"])
+async def get_fyers_tbt_status_endpoint():
+    """Returns real-time 15-slot allocation and status of Fyers TBT depth engine."""
+    from market.fyers_tbt_manager import fyers_tbt_manager
+
+    status = await asyncio.to_thread(fyers_tbt_manager.get_active_slots_status)
+    return {"status": "ok", "data": status}
+
+
 @router.get("/api/market/symbol/search", tags=["Symbol Master"])
 async def search_symbols_endpoint(q: str, limit: int = 10):
     """Fast token-free symbol search across public Fyers master."""
@@ -1249,8 +1262,10 @@ async def get_index_adaptive_regime_endpoint(symbol: Optional[str] = "NIFTY"):
         df_5m = None
         try:
             df_5m = get_ohlcv(clean, days=5, timeframe="5m")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         decision = evaluate_index_adaptive_regime(
             underlying=clean,

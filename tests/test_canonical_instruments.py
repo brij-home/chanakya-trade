@@ -26,6 +26,17 @@ def test_resolve_equities():
     assert bse_tcs.instrument_id == "BSE:TCS:EQUITY"
     assert bse_tcs.exchange == "BSE"
 
+    # SEBI Sub-₹250 1-Paisa Tick Size Test (e.g. TATASTEEL at ₹150 vs RELIANCE at ₹1400)
+    tatasteel = resolve_canonical_instrument("TATASTEEL", price=152.0)
+    assert tatasteel.tick_size == 0.01
+    assert tatasteel.segment == "EQUITY"
+
+    bel = resolve_canonical_instrument("BEL", price=249.50)
+    assert bel.tick_size == 0.01
+
+    reliance = resolve_canonical_instrument("RELIANCE", price=1450.0)
+    assert reliance.tick_size == 0.05
+
 
 def test_resolve_indices():
     """Verify benchmark and sectoral indices resolve with lot sizes."""

@@ -21,6 +21,10 @@ Public API:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("agent.persona_agent")
+
 
 import re
 from typing import Any
@@ -83,8 +87,8 @@ def parse_persona_response(text: str, persona_id: str) -> PersonaSignal:
     if conf_match:
         try:
             confidence = max(0, min(100, int(conf_match.group(1))))
-        except ValueError:
-            pass
+        except ValueError as e_suppressed:
+            logger.debug(f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}")
 
     # A response without a machine-readable verdict or confidence is not an
     # auditable recommendation. Keep its commentary, but make it non-actionable.
@@ -444,40 +448,50 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
             try:
                 roe = float(roe)
                 score += 15 if roe > 15 else (-10 if roe < 8 else 5)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e_suppressed:
+                logger.debug(
+                    f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         de = fund.get("debt_equity") or fund.get("de") or fund.get("D/E")
         if de is not None:
             try:
                 de = float(de)
                 score += 10 if de < 0.5 else (-10 if de > 1.5 else 0)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e_suppressed:
+                logger.debug(
+                    f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         pe = fund.get("pe") or fund.get("PE")
         if pe is not None:
             try:
                 pe = float(pe)
                 score += 10 if pe < 15 else (-10 if pe > 40 else 0)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e_suppressed:
+                logger.debug(
+                    f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         fcf_yield = fund.get("fcf_yield") or fund.get("FCF_yield")
         if fcf_yield is not None:
             try:
                 fcf_yield = float(fcf_yield)
                 score += 10 if fcf_yield > 5 else (-5 if fcf_yield < 2 else 0)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e_suppressed:
+                logger.debug(
+                    f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         f_score = fund.get("score")
         if f_score is not None:
             try:
                 fs = float(f_score)
                 score = (score + fs) / 2.0
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e_suppressed:
+                logger.debug(
+                    f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Forensic indicators
         if forensic:
@@ -486,8 +500,10 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
                 try:
                     p = float(piotroski)
                     score += 15 if p >= 7 else (-15 if p <= 4 else 0)
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as e_suppressed:
+                    logger.debug(
+                        f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             altman = forensic.get("altman_zone")
             if altman:
                 if "SAFE" in str(altman).upper():
@@ -499,8 +515,10 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
                 try:
                     pl = float(pledge)
                     score += 5 if pl < 5 else (-15 if pl > 20 else 0)
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as e_suppressed:
+                    logger.debug(
+                        f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         return max(0.0, min(100.0, score))
 
@@ -528,8 +546,10 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
                     score -= 15  # overbought → cautious
                 elif 40 <= rsi <= 60:
                     score += 5  # neutral zone
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e_suppressed:
+                logger.debug(
+                    f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         trend = tech.get("trend") or tech.get("price_trend") or tech.get("verdict")
         if trend:
@@ -544,8 +564,10 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
             try:
                 ts = float(t_score)
                 score = (score + ts) / 2.0
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e_suppressed:
+                logger.debug(
+                    f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         return max(0.0, min(100.0, score))
 
@@ -569,8 +591,10 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
             try:
                 fii_net = float(fii_net)
                 score += 15 if fii_net > 0 else (-10 if fii_net < 0 else 0)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e_suppressed:
+                logger.debug(
+                    f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Market regime
         vix = macro.get("india_vix") or macro.get("VIX") or macro.get("vix")
@@ -578,8 +602,10 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
             try:
                 vix = float(vix)
                 score += 10 if vix < 15 else (-15 if vix > 25 else 0)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e_suppressed:
+                logger.debug(
+                    f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         return max(0.0, min(100.0, score))
 
@@ -616,8 +642,8 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
                 score -= 10
             elif pcr >= 0.5:
                 score += 5
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as e_suppressed:
+            logger.debug(f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}")
         return max(0.0, min(100.0, score))
 
     return None
@@ -856,8 +882,8 @@ def run_persona_analysis(
             details={"persona": persona_id, "symbol": symbol, "exchange": exchange},
             severity="WARNING",
         )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[agent.persona_agent] Non-fatal exception suppressed: {e_suppressed}")
 
     sig = _rule_based_signal(persona_id, brief)
     sig.key_metrics["Analysis Engine"] = "Quantitative Engine (Deterministic Fallback)"

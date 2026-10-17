@@ -6,6 +6,10 @@ SENSEX, sector indices, and a market posture helper.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.indices")
+
 
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -212,8 +216,8 @@ def get_market_snapshot() -> MarketSnapshot:
         from market.gift_nifty import get_gift_nifty
 
         gift_nifty = get_gift_nifty(nifty_spot=nifty.ltp if nifty.ltp else None)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.indices] Non-fatal exception suppressed: {e_suppressed}")
 
     # Heavyweight Tug-of-War Polarization Detector
     polarization = None
@@ -223,8 +227,8 @@ def get_market_snapshot() -> MarketSnapshot:
             reason += f" | {polarization.summary}"
             if posture in ("BULLISH", "BEARISH"):
                 posture = "NEUTRAL"
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.indices] Non-fatal exception suppressed: {e_suppressed}")
 
     return MarketSnapshot(
         nifty=nifty,

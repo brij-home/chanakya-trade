@@ -60,6 +60,37 @@ def _test_safe_thread_init(self, *args, **kwargs):
 
 threading.Thread.__init__ = _test_safe_thread_init
 
+
+@pytest.fixture(autouse=True)
+def _isolate_fyers_rate_gate_and_circuit_breaker():
+    """Defensively reset rate gate and circuit breaker before and after each test."""
+    try:
+        from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+
+        get_fyers_circuit_breaker().record_success()
+    except Exception:
+        pass
+    try:
+        from market.fyers_rate_gate import get_fyers_rate_gate
+
+        get_fyers_rate_gate().reset_daily_quota(requests=0)
+    except Exception:
+        pass
+    yield
+    try:
+        from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+
+        get_fyers_circuit_breaker().record_success()
+    except Exception:
+        pass
+    try:
+        from market.fyers_rate_gate import get_fyers_rate_gate
+
+        get_fyers_rate_gate().reset_daily_quota(requests=0)
+    except Exception:
+        pass
+
+
 # 3. Institutional zero-network quarantine:
 # Defensively isolate test sessions from unmocked external network connections.
 # Any attempt to connect to a non-loopback host raises RuntimeError unless marked with @pytest.mark.network.
@@ -130,10 +161,38 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         monkeypatch.setenv("OPENROUTER_API_KEY", "")
 
     try:
-        from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+        from collections import OrderedDict
+        import market.quotes as mq
 
-        with _quote_cache_lock:
-            _QUOTE_CACHE.clear()
+        if not isinstance(mq._QUOTE_CACHE, OrderedDict):
+            mq._QUOTE_CACHE = OrderedDict()
+        with mq._quote_cache_lock:
+            mq._QUOTE_CACHE.clear()
+        with mq._in_flight_quote_lock:
+            mq._in_flight_quote_events.clear()
+    except Exception:
+        pass
+
+    try:
+        from market.fyers_tbt_manager import FyersTbtManager
+
+        tbt_mgr = FyersTbtManager()
+        tbt_mgr._connected = False
+        with tbt_mgr._depth_lock:
+            tbt_mgr._depth_cache.clear()
+        with tbt_mgr._slots_lock:
+            tbt_mgr._in_flight.clear()
+            tbt_mgr._scout.clear()
+    except Exception:
+        pass
+
+    try:
+        from market.websocket import FyersWebSocket
+
+        ws = FyersWebSocket._instance
+        if ws:
+            with ws._lock:
+                ws._ticks.clear()
     except Exception:
         pass
 

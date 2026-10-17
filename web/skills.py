@@ -66,13 +66,13 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
@@ -548,8 +548,8 @@ async def skill_history(req: HistoryRequest):
                             ),
                         }
                     )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         # ── 3. Volume Profile: POC, VAH, VAL ──────────────────────────
         vp_dict = {"tf": tf_label, "poc": 0.0, "vah": 0.0, "val": 0.0, "buckets": []}
@@ -571,8 +571,8 @@ async def skill_history(req: HistoryRequest):
                     for b in buckets
                 ],
             }
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         # ── 4. Stochastic RSI & Divergences ───────────────────────────
         stoch_k, stoch_d = [], []
@@ -1174,8 +1174,8 @@ async def skill_analyze(req: AnalyzeRequest):
                 if q_bse and list(q_bse.values())[0].last_price > 0:
                     exch = "BSE"
                     spot = list(q_bse.values())[0].last_price
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         from agent.tools import build_registry
         from agent.core import get_deep_provider, get_fast_provider
@@ -1211,8 +1211,8 @@ async def skill_analyze(req: AnalyzeRequest):
                 analyst_signals=_serialise(getattr(analyzer, "last_signals", [])),
                 ttl_minutes=15,
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         return {
             "status": "ok",
@@ -1330,8 +1330,8 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
                     if q_bse and list(q_bse.values())[0].last_price > 0:
                         exch = "BSE"
                         spot = list(q_bse.values())[0].last_price
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
             from agent.tools import build_registry
             from agent.core import get_deep_provider, get_fast_provider
@@ -1368,8 +1368,8 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
                     analyst_signals=_serialise(getattr(analyzer, "last_signals", [])),
                     ttl_minutes=15,
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
             _cb(
                 {
@@ -1507,15 +1507,15 @@ async def skill_morning_brief():
                 from market.gift_nifty import get_gift_nifty
 
                 gift = get_gift_nifty()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
             battle_plan = None
             try:
                 from market.indices import get_premarket_battle_plan
 
                 battle_plan = get_premarket_battle_plan()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
             return snap, fl, nw, br, ev, gift, battle_plan
 
         snapshot, flows, news, breadth, events, gift, battle_plan = await asyncio.to_thread(
@@ -1904,8 +1904,8 @@ async def skill_alert_preferences_post(req: Optional[AlertPreferencesUpdateReque
                     "preferences": updated,
                 },
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         return {"status": "ok", "data": updated}
     except Exception as e:
@@ -2057,8 +2057,8 @@ async def skill_auto_alerts_clear():
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
         return {"status": "ok", "data": {"cleared": True}}
     except Exception as e:
         raise _err(str(e))
@@ -2084,8 +2084,8 @@ async def skill_auto_alerts_clear_test():
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
         return {
             "status": "ok",
             "data": {
@@ -2234,8 +2234,8 @@ async def skill_auto_alerts_archive(req: AutoAlertArchiveRequest):
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         return {"status": "ok", "data": alert.to_dict()}
     except HTTPException:
@@ -2260,8 +2260,8 @@ async def skill_auto_alerts_archive_all_invalidated():
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
         return {"status": "ok", "archived_count": count}
     except Exception as e:
         raise _err(str(e))
@@ -2291,10 +2291,51 @@ async def skill_auto_alerts_clear_lockouts(req: Optional[dict[str, Any]] = None)
 
         sym = (req or {}).get("symbol")
         pattern_learning_engine.clear_symbol_lockout(symbol=sym)
+        if not sym or (req or {}).get("reset_detectors"):
+            from engine.detector_circuit_breaker import detector_circuit_breaker
+
+            detector_circuit_breaker.reset_all()
         return {
             "status": "ok",
-            "message": f"Lockouts cleared for {sym or 'all symbols'}",
+            "message": f"Lockouts cleared for {sym or 'all symbols and detectors'}",
             "active_lockouts": pattern_learning_engine.get_locked_out_symbols(),
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/circuit-breakers/reset")
+async def skill_auto_alerts_reset_circuit_breakers(req: Optional[dict[str, Any]] = None):
+    """Resets detector circuit breaker degradation for a specific alert type or all detectors."""
+    try:
+        from engine.detector_circuit_breaker import detector_circuit_breaker
+
+        atype = (req or {}).get("alert_type")
+        if atype:
+            detector_circuit_breaker.reset_detector(atype)
+            msg = f"Detector circuit breaker reset for '{atype}'"
+        else:
+            detector_circuit_breaker.reset_all()
+            msg = "All detector circuit breakers reset to NORMAL"
+
+        return {
+            "status": "ok",
+            "message": msg,
+            "detectors": detector_circuit_breaker.get_all_metrics(),
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/alerts/auto/circuit-breakers/status")
+async def skill_auto_alerts_circuit_breakers_status():
+    """Returns current status and metrics of all detector circuit breakers."""
+    try:
+        from engine.detector_circuit_breaker import detector_circuit_breaker
+
+        return {
+            "status": "ok",
+            "detectors": detector_circuit_breaker.get_all_metrics(),
         }
     except Exception as e:
         raise _err(str(e))
@@ -3014,8 +3055,8 @@ async def skill_telegram_status():
             from bot.telegram_bot import _bot_running
 
             running = _bot_running
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
         return {
             "status": "ok",
             "data": {
@@ -3274,8 +3315,8 @@ async def skill_explain(req: ExplainRequest):
             from agent.core import ToolRegistry, get_provider
 
             llm_provider = get_provider(registry=ToolRegistry())
-        except Exception:
-            pass  # No provider configured — fine, rule-based fallback handles it
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         simplified = explain_simply(req.content, llm_provider=llm_provider)
         return _ok({"simplified": simplified})
@@ -3351,8 +3392,8 @@ async def skill_settings_post(req: SettingsUpdateRequest):
                 from engine.alert_preferences import alert_preferences
 
                 alert_preferences.set_allowed_segments(value)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
         updated.append(key)
 
     return _ok({"updated": updated})
@@ -3523,8 +3564,8 @@ async def skill_position_size(req: PositionSizeSkillRequest):
                 q = get_live_quote(req.symbol)
                 if q and hasattr(q, "ltp") and q.ltp and q.ltp > 0:
                     entry = float(q.ltp)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
         if not entry or entry <= 0:
             entry = 100.0
 
@@ -3991,8 +4032,8 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
                         c.ltp = round(float(q.last_price), 2)
                         if hasattr(q, "change_pct") and q.change_pct is not None:
                             c.day_change_pct = round(float(q.change_pct), 2)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         return res
 
@@ -4011,8 +4052,8 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
         if is_originator and req.use_local_cache:
             try:
                 analysis_cache.save_macro(cache_key, res_dict, ttl_minutes=5)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
         return _ok(res_dict)
     except Exception as e:
         raise _err(str(e))
@@ -4759,8 +4800,8 @@ async def skill_send_opportunity_telegram(req: SendOpportunityTelegramRequest):
 
         try:
             auto_alert_engine.ingest_execution_gate_report(req.opportunity)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         push_execution_alert(req.opportunity)
         return _ok(
@@ -4969,8 +5010,8 @@ async def skill_trending(req: Optional[TrendingSkillRequest] = None):
         quotes = {}
         try:
             quotes = get_quote(instruments)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         items = []
         for c in candidates_meta:
@@ -5061,8 +5102,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                     and "portfolio_heat" in cached  # v7 sentinel — rejects old v6 entries
                 ):
                     return cached
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         # 1. Watchlist Quotes — comprehensive institutional universe (Equities, Indices, MCX Commodities, ETFs, Forex)
         watch_meta = [
@@ -5170,8 +5211,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         quotes_map = {}
         try:
             quotes_map = get_quote([w["inst"] for w in watch_meta])
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         def _resolve_quote(w: dict):
             """Try all key variants: inst → symbol → short symbol → stripped symbol."""
@@ -5349,8 +5390,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                         loss_by_strike[s] = total_loss
                     if loss_by_strike:
                         max_pain_val = min(loss_by_strike, key=loss_by_strike.get)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         # Upsert active symbol into watchlist so frontend always gets live price
         # (handles non-standard symbols like MCX commodities that may not be in the fixed list)
@@ -5403,8 +5444,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         d_count = 15 if inv in ["5m", "15m"] else (90 if inv == "1h" else 365)
         try:
             df = get_historical_data(setup_sym, interval=inv, days=d_count, exchange=exch)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         if not cur_ltp or cur_ltp <= 0:
             if df is not None and not df.empty and "close" in df.columns:
@@ -5414,8 +5455,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                     idx = get_index(setup_sym)
                     if idx and idx.last_price > 0:
                         cur_ltp = float(idx.last_price)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
                 if not cur_ltp or cur_ltp <= 0:
                     unavail_payload = {
                         "terminal_contract_version": 2,
@@ -5442,12 +5483,12 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         vp_report = None
         try:
             ms_report = analyze_market_structure(setup_sym, df=df, exchange=exch)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
         try:
             vp_report = analyze_volume_profile(setup_sym, df=df, exchange=exch)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         # Real quantitative analysis for setup_sym (executed concurrently for Indian equities)
         fund_snap = None
@@ -5495,18 +5536,18 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 if fut_fund in done:
                     try:
                         fund_snap = fut_fund.result()
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
                 if fut_forensic in done:
                     try:
                         forensic_rep = fut_forensic.result()
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
                 if fut_mb in done:
                     try:
                         mb_rep = fut_mb.result()
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         # Technical setups require valid LTP. If df/ms_report/vp_report are not computed, synthesize sound fallback quant metrics
         if cur_ltp <= 0:
@@ -5588,8 +5629,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                     val = float(atr_s.dropna().iloc[-1])
                     if val > 0:
                         atr_val = val
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         effective_atr = (
             atr_val if (atr_val is not None and atr_val > 0) else max(cur_ltp * 0.015, 1.0)
@@ -6619,8 +6660,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             from market.flow_intel import get_flow_analysis
 
             flow_ana = get_flow_analysis()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         has_flows = (
             flow_ana is not None
@@ -6709,8 +6750,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                         "factor_drivers": p.factor_drivers,
                     }
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         # 6. Multi-Timeframe Technical Confluence (15m, 1h, 1D)
         multi_tf = None
@@ -6734,8 +6775,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             )
             if global_macro_rep:
                 global_macro_data = global_macro_rep.to_dict()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         # Portfolio Heat — derived from India VIX level (live watchlist quote).
         # VIX 10 → heat 0%; VIX 40+ → heat 100%. Clamped [0, 100].
@@ -6790,8 +6831,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             from engine.analysis_cache import analysis_cache
 
             analysis_cache.save_macro(cache_key, payload, ttl_minutes=15)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         return payload
     except Exception as e:
@@ -6842,8 +6883,8 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
                     and "portfolio_heat" in cached  # v7 sentinel — rejects stale v6 entries
                 ):
                     return _ok(cached)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         async with _in_flight_snapshots_lock:
             existing_task = _in_flight_snapshots.get(cache_key)
@@ -6890,8 +6931,8 @@ async def skill_live_tickers():
         if tickers and len(tickers) >= 8:
             try:
                 analysis_cache.save_macro("live_tickers_ribbon_v1", tickers, ttl_minutes=1)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
         return _ok({"tickers": tickers})
     except Exception as e:
         import traceback
@@ -6941,8 +6982,8 @@ def _compute_market_overview_sync() -> dict:
         cached = analysis_cache.get_macro("market_overview_snapshot_v2")
         if cached and isinstance(cached, dict) and cached.get("_status") == "cached_fresh":
             return cached
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
     result = {
         "_status": "unavailable",
@@ -6972,8 +7013,8 @@ def _compute_market_overview_sync() -> dict:
             if ltp and float(ltp) > 0:
                 result["vix"] = round(float(ltp), 2)
                 fetched_any = True
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
     # FII/DII Flows
     try:
@@ -6993,8 +7034,8 @@ def _compute_market_overview_sync() -> dict:
                 else round(float(latest.get("dii_net", 0)), 2)
             )
             fetched_any = True
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
     # Market Breadth (Advances / Declines)
     try:
@@ -7018,8 +7059,8 @@ def _compute_market_overview_sync() -> dict:
                 else breadth.get("unchanged")
             )
             fetched_any = True
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
     # Sector RRG — non-blocking timeout
     try:
@@ -7058,8 +7099,8 @@ def _compute_market_overview_sync() -> dict:
                     )
             result["sectors"] = sectors
             fetched_any = True
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
     if fetched_any:
         result["_status"] = "cached_fresh"
@@ -7069,8 +7110,8 @@ def _compute_market_overview_sync() -> dict:
             from engine.analysis_cache import analysis_cache
 
             analysis_cache.save_macro("market_overview_snapshot_v2", result, ttl_minutes=15)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
     return result
 
@@ -7149,8 +7190,8 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             cached = analysis_cache.get_macro(cache_key)
             if cached and isinstance(cached, dict) and cached.get("symbol") == sym:
                 return _ok(cached)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         quote = get_quote(f"{exch}:{sym}") or {}
         ltp = (
@@ -7165,8 +7206,8 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
                 idx = get_index(sym)
                 if idx and getattr(idx, "last_price", 0) > 0:
                     ltp = float(idx.last_price)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
             if not ltp or ltp <= 0:
                 from market.history import get_ohlcv
@@ -7201,26 +7242,26 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
 
             try:
                 ms = fut_ms.result(timeout=4.5)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
             try:
                 vp = fut_vp.result(timeout=4.5)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
             try:
                 fa = fut_fa.result(timeout=4.5)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
             try:
                 mb = fut_mb.result(timeout=4.5)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
             try:
                 flow_list = fut_flows.result(timeout=3.0)
                 if flow_list:
                     flows = flow_list[0]
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         # Compute dynamic conviction score
         base_score = 65
@@ -7349,8 +7390,8 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
                     val = float(atr_s.dropna().iloc[-1])
                     if val > 0:
                         atr_px = val
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         ms_structure_score = getattr(ms, "structure_score", None) if ms else None
         is_bull = (
@@ -7448,8 +7489,8 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             from engine.analysis_cache import analysis_cache
 
             analysis_cache.save_macro(cache_key, payload, ttl_minutes=15)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         return _ok(payload)
     except Exception as e:
@@ -7677,8 +7718,8 @@ async def skill_gex_snapshot(
             exp_dt = datetime.strptime(active_expiry, "%Y-%m-%d")
             diff = (exp_dt.date() - datetime.now().date()).days
             dte_days = max(1.0, float(diff))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
         T = dte_days / 365.0
         sqrtT = math.sqrt(T)
         r = 0.065
@@ -8228,8 +8269,10 @@ async def skill_gex_snapshot(
                                 max_pain=float(mp) if mp else None,
                                 data_state=dstate,
                             )
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[web.skills] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
                     _CONVICTION_BG_TASKS[clean_sym] = asyncio.create_task(
                         asyncio.to_thread(_run_bg_conviction)
@@ -8348,8 +8391,8 @@ async def skill_conviction_score(req: Optional[ConvictionScoreRequest] = None):
                 q = get_live_quote(underlying)
                 if q and getattr(q, "ltp", None) and q.ltp > 0:
                     spot = float(q.ltp)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
         conviction = get_conviction_score(
             underlying=underlying,
@@ -8601,8 +8644,8 @@ def _persona_council_sync(req: CouncilRequest):
         cached = analysis_cache.get_macro(cache_key)
         if cached and isinstance(cached, dict) and cached.get("symbol") == sym:
             return _ok(cached)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
     from agent.persona_agent import run_council
 
@@ -8619,8 +8662,8 @@ def _persona_council_sync(req: CouncilRequest):
         from engine.analysis_cache import analysis_cache
 
         analysis_cache.save_macro(cache_key, res, ttl_minutes=15)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
     return _ok(res)
 
 
@@ -8647,8 +8690,8 @@ def _persona_analyze_sync(req: PersonaAnalyzeRequest):
         cached = analysis_cache.get_macro(cache_key)
         if cached and isinstance(cached, dict) and cached.get("persona") == persona_id:
             return _ok(cached)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
 
     from agent.persona_agent import run_persona_analysis
 
@@ -8663,8 +8706,8 @@ def _persona_analyze_sync(req: PersonaAnalyzeRequest):
         from engine.analysis_cache import analysis_cache
 
         analysis_cache.save_macro(cache_key, res, ttl_minutes=15)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.skills] Non-fatal exception suppressed: {e_suppressed}")
     return _ok(res)
 
 

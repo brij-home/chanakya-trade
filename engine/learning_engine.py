@@ -815,8 +815,10 @@ class PatternLearningEngine:
                 if m:
                     try:
                         entry_price = float(m.group(0))
-                    except ValueError:
-                        pass
+                    except ValueError as e_suppressed:
+                        logger.debug(
+                            f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}"
+                        )
             if entry_price <= 0:
                 entry_price = float(getattr(alert, "ltp", 0.0) or exit_price or 1.0)
 
@@ -895,8 +897,8 @@ class PatternLearningEngine:
             if q and getattr(q, "vwap", None) and q.vwap > 0:
                 intraday_vwap = float(q.vwap)
                 metrics_snapshot["intraday_vwap"] = intraday_vwap
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
 
         if intraday_vwap and intraday_vwap > 0:
             if direction == "BULLISH" and exit_price < intraday_vwap:
@@ -975,8 +977,8 @@ class PatternLearningEngine:
                 rrg_quadrant = align.get("quadrant", "NEUTRAL")
                 metrics_snapshot["sector"] = sector_name
                 metrics_snapshot["rrg_quadrant"] = rrg_quadrant
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
 
         if rrg_quadrant in ("LAGGING", "WEAKENING"):
             missed_signals.append(
@@ -989,8 +991,8 @@ class PatternLearningEngine:
 
             nifty_ltp = get_ltp("NSE:NIFTY") or get_ltp("NIFTY")
             metrics_snapshot["nifty_ref"] = nifty_ltp
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
 
         # 4b. Forensic Check: Session Time Windows (Opening Bell Auction Chop vs Late Session)
         alert_time_str = str(
@@ -1008,8 +1010,10 @@ class PatternLearningEngine:
                     hh > 15 and getattr(alert, "exchange", "NSE") in ("NSE", "BSE", "NFO")
                 ):
                     is_late_session = True
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if is_opening_bell:
             missed_signals.append(
@@ -1205,8 +1209,8 @@ class PatternLearningEngine:
 
             sq = compute_ttm_squeeze(analysis_df)
             squeeze_bars = sq.squeeze_duration_bars if (sq.is_squeeze_on or sq.squeeze_fired) else 0
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
 
         # 3. Call OI Unwinding in options chain (only query for F&O instruments with active coiling or volume dry-up)
         ce_unwind_pct = 0.0
@@ -1245,8 +1249,8 @@ class PatternLearningEngine:
                 if bull_obs:
                     nearest_top = bull_obs[0].top
                     ob_dist_pct = round(abs(ltp - nearest_top) / ltp * 100, 2)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
 
         # 5. Sector RRG alignment
         rrg_quad = "LEADING"
@@ -1258,8 +1262,8 @@ class PatternLearningEngine:
                 rrg_quad = align.get("quadrant", "LEADING")
             elif isinstance(align, str) and "LEADING" in align:
                 rrg_quad = "LEADING"
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
 
         # 6. Breakout Trigger Pivot (highest high of the last 5 coiling bars)
         pivot_high = (
@@ -1273,8 +1277,8 @@ class PatternLearningEngine:
 
             snap = analyse(clean_sym, fast=True)
             sepa_qual = bool(getattr(snap, "sepa_qualified", False))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
 
         return {
             "symbol": clean_sym,
@@ -1445,14 +1449,16 @@ class PatternLearningEngine:
             if q:
                 ltp_val = float(q.ltp or 0.0)
                 vwap_val = float(getattr(q, "vwap", 0.0) or 0.0)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
 
         if (ltp_val is None or ltp_val <= 0) and df is not None and len(df) > 0:
             try:
                 ltp_val = float(df["close"].iloc[-1])
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         is_locked, lock_reason = self.is_symbol_locked_out(
             clean_sym, direction="BULLISH", ltp=ltp_val, vwap=vwap_val
@@ -1504,8 +1510,8 @@ class PatternLearningEngine:
                     matched_factors.append(
                         f"⚠️ Intraday price (₹{ltp_val:,.1f}) is below VWAP (₹{vwap_val:,.1f}) — Knife-catching risk penalty applied"
                     )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
 
         # Weights from calibrated dictionary
         w_vol = self._factor_weights.get("volume_dry_up", 25)

@@ -9,6 +9,11 @@ Remediates historical alerts in auto_alerts.json:
 5. Re-activates valid swing setups so they show as Active trades.
 """
 
+import logging
+
+logger = logging.getLogger("scripts.remediate_horizon_and_offmarket_alerts")
+
+
 import json
 import os
 import shutil
@@ -58,8 +63,10 @@ for a in alerts:
         except Exception:
             try:
                 created_dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[scripts.remediate_horizon_and_offmarket_alerts] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
     age_hours = (now - created_dt).total_seconds() / 3600.0 if created_dt else 999.0
     is_today = created_dt and (created_dt.date() == now.date())

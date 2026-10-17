@@ -6,6 +6,10 @@ All data sourced from public endpoints (NSE, RBI websites).
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.events")
+
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -195,8 +199,8 @@ def get_rbi_calendar() -> list[RBIEvent]:
                 )
         if events:
             return events
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.events] Non-fatal exception suppressed: {e_suppressed}")
 
     return []  # No mock data — return empty when RBI RSS fails
 

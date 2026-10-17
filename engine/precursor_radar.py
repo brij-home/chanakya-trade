@@ -85,8 +85,8 @@ def classify_symbol_segment(symbol: str) -> str:
 
         if is_fno_symbol(clean):
             return "FNO"
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}")
     return "NON_FNO"
 
 
@@ -327,8 +327,8 @@ class PrecursorRadarScanner:
             if is_locked:
                 logger.debug(f"[PrecursorRadar] Skipping {clean_sym}: locked out ({lock_reason})")
                 return None
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}")
 
         # 2. Fetch Live Quote & Liquidity Checks
         from market.quotes import get_quote
@@ -346,8 +346,10 @@ class PrecursorRadarScanner:
                     q_item = q_res.get(inst_lookup) or q_res.get(clean_sym)
                 else:
                     q_item = q_res
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if not q_item:
             return None
@@ -365,8 +367,10 @@ class PrecursorRadarScanner:
                     if f > 0:
                         ltp = f
                         break
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         if ltp <= 0 and hasattr(q_item, "__dict__"):
             for attr in ("last_price", "ltp"):
                 if attr in q_item.__dict__:
@@ -375,8 +379,10 @@ class PrecursorRadarScanner:
                         if f > 0:
                             ltp = f
                             break
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
         if ltp <= 0:
             return None
@@ -399,15 +405,19 @@ class PrecursorRadarScanner:
                 f = float(vwap_val)
                 if f > 0:
                     vwap = f
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}"
+                )
         elif hasattr(q_item, "__dict__") and "vwap" in q_item.__dict__:
             try:
                 f = float(q_item.__dict__["vwap"])
                 if f > 0:
                     vwap = f
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # 3. Daily History & Structural Footprint
         from market.history import get_ohlcv
@@ -437,8 +447,10 @@ class PrecursorRadarScanner:
         if vol <= 0 and volumes is not None and len(volumes) > 0:
             try:
                 vol = int(volumes[-1])
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         turnover_cr = round((ltp * vol) / 1e7, 2)
         avg_20_vol = (
@@ -516,8 +528,8 @@ class PrecursorRadarScanner:
                     matched_factors.append(
                         f"Active Squeeze compression coiling ({squeeze_bars} sessions)"
                     )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}")
 
         # VCP Tightness check
         recent_spreads = [abs(highs[i] - lows[i]) / closes[i] * 100 for i in range(-5, 0)]
@@ -578,8 +590,8 @@ class PrecursorRadarScanner:
             elif in_discount:
                 score += 10
                 matched_factors.append("Trading in institutional 50% OTE discount zone")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}")
 
         # D. Sector RRG Tailwind [0–15 pts]
         sector_name = "Equities"
@@ -610,8 +622,10 @@ class PrecursorRadarScanner:
                     )
                 elif rrg_quad == "LAGGING":
                     score -= 10  # Mild drag penalty instead of harsh -15
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}"
+                )
         elif sym_seg == "CRYPTO":
             sector_name = "Crypto"
         elif sym_seg == "COMMODITY":
@@ -643,8 +657,10 @@ class PrecursorRadarScanner:
                         matched_factors.append(
                             f"Call OI liquidation detected ({abs(min(ce_shedding)):.1f}%)"
                         )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # 5. Intraday VWAP & Knife-Catching Check (VETO / PENALTY)
         if vwap > 0 and ltp < vwap:

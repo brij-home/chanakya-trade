@@ -16,6 +16,10 @@ Includes stock-to-sector mapping and sector tailwind alignment scoring.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.sector_rotation")
+
 
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -545,8 +549,10 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
                     )
                     for item in cached
                 ]
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.sector_rotation] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     points: list[SectorRRGPoint] = []
     benchmark_change = 0.0
@@ -558,8 +564,8 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
         bm_df = get_ohlcv("NIFTY 50", interval="day", days=60)
         if not bm_df.empty and len(bm_df) >= 15:
             bm_closes = bm_df["close"].tolist()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.sector_rotation] Non-fatal exception suppressed: {e_suppressed}")
 
     try:
         from market.indices import get_sector_snapshot
@@ -607,8 +613,10 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
                     if trail:
                         rs_ratio = trail[-1]["rs_ratio"]
                         rs_momentum = trail[-1]["rs_momentum"]
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[analysis.sector_rotation] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if not trail:
             # An RRG requires the benchmark and sector history. A 1-day move
@@ -638,8 +646,10 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
             from engine.analysis_cache import analysis_cache
 
             analysis_cache.save_macro(cache_key, [p.as_dict() for p in points], ttl_minutes=15)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.sector_rotation] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     return points
 

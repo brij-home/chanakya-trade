@@ -227,3 +227,11 @@ broker_positions = internal_positions  # circular self-comparison
 - **Physical Delivery Margin Step-Up**: Near-month single-stock options in Indian markets carry severe physical settlement risk during the final expiry week (margins step up to 40–50% of contract notional).
 - **Mandatory Position Discount**: `engine.position_sizer.py` must enforce a 50% lot discount / margin risk buffer during expiry week for all single-stock F&O contracts (`is_physical_expiry_week=True`).
 - **Index Exemption**: Cash-settled index options (NIFTY, BANKNIFTY, FINNIFTY) are exempt from physical settlement margins.
+
+---
+
+## 11. Dynamic Risk & SEBI Single-Weekly-Index Calendar Verification
+
+- **Dynamic Price-Tier Stop Validation**: `validate_pretrade(order)` MUST verify that stop-loss orders comply with [`engine.dynamic_risk.clamp_dynamic_risk`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/dynamic_risk.py) for the intended timeframe, and prices are quantized to proper ticks (1-paisa for equity $< ₹250$, 5-paise for $\ge ₹250$ and derivatives). Arbitrary fixed stops (`max(1.0, ...)`) are strictly prohibited.
+- **SEBI Single-Weekly-Index Compliance**: The order pipeline must reject weekly option orders on non-permitted indices (BankNifty, FinNifty, MidcpNifty weekly options discontinued by SEBI). Only NIFTY (Thursday) on NSE and SENSEX (Friday) on BSE permit weekly expiries; all other indices and single stocks are monthly only ([`engine.alert_expiry.classify_expiry_type`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/alert_expiry.py)).
+- **Canonical Lot Authority**: Order quantities for derivatives must strictly be integer multiples of canonical lot sizes from [`market.instruments.STANDARD_LOT_SIZES`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/instruments.py). Client or legacy overrides (e.g. Nifty 25/50) must be rejected fail-closed.

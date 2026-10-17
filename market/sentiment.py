@@ -8,6 +8,10 @@ Market sentiment indicators:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.sentiment")
+
 
 import re
 import threading
@@ -55,8 +59,8 @@ def get_fii_dii_data(days: int = 5, use_cache: bool = True) -> list[FIIDIIData]:
             cached = analysis_cache.get_macro(cache_key)
             if cached and isinstance(cached, list) and len(cached) > 0:
                 return [FIIDIIData(**item) for item in cached]
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.sentiment] Non-fatal exception suppressed: {e_suppressed}")
 
     try:
         import os
@@ -143,8 +147,8 @@ def get_fii_dii_data(days: int = 5, use_cache: bool = True) -> list[FIIDIIData]:
                 ],
                 ttl_minutes=30,
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.sentiment] Non-fatal exception suppressed: {e_suppressed}")
 
         return result
 
@@ -161,8 +165,8 @@ def get_fii_dii_data(days: int = 5, use_cache: bool = True) -> list[FIIDIIData]:
                     import json
 
                     return [FIIDIIData(**item) for item in json.loads(row["data_json"])]
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.sentiment] Non-fatal exception suppressed: {e_suppressed}")
         return []
 
 
@@ -326,8 +330,8 @@ def get_market_breadth(use_cache: bool = True, force_refresh: bool = False) -> M
                     _BREADTH_CACHE = mb
                     _BREADTH_CACHE_TS = now
                 return mb
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.sentiment] Non-fatal exception suppressed: {e_suppressed}")
 
     with _BREADTH_LOCK:
         if use_cache and not force_refresh:
@@ -365,8 +369,10 @@ def get_market_breadth(use_cache: bool = True, force_refresh: bool = False) -> M
                         },
                         ttl=int(_BREADTH_TTL),
                     )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.sentiment] Non-fatal exception suppressed: {e_suppressed}"
+                    )
                 return mb
         except Exception:
             if _BREADTH_CACHE is not None and _BREADTH_CACHE.verdict != "UNAVAILABLE":

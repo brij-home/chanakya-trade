@@ -157,8 +157,8 @@ def run_nightly_post_market_chain(
     if send_telegram:
         try:
             _dispatch_telegram_summary(result)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.nightly_chain] Non-fatal exception suppressed: {e_suppressed}")
 
     logger.info("[NightlyChain] Pipeline complete. Status: %s", result["status"])
     return result
@@ -201,8 +201,8 @@ def _dispatch_telegram_summary(result: dict[str, Any]) -> None:
             f"{corr_text}"
         )
         bot.send_message(msg)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.nightly_chain] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def schedule_nightly_chain(hour: int = 15, minute: int = 45) -> None:

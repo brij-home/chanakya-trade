@@ -203,8 +203,8 @@ class MoverAutopsyEngine:
             from engine.precursor_radar import precursor_radar
 
             return precursor_radar.get_scan_universe(segment=segment)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.mover_autopsy] Non-fatal exception suppressed: {e_suppressed}")
 
         # Fallback to high-liquidity defaults
         return [
@@ -388,8 +388,10 @@ class MoverAutopsyEngine:
                     sq = compute_ttm_squeeze(pre_slice)
                     if sq and (sq.is_squeeze_on or sq.squeeze_fired):
                         squeeze_bars = sq.squeeze_duration_bars
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.mover_autopsy] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 # VCP range contraction ratio over last 5 bars
                 if len(closes) >= 6:
@@ -417,8 +419,10 @@ class MoverAutopsyEngine:
                                 target_obs[0].top if direction == "GAINER" else target_obs[0].bottom
                             )
                             ob_dist = round(abs(ltp - nearest) / max(1.0, ltp) * 100, 2)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.mover_autopsy] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         except Exception as e:
             logger.debug(f"[MoverAutopsyEngine] History analysis error for {sym}: {e}")
 
@@ -432,8 +436,8 @@ class MoverAutopsyEngine:
             if isinstance(align, dict):
                 sector_name = align.get("sector_name", sector_name)
                 rrg_quadrant = align.get("quadrant", rrg_quadrant)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.mover_autopsy] Non-fatal exception suppressed: {e_suppressed}")
 
         # 4. Derivatives & Options Structure (for F&O)
         is_fo = True
@@ -646,8 +650,10 @@ class MoverAutopsyEngine:
                 align = get_stock_sector_alignment(c_sym, rrg_matrix=rrg_matrix)
                 if isinstance(align, dict) and align.get("quadrant") == "LEADING":
                     control_leading_sector += 1
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.mover_autopsy] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         p_control_vol_dry_up = control_vol_dry_up / control_total
         p_control_leading_sec = control_leading_sector / control_total
@@ -737,8 +743,8 @@ class MoverAutopsyEngine:
                 market_regime = "HIGH_VIX_CHOPPY"
             elif vix < 12.5:
                 market_regime = "LOW_VIX_EXPANSION"
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.mover_autopsy] Non-fatal exception suppressed: {e_suppressed}")
 
         autopsy = DailyMoverAutopsy(
             date=date_str,

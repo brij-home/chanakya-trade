@@ -521,8 +521,10 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
 
                             f_data = crypto_stream.fetch_futures_metrics(clean_sym)
                             fr_8h = float((f_data or {}).get("funding_rate_8h", 0.0) or 0.0)
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.detectors.crypto] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         is_crowded_long = (
                             fr_8h >= 0.0005
                             and is_breakout
@@ -767,8 +769,10 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
 
                             f_data = crypto_stream.fetch_futures_metrics(clean_sym)
                             fr_8h = float((f_data or {}).get("funding_rate_8h", 0.0) or 0.0)
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.detectors.crypto] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         is_crowded_short = (
                             fr_8h <= -0.0003
                             and is_breakdown

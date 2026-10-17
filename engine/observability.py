@@ -18,6 +18,10 @@ Design principles:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.observability")
+
 
 import contextvars
 import logging
@@ -219,8 +223,48 @@ class ProviderFreshnessRecord:
 
     @property
     def is_stale(self) -> bool:
+        """
+        Check if the provider is returning or experiencing stale data.
+
+        Institutional provenance semantics:
+        1. If no success has occurred, it is only stale if requests were attempted and failed.
+        2. If last_success_at is within STALE_THRESHOLD_SECONDS, it is fresh (not stale).
+        3. If last_success_at exceeds STALE_THRESHOLD_SECONDS:
+           - If Indian markets are closed (weekends, off-market hours), quotes do not update
+             continuously, so elapsed time does not indicate staleness.
+           - If the provider is an auxiliary/fallback source (e.g. yfinance, secondary broker)
+             rather than the active primary data broker, elapsed time does not indicate staleness
+             unless it actively experienced consecutive errors or explicit stale responses.
+           - If the provider is the active primary data broker during open market hours and no
+             quote has arrived in >120s, it is genuinely stale.
+        """
+        if self.last_success_at is None:
+            return self.total_requests > 0 and self.error_count == self.total_requests
+
         age = self.age_seconds
-        return age is None or age > STALE_THRESHOLD_SECONDS
+        if age is None or age <= STALE_THRESHOLD_SECONDS:
+            return False
+
+        # If age > STALE_THRESHOLD_SECONDS, verify market hours and active primary role
+        try:
+            from market.calendar import is_market_open
+
+            if not is_market_open("NSE"):
+                return False
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
+
+        try:
+            from brokers.session import get_data_broker_key
+
+            primary = (get_data_broker_key() or "").lower()
+            prov_lower = self.provider.lower()
+            if primary and prov_lower != primary and prov_lower != "primary":
+                return self.consecutive_errors > 0 and self.stale_count > 0
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
+
+        return True
 
     @property
     def stale_rate_pct(self) -> float:
@@ -282,8 +326,8 @@ class ObservabilityRegistry:
         try:
             with self._lock:
                 self._correlation_ids.append(cid)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
 
     def recent_correlation_ids(self, limit: int = 20) -> list[str]:
         try:
@@ -319,8 +363,8 @@ class ObservabilityRegistry:
             )
             with self._lock:
                 self._metrics.append(event)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
 
     def get_slo_report(self, journey_id: Optional[str] = None) -> dict[str, Any]:
         """
@@ -406,8 +450,8 @@ class ObservabilityRegistry:
                 rec.last_success_at = time.time()
                 rec.total_requests += 1
                 rec.consecutive_errors = 0
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
 
     def record_provider_error(self, provider: str, is_stale: bool = False) -> None:
         """Record a provider fetch error or stale response."""
@@ -422,22 +466,46 @@ class ObservabilityRegistry:
                 rec.consecutive_errors += 1
                 if is_stale:
                     rec.stale_count += 1
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
 
     def get_provider_health(self) -> dict[str, Any]:
         """Return freshness and health status for all tracked providers."""
         try:
             with self._lock:
                 records = {k: v.to_dict() for k, v in self._provider_freshness.items()}
+
+            if not records:
+                overall_health = "HEALTHY"
+            else:
+                try:
+                    from brokers.session import get_data_broker_key
+
+                    primary_key = (get_data_broker_key() or "").lower()
+                except Exception:
+                    primary_key = ""
+
+                primary_rec = None
+                if primary_key and primary_key in records:
+                    primary_rec = records[primary_key]
+                elif "fyers" in records:
+                    primary_rec = records["fyers"]
+
+                if primary_rec and primary_rec.get("health") == "UNHEALTHY":
+                    overall_health = "UNHEALTHY"
+                elif all(r.get("health") == "UNHEALTHY" for r in records.values()):
+                    overall_health = "UNHEALTHY"
+                elif (primary_rec and primary_rec.get("health") == "DEGRADED") or any(
+                    r.get("health") in ("DEGRADED", "UNHEALTHY") for r in records.values()
+                ):
+                    overall_health = "DEGRADED"
+                else:
+                    overall_health = "HEALTHY"
+
             return {
                 "as_of": datetime.now(timezone.utc).isoformat(),
                 "providers": records,
-                "overall_health": "HEALTHY"
-                if all(r.get("health") == "HEALTHY" for r in records.values())
-                else "DEGRADED"
-                if any(r.get("health") == "UNHEALTHY" for r in records.values())
-                else "DEGRADED",
+                "overall_health": overall_health,
             }
         except Exception as exc:
             return {"error": str(exc), "overall_health": "UNKNOWN"}

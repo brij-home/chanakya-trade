@@ -41,6 +41,7 @@ class MemoryStatus:
             "total_ram_mb": round(self.total_ram_mb, 1),
             "available_ram_mb": round(self.available_ram_mb, 1),
             "used_ram_pct": round(self.used_ram_pct, 1),
+            "system_ram_pct": round(self.used_ram_pct, 1),
             "process_rss_mb": round(self.process_rss_mb, 1),
             "pressure_level": self.pressure_level,
             "recommendation": self.recommendation,
@@ -68,8 +69,8 @@ def _get_process_rss_mb() -> float:
         import psutil
 
         return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.memory_guard] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. Windows ctypes fallback
     if sys.platform == "win32":
@@ -94,10 +95,13 @@ def _get_process_rss_mb() -> float:
             pmc = PROCESS_MEMORY_COUNTERS()
             pmc.cb = ctypes.sizeof(pmc)
             handle = ctypes.windll.kernel32.GetCurrentProcess()
-            if ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
+            fn = ctypes.windll.psapi.GetProcessMemoryInfo
+            fn.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wintypes.DWORD]
+            fn.restype = wintypes.BOOL
+            if fn(handle, ctypes.byref(pmc), pmc.cb):
                 return pmc.WorkingSetSize / (1024 * 1024)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.memory_guard] Non-fatal exception suppressed: {e_suppressed}")
 
     return 0.0
 
@@ -112,8 +116,8 @@ def _get_system_ram_mb() -> tuple[float, float, float]:
         total_mb = vm.total / (1024 * 1024)
         avail_mb = vm.available / (1024 * 1024)
         return total_mb, avail_mb, vm.percent
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.memory_guard] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. Windows ctypes GlobalMemoryStatusEx fallback
     if sys.platform == "win32":
@@ -140,8 +144,8 @@ def _get_system_ram_mb() -> tuple[float, float, float]:
                 avail_mb = stat.ullAvailPhys / (1024 * 1024)
                 used_pct = float(stat.dwMemoryLoad)
                 return total_mb, avail_mb, used_pct
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.memory_guard] Non-fatal exception suppressed: {e_suppressed}")
 
     # Default fallback assumption for 8 GB system
     return 8192.0, 2048.0, 75.0

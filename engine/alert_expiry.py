@@ -3,6 +3,10 @@ Expiry classification and option contract metadata helpers for ChanakyaTrade.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.alert_expiry")
+
 
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -13,8 +17,11 @@ def classify_expiry_type(expiry_str: Optional[str], symbol: Optional[str] = None
     """
     Classifies an Indian market option contract expiry into 'WEEKLY' or 'MONTHLY'.
     - Single-stock equities in NSE/BSE only have monthly options.
-    - Index options have weekly expiries, with the final expiry of the month being 'MONTHLY'.
+    - Under SEBI single-benchmark index derivative regulations (effective Nov 2024):
+      Only NIFTY 50 (NSE, Thursday) and SENSEX (BSE, Friday) offer weekly options.
+      All other indices (MIDCPNIFTY, BANKNIFTY, FINNIFTY, BANKEX) trade strictly MONTHLY expiries.
     """
+    _WEEKLY_INDEX_SYMBOLS = frozenset({"NIFTY", "SENSEX"})
     if not expiry_str:
         return "MONTHLY"
     try:
@@ -36,16 +43,12 @@ def classify_expiry_type(expiry_str: Optional[str], symbol: Optional[str] = None
             .replace("BFO:", "")
             .strip()
         )
-        # SEBI Regulatory Mandate (Effective Nov 20, 2024):
-        # Only ONE benchmark index per exchange offers weekly options:
-        #   - NSE: NIFTY 50 (Thursday weekly expiry)
-        #   - BSE: SENSEX (Friday weekly expiry)
-        # All other indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX) and all single-stock equities
-        # trade strictly MONTHLY expiry contracts.
-        if sym not in ("NIFTY", "SENSEX"):
+        # Only NIFTY and SENSEX support weekly contracts
+        if sym not in _WEEKLY_INDEX_SYMBOLS:
             return "MONTHLY"
 
-        # For NIFTY and SENSEX weekly indices: if adding 7 days changes month, it is the month-end expiry -> MONTHLY
+        # Monthly determination: if adding 7 days falls in the NEXT calendar month,
+        # this IS the last / monthly expiry of the series.
         if (dt + timedelta(days=7)).month != dt.month:
             return "MONTHLY"
         return "WEEKLY"
@@ -104,15 +107,8 @@ def get_expiry_metadata(
                         .replace("NSE:", "")
                         .strip()
                     )
-                    is_idx = clean_und in (
-                        "NIFTY",
-                        "BANKNIFTY",
-                        "FINNIFTY",
-                        "MIDCPNIFTY",
-                        "SENSEX",
-                        "BANKEX",
-                    )
-                    if is_idx:
+                    is_weekly_idx = clean_und in ("NIFTY", "SENSEX")
+                    if is_weekly_idx:
                         expiry_type = (
                             "MONTHLY" if (dt + timedelta(days=7)).month != dt.month else "WEEKLY"
                         )
@@ -131,15 +127,8 @@ def get_expiry_metadata(
                 .replace("NSE:", "")
                 .strip()
             )
-            is_idx = clean_und in (
-                "NIFTY",
-                "BANKNIFTY",
-                "FINNIFTY",
-                "MIDCPNIFTY",
-                "SENSEX",
-                "BANKEX",
-            )
-            if is_idx:
+            is_weekly_idx = clean_und in ("NIFTY", "SENSEX")
+            if is_weekly_idx:
                 m_weekly = re.search(r"^([A-Z]+)(\d{2})([1-9OND])(0[1-9]|[12]\d|3[01])", csym)
                 if m_weekly:
                     yr = 2000 + int(m_weekly.group(2))
@@ -154,8 +143,10 @@ def get_expiry_metadata(
                         dt = date(yr, m_idx, day)
                         if not expiry_type:
                             expiry_type = "WEEKLY"
-                    except ValueError:
-                        pass
+                    except ValueError as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_expiry] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
         # 3. Monthly Contract: e.g. NIFTY26SEP25000CE, RELIANCE26SEPFUT, GOLD26SEP154000CE
         if not dt:
@@ -200,15 +191,19 @@ def get_expiry_metadata(
                             dt = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
                             if not expiry_type:
                                 expiry_type = "MONTHLY"
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.alert_expiry] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                     if not dt:
                         try:
                             dt = get_last_thursday_of_month(yr, m_idx)
                             if not expiry_type:
                                 expiry_type = "MONTHLY"
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.alert_expiry] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
     if not dt:
         return {
@@ -507,8 +502,8 @@ def is_monthly_physical_expiry_week(
                             dte = (p - now_d).days
                             return 0 <= dte <= 4
                     return False
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alert_expiry] Non-fatal exception suppressed: {e_suppressed}")
 
     # 4. Calendar fallback to monthly last Thursday
     this_month_last_thu = get_last_thursday_of_month(now_d.year, now_d.month)

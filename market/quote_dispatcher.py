@@ -15,24 +15,30 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any
+from typing import Any, Optional
 
 from market.fyers_rate_gate import FyersCallCategory, get_fyers_rate_gate
 
 logger = logging.getLogger(__name__)
 
-FYERS_MAX_CHUNK_SIZE = 50
+FYERS_MAX_CHUNK_SIZE = 1000
+SAFE_HTTP_MAX_CHUNK_SIZE = (
+    300  # Clamped to 300 symbols to avoid HTTP 414 URI Too Long on GET queries
+)
 
 
 class QuoteDispatcher:
     """
     Serialized, priority-aware quote dispatcher.
     Eliminates parallel thread bursts against Fyers quotes API.
+    Supports up to 300 symbols/request batching for Fyers Prime (50 for Standard).
     """
 
-    def __init__(self, chunk_size: int = FYERS_MAX_CHUNK_SIZE) -> None:
-        self._chunk_size = min(chunk_size, FYERS_MAX_CHUNK_SIZE)
+    def __init__(self, chunk_size: Optional[int] = None) -> None:
         self._rate_gate = get_fyers_rate_gate()
+        max_chunk = getattr(self._rate_gate, "quotes_chunk_size", FYERS_MAX_CHUNK_SIZE)
+        safe_max = min(max_chunk, SAFE_HTTP_MAX_CHUNK_SIZE)
+        self._chunk_size = min(chunk_size or safe_max, safe_max)
         self._dispatch_lock = threading.Lock()
 
     def fetch_quotes_batch(
@@ -67,8 +73,10 @@ class QuoteDispatcher:
                 for s, q in stream_res.items():
                     if q and getattr(q, "last_price", 0.0) > 0:
                         combined[s] = q
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[market.quote_dispatcher] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         unresolved = [
             s for s in unique_syms if s not in combined and s.split(":")[-1] not in combined
@@ -92,8 +100,12 @@ class QuoteDispatcher:
                             )
                             continue
 
-                        # Dispatch single chunk
-                        res = get_quote(chunk)
+                        # Dispatch single chunk with rate_gate_acquired=True to eliminate duplicate token debit
+                        res = get_quote(
+                            chunk,
+                            category=category,
+                            rate_gate_acquired=True,
+                        )
                         if isinstance(res, dict):
                             combined.update(res)
                     except Exception as exc:

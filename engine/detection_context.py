@@ -80,8 +80,10 @@ class DetectionContext:
                 b, a = float(bid), float(ask)
                 if a >= b and b > 0:
                     return round(((a - b) / self.ltp) * 100.0, 2)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.detection_context] Non-fatal exception suppressed: {e_suppressed}"
+                )
         return None
 
     @property

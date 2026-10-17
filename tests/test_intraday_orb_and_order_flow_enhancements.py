@@ -13,6 +13,7 @@ Comprehensive test suite for:
 from __future__ import annotations
 
 import datetime
+from contextlib import ExitStack
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -108,9 +109,11 @@ def test_detect_opening_range_breakout_bullish():
     assert alert.direction == "BULLISH"
     assert alert.trigger_level == 6060.0
     assert alert.stop_loss == 6020.0  # Midpoint of 6060 and 5980
-    assert alert.target_level == 6140.0  # +1.0x Range (6060 + 80)
-    assert alert.metrics["target_2"] == 6220.0  # +2.0x Range (6060 + 160)
-    assert alert.metrics["target_3"] == 6340.0  # +3.5x Range (6060 + 280)
+    assert (
+        alert.target_level == 6174.0
+    )  # max(orb_high + 1.0x Range, ltp + 1.8 * risk_pts = 6075 + 99)
+    assert alert.metrics["target_2"] == 6251.0  # max(6060 + 160, 6075 + 3.2 * 55)
+    assert alert.metrics["target_3"] == 6350.0  # max(6060 + 280, 6075 + 5.0 * 55)
     assert alert.no_chase_boundary == 6088.0  # 6060 + 0.35 * 80
     assert alert.confidence >= 80
 
@@ -135,8 +138,10 @@ def test_detect_opening_range_breakdown_bearish():
     assert alert.direction == "BEARISH"
     assert alert.trigger_level == 5980.0
     assert alert.stop_loss == 6020.0  # Midpoint
-    assert alert.target_level == 5900.0  # -1.0x Range (5980 - 80)
-    assert alert.metrics["target_2"] == 5820.0  # -2.0x Range (5980 - 160)
+    assert (
+        alert.target_level == 5880.0
+    )  # min(orb_low - 1.0x Range, ltp - 1.8 * risk_pts = 5970 - 90)
+    assert alert.metrics["target_2"] == 5810.0  # min(5980 - 160, 5970 - 3.2 * 50)
     assert alert.confidence >= 80
 
 
@@ -252,17 +257,19 @@ def test_early_pre_0930_signals_unmuted_by_orb():
     engine._alerts = []
 
     # Mock scanners returning early signals
-    with (
+    mocked_scanners = [
         patch.object(engine, "_get_cycle_quotes", return_value={}),
         patch.object(engine, "scan_index_micro_scalp", return_value=[]),
         patch.object(engine, "scan_index_call_setups", return_value=[]),
         patch.object(engine, "scan_index_put_setups", return_value=[]),
         patch.object(engine, "scan_opening_drives", return_value=[]),
         patch.object(engine, "scan_index_contagion", return_value=[]),
+        patch.object(engine, "scan_thematic_peer_sympathy", return_value=[]),
         patch.object(engine, "scan_gamma_blasts", return_value=[early_gamma_blast]),
         patch.object(engine, "scan_precursor_radars", return_value=[early_precursor]),
         patch.object(engine, "scan_options_momentum_breakouts", return_value=[]),
         patch.object(engine, "scan_squeeze_breakouts", return_value=[]),
+        patch.object(engine, "scan_afternoon_thrusts", return_value=[]),
         patch.object(engine, "scan_circuits", return_value=[]),
         patch.object(engine, "scan_pattern_coilings", return_value=[]),
         patch.object(engine, "scan_intraday_mover_sparks", return_value=[]),
@@ -272,7 +279,10 @@ def test_early_pre_0930_signals_unmuted_by_orb():
         patch.object(engine, "scan_incubation_triggers", return_value=[]),
         patch.object(engine, "scan_smc_orderblock_retests", return_value=[]),
         patch.object(engine, "scan_swing_inflections", return_value=[]),
-    ):  # ORB returns [] pre-09:30
+    ]
+    with ExitStack() as stack:
+        for p in mocked_scanners:
+            stack.enter_context(p)
         all_morning_alerts = engine.scan_equity_nfo_now()
 
     # Both early alerts pass with 100% fidelity through the pipeline

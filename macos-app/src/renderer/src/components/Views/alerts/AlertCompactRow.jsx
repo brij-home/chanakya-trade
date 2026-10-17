@@ -66,7 +66,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
     horizonInfo,
   } = lifecycle
 
-  const lotSize = isDerivative ? (alert.lot_size || alert.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || null) : null
+  const lotSize = isDerivative ? (alert.lot_size || optPlan?.lot_size || alert.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || null) : null
   const expiryInfo = useMemo(() => formatExpiryDetails(alert), [alert])
 
   const expiryShort = useMemo(() => {

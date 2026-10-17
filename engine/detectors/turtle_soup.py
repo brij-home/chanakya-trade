@@ -57,8 +57,10 @@ def _calc_atr(df: pd.DataFrame, period: int = 14) -> float:
         val = tr.rolling(period).mean().iloc[-1]
         if not np.isnan(val) and val > 0:
             return float(val)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[engine.detectors.turtle_soup] Non-fatal exception suppressed: {e_suppressed}"
+        )
     return 0.0
 
 
@@ -213,8 +215,10 @@ def detect_turtle_soup_sweep(
                 strike = getattr(resolved, "strike", None)
                 option_type = opt_type_req
                 expiry_date_str = getattr(resolved, "expiry_date", None)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[engine.detectors.turtle_soup] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
     blueprint = ActionableBlueprint(
         action=action_verb if not option_type else ("BUY_CALL" if is_bullish else "BUY_PUT"),

@@ -21,6 +21,10 @@ Accepts OHLCV DataFrame or fetches live/cached history via market.history.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.market_structure")
+
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
@@ -240,8 +244,8 @@ def detect_confirmation_candle(
                 ):
                     result = {"confirmed": True, "pattern": "Evening Star", "strength": 88}
 
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.market_structure] Non-fatal exception suppressed: {e_suppressed}")
 
     return result
 
@@ -330,8 +334,8 @@ def detect_divergence(
         if price_lower(price_high1, price_high2) and rsi_higher(rsi_high1, rsi_high2):
             return {"type": "BEARISH_HIDDEN", "bias": "BEARISH"}
 
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.market_structure] Non-fatal exception suppressed: {e_suppressed}")
 
     return result
 
@@ -1237,8 +1241,10 @@ def check_mtf_structural_alignment(
                 ):
                     alignment_count += 1
 
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.market_structure] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # Composite alignment: require >= 2/3 timeframes aligned for strong conviction
     is_aligned_composite = alignment_count >= 2 or (
@@ -1300,8 +1306,10 @@ def compute_mtf_alignment(
                     tf_5m_trend = "BULLISH"
                 elif float(c5.iloc[-1]) < float(c5.iloc[0]):
                     tf_5m_trend = "BEARISH"
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.market_structure] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # 2. 15-Minute Trend via EMA 9 / EMA 21
     df_15 = df_15m
@@ -1335,8 +1343,10 @@ def compute_mtf_alignment(
                     tf_15m_trend = "BULLISH"
                 elif ltp_15 <= ema9_15 and ema9_15 <= ema21_15 * 1.002:
                     tf_15m_trend = "BEARISH"
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.market_structure] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # 3. Daily / Higher Timeframe Trend via EMA 20 / EMA 50
     if df_daily is not None and len(df_daily) >= 10:
@@ -1350,8 +1360,10 @@ def compute_mtf_alignment(
                     htf_trend = "BULLISH"
                 elif ltp_d <= ema20_d and ema20_d <= ema50_d * 1.002:
                     htf_trend = "BEARISH"
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.market_structure] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # Alignment count
     dir_norm = (direction or "BULLISH").upper()

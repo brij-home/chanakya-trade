@@ -86,6 +86,31 @@ def detect_index_micro_scalp(
             )
             return []
 
+        # Wide CPR Range-Chop Guard:
+        # If daily CPR is wide (width >= 0.35%) and spot is trapped between Camarilla L3 and H3,
+        # 1-minute directional breakouts suffer high false-breakout rates and theta chop.
+        try:
+            from engine.daily_levels import get_daily_levels
+
+            dl = get_daily_levels(clean_sym)
+            if dl:
+                cpr = dl.cpr or {}
+                cam = dl.camarilla or {}
+                is_wide_cpr = cpr.get("is_wide", False) or (
+                    float(cpr.get("width_pct", 0.0) or 0.0) >= 0.35
+                )
+                cam_h3 = float(cam.get("h3", 0.0) or 0.0)
+                cam_l3 = float(cam.get("l3", 0.0) or 0.0)
+                if is_wide_cpr and cam_h3 > 0 and cam_l3 > 0 and (cam_l3 <= spot <= cam_h3):
+                    logger.debug(
+                        f"[IndexMicroScalp] Wide CPR chop zone active for {clean_sym} "
+                        f"(Spot ₹{spot:,.1f} trapped between L3 ₹{cam_l3:,.1f} and H3 ₹{cam_h3:,.1f}). "
+                        f"1m micro-scalp breakout suppressed to avoid range chop."
+                    )
+                    return []
+        except Exception as e_dl:
+            logger.debug(f"[IndexMicroScalp] Wide CPR check skipped for {clean_sym}: {e_dl}")
+
     is_bse = clean_sym in ("SENSEX", "BANKEX")
     opt_exchange = "BFO" if is_bse else "NFO"
     effective_vwap = vwap if (vwap and vwap > 0) else spot
@@ -169,12 +194,42 @@ def detect_index_micro_scalp(
         ((spot - day_low) / max(1.0, day_low) * 100.0) if (day_low and day_low > 0) else 0.0
     )
 
+    # Spot is flushing only if trading below VWAP with downward velocity, or significantly below VWAP
     is_spot_flushing = bool(
-        (effective_vwap > 0 and spot < effective_vwap * 0.9992) or spot_chg_from_high >= 0.20
+        (effective_vwap > 0 and spot < effective_vwap * 0.9992)
+        or (effective_vwap > 0 and spot < effective_vwap and spot_chg_from_high >= 0.25)
     )
+    # Spot is surging only if trading above VWAP with upward velocity, or significantly above VWAP
     is_spot_surging = bool(
-        (effective_vwap > 0 and spot > effective_vwap * 1.0008) or spot_chg_from_low >= 0.20
+        (effective_vwap > 0 and spot > effective_vwap * 1.0008)
+        or (effective_vwap > 0 and spot > effective_vwap and spot_chg_from_low >= 0.25)
     )
+
+    # Check recent candle momentum if available (1m, 3m, or 5m)
+    bars_df = (
+        ohlcv_1m
+        if (ohlcv_1m is not None and len(ohlcv_1m) >= 2)
+        else (
+            ohlcv_3m
+            if (ohlcv_3m is not None and len(ohlcv_3m) >= 2)
+            else (ohlcv_5m if (ohlcv_5m is not None and len(ohlcv_5m) >= 2) else None)
+        )
+    )
+    is_recent_momentum_bullish = False
+    is_recent_momentum_bearish = False
+    if bars_df is not None and len(bars_df) >= 2:
+        try:
+            last_two = bars_df.iloc[-2:]
+            c1, c2 = float(last_two.iloc[0]["close"]), float(last_two.iloc[1]["close"])
+            o2 = float(last_two.iloc[1]["open"])
+            if c2 > o2 and c2 >= c1:
+                is_recent_momentum_bullish = True
+            elif c2 < o2 and c2 <= c1:
+                is_recent_momentum_bearish = True
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.detectors.index_micro_scalp] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     for c in candidate_contracts:
         try:
@@ -189,31 +244,56 @@ def detect_index_micro_scalp(
             c_exp = getattr(c, "expiry", None) or getattr(c, "expiry_date", None) or session_date
 
             # Directional alignment check with spot
-            if c_opt == "PE" and not is_spot_flushing:
-                # Need either spot flushing or strong option-specific breakout
-                if c_pch < 12.0 and c_vol_oi < 1.5:
+            if c_opt == "PE":
+                # Short-Squeeze / Bear-Trap Guard: Reject Puts if spot is surging off lows, above VWAP, or printing green candles
+                if (
+                    is_spot_surging
+                    or spot_chg_from_low >= 0.25
+                    or is_recent_momentum_bullish
+                    or (effective_vwap > 0 and spot > effective_vwap * 1.0005)
+                ):
                     continue
-            elif c_opt == "CE" and not is_spot_surging:
-                if c_pch < 12.0 and c_vol_oi < 1.5:
+                if not is_spot_flushing and c_pch < 12.0 and c_vol_oi < 1.5:
                     continue
-
-            # Dead-Cat Bounce Guard for Call options
-            if c_opt == "CE" and is_spot_flushing and spot_chg_from_high >= 0.20:
-                continue
+            elif c_opt == "CE":
+                # Dynamic V-Reversal / Bottom Bounce Engine:
+                # If spot has staged a structural bounce >= 0.28% off session low with bullish momentum,
+                # permit the CE micro-breakout even if spot began below VWAP or is off the morning high!
+                is_v_reversal_thrust = (
+                    spot_chg_from_low >= 0.28 and is_recent_momentum_bullish
+                ) or (
+                    effective_vwap > 0
+                    and spot >= effective_vwap * 0.9995
+                    and is_recent_momentum_bullish
+                )
+                if not is_v_reversal_thrust:
+                    if (
+                        is_spot_flushing
+                        or spot_chg_from_high >= 0.25
+                        or is_recent_momentum_bearish
+                        or (effective_vwap > 0 and spot < effective_vwap * 0.9980)
+                    ):
+                        continue
+                if (
+                    not is_spot_surging
+                    and not is_v_reversal_thrust
+                    and c_pch < 12.0
+                    and c_vol_oi < 1.5
+                ):
+                    continue
 
             # Check option price action momentum
             # Micro-Trigger calculation:
             # 1. Trigger level: slightly above current LTP or rounded to resistance level
             # 2. Stop Loss: 8% to 11% below trigger (10-14 pts on NIFTY, 25-40 pts on BANKNIFTY)
-            risk_pts = (
-                max(10.0, min(16.0, c_ltp * 0.09))
-                if clean_sym in ("NIFTY", "FINNIFTY")
-                else (
-                    max(5.0, min(10.0, c_ltp * 0.10))
-                    if clean_sym == "MIDCPNIFTY"
-                    else max(22.0, min(42.0, c_ltp * 0.09))
-                )
+            pct_risk = 0.09 if clean_sym in ("NIFTY", "FINNIFTY", "MIDCPNIFTY") else 0.085
+            min_risk = (
+                6.0
+                if clean_sym == "MIDCPNIFTY"
+                else (10.0 if clean_sym in ("NIFTY", "FINNIFTY") else 24.0)
             )
+            # Remove artificial upper cap that produced razor-thin (<5%) noise stops on high-ticket premiums
+            risk_pts = max(min_risk, round(c_ltp * pct_risk, 1))
 
             # Check micro-breakout condition
             trigger_level = round(c_ltp, 1)
@@ -237,6 +317,14 @@ def detect_index_micro_scalp(
                 variant=variant_slug,
             )
 
+            # Calculate underlying spot structural anchor (VWAP / swing barrier)
+            if c_opt == "PE":
+                # For Put option (bearish spot): Invalidation is spot reclaiming resistance or VWAP
+                spot_sl = round(max(spot * 1.0018, effective_vwap), 1)
+            else:
+                # For Call option (bullish spot): Invalidation is spot dropping below support or VWAP
+                spot_sl = round(min(spot * 0.9982, effective_vwap), 1)
+
             opt_action = "BUY PE" if c_opt == "PE" else "BUY CE"
             headline = f"⚡ {clean_sym} {int(c_strk)} {c_opt} 1m Micro Breakout"
             summary = (
@@ -245,6 +333,7 @@ def detect_index_micro_scalp(
                 f"T1 (+2R) ₹{tgt1:,.1f}, T2 (+3.5R) ₹{tgt2:,.1f}, Runner ₹{tgt3:,.1f}. High-Delta torque."
             )
 
+            disaster_floor = round(max(1.0, trigger_level * 0.68), 1)
             actionable_blueprint = ActionableBlueprint(
                 action=opt_action,
                 entry_range=f"₹{trigger_level:,.1f} – ₹{no_chase:,.1f}",
@@ -257,7 +346,16 @@ def detect_index_micro_scalp(
                 no_chase_boundary=no_chase,
                 execution_style="BREAKOUT_STOP",
                 lot_size=lot_sz,
-                when_to_buy=f"Buy above ₹{trigger_level:,.1f} on 1-min candle close confirmation or immediate impulse breach.",
+                tactical_sl=f"₹{sl_level:,.1f} (1m close basis)",
+                structural_spot_sl=f"{clean_sym} ₹{spot_sl:,.1f} Spot Invalidation",
+                disaster_stop_floor=f"-32% (₹{disaster_floor:,.1f} hard exit)",
+                dual_invalidation={
+                    "tactical_option_sl": sl_level,
+                    "structural_spot_sl": spot_sl,
+                    "underlying_sl": spot_sl,
+                    "disaster_floor": disaster_floor,
+                },
+                when_to_buy=f"Buy above ₹{trigger_level:,.1f} on 1-min candle close confirmation or limit bid on micro-pullback into ₹{trigger_level:,.1f}–₹{no_chase:,.1f}.",
                 when_to_wait=f"DO NOT CHASE above ₹{no_chase:,.1f}. If premium exceeds ₹{no_chase:,.1f}, wait for 1m pullback retest into entry zone.",
                 profit_rule=f"Institutional Blueprint: Book 50% at Target 1 (+2.0R: ₹{tgt1:,.1f}) and trail SL to Cost/Breakeven (+0.2%). Book 25% at Target 2 (+3.5R: ₹{tgt2:,.1f}). Hold 25% runner trailing on 1m 9-EMA.",
                 segment="FNO_INDEX",
@@ -270,6 +368,9 @@ def detect_index_micro_scalp(
                     "delta_estimate": round(0.60 if c_opt == "CE" else -0.60, 2),
                     "vol_oi_ratio": c_vol_oi,
                     "underlying_spot": spot,
+                    "underlying_sl": spot_sl,
+                    "structural_spot_sl": spot_sl,
+                    "spot_invalidation_anchor": spot_sl,
                     "target_3": tgt3,
                 },
             )
@@ -282,6 +383,9 @@ def detect_index_micro_scalp(
                 symbol=clean_sym,
                 exchange=opt_exchange,
                 direction=direction,
+                is_live=not is_test_runner,
+                environment="TEST" if is_test_runner else "LIVE",
+                market_status="LIVE",
                 headline=headline,
                 summary=summary,
                 ltp=c_ltp,
@@ -305,13 +409,20 @@ def detect_index_micro_scalp(
                     "vol_oi_ratio": c_vol_oi,
                     "option_pchange": c_pch,
                     "underlying_spot": spot,
+                    "underlying_sl": spot_sl,
+                    "structural_spot_sl": spot_sl,
+                    "spot_invalidation_anchor": spot_sl,
                     "lot_size": lot_sz,
-                    "is_institutional_thrust": True,
+                    "is_institutional_thrust": False,
                 },
                 contract_symbol=c_sym,
                 strike=c_strk,
                 option_type=c_opt,
                 underlying_spot=spot,
+                underlying_sl=spot_sl,
+                structural_spot_sl=spot_sl,
+                tactical_sl=sl_level,
+                disaster_stop_floor=disaster_floor,
                 option_premium=c_ltp,
                 lot_size=lot_sz,
                 segment="FNO_INDEX",

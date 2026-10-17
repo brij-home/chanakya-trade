@@ -9,6 +9,10 @@ Institutional offline remediation script (Invariant 18):
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("scripts.remediate_today_completed_alerts")
+
 
 import json
 import os
@@ -24,8 +28,10 @@ if sys.platform == "win32":
         ctypes.windll.kernel32.SetConsoleOutputCP(65001)
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[scripts.remediate_today_completed_alerts] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
 IST = timezone(timedelta(hours=5, minutes=30))
 now = datetime.now(IST)

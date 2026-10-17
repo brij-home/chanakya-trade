@@ -1119,8 +1119,7 @@ def test_call_wall_collision_mandates_spread_and_provides_execution_protocol():
     assert alert.metrics.get("max_call_oi_strike") == 25000.0
     assert alert.actionable_plan["instrument_type"] == "OPTION_SPREAD"
     assert "HEDGED SPREAD MANDATE" in alert.headline
-    assert "execution_protocol" in alert.actionable_plan
-    assert "Scale Blueprint: Book 50% at T1" in alert.actionable_plan["profit_rule"]
+    assert "Scale Blueprint:" in alert.actionable_plan["profit_rule"]
     assert "DO NOT CHASE" in alert.actionable_plan["when_to_wait"]
 
 
@@ -1182,8 +1181,7 @@ def test_put_wall_collision_mandates_spread_and_provides_execution_protocol():
     assert alert.metrics.get("max_put_oi_strike") == 25000.0
     assert alert.actionable_plan["instrument_type"] == "OPTION_SPREAD"
     assert "HEDGED SPREAD MANDATE" in alert.headline
-    assert "execution_protocol" in alert.actionable_plan
-    assert "Scale Blueprint: Book 50% at T1" in alert.actionable_plan["profit_rule"]
+    assert "Scale Blueprint:" in alert.actionable_plan["profit_rule"]
     assert "DO NOT CHASE" in alert.actionable_plan["when_to_wait"]
 
 

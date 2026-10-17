@@ -13,6 +13,10 @@ streaming is exposed through ``start_websocket`` when the optional
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("brokers.shoonya")
+
 
 import hashlib
 import json
@@ -133,8 +137,8 @@ class ShoonyaAPI(BrokerAPI):
                     broker="SHOONYA",
                 )
                 return True
-        except (OSError, ValueError, TypeError):
-            pass
+        except (OSError, ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[brokers.shoonya] Non-fatal exception suppressed: {e_suppressed}")
         return False
 
     def _save_token(self, response: dict[str, Any]) -> None:
@@ -218,21 +222,21 @@ class ShoonyaAPI(BrokerAPI):
         if self._token:
             try:
                 self._post("Logout", {"uid": self.user_id})
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.shoonya] Non-fatal exception suppressed: {e_suppressed}")
         self._token = ""
         self._token_date = ""
         self._account_id = ""
         self._user_profile = None
         try:
             TOKEN_FILE.unlink()
-        except OSError:
-            pass
+        except OSError as e_suppressed:
+            logger.debug(f"[brokers.shoonya] Non-fatal exception suppressed: {e_suppressed}")
         if hasattr(self, "_client") and self._client is not None:
             try:
                 self._client.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.shoonya] Non-fatal exception suppressed: {e_suppressed}")
 
     def close(self) -> None:
         """Alias for logout to conform to standard resource close protocol."""
@@ -716,6 +720,6 @@ class ShoonyaAPI(BrokerAPI):
         if self._ws:
             try:
                 self._ws.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.shoonya] Non-fatal exception suppressed: {e_suppressed}")
         self._ws = None

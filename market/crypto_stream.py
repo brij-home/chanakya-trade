@@ -183,8 +183,10 @@ class CryptoStreamManager:
                     self._loop.stop()
 
                 self._loop.call_soon_threadsafe(_shutdown)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.crypto_stream] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=timeout)

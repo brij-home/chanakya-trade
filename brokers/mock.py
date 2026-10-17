@@ -165,6 +165,25 @@ class MockBrokerAPI(BrokerAPI):
         self._orders = [o for o in self._orders if o.order_id != order_id]
         return True
 
+    def modify_order(
+        self,
+        order_id: str,
+        price: Optional[float] = None,
+        qty: Optional[int] = None,
+        trigger_price: Optional[float] = None,
+        order_type: Optional[str] = None,
+    ) -> OrderResponse:
+        for o in self._orders:
+            if o.order_id == order_id:
+                if price is not None:
+                    o.price = price
+                if qty is not None:
+                    o.quantity = qty
+                if order_type is not None:
+                    o.order_type = order_type
+                return OrderResponse(order_id=order_id, status=o.status, message="Order modified")
+        return OrderResponse(order_id=order_id, status="REJECTED", message="Order not found")
+
     # ── Historical Data (passthrough to yfinance) ─────────────
 
     def get_historical_data(

@@ -18,6 +18,9 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.paper_execute")
 
 
 from rich.console import Console
@@ -132,8 +135,8 @@ def execute_trade_plan(plan, broker: BrokerAPI) -> list[dict]:
                 plan.exchange,
             )
             console.print("[dim]  Auto-created alerts for SL and Target 1.[/dim]")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.paper_execute] Non-fatal exception suppressed: {e_suppressed}")
 
     console.print()
     return results

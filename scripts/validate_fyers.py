@@ -16,6 +16,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("scripts.validate_fyers")
+
 
 import argparse
 import json
@@ -36,8 +40,8 @@ if sys.platform == "win32":
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         if sys.stderr and hasattr(sys.stderr, "reconfigure"):
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[scripts.validate_fyers] Non-fatal exception suppressed: {e_suppressed}")
 
 from dotenv import load_dotenv
 

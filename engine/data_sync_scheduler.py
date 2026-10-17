@@ -323,8 +323,10 @@ class DataSyncScheduler:
             syms = get_universe_symbols(universe_name)
             if syms:
                 return list(syms)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.data_sync_scheduler] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         # Fallback to nifty500.json
         try:
@@ -335,8 +337,10 @@ class DataSyncScheduler:
             if p.exists():
                 data = json.loads(p.read_text(encoding="utf-8"))
                 return [d.get("symbol") for d in data if d.get("symbol")]
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.data_sync_scheduler] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         return []
 
@@ -359,8 +363,10 @@ class DataSyncScheduler:
                 if conn is not None:
                     try:
                         conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.data_sync_scheduler] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
 
 # Canonical singleton

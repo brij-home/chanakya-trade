@@ -462,3 +462,42 @@ def test_bot_template_expired_untriggered_setup_rendering():
     rendered_free = render_free_index_alert(alert, in_market=True)
     assert "SETUP EXPIRED" in rendered_free
     assert "Cancel pending orders" in rendered_free
+
+
+def test_0dte_post_t0_5_stagnation_triggers_time_stop_scratch():
+    """Regression test: A 0-DTE option that reached T0.5 but stagnates >= 20m without reaching T1 triggers TIME_STOP_SCRATCH."""
+    from engine.alert_evaluator import evaluate_alert_targets_and_trailing
+
+    now_ist = datetime.now(IST)
+    created_time = (now_ist - timedelta(minutes=22)).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    alert = AutoAlert(
+        alert_id="aa-0dte-stagnation-test",
+        alert_type="INDEX_CONTAGION_NIFTY",
+        stage="T0_5_ACHIEVED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Nifty 0-DTE Call",
+        summary="Nifty 22550 CE",
+        ltp=66.50,
+        trigger_level=66.50,
+        target_level=90.0,
+        stop_loss=54.50,
+        option_premium=66.50,
+        contract_symbol="NIFTY26OCT22550CE",
+        is_live=True,
+        environment="LIVE",
+        created_at=created_time,
+        triggered_at=created_time,
+        actionable_plan={"action": "BUY CE"},
+        metrics={"dte": 0},
+        achieved_milestones=["T0_5_ACHIEVED"],
+    )
+
+    # Option retraced to entry price 66.50 (+0.0% PnL) after 22 minutes
+    res = evaluate_alert_targets_and_trailing(alert, current_ltp=66.50)
+    assert res is not None
+    assert res.new_milestone == "TIME_STOP_SCRATCH"
+    assert res.trailing_decision == "TIME_STOP_SCRATCH"
+    assert "0-DTE Theta Expiry" in res.trailing_rationale

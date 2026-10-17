@@ -9,6 +9,11 @@ Usage:
   python scripts/validate_all.py --fix           # Auto-format and auto-fix Python code
 """
 
+import logging
+
+logger = logging.getLogger("scripts.validate_all")
+
+
 import argparse
 import os
 import sys
@@ -19,8 +24,8 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[scripts.validate_all] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def run_step(title: str, cmd: str, cwd: str | None = None) -> bool:

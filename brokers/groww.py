@@ -9,6 +9,10 @@ NOTE: Groww's Partner API uses standard OAuth2 (auth code flow).
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("brokers.groww")
+
 
 import json
 from datetime import datetime
@@ -172,8 +176,8 @@ class GrowwAPI(BrokerAPI):
                 },
                 timeout=5,
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.groww] Non-fatal exception suppressed: {e_suppressed}")
         TOKEN_FILE.unlink(missing_ok=True)
         self._token = {}
 
@@ -276,8 +280,8 @@ class GrowwAPI(BrokerAPI):
                     change=round(change, 2),
                     change_pct=round(chg_pct, 2),
                 )
-            except Exception:
-                pass  # skip if individual quote fails
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.groww] Non-fatal exception suppressed: {e_suppressed}")
         return result
 
     def get_options_chain(

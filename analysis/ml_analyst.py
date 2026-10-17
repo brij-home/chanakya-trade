@@ -20,6 +20,10 @@ Compatible with agent/multi_agent.py BaseAnalyst interface.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.ml_analyst")
+
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
@@ -163,8 +167,10 @@ class MLPredictor:
                     verbosity=0,
                 )
                 return clf, "XGBoost"
-            except ImportError:
-                pass
+            except ImportError as e_suppressed:
+                logger.debug(
+                    f"[analysis.ml_analyst] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         from sklearn.ensemble import GradientBoostingClassifier
 

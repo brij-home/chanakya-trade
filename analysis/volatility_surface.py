@@ -12,6 +12,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.volatility_surface")
+
 
 from typing import Optional
 
@@ -88,8 +92,10 @@ def compute_iv_smile(underlying: str, expiry: Optional[str] = None) -> Optional[
                     if exp_str:
                         g = compute_greeks(spot, s, exp_str, c.option_type, c.last_price)
                         iv_val = g.iv_pct if g.iv_pct > 0 else None
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[analysis.volatility_surface] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             if c.option_type == "CE":
                 strikes[s]["ce_iv"] = iv_val
@@ -141,8 +147,10 @@ def compute_iv_term_structure(underlying: str) -> Optional[pd.DataFrame]:
 
                             g = compute_greeks(spot, atm, exp, c.option_type, c.last_price)
                             iv = g.iv_pct
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[analysis.volatility_surface] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                     if c.option_type == "CE":
                         ce_iv = iv
                     else:

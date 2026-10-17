@@ -1,3 +1,7 @@
+import logging
+
+logger = logging.getLogger("tools.audit_today_performance")
+
 import json
 import pathlib
 import sys
@@ -42,8 +46,10 @@ def parse_time(ts_str):
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
         try:
             return datetime.strptime(ts_str, fmt).replace(tzinfo=IST)
-        except ValueError:
-            pass
+        except ValueError as e_suppressed:
+            logger.debug(
+                f"[tools.audit_today_performance] Non-fatal exception suppressed: {e_suppressed}"
+            )
     return None
 
 

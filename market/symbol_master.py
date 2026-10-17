@@ -14,6 +14,10 @@ Features:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.symbol_master")
+
 
 import datetime as dt
 import json
@@ -94,8 +98,10 @@ def load_master(master: str, force: bool = False, offline_fallback: bool = True)
                     data = json.loads(path.read_text(encoding="utf-8"))
                     _IN_MEMORY_CACHE[master_upper] = data
                     return data
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.symbol_master] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             raise RuntimeError(f"Failed to fetch symbol master {master_upper}: {e}") from e
 
     data = json.loads(path.read_text(encoding="utf-8"))

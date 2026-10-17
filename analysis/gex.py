@@ -21,6 +21,10 @@ Formulas (Crores of Rupee Gamma per 1% underlying move):
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.gex")
+
 
 import math
 from datetime import date, datetime
@@ -54,6 +58,55 @@ def _bs_gamma(
     return gamma
 
 
+def _bs_vanna(
+    spot: float, strike: float, dte_days: int, iv_pct: float, rate: float = RISK_FREE_RATE
+) -> float:
+    """Analytical Black-Scholes Vanna (dDelta/dVol = dVega/dSpot)."""
+    if spot <= 0 or strike <= 0:
+        return 0.0
+    t_years = max(1.0 / 365.0, dte_days / 365.0)
+    sigma = max(0.05, min(3.0, (iv_pct / 100.0) if iv_pct > 0 else 0.15))
+    sqrt_t = math.sqrt(t_years)
+    denom = sigma * sqrt_t
+    if denom <= 0:
+        return 0.0
+    d1 = (math.log(spot / strike) + (rate + 0.5 * sigma * sigma) * t_years) / denom
+    d2 = d1 - denom
+    pdf_d1 = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+    vanna = -pdf_d1 * (d2 / sigma)
+    return vanna
+
+
+def _bs_charm(
+    spot: float,
+    strike: float,
+    dte_days: int,
+    iv_pct: float,
+    is_call: bool,
+    rate: float = RISK_FREE_RATE,
+) -> float:
+    """Analytical Black-Scholes Charm (delta bleed / time decay of delta per calendar day)."""
+    if spot <= 0 or strike <= 0:
+        return 0.0
+    t_years = max(1.0 / 365.0, dte_days / 365.0)
+    sigma = max(0.05, min(3.0, (iv_pct / 100.0) if iv_pct > 0 else 0.15))
+    sqrt_t = math.sqrt(t_years)
+    denom = sigma * sqrt_t
+    if denom <= 0:
+        return 0.0
+    d1 = (math.log(spot / strike) + (rate + 0.5 * sigma * sigma) * t_years) / denom
+    d2 = d1 - denom
+    pdf_d1 = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+    term1 = rate / denom
+    term2 = d2 / (2.0 * t_years)
+    call_charm = pdf_d1 * (term1 - term2)
+    if is_call:
+        return call_charm / 365.0
+    else:
+        put_charm = call_charm - rate * math.exp(-rate * t_years)
+        return put_charm / 365.0
+
+
 def compute_gex_at_strike(
     oi: int,
     gamma: float,
@@ -67,6 +120,23 @@ def compute_gex_at_strike(
     # Rupee GEX in Crores (1e7)
     gex_cr = 0.5 * gamma * (spot**2) * oi * lot_size / 1e7
     return round(gex_cr, 2) if is_call else round(-gex_cr, 2)
+
+
+def compute_vex_at_strike(
+    oi: int,
+    vanna: float,
+    spot: float,
+    lot_size: int,
+    is_call: bool,
+) -> float:
+    """Compute Rupee Vanna Exposure (VEX) in Crores per 1 vol point move."""
+    if oi <= 0 or abs(vanna) <= 0 or spot <= 0 or lot_size <= 0:
+        return 0.0
+    # Net dealer delta sensitivity per 1% change in sigma
+    # Calls: dealer short calls has -vanna exposure
+    # Puts: dealer short puts has +vanna exposure
+    vex_cr = ((-vanna if is_call else vanna) * spot * oi * lot_size * 0.01) / 1e7
+    return round(vex_cr, 2)
 
 
 def find_gex_flip(gex_by_strike: List[Tuple[float, float]]) -> Optional[float]:
@@ -130,16 +200,21 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
         elif clean in ("FINNIFTY", "NIFTY FIN SERVICE"):
             clean = "FINNIFTY"
             spot_key = "NSE:NIFTY FIN SERVICE"
-        elif clean in ("MIDCPNIFTY", "NIFTY MIDCAP SELECT"):
+        elif clean in ("MIDCPNIFTY", "NIFTY MIDCAP SELECT", "NIFTY MID SELECT", "MIDCAP"):
             clean = "MIDCPNIFTY"
-            spot_key = "NSE:NIFTY MIDCAP SELECT"
-        elif clean == "SENSEX":
+            spot_key = "NSE:NIFTY MID SELECT"
+        elif clean in ("SENSEX", "BSE SENSEX"):
+            clean = "SENSEX"
             spot_key = "BSE:SENSEX"
         else:
             spot_key = f"NSE:{clean}"
 
         # 2. Retrieve live spot quote
         spot = float(get_ltp(spot_key) or get_ltp(clean) or 0.0)
+        if spot <= 0 and clean == "MIDCPNIFTY":
+            spot = float(get_ltp("NSE:MIDCPNIFTY") or 0.0)
+        elif spot <= 0 and clean == "SENSEX":
+            spot = float(get_ltp("BSE:SENSEX-INDEX") or 0.0)
         if spot <= 0:
             q_dict = get_quote(spot_key)
             if spot_key in q_dict and q_dict[spot_key].last_price:
@@ -175,8 +250,8 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
             try:
                 exp_date = datetime.strptime(str(first_exp)[:10], "%Y-%m-%d").date()
                 dte_days = max(1, (exp_date - date.today()).days)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[analysis.gex] Non-fatal exception suppressed: {e_suppressed}")
 
         # 6. Aggregate by strike
         strike_map: Dict[float, Dict[str, Any]] = {}
@@ -208,7 +283,7 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
                 if iv > 0:
                     strike_map[k]["pe_iv"] = iv
 
-        # 7. Compute GEX per strike
+        # 7. Compute GEX, VEX & Greeks per strike
         strikes_sorted = sorted(strike_map.keys())
         gex_strip: List[Dict[str, Any]] = []
 
@@ -216,10 +291,17 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
             row = strike_map[k]
             avg_iv = (row["ce_iv"] + row["pe_iv"]) / 2.0
             gamma = _bs_gamma(spot, k, dte_days, avg_iv)
+            vanna = _bs_vanna(spot, k, dte_days, avg_iv)
+            call_charm = _bs_charm(spot, k, dte_days, avg_iv, is_call=True)
+            put_charm = _bs_charm(spot, k, dte_days, avg_iv, is_call=False)
 
             call_gex = compute_gex_at_strike(row["ce_oi"], gamma, spot, lot_size, is_call=True)
             put_gex = compute_gex_at_strike(row["pe_oi"], gamma, spot, lot_size, is_call=False)
             net_gex = round(call_gex + put_gex, 2)
+
+            call_vex = compute_vex_at_strike(row["ce_oi"], vanna, spot, lot_size, is_call=True)
+            put_vex = compute_vex_at_strike(row["pe_oi"], vanna, spot, lot_size, is_call=False)
+            net_vex = round(call_vex + put_vex, 2)
 
             dist_pct = round(((k - spot) / spot) * 100.0, 2)
 
@@ -228,11 +310,17 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
                     "strike": k,
                     "distance_pct": dist_pct,
                     "gamma": float(f"{gamma:.6f}"),
+                    "vanna": float(f"{vanna:.6f}"),
+                    "call_charm": float(f"{call_charm:.6f}"),
+                    "put_charm": float(f"{put_charm:.6f}"),
                     "ce_oi": row["ce_oi"],
                     "pe_oi": row["pe_oi"],
                     "call_gex_cr": call_gex,
                     "put_gex_cr": put_gex,
                     "net_gex_cr": net_gex,
+                    "call_vex_cr": call_vex,
+                    "put_vex_cr": put_vex,
+                    "net_vex_cr": net_vex,
                     "avg_iv": round(avg_iv, 1),
                 }
             )
@@ -241,6 +329,16 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
         total_call_gex = round(sum(s["call_gex_cr"] for s in gex_strip), 2)
         total_put_gex = round(sum(s["put_gex_cr"] for s in gex_strip), 2)
         total_net_gex = round(total_call_gex + total_put_gex, 2)
+
+        total_call_vex = round(sum(s["call_vex_cr"] for s in gex_strip), 2)
+        total_put_vex = round(sum(s["put_vex_cr"] for s in gex_strip), 2)
+        total_net_vex = round(total_call_vex + total_put_vex, 2)
+
+        vanna_bias = (
+            "EXPANSIVE_SQUEEZE"
+            if total_net_vex > 5.0
+            else ("DAMPENING_DROP" if total_net_vex < -5.0 else "BALANCED")
+        )
 
         # Call Wall (Maximum positive Call GEX — strong dealer selling resistance)
         call_wall_entry = max(gex_strip, key=lambda x: x["call_gex_cr"]) if gex_strip else None
@@ -275,7 +373,9 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
         }
 
         # Actionable Dealer Positioning Interpretation
-        interpretation = _interpret_institutional_gex(regime, zero_gamma, call_wall, put_wall, spot)
+        interpretation = _interpret_institutional_gex(
+            regime, zero_gamma, call_wall, put_wall, spot, total_net_vex
+        )
 
         return {
             "status": "ok",
@@ -288,6 +388,10 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
             "total_net_gex_cr": total_net_gex,
             "total_call_gex_cr": total_call_gex,
             "total_put_gex_cr": total_put_gex,
+            "total_net_vex_cr": total_net_vex,
+            "total_call_vex_cr": total_call_vex,
+            "total_put_vex_cr": total_put_vex,
+            "vanna_bias": vanna_bias,
             "zero_gamma_level": zero_gamma,
             "gamma_flip": zero_gamma,
             "call_wall": call_wall,
@@ -308,24 +412,31 @@ def _interpret_institutional_gex(
     call_wall: Optional[float],
     put_wall: Optional[float],
     spot: float,
+    total_net_vex: float = 0.0,
 ) -> str:
-    """Generate crisp, actionable dealer positioning blueprint."""
+    """Generate crisp, actionable dealer positioning blueprint with second-order Greek integration."""
+    vanna_note = ""
+    if total_net_vex > 10.0:
+        vanna_note = f" ⚡ Net Dealer Vanna is strongly positive (+{total_net_vex:,.1f} Cr/vol pt). Afternoon IV crush forces dealers to BUY underlying delta, catalyzing a 0DTE short squeeze bias."
+    elif total_net_vex < -10.0:
+        vanna_note = f" 🔻 Net Dealer Vanna is negative ({total_net_vex:,.1f} Cr/vol pt). Implied volatility compression forces dealers to SELL underlying delta, creating downward friction."
+
     if regime == "POSITIVE":
         msg = "POSITIVE DEALER GAMMA (Long Gamma Regime). Market makers dampen volatility by selling rallies and buying dips. Expect mean-reverting price action and pinning."
         if put_wall and call_wall:
             msg += f" Institutional corridor: {put_wall:,.0f} (Put Wall Support) to {call_wall:,.0f} (Call Wall Resistance)."
         if zero_gamma and spot < zero_gamma:
             msg += f" Caution: Spot ({spot:,.0f}) is below Zero-Gamma ({zero_gamma:,.0f}) — dealer hedging could abruptly flip to volatility acceleration."
-        return msg
+        return msg + vanna_note
     elif regime == "NEGATIVE":
         msg = "NEGATIVE DEALER GAMMA (Short Gamma Regime). Market makers accelerate volatility by chasing price directionally. High probability of trending expansion and violent breakout moves."
         if zero_gamma:
             msg += (
                 f" Gamma Flip pivot is {zero_gamma:,.0f}. Stability requires reclaiming this level."
             )
-        return msg
+        return msg + vanna_note
 
-    return "BALANCED DEALER GAMMA. Gamma profile is neutral across strikes. Directional follow-through will be dictated by cash delivery and macro flows rather than dealer rehedging."
+    return f"BALANCED DEALER GAMMA. Gamma profile is neutral across strikes. Directional follow-through will be dictated by cash delivery and macro flows rather than dealer rehedging.{vanna_note}"
 
 
 def print_gex(underlying: str, expiry: Optional[str] = None) -> None:
@@ -340,6 +451,10 @@ def print_gex(underlying: str, expiry: Optional[str] = None) -> None:
         f"  Total Net GEX: [bold {'green' if data['total_net_gex_cr'] > 0 else 'red'}]{data['total_net_gex_cr']:+,.2f} Cr[/bold]",
         f"  Dealer Regime: [bold cyan]{data['regime']}[/bold cyan]",
     ]
+    if data.get("total_net_vex_cr") is not None:
+        lines.append(
+            f"  Total Net VEX: [bold {'green' if data['total_net_vex_cr'] > 0 else 'red'}]{data['total_net_vex_cr']:+,.2f} Cr/vol pt[/bold] ({data.get('vanna_bias', 'BALANCED')})"
+        )
     if data.get("zero_gamma_level"):
         lines.append(
             f"  Zero-Gamma Level (Flip): [bold yellow]₹{data['zero_gamma_level']:,.1f}[/bold yellow]"

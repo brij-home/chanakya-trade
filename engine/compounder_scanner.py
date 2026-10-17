@@ -256,8 +256,10 @@ class CompounderScanner:
             from market.history import get_ohlcv
 
             nifty_df = get_ohlcv("NSE:NIFTY 50", interval="day", days=150)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.compounder_scanner] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         st_candidates: list[CompounderCandidate] = []
         mt_candidates: list[CompounderCandidate] = []

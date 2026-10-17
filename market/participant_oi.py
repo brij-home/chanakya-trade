@@ -310,8 +310,10 @@ def get_latest_participant_oi(force_refresh: bool = False) -> ParticipantOISumma
                         with open(CACHE_FILE, "r", encoding="utf-8") as f:
                             data = json.load(f)
                             return ParticipantOISummary(**data)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.participant_oi] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         return fetch_and_cache_participant_oi()
 

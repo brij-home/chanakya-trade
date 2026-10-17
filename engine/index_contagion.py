@@ -45,6 +45,30 @@ INDEX_CONSTITUENTS: dict[str, dict[str, float]] = {
         "BHARTIARTL": 0.035,
         "SBIN": 0.030,
     },
+    "MIDCPNIFTY": {
+        "PERSISTENT": 0.078,
+        "FEDERALBNK": 0.069,
+        "DIXON": 0.064,
+        "POLYCAB": 0.061,
+        "COFORGE": 0.058,
+        "AUBANK": 0.055,
+        "HDFCAMC": 0.052,
+        "ASHOKLEY": 0.049,
+        "MAXHEALTH": 0.047,
+        "CONCOR": 0.044,
+    },
+    "SENSEX": {
+        "HDFCBANK": 0.148,
+        "RELIANCE": 0.122,
+        "ICICIBANK": 0.105,
+        "INFY": 0.072,
+        "TCS": 0.052,
+        "LT": 0.049,
+        "BHARTIARTL": 0.045,
+        "SBIN": 0.039,
+        "AXISBANK": 0.038,
+        "KOTAKBANK": 0.032,
+    },
     "FINNIFTY": {
         "HDFCBANK": 0.280,
         "ICICIBANK": 0.220,
@@ -102,7 +126,18 @@ class IndexContagionEngine:
         """
         Evaluates constituent synchronization for a specific index.
         """
-        clean_idx = index_name.upper().replace("NSE:", "").strip()
+        clean_idx = index_name.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        if clean_idx in ("NIFTY 50", "NIFTY50"):
+            clean_idx = "NIFTY"
+        elif clean_idx in ("NIFTY BANK", "BANK"):
+            clean_idx = "BANKNIFTY"
+        elif clean_idx in ("NIFTY FIN SERVICE", "NIFTY FINANCIAL SERVICES"):
+            clean_idx = "FINNIFTY"
+        elif clean_idx in ("NIFTY MID SELECT", "NIFTY MIDCAP SELECT", "MIDCAP"):
+            clean_idx = "MIDCPNIFTY"
+        elif clean_idx in ("BSE SENSEX", "SENSEX-INDEX"):
+            clean_idx = "SENSEX"
+
         weights = INDEX_CONSTITUENTS.get(clean_idx)
         if not weights:
             return None
@@ -114,8 +149,15 @@ class IndexContagionEngine:
         now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
 
         # 1. Resolve index quote
-        idx_sym = f"NSE:{clean_idx}"
-        symbols_to_fetch = [idx_sym] + [f"NSE:{s}" for s in weights.keys()]
+        if clean_idx == "SENSEX":
+            idx_sym = "BSE:SENSEX"
+            symbols_to_fetch = [idx_sym, "BSE:SENSEX-INDEX"] + [f"NSE:{s}" for s in weights.keys()]
+        elif clean_idx == "MIDCPNIFTY":
+            idx_sym = "NSE:NIFTY MID SELECT"
+            symbols_to_fetch = [idx_sym, "NSE:MIDCPNIFTY"] + [f"NSE:{s}" for s in weights.keys()]
+        else:
+            idx_sym = f"NSE:{clean_idx}"
+            symbols_to_fetch = [idx_sym] + [f"NSE:{s}" for s in weights.keys()]
 
         if not quotes_map:
             try:
@@ -124,10 +166,19 @@ class IndexContagionEngine:
                 logger.debug(f"[IndexContagion] Failed to fetch quotes: {e}")
                 return None
 
-        idx_q = quotes_map.get(idx_sym) or quotes_map.get(clean_idx)
+        idx_q = (
+            quotes_map.get(idx_sym)
+            or quotes_map.get(clean_idx)
+            or (quotes_map.get("BSE:SENSEX-INDEX") if clean_idx == "SENSEX" else None)
+            or (quotes_map.get("NSE:MIDCPNIFTY") if clean_idx == "MIDCPNIFTY" else None)
+        )
         idx_ltp = float(getattr(idx_q, "last_price", 0.0) or getattr(idx_q, "ltp", 0.0) or 0.0)
         if idx_ltp <= 0:
             idx_ltp = get_ltp(idx_sym) or get_ltp(clean_idx)
+            if idx_ltp <= 0 and clean_idx == "SENSEX":
+                idx_ltp = get_ltp("BSE:SENSEX-INDEX")
+            elif idx_ltp <= 0 and clean_idx == "MIDCPNIFTY":
+                idx_ltp = get_ltp("NSE:MIDCPNIFTY")
         if idx_ltp <= 0:
             return None
 
@@ -231,6 +282,7 @@ class IndexContagionEngine:
                 sync_pct=bullish_pct,
                 leading=leading_bulls,
                 now_iso=now_iso,
+                quotes_map=quotes_map,
             )
         elif bearish_pct >= 68.0 and net_score <= -1.2 and is_index_bear_active:
             alert = self._create_contagion_alert(
@@ -242,6 +294,7 @@ class IndexContagionEngine:
                 sync_pct=bearish_pct,
                 leading=leading_bears,
                 now_iso=now_iso,
+                quotes_map=quotes_map,
             )
 
         result.alert = alert
@@ -257,6 +310,7 @@ class IndexContagionEngine:
         sync_pct: float,
         leading: list[str],
         now_iso: str,
+        quotes_map: Optional[dict[str, Any]] = None,
     ) -> Optional[AutoAlert]:
         """Creates an early-warning institutional contagion alert."""
         from engine.trade_plan import calculate_trade_plan
@@ -271,7 +325,7 @@ class IndexContagionEngine:
                 direction=act_dir,
                 spot=spot,
                 timeframe="INTRADAY",
-                exchange="NFO",
+                exchange="BFO" if index_name == "SENSEX" else "NFO",
                 has_active_blast=True,
             )
         except Exception as e_tp:
@@ -280,7 +334,36 @@ class IndexContagionEngine:
         is_viable = True
         asym_verdict = "ACCEPTABLE"
         asym_note = ""
-        if tp:
+
+        # Day Extreme Exhaustion Guard:
+        # If spot is pressing within 0.10% of Day High (Bullish) or Day Low (Bearish)
+        # while extended >= 0.25% from VWAP, fatigue/mean-reversion risk is severe.
+        day_high = 0.0
+        day_low = 0.0
+        if isinstance(quotes_map, dict):
+            idx_q = quotes_map.get(index_name) or quotes_map.get(f"NSE:{index_name}")
+            if idx_q:
+                day_high = float(
+                    getattr(idx_q, "high", 0.0) or getattr(idx_q, "day_high", 0.0) or 0.0
+                )
+                day_low = float(getattr(idx_q, "low", 0.0) or getattr(idx_q, "day_low", 0.0) or 0.0)
+
+        vwap_dist_pct = abs(spot - vwap) / max(1.0, vwap) * 100.0
+        if is_bull and day_high > 0 and spot >= (day_high * 0.9990) and vwap_dist_pct >= 0.25:
+            is_viable = False
+            asym_verdict = "DAY_HIGH_FATIGUE_TRAP"
+            asym_note = (
+                f"Index spot is pinned against Day High (₹{day_high:,.1f}) and +{vwap_dist_pct:.2f}% from VWAP. "
+                f"High risk of exhaustion trap; await consolidation pullback to VWAP."
+            )
+        elif not is_bull and day_low > 0 and spot <= (day_low * 1.0010) and vwap_dist_pct >= 0.25:
+            is_viable = False
+            asym_verdict = "DAY_LOW_FATIGUE_TRAP"
+            asym_note = (
+                f"Index spot is pinned against Day Low (₹{day_low:,.1f}) and -{vwap_dist_pct:.2f}% from VWAP. "
+                f"High risk of exhaustion bounce; await consolidation pullback to VWAP."
+            )
+        elif tp:
             sl = tp.invalidation_stop
             t1 = tp.target_1
             t2 = tp.target_2
@@ -306,10 +389,60 @@ class IndexContagionEngine:
             rr_str = "1:2.2"
             tp_dict = None
 
+        # Fail-closed guard: Non-viable setups (fatigue trap or poor R:R) MUST NOT emit alerts
+        if not is_viable:
+            logger.info(
+                f"[IndexContagion] Non-viable setup for {index_name} {direction}: "
+                f"{asym_verdict} ({asym_note}). Suppressing alert."
+            )
+            return None
+
+        # Terminal ADR & Camarilla H5/L5 Exhaustion Guard
+        try:
+            from engine.daily_levels import get_daily_levels
+
+            clean_idx = (
+                index_name.replace("NSE:", "").replace("BSE:", "").replace("INDEX:", "").upper()
+            )
+            s_date = now_iso[:10] if now_iso and len(now_iso) >= 10 else None
+            dl = get_daily_levels(clean_idx, session_date=s_date)
+            session_mismatch = (
+                isinstance(getattr(dl, "session_date", None), str)
+                and bool(s_date)
+                and dl.session_date != s_date
+            )
+            if dl and not session_mismatch:
+                cam = dl.camarilla or {}
+                h5 = float(cam.get("h5", 0.0) or 0.0)
+                l5 = float(cam.get("l5", 0.0) or 0.0)
+                atr = float(dl.atr_14 or 0.0)
+                if is_bull:
+                    if h5 > 0 and spot >= h5 * 0.9990:
+                        logger.info(
+                            f"[IndexContagion] Suppressed for {index_name}: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ceiling ₹{h5:,.1f}."
+                        )
+                        return None
+                    if atr > 0 and day_low > 0 and (spot - day_low) >= (1.25 * atr):
+                        logger.info(
+                            f"[IndexContagion] Suppressed for {index_name}: Spot ₹{spot:,.1f} reached Terminal ADR expansion (+{spot - day_low:.1f} pts >= 1.25x ATR {atr:.1f})."
+                        )
+                        return None
+                else:
+                    if l5 > 0 and spot <= l5 * 1.0010:
+                        logger.info(
+                            f"[IndexContagion] Suppressed for {index_name}: Spot ₹{spot:,.1f} reached/exceeded Camarilla L5 floor ₹{l5:,.1f}."
+                        )
+                        return None
+                    if atr > 0 and day_high > 0 and (day_high - spot) >= (1.25 * atr):
+                        logger.info(
+                            f"[IndexContagion] Suppressed for {index_name}: Spot ₹{spot:,.1f} reached Terminal ADR expansion (-{day_high - spot:.1f} pts >= 1.25x ATR {atr:.1f})."
+                        )
+                        return None
+        except Exception as e_dl:
+            logger.debug(f"[IndexContagion] Daily levels check skipped for {index_name}: {e_dl}")
+
         leaders_str = ", ".join(leading[:3]) if leading else "Core heavyweights"
-        tag = ("🚀 HEAVYWEIGHT CONTAGION" if is_bull else "🔻 HEAVYWEIGHT BREAKDOWN") + (
-            f" [WAIT CONFIRMATION: {asym_verdict}]" if not is_viable else ""
-        )
+        tag = "🚀 HEAVYWEIGHT CONTAGION" if is_bull else "🔻 HEAVYWEIGHT BREAKDOWN"
 
         # Resolve live ATM Option Contract for the index
         opt_type = "CE" if is_bull else "PE"
@@ -395,8 +528,13 @@ class IndexContagionEngine:
             entry_range_str = f"₹{round(opt_ltp * 0.98, 1):,.1f} – ₹{round(opt_ltp * 1.02, 1):,.1f}"
             when_to_buy_str = f"Buy {opt_contract_sym} on limit/ask while {index_name} spot holds above ₹{vwap:,.1f}."
         else:
-            # Estimate ATM strike from index spot (50 pt step for NIFTY, 100 pt for BANKNIFTY/SENSEX)
-            step = 100 if index_name in ("BANKNIFTY", "SENSEX", "BANKEX") else 50
+            # Estimate ATM strike from index spot (25 for MIDCPNIFTY, 100 for BANKNIFTY/SENSEX, 50 for NIFTY/FINNIFTY)
+            if index_name in ("BANKNIFTY", "SENSEX", "BANKEX"):
+                step = 100
+            elif index_name == "MIDCPNIFTY":
+                step = 25
+            else:
+                step = 50
             est_strike = round(spot / step) * step
             est_premium = round(max(20.0, spot * 0.0065), 1)
             est_sl = round(est_premium * 0.82, 1)
@@ -441,8 +579,10 @@ class IndexContagionEngine:
             if m:
                 try:
                     leader_chgs.append(abs(float(m.group(1))))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.index_contagion] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         avg_lead_chg = (sum(leader_chgs) / len(leader_chgs)) if leader_chgs else 0.0
         if avg_lead_chg >= 0.8:
             conf_score += 10.0
@@ -466,7 +606,7 @@ class IndexContagionEngine:
             alert_type="INDEX_CONTAGION",
             stage="EARLY_WARNING",
             symbol=index_name,
-            exchange="NFO",
+            exchange="BFO" if index_name == "SENSEX" else "NFO",
             direction=direction,
             headline=headline,
             summary=summary,

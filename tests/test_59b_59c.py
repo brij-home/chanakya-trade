@@ -18,12 +18,13 @@ class TestSectorFallback:
         assert isinstance(result, list)
 
     @pytest.mark.network
-    def test_sectors_have_non_zero_values(self):
+    def test_sectors_have_non_zero_values(self, monkeypatch):
         """At least some sectors should have real prices.
 
         Requires network access (yfinance). Skipped in offline CI.
         Run with: pytest -m network
         """
+        monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
         from market.indices import get_sector_snapshot
 
         result = get_sector_snapshot()

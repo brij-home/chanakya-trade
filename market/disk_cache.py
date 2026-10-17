@@ -14,6 +14,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.disk_cache")
+
 
 import json
 from datetime import datetime, timedelta
@@ -58,8 +62,8 @@ def prune_disk_cache(
                     deleted_count += 1
                 else:
                     remaining.append((f, stat.st_size, stat.st_mtime))
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.disk_cache] Non-fatal exception suppressed: {e_suppressed}")
 
         # 2. Check total size and prune oldest if exceeding max_total_mb
         total_bytes = sum(size for _, size, _ in remaining)
@@ -75,10 +79,12 @@ def prune_disk_cache(
                     total_bytes -= size
                     if total_bytes <= max_bytes:
                         break
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.disk_cache] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+    except Exception as e_suppressed:
+        logger.debug(f"[market.disk_cache] Non-fatal exception suppressed: {e_suppressed}")
 
     return deleted_count
 
@@ -101,14 +107,14 @@ def save_cache(key: str, data: list, cache_dir: Optional[Path] = None) -> None:
     }
     try:
         _cache_file(key, target_dir).write_text(json.dumps(payload, default=str))
-    except Exception:
-        pass  # Cache write failure is never fatal
+    except Exception as e_suppressed:
+        logger.debug(f"[market.disk_cache] Non-fatal exception suppressed: {e_suppressed}")
 
     # Periodic prune trigger
     try:
         prune_disk_cache(target_dir)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.disk_cache] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def load_cache(key: str, cache_dir: Optional[Path] = None) -> tuple[list, Optional[datetime]]:

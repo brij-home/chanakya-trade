@@ -27,20 +27,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Fix windows console encoding if available
-try:
-    from config.encoding import fix_windows_console
-
-    fix_windows_console()
-except Exception:
-    pass
-
 logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("seed_10y")
 logger.setLevel(logging.INFO)
+
+# Fix windows console encoding if available
+try:
+    from config.encoding import fix_windows_console
+
+    fix_windows_console()
+except Exception as e_suppressed:
+    logger.debug(f"[scripts.seed_10y_history] Non-fatal exception suppressed: {e_suppressed}")
 
 import pandas as pd
 from engine.eod_store import (

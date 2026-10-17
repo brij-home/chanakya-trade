@@ -9,6 +9,7 @@ Unit tests for:
 """
 
 from datetime import datetime, timedelta
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from engine.alert_model import AutoAlert
@@ -99,8 +100,8 @@ def test_intraday_alert_invalidation_at_cutoff():
 
 def test_unignited_early_warning_time_stop():
     """Verify that unignited EARLY_WARNING setups expire after 60 minutes."""
-    now = datetime.now(IST)
-    old_time = now - timedelta(minutes=75)
+    simulated_now = datetime(2026, 10, 16, 11, 30, tzinfo=IST)
+    old_time = simulated_now - timedelta(minutes=75)
 
     alert = AutoAlert(
         alert_id="test-timestop-004",
@@ -120,7 +121,10 @@ def test_unignited_early_warning_time_stop():
         created_at=old_time.strftime("%Y-%m-%d %H:%M:%S IST"),
     )
     alert._force_test_expiry = True
-    reason = evaluate_alert_invalidation(alert, current_ltp=2505.0)
+    with patch("engine.alert_evaluator.datetime") as mock_dt:
+        mock_dt.now.return_value = simulated_now
+        mock_dt.strptime.side_effect = datetime.strptime
+        reason = evaluate_alert_invalidation(alert, current_ltp=2505.0)
     assert reason is not None
     assert "Time-Stop expired" in reason
     assert "60-minute momentum window" in reason

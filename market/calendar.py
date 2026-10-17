@@ -545,3 +545,169 @@ def is_trading_day(target_date: date, exchange: str = "NSE") -> bool:
     Excludes weekends (Saturday & Sunday) and exchange trading holidays.
     """
     return target_date.weekday() < 5 and not is_trading_holiday(target_date, exchange)
+
+
+def get_latest_trading_day(
+    ref_dt: Optional[datetime | date] = None,
+    exchange: str = "NSE",
+) -> date:
+    """
+    Returns the most recent official exchange trading day on or before ref_dt.
+    If ref_dt falls on a weekend, exchange holiday, or (if datetime provided)
+    before the official market opening auction (09:15 IST), rolls backward
+    to the last completed trading day.
+    """
+    if ref_dt is None:
+        ref_dt = datetime.now(IST)
+
+    if isinstance(ref_dt, datetime):
+        if ref_dt.tzinfo is None:
+            ref_dt = ref_dt.replace(tzinfo=IST)
+        else:
+            ref_dt = ref_dt.astimezone(IST)
+        target_date = ref_dt.date()
+        # If it's a weekday trading day but before 09:15 IST, the session has not started.
+        # The latest completed or active market data corresponds to the previous trading day.
+        if is_trading_day(target_date, exchange=exchange):
+            if (ref_dt.hour < 9) or (ref_dt.hour == 9 and ref_dt.minute < 15):
+                target_date -= timedelta(days=1)
+    else:
+        target_date = ref_dt
+
+    for _ in range(30):
+        if is_trading_day(target_date, exchange=exchange):
+            return target_date
+        target_date -= timedelta(days=1)
+
+    return target_date
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Canonical F&O Expiry Resolvers (SEBI Single Weekly Contract Mandate)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def get_nearest_weekly_expiry(
+    underlying: str,
+    ref_date: Optional[date] = None,
+    ref_time: Optional[dtime] = None,
+) -> date:
+    """
+    Get the nearest upcoming weekly contract expiry date.
+    Per SEBI Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136:
+      - NSE: NIFTY options expire weekly on Thursdays.
+      - BSE: SENSEX options expire weekly on Fridays.
+      - BANKNIFTY, MIDCPNIFTY, FINNIFTY, and Equities offer strictly monthly contracts.
+        For these underlyings, automatically resolves to nearest monthly expiry.
+    """
+    cur_date = ref_date or datetime.now(IST).date()
+    cur_time = ref_time
+    if cur_time is None and ref_date is None:
+        try:
+            cur_time = datetime.now(IST).time()
+        except Exception as e_suppressed:
+            logger.debug(f"[market.calendar] Non-fatal exception suppressed: {e_suppressed}")
+
+    clean = (
+        underlying.upper()
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("NFO:", "")
+        .replace("BFO:", "")
+        .replace("-INDEX", "")
+        .strip()
+    )
+
+    is_bse = clean in ("SENSEX", "BANKEX")
+    is_nse_weekly = clean in ("NIFTY", "NIFTY50")
+
+    # If underlying does not have weekly options under SEBI mandate, return monthly expiry
+    if not is_bse and not is_nse_weekly:
+        return get_nearest_monthly_expiry(clean, ref_date=cur_date, ref_time=cur_time)
+
+    target_weekday = 4 if is_bse else 3
+    exch = "BSE" if is_bse else "NFO"
+
+    days_ahead = (target_weekday - cur_date.weekday()) % 7
+    # If today is expiry day, but market has already closed (>= 15:30 IST), roll to next week
+    if days_ahead == 0 and cur_time and cur_time >= dtime(15, 30):
+        days_ahead = 7
+
+    candidate = cur_date + timedelta(days=days_ahead)
+    adj = get_adjusted_expiry_date(candidate, exch)
+
+    # If adjusted holiday roll pushed candidate to before today (or past closed hours), advance by 1 week
+    if adj < cur_date or (adj == cur_date and cur_time and cur_time >= dtime(15, 30)):
+        candidate += timedelta(days=7)
+        adj = get_adjusted_expiry_date(candidate, exch)
+
+    return adj
+
+
+def get_nearest_monthly_expiry(
+    underlying: str,
+    ref_date: Optional[date] = None,
+    ref_time: Optional[dtime] = None,
+) -> date:
+    """
+    Get the nearest upcoming monthly contract expiry date (Futures & Monthly Options).
+    - NSE / NFO: Last Thursday of the month.
+    - BSE / BFO: Last Friday of the month.
+    If the current month's expiry date has passed (or is today post-15:30 IST), rolls forward to next month.
+    """
+    from calendar import monthrange
+
+    cur_date = ref_date or datetime.now(IST).date()
+    cur_time = ref_time
+    if cur_time is None and ref_date is None:
+        try:
+            cur_time = datetime.now(IST).time()
+        except Exception as e_suppressed:
+            logger.debug(f"[market.calendar] Non-fatal exception suppressed: {e_suppressed}")
+
+    clean = (
+        underlying.upper()
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("NFO:", "")
+        .replace("BFO:", "")
+        .replace("-INDEX", "")
+        .strip()
+    )
+
+    is_bse = clean in ("SENSEX", "BANKEX")
+    target_weekday = 4 if is_bse else 3
+    exch = "BSE" if is_bse else "NFO"
+
+    def _calc_month_last(yr: int, mo: int) -> date:
+        _, num_days = monthrange(yr, mo)
+        d = date(yr, mo, num_days)
+        while d.weekday() != target_weekday:
+            d -= timedelta(days=1)
+        return get_adjusted_expiry_date(d, exch)
+
+    adj = _calc_month_last(cur_date.year, cur_date.month)
+    if adj < cur_date or (adj == cur_date and cur_time and cur_time >= dtime(15, 30)):
+        next_mo = cur_date.month + 1 if cur_date.month < 12 else 1
+        next_yr = cur_date.year if cur_date.month < 12 else cur_date.year + 1
+        adj = _calc_month_last(next_yr, next_mo)
+
+    return adj
+
+
+def get_active_derivative_expiry(
+    underlying: str,
+    is_future: bool = False,
+    ref_date: Optional[date] = None,
+    ref_time: Optional[dtime] = None,
+) -> date:
+    """
+    Canonical SSOT resolver for active derivative contract expiries.
+    - If is_future=True: always resolves to the active near-month Future expiry.
+    - If is_future=False (Options):
+      - NIFTY / SENSEX: resolves to the nearest active weekly expiry (or monthly if last week).
+      - BANKNIFTY / MIDCPNIFTY / FINNIFTY / Stock Options: resolves to monthly expiry.
+    """
+    if is_future:
+        return get_nearest_monthly_expiry(underlying, ref_date=ref_date, ref_time=ref_time)
+    return get_nearest_weekly_expiry(underlying, ref_date=ref_date, ref_time=ref_time)

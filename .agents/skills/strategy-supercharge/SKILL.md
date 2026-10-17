@@ -22,6 +22,7 @@ Implemented in [`engine/supercharge.py`](file:///c:/Users/brije/.gemini/antigrav
 2. **Improve, Not Just Validate**: The goal is to discover measurably better parameter and structural variants without introducing curve-fitting or parameter bloat.
 3. **Controlled Variance**: Each variant modifies **at most 1–2 variables** (e.g. ATR trailing stop multiplier or regime volatility filter) so causal attribution remains clean.
 4. **Binding Vetoes**: Four seats possess absolute veto power. No variant can be accepted if an active veto remains unresolved.
+5. **Real-World Execution & Regulatory Grounding**: Variants must strictly adhere to October 2026 market realities: post-October 2024 statutory STT drag via [`engine.charges.calculate_charges`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/charges.py), canonical lot sizes from [`market.instruments.STANDARD_LOT_SIZES`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/instruments.py), and dynamic price-tier risk floors ([`engine.dynamic_risk.clamp_dynamic_risk`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/dynamic_risk.py)). Any variant relying on zero friction or sub-noise stops is vetoed by the Execution and Risk seats.
 
 ---
 
@@ -35,7 +36,7 @@ Implemented in [`engine/supercharge.py`](file:///c:/Users/brije/.gemini/antigrav
 | **Exit Intelligence** | Stops, targets, trailing rules, time exits | Cut losers quickly and let winners run | `avg_loss`, `profit_factor`, `largest_loss` | — (Advisory) |
 | **Market Regime** | Trend vs range, high vs low volatility | Expose regime dependence, add macro filters | `robustness_score`, `positive_period_pct` | — (Advisory) |
 | **Backtest Integrity** | Look-ahead, data-snooping, curve-fitting | Guarantee improvements survive out-of-sample | `robustness_score` | 🛑 **VETO**: Overfit (OOS score < 0.35) |
-| **Execution** | Broker limits, slippage, liquidity | Keep strategy executable under broker limits | `trade_count` | 🛑 **VETO**: Rate-limit breach (>1000 orders) |
+| **Execution** | Broker limits, slippage, liquidity | Keep strategy executable under broker limits & real costs | `trade_count` | 🛑 **VETO**: Rate-limit breach (>1000 orders) OR Stale/Frictionless assumptions |
 | **Options** | Strike/expiry selection, Greeks, IV | Optimize delta/theta posture and spreads | `total_return_pct`, `max_drawdown` | — (Advisory) |
 | **Capital Efficiency** | Margin utilization, idle cash drag | Maximize return per rupee of margin | `cagr` | — (Advisory) |
 | **Simplicity** | Parsimony, parameter penalty | Guard against 'one more parameter' overfit | `robustness_score` | 🛑 **VETO**: Complexity without $\ge10\%$ Sharpe gain |

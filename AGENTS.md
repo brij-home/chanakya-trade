@@ -7,7 +7,7 @@
 
 <!-- TOC -->
 - [1. Project Overview & Component Map](#1-project-overview--component-map)
-- [2. Safety & Trading Guardrails (30 Core Invariants)](#2-safety--trading-guardrails-30-core-invariants)
+- [2. Safety & Trading Guardrails (34 Core Invariants)](#2-safety--trading-guardrails-34-core-invariants)
 - [3. LLM Model Hierarchy & Multi-Key Resilience](#3-llm-model-hierarchy--multi-key-resilience)
 - [4. Environment & Common Commands](#4-environment--common-commands)
 - [5. On-Demand Skills Directory](#5-on-demand-skills-directory)
@@ -35,7 +35,7 @@
 
 ---
 
-## 2. Safety & Trading Guardrails (30 Core Invariants)
+## 2. Safety & Trading Guardrails (34 Core Invariants)
 
 > **⚠️ Never commit `.env` — see [`config/credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) for secure token management.**
 
@@ -184,21 +184,61 @@
    - Hardcoding `Path.home() / ".trading_platform"` or raw user home directories in any module is strictly prohibited.
    - All runtime databases, ledgers, caches, PDFs, and config files MUST resolve via `config.paths.app_data_path(...)`. This guarantees containerization support, clean test redirection via `TRADING_PLATFORM_HOME`, and multi-environment portability.
 
+31. **Stale Assumption Elimination & Market Master Authority (October 2026 Mandate)**:
+   - System components, detectors, risk planners, and backtest engines MUST NEVER rely on stale historical assumptions or static heuristics (e.g. legacy Nifty lot size 50/25, discontinued weekly expiries on Bank Nifty/FinNifty, pre-Oct 2024 STT rates, static 5-paise ticks on sub-₹250 cash equities, or hardcoded arbitrary stops `max(1.0, ...)`).
+   - All instrument specifications, lot sizes, tick sizes, expiry structures, statutory charges, and circuit boundaries MUST resolve exclusively from canonical SSOT modules:
+     - Lot sizes: `market.instruments.STANDARD_LOT_SIZES`
+     - Expiry architecture & single-weekly index rule: `engine.alert_expiry.classify_expiry_type`
+     - Nominal price tiers & dynamic risk clamping: `engine.dynamic_risk.resolve_price_tier` and `clamp_dynamic_risk`
+     - Statutory taxes & STT schedule: `engine.charges.calculate_charges`
+   - Zero ad-hoc local guesswork or legacy pre-2024 heuristics permitted anywhere in code or AI agent logic.
+
+32. **Timeframe-Agnostic & Adaptive Risk Invariant**:
+   - All risk calculations, stop-loss floors, volatility buffers, and target expansions MUST be strictly timeframe-agnostic and adapt dynamically to the intended trade horizon:
+     - `INTRADAY` (5m, 15m, 60m): ATR bounds ($0.35\times - 1.50\times$), max risk cap 3.5%, Brownian square-root-of-time session decay ($\sqrt{t}$).
+     - `SWING_SHORT` (2–5 days): Overnight gap tolerance ($0.80\times - 2.20\times$ ATR), max risk cap 5.5%, floor multiplier $1.5\times$.
+     - `SWING_MID` (1–4 weeks): Multi-week structure ($1.20\times - 3.50\times$ ATR), max risk cap 8.5%, floor multiplier $2.0\times$.
+     - `POSITIONAL` (1–6 months): Macro cycle ($1.80\times - 5.00\times$ ATR), max risk cap 12.0%, floor multiplier $2.5\times$.
+   - Hardcoded intraday-only assumptions (like fixed 1-bar time horizons or static daily ATR multiples) inside shared risk models are strictly prohibited.
+
+33. **Regression Prevention & Architectural Invariant Defense**:
+   - Any institutional requirement, nominal price tier, regulatory constraint (1-paisa tick on sub-₹250 cash equities, SEBI single-weekly index expiry calendar, physical delivery expiry margin step-ups), or statutory cost schedule MUST be guarded by deterministic, fast (< 1s) regression test suites (e.g. `tests/test_standardized_risk_invariants.py`, `tests/test_dynamic_risk.py`).
+   - AI agents, developers, and automated tools are strictly prohibited from re-introducing arbitrary magic numbers (e.g. `max(1.0, ...)`), hardcoded legacy lot sizes, or bypassing canonical SSOT modules (`market.instruments`, `engine.dynamic_risk`, `engine.alert_expiry`, `engine.charges`).
+   - Every trade setup, execution ticket draft, and radar scan MUST carry explicit timeframe and provenance metadata, ensuring complete downstream auditability.
+
+34. **Tri-Directional Holistic Calibration & Symmetric Integrity Mandate (Zero Unilateral Patching)**:
+   - **Cross-Regime Symmetry Invariant**: When investigating, fixing, or refining any trade setup, detector, or filter for one directional bias (**BEAR** / Put or **BULL** / Call), agents and developers MUST systematically review, analyze, and calibrate the opposing side and the neutral regime (**NEUTRAL** / Range-bound defined-risk spreads like Iron Condor) before finalizing changes.
+   - **Universal Options Applicability**: Directional and structural guards (e.g., VWAP alignment, short-squeeze / dead-cat bounce defense, dynamic momentum vs static morning extremes, volume/OI sweet-spots, liquidity caps, 0DTE afternoon theta exhaustion) apply symmetrically across ALL option contracts (both Index Options like NIFTY/BANKNIFTY/SENSEX and Single-Stock Options) where relevant and valid.
+   - **Anti-Blindspot Protocol**: A patch applied to Call options (e.g., Dead-Cat Bounce Guard) must have its exact mathematical mirror implemented on Put options (e.g., Short-Squeeze Guard), and vice versa. Unilateral patches that leave the opposing side unanchored or over-suppress structural V-reversals violate the institutional symmetry contract.
+   - **Tri-Directional Regression Test Defense**: Any change to directional or volatility filters must execute regression tests spanning Bull, Bear, and Neutral setups simultaneously to ensure holistic calibration without cross-regime degradation.
+
+35. **"Right First Time" Contract Parity & Pre-Handoff Smoke Invariant**:
+   - **Zero "Fantasy Mocking"**: Component tests and UI fixtures must NEVER be mocked from imagination. Mock fixtures must mirror the real serialized dictionary produced by backend serializers (`to_dict()`). Mismatches between frontend expectations and backend payloads are strictly prohibited.
+   - **Contract Parity Regression Defense**: All UI views that consume sidecar APIs must be protected by fast contract tests in `tests/test_api_ui_contracts.py`, asserting that 100% of JSON keys and object paths referenced in JSX actually exist in backend payloads.
+   - **Mandatory Pre-Handoff Smoke Protocol**: Before declaring any UI, API, or engine task complete, agents MUST:
+     1. Execute targeted backend and frontend test suites (`pytest` and `vitest`).
+     2. Execute live HTTP queries (`curl` / `httpx`) against the running FastAPI daemon to verify HTTP 200 OK.
+     3. Verify secondary button actions (e.g. sync, reset, clear, purge) actually invoke valid backend methods without runtime exceptions, missing imports, or unhandled 500 errors.
+     4. Never leave the user to discover broken buttons, missing card fields, or runtime import errors.
+
+36. **Temporal Anchoring & Knowledge Currency Standard (October 2026 Mandate)**:
+   - **System Clock SSOT**: Analytical reasoning, quant strategy evaluations, macro commentaries, and backtest evaluations MUST be explicitly anchored to the current calendar date (`datetime.now(IST)` / system prompt anchor, e.g. `2026-10-17`).
+   - **Zero Stale Regulatory / Structural Assumptions**: Never rely on stale pre-trained LLM memory for Indian market regulatory parameters (e.g. lot sizes, weekly expiry cycles, index derivatives frameworks, STT charges). Always resolve them from canonical exchange master feeds (`market/instruments.py`, `market/symbol_master.py`) or verify via live web search (`search_web`).
+   - **Data Provenance Currency**: All market quotes, fundamentals, and forensic scores must carry verifiable timestamped provenance (`REAL/LIVE`, `OFF-MARKET/EOD as of YYYY-MM-DD`). If data is older than the staleness threshold, mark it explicitly as `DEGRADED` rather than presenting stale numbers as current.
+
 ---
 
 ## 3. LLM Model Hierarchy & Multi-Key Resilience
 
-### Groq Cloud Active Models (Verified 31 Aug 2026)
+### Groq Cloud Active Models (Verified 17 Oct 2026)
 
-| Priority | Model ID | Latency | Tool-Calling | Best For |
-| :---: | :--- | :---: | :---: | :--- |
-| 1 | `qwen/qwen3.8-27b` | ~389 ms | ✅ Yes | **Fast-LLM**: Real-time tool calls (quotes, options, VPA), parallel debate rounds |
-| 2 | `openai/gpt-oss-120b` | ~446 ms | ❌ No | **Deep-LLM**: Council consensus synthesis, Fund Manager final verdict |
-| 3 | `openai/gpt-oss-20b` | ~471 ms | ❌ No | Lower-cost fallback for pure-text generation |
-| 4 | `qwen/qwen3.6-27b` | ~660 ms | ❌ No | Secondary fallback when primary models are throttled |
-| 5 | `groq/compound-mini` | — | ❌ No | Cheapest option for non-critical batch jobs |
+| Priority | Model ID | Latency | Tool-Calling | Max Context / TPM | Best For |
+| :---: | :--- | :---: | :---: | :---: | :--- |
+| 1 | `qwen/qwen3.8-27b` | ~389 ms | ✅ Yes | 128k ctx / 30k TPM | **Fast-LLM**: Real-time tool calls (quotes, options, VPA), parallel debate rounds, deep synthesis |
+| 2 | `openai/gpt-oss-120b` | ~446 ms | ❌ No | 8k TPM (on-demand) | **Deep-LLM**: Pure-text reasoning (zero tools attached, <=1.5k tokens) |
+| 3 | `openai/gpt-oss-20b` | ~471 ms | ❌ No | High TPM | High-throughput fallback for text synthesis |
 
-**Deprecated**: `llama-3.3-70b-versatile` was removed from Groq Cloud (returns 404). Do NOT reference it.
+**Deprecated by Groq**: `qwen/qwen3.6-27b`, `groq/compound-mini`, and `llama-3.3-70b-versatile` have been removed from Groq Cloud (return 404). Do NOT reference them.
 
 ### Other Supported LLM Providers
 
