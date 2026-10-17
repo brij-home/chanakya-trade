@@ -480,51 +480,55 @@ def test_alert_scrutiny_tbt_microstructure_gate():
     from market.fyers_tbt_manager import FyersTbtManager
 
     mgr = FyersTbtManager()
-    mgr._connected = True
+    try:
+        mgr._connected = True
 
-    # 1. Candidate facing a massive resting Ask Wall right above entry
-    mgr._depth_cache["NSE:NIFTY50-INDEX"] = {
-        "status": "LIVE",
-        "ltp": 25000.0,
-        "obi_50": 0.10,
-        "ask_walls": [{"price": 25020.0, "qty": 25000, "level": 3}],
-        "bid_walls": [],
-    }
+        # 1. Candidate facing a massive resting Ask Wall right above entry
+        mgr._depth_cache["NSE:NIFTY50-INDEX"] = {
+            "status": "LIVE",
+            "ltp": 25000.0,
+            "obi_50": 0.10,
+            "ask_walls": [{"price": 25020.0, "qty": 25000, "level": 3}],
+            "bid_walls": [],
+        }
 
-    alert = AutoAlert(
-        alert_id="aa-test-wall-20261016",
-        alert_type="ORB_BREAKOUT",
-        stage="PRIMED",
-        symbol="NIFTY",
-        exchange="NSE",
-        direction="BULLISH",
-        headline="NIFTY ORB Breakout",
-        summary="Testing breakout into ask wall",
-        ltp=25000.0,
-        trigger_level=25000.0,
-        stop_loss=24950.0,
-        target_level=25100.0,
-        confidence=85,
-    )
+        alert = AutoAlert(
+            alert_id="aa-test-wall-20261016",
+            alert_type="ORB_BREAKOUT",
+            stage="PRIMED",
+            symbol="NIFTY",
+            exchange="NSE",
+            direction="BULLISH",
+            headline="NIFTY ORB Breakout",
+            summary="Testing breakout into ask wall",
+            ltp=25000.0,
+            trigger_level=25000.0,
+            stop_loss=24950.0,
+            target_level=25100.0,
+            confidence=85,
+        )
 
-    passed, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
-    assert passed is False
-    assert "TBT Iceberg Wall Veto" in reason or "Massive resting ask wall" in reason
-    assert flags.get("trap_immediate_resistance") is True
+        passed, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
+        assert passed is False
+        assert "TBT Iceberg Wall Veto" in reason or "Massive resting ask wall" in reason
+        assert flags.get("trap_immediate_resistance") is True
 
-    # 2. Candidate with severe adverse Order Book Imbalance (heavy ask dumping)
-    mgr._depth_cache["NSE:NIFTY50-INDEX"] = {
-        "status": "LIVE",
-        "ltp": 25000.0,
-        "obi_50": -0.55,  # Extreme ask supply
-        "ask_walls": [],
-        "bid_walls": [],
-    }
+        # 2. Candidate with severe adverse Order Book Imbalance (heavy ask dumping)
+        mgr._depth_cache["NSE:NIFTY50-INDEX"] = {
+            "status": "LIVE",
+            "ltp": 25000.0,
+            "obi_50": -0.55,  # Extreme ask supply
+            "ask_walls": [],
+            "bid_walls": [],
+        }
 
-    passed_obi, reason_obi, flags_obi = alert_scrutiny_auditor.verify_tier1_sanity(alert)
-    assert passed_obi is False
-    assert "TBT Order Book Imbalance Veto" in reason_obi or "Severe ask pressure" in reason_obi
-    assert flags_obi.get("adverse_tbt_imbalance") is True
+        passed_obi, reason_obi, flags_obi = alert_scrutiny_auditor.verify_tier1_sanity(alert)
+        assert passed_obi is False
+        assert "TBT Order Book Imbalance Veto" in reason_obi or "Severe ask pressure" in reason_obi
+        assert flags_obi.get("adverse_tbt_imbalance") is True
+    finally:
+        mgr._connected = False
+        mgr._depth_cache.clear()
 
 
 def test_tbt_scout_priority_scoring():

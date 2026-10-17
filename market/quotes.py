@@ -855,9 +855,16 @@ def get_quote(
             for k, q in result.items():
                 if q and getattr(q, "last_price", 0.0) > 0:
                     _QUOTE_CACHE[k] = (now_wall, q)
-                    _QUOTE_CACHE.move_to_end(k)
+                    if hasattr(_QUOTE_CACHE, "move_to_end"):
+                        _QUOTE_CACHE.move_to_end(k)
             while len(_QUOTE_CACHE) > _MAX_QUOTE_CACHE_ITEMS:
-                _QUOTE_CACHE.popitem(last=False)
+                if hasattr(_QUOTE_CACHE, "popitem"):
+                    try:
+                        _QUOTE_CACHE.popitem(last=False)
+                    except TypeError:
+                        _QUOTE_CACHE.popitem()
+                else:
+                    break
 
     # 6. Populate raw aliases so quotes["GOLD"] and quotes["MCX:GOLD"] both resolve
     final_result: dict[str, Quote] = dict(result)

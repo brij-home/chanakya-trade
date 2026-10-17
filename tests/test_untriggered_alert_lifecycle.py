@@ -250,7 +250,7 @@ def test_precursor_radar_does_not_pre_ignite():
         stop_loss=55200.0,
         target_level=56000.0,
     )
-    engine._alerts.append(radar)
+    engine._alerts = [radar]
 
     # Price at 55450.0 is 0.18% below trigger level 55551.75.
     # An asymmetric setup might pre-ignite within 0.25%, but PRECURSOR_RADAR must NOT pre-ignite!

@@ -161,10 +161,26 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         monkeypatch.setenv("OPENROUTER_API_KEY", "")
 
     try:
-        from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+        from collections import OrderedDict
+        import market.quotes as mq
 
-        with _quote_cache_lock:
-            _QUOTE_CACHE.clear()
+        if not isinstance(mq._QUOTE_CACHE, OrderedDict):
+            mq._QUOTE_CACHE = OrderedDict()
+        with mq._quote_cache_lock:
+            mq._QUOTE_CACHE.clear()
+    except Exception:
+        pass
+
+    try:
+        from market.fyers_tbt_manager import FyersTbtManager
+
+        tbt_mgr = FyersTbtManager()
+        tbt_mgr._connected = False
+        with tbt_mgr._depth_lock:
+            tbt_mgr._depth_cache.clear()
+        with tbt_mgr._slots_lock:
+            tbt_mgr._in_flight.clear()
+            tbt_mgr._scout.clear()
     except Exception:
         pass
 

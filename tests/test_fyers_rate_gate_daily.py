@@ -61,9 +61,11 @@ def test_get_quote_ws_only_skips_external_rest(monkeypatch):
             mock_called.append(instruments)
             return {}
 
+    from collections import OrderedDict
+
     monkeypatch.setattr("market.quotes.get_data_broker", lambda: MockBroker())
     monkeypatch.setattr("market.quotes._ws_quotes", lambda insts, **kwargs: {})
-    monkeypatch.setattr("market.quotes._QUOTE_CACHE", {})
+    monkeypatch.setattr("market.quotes._QUOTE_CACHE", OrderedDict())
 
     # Call with ws_only=True
     res = get_quote(["NSE:INFY", "NSE:RELIANCE"], ws_only=True)
