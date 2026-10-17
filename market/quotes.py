@@ -525,6 +525,23 @@ from config.market_universes import (
 )
 
 
+def is_yf_eligible(inst: str) -> bool:
+    """Return True only if instrument is an equity ticker eligible for Yahoo Finance fallback."""
+    clean = inst.split(":")[-1].strip().upper()
+    clean_deriv = clean.replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
+    if (
+        inst.startswith(("NFO:", "BFO:", "CRYPTO:", "BINANCE:", "BYBIT:", "COINBASE:"))
+        or clean in _CRYPTO_SYMBOLS
+        or clean in _MCX_SYMBOLS
+        or clean in _CDS_SYMBOLS
+        or _OPTION_PATTERN.match(clean)
+        or _OPTION_PATTERN.match(clean_deriv)
+        or _FUT_PATTERN.match(clean)
+    ):
+        return False
+    return True
+
+
 def _yf_fallback_quotes(
     instruments: list[str], *, correlation_id: Optional[str] = None
 ) -> dict[str, Quote]:
@@ -538,22 +555,7 @@ def _yf_fallback_quotes(
         if not yf_available() or is_yf_rate_limited():
             return {}
 
-        yf_eligible = [
-            i
-            for i in instruments
-            if not (
-                i.startswith("NFO:")
-                or i.startswith("BFO:")
-                or i.startswith("CRYPTO:")
-                or i.startswith("BINANCE:")
-                or i.split(":")[-1].upper() in _CRYPTO_SYMBOLS
-                or _OPTION_PATTERN.match(i.split(":")[-1])
-                or _OPTION_PATTERN.match(
-                    i.split(":")[-1].replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
-                )
-                or _FUT_PATTERN.match(i.split(":")[-1])
-            )
-        ]
+        yf_eligible = [i for i in instruments if is_yf_eligible(i)]
 
         if not yf_eligible:
             return {}
@@ -805,15 +807,17 @@ def get_quote(
                         fetched_external.update(opt_quotes)
                         rem_leaders = [i for i in leaders if i not in fetched_external]
 
-                # 3c. yfinance fallback
+                # 3c. yfinance fallback (only evaluate and record if instruments are eligible)
                 if rem_leaders:
-                    yf_quotes = _yf_fallback_quotes(rem_leaders, correlation_id=correlation_id)
-                    fetched_external.update(yf_quotes)
-                    if yf_quotes:
-                        get_registry().record_provider_success("yfinance")
-                    else:
-                        get_registry().record_provider_error("yfinance", is_stale=True)
-                    rem_leaders = [i for i in leaders if i not in fetched_external]
+                    yf_targets = [i for i in rem_leaders if is_yf_eligible(i)]
+                    if yf_targets:
+                        yf_quotes = _yf_fallback_quotes(yf_targets, correlation_id=correlation_id)
+                        fetched_external.update(yf_quotes)
+                        if yf_quotes:
+                            get_registry().record_provider_success("yfinance")
+                        else:
+                            get_registry().record_provider_error("yfinance", is_stale=True)
+                        rem_leaders = [i for i in leaders if i not in fetched_external]
 
                 # 3d. Futures fallback
                 if rem_leaders:
@@ -865,14 +869,35 @@ def get_quote(
             if sym_part not in final_result:
                 final_result[sym_part] = result[canon_key]
 
+    # Determine if any of the requested instruments belong to an actively open market
+    is_live_venue = False
+    try:
+        from market.calendar import is_market_open
+
+        for inst in canonical_instruments:
+            ex = inst.split(":")[0] if ":" in inst else "NSE"
+            if ex in ("CRYPTO", "BINANCE", "DERIBIT") or is_market_open(ex):
+                is_live_venue = True
+                break
+    except Exception:
+        is_live_venue = True
+
+    # If all requested instruments are on closed/off-market venues, an unfulfilled
+    # quote is expected off-market state rather than a live journey availability breach.
+    is_success = bool(result) or not is_live_venue
+
     get_registry().record_metric(
         "quote_fetch",
         latency_ms=(time.monotonic() - started) * 1000,
-        success=bool(result),
+        success=is_success,
         correlation_id=correlation_id,
         provider=get_data_broker_key() or "fallback",
-        error_type=None if result else "QUOTE_UNAVAILABLE",
-        metadata={"requested": len(canonical_instruments), "resolved": len(result)},
+        error_type=None if is_success else "QUOTE_UNAVAILABLE",
+        metadata={
+            "requested": len(canonical_instruments),
+            "resolved": len(result),
+            "off_market": not is_live_venue,
+        },
     )
     return final_result
 
