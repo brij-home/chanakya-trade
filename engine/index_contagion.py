@@ -404,8 +404,9 @@ class IndexContagionEngine:
             clean_idx = (
                 index_name.replace("NSE:", "").replace("BSE:", "").replace("INDEX:", "").upper()
             )
-            dl = get_daily_levels(clean_idx)
-            if dl:
+            s_date = now_iso[:10] if now_iso and len(now_iso) >= 10 else None
+            dl = get_daily_levels(clean_idx, session_date=s_date)
+            if dl and (not s_date or dl.session_date == s_date):
                 cam = dl.camarilla or {}
                 h5 = float(cam.get("h5", 0.0) or 0.0)
                 l5 = float(cam.get("l5", 0.0) or 0.0)
