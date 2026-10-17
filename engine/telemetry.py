@@ -134,6 +134,9 @@ def _load_recent_events_from_disk(limit: int = 250) -> None:
                     comp = data.get("component", "SYSTEM")
                     sev = data.get("severity", "INFO")
                     rsn = data.get("reason", "")
+                    # Suppress spurious Starlette SSE client disconnect artifacts from historical memory
+                    if "RuntimeError: No response returned." in rsn:
+                        continue
                     prio = data.get("priority")
                     if not prio or prio not in ("P0", "P1", "P2", "P3"):
                         prio = derive_priority(ev_type, comp, sev, rsn)
@@ -282,6 +285,22 @@ def record_exception(
     """
     Record an unhandled exception with full stack trace, system vitals, and unique incident_id.
     """
+    err_str = str(error)
+    # Ignore spurious Starlette SSE client disconnect artifacts
+    if (
+        "No response returned" in err_str
+        and context
+        and (
+            "stream" in context.get("path", "")
+            or "text/event-stream" in str(context.get("headers", {}).get("accept", "")).lower()
+        )
+    ):
+        return {
+            "incident_id": "DISCONNECT-IGNORED",
+            "error_type": type(error).__name__,
+            "error_message": err_str,
+        }
+
     now = datetime.now(timezone.utc)
     incident_id = f"ERR-{now.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
     tb_str = "".join(traceback.format_exception(type(error), error, error.__traceback__))
