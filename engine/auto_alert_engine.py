@@ -6287,19 +6287,29 @@ class AutoAlertEngine:
         now_date_str = now_dt.strftime("%Y-%m-%d")
         now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
 
+        from market.calendar import is_trading_day
+
         # Indian market hours for Equity/FNO: 09:15 to 15:30 IST.
         # MCX hours: 09:00 to 23:30 IST.
         # CDS hours: 09:00 to 17:00 IST.
         is_equity_closed = (
-            now_dt.hour > 15
+            not is_trading_day(now_dt.date(), exchange="NSE")
+            or now_dt.hour > 15
             or (now_dt.hour == 15 and now_dt.minute >= 30)
             or now_dt.hour < 9
             or (now_dt.hour == 9 and now_dt.minute < 15)
         )
         is_mcx_closed = (
-            now_dt.hour > 23 or (now_dt.hour == 23 and now_dt.minute >= 30) or now_dt.hour < 9
+            not is_trading_day(now_dt.date(), exchange="MCX")
+            or now_dt.hour > 23
+            or (now_dt.hour == 23 and now_dt.minute >= 30)
+            or now_dt.hour < 9
         )
-        is_cds_closed = now_dt.hour >= 17 or now_dt.hour < 9
+        is_cds_closed = (
+            not is_trading_day(now_dt.date(), exchange="CDS")
+            or now_dt.hour >= 17
+            or now_dt.hour < 9
+        )
 
         resolved = []
         intraday_types = {
@@ -6438,8 +6448,13 @@ class AutoAlertEngine:
 
             exch = (alert.exchange or "NSE").upper()
 
-            # 2. In live environments, only dispatch during the actual session-close window for that exchange
+            # 2. In live environments, only dispatch during the actual session-close window on official trading days
             if not is_test_runner:
+                from market.calendar import is_trading_day
+
+                if not is_trading_day(now_dt.date(), exchange=exch):
+                    continue
+
                 if exch == "MCX":
                     # MCX close window: 23:30 to 23:59 IST
                     if not (now_dt.hour == 23 and now_dt.minute >= 30):
@@ -6644,9 +6659,14 @@ class AutoAlertEngine:
 
         market_filter = (market or "ALL").upper().strip()
 
+        from market.calendar import is_trading_day
+
+        is_equity_trading_day = is_trading_day(now_dt.date(), exchange="NSE")
+        is_mcx_trading_day = is_trading_day(now_dt.date(), exchange="MCX")
+
         # ── 1. Indian Equity / FNO 15:10 IST pre-squareoff window ──────
         in_equity_window = (
-            (now_dt.hour == 15 and 10 <= now_dt.minute <= 14)
+            (is_equity_trading_day and now_dt.hour == 15 and 10 <= now_dt.minute <= 14)
             or (is_test_runner and market_filter in ("ALL", "EQUITY", "FNO"))
             or (force and market_filter in ("ALL", "EQUITY", "FNO"))
         )
@@ -6655,7 +6675,7 @@ class AutoAlertEngine:
 
         # ── 2. MCX Commodity 23:10 IST pre-squareoff window ───────────
         in_mcx_window = (
-            (now_dt.hour == 23 and 10 <= now_dt.minute <= 14)
+            (is_mcx_trading_day and now_dt.hour == 23 and 10 <= now_dt.minute <= 14)
             or (is_test_runner and market_filter in ("ALL", "MCX", "COMMODITY"))
             or (force and market_filter in ("ALL", "MCX", "COMMODITY"))
         )
@@ -6742,6 +6762,11 @@ class AutoAlertEngine:
                 ):
                     continue
 
+                # Prior-session alerts must never be treated as today's active intraday positions
+                is_prior_date = bool(a.created_at and a.created_at[:10] < today_str)
+                if is_prior_date:
+                    continue
+
                 exch = (a.exchange or "NSE").upper()
                 is_commodity = (
                     exch == "MCX"
@@ -6749,12 +6774,24 @@ class AutoAlertEngine:
                     or getattr(a, "segment", "") == "COMMODITY"
                 )
 
+                # Multi-session swing setups are explicitly excluded from intraday MIS squareoff warnings
+                is_multi_session = getattr(a, "time_horizon", "") in (
+                    "SWING",
+                    "SWING_SHORT",
+                    "SWING_MID",
+                    "LONG_TERM",
+                    "POSITIONAL",
+                    "MULTIBAGGER",
+                ) or getattr(a, "setup_style", "") in ("SWING", "POSITIONAL")
+
                 if is_commodity:
                     if not eval_mcx:
                         continue
-                    is_intra = a.alert_type in commodity_intraday_types or getattr(
-                        a, "time_horizon", "INTRADAY"
-                    ) in ("INTRADAY", "SCALP", "INTRADAY_SCALP_ONLY")
+                    is_intra = (not is_multi_session) and (
+                        a.alert_type in commodity_intraday_types
+                        or getattr(a, "time_horizon", "INTRADAY")
+                        in ("INTRADAY", "SCALP", "INTRADAY_SCALP_ONLY")
+                    )
                     if is_intra:
                         open_mcx_positions.append(_calc_pnl_and_pos(a))
                 else:
@@ -6762,9 +6799,11 @@ class AutoAlertEngine:
                         continue
                     if exch not in ("NSE", "NFO", "BSE"):
                         continue
-                    is_intra = a.alert_type in intraday_types or getattr(
-                        a, "time_horizon", "INTRADAY"
-                    ) in ("INTRADAY", "SCALP", "INTRADAY_SCALP_ONLY")
+                    is_intra = (not is_multi_session) and (
+                        a.alert_type in intraday_types
+                        or getattr(a, "time_horizon", "INTRADAY")
+                        in ("INTRADAY", "SCALP", "INTRADAY_SCALP_ONLY")
+                    )
                     if is_intra:
                         open_equity_positions.append(_calc_pnl_and_pos(a))
 
@@ -6913,8 +6952,14 @@ class AutoAlertEngine:
             or ("PYTEST_CURRENT_TEST" in os.environ)
         )
 
+        from market.calendar import is_trading_day
+
+        is_equity_day = is_trading_day(now_dt.date(), exchange="NSE")
+
         in_time_window = (
-            (now_dt.hour == 15 and 35 <= now_dt.minute <= 45) or is_test_runner or force
+            (is_equity_day and now_dt.hour == 15 and 35 <= now_dt.minute <= 45)
+            or is_test_runner
+            or force
         )
         if not in_time_window:
             return None
@@ -6925,7 +6970,9 @@ class AutoAlertEngine:
         try:
             from engine.alert_postmortem_runner import run_eod_alert_postmortems
 
-            report = run_eod_alert_postmortems(auto_engine=self, force=True, broadcast=True)
+            report = run_eod_alert_postmortems(auto_engine=self, force=force, broadcast=True)
+            if report.get("status") in ("SKIPPED_WEEKEND_OR_HOLIDAY", "SKIPPED_MARKET_OPEN"):
+                return None
             self._eod_session_reviewed_date = today_str
             logger.info(
                 f"[AutoAlertEngine] 🏁 EOD Session Scorecard generated and broadcast for {report.get('processed_count', 0)} alerts."
@@ -10008,9 +10055,12 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
         now_dt = datetime.now(IST)
-        # Only run during active equity/NFO session (09:16 – 15:10 IST)
-        is_active_session = (now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 16)) and (
-            now_dt.hour < 15 or (now_dt.hour == 15 and now_dt.minute <= 10)
+        from market.calendar import is_market_open
+
+        # Only run during active equity/NFO session (09:16 – 15:10 IST) on open trading days
+        is_active_session = is_market_open("FNO", ref_dt=now_dt) and (
+            (now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 16))
+            and (now_dt.hour < 15 or (now_dt.hour == 15 and now_dt.minute <= 10))
         )
         is_test_runner = (
             os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
@@ -10439,9 +10489,12 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
         now_dt = datetime.now(IST)
-        # Only run during active equity/NFO session (09:16 – 15:10 IST)
-        is_active_session = (now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 16)) and (
-            now_dt.hour < 15 or (now_dt.hour == 15 and now_dt.minute <= 10)
+        from market.calendar import is_market_open
+
+        # Only run during active equity/NFO session (09:16 – 15:10 IST) on open trading days
+        is_active_session = is_market_open("FNO", ref_dt=now_dt) and (
+            (now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 16))
+            and (now_dt.hour < 15 or (now_dt.hour == 15 and now_dt.minute <= 10))
         )
         is_test_runner = (
             os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
@@ -10927,11 +10980,14 @@ class AutoAlertEngine:
             return []
 
         now_dt = datetime.now(IST)
+        from market.calendar import is_market_open
+
         is_test_runner = (
             os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
         )
-        is_active = (now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 16)) and (
-            now_dt.hour < 15 or (now_dt.hour == 15 and now_dt.minute <= 15)
+        is_active = is_market_open("FNO", ref_dt=now_dt) and (
+            (now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 16))
+            and (now_dt.hour < 15 or (now_dt.hour == 15 and now_dt.minute <= 15))
         )
         if not is_active and not is_test_runner:
             return []
@@ -11815,14 +11871,23 @@ class AutoAlertEngine:
         while self._is_running and not self._stop_event.is_set():
             try:
                 now_ist = datetime.now(IST)
-                # Active equity/NFO index window: 09:15:05 - 15:10 IST
+                from market.calendar import is_market_open
+
+                # Active equity/NFO index window: 09:15:05 - 15:10 IST on official trading days
                 is_active_index_window = (
-                    now_ist.hour > 9
-                    or (
-                        now_ist.hour == 9
-                        and (now_ist.minute > 15 or (now_ist.minute == 15 and now_ist.second >= 5))
+                    is_market_open("NSE", ref_dt=now_ist)
+                    and (
+                        now_ist.hour > 9
+                        or (
+                            now_ist.hour == 9
+                            and (
+                                now_ist.minute > 15
+                                or (now_ist.minute == 15 and now_ist.second >= 5)
+                            )
+                        )
                     )
-                ) and (now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute <= 10))
+                    and (now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute <= 10))
+                )
 
                 from engine.alert_preferences import alert_preferences
 
@@ -11871,8 +11936,10 @@ class AutoAlertEngine:
 
                 # MCX Commodity Fast Scan during Golden Hours (17:30 - 22:30 IST)
                 is_golden_hours_window = (
-                    now_ist.hour > 17 or (now_ist.hour == 17 and now_ist.minute >= 30)
-                ) and (now_ist.hour < 22 or (now_ist.hour == 22 and now_ist.minute <= 30))
+                    is_market_open("MCX", ref_dt=now_ist)
+                    and (now_ist.hour > 17 or (now_ist.hour == 17 and now_ist.minute >= 30))
+                    and (now_ist.hour < 22 or (now_ist.hour == 22 and now_ist.minute <= 30))
+                )
                 commodity_allowed = not alert_preferences.is_segment_globally_disabled("COMMODITY")
                 if is_golden_hours_window and commodity_allowed:
                     try:

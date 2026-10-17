@@ -255,9 +255,20 @@ def run_eod_alert_postmortems(
     }
 
     if not force:
-        # Require after-market execution (after 15:30 IST) on weekdays
+        # Require that today is an official trading day and post-market (after 15:30 IST)
+        from market.calendar import is_trading_day
+
+        if not is_trading_day(now_ist.date(), exchange="NSE"):
+            report["status"] = "SKIPPED_WEEKEND_OR_HOLIDAY"
+            report["reason"] = (
+                f"Today ({now_ist.strftime('%Y-%m-%d')}) is not an active exchange trading day. "
+                "EOD session scorecard skipped."
+            )
+            logger.info("[AlertPostMortem] %s", report["reason"])
+            return report
+
         hhmm = now_ist.hour * 100 + now_ist.minute
-        if now_ist.weekday() < 5 and hhmm < 1530:
+        if hhmm < 1530:
             report["status"] = "SKIPPED_MARKET_OPEN"
             report["reason"] = "Market is still open (pre-15:30 IST). Use force=True to override."
             logger.info("[AlertPostMortem] %s", report["reason"])
