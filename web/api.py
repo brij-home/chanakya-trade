@@ -1099,7 +1099,11 @@ async def get_system_health_hub(
     storage_bd = await asyncio.to_thread(get_storage_breakdown)
 
     # Compute single truth overall health status
-    if incident_counts.get("P0", 0) > 0 or cb_diag.get("state") == "OPEN":
+    if (
+        incident_counts.get("P0", 0) > 0
+        or cb_diag.get("state") == "OPEN"
+        or provider_health.get("overall_health") == "UNHEALTHY"
+    ):
         overall_status = "CRITICAL"
     elif (
         incident_counts.get("P1", 0) > 0
