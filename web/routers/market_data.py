@@ -72,8 +72,10 @@ async def get_market_regime():
                 "active_detectors": gov.active_detectors,
                 "summary": gov.summary,
             }
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         return {
             "status": "ok",
@@ -191,8 +193,8 @@ async def run_mover_autopsy(payload: Optional[dict] = None):
                 "traps_filtered": autopsy.traps_filtered,
             },
         )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}")
 
     return {"status": "ok", "data": autopsy.to_dict()}
 
@@ -259,8 +261,8 @@ async def run_asymmetric_opportunities_scan(payload: Optional[dict] = None):
                 "top_opportunity": opps[0].symbol if opps else None,
             },
         )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}")
 
     return {"status": "ok", "data": [o.to_dict() for o in opps]}
 
@@ -300,13 +302,15 @@ async def get_market_depth_endpoint(symbol: str):
     brk = None
     try:
         brk = get_data_broker()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}")
     if not brk:
         try:
             brk = get_execution_broker()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     if brk and hasattr(brk, "get_market_depth"):
         depth = await asyncio.to_thread(brk.get_market_depth, clean)
@@ -1258,8 +1262,10 @@ async def get_index_adaptive_regime_endpoint(symbol: Optional[str] = "NIFTY"):
         df_5m = None
         try:
             df_5m = get_ohlcv(clean, days=5, timeframe="5m")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[web.routers.market_data] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         decision = evaluate_index_adaptive_regime(
             underlying=clean,

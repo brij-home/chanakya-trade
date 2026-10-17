@@ -17,6 +17,10 @@ update it here only.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("config.encoding")
+
 
 import sys
 
@@ -35,5 +39,5 @@ def fix_windows_console() -> None:
         if stream and hasattr(stream, "reconfigure"):
             try:
                 stream.reconfigure(encoding="utf-8", errors="replace")
-            except Exception:
-                pass  # Stream may be None or not support reconfigure (e.g. pytest capture)
+            except Exception as e_suppressed:
+                logger.debug(f"[config.encoding] Non-fatal exception suppressed: {e_suppressed}")

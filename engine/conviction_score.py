@@ -458,8 +458,10 @@ def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
                     from market.indices import get_vix
 
                     vix_now = get_vix()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.conviction_score] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if vix_now is None or vix_now <= 0:
             res = FactorScore(
@@ -546,8 +548,10 @@ def _score_gex_posture(
             gex_data = get_gex_analysis(underlying)
             if isinstance(gex_data, dict) and gex_data.get("regime"):
                 gex_posture = str(gex_data["regime"]).upper()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.conviction_score] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     score = 5
     details = []
@@ -946,8 +950,10 @@ def _score_sector_rotation(underlying: str = "NIFTY", symbol: str = "") -> Facto
                         raw_value=float(tailwind_score),
                         axis="TIMING",
                     )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.conviction_score] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Fallback: index-to-sector mapping for index options/derivatives
         sector_map = {
@@ -1072,8 +1078,10 @@ def _score_event_calendar() -> FactorScore:
                             high_impact.append(name)
                         elif impact in ("MEDIUM",):
                             medium_impact.append(name)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.conviction_score] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         if not high_impact and not medium_impact:
             score = 9
@@ -1210,8 +1218,8 @@ def _check_veto_conditions(
                 reason=f"⛔ VETO: Options data state is {data_state} — cannot compute reliable signal",
             )
 
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.conviction_score] Non-fatal exception suppressed: {e_suppressed}")
 
     return VetoResult(vetoed=False)
 
@@ -1274,8 +1282,8 @@ def get_conviction_score(
         fii_streak_total = flow.fii_streak_total
         if vix is None:
             pass  # will be fetched inside _score_india_vix_regime
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.conviction_score] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Run all 12 factors ───────────────────────────────────────────────────
     factors = [

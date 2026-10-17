@@ -181,8 +181,10 @@ def detect_afternoon_thrust(
             avg_v = float(np.mean(vols[:-1]))
             if avg_v > 0:
                 rvol_val = max(rvol_val, round(cur_v / avg_v, 2))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.detectors.afternoon_thrust] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # Recent candle momentum
     last_bar = df_today.iloc[-1]

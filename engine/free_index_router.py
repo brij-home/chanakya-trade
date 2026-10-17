@@ -59,8 +59,10 @@ class FreeIndexRouter:
             pref_id = alert_preferences.get_free_index_chat_id()
             if pref_id:
                 return pref_id
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.free_index_router] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         # In live production runtime, default to the canonical Free Index Channel ID.
         # In test environments (CHANAKYA_TESTING=1), return None unless explicitly set.
@@ -215,8 +217,10 @@ class FreeIndexRouter:
                                 f"Option SL distance ({opt_risk:.1f} pts) exceeds intraday ceiling ({max_opt_sl_pts:.1f} pts)"
                             )
                             return False
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.free_index_router] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # 2. Spot Stop Loss distance check
             spot_p = float(
@@ -242,8 +246,10 @@ class FreeIndexRouter:
                                 f"Spot SL distance ({spot_risk:.1f} pts) exceeds intraday ceiling ({max_spot_sl_pts:.1f} pts)"
                             )
                             return False
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.free_index_router] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             return True
         except Exception as e:

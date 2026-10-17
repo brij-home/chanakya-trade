@@ -117,3 +117,40 @@ def test_circuit_breaker_manual_controls():
     cb.reset()
     assert cb.state == CircuitState.CLOSED
     assert cb.is_tripped() is False
+
+
+def test_memory_and_storage_host_vitals():
+    """Verify host vitals metrics contract for OpsDeck."""
+    from engine.maintenance import get_storage_breakdown
+    from engine.memory_guard import get_memory_status
+
+    mem = get_memory_status().to_dict()
+    assert "used_ram_pct" in mem
+    assert "system_ram_pct" in mem
+    assert "process_rss_mb" in mem
+    assert mem["system_ram_pct"] == mem["used_ram_pct"]
+
+    storage = get_storage_breakdown().to_dict()
+    assert "free_ssd_gb" in storage
+    assert "ssd_free_gb" in storage
+    assert "total_size_mb" in storage
+    assert "wal_mb" in storage
+    assert "tiers" in storage
+    assert "business" in storage["tiers"]
+    assert "wal_mb" in storage["tiers"]["business"]
+
+
+def test_fundamental_snapshot_and_scheduler_sync():
+    """Verify get_fundamental_snapshot export and batch synchronization."""
+    from analysis.fundamental import get_fundamental_snapshot
+    from engine.data_sync_scheduler import data_sync_scheduler
+
+    snap = get_fundamental_snapshot("INFY", fast=True)
+    if snap:
+        assert isinstance(snap, dict)
+        assert "symbol" in snap
+
+    res = data_sync_scheduler.sync_weekly_fundamentals(limit=1)
+    assert res["status"] == "SUCCESS"
+    assert "fundamentals_saved" in res
+    assert "forensics_saved" in res

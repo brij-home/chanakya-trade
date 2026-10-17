@@ -136,21 +136,21 @@ def close_http_pools() -> None:
         if _SHARED_CLIENT is not None:
             try:
                 _SHARED_CLIENT.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.http_pool] Non-fatal exception suppressed: {e_suppressed}")
             _SHARED_CLIENT = None
 
         if _NSE_CLIENT is not None:
             try:
                 _NSE_CLIENT.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.http_pool] Non-fatal exception suppressed: {e_suppressed}")
             _NSE_CLIENT = None
             _NSE_LAST_INIT = 0.0
 
         if _BINANCE_CLIENT is not None:
             try:
                 _BINANCE_CLIENT.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.http_pool] Non-fatal exception suppressed: {e_suppressed}")
             _BINANCE_CLIENT = None

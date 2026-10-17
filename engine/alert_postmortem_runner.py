@@ -217,8 +217,10 @@ def broadcast_eod_scorecard(scorecard: dict[str, Any]) -> None:
         from web.sse import event_bus
 
         event_bus.publish_sync("eod_scorecard", scorecard)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[engine.alert_postmortem_runner] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
 
 def run_eod_alert_postmortems(

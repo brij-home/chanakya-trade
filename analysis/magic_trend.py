@@ -30,6 +30,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.magic_trend")
+
 
 from dataclasses import asdict, dataclass, field
 import os
@@ -371,16 +375,16 @@ def calculate_magic_trend_score(
             align = get_stock_tailwind(clean_sym)
             sector = align.sector
             sector_tailwind = align.tailwind_score
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.magic_trend] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             from analysis.forensic import audit_company_forensics
 
             f_audit = audit_company_forensics(clean_sym)
             forensic_safe = f_audit.overall_forensic_verdict in ("CLEAN_PASS", "MILD_WARNING")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.magic_trend] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             from analysis.fundamental import analyse
@@ -401,8 +405,8 @@ def calculate_magic_trend_score(
                     market_cap = snap.market_cap
                 if snap.pe is not None:
                     pe_ratio = snap.pe
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.magic_trend] Non-fatal exception suppressed: {e_suppressed}")
 
     # 4. Compute 3-Axis Scores
     score_x, ax_x = _evaluate_axis_x_quality(

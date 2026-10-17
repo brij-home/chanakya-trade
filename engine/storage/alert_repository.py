@@ -120,7 +120,18 @@ class AlertRepository:
                             exc_info=True,
                         )
 
-                # Atomic persistence: write to sibling PID-tagged temp file then atomic replace
+                # Primary durability: Commit to institutional SQLite WAL alert store first
+                if not (
+                    "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("CHANAKYA_TESTING") == "1"
+                ):
+                    try:
+                        from engine.sqlite_store import alert_sqlite_store
+
+                        alert_sqlite_store.save_alerts_batch(alerts_snapshot)
+                    except Exception as e_sql:
+                        logger.warning(f"[AlertRepository] SQLite store save error: {e_sql}")
+
+                # Secondary snapshot: write to sibling PID-tagged temp file then atomic replace for human-readable JSON
                 if is_test_env:
                     payload = json.dumps(data, indent=2)
                 else:
@@ -142,19 +153,26 @@ class AlertRepository:
                 finally:
                     if temp_path.exists():
                         temp_path.unlink(missing_ok=True)
-
-                # Dual-write to institutional SQLite WAL alert store (skip under test harness)
-                if not (
-                    "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("CHANAKYA_TESTING") == "1"
-                ):
-                    try:
-                        from engine.sqlite_store import alert_sqlite_store
-
-                        alert_sqlite_store.save_alerts_batch(alerts_snapshot)
-                    except Exception as e_sql:
-                        logger.warning(f"[AlertRepository] SQLite store save error: {e_sql}")
             except Exception as e:
                 logger.warning(f"[AlertRepository] save error: {e}")
+
+    def save_single_alert(self, alert: AutoAlert) -> None:
+        """
+        Microsecond row-level ACID upsert directly into SQLite WAL store.
+        Bypasses monolithic full-array JSON serialization on the high-frequency tick path.
+        """
+        is_test_env = bool(
+            os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+        )
+        if not is_test_env:
+            try:
+                from engine.sqlite_store import alert_sqlite_store
+
+                alert_sqlite_store.save_alert(alert)
+            except Exception as e_sql:
+                logger.warning(
+                    f"[AlertRepository] Failed row-level SQLite upsert for {getattr(alert, 'alert_id', 'UNKNOWN')}: {e_sql}"
+                )
 
     def load(self) -> list[AutoAlert]:
         """
@@ -177,8 +195,10 @@ class AlertRepository:
                             f"{target_path.name}.corrupt.{int(time.time())}"
                         )
                         os.replace(target_path, backup_path)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
         if not data:
             is_test_env = (
@@ -258,8 +278,10 @@ class AlertRepository:
                         from engine.learning_engine import pattern_learning_engine
 
                         pattern_learning_engine.clear_symbol_lockout(a.symbol)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
         if rehab_count > 0:
             self.save(alerts)
@@ -361,10 +383,14 @@ class AlertRepository:
                                     exp_dt = datetime.strptime(exp_str, fmt).date()
                                     dte = (exp_dt - datetime.now(IST).date()).days
                                     break
-                                except ValueError:
-                                    pass
-                        except Exception:
-                            pass
+                                except ValueError as e_suppressed:
+                                    logger.debug(
+                                        f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
+                                    )
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
                     if oi < 15000:
                         purged += 1
@@ -409,8 +435,10 @@ class AlertRepository:
                 clean_ts = a.created_at.replace(" IST", "").strip()[:10]
                 try:
                     ts_date = datetime.strptime(clean_ts, "%Y-%m-%d").date()
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[engine.storage.alert_repository] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             today_d = datetime.now(IST).date()
             if ts_date and ts_date < today_d:
                 is_swing = (getattr(a, "time_horizon", "") or "").upper() in (

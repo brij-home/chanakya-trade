@@ -13,6 +13,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.options_scanner")
+
 
 from typing import Optional
 
@@ -187,8 +191,10 @@ def scan_options(
                                         "oi_change_pct": round(oi_chg_pct, 1),
                                     }
                                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.options_scanner] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         except Exception:
             continue

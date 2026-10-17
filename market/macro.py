@@ -16,6 +16,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.macro")
+
 
 from dataclasses import dataclass
 from typing import Optional
@@ -105,8 +109,8 @@ def get_macro_snapshot() -> MacroSnapshot:
                 natural_gas=cached.get("natural_gas"),
                 natural_gas_change=cached.get("natural_gas_change"),
             )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.macro] Non-fatal exception suppressed: {e_suppressed}")
 
     # Tier 1.5: Unified Global Macro Engine (reuses cached or live macro pipeline)
     try:
@@ -137,8 +141,8 @@ def get_macro_snapshot() -> MacroSnapshot:
             )
             if snap.usdinr or snap.crude_oil or snap.gold:
                 return snap
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.macro] Non-fatal exception suppressed: {e_suppressed}")
 
     try:
         from market.yfinance_provider import _get_yf
@@ -154,8 +158,8 @@ def get_macro_snapshot() -> MacroSnapshot:
             prev = float(info.get("previousClose", 0) or info.get("previous_close", 0) or 0)
             if snap.usdinr and prev:
                 snap.usdinr_change = round((snap.usdinr - prev) / prev * 100, 2)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.macro] Non-fatal exception suppressed: {e_suppressed}")
 
         # Brent Crude
         try:
@@ -165,8 +169,8 @@ def get_macro_snapshot() -> MacroSnapshot:
             prev = float(info.get("previousClose", 0) or info.get("previous_close", 0) or 0)
             if snap.crude_oil and prev:
                 snap.crude_change = round((snap.crude_oil - prev) / prev * 100, 2)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.macro] Non-fatal exception suppressed: {e_suppressed}")
 
         # Gold
         try:
@@ -176,8 +180,8 @@ def get_macro_snapshot() -> MacroSnapshot:
             prev = float(info.get("previousClose", 0) or info.get("previous_close", 0) or 0)
             if snap.gold and prev:
                 snap.gold_change = round((snap.gold - prev) / prev * 100, 2)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.macro] Non-fatal exception suppressed: {e_suppressed}")
 
         # US 10Y — change shown in basis points (yield moves in bps, not %)
         try:
@@ -187,8 +191,8 @@ def get_macro_snapshot() -> MacroSnapshot:
             prev = float(info.get("previousClose", 0) or info.get("previous_close", 0) or 0)
             if snap.us_10y and prev:
                 snap.us_10y_change = round((snap.us_10y - prev) * 100, 1)  # bps
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.macro] Non-fatal exception suppressed: {e_suppressed}")
 
         # DXY
         try:
@@ -198,8 +202,8 @@ def get_macro_snapshot() -> MacroSnapshot:
             prev = float(info.get("previousClose", 0) or info.get("previous_close", 0) or 0)
             if snap.dxy and prev:
                 snap.dxy_change = round((snap.dxy - prev) / prev * 100, 2)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.macro] Non-fatal exception suppressed: {e_suppressed}")
 
         # Henry Hub Natural Gas
         try:
@@ -209,8 +213,8 @@ def get_macro_snapshot() -> MacroSnapshot:
             prev = float(info.get("previousClose", 0) or info.get("previous_close", 0) or 0)
             if snap.natural_gas and prev:
                 snap.natural_gas_change = round((snap.natural_gas - prev) / prev * 100, 2)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.macro] Non-fatal exception suppressed: {e_suppressed}")
 
         # Save to macro cache (15-min TTL)
         try:
@@ -234,8 +238,8 @@ def get_macro_snapshot() -> MacroSnapshot:
                 },
                 ttl_minutes=15,
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.macro] Non-fatal exception suppressed: {e_suppressed}")
 
         return snap
     except Exception:

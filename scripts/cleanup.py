@@ -10,6 +10,10 @@ Safely discovers and terminates:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("scripts.cleanup")
+
 
 import os
 import sys
@@ -22,8 +26,8 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[scripts.cleanup] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def is_port_in_use(port: int = 8765) -> bool:
@@ -62,8 +66,12 @@ def cleanup_orphaned_processes() -> int:
                 if is_xdist_worker or is_stale_uvicorn or is_stale_pytest:
                     proc.kill()
                     killed_count += 1
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                pass
+            except (
+                psutil.NoSuchProcess,
+                psutil.AccessDenied,
+                psutil.ZombieProcess,
+            ) as e_suppressed:
+                logger.debug(f"[scripts.cleanup] Non-fatal exception suppressed: {e_suppressed}")
     except ImportError:
         # Fallback using PowerShell CIM on Windows
         if sys.platform == "win32":
@@ -83,8 +91,8 @@ def cleanup_orphaned_processes() -> int:
                 out = subprocess.check_output(cmd, text=True)
                 pids = [int(line.strip()) for line in out.splitlines() if line.strip().isdigit()]
                 killed_count = len(pids)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[scripts.cleanup] Non-fatal exception suppressed: {e_suppressed}")
     return killed_count
 
 
@@ -109,8 +117,8 @@ def release_port(port: int = 8765) -> bool:
             out = subprocess.check_output(cmd, text=True)
             if out.strip():
                 released = True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[scripts.cleanup] Non-fatal exception suppressed: {e_suppressed}")
     return released
 
 
@@ -137,8 +145,8 @@ def cleanup_stale_cache_files() -> int:
 
                     shutil.rmtree(p, ignore_errors=True)
                     cleaned += 1
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[scripts.cleanup] Non-fatal exception suppressed: {e_suppressed}")
     return cleaned
 
 

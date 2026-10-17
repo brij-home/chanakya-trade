@@ -102,58 +102,85 @@ def analyze_order_flow(symbol: str, timeframe: str = "5m") -> OrderFlowSnapshot:
     # 1. Fetch live LTP
     ltp = float(get_ltp(f"NSE:{clean_sym}") or get_ltp(clean_sym) or 0.0)
 
-    # 2. Fetch L2 Market Depth from Data Broker (Fyers)
+    market_state = "OFFLINE"
     total_buy = 0
     total_sell = 0
-    top_bids: List[Dict[str, Any]] = []
-    top_asks: List[Dict[str, Any]] = []
+    top_bids: list[dict[str, Any]] = []
+    top_asks: list[dict[str, Any]] = []
     micro_price = ltp
     spread = 0.0
     spread_pct = 0.0
     imbalance = 0.0
-    market_state = "DEGRADED"
 
-    broker = None
+    # 2. Check live streaming BisectDepthBook in RAM first (sub-millisecond streaming depth)
     try:
-        broker = get_data_broker()
-    except Exception:
-        pass
+        from market.order_book import get_depth_book
 
-    if broker and hasattr(broker, "get_market_depth"):
+        live_book = get_depth_book(clean_sym)
+        if live_book.best_bid > 0 and live_book.best_ask > 0:
+            market_state = "LIVE"
+            total_buy = live_book.total_bid_qty
+            total_sell = live_book.total_ask_qty
+            top_bids = [
+                {"price": b["price"], "volume": b["quantity"], "orders": b["orders"]}
+                for b in live_book.get_bids(5)
+            ]
+            top_asks = [
+                {"price": a["price"], "volume": a["quantity"], "orders": a["orders"]}
+                for a in live_book.get_asks(5)
+            ]
+            micro_price = live_book.micro_price
+            spread = live_book.spread
+            spread_pct = (spread / live_book.best_bid) * 100.0 if live_book.best_bid > 0 else 0.0
+            imbalance = live_book.obi(5)
+            if live_book.rolling_tick_vwap > 0:
+                ltp = live_book.rolling_tick_vwap
+    except Exception as e_mem:
+        logger.debug(f"Failed querying in-memory depth book for {clean_sym}: {e_mem}")
+
+    # Fallback to REST broker depth if in-memory stream not populated
+    if market_state != "LIVE":
+        broker = None
         try:
-            depth_data = broker.get_market_depth(clean_sym)
-            if depth_data.get("status") == "ok":
-                market_state = "LIVE"
-                total_buy = int(depth_data.get("total_buy_qty", 0) or 0)
-                total_sell = int(depth_data.get("total_sell_qty", 0) or 0)
-                top_bids = depth_data.get("bids", [])[:5]
-                top_asks = depth_data.get("asks", [])[:5]
+            broker = get_data_broker()
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.order_flow] Non-fatal exception suppressed: {e_suppressed}")
 
-                if depth_data.get("ltp") and depth_data["ltp"] > 0:
-                    ltp = float(depth_data["ltp"])
+        if broker and hasattr(broker, "get_market_depth"):
+            try:
+                depth_data = broker.get_market_depth(clean_sym)
+                if depth_data.get("status") == "ok":
+                    market_state = "LIVE"
+                    total_buy = int(depth_data.get("total_buy_qty", 0) or 0)
+                    total_sell = int(depth_data.get("total_sell_qty", 0) or 0)
+                    top_bids = depth_data.get("bids", [])[:5]
+                    top_asks = depth_data.get("asks", [])[:5]
 
-                # Calculate Micro-Price & Spread
-                if top_bids and top_asks:
-                    best_bid = float(top_bids[0].get("price", 0.0) or 0.0)
-                    best_ask = float(top_asks[0].get("price", 0.0) or 0.0)
-                    bid_vol = float(top_bids[0].get("volume", 1.0) or 1.0)
-                    ask_vol = float(top_asks[0].get("volume", 1.0) or 1.0)
+                    if depth_data.get("ltp") and depth_data["ltp"] > 0:
+                        ltp = float(depth_data["ltp"])
 
-                    if best_bid > 0 and best_ask > 0:
-                        spread = max(0.0, best_ask - best_bid)
-                        spread_pct = (spread / best_bid) * 100.0 if best_bid > 0 else 0.0
-                        tot_vol = bid_vol + ask_vol
-                        micro_price = (
-                            (best_ask * bid_vol + best_bid * ask_vol) / tot_vol
-                            if tot_vol > 0
-                            else ltp
-                        )
+                    # Calculate Micro-Price & Spread
+                    if top_bids and top_asks:
+                        best_bid = float(top_bids[0].get("price", 0.0) or 0.0)
+                        best_ask = float(top_asks[0].get("price", 0.0) or 0.0)
+                        bid_vol = float(top_bids[0].get("volume", 1.0) or 1.0)
+                        ask_vol = float(top_asks[0].get("volume", 1.0) or 1.0)
 
-                tot_depth = total_buy + total_sell
-                if tot_depth > 0:
-                    imbalance = (total_buy - total_sell) / tot_depth
-        except Exception as e:
-            logger.warning(f"Error reading depth for {clean_sym}: {e}")
+                        if best_bid > 0 and best_ask > 0:
+                            spread = max(0.0, best_ask - best_bid)
+                            spread_pct = (spread / best_bid) * 100.0 if best_bid > 0 else 0.0
+                            tot_vol = bid_vol + ask_vol
+                            micro_price = (
+                                (best_ask * bid_vol + best_bid * ask_vol) / tot_vol
+                                if tot_vol > 0
+                                else ltp
+                            )
+
+                    tot_depth = total_buy + total_sell
+                    if tot_depth > 0:
+                        imbalance = (total_buy - total_sell) / tot_depth
+            except Exception as e:
+                logger.warning(f"Error reading depth for {clean_sym}: {e}")
 
     bid_ask_ratio = round(total_buy / max(1, total_sell), 2) if total_sell > 0 else 1.0
 

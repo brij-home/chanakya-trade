@@ -8,6 +8,10 @@ All prices in INR. Rates in decimals (0.065 = 6.5%).
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.options")
+
 
 import math
 from dataclasses import dataclass, field
@@ -157,8 +161,8 @@ def compute_greeks(
                 iv=iv,
                 iv_pct=round(iv * 100, 2),
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.options] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Analytical fallback (own Black-Scholes) ───────────────
     return _bs_greeks_manual(spot, strike, t, rate, ltp, option_type)

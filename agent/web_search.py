@@ -23,6 +23,10 @@ The function never raises — it returns an empty list on total failure.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("agent.web_search")
+
 
 import os
 from dataclasses import dataclass
@@ -100,8 +104,8 @@ def web_search(
             return _dispatch(provider.lower(), query, limit)
         except ValueError:
             raise  # unknown provider name → propagate
-        except Exception:
-            pass  # provider failed (network / key error) → try auto-select below
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.web_search] Non-fatal exception suppressed: {e_suppressed}")
 
     # Auto-select: first provider whose API key is configured
     for name, key_env in [

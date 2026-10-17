@@ -57,13 +57,22 @@ PRICE_TIER_RULES: list[PriceTierRule] = [
         description="Sub-₹100 low-ticket equities & F&O underlyings (SUZLON, IRFC, IDEA, YESBANK). Prevents inverted R:R.",
     ),
     PriceTierRule(
-        tier_name="SMALL_MID_100_500",
+        tier_name="SMALL_MID_100_250",
         min_price=100.0,
+        max_price=250.0,
+        abs_min_risk_pts=0.25,
+        min_opt_premium=1.00,
+        tick_size=0.01,
+        description="Sub-₹250 liquid equities under SEBI 1-paisa tick size mandate (TATASTEEL, BEL, BHEL, IOC).",
+    ),
+    PriceTierRule(
+        tier_name="SMALL_MID_100_500",
+        min_price=250.0,
         max_price=500.0,
         abs_min_risk_pts=0.50,
         min_opt_premium=1.50,
         tick_size=0.05,
-        description="Small-to-mid liquid equities (TATASTEEL, BEL, ITC, DELHIVERY, RVNL).",
+        description="Small-to-mid liquid equities ₹250-₹500 (ITC, DELHIVERY, RVNL, TATAPOWER).",
     ),
     PriceTierRule(
         tier_name="MID_LARGE_500_2500",
@@ -231,8 +240,8 @@ def get_vix_regime_multiplier(vix: Optional[float] = None) -> tuple[float, str]:
             reg = get_cached_regime()
             if reg and reg.vix:
                 vix = float(reg.vix)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.dynamic_risk] Non-fatal exception suppressed: {e_suppressed}")
 
     if vix is None or vix <= 0:
         return 1.0, "NORMAL_MARKET"

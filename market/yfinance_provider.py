@@ -482,8 +482,10 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
                     with _quote_cache_lock:
                         _quote_cache[cache_key] = (now, bse_q)
                     return bse_q
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.yfinance_provider] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         change = round(last_price - prev_close, 2) if prev_close else 0
         change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
@@ -519,8 +521,10 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
                         with _quote_cache_lock:
                             _quote_cache[cache_key] = (now, bse_q)
                         return bse_q
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.yfinance_provider] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             with _dead_ticker_lock:
                 if ticker not in _DEAD_TICKER_CACHE:  # first detection — log it
                     logger.warning(
@@ -593,8 +597,10 @@ def yf_get_quotes(instruments: list[str]) -> dict[str, Quote]:
                 inst_key, quote_obj = fut.result()
                 if quote_obj:
                     result[inst_key] = quote_obj
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.yfinance_provider] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
     return result
 
@@ -729,8 +735,10 @@ def yf_get_ohlcv(
                     )
                     if bse_rows:
                         return bse_rows
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.yfinance_provider] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             return []
 
         # ── MCX Commodity USD → INR conversion for OHLCV ────────────────
@@ -787,8 +795,10 @@ def yf_get_ohlcv(
                     )
                     if bse_rows:
                         return bse_rows
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.yfinance_provider] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             with _dead_ticker_lock:
                 _DEAD_TICKER_CACHE[ticker] = time.time()
         elif (

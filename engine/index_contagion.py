@@ -579,8 +579,10 @@ class IndexContagionEngine:
             if m:
                 try:
                     leader_chgs.append(abs(float(m.group(1))))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.index_contagion] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         avg_lead_chg = (sum(leader_chgs) / len(leader_chgs)) if leader_chgs else 0.0
         if avg_lead_chg >= 0.8:
             conf_score += 10.0

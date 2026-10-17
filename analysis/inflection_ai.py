@@ -22,6 +22,10 @@ Includes deterministic quantitative fallback adhering to AGENTS.md (zero blank c
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.inflection_ai")
+
 
 import json
 import os
@@ -38,13 +42,13 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.inflection_ai] Non-fatal exception suppressed: {e_suppressed}")
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.inflection_ai] Non-fatal exception suppressed: {e_suppressed}")
 
 from analysis.big_move import analyze_options_flow
 from analysis.forensic import audit_company_forensics
@@ -356,20 +360,20 @@ def generate_inflection_decision(
     macro_report = None
     try:
         macro_report = fetch_global_macro_report(nifty_spot=setup.ltp)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.inflection_ai] Non-fatal exception suppressed: {e_suppressed}")
 
     forensic_rep = None
     try:
         forensic_rep = audit_company_forensics(clean_sym)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.inflection_ai] Non-fatal exception suppressed: {e_suppressed}")
 
     options_flow = None
     try:
         options_flow = analyze_options_flow(clean_sym, ltp=setup.ltp, exchange=exchange)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.inflection_ai] Non-fatal exception suppressed: {e_suppressed}")
 
     # Live quote fetch for real-time truthfulness
     live_ltp = None
@@ -387,8 +391,8 @@ def generate_inflection_decision(
             live_as_of = str(
                 getattr(q, "received_at", "") or datetime.now(timezone.utc).isoformat()
             )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.inflection_ai] Non-fatal exception suppressed: {e_suppressed}")
 
     # 3. If testing or offline, return deterministic quantitative synthesis directly
     if os.environ.get("CHANAKYA_TESTING") or not (
@@ -519,7 +523,10 @@ Respond ONLY with a valid JSON object with these exact keys:
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
-                ]
+                ],
+                enable_tools=False,
+                stream=False,
+                max_tokens=1500,
             )
             response_text = res if isinstance(res, str) else getattr(res, "text", str(res))
 
@@ -555,8 +562,8 @@ Respond ONLY with a valid JSON object with these exact keys:
                 live_data_state=live_data_state,
                 live_as_of=live_as_of,
             )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.inflection_ai] Non-fatal exception suppressed: {e_suppressed}")
 
     # Fallback if parsing or call fails
     return _build_deterministic_5w_decision(
@@ -622,8 +629,27 @@ def answer_inflection_chat(
                         "answer": ans,
                         "status": "success",
                     }
-        except Exception:
-            pass
+                elif hasattr(provider, "chat"):
+                    ans = provider.chat(
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are ChanakyaTrade Inflection Copilot. Connect dots authoritatively.",
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        enable_tools=False,
+                        stream=False,
+                        max_tokens=600,
+                    )
+                    return {
+                        "symbol": clean_sym,
+                        "question": question,
+                        "answer": ans,
+                        "status": "success",
+                    }
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.inflection_ai] Non-fatal exception suppressed: {e_suppressed}")
 
     # Deterministic contextual answer fallback
     q_lower = question.lower()

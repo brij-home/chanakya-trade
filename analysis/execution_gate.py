@@ -27,6 +27,10 @@ Rules:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.execution_gate")
+
 
 import sys
 from dataclasses import asdict, dataclass, field
@@ -37,8 +41,10 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.execution_gate] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
 import pandas as pd
 
@@ -305,8 +311,10 @@ def evaluate_execution_gate(
                 val = float(atr_s.dropna().iloc[-1])
                 if val > 0:
                     atr_val = val
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.execution_gate] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     atr = atr_val if atr_val is not None else round(ltp * 0.015, 2)
     raw_stop = round(max(ltp * 0.85, ltp - (1.5 * atr)), 2)
@@ -371,16 +379,20 @@ def evaluate_execution_gate(
             from engine.auto_alert_engine import auto_alert_engine
 
             auto_alert_engine.ingest_execution_gate_report(report)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.execution_gate] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         try:
             from bot.telegram_bot import push_execution_alert
 
             push_execution_alert(report.to_dict())
             report.telegram_sent = True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.execution_gate] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     return report
 

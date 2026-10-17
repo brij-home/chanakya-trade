@@ -337,8 +337,10 @@ def detect_commodity_breakouts(
                 c_ago = float(df_5m.iloc[-4]["close"])
                 if c_ago > 0:
                     roc_15m = round(((ltp - c_ago) / c_ago * 100), 2)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.commodity] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Compute Relative Volume (RVOL) early against 20-bar rolling average
         if df_5m is not None and len(df_5m) >= 20:
@@ -966,8 +968,10 @@ def detect_commodity_breakouts(
                     smc_tags.append("Bullish Engulfing Expansion")
                 elif is_bearish and (c_c < c_o) and (p_c > p_o) and (c_c <= p_o) and (c_o >= p_c):
                     smc_tags.append("Bearish Engulfing Expansion")
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.commodity] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if smc_report is not None:
             if smc_report.confirmation_confirmed and smc_report.confirmation_candle:
@@ -1437,8 +1441,10 @@ def detect_commodity_breakouts(
                             dte = (exp_date - _date.today()).days
                             if dte <= 5:
                                 dte_warning = f"⚠️ THETA RISK: Only {dte} DTE — rapid premium decay."
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.detectors.commodity] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                     opt_prem = float(getattr(closest_opt, "last_price", 0.0))
                     opt_risk = round(max(1.0, min(opt_prem * 0.35, risk_pts * 0.52)), 1)

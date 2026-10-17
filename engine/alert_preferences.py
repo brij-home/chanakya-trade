@@ -1020,8 +1020,10 @@ class AlertPreferencesManager:
                     effective_min_conf = min(
                         effective_min_conf, int(os.environ["TELEGRAM_MIN_CONFIDENCE"])
                     )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_preferences] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             if conf < effective_min_conf:
                 return False, f"Confidence {conf}% below {channel} threshold {effective_min_conf}%"

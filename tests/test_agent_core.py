@@ -492,3 +492,45 @@ class TestKeyPoolThreadSafety:
             futures = [executor.submit(worker, i) for i in range(8)]
             for f in futures:
                 f.result()
+
+
+class TestOpenAIContextFailover:
+    """Verify that 413 / request too large triggers model failover without putting keys on cooldown."""
+
+    def test_413_tpm_triggers_model_failover(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key-1,sk-test-key-2")
+        mock_sdk = MagicMock()
+        mock_client_1 = MagicMock()
+        mock_client_2 = MagicMock()
+        mock_sdk.OpenAI.side_effect = [mock_client_1, mock_client_2]
+
+        err_413 = RuntimeError(
+            "Error code: 413 - {'error': {'message': 'Request too large for model `openai/gpt-oss-120b` on tokens per minute (TPM): Limit 8000, Requested 8705'}}"
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [
+            MagicMock(message=MagicMock(content="fallback success", tool_calls=None))
+        ]
+
+        def completions_create(**kwargs):
+            if kwargs.get("model") == "openai/gpt-oss-120b":
+                raise err_413
+            return mock_resp
+
+        mock_client_1.chat.completions.create.side_effect = completions_create
+        mock_client_2.chat.completions.create.side_effect = completions_create
+
+        with patch.dict("sys.modules", {"openai": mock_sdk}):
+            from agent.core import OpenAIProvider
+            from agent.tools import ToolRegistry
+
+            p = OpenAIProvider(
+                model="openai/gpt-oss-120b,qwen/qwen3.8-27b",
+                registry=ToolRegistry(),
+                system_prompt="test",
+            )
+
+            res = p.chat(messages=[{"role": "user", "content": "analyze"}], stream=False)
+            assert res == "fallback success"
+            assert p.is_pool_available() is True

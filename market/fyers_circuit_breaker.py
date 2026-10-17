@@ -135,8 +135,10 @@ class FyersCircuitBreaker:
                     from market.fyers_rate_gate import get_fyers_rate_gate
 
                     get_fyers_rate_gate().record_external_exhaustion()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.fyers_circuit_breaker] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             elif is_rate_limit:
                 trip_needed = True
                 self._active_cooldown_sec = (

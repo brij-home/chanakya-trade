@@ -189,8 +189,10 @@ def get_active_index_options_grid(num_strikes_per_side: int = 8) -> list[str]:
         fin_p = get_ltp("NSE:FINNIFTY-INDEX") or get_ltp("FINNIFTY")
         if fin_p and fin_p > 0:
             estimated_spots["FINNIFTY"] = ("NSE", fin_p, 50, max(4, num_strikes_per_side - 3))
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[market.ws_subscription_manager] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
     grid: list[str] = []
     for idx_name, (exch, spot, step, n_stk) in estimated_spots.items():
@@ -227,8 +229,10 @@ def get_active_index_options_grid(num_strikes_per_side: int = 8) -> list[str]:
                     grid.append(ce)
                 if pe not in grid:
                     grid.append(pe)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[market.ws_subscription_manager] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
     return grid
 
@@ -262,8 +266,10 @@ def get_active_commodity_grid() -> list[str]:
 
         cl = get_ltp("MCX:CRUDEOIL") or 6500.0
         crude_atm = int(round(cl / 50.0) * 50)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[market.ws_subscription_manager] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
     for offset in (-2, -1, 0, 1, 2):
         stk = crude_atm + (offset * 50)
@@ -377,8 +383,10 @@ class WsSubscriptionManager:
                 if temp.exists():
                     try:
                         temp.unlink()
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[market.ws_subscription_manager] Non-fatal exception suppressed: {e_suppressed}"
+                        )
         except Exception as exc:
             logger.warning(f"[WsSubManager] Failed saving disk subscriptions: {exc}", exc_info=True)
 

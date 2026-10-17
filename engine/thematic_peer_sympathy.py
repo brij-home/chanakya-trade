@@ -51,8 +51,10 @@ def _extract_float(obj: Any, *attr_names: str, default: float = 0.0) -> float:
         ):
             try:
                 return float(val)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.thematic_peer_sympathy] Non-fatal exception suppressed: {e_suppressed}"
+                )
     return default
 
 

@@ -17,6 +17,10 @@ when called with use_agent=False — useful for testing without API keys.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("app.commands.morning_brief")
+
 
 from datetime import datetime
 import pytz
@@ -113,14 +117,14 @@ def _run_raw() -> None:
     # ── Personal watchlist (from memory) ──────────────────────
     try:
         _print_memory_watchlist()
-    except Exception:
-        pass  # non-blocking
+    except Exception as e_suppressed:
+        logger.debug(f"[app.commands.morning_brief] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Actionable agenda ─────────────────────────────────────
     try:
         _print_actionable_agenda(fii_data, breadth_data)
-    except Exception:
-        pass  # non-blocking
+    except Exception as e_suppressed:
+        logger.debug(f"[app.commands.morning_brief] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Perplexity Finance macro context (best-effort) ────────
     try:
@@ -138,8 +142,8 @@ def _run_raw() -> None:
                     )
             else:
                 console.print(f"[dim]Finance data unavailable: {result.error}[/dim]")
-    except Exception:
-        pass  # finance context is always best-effort
+    except Exception as e_suppressed:
+        logger.debug(f"[app.commands.morning_brief] Non-fatal exception suppressed: {e_suppressed}")
 
 
 # ── Raw display helpers ───────────────────────────────────────
@@ -361,8 +365,8 @@ def _print_actionable_agenda(fii_data=None, breadth_data=None) -> None:
         if with_targets:
             sym = with_targets[0].symbol
             agenda.append(("📍", f"Revisit open setup: {sym} — stop/target was set at analysis"))
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[app.commands.morning_brief] Non-fatal exception suppressed: {e_suppressed}")
 
     if not agenda:
         return

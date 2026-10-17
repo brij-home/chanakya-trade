@@ -265,8 +265,10 @@ class SingleFlightCache(Generic[T]):
 
         try:
             asyncio.create_task(_bg_coro())
-        except RuntimeError:
-            pass
+        except RuntimeError as e_suppressed:
+            logger.debug(
+                f"[market.single_flight_cache] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     def _put_locked(self, key: str, value: T) -> None:
         """Store value with LRU eviction under self._lock."""

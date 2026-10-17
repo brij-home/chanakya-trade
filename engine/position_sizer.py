@@ -12,6 +12,10 @@ Includes Indian market lot-size rounding for F&O underlying derivatives.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.position_sizer")
+
 
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -214,8 +218,8 @@ def get_lot_size(symbol: str) -> int:
         vc = get_verified_contract(symbol)
         if vc and int(vc.get("lot_size", 0)) > 0:
             return int(vc["lot_size"])
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.position_sizer] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. Extract underlying and resolve from canonical lot sizes
     und = extract_underlying_symbol(symbol)
@@ -295,8 +299,8 @@ def calculate_position_size(
             _reg = get_cached_regime()
             if _reg and _reg.vix:
                 vix = float(_reg.vix)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.position_sizer] Non-fatal exception suppressed: {e_suppressed}")
 
     if vix is not None and vix > 0:
         if vix >= 25.0:
@@ -329,8 +333,8 @@ def calculate_position_size(
             elif getattr(_cached_reg, "is_locomotive_polarized", False):
                 effective_risk_pct = round(effective_risk_pct * 0.50, 2)
                 vix_note += " [LOCOMOTIVE POLARIZATION: Risk scaled down 50%]"
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.position_sizer] Non-fatal exception suppressed: {e_suppressed}")
 
     # Dollar risk budget
     risk_budget = capital * (effective_risk_pct / 100.0)
@@ -437,8 +441,8 @@ def calculate_volatility_risk_parity_size(
                 )
                 if avail > 0:
                     capital = avail
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.position_sizer] Non-fatal exception suppressed: {e_suppressed}")
         if capital is None or capital <= 0:
             capital = 100000.0
 
@@ -448,8 +452,8 @@ def calculate_volatility_risk_parity_size(
             from market.quotes import get_ltp
 
             entry_price = float(get_ltp(f"NSE:{clean_sym}") or get_ltp(clean_sym) or 0.0)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.position_sizer] Non-fatal exception suppressed: {e_suppressed}")
         if entry_price is None or entry_price <= 0:
             entry_price = 100.0
 
@@ -466,8 +470,8 @@ def calculate_volatility_risk_parity_size(
                     val = float(atr_series.iloc[-1])
                     if val > 0:
                         atr = val
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.position_sizer] Non-fatal exception suppressed: {e_suppressed}")
         if atr is None or atr <= 0:
             atr = max(round(entry_price * 0.015, 2), 1.0)
 

@@ -5,6 +5,10 @@ provenance, bounded delivery, reconnect visibility and safe degradation.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("market.streaming")
+
 
 import queue
 import threading
@@ -22,8 +26,8 @@ def _timestamp_from_epoch(value: Any) -> Optional[str]:
         numeric = float(value)
         if numeric > 0:
             return datetime.fromtimestamp(numeric, tz=timezone.utc).isoformat()
-    except (TypeError, ValueError, OSError):
-        pass
+    except (TypeError, ValueError, OSError) as e_suppressed:
+        logger.debug(f"[market.streaming] Non-fatal exception suppressed: {e_suppressed}")
     return None
 
 
@@ -114,8 +118,8 @@ class MarketDataStreamRegistry:
             try:
                 if int(event.sequence) > int(previous.sequence) + 1:
                     flags.add("SEQUENCE_GAP")
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[market.streaming] Non-fatal exception suppressed: {e_suppressed}")
         state = (
             "DEGRADED"
             if {"NON_POSITIVE_PRICE", "CROSSED_MARKET"}.intersection(flags)
@@ -137,9 +141,9 @@ class MarketDataStreamRegistry:
             from market.tick_store import tick_archive
 
             tick_archive.record(event)
-        except Exception:
+        except Exception as e_suppressed:
             # Recording is best-effort and must not affect the market-data path.
-            pass
+            logger.debug(f"[market.streaming] Non-fatal exception suppressed: {e_suppressed}")
         with self._lock:
             self._latest[event.canonical_instrument_id] = event
             callbacks = tuple(self._callbacks)
@@ -149,8 +153,8 @@ class MarketDataStreamRegistry:
             try:
                 self._queue.get_nowait()
                 self._queue.put_nowait(event)
-            except queue.Empty:
-                pass
+            except queue.Empty as e_suppressed:
+                logger.debug(f"[market.streaming] Non-fatal exception suppressed: {e_suppressed}")
             self._dropped_events += 1
         for callback in callbacks:
             try:

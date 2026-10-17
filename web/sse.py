@@ -55,10 +55,10 @@ class SSEEventBus:
                     q.get_nowait()
                     q.put_nowait(data)
                     count += 1
-                except Exception:
-                    pass
-            except Exception:
-                pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[web.sse] Non-fatal exception suppressed: {e_suppressed}")
+            except Exception as e_suppressed:
+                logger.debug(f"[web.sse] Non-fatal exception suppressed: {e_suppressed}")
         if count > 0 or queues:
             logger.debug(
                 f"[SSEEventBus] Dispatched {channel} event to {count}/{len(queues)} queues"
@@ -90,8 +90,8 @@ class SSEEventBus:
                 logger.info(
                     f"[SSEEventBus] Subscriber disconnected from '{channel}' (remaining={len(self._channels[channel])})"
                 )
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[web.sse] Non-fatal exception suppressed: {e_suppressed}")
 
     def publish_sync(self, channel: str, data: dict) -> None:
         """Thread-safe publish from sync code (e.g. background polling threads)."""

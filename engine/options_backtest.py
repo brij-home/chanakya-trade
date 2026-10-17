@@ -14,6 +14,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.options_backtest")
+
 
 import math
 from abc import ABC, abstractmethod
@@ -617,8 +621,10 @@ class OptionsBacktester:
         # VIX data (India VIX from yfinance)
         try:
             self._vix_data = get_ohlcv("INDIA VIX", days=days)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.options_backtest] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         if self._vix_data is None or self._vix_data.empty:
             # Fallback: compute realized vol as IV proxy

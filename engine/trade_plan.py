@@ -252,8 +252,8 @@ def calculate_trade_plan(
             q = get_live_quote(clean_sym)
             if q and getattr(q, "ltp", None) and q.ltp > 0:
                 ltp = float(q.ltp)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.trade_plan] Non-fatal exception suppressed: {e_suppressed}")
 
     if ltp <= 0:
         # Fallback to index approximation if completely disconnected
@@ -963,8 +963,8 @@ def calculate_trade_plan(
                         f"Intraday Range Exhaustion: {adr_consumed:.0f}% of daily ADR consumed. "
                         f"Continuation expectancy severely degraded; high probability of mean-reversion trap."
                     )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.trade_plan] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── 8. Dynamic Velocity-Derived ETA Engine ─────────────────────────────────
     # In Indian markets, 1 trading day = 375 minutes (09:15 to 15:30 IST) = 75 five-minute bars
@@ -1083,8 +1083,8 @@ def calculate_trade_plan(
         is_stock_phys_week = is_monthly_physical_expiry_week(
             exp_d.strftime("%Y-%m-%d"), symbol=clean_sym, ref_dt=now
         )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.trade_plan] Non-fatal exception suppressed: {e_suppressed}")
 
     if is_stock_phys_week:
         options_recommended_structure = "DEFINED_RISK_SPREAD"

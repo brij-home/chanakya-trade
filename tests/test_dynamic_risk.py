@@ -28,12 +28,21 @@ def test_resolve_price_tier_across_all_bands():
     assert t1.tier_name == "SUB_100_MICRO"
     assert t1.abs_min_risk_pts == 0.10
     assert t1.min_opt_premium == 0.50
+    assert t1.tick_size == 0.01
 
-    # ₹100 - ₹500 Mid
+    # ₹100 - ₹250 Liquid Equities (SEBI 1-Paisa Tick Size Mandate)
+    t_sub250 = resolve_price_tier(185.0)
+    assert t_sub250.tier_name == "SMALL_MID_100_250"
+    assert t_sub250.abs_min_risk_pts == 0.25
+    assert t_sub250.min_opt_premium == 1.00
+    assert t_sub250.tick_size == 0.01
+
+    # ₹250 - ₹500 Mid
     t2 = resolve_price_tier(395.0)
     assert t2.tier_name == "SMALL_MID_100_500"
     assert t2.abs_min_risk_pts == 0.50
     assert t2.min_opt_premium == 1.50
+    assert t2.tick_size == 0.05
 
     # ₹500 - ₹2,500 Core Heavyweight
     t3 = resolve_price_tier(1450.0)

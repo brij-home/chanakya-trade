@@ -99,11 +99,13 @@ export default function SystemHealthPill({ onOpenDrawer, onOpenOpsDeck }) {
 
   const p0Count = healthData?.incident_counts?.P0 || 0
   const p1Count = healthData?.incident_counts?.P1 || 0
+  const activeP0 = healthData?.active_incident_counts?.P0 ?? (healthData?.overall_status === 'HEALTHY' ? 0 : p0Count)
+  const activeP1 = healthData?.active_incident_counts?.P1 ?? (healthData?.overall_status === 'HEALTHY' ? 0 : p1Count)
   const cb = healthData?.circuit_breaker || {}
   const cbState = cb.state || 'CLOSED'
   const isCbTripped = cbState === 'OPEN'
   const isDailyExhausted = !!cb.daily_quota_exhausted
-  const overall = healthData?.overall_status || (isCbTripped || p0Count > 0 ? 'CRITICAL' : p1Count > 0 ? 'DEGRADED' : 'HEALTHY')
+  const overall = healthData?.overall_status || (isCbTripped || activeP0 > 0 ? 'CRITICAL' : activeP1 > 0 ? 'DEGRADED' : 'HEALTHY')
 
   let badgeColor = 'var(--color-emerald)'
   let badgeBg = 'rgba(0, 214, 143, 0.12)'
@@ -111,7 +113,7 @@ export default function SystemHealthPill({ onOpenDrawer, onOpenOpsDeck }) {
   let label = 'NOMINAL'
   let subText = ''
 
-  if (overall === 'CRITICAL' || isCbTripped || p0Count > 0) {
+  if (overall === 'CRITICAL' || isCbTripped || activeP0 > 0) {
     badgeColor = 'var(--color-rose)'
     badgeBg = 'rgba(255, 79, 123, 0.18)'
     badgeBorder = 'var(--color-rose)'
@@ -120,13 +122,13 @@ export default function SystemHealthPill({ onOpenDrawer, onOpenOpsDeck }) {
     } else if (isCbTripped) {
       label = cooldownRemaining > 0 ? `BREAKER (${cooldownRemaining}s)` : 'BREAKER OPEN'
     } else {
-      label = `CRITICAL (${p0Count})`
+      label = `CRITICAL (${activeP0})`
     }
-  } else if (overall === 'DEGRADED' || p1Count > 0 || cbState === 'HALF_OPEN') {
+  } else if (overall === 'DEGRADED' || activeP1 > 0 || cbState === 'HALF_OPEN') {
     badgeColor = 'var(--color-gold)'
     badgeBg = 'rgba(245, 166, 35, 0.15)'
     badgeBorder = 'var(--color-gold)'
-    label = cbState === 'HALF_OPEN' ? 'PROBING' : `DEGRADED (${p1Count})`
+    label = cbState === 'HALF_OPEN' ? 'PROBING' : activeP1 > 0 ? `DEGRADED (${activeP1})` : 'DEGRADED'
   }
 
   return (

@@ -265,8 +265,8 @@ def evaluate_hbcm(
                 )
                 if c_vwap and c_vwap > 0:
                     vwap = float(c_vwap)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.hbcm] Non-fatal exception suppressed: {e_suppressed}")
 
         # 5m candle close vs open
         c_5m = None
@@ -288,8 +288,8 @@ def evaluate_hbcm(
                     col_o = "open" if "open" in df_5m.columns else "Open"
                     c_5m = float(df_5m[col_c].iloc[-1])
                     o_5m = float(df_5m[col_o].iloc[-1])
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.hbcm] Non-fatal exception suppressed: {e_suppressed}")
 
         # Freshness & live trading verification:
         # A constituent requires a valid live price to establish institutional confluence.

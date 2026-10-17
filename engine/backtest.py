@@ -23,6 +23,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.backtest")
+
 
 import math
 from abc import ABC, abstractmethod
@@ -911,8 +915,8 @@ class Backtester:
             from engine.quantstats_report import calculate_robustness_score
 
             oos_robustness = calculate_robustness_score(daily_returns)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.backtest] Non-fatal exception suppressed: {e_suppressed}")
 
         return BacktestResult(
             symbol=self.symbol,
@@ -1398,8 +1402,8 @@ def run_backtest(
             strategy = strategy_store.load_strategy(strategy_name)
             bt = Backtester(symbol=symbol, period=period, capital=capital)
             return bt.run(strategy)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.backtest] Non-fatal exception suppressed: {e_suppressed}")
 
         # Check options strategies
         try:
@@ -1407,8 +1411,8 @@ def run_backtest(
 
             if strategy_name.lower() in OPTIONS_STRATEGIES:
                 return run_options_backtest(symbol, strategy_name, strategy_args, period, capital)
-        except ImportError:
-            pass
+        except ImportError as e_suppressed:
+            logger.debug(f"[engine.backtest] Non-fatal exception suppressed: {e_suppressed}")
 
         raise ValueError(
             f"Unknown strategy: {strategy_name}. Available: {', '.join(STRATEGIES.keys())}"
@@ -1536,8 +1540,8 @@ def walk_forward_test(
                         "max_dd": result.max_drawdown,
                     }
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.backtest] Non-fatal exception suppressed: {e_suppressed}")
 
         current += timedelta(days=window_days)
 

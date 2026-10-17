@@ -49,8 +49,10 @@ def evaluate_alert_invalidation(
             try:
                 created_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
                 break
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
     if not is_test_runner and created_dt:
         now_ist = datetime.now(IST)
@@ -120,8 +122,8 @@ def evaluate_alert_invalidation(
 
             if not is_market_open(exch):
                 return None
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}")
 
     # 0b. Time-Stop for unignited EARLY_WARNING setups (Requires live market quote due diligence)
     if (
@@ -1051,8 +1053,10 @@ def evaluate_alert_targets_and_trailing(
             if m:
                 try:
                     entry = float(m.group(0).replace(",", ""))
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if not entry and plan.get("entry_range"):
                 matches = re.findall(r"[\d,]+(?:\.\d+)?", str(plan["entry_range"]))
                 if len(matches) >= 2:
@@ -1065,13 +1069,17 @@ def evaluate_alert_targets_and_trailing(
                             / 2.0,
                             2,
                         )
-                    except ValueError:
-                        pass
+                    except ValueError as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 elif len(matches) == 1:
                     try:
                         entry = float(matches[0].replace(",", ""))
-                    except ValueError:
-                        pass
+                    except ValueError as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                        )
         if not entry:
             # For pure option setups (OPTIONS_MOMENTUM, GAMMA_BLAST, INDEX_CALL_SETUP, etc.), trigger_level
             # is the immutable entry premium recorded at creation time and is far more reliable than
@@ -1130,8 +1138,10 @@ def evaluate_alert_targets_and_trailing(
             if m:
                 try:
                     entry = float(m.group(0).replace(",", ""))
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if not entry and plan.get("entry_range"):
                 matches = re.findall(r"[\d,]+(?:\.\d+)?", str(plan["entry_range"]))
                 if len(matches) >= 2:
@@ -1144,13 +1154,17 @@ def evaluate_alert_targets_and_trailing(
                             / 2.0,
                             2,
                         )
-                    except ValueError:
-                        pass
+                    except ValueError as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 elif len(matches) == 1:
                     try:
                         entry = float(matches[0].replace(",", ""))
-                    except ValueError:
-                        pass
+                    except ValueError as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                        )
         if not entry and getattr(alert, "trigger_level", None) and alert.trigger_level > 0:
             entry = alert.trigger_level
         if not entry:
@@ -1191,8 +1205,10 @@ def evaluate_alert_targets_and_trailing(
         if m_sl:
             try:
                 stop = float(m_sl.group(0).replace(",", ""))
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                )
     if not stop:
         stop = round(entry * 0.98 if is_bullish else entry * 1.02, 2)
 
@@ -1690,8 +1706,10 @@ def evaluate_alert_targets_and_trailing(
                 rec_spot_stop = float(
                     re.findall(r"[\d.]+", str(spot_entry_raw).replace(",", ""))[0]
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         spot_trail_note = f" | 🏛️ Spot Trail: {rec_spot_stop:,.1f}" if rec_spot_stop else ""
         trail_label = (
@@ -2054,8 +2072,10 @@ def evaluate_alert_targets_and_trailing(
                                 risk_reduction_pct=round(risk_reduction, 1),
                             )
                     break
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
     # Rule 4D: Velocity Time-Stop & Coiling Stagnation Protocol
     # 1. Defined-risk spreads (Bull Call / Bear Put) are theta-hedged by their short leg and strictly exempt from velocity scratches.
@@ -2443,13 +2463,17 @@ def evaluate_alert_in_flight_decay(
                         (float(m_ent[0].replace(",", "")) + float(m_ent[1].replace(",", ""))) / 2.0,
                         2,
                     )
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             elif len(m_ent) == 1:
                 try:
                     entry = float(m_ent[0].replace(",", ""))
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         if not entry and getattr(alert, "trigger_level", None) and alert.trigger_level > 0:
             entry = alert.trigger_level
         if not entry:
@@ -2474,8 +2498,10 @@ def evaluate_alert_in_flight_decay(
                     raw_opt_p = get_ltp(c_sym)
                     if raw_opt_p and 0 < raw_opt_p <= (entry * 3.5):
                         resolved_opt_ltp = raw_opt_p
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if resolved_opt_ltp:
                 current_ltp = resolved_opt_ltp
             else:
@@ -2493,8 +2519,10 @@ def evaluate_alert_in_flight_decay(
         if m_sl:
             try:
                 stop = float(m_sl.group(0).replace(",", ""))
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                )
     if not stop and getattr(alert, "stop_loss", None) and alert.stop_loss > 0:
         stop = alert.stop_loss
 
@@ -2597,8 +2625,8 @@ def evaluate_alert_in_flight_decay(
         try:
             created_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
             break
-        except ValueError:
-            pass
+        except ValueError as e_suppressed:
+            logger.debug(f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}")
 
     if created_dt:
         now_dt = datetime.now(IST)
@@ -2635,8 +2663,10 @@ def evaluate_alert_in_flight_decay(
                     elif exp_d > now_dt.date():
                         has_future_exp = True
                     break
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         if not is_0dte and not has_future_exp and exp_type != "MONTHLY":
             if (
@@ -2787,8 +2817,10 @@ def evaluate_alert_in_flight_decay(
                     clean_sym, f"NSE:{raw_sym}" if ":" not in raw_sym else raw_sym
                 )
                 spot_price = get_ltp(lookup)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                )
     else:
         spot_price = current_ltp
 
@@ -2797,8 +2829,10 @@ def evaluate_alert_in_flight_decay(
         if isinstance(alert.metrics, dict) and alert.metrics.get("vwap"):
             try:
                 effective_vwap = float(alert.metrics["vwap"])
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if not effective_vwap or effective_vwap <= 0:
             try:
                 from market.quotes import get_quote
@@ -2814,8 +2848,10 @@ def evaluate_alert_in_flight_decay(
                 q_res = get_quote([lookup])
                 if q_res and getattr(q_res.get(lookup), "vwap", 0):
                     effective_vwap = float(q_res[lookup].vwap)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
     if spot_price and spot_price > 0 and effective_vwap and effective_vwap > 0:
         # Cross-Sanity Feed Guard:

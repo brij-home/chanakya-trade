@@ -192,8 +192,8 @@ class DriftReport:
                 correction_event["actions_taken"].append(
                     f"Analyst {self.worst_analyst} flagged (accuracy {self.analyst_accuracy[self.worst_analyst].get('accuracy', 0):.0f}% < 35%)"
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.drift] Non-fatal exception suppressed: {e_suppressed}")
 
         correction_event["correction_applied"] = len(correction_event["actions_taken"]) > 0
         if correction_event["correction_applied"]:

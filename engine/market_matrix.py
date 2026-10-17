@@ -380,6 +380,8 @@ def get_market_matrix() -> MarketMatrix:
                     from engine.memory_guard import register_trim_callback
 
                     register_trim_callback(_global_matrix.clear)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.market_matrix] Non-fatal exception suppressed: {e_suppressed}"
+                    )
     return _global_matrix

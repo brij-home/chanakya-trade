@@ -404,9 +404,10 @@ def get_current_ist_time(now_utc: Optional[datetime] = None) -> datetime:
     return utc_dt.astimezone(IST_OFFSET)
 
 
-def resolve_canonical_instrument(query: str) -> CanonicalInstrument:
+def resolve_canonical_instrument(query: str, price: Optional[float] = None) -> CanonicalInstrument:
     """
     Resolve and normalize any user/symbol query into a canonical instrument master record.
+    Respects SEBI 1-paisa tick size rule for cash equities <= ₹250 when price is known.
 
     Examples:
         "RELIANCE"       → NSE:RELIANCE:EQUITY (Lot: 1, Tick: 0.05)
@@ -514,6 +515,8 @@ def resolve_canonical_instrument(query: str) -> CanonicalInstrument:
         )
 
     # Default: NSE/BSE Cash Equity (Always trades in units of 1 share)
+    # SEBI Circular: Cash equities trading at <= ₹250 have 1-paisa (₹0.01) tick size.
+    equity_tick = 0.01 if (price is not None and price <= 250.0) else 0.05
     return CanonicalInstrument(
         instrument_id=f"{venue}:{clean_sym}:EQUITY",
         symbol=clean_sym,
@@ -521,7 +524,7 @@ def resolve_canonical_instrument(query: str) -> CanonicalInstrument:
         segment="EQUITY",
         instrument_type="EQUITY",
         lot_size=1,
-        tick_size=0.05,
+        tick_size=equity_tick,
         currency="INR",
         is_tradable=True,
         status="ACTIVE",

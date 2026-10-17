@@ -135,6 +135,38 @@ export default function OpsDeckView() {
     }
   }
 
+  const handleTriggerFundamentalsSync = async () => {
+    try {
+      setActionInProgress('sync_fundamentals')
+      addToast({
+        title: 'Fundamentals Sync Started',
+        message: 'Synchronizing balance sheet & forensic audit data in background…',
+        type: 'info',
+      })
+      const res = await fetch(`${getBaseUrl(port)}/api/maintenance/sync-fundamentals?limit=50`, { method: 'POST' })
+      if (res.ok) {
+        const json = await res.json()
+        addToast({
+          title: 'Fundamentals Sync Complete',
+          message: `Saved ${json.fundamentals_saved || 0} fundamentals and ${json.forensics_saved || 0} forensic audits.`,
+          type: 'success',
+        })
+        fetchHubData()
+      } else {
+        const err = await res.json().catch(() => ({}))
+        addToast({
+          title: 'Fundamentals Sync Failed',
+          message: err.detail || err.error || 'Server error during fundamentals sync.',
+          type: 'error',
+        })
+      }
+    } catch (e) {
+      addToast({ title: 'Fundamentals Sync Failed', message: String(e), type: 'error' })
+    } finally {
+      setActionInProgress('')
+    }
+  }
+
   const toggleTraceback = (id) => {
     setExpandedTracebacks((prev) => ({ ...prev, [id]: !prev[id] }))
   }
@@ -332,16 +364,22 @@ export default function OpsDeckView() {
           <div className="my-1.5 text-xs font-mono space-y-0.5">
             <div className="flex justify-between text-muted">
               <span>System RAM:</span>
-              <span className="text-text font-bold">{memory.system_ram_pct || 0}%</span>
+              <span className="text-text font-bold">
+                {Math.round(memory.used_ram_pct ?? memory.system_ram_pct ?? 0)}%
+              </span>
             </div>
             <div className="flex justify-between text-muted">
               <span>SSD Free:</span>
-              <span className="text-text font-bold">{storage.ssd_free_gb || '—'} GB</span>
+              <span className="text-text font-bold">
+                {(storage.free_ssd_gb ?? storage.ssd_free_gb ?? 0)
+                  ? `${Math.round((storage.free_ssd_gb ?? storage.ssd_free_gb) * 10) / 10} GB`
+                  : '—'}
+              </span>
             </div>
           </div>
 
           <div className="text-[10px] font-mono text-muted">
-            SQLite WAL: {storage.tiers?.business?.wal_mb || 0} MB
+            SQLite WAL: {Math.round((storage.tiers?.business?.wal_mb ?? storage.wal_mb ?? 0) * 10) / 10} MB
           </div>
         </div>
 
@@ -607,6 +645,102 @@ export default function OpsDeckView() {
         {/* ─────────── TAB 2: FEEDS & BROKERS ─────────── */}
         {activeTab === 'feeds' && (
           <div className="space-y-4 max-w-6xl mx-auto">
+            {/* Data Feeds & Provider Health */}
+            <div className="p-4 rounded-xl border border-border bg-panel space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold font-ui uppercase tracking-wider text-muted">
+                  Data Providers & Freshness Health
+                </h3>
+                <span
+                  className="px-2 py-0.5 rounded font-mono text-[10px] font-bold uppercase border"
+                  style={{
+                    background:
+                      providerHealth.overall_health === 'HEALTHY'
+                        ? 'rgba(0,214,143,0.12)'
+                        : providerHealth.overall_health === 'DEGRADED'
+                        ? 'rgba(245,166,35,0.15)'
+                        : 'rgba(255,79,123,0.2)',
+                    borderColor:
+                      providerHealth.overall_health === 'HEALTHY'
+                        ? 'var(--color-emerald)'
+                        : providerHealth.overall_health === 'DEGRADED'
+                        ? 'var(--color-gold)'
+                        : 'var(--color-rose)',
+                    color:
+                      providerHealth.overall_health === 'HEALTHY'
+                        ? 'var(--color-emerald)'
+                        : providerHealth.overall_health === 'DEGRADED'
+                        ? 'var(--color-gold)'
+                        : 'var(--color-rose)',
+                  }}
+                >
+                  ● {providerHealth.overall_health || 'HEALTHY'}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {Object.keys(providerHealth.providers || {}).length === 0 ? (
+                  <div className="col-span-3 p-4 rounded-xl border border-border bg-elevated/40 text-center text-xs font-mono text-muted">
+                    No active external provider calls recorded yet in current session. Primary broker initialized.
+                  </div>
+                ) : (
+                  Object.entries(providerHealth.providers).map(([pName, pRec]) => {
+                    const isHealthy = pRec.health === 'HEALTHY'
+                    const isDegraded = pRec.health === 'DEGRADED'
+                    const statusColor = isHealthy
+                      ? 'var(--color-emerald)'
+                      : isDegraded
+                      ? 'var(--color-gold)'
+                      : 'var(--color-rose)'
+                    const statusBg = isHealthy
+                      ? 'rgba(0,214,143,0.15)'
+                      : isDegraded
+                      ? 'rgba(245,166,35,0.15)'
+                      : 'rgba(255,79,123,0.2)'
+                    return (
+                      <div
+                        key={pName}
+                        className="p-3 rounded-xl border border-border bg-elevated flex flex-col justify-between space-y-2"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold font-mono uppercase text-text">{pName}</span>
+                          <span
+                            className="px-2 py-0.5 rounded font-mono text-[10px] font-bold uppercase"
+                            style={{ background: statusBg, color: statusColor }}
+                          >
+                            {pRec.health || 'HEALTHY'}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono space-y-1 text-muted">
+                          <div className="flex justify-between">
+                            <span>Requests:</span>
+                            <span className="text-text font-bold">{pRec.total_requests || 0}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Freshness Age:</span>
+                            <span className="text-text">
+                              {pRec.age_seconds !== null && pRec.age_seconds !== undefined
+                                ? `${Math.round(pRec.age_seconds)}s ago`
+                                : 'Active'}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Errors / Stale:</span>
+                            <span
+                              style={{
+                                color: (pRec.error_count || 0) > 0 ? 'var(--color-rose)' : undefined,
+                              }}
+                            >
+                              {pRec.error_count || 0} errors • {pRec.stale_count || 0} stale
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
+              </div>
+            </div>
+
             {/* Brokers Connectivity Matrix */}
             <div className="p-4 rounded-xl border border-border bg-panel space-y-3">
               <h3 className="text-xs font-bold font-ui uppercase tracking-wider text-muted">
@@ -663,26 +797,33 @@ export default function OpsDeckView() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border/40">
-                    {Object.values(slo.journeys || {}).map((j, idx) => (
-                      <tr key={j.journey_id || `slo-${idx}`} className="hover:bg-elevated/40">
-                        <td className="py-2 font-bold text-text">{j.description || j.journey_id}</td>
-
-                        <td className="text-emerald">{j.availability_pct}%</td>
-                        <td className="text-muted">{j.slo_availability_target || '—'}%</td>
-                        <td className="text-text">{j.p95_latency_ms ? `${Math.round(j.p95_latency_ms)} ms` : '—'}</td>
-                        <td className="text-muted">{j.slo_p95_target_ms ? `${j.slo_p95_target_ms} ms` : '—'}</td>
-                        <td className="text-muted">{j.error_budget_consumed_pct ?? 0}%</td>
-                        <td>
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                              j.status === 'OK' ? 'bg-emerald/15 text-emerald' : 'bg-rose/20 text-rose'
-                            }`}
-                          >
-                            {j.status}
-                          </span>
+                    {Object.keys(slo.journeys || {}).length === 0 ? (
+                      <tr>
+                        <td colSpan="7" className="py-6 text-center text-muted font-mono">
+                          No journey latency measurements recorded in current session. All systems nominal.
                         </td>
                       </tr>
-                    ))}
+                    ) : (
+                      Object.values(slo.journeys).map((j, idx) => (
+                        <tr key={j.journey_id || `slo-${idx}`} className="hover:bg-elevated/40">
+                          <td className="py-2 font-bold text-text">{j.description || j.journey_id}</td>
+                          <td className="text-emerald">{j.availability_pct}%</td>
+                          <td className="text-muted">{j.slo_availability_target || '—'}%</td>
+                          <td className="text-text">{j.p95_latency_ms ? `${Math.round(j.p95_latency_ms)} ms` : '—'}</td>
+                          <td className="text-muted">{j.slo_p95_target_ms ? `${j.slo_p95_target_ms} ms` : '—'}</td>
+                          <td className="text-muted">{j.error_budget_consumed_pct ?? 0}%</td>
+                          <td>
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                j.status === 'OK' ? 'bg-emerald/15 text-emerald' : 'bg-rose/20 text-rose'
+                              }`}
+                            >
+                              {j.status}
+                            </span>
+                          </td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -753,26 +894,34 @@ export default function OpsDeckView() {
                   Disk Storage Allocations
                 </h3>
                 <span className="text-xs font-mono text-text font-bold">
-                  Total Allocated: {storage.total_size_mb || 0} MB
+                  Total Allocated: {Math.round((storage.total_size_mb ?? storage.total_app_data_mb ?? 0) * 10) / 10} MB
                 </span>
               </div>
 
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <div className="p-3 rounded-lg border border-border bg-elevated">
                   <span className="text-[10px] font-mono text-muted block uppercase">Business Orders & Fills</span>
-                  <span className="text-sm font-mono font-bold text-text">{storage.tiers?.business?.size_mb || 0} MB</span>
+                  <span className="text-sm font-mono font-bold text-text">
+                    {Math.round((storage.tiers?.business?.size_mb ?? storage.business_data_mb ?? 0) * 10) / 10} MB
+                  </span>
                 </div>
                 <div className="p-3 rounded-lg border border-border bg-elevated">
                   <span className="text-[10px] font-mono text-muted block uppercase">Market Data Ticks</span>
-                  <span className="text-sm font-mono font-bold text-text">{storage.tiers?.market_data?.size_mb || 0} MB</span>
+                  <span className="text-sm font-mono font-bold text-text">
+                    {Math.round((storage.tiers?.market_data?.size_mb ?? storage.market_data_mb ?? 0) * 10) / 10} MB
+                  </span>
                 </div>
                 <div className="p-3 rounded-lg border border-border bg-elevated">
                   <span className="text-[10px] font-mono text-muted block uppercase">Analytical Cache</span>
-                  <span className="text-sm font-mono font-bold text-text">{storage.tiers?.analytics?.size_mb || 0} MB</span>
+                  <span className="text-sm font-mono font-bold text-text">
+                    {Math.round((storage.tiers?.analytics?.size_mb ?? storage.analysis_cache_mb ?? 0) * 10) / 10} MB
+                  </span>
                 </div>
                 <div className="p-3 rounded-lg border border-border bg-elevated">
                   <span className="text-[10px] font-mono text-muted block uppercase">Telemetry Logs</span>
-                  <span className="text-sm font-mono font-bold text-text">{storage.tiers?.telemetry?.size_mb || 0} MB</span>
+                  <span className="text-sm font-mono font-bold text-text">
+                    {Math.round((storage.tiers?.telemetry?.size_mb ?? storage.telemetry_mb ?? 0) * 10) / 10} MB
+                  </span>
                 </div>
               </div>
             </div>
@@ -783,7 +932,7 @@ export default function OpsDeckView() {
                 1-Click Maintenance Operations
               </h3>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
                 <div className="p-3 rounded-xl border border-border bg-elevated flex flex-col justify-between space-y-3">
                   <div>
                     <h4 className="text-xs font-bold text-text">Purge Ephemeral Cache</h4>
@@ -832,6 +981,23 @@ export default function OpsDeckView() {
                     className="w-full py-1.5 px-3 rounded-lg text-xs font-mono font-bold bg-panel hover:bg-highlight border border-border text-text transition-colors cursor-pointer"
                   >
                     {actionInProgress === 'sync_eod' ? 'Syncing…' : '📊 Sync EOD Bars'}
+                  </button>
+                </div>
+
+                <div className="p-3 rounded-xl border border-border bg-elevated flex flex-col justify-between space-y-3">
+                  <div>
+                    <h4 className="text-xs font-bold text-text">Sync Fundamentals</h4>
+                    <p className="text-[11px] font-mono text-muted mt-1 leading-normal">
+                      Synchronizes financial metrics, balance sheets, and forensic models.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleTriggerFundamentalsSync}
+                    disabled={actionInProgress === 'sync_fundamentals'}
+                    className="w-full py-1.5 px-3 rounded-lg text-xs font-mono font-bold bg-panel hover:bg-highlight border border-border text-text transition-colors cursor-pointer"
+                  >
+                    {actionInProgress === 'sync_fundamentals' ? 'Syncing…' : '📑 Sync Financials'}
                   </button>
                 </div>
               </div>

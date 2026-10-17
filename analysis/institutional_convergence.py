@@ -240,8 +240,10 @@ def scan_master_institutional_radar() -> list[MasterConvergenceReport]:
         from market.quotes import get_quote
 
         get_quote([f"NSE:{s}" for s in all_symbols])
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[analysis.institutional_convergence] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
     try:
         rrg_matrix = {p.sector: p for p in get_sector_rrg_matrix()}

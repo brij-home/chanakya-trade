@@ -18,6 +18,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("scripts.shift_left_check")
+
 
 import argparse
 import os
@@ -31,8 +35,8 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[scripts.shift_left_check] Non-fatal exception suppressed: {e_suppressed}")
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -187,8 +191,8 @@ exit 0
 
         pre_commit_hook.chmod(pre_commit_hook.stat().st_mode | stat.S_IEXEC)
         pre_push_hook.chmod(pre_push_hook.stat().st_mode | stat.S_IEXEC)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[scripts.shift_left_check] Non-fatal exception suppressed: {e_suppressed}")
 
     # Configure git
     res = subprocess.run(

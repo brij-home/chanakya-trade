@@ -73,8 +73,8 @@ def get_regime_weights(vix: Optional[float] = None) -> dict[str, float]:
                     vix = float(raw_vix.ltp)
                 elif isinstance(raw_vix, dict):
                     vix = float(raw_vix.get("ltp") or raw_vix.get("value") or 0)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.signal_ensemble] Non-fatal exception suppressed: {e_suppressed}")
 
     if vix is None or vix <= 0:
         return dict(STRATEGY_WEIGHTS)  # Return copy of defaults
@@ -535,8 +535,8 @@ def ensemble_signal(df: pd.DataFrame) -> EnsembleSignal:
     try:
         adx_series, _, _ = _adx(df)
         adx_val = round(float(adx_series.iloc[-1]), 1)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.signal_ensemble] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Regime-adaptive weights (reads live VIX; ~0ms with in-process cache) ─────
     regime_weights = get_regime_weights()
@@ -563,8 +563,8 @@ def ensemble_signal(df: pd.DataFrame) -> EnsembleSignal:
                     if _vix_hint < 28
                     else "EXTREME"
                 )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.signal_ensemble] Non-fatal exception suppressed: {e_suppressed}")
 
     # Apply regime-adaptive weights to each vote
     trend_vote.weight = regime_weights.get("trend", STRATEGY_WEIGHTS["trend"])

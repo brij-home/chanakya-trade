@@ -17,6 +17,10 @@ Session token is persisted to ~/.trading_platform/stoxkart.json and auto-restore
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("brokers.stoxkart")
+
 
 import json
 import os
@@ -122,8 +126,8 @@ class StoxkartAPI(BrokerAPI):
                     self._token_expiry = expiry
                     self._client_code = client_code or self._client_code
                     return True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.stoxkart] Non-fatal exception suppressed: {e_suppressed}")
         return False
 
     def _save_token(self, token: str, expiry_seconds: int = 86400, refresh_token: str = "") -> None:
@@ -137,8 +141,8 @@ class StoxkartAPI(BrokerAPI):
                 "updated_at": datetime.now().isoformat(),
             }
             TOKEN_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.stoxkart] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Authentication ────────────────────────────────────────
 
@@ -170,8 +174,8 @@ class StoxkartAPI(BrokerAPI):
                 import pyotp
 
                 totp_code = pyotp.TOTP(totp_s.strip()).now()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.stoxkart] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             url = f"{STOXKART_BASE_URL}/interactive/user/session"
@@ -215,13 +219,13 @@ class StoxkartAPI(BrokerAPI):
         if TOKEN_FILE.exists():
             try:
                 TOKEN_FILE.unlink()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.stoxkart] Non-fatal exception suppressed: {e_suppressed}")
         if hasattr(self, "_client") and self._client is not None:
             try:
                 self._client.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.stoxkart] Non-fatal exception suppressed: {e_suppressed}")
 
     def close(self) -> None:
         """Alias for logout to conform to standard resource close protocol."""
@@ -303,8 +307,8 @@ class StoxkartAPI(BrokerAPI):
                         )
                     )
                 return res
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.stoxkart] Non-fatal exception suppressed: {e_suppressed}")
 
         return []
 
@@ -337,8 +341,8 @@ class StoxkartAPI(BrokerAPI):
                         )
                     )
                 return res
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.stoxkart] Non-fatal exception suppressed: {e_suppressed}")
 
         return []
 
@@ -372,8 +376,8 @@ class StoxkartAPI(BrokerAPI):
                         change=round(chg, 2),
                         change_pct=round(chg_pct, 2),
                     )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.stoxkart] Non-fatal exception suppressed: {e_suppressed}")
 
         return Quote(symbol=sym, last_price=0.0, open=0.0, high=0.0, low=0.0, close=0.0, volume=0)
 
@@ -466,6 +470,6 @@ class StoxkartAPI(BrokerAPI):
                         )
                     )
                 return orders
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.stoxkart] Non-fatal exception suppressed: {e_suppressed}")
         return []

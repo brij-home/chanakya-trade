@@ -502,8 +502,10 @@ class MStockWebSocket:
             try:
                 if self._loop and self._loop.is_running():
                     asyncio.run_coroutine_threadsafe(self._ws.close(), self._loop)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.mstock_websocket] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread and self._thread.is_alive():
@@ -522,12 +524,16 @@ class MStockWebSocket:
         finally:
             try:
                 self._loop.run_until_complete(self._loop.shutdown_asyncgens())
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.mstock_websocket] Non-fatal exception suppressed: {e_suppressed}"
+                )
             try:
                 self._loop.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.mstock_websocket] Non-fatal exception suppressed: {e_suppressed}"
+                )
             self._loop = None
 
     async def _connect_and_listen(self) -> None:
@@ -573,8 +579,10 @@ class MStockWebSocket:
                                 "status": "ONLINE",
                             },
                         )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[market.mstock_websocket] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                     # Step 1: Send LOGIN frame
                     if self.access_token:
@@ -628,8 +636,10 @@ class MStockWebSocket:
                                 "cooldown_seconds": self._circuit_cooldown,
                             },
                         )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[market.mstock_websocket] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                     reconnect_delay = min(self._circuit_cooldown, 60.0)
 
                 # If server rejects connection (e.g. 502 Bad Gateway), check market session
@@ -695,8 +705,10 @@ class MStockWebSocket:
             try:
                 data = json.loads(message)
                 logger.debug(f"m.Stock WS text message: {data}")
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.mstock_websocket] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
     def _process_tick(self, tick: MStockTick) -> None:
         """Store tick in cache and dispatch to callbacks & ws_manager."""
@@ -728,8 +740,49 @@ class MStockWebSocket:
                 ws_sym = _to_ws_symbol(tick.symbol)
                 if ws_sym:
                     ws_manager._ticks[ws_sym] = compat_tick
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[market.mstock_websocket] Non-fatal exception suppressed: {e_suppressed}"
+            )
+
+        # Update live BisectDepthBook in RAM if market depth or tick is present
+        if tick.bids or tick.asks:
+            try:
+                from market.order_book import get_depth_book
+
+                book = get_depth_book(tick.symbol)
+                bids_list = [
+                    {"price": b.price, "quantity": b.quantity, "orders": b.orders}
+                    for b in tick.bids
+                    if b.price > 0
+                ]
+                asks_list = [
+                    {"price": a.price, "quantity": a.quantity, "orders": a.orders}
+                    for a in tick.asks
+                    if a.price > 0
+                ]
+                book.batch_update(bids_list, asks_list)
+                if tick.ltp > 0:
+                    book.record_tick(
+                        price=tick.ltp,
+                        volume=tick.last_traded_qty or 1,
+                        timestamp=tick.timestamp,
+                    )
+            except Exception as e_depth:
+                logger.debug(f"Failed updating BisectDepthBook for {tick.symbol}: {e_depth}")
+        elif tick.ltp > 0:
+            try:
+                from market.order_book import get_depth_book
+
+                get_depth_book(tick.symbol).record_tick(
+                    price=tick.ltp,
+                    volume=tick.last_traded_qty or 1,
+                    timestamp=tick.timestamp,
+                )
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.mstock_websocket] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Dispatch registered callbacks
         for cb in self._callbacks:

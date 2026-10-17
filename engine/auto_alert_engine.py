@@ -377,8 +377,10 @@ class AutoAlertEngine:
                         try:
                             c_str = str(a.created_at).replace(" IST", "").strip()
                             a_ts = datetime.fromisoformat(c_str).timestamp()
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                     if a_ts and (now_epoch - a_ts) < 900.0:
                         _raw_s = (getattr(a, "contract_symbol", "") or sym or "").upper()
                         for _idx_k in _INDEX_SYMS_SET:
@@ -431,8 +433,10 @@ class AutoAlertEngine:
                             a_dt = datetime.fromisoformat(c_str)
                             a_epoch = a_dt.timestamp()
                             a_time = a_dt.time()
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
                     if is_idx_a:
                         if d_key:
@@ -583,10 +587,10 @@ class AutoAlertEngine:
                 for s in getattr(self, "_active_stocks_cache", []):
                     if s not in symbols:
                         symbols.append(s)
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
+        except Exception as e_suppressed:
+            logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
         return symbols
 
     @watched_equities.setter
@@ -606,8 +610,8 @@ class AutoAlertEngine:
         if ts:
             try:
                 return datetime.strptime(ts, "%Y-%m-%d").date()
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
         return None
 
     # ── Single-Authority External Ingestion ─────────────────────
@@ -777,8 +781,8 @@ class AutoAlertEngine:
                             f"[AutoAlertEngine] 🛑 Data Integrity Veto for {clean_target} ({alert.alert_type}): {inv_reason}"
                         )
                         return False
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         # 00-CB. Institutional Detector Degradation Circuit Breaker & Kelly Governor
         if not is_sim:
@@ -872,8 +876,8 @@ class AutoAlertEngine:
                 alert.order_flow_signals.setdefault(
                     "broker_depth_status", "LIVE_L2" if is_live_b else "LIVE_REST"
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         # 00b-1. Market Status Calibration
         if alert.environment == "LIVE" and not is_sim:
@@ -883,8 +887,8 @@ class AutoAlertEngine:
                 if is_market_open(alert.exchange or "NSE"):
                     alert.market_status = "LIVE"
                     alert.is_live = True
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         # 00b-2. Real Real-Time Data Feed Integrity Gate (Zero Tolerance for Delayed / Synthetic Data)
         # Decision making on delayed feeds (e.g. 15-minute delayed yfinance or synthetic futures)
@@ -924,8 +928,8 @@ class AutoAlertEngine:
                             f"Feed source is {q_prov} (state={q_state}, flags={q_flags}). Real-money decisions strictly require verified real-time data."
                         )
                         return False
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         # 00c. Quantitative State Snapshot & Traceability
         if not getattr(alert, "quant_snapshot", None):
@@ -934,8 +938,8 @@ class AutoAlertEngine:
                 from market.indices import get_vix
 
                 vix_val = get_vix()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
             alert.quant_snapshot = {
                 "ltp": alert.ltp,
                 "trigger_level": alert.trigger_level,
@@ -1264,8 +1268,10 @@ class AutoAlertEngine:
                         try:
                             c_str = (active_a.created_at or "").replace(" IST", "").strip()
                             a_ts = datetime.fromisoformat(c_str).timestamp()
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         age_sec = (now - a_ts) if a_ts else 0.0
                         has_rev = bool(
                             (alert.metrics or {}).get("choch")
@@ -1577,8 +1583,10 @@ class AutoAlertEngine:
                                     ),
                                     alert_id=existing_active.alert_id,
                                 )
-                            except Exception:
-                                pass
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                     self._save()
                     to_dispatch = existing_active
                 else:
@@ -1685,8 +1693,10 @@ class AutoAlertEngine:
                                             ),
                                             alert_id=existing_opt.alert_id,
                                         )
-                                    except Exception:
-                                        pass
+                                    except Exception as e_suppressed:
+                                        logger.debug(
+                                            f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                                        )
                         self._save()
                         return False
 
@@ -1819,8 +1829,10 @@ class AutoAlertEngine:
                                 if dt_val.tzinfo is None:
                                     dt_val = dt_val.replace(tzinfo=IST)
                                 opp_created_sec = dt_val.timestamp()
-                            except Exception:
-                                pass
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                             opp_elapsed_sec = (now - opp_created_sec) if opp_created_sec else 9999.0
 
                             is_test_env = (
@@ -1955,8 +1967,10 @@ class AutoAlertEngine:
                                 _regime_tag = "NORMAL"
                                 try:
                                     _regime_tag = self._get_index_intraday_regime(None, alert.ltp)
-                                except Exception:
-                                    pass
+                                except Exception as e_suppressed:
+                                    logger.debug(
+                                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                                    )
 
                                 if _regime_tag in ("CHOP_PINNED", "CHOP_CONSOLIDATION"):
                                     # In chop regime: neither naked CE nor naked PE; mandate spreads
@@ -2120,8 +2134,10 @@ class AutoAlertEngine:
                             cand_ts = datetime.fromisoformat(c_str).timestamp()
                             if (now - cand_ts) >= 2700.0:  # 45 minutes
                                 return False
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         return True
 
                     active_diff_detector = next(
@@ -2256,8 +2272,10 @@ class AutoAlertEngine:
                                             "alert": active_diff_detector.to_dict(),
                                         },
                                     )
-                                except Exception:
-                                    pass
+                                except Exception as e_suppressed:
+                                    logger.debug(
+                                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                                    )
                             else:
                                 logger.info(
                                     f"[AutoAlertEngine] 🛑 Suppressed redundant {alert.alert_type} for {clean_target}: "
@@ -2850,8 +2868,10 @@ class AutoAlertEngine:
                                 alert.actionable_plan["entry_range"] = (
                                     f"₹{corr_lower:,.1f} – ₹{corr_upper:,.1f}"
                                 )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
         # 4. Institutional AI Sanity & Scrutiny Funnel (Fresh Setups Only)
         if not to_dispatch:
@@ -3025,8 +3045,10 @@ class AutoAlertEngine:
                             "CONFLUENCE_BOOST",
                             f"⚡ DUAL-HORIZON CONFLUENCE: Multi-timeframe alignment across {', '.join(sorted(aligned_horizons))}.",
                         )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 setattr(alert, "_recorded_epoch", time.time())
                 self._alerts.insert(0, alert)
@@ -3104,8 +3126,10 @@ class AutoAlertEngine:
                                 "timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
                             },
                         )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                        )
             except Exception as e:
                 logger.debug(f"[AutoAlertEngine] Async scrutiny error for {alert.alert_id}: {e}")
 
@@ -3473,8 +3497,8 @@ class AutoAlertEngine:
         if _env_tg_min:
             try:
                 min_conf = min(min_conf, int(_env_tg_min))
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         is_lifecycle_update = bool(
             getattr(alert, "telegram_dispatched", False)
@@ -3526,8 +3550,10 @@ class AutoAlertEngine:
                     try:
                         p_rr = float(plan_rr_str.split("1:")[1].split()[0])
                         rr_ratio = max(rr_ratio, p_rr)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 min_rr = 1.8 if is_non_equity else (1.6 if is_index else 1.4)
                 if rr_ratio < min_rr:
                     return False, f"R:R 1:{rr_ratio:.1f} below minimum 1:{min_rr:.1f} threshold"
@@ -3563,16 +3589,20 @@ class AutoAlertEngine:
 
                     exp_d = _dt_g.strptime(str(exp_date)[:10], "%Y-%m-%d").date()
                     is_0dte = exp_d == now_dt.date()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # Greeks extraction or computation
             abs_delta = None
             if metrics.get("delta") is not None:
                 try:
                     abs_delta = abs(float(metrics["delta"]))
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if abs_delta is None and exp_date and op_type in ("CE", "PE") and spot > 0:
                 try:
                     from analysis.options import compute_greeks
@@ -3583,8 +3613,10 @@ class AutoAlertEngine:
                         metrics["delta"] = abs_delta
                         metrics["gamma"] = round(float(g.gamma), 6)
                         metrics["iv"] = round(float(g.iv_pct), 2)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # 7a. Strike Proximity / Moneyness Gate (evaluated only when spot is sane)
             is_spot_sane = (spot > 0) and not (is_index and spot < 1000 and strike > 5000)
@@ -3821,8 +3853,10 @@ class AutoAlertEngine:
                                     False,
                                     f"Systemic volatility shock: India VIX up +{vix_snap.change_pct:.1f}% (Risk-Off Liquidation)",
                                 )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                 # 10c. Long Setup on Red Index Days (NIFTY down <= -0.60%)
                 if nifty_chg <= -0.60 and (
@@ -4347,8 +4381,8 @@ class AutoAlertEngine:
                     title=desktop_title,
                     message=desktop_msg,
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         # 3. Telegram push with multi-layer deduplication & decisive institutional formatting
         try:
@@ -4387,8 +4421,10 @@ class AutoAlertEngine:
                         "alerts",
                         {"type": "alert_updated", "alert": alert.to_dict()},
                     )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # Ad-hoc / Scratch Script Protection:
             # Prevent python -c or scratch one-liners from broadcasting live Telegram messages
@@ -4748,8 +4784,10 @@ class AutoAlertEngine:
                             chat_id=tg_target_chat_id,
                             alert_id=getattr(alert, "alert_id", None),
                         )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
             def _on_tg_sent(msg_id: int) -> None:
                 try:
@@ -4761,8 +4799,10 @@ class AutoAlertEngine:
                             alert.telegram_root_message_id = int(msg_id)
                         alert.telegram_message_id = int(msg_id)
                         self._save()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             if tg_target_chat_id:
                 try:
@@ -4935,8 +4975,8 @@ class AutoAlertEngine:
                     "alerts",
                     {"type": "alert_updated", "alert": alert.to_dict()},
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
         except Exception as e:
             logger.warning(f"[AutoAlertEngine] Telegram dispatch failed: {e}", exc_info=True)
 
@@ -4975,8 +5015,8 @@ class AutoAlertEngine:
                 )
             )
             print("\a", end="", flush=True)  # Audio chime
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Batch Quote Helpers (avoid N serial get_ltp() calls per poller cycle) ─
 
@@ -5077,8 +5117,10 @@ class AutoAlertEngine:
                         res[s] = val
                         if ":" in s:
                             res[s.split(":", 1)[1]] = val
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             return res
 
         try:
@@ -5984,8 +6026,10 @@ class AutoAlertEngine:
                                     f"Price already reached Target 1 (LTP={cur_ltp} vs T1={t1_f}). Marked EXPIRED."
                                 )
                                 continue
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                 entry_style = str(
                     alert.entry_type
@@ -6055,8 +6099,10 @@ class AutoAlertEngine:
                                     "proximity_pct": round(dist_ratio * 100.0, 3),
                                 },
                             )
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                     continue
 
                 if has_ignited:
@@ -6773,8 +6819,8 @@ class AutoAlertEngine:
                         "timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S IST"),
                     },
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
             logger.info(
                 f"[AutoAlertEngine] ⏰ Pre-squareoff advisory broadcast for {len(open_equity_positions)} open equity positions."
@@ -6827,8 +6873,8 @@ class AutoAlertEngine:
                         "timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S IST"),
                     },
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
             logger.info(
                 f"[AutoAlertEngine] ⏰ Pre-squareoff advisory broadcast for {len(open_mcx_positions)} open MCX positions."
@@ -7651,8 +7697,8 @@ class AutoAlertEngine:
                     ws_res = _ws_quotes(unresolved_ws, correlation_id=cid)
                     if ws_res:
                         final_map.update(ws_res)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         # 3. Only dispatch external REST fetch for symbols still unresolved after cache + WebSocket
         unresolved_rest = [
@@ -7672,8 +7718,8 @@ class AutoAlertEngine:
             # Auto-subscribe newly discovered unresolved targets to WebSocket stream for future zero-cost hits
             try:
                 self._auto_subscribe_stream(unresolved_rest)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         # 4. Always update cycle cache so all subsequent callers hit RAM (fixes target subset cache bypass)
         with self._cycle_quotes_lock:
@@ -7903,8 +7949,10 @@ class AutoAlertEngine:
                                 prev_day_high_val = float(df_d[col_h].iloc[-2])
                             if prev_day_low_val <= 0:
                                 prev_day_low_val = float(df_d[col_l].iloc[-2])
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                 # Pre-filter for single-stock F&O equities:
                 # 1. Skip non-F&O cash equities (lot size <= 1)
@@ -8109,8 +8157,8 @@ class AutoAlertEngine:
             v_val = get_vix()
             if v_val and v_val > 0:
                 vix_val = float(v_val)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         # Low VIX Regime Filter (VIX < 12.5):
         # Under ultra-low volatility, daily Bollinger compressions fail due to whipsaw chop (0% win rate).
@@ -8195,8 +8243,10 @@ class AutoAlertEngine:
                                     alert_15m.exchange = exch
                                     local_sq_alerts.append(alert_15m)
                                     return local_sq_alerts
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                 # 2. Daily macro squeeze check (Suppressed in Low-VIX regime to eliminate false breakouts)
                 if not is_low_vix:
@@ -8270,8 +8320,8 @@ class AutoAlertEngine:
                 if not ltp or ltp <= 0:
                     continue
                 eval_coiling_targets.append((sym, ltp))
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
         eod_cache = {}
         try:
@@ -8603,8 +8653,10 @@ class AutoAlertEngine:
                             lot_size=opp.lot_size,
                             asymmetric_r_r=True,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                 if opp.is_next_month_routed:
                     plan["is_next_month_routed"] = True
@@ -9084,8 +9136,10 @@ class AutoAlertEngine:
                             try:
                                 clean_ts = a.created_at.replace(" IST", "").strip()[:10]
                                 created_dt = datetime.strptime(clean_ts, "%Y-%m-%d").date()
-                            except Exception:
-                                pass
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                         if created_dt:
                             t_days = get_trading_days_elapsed(
                                 created_dt, today, exchange=a.exchange or "NSE"
@@ -9117,8 +9171,10 @@ class AutoAlertEngine:
                                         "Near-expiry stock derivative subject to physical delivery margin escalation."
                                     )
                                     results["physical_delivery_risks"] += 1
-                            except Exception:
-                                pass
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                                )
 
             # Off-market scan for fresh compounders & positional setups for tomorrow
             fresh: list[AutoAlert] = []
@@ -9391,8 +9447,10 @@ class AutoAlertEngine:
                         avg_v = float(np.mean(vols[:-1]))
                         if avg_v > 0:
                             rvol_val = round(cur_v / avg_v, 2)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 return detect_opening_drive(
                     symbol=sym,
@@ -9615,8 +9673,10 @@ class AutoAlertEngine:
                         avg_v = float(np.mean(vols[:-1]))
                         if avg_v > 0:
                             rvol_val = round(cur_v / avg_v, 2)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 return detect_afternoon_thrust(
                     symbol=sym,
@@ -9837,8 +9897,10 @@ class AutoAlertEngine:
                         avg_v = float(np.mean(vols[:-1]))
                         if avg_v > 0:
                             rvol_val = round(cur_v / avg_v, 2)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 return detect_opening_range_breakout(
                     sym,
@@ -9911,16 +9973,20 @@ class AutoAlertEngine:
                 if v is not None:
                     try:
                         return float(v)
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                        )
             return default
         for k in keys:
             v = getattr(obj, k, None)
             if v is not None:
                 try:
                     return float(v)
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         return default
 
     def scan_index_call_setups(
@@ -10159,8 +10225,10 @@ class AutoAlertEngine:
                     df_5m = get_ohlcv(
                         sym, exchange=exch, interval="5minute", days=2, include_live_candle=True
                     )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 chain = get_options_chain(sym)
                 if not chain:
@@ -10245,8 +10313,10 @@ class AutoAlertEngine:
                                 "Cancel if price never revisits zone within session."
                             ),
                         }
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 # ── Upgrade 1 + 3: VIX Spread Auto-Selection ─────────────────────────
                 # When VIX < 13.0, inject spread recommendation into actionable_plan.
@@ -10264,8 +10334,10 @@ class AutoAlertEngine:
                             spot=spot,
                             direction="BULLISH",
                         )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 for a in alerts:
                     if not isinstance(a.actionable_plan, dict):
@@ -10601,8 +10673,10 @@ class AutoAlertEngine:
                     df_5m = get_ohlcv(
                         sym, exchange=exch, interval="5minute", days=2, include_live_candle=True
                     )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 chain = get_options_chain(sym)
                 if not chain:
@@ -10728,8 +10802,10 @@ class AutoAlertEngine:
                                 "Cancel if price never revisits zone within session."
                             ),
                         }
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 # ── Upgrade 1 + 3: VIX Spread Auto-Selection (PUT) ───────────────────
                 spread_rec: dict = {}
@@ -10746,8 +10822,10 @@ class AutoAlertEngine:
                             spot=spot,
                             direction="BEARISH",
                         )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 for a in alerts:
                     if not isinstance(a.actionable_plan, dict):
@@ -10895,16 +10973,20 @@ class AutoAlertEngine:
                     df_1m = get_ohlcv(
                         sym, exchange=exch, interval="1m", days=1, include_live_candle=True
                     )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 df_3m = None
                 try:
                     df_3m = get_ohlcv(
                         sym, exchange=exch, interval="3m", days=1, include_live_candle=True
                     )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
                 chain = get_options_chain(sym)
                 if not chain:
@@ -11194,8 +11276,8 @@ class AutoAlertEngine:
                 from engine.alert_expiry import is_alert_option_premium_level
 
                 is_opt = is_alert_option_premium_level(alert)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
             is_contract_match = (
                 self._clean_sym(getattr(alert, "contract_symbol", "") or "") == clean_sym
@@ -11581,15 +11663,15 @@ class AutoAlertEngine:
         if self._poller_thread and self._poller_thread.is_alive():
             try:
                 self._poller_thread.join(timeout=1.5)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
         self._poller_thread = None
 
         if self._in_flight_guardian_thread and self._in_flight_guardian_thread.is_alive():
             try:
                 self._in_flight_guardian_thread.join(timeout=1.0)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
         self._in_flight_guardian_thread = None
 
         if (
@@ -11599,8 +11681,8 @@ class AutoAlertEngine:
         ):
             try:
                 self._index_scanner_thread.join(timeout=1.0)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
         self._index_scanner_thread = None
 
         # Synchronous persistence flush on shutdown
@@ -11616,8 +11698,8 @@ class AutoAlertEngine:
         ):
             try:
                 self._save_worker_thread.join(timeout=1.0)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
         self._save_worker_thread = None
 
         logger.info("[AutoAlertEngine] Background poller stopped cleanly")
@@ -12376,12 +12458,19 @@ class AutoAlertEngine:
             except Exception as e:
                 logger.warning(f"[AutoAlertEngine] Background persistence worker error: {e}")
 
-    def _save(self, sync: bool = False) -> None:
+    def _save(self, sync: bool = False, single_alert: Optional[AutoAlert] = None) -> None:
         """
         Persists alerts to disk and SQLite store.
+        If single_alert is provided, performs an immediate row-level SQLite WAL upsert (microsecond hot-path).
         In test environments or on shutdown flush (sync=True), writes synchronously.
         In live production, triggers background persistence worker without blocking the engine lock.
         """
+        if single_alert is not None:
+            try:
+                self._repository.save_single_alert(single_alert)
+            except Exception as e_row:
+                logger.debug(f"[AutoAlertEngine] Row-level save note: {e_row}")
+
         is_test_env = (
             "PYTEST_CURRENT_TEST" in os.environ
             or "pytest" in sys.modules
@@ -12398,8 +12487,8 @@ class AutoAlertEngine:
         """Emergency fail-safe persistence flush on interpreter termination."""
         try:
             self._save(sync=True)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
 
     def _sanitize_legacy_alerts_unlocked(self) -> int:
         """
@@ -12538,10 +12627,14 @@ class AutoAlertEngine:
                                     from engine.learning_engine import pattern_learning_engine
 
                                     pattern_learning_engine.clear_symbol_lockout(a.symbol)
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
+                                except Exception as e_suppressed:
+                                    logger.debug(
+                                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                                    )
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                            )
             if rehab_count > 0:
                 self._save()
             return rehab_count

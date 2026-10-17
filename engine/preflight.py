@@ -8,6 +8,10 @@ storage databases, trading mode safety guardrails, and AI provider bindings.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.preflight")
+
 
 import os
 import socket
@@ -285,8 +289,10 @@ def run_preflight(verbose: bool = True) -> PreflightReport:
                     if conn is not None:
                         try:
                             conn.close()
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.preflight] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
         if corrupt_dbs:
             checks.append(

@@ -21,6 +21,10 @@ Calculates:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.defined_risk_spreads")
+
 
 from dataclasses import dataclass
 from typing import Literal, Optional, Any
@@ -100,8 +104,10 @@ def _get_lot_size(symbol: str) -> int:
         ls = get_fno_lot_size(symbol)
         if ls and ls > 0:
             return ls
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[engine.defined_risk_spreads] Non-fatal exception suppressed: {e_suppressed}"
+        )
     return 100
 
 
@@ -292,8 +298,10 @@ def recommend_defined_risk_spreads(
             q = get_quote([inst])
             if q and inst in q:
                 spot = q[inst].last_price
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.defined_risk_spreads] Non-fatal exception suppressed: {e_suppressed}"
+            )
     if not spot or spot <= 0:
         spot = 24500.0 if "NIFTY" in sym else 1500.0
 

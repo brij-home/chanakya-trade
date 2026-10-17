@@ -70,8 +70,10 @@ def remediate_crypto_alerts() -> int:
                 try:
                     created_dt = datetime.strptime(created_ts, fmt).replace(tzinfo=IST)
                     break
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[scripts.remediate_crypto_alerts] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # Only reactivate if within the 24-hour rolling window
             if created_dt and (now - created_dt).total_seconds() < 86400:

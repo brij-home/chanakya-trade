@@ -225,8 +225,10 @@ def detect_intraday_mover_sparks(
                 from analysis.universe import get_stock_sector
 
                 sec_id, sec_name = get_stock_sector(clean_sym)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             try:
                 from analysis.sector_rotation import get_stock_tailwind
@@ -243,8 +245,10 @@ def detect_intraday_mover_sparks(
                             sector_tailwind_bonus = 8
                         elif tailwind.quadrant == "LEADING" and rvol < 2.5:
                             continue
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         is_mock_spark = (
             type(q).__name__ == "MagicMock"
@@ -297,8 +301,10 @@ def detect_intraday_mover_sparks(
                     atr_calc = float(tr.tail(14).mean())
                     if atr_calc > 0:
                         atr_val = round(atr_calc, 2)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             min_risk = (
                 max(price_tier.abs_min_risk_pts, round(1.20 * atr_val, 2))
                 if seg != "INDEX"
@@ -361,8 +367,10 @@ def detect_intraday_mover_sparks(
                             f"⚠️ SEBI Physical Delivery Week (DTE: {dte}d). For Derivatives: "
                             f"Roll over / execute in Next-Month Future (Exp: {next_str}) to eliminate physical delivery margin risk."
                         )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             plan = {
                 "action": "BUY / LONG",
@@ -437,8 +445,10 @@ def detect_intraday_mover_sparks(
                     atr_calc = float(tr.tail(14).mean())
                     if atr_calc > 0:
                         atr_val = round(atr_calc, 2)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             min_risk = (
                 max(price_tier.abs_min_risk_pts, round(1.20 * atr_val, 2))
                 if seg != "INDEX"
@@ -503,8 +513,10 @@ def detect_intraday_mover_sparks(
                             f"⚠️ SEBI Physical Delivery Week (DTE: {dte}d). For Short Derivatives: "
                             f"Execute in Next-Month Future (Exp: {next_str}) to eliminate physical delivery margin spikes."
                         )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             plan = {
                 "action": "SELL_SHORT_OR_BUY_PUT",

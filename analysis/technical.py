@@ -11,6 +11,10 @@ Main entry point: analyse(symbol) → TechnicalSnapshot
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.technical")
+
 
 from dataclasses import dataclass, field
 from typing import Optional
@@ -204,8 +208,8 @@ def analyse(
             if not bse_df.empty and len(bse_df) >= 30:
                 df = bse_df
                 exchange = "BSE"
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.technical] Non-fatal exception suppressed: {e_suppressed}")
 
     if df.empty or len(df) < 30:
         return TechnicalSnapshot(

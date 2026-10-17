@@ -71,13 +71,13 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
 from rich.console import Console
 from dotenv import load_dotenv
@@ -101,9 +101,7 @@ OPENAI_DEFAULT_MODEL = "gpt-4o"
 GEMINI_DEFAULT_MODEL = "gemini-3.6-flash,gemini-3.5-flash-lite"
 OLLAMA_DEFAULT_MODEL = "llama3.3"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
-GROQ_DEFAULT_MODEL = (
-    "qwen/qwen3.8-27b,openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.6-27b,groq/compound-mini"
-)
+GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b,openai/gpt-oss-120b,openai/gpt-oss-20b"
 
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
 OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-chat"
@@ -323,8 +321,8 @@ class CascadingLLMProvider(LLMProvider):
                         details={"from_provider": prov.provider_name},
                         severity="INFO",
                     )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
                 continue
 
         if last_exc:
@@ -633,8 +631,8 @@ class OpenAIProvider(LLMProvider):
         if ms_m:
             try:
                 return max(0.4, float(ms_m.group(1)) / 1000.0 + 0.2)
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         s_m = re.search(
             r"(?:try again in|retry in|retry after|reset in)\s*([0-9\.]+)\s*(?:s|sec|seconds)?",
@@ -646,8 +644,8 @@ class OpenAIProvider(LLMProvider):
                 val = float(s_m.group(1))
                 if val > 0:
                     return max(0.5, min(val + 0.3, 30.0))
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         if any(term in err_str for term in ("daily", "per day", "rpd", "quota exceeded")):
             return 60.0
@@ -799,6 +797,38 @@ class OpenAIProvider(LLMProvider):
                     return msg.content or "", tcs
                 except Exception as e:
                     err_str = str(e).lower()
+                    # If request payload / context length exceeds model limit, fail over immediately to next model candidate
+                    if any(
+                        s in err_str
+                        for s in (
+                            "413",
+                            "request too large",
+                            "payload too large",
+                            "context length",
+                            "maximum context length",
+                            "input tokens per minute",
+                            "itpm",
+                            "on tokens per minute (tpm): limit",
+                        )
+                    ):
+                        try:
+                            from engine.telemetry import EVENT_LLM_FAILOVER, record_event
+
+                            record_event(
+                                event_type=EVENT_LLM_FAILOVER,
+                                component="openai_provider",
+                                action_taken=f"Context ceiling/TPM exceeded for {current_model}; failing over to next candidate model",
+                                reason=err_str[:120],
+                                details={"failed_model": current_model, "base_url": self._base_url},
+                                severity="WARNING",
+                            )
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+                        last_exc = e
+                        break
+
                     if any(
                         r in err_str
                         for r in (
@@ -828,8 +858,10 @@ class OpenAIProvider(LLMProvider):
                                 },
                                 severity="INFO" if self.is_pool_available() else "WARNING",
                             )
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         if self.is_pool_available():
                             continue
                         last_exc = e
@@ -857,8 +889,10 @@ class OpenAIProvider(LLMProvider):
                                 details={"failed_model": current_model, "base_url": self._base_url},
                                 severity="WARNING",
                             )
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         last_exc = e
                         break
 
@@ -869,10 +903,7 @@ class OpenAIProvider(LLMProvider):
                             "tool_call",
                             "parallel tool",
                             "tools at once",
-                            "400",
-                            "413",
                             "not supported",
-                            "request too large",
                         )
                     ):
                         try:
@@ -989,6 +1020,38 @@ class OpenAIProvider(LLMProvider):
                     return text, tcs
                 except Exception as e:
                     err_str = str(e).lower()
+                    # If request payload / context length exceeds model limit, fail over immediately to next model candidate
+                    if any(
+                        s in err_str
+                        for s in (
+                            "413",
+                            "request too large",
+                            "payload too large",
+                            "context length",
+                            "maximum context length",
+                            "input tokens per minute",
+                            "itpm",
+                            "on tokens per minute (tpm): limit",
+                        )
+                    ):
+                        try:
+                            from engine.telemetry import EVENT_LLM_FAILOVER, record_event
+
+                            record_event(
+                                event_type=EVENT_LLM_FAILOVER,
+                                component="openai_provider",
+                                action_taken=f"Context ceiling/TPM exceeded for {current_model}; failing over to next candidate model",
+                                reason=err_str[:120],
+                                details={"failed_model": current_model, "base_url": self._base_url},
+                                severity="WARNING",
+                            )
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+                        last_exc = e
+                        break
+
                     if any(
                         r in err_str
                         for r in (
@@ -1018,8 +1081,10 @@ class OpenAIProvider(LLMProvider):
                                 },
                                 severity="INFO" if self.is_pool_available() else "WARNING",
                             )
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         if self.is_pool_available():
                             continue
                         last_exc = e
@@ -1047,8 +1112,10 @@ class OpenAIProvider(LLMProvider):
                                 details={"failed_model": current_model, "base_url": self._base_url},
                                 severity="WARNING",
                             )
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                         last_exc = e
                         break
 
@@ -1059,10 +1126,7 @@ class OpenAIProvider(LLMProvider):
                             "tool_call",
                             "parallel tool",
                             "tools at once",
-                            "400",
-                            "413",
                             "not supported",
-                            "request too large",
                         )
                     ):
                         try:
@@ -1760,8 +1824,8 @@ class ClaudeCLIProvider(LLMProvider):
                     try:
                         proc.kill()
                         proc.wait(timeout=2)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         except FileNotFoundError:
             return (
@@ -2123,8 +2187,8 @@ class OpenAISubscriptionProvider(LLMProvider):
                         parts = chunk.get("message", {}).get("content", {}).get("parts", [])
                         if parts:
                             text = parts[-1]
-                    except json.JSONDecodeError:
-                        pass
+                    except json.JSONDecodeError as e_suppressed:
+                        logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
             console.print(text, highlight=False)
             return text
@@ -2327,8 +2391,8 @@ class GeminiProvider(LLMProvider):
         if ms_m:
             try:
                 return max(0.4, float(ms_m.group(1)) / 1000.0 + 0.2)
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         s_m = re.search(
             r"(?:try again in|retry in|retry after|reset in)\s*([0-9\.]+)\s*(?:s|sec|seconds)?",
@@ -2340,8 +2404,8 @@ class GeminiProvider(LLMProvider):
                 val = float(s_m.group(1))
                 if val > 0:
                     return max(1.0, min(val + 0.5, 30.0))
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         if any(term in err_str for term in ("daily", "per day", "rpd", "quota exceeded")):
             return 60.0
@@ -2503,8 +2567,8 @@ class GeminiProvider(LLMProvider):
                             },
                             severity="INFO" if self.is_pool_available() else "WARNING",
                         )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
                     # 1. Try other keys in the pool first for the current model
                     key_recovered = False
@@ -2529,8 +2593,10 @@ class GeminiProvider(LLMProvider):
                                         details={"new_key_index": next_idx, "model": active_model},
                                         severity="INFO",
                                     )
-                                except Exception:
-                                    pass
+                                except Exception as e_suppressed:
+                                    logger.debug(
+                                        f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                                    )
                                 break
                             except Exception:
                                 self._mark_key_cooldown(next_idx, cooldown_seconds=cooldown_sec)
@@ -2568,8 +2634,10 @@ class GeminiProvider(LLMProvider):
                                             },
                                             severity="WARNING",
                                         )
-                                    except Exception:
-                                        pass
+                                    except Exception as e_suppressed:
+                                        logger.debug(
+                                            f"[agent.core] Non-fatal exception suppressed: {e_suppressed}"
+                                        )
                                     break
                                 except Exception:
                                     continue
@@ -2813,8 +2881,6 @@ def _build_custom_openai_provider(
             "qwen/qwen3.8-27b",
             "openai/gpt-oss-120b",
             "openai/gpt-oss-20b",
-            "qwen/qwen3.6-27b",
-            "groq/compound-mini",
         ]
         models_list = [m.strip() for m in mdl.split(",") if m.strip()]
         for fb in fallbacks:
@@ -2989,8 +3055,8 @@ def _clear_saved_provider() -> None:
         from config.credentials import _kr_set
 
         _kr_set("AI_PROVIDER", "")  # blank it — falsy, so load_all() won't set os.environ
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
     os.environ.pop("AI_PROVIDER", None)
 
 
@@ -3263,8 +3329,8 @@ class TradingAgent:
                 f"\n[dim]🤖  AI: {self._provider.provider_name}[/dim]",
                 highlight=False,
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Public API ────────────────────────────────────────────
 
@@ -3278,8 +3344,8 @@ class TradingAgent:
         try:
             console.print()
             console.rule("[bold cyan]Agent[/bold cyan]", style="cyan dim")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             response = self._provider.chat(
@@ -3302,8 +3368,8 @@ class TradingAgent:
                     reason=str(exc)[:120],
                     severity="WARNING",
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
             response = self._fallback_chat(user_message, str(exc))
 
         self._history.append(_assistant_msg(response))
@@ -3311,8 +3377,8 @@ class TradingAgent:
         try:
             console.rule(style="cyan dim")
             console.print()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         return response
 
@@ -3500,8 +3566,8 @@ class TradingAgent:
             if model:
                 _kr_set("AI_MODEL", model)
                 os.environ["AI_MODEL"] = model
-        except Exception:
-            pass  # keychain unavailable — in-session switch still worked
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
         console.print(
             f"[green]✓ Switched to {self._provider.provider_name}[/green]"
@@ -3672,8 +3738,8 @@ def _print_tool_call(name: str, args: dict) -> None:
                 f"  [dim cyan]>  {name}({args_str})[/dim cyan]",
                 highlight=False,
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
 
 # ── Dual LLM routing helpers (#91) ────────────────────────────
@@ -3709,7 +3775,13 @@ def get_deep_provider(
         )
         or _default_model(deep_prov)
     )
-    return get_provider(provider=deep_prov, model=deep_model, registry=registry)
+    primary = get_provider(provider=deep_prov, model=deep_model, registry=registry)
+    reg = registry or build_registry()
+    system = build_system_prompt()
+    fallbacks = _build_fallback_fast_providers(deep_prov, reg, system)
+    if fallbacks:
+        return CascadingLLMProvider([primary] + fallbacks)
+    return primary
 
 
 def _build_fallback_fast_providers(
@@ -3736,8 +3808,8 @@ def _build_fallback_fast_providers(
                 or GEMINI_DEFAULT_MODEL
             )
             fallbacks.append(GeminiProvider(gem_model, registry, system))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
     # NVIDIA NIM fallback
     if exclude_prov != PROVIDER_NVIDIA and _has("NVIDIA_API_KEY"):
@@ -3745,8 +3817,8 @@ def _build_fallback_fast_providers(
             p = _build_custom_openai_provider(PROVIDER_NVIDIA, None, registry, system)
             if p:
                 fallbacks.append(p)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
     # OpenRouter fallback
     if exclude_prov != PROVIDER_OPENROUTER and _has("OPENROUTER_API_KEY"):
@@ -3754,8 +3826,8 @@ def _build_fallback_fast_providers(
             p = _build_custom_openai_provider(PROVIDER_OPENROUTER, None, registry, system)
             if p:
                 fallbacks.append(p)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
     # Groq fallback if primary was something else
     if exclude_prov != PROVIDER_GROQ and _has("GROQ_API_KEY"):
@@ -3763,8 +3835,8 @@ def _build_fallback_fast_providers(
             p = _build_custom_openai_provider(PROVIDER_GROQ, None, registry, system)
             if p:
                 fallbacks.append(p)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.core] Non-fatal exception suppressed: {e_suppressed}")
 
     return fallbacks
 

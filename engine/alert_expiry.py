@@ -3,6 +3,10 @@ Expiry classification and option contract metadata helpers for ChanakyaTrade.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.alert_expiry")
+
 
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -139,8 +143,10 @@ def get_expiry_metadata(
                         dt = date(yr, m_idx, day)
                         if not expiry_type:
                             expiry_type = "WEEKLY"
-                    except ValueError:
-                        pass
+                    except ValueError as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_expiry] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
         # 3. Monthly Contract: e.g. NIFTY26SEP25000CE, RELIANCE26SEPFUT, GOLD26SEP154000CE
         if not dt:
@@ -185,15 +191,19 @@ def get_expiry_metadata(
                             dt = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
                             if not expiry_type:
                                 expiry_type = "MONTHLY"
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.alert_expiry] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                     if not dt:
                         try:
                             dt = get_last_thursday_of_month(yr, m_idx)
                             if not expiry_type:
                                 expiry_type = "MONTHLY"
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.alert_expiry] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
     if not dt:
         return {
@@ -492,8 +502,8 @@ def is_monthly_physical_expiry_week(
                             dte = (p - now_d).days
                             return 0 <= dte <= 4
                     return False
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alert_expiry] Non-fatal exception suppressed: {e_suppressed}")
 
     # 4. Calendar fallback to monthly last Thursday
     this_month_last_thu = get_last_thursday_of_month(now_d.year, now_d.month)

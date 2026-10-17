@@ -62,13 +62,13 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
 from fastapi import FastAPI, HTTPException, Request as _Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
@@ -119,28 +119,28 @@ async def _background_cache_warmer():
                         "NSE:TECHM",
                     ]
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
             # 2. Warm OHLCV for benchmark indices (2-year lookback)
             try:
                 get_ohlcv("NIFTY", days=500)
                 get_ohlcv("BANKNIFTY", days=500)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
             # 3. Warm sector rotation matrix
             try:
                 get_sector_rrg_matrix(use_cache=True)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
             # 4. Check memory headroom and trim in-memory caches if approaching limits
             try:
                 from engine.memory_guard import trim_memory_if_needed
 
                 trim_memory_if_needed()
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     try:
         await asyncio.sleep(5)
@@ -149,10 +149,10 @@ async def _background_cache_warmer():
         while True:
             await asyncio.sleep(300)
             await asyncio.to_thread(_warm_sync)
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        pass
+    except asyncio.CancelledError as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
 
 async def _background_maintenance_scheduler():
@@ -165,8 +165,8 @@ async def _background_maintenance_scheduler():
             await asyncio.to_thread(run_maintenance_purge)
         except asyncio.CancelledError:
             break
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
 
 @asynccontextmanager
@@ -193,16 +193,16 @@ async def lifespan(app: FastAPI):
         from market.crypto_stream import crypto_stream
 
         crypto_stream.start()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     # Start the autonomous real-time auto alert engine (45s loop)
     try:
         from engine.auto_alert_engine import auto_alert_engine
 
         auto_alert_engine.start_polling(interval_seconds=45)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     warmer_task = asyncio.create_task(_background_cache_warmer())
     maintenance_task = asyncio.create_task(_background_maintenance_scheduler())
@@ -222,60 +222,60 @@ async def lifespan(app: FastAPI):
         from engine.data_sync_scheduler import data_sync_scheduler
 
         data_sync_scheduler.stop()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     try:
         from engine.auto_alert_engine import auto_alert_engine
 
         auto_alert_engine.stop_polling()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     try:
         ticker_stream.stop(timeout=1.5)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     try:
         from market.crypto_stream import crypto_stream
 
         crypto_stream.stop(timeout=1.5)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     try:
         from market.tick_store import tick_archive
 
         tick_archive.stop(timeout=1.5)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     try:
         from brokers.session import close_all_brokers
 
         close_all_brokers()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     try:
         from engine.search import analysis_search
 
         analysis_search.close()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     try:
         from market.http_pool import close_http_pools
 
         close_http_pools()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     try:
         from engine.analysis_cache import analysis_cache
 
         analysis_cache.close()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
     try:
         from market.instrument_master import close_db
 
         close_db()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
 
 app = FastAPI(
@@ -567,8 +567,8 @@ async def _auto_restore_brokers() -> None:
                         from brokers.session import _start_websocket
 
                         _start_websocket(b)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
                     logging.info(
                         "[startup] Fyers session restored as primary (role: both) & WebSocket started"
                     )
@@ -659,8 +659,8 @@ async def _auto_restore_brokers() -> None:
                     from brokers.session import _start_websocket
 
                     _start_websocket(b)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
                 logging.info("[startup] m.Stock session active & registered")
         except Exception as exc:
             logging.warning("[startup] Could not restore m.Stock: %s", exc)
@@ -678,8 +678,8 @@ async def _auto_restore_brokers() -> None:
                         from brokers.session import _start_websocket
 
                         _start_websocket(b)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
                     logging.info("[startup] Kotak Neo session active & registered")
         except Exception as exc:
             logging.warning("[startup] Could not restore Kotak Neo: %s", exc)
@@ -783,8 +783,8 @@ async def telemetry_health():
         from market.crypto_stream import crypto_stream
 
         crypto_connected = bool(crypto_stream.is_connected)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     mstock_ws_connected = False
     try:
@@ -792,16 +792,16 @@ async def telemetry_health():
 
         ws = get_mstock_websocket()
         mstock_ws_connected = bool(ws and ws.is_connected)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     fyers_ws_connected = False
     try:
         from market.websocket import ws_manager
 
         fyers_ws_connected = bool(ws_manager.connected)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     mode_info = get_trading_mode()
 
@@ -1000,8 +1000,8 @@ async def set_mode(payload: dict[str, Any]):
                 "backend_mode": mode_info.mode.value,
             }
         )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     return JSONResponse(
         {
@@ -1094,19 +1094,20 @@ async def get_system_health_hub(
     slo_report = obs_reg.get_slo_report()
     telem_summary = get_telemetry_summary()
     incident_counts = get_incident_counts()
+    active_counts = get_incident_counts(window_minutes=15)
     incidents = get_prioritized_incidents(limit=limit, priority=priority, component=component)
     mem_status = get_memory_status().to_dict()
     storage_bd = await asyncio.to_thread(get_storage_breakdown)
 
-    # Compute single truth overall health status
+    # Compute single truth overall health status based on active state and recent 15m window
     if (
-        incident_counts.get("P0", 0) > 0
+        active_counts.get("P0", 0) > 0
         or cb_diag.get("state") == "OPEN"
         or provider_health.get("overall_health") == "UNHEALTHY"
     ):
         overall_status = "CRITICAL"
     elif (
-        incident_counts.get("P1", 0) > 0
+        active_counts.get("P1", 0) > 0
         or cb_diag.get("state") == "HALF_OPEN"
         or provider_health.get("overall_health") == "DEGRADED"
         or slo_report.get("overall_status") == "BREACHED"
@@ -1119,6 +1120,7 @@ async def get_system_health_hub(
         {
             "overall_status": overall_status,
             "incident_counts": incident_counts,
+            "active_incident_counts": active_counts,
             "circuit_breaker": cb_diag,
             "websocket": ws_diag,
             "brokers": broker_statuses,
@@ -1193,8 +1195,38 @@ async def get_error_logs(limit: int = 50):
     )
 
 
+@app.get("/api/diagnostics/errors/history", tags=["Observability", "Operations"])
+async def get_historical_error_logs(
+    limit: int = 100,
+    priority: Optional[str] = None,
+    component: Optional[str] = None,
+    event_type: Optional[str] = None,
+):
+    """
+    Retrieve historical incidents and errors persisted to disk across rotated events.jsonl files.
+    Enables institutional retrospective audit beyond the rolling in-memory buffer.
+    """
+    from engine.telemetry import query_historical_events
+
+    incidents = await asyncio.to_thread(
+        query_historical_events,
+        limit=limit,
+        priority=priority,
+        component=component,
+        event_type=event_type,
+    )
+    return JSONResponse(
+        {
+            "total": len(incidents),
+            "incidents": incidents,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
 @app.post("/api/maintenance/purge", tags=["Maintenance"])
 async def trigger_maintenance_purge(
+    request: _Request,
     raw_tick_retention_days: int = 7,
     disk_cache_retention_days: int = 7,
     export_retention_days: int = 14,
@@ -1203,7 +1235,24 @@ async def trigger_maintenance_purge(
     """
     Execute storage maintenance purge across ephemeral and diagnostic tiers,
     preserving all business-critical order/audit data. Checkpoints SQLite WAL logs.
+    Supports both JSON request body and URL query parameters.
     """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+
+    if isinstance(body, dict):
+        if "raw_tick_retention_days" in body:
+            raw_tick_retention_days = int(body["raw_tick_retention_days"])
+        if "disk_cache_retention_days" in body:
+            disk_cache_retention_days = int(body["disk_cache_retention_days"])
+        if "export_retention_days" in body:
+            export_retention_days = int(body["export_retention_days"])
+        if "vacuum_databases" in body:
+            vacuum_databases = bool(body["vacuum_databases"])
+
     from engine.maintenance import run_maintenance_purge
 
     report = run_maintenance_purge(
@@ -1266,7 +1315,7 @@ async def trigger_eod_sync(universe: str = "NIFTY500", force: bool = False):
 
 
 @app.post("/api/maintenance/sync-fundamentals", tags=["Maintenance"])
-async def trigger_fundamentals_sync(limit: int = 500, force: bool = False):
+async def trigger_fundamentals_sync(limit: int = 50, force: bool = False):
     """
     Weekly or on-demand balance sheet fundamentals and forensic accounting audit synchronization.
     """
@@ -2146,8 +2195,8 @@ async def fyers_callback(auth_code: str = "", state: str = "", s: str = ""):
             from brokers.session import _start_websocket
 
             _start_websocket(b)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
         _invalidate_auth_cache("fyers")
     except Exception as e:
         body = f"""<div class="card"><div class="err-box">❌ {e}</div>
@@ -2348,8 +2397,8 @@ async def mstock_callback(request: Request):
             from brokers.session import _start_websocket
 
             _start_websocket(b)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
         _invalidate_auth_cache("mstock")
     except Exception as e:
         body = f"""<div class="card"><div class="err-box">❌ {e}</div>
@@ -2692,8 +2741,8 @@ async def onboarding_status():
 
         get_broker()
         broker_connected = True
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     return {
         "onboarding_complete": onboarding_done or bool(ai_provider),
@@ -3191,8 +3240,8 @@ def _compute_portfolio(source: str = "auto") -> Optional[dict]:
             total_balance += f.total_balance
             holdings.extend(h_list)
             positions.extend(p_list)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     if src != "paper":
         if _has_zerodha():
@@ -3277,8 +3326,8 @@ def _compute_portfolio(source: str = "auto") -> Optional[dict]:
                         "pnl": p.pnl,
                     }
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     if not active_brokers:
         return None
@@ -3593,8 +3642,8 @@ async def stream_ticker():
                 tickers = await asyncio.to_thread(compute_ribbon_tickers)
                 ticker_stream._cached_ribbon_tickers = tickers
                 snap["tickers"] = tickers
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
         yield f"data: {json.dumps({'type': 'ticker_snapshot', 'data': snap, 'tickers': tickers})}\n\n"
 
@@ -3634,10 +3683,10 @@ async def websocket_ticker(ws: WebSocket):
                 await ws.send_text(raw)
             elif not chunk.startswith(":"):
                 await ws.send_text(chunk)
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
+    except WebSocketDisconnect as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
 
 # ── 24x7 Real-Time Crypto Pipeline Endpoints ─────────────────────────────────
@@ -3801,8 +3850,8 @@ async def stream_crypto():
                 loop.call_soon_threadsafe(
                     lambda: queue.put_nowait(tick) if not queue.full() else None
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
         crypto_stream.on_tick(_on_tick)
 
@@ -3813,8 +3862,8 @@ async def stream_crypto():
                     yield f"data: {json.dumps({'type': 'crypto_tick', 'data': tick})}\n\n"
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
-        except asyncio.CancelledError:
-            pass
+        except asyncio.CancelledError as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     return StreamingResponse(
         _crypto_generator(),
@@ -3865,8 +3914,8 @@ async def stream_system_status():
                 pilot = get_pilot_status()
                 if hasattr(pilot, "__dict__"):
                     pilot = vars(pilot)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
             snapshot = {
                 "type": "system_status",
@@ -3984,15 +4033,17 @@ async def stream_dashboard_snapshot(symbol: str = "NIFTY", exchange: str = ""):
                                         last_ltp = snap.get("ltp", new_ltp)
                                         last_push_ts = now
                                         yield f"data: {json.dumps(snap)}\n\n"
-                                except Exception:
-                                    pass
-                    except (json.JSONDecodeError, Exception):
-                        pass
+                                except Exception as e_suppressed:
+                                    logger.debug(
+                                        f"[web.api] Non-fatal exception suppressed: {e_suppressed}"
+                                    )
+                    except (json.JSONDecodeError, Exception) as e_suppressed:
+                        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
                 elif raw_chunk.startswith(":"):
                     # Keepalive heartbeat
                     yield f": keepalive symbol={symbol}\n\n"
-        except _asyncio.CancelledError:
-            pass
+        except _asyncio.CancelledError as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     return StreamingResponse(
         _dashboard_generator(),

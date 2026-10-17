@@ -30,6 +30,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.trader")
+
 
 import os
 from dataclasses import dataclass, field
@@ -1079,7 +1083,7 @@ class TraderAgent:
             events = get_event_strategies(symbols=[symbol], days_ahead=3)
             for ev in events:
                 conditions.append(f"EVENT in {ev.days_away}d: {ev.event} — {ev.strategy[:50]}")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.trader] Non-fatal exception suppressed: {e_suppressed}")
 
         return conditions

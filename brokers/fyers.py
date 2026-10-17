@@ -200,8 +200,8 @@ def _parse_expiry_from_fyers_symbol(symbol: str, option_type: str = "") -> str:
             d4 = int(date_part[2:])
             if 1 <= m4 <= 12 and 1 <= d4 <= 31:
                 return dt.date(year, m4, d4).strftime("%Y-%m-%d")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
     return ""
 
 
@@ -562,8 +562,8 @@ class FyersAPI(BrokerAPI):
                 from pathlib import Path
 
                 load_dotenv(Path(__file__).parent.parent / ".env")
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
         app_id = (
             app_id
@@ -666,8 +666,8 @@ class FyersAPI(BrokerAPI):
                 dt_now.hour > 8 or (dt_now.hour == 8 and dt_now.minute >= 30)
             ):
                 return True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
         return False
 
     def _load_token(self) -> None:
@@ -683,8 +683,8 @@ class FyersAPI(BrokerAPI):
                 else:
                     self._access_token = ""
                     self._token_ts = 0.0
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
     def _save_token(self, token: str) -> None:
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -702,22 +702,22 @@ class FyersAPI(BrokerAPI):
             from market.fyers_tbt_manager import fyers_tbt_manager
 
             fyers_tbt_manager.update_token(access_token=token, app_id=self._app_id)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             from market.websocket import ws_manager
 
             ws_manager.update_token(access_token=token, app_id=self._app_id)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             from market.fyers_order_stream import fyers_order_stream
 
             fyers_order_stream.update_token(access_token=token, app_id=self._app_id)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Auth ──────────────────────────────────────────────────
 
@@ -961,8 +961,8 @@ class FyersAPI(BrokerAPI):
             self._fyers = None
             try:
                 TOKEN_FILE.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
             if (
                 self._fy_id
@@ -1012,15 +1012,15 @@ class FyersAPI(BrokerAPI):
             fyers = self._get_fyers()
             if fyers:
                 fyers.logout()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
         self._access_token = ""
         self._profile = None
         self._fyers = None
         try:
             TOKEN_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Profile & Funds ───────────────────────────────────────
 
@@ -1302,8 +1302,8 @@ class FyersAPI(BrokerAPI):
                     exch = symbol.split(":")[0] if ":" in symbol else "NSE"
                     if not is_market_open(exch):
                         effective_ttl = 300.0
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
                 if (now_mono - ts) < effective_ttl:
                     return cached_res
 
@@ -2364,8 +2364,10 @@ class FyersAPI(BrokerAPI):
                                 if isinstance(retry_data, dict) and retry_data.get("s") == "ok":
                                     all_candles.extend(retry_data.get("candles", []))
                                     continue
-                            except Exception:
-                                pass
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}"
+                                )
 
                         logger.warning(
                             f"[FyersAPI] Historical data not available for symbol '{fyers_sym}' (code -300). Contract may be expired or delisted: {err_msg}"
@@ -2895,8 +2897,8 @@ class FyersAPI(BrokerAPI):
                 margin_avail = float(
                     funds.available_margin or funds.equity_margin or funds.total_balance or 0.0
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
         # 3. Calculate statutory transaction charges across all orders
         total_brokerage = Decimal("0.00")

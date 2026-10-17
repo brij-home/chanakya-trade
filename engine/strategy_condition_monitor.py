@@ -18,6 +18,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.strategy_condition_monitor")
+
 
 import json
 import threading
@@ -352,8 +356,10 @@ class StrategyConditionMonitor:
         if self._poller_thread and self._poller_thread.is_alive():
             try:
                 self._poller_thread.join(timeout=1.0)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.strategy_condition_monitor] Non-fatal exception suppressed: {e_suppressed}"
+                )
         self._poller_thread = None
 
     # ── Private ───────────────────────────────────────────────
@@ -362,8 +368,10 @@ class StrategyConditionMonitor:
         while self._polling and not self._stop_event.is_set():
             try:
                 self.check_all()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.strategy_condition_monitor] Non-fatal exception suppressed: {e_suppressed}"
+                )
             if self._stop_event.wait(timeout=interval_seconds):
                 break
 
@@ -385,8 +393,10 @@ class StrategyConditionMonitor:
             self._alerts_file.parent.mkdir(parents=True, exist_ok=True)
             data = [_alert_to_dict(a) for a in self._alerts]
             self._alerts_file.write_text(json.dumps(data, indent=2))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.strategy_condition_monitor] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     def _load(self) -> None:
         try:

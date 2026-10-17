@@ -513,6 +513,21 @@ class TradeLifecycleManager:
                         alert.actionable_plan["free_roll_active"] = True
                         alert.actionable_plan["stop_loss"] = eval_res.recommended_stop
 
+                    # Institutional OMS ratchet: update resting broker stop-loss orders to breakeven
+                    try:
+                        from engine.order_lifecycle import ratchet_stop_loss_on_milestone
+
+                        if eval_res.recommended_stop:
+                            ratchet_stop_loss_on_milestone(
+                                symbol=alert.symbol,
+                                new_stop_loss=float(eval_res.recommended_stop),
+                                milestone="T1_ACHIEVED",
+                            )
+                    except Exception as e_ratchet:
+                        logger.warning(
+                            f"[TradeLifecycleManager] Could not ratchet broker SL for {alert.symbol}: {e_ratchet}"
+                        )
+
                 try:
                     from engine.learning_engine import pattern_learning_engine
 

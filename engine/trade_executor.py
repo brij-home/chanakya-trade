@@ -418,8 +418,10 @@ def execute_trade_plan(
                     quantity=leg.quantity,
                     price=leg.price or 0.0,
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.trade_executor] Non-fatal exception suppressed: {e_suppressed}"
+                )
             status_style = "green" if response.status in ("COMPLETE", "OPEN") else "red"
 
             console.print(
@@ -520,8 +522,8 @@ def execute_trade_plan(
             alert_manager.add_price_alert(plan.symbol, "BELOW", ep.stop_loss, plan.exchange)
             alert_manager.add_price_alert(plan.symbol, "ABOVE", ep.target_1, plan.exchange)
             console.print("[dim]  Auto-created price alerts for stop-loss and target.[/dim]")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.trade_executor] Non-fatal exception suppressed: {e_suppressed}")
 
     console.print()
     return results

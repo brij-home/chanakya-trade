@@ -1095,7 +1095,7 @@ function InstitutionalTradeInspector({
 }) {
   const [selectedLots, setSelectedLots] = useState(1)
   const cleanSym = alert?.symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase()
-  const lotSize = INDEX_LOT_SIZES[cleanSym] || alert?.lot_size || alert?.metrics?.lot_size || 1
+  const lotSize = alert?.lot_size || alert?.metrics?.lot_size || alert?.option_plan?.lot_size || INDEX_LOT_SIZES[cleanSym] || 1
   const ltpNum = alert?.option_premium ? Number(alert.option_premium) : (alert?.ltp ? Number(alert.ltp) : 0)
   const marginEst = Math.round(selectedLots * lotSize * (ltpNum || 100))
   const isInvalidated = alert?.is_invalidated || alert?.stage === 'INVALIDATED'

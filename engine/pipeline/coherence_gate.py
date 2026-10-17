@@ -212,8 +212,10 @@ class CoherenceGate:
         try:
             if ltp > 0 and t1 > 0 and sl > 0:
                 rr_ratio = abs(t1 - ltp) / max(0.01, abs(ltp - sl))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.pipeline.coherence_gate] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         if conf < 80.0 or rr_ratio < 2.0:
             msg = (
@@ -393,8 +395,10 @@ class CoherenceGate:
                     from engine.alert_expiry import is_0dte_expiry
 
                     is_0dte = is_0dte_expiry(str(exp_date_str), ref_dt=now_dt)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.pipeline.coherence_gate] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         cutoff_time = dtime(13, 45) if is_0dte else dtime(14, 0)
         if now_time >= cutoff_time:

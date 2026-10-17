@@ -8,6 +8,11 @@ the legacy dataclass default.
 Rule 18 compliance: Offline maintenance, never run on hot startup loops.
 """
 
+import logging
+
+logger = logging.getLogger("scripts.remediate_live_alert_market_status")
+
+
 import json
 import os
 import shutil
@@ -60,8 +65,10 @@ for a in alerts:
                 created_dt = datetime.strptime(clean_ts[:19], "%Y-%m-%d %H:%M:%S").replace(
                     tzinfo=IST
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[scripts.remediate_live_alert_market_status] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # If created during trading window or created today
         should_fix = False

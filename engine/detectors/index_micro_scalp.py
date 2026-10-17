@@ -226,8 +226,10 @@ def detect_index_micro_scalp(
                 is_recent_momentum_bullish = True
             elif c2 < o2 and c2 <= c1:
                 is_recent_momentum_bearish = True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.detectors.index_micro_scalp] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     for c in candidate_contracts:
         try:

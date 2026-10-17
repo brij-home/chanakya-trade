@@ -35,6 +35,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.memory")
+
 
 import json
 import os
@@ -294,8 +298,8 @@ class TradeMemory:
                 start = datetime.fromisoformat(record.timestamp)
                 end = datetime.fromisoformat(record.exit_date)
                 record.hold_days = (end - start).days
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.memory] Non-fatal exception suppressed: {e_suppressed}")
 
         self._save()
         # Auto-reflect on outcome so the lesson is captured immediately (#92)
@@ -307,8 +311,8 @@ class TradeMemory:
                 self.reflect_and_remember(trade_id, llm_provider=provider)
             else:
                 self.reflect_and_remember(trade_id, llm_provider=None)
-        except Exception:
-            pass  # reflect is best-effort — never block outcome recording
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.memory] Non-fatal exception suppressed: {e_suppressed}")
         return True
 
     def reflect_and_remember(self, trade_id: str, llm_provider=None) -> str:
@@ -330,8 +334,8 @@ class TradeMemory:
                     record.lesson = lesson
                     self._save()
                     return lesson
-            except Exception:
-                pass  # fall through to rule-based
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.memory] Non-fatal exception suppressed: {e_suppressed}")
 
         # Rule-based fallback
         lesson = self._rule_reflect(record)
@@ -432,8 +436,8 @@ class TradeMemory:
                 cutoff_dt = datetime.now() - timedelta(days=days_back)
                 cutoff = cutoff_dt.isoformat(timespec="seconds")
                 results = [r for r in results if r.timestamp >= cutoff]
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.memory] Non-fatal exception suppressed: {e_suppressed}")
 
         if vix_above is not None:
             results = [r for r in results if r.vix is not None and r.vix >= vix_above]
@@ -695,15 +699,15 @@ class TradeMemory:
             MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
             data = [asdict(r) for r in self._records]
             MEMORY_FILE.write_text(json.dumps(data, indent=2, default=str))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.memory] Non-fatal exception suppressed: {e_suppressed}")
         # Auto-index into FTS5 search DB so `search` command stays fresh (#90)
         try:
             from engine.search import analysis_search
 
             analysis_search.index_records(self._records)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.memory] Non-fatal exception suppressed: {e_suppressed}")
 
     def _load(self) -> None:
         try:
@@ -716,8 +720,10 @@ class TradeMemory:
                     filtered = {k: v for k, v in d.items() if k in valid_fields}
                     try:
                         records.append(TradeRecord(**filtered))
-                    except Exception:
-                        pass  # skip corrupt records
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.memory] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 self._records = records
         except Exception:
             self._records = []

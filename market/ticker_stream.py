@@ -595,8 +595,10 @@ class MarketTickerStream:
         for cb in self._listeners:
             try:
                 cb(all_items)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.ticker_stream] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Publish to web.sse event_bus
         try:

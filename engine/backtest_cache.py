@@ -30,6 +30,10 @@ Schema (one entry per strategy key):
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.backtest_cache")
+
 
 import json
 from datetime import date
@@ -45,8 +49,8 @@ def _load() -> dict[str, Any]:
     try:
         if _CACHE_PATH.exists():
             return json.loads(_CACHE_PATH.read_text())
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.backtest_cache] Non-fatal exception suppressed: {e_suppressed}")
     return {}
 
 

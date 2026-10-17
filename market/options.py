@@ -48,8 +48,8 @@ def get_chain_cache_ttl(is_broker: bool = True, is_empty: bool = False) -> float
 
             if get_fyers_circuit_breaker().is_tripped():
                 return _CHAIN_CACHE_TTL_EMPTY
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
         return 30.0
 
     try:
@@ -57,8 +57,8 @@ def get_chain_cache_ttl(is_broker: bool = True, is_empty: bool = False) -> float
 
         if is_market_open("NFO") or is_market_open("NSE") or is_market_open("MCX"):
             return _CHAIN_CACHE_TTL_LIVE if is_broker else _CHAIN_CACHE_TTL_SCRAPER
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
     return _CHAIN_CACHE_TTL_DEFAULT
 
 
@@ -136,8 +136,8 @@ def enrich_options_chain_deltas(
                                 c.pchange_oi = nse_c.pchange_oi
                         if not getattr(c, "iv", None) and getattr(nse_c, "iv", None):
                             c.iv = nse_c.iv
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. Baseline tracking fallback: calculate delta against session opening baseline
     with _BASELINE_LOCK:
@@ -237,6 +237,7 @@ def get_options_chain(
             box = [None]
             _IN_FLIGHT_CHAIN_EVENTS[cache_key] = (evt, box)
             is_leader = True
+            t0 = time.time()
 
     if not is_leader:
         evt.wait(timeout=6.0)
@@ -255,8 +256,8 @@ def get_options_chain(
 
             if get_fyers_circuit_breaker().is_tripped():
                 broker_available = False
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
         # Tier 1: data broker (live broker feed)
         if broker_available:
@@ -360,8 +361,8 @@ def get_options_chain(
                                 _CHAIN_CACHE[cache_key] = (time.time(), chain)
                             chain_result = chain
                             return chain
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
         record_source("options", "none")
         with _CHAIN_CACHE_LOCK:
@@ -374,6 +375,17 @@ def get_options_chain(
             with _IN_FLIGHT_CHAIN_LOCK:
                 _IN_FLIGHT_CHAIN_EVENTS.pop(cache_key, None)
             evt.set()
+            try:
+                from engine.observability import get_registry
+
+                get_registry().record_metric(
+                    journey_id="options_chain",
+                    latency_ms=(time.time() - t0) * 1000.0,
+                    success=bool(chain_result),
+                    metadata={"symbol": clean_sym, "count": len(chain_result)},
+                )
+            except Exception as e_suppressed:
+                logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def build_index_synthetic_option_chain(
@@ -518,8 +530,8 @@ def get_expiries(underlying: str, allow_chain_fallback: bool = False) -> list[st
             if exp:
                 _EXPIRIES_CACHE[clean_u] = (now, exp)
                 return exp
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
     from market.instruments import COMMODITY_SYMBOLS
 
@@ -531,8 +543,8 @@ def get_expiries(underlying: str, allow_chain_fallback: bool = False) -> list[st
             if exp_date:
                 _EXPIRIES_CACHE[clean_u] = (now, [exp_date])
                 return [exp_date]
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
     try:
         from market.nse_scraper import nse_get_expiries
@@ -541,8 +553,8 @@ def get_expiries(underlying: str, allow_chain_fallback: bool = False) -> list[st
         if exp:
             _EXPIRIES_CACHE[clean_u] = (now, exp)
             return exp
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
     if allow_chain_fallback:
         try:
@@ -550,8 +562,8 @@ def get_expiries(underlying: str, allow_chain_fallback: bool = False) -> list[st
             dates = sorted({c.expiry for c in chain if c.expiry})
             _EXPIRIES_CACHE[clean_u] = (now, dates)
             return dates
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
     # Negative caching to prevent hot rate-limit retry loops
     _EXPIRIES_CACHE[clean_u] = (now, [])
@@ -596,8 +608,8 @@ def get_options_snapshot(
                     spot_fn = getattr(broker, "get_ltp", None)
                     if callable(spot_fn):
                         spot = float(spot_fn(underlying) or 0.0)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
                 if not spot or spot <= 0:
                     try:
                         from market.quotes import get_ltp as _mkt_ltp
@@ -652,8 +664,8 @@ def get_options_snapshot(
                 ),
             }
             return contracts, spot, expiries, source_info
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
     # Tier 3: Honest Disconnected / Broker Required
     source_info = {

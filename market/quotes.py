@@ -33,6 +33,10 @@ _FUT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 _quote_cache_lock = threading.Lock()
 _QUOTE_CACHE: OrderedDict[str, tuple[float, Quote]] = OrderedDict()
 _QUOTE_TTL_SECONDS = 10.0  # 10.0-second in-memory coalescing cache window (scaled for 24 GB RAM)
@@ -56,13 +60,8 @@ try:
     from engine.memory_guard import register_trim_callback
 
     register_trim_callback(clear_quote_cache)
-except Exception:
-    pass
-
-
-import logging
-
-logger = logging.getLogger(__name__)
+except Exception as e_suppressed:
+    logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
 
 
 # ── Computed VWAP session cache ────────────────────────────────────────────────
@@ -86,8 +85,8 @@ def _compute_raw_vwap(clean_sym: str, exchange: str = "NSE") -> Optional[float]:
                     vw = float((typical * mm_df["volume"]).sum() / vol_sum)
                     if vw > 0:
                         return vw
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
 
         from market.history import get_ohlcv
         from config.constants import IST_ZONE as IST
@@ -146,8 +145,8 @@ def get_computed_vwap(symbol: str, exchange: str = "NSE") -> Optional[float]:
         m_vwap = get_market_matrix().get_vwap(clean)
         if m_vwap is not None and m_vwap > 0:
             return m_vwap
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
 
     from market.vwap_session_cache import get_vwap_session_cache
 
@@ -471,16 +470,36 @@ def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
                             res[inst] = enriched
                             res[clean] = enriched
                             break
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
         return res
     except Exception:
         return {}
 
 
+def _calculate_cost_of_carry_factor(ref_date: Optional[datetime] = None) -> float:
+    """Calculate institutional cost-of-carry factor F = S * (1 + r * (days / 365.0))."""
+    import calendar
+    from datetime import date
+
+    now = ref_date or datetime.now(timezone.utc)
+    year, month = now.year, now.month
+    last_day = calendar.monthrange(year, month)[1]
+    thursdays = [
+        day for day in range(last_day - 6, last_day + 1) if calendar.weekday(year, month, day) == 3
+    ]
+    exp_day = thursdays[-1] if thursdays else last_day
+    exp_date = date(year, month, exp_day)
+    curr_date = now.date()
+    days_to_expiry = max(1, (exp_date - curr_date).days)
+    repo_rate = 0.065  # RBI base repo rate (6.50%)
+    return 1.0 + (repo_rate * (days_to_expiry / 365.0))
+
+
 def _futures_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quote]:
-    """Resolve derivative futures contract quotes when broker feed is offline or in paper mode."""
+    """Resolve derivative futures contract quotes via institutional cost-of-carry pricing when broker feed is offline or in paper mode."""
     res: dict[str, Quote] = {}
+    carry_factor = _calculate_cost_of_carry_factor()
     for inst in instruments:
         clean = inst.split(":")[-1].strip().upper()
         m = _FUT_PATTERN.match(clean)
@@ -491,29 +510,30 @@ def _futures_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
             spot_quotes = get_quote([und])
             spot_q = spot_quotes.get(und) or spot_quotes.get(f"NSE:{und}")
             if spot_q and getattr(spot_q, "last_price", 0.0) > 0:
-                fut_price = round(spot_q.last_price * 1.0035, 2)
+                fut_price = round(spot_q.last_price * carry_factor, 2)
                 q = Quote(
                     symbol=clean,
                     last_price=fut_price,
-                    open=round(spot_q.open * 1.0035, 2) if spot_q.open else None,
-                    high=round(spot_q.high * 1.0035, 2) if spot_q.high else None,
-                    low=round(spot_q.low * 1.0035, 2) if spot_q.low else None,
-                    close=round(spot_q.close * 1.0035, 2) if spot_q.close else None,
+                    open=round(spot_q.open * carry_factor, 2) if spot_q.open else None,
+                    high=round(spot_q.high * carry_factor, 2) if spot_q.high else None,
+                    low=round(spot_q.low * carry_factor, 2) if spot_q.low else None,
+                    close=round(spot_q.close * carry_factor, 2) if spot_q.close else None,
                     volume=spot_q.volume or 0,
-                    change=round((spot_q.change or 0.0) * 1.0035, 2),
+                    change=round((spot_q.change or 0.0) * carry_factor, 2),
                     change_pct=spot_q.change_pct or 0.0,
                 )
                 enriched = _enrich_quote(
                     q,
                     instrument=inst,
-                    provider="synthetic_fut",
+                    provider="cost_of_carry_synthetic",
                     source="FALLBACK",
                     correlation_id=correlation_id,
+                    quality_flags=("COST_OF_CARRY_ESTIMATE",),
                 )
                 res[inst] = enriched
                 res[clean] = enriched
-        except Exception:
-            pass
+        except Exception as e_fut:
+            logger.debug(f"[market.quotes] Cost of carry pricing failed for {inst}: {e_fut}")
     return res
 
 
@@ -573,8 +593,8 @@ def _yf_fallback_quotes(
             )
             for instrument, quote in raw.items()
         }
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
     return {}
 
 
@@ -661,8 +681,10 @@ def get_quote(
                                 exch
                             ):
                                 effective_ttl = 300.0
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                     if now_wall - ts < effective_ttl and getattr(cached_q, "last_price", 0.0) > 0:
                         result[inst] = cached_q
 
@@ -730,8 +752,8 @@ def get_quote(
                     if q and getattr(q, "last_price", 0.0) > 0:
                         result[c_inst] = q
                 missing = [i for i in canonical_instruments if i not in result]
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}")
 
     # 3. Coalesced external fetch (Broker REST -> Options -> yfinance -> Futures)
     if missing and not ws_only:

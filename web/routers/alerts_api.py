@@ -96,8 +96,8 @@ async def archive_auto_alert(payload: dict):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.routers.alerts_api] Non-fatal exception suppressed: {e_suppressed}")
     return {"status": "ok", "data": alert.to_dict()}
 
 
@@ -300,8 +300,8 @@ async def update_alert_preferences_api(payload: dict):
                 "preferences": updated,
             },
         )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.routers.alerts_api] Non-fatal exception suppressed: {e_suppressed}")
 
     return {"status": "ok", "data": updated}
 
@@ -457,8 +457,8 @@ async def scan_swing_trades(
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[web.routers.alerts_api] Non-fatal exception suppressed: {e_suppressed}")
 
     return {
         "status": "ok",

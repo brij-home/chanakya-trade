@@ -209,8 +209,8 @@ class UnifiedFyersRateGate:
             tmp_path = _QUOTA_FILE.with_suffix(".tmp")
             tmp_path.write_text(json.dumps(payload), encoding="utf-8")
             tmp_path.replace(_QUOTA_FILE)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.fyers_rate_gate] Non-fatal exception suppressed: {e_suppressed}")
 
     def record_external_exhaustion(self) -> None:
         """Explicitly record that Fyers returned 429 daily limit reached."""

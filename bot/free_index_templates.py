@@ -584,8 +584,10 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
                     t1_cand = None
                     try:
                         t1_cand = float(alert.target_1)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[bot.free_index_templates] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                     if t1_cand:
                         is_downward = t1_cand < entry_p
                     else:
@@ -613,8 +615,10 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
                     if m_t1:
                         try:
                             t1_num = float(m_t1.group(0).replace(",", ""))
-                        except ValueError:
-                            pass
+                        except ValueError as e_suppressed:
+                            logger.debug(
+                                f"[bot.free_index_templates] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                 if not t1_num and entry_p and getattr(alert, "stop_loss", None):
                     try:
                         sl_val = float(alert.stop_loss)
@@ -626,8 +630,10 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
                                 else entry_p - (r_val * 2.0),
                                 2,
                             )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[bot.free_index_templates] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                 has_hit_t1 = (
                     t1_num is not None
@@ -656,8 +662,10 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
                     if m_t2:
                         try:
                             t2_num = float(m_t2.group(0).replace(",", ""))
-                        except ValueError:
-                            pass
+                        except ValueError as e_suppressed:
+                            logger.debug(
+                                f"[bot.free_index_templates] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                 has_hit_t2 = (
                     t2_num is not None
                     and t2_num > 0
@@ -681,8 +689,10 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
                         if m_t1:
                             try:
                                 t1_num = float(m_t1.group(0).replace(",", ""))
-                            except ValueError:
-                                pass
+                            except ValueError as e_suppressed:
+                                logger.debug(
+                                    f"[bot.free_index_templates] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                     has_hit_t1 = (
                         t1_num is not None
                         and t1_num > 0
@@ -773,8 +783,10 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
     if m_e:
         try:
             entry_val_num = float(m_e.group(1).replace(",", ""))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[bot.free_index_templates] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     t1_disp, t2_disp, _ = _resolve_monotonic_display_targets(
         actionable_plan=actionable_plan,

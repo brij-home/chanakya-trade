@@ -134,6 +134,18 @@ describe('OpsDeck & System Health Hub UI Tests', () => {
                 timestamp: new Date().toISOString(),
               },
             ],
+            provider_health: {
+              overall_health: 'HEALTHY',
+              providers: {
+                fyers: {
+                  health: 'HEALTHY',
+                  total_requests: 120,
+                  age_seconds: 4,
+                  error_count: 0,
+                  error_rate_pct: 0,
+                },
+              },
+            },
             brokers: {
               fyers: { authenticated: true, configured: true, role: 'Data & Execution' },
               zerodha: { authenticated: false, configured: true, role: 'Execution' },
@@ -162,6 +174,7 @@ describe('OpsDeck & System Health Hub UI Tests', () => {
     })
 
     await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Data Providers & Freshness Health/i })).toBeInTheDocument()
       expect(screen.getByRole('heading', { name: /Broker Integrations & Session Status/i })).toBeInTheDocument()
       expect(screen.getAllByText(/fyers/i).length).toBeGreaterThan(0)
     })
@@ -174,6 +187,7 @@ describe('OpsDeck & System Health Hub UI Tests', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: /Disk Storage Allocations/i })).toBeInTheDocument()
       expect(screen.getByText(/Purge Ephemeral Cache/i)).toBeInTheDocument()
+      expect(screen.getByText(/Sync Fundamentals/i)).toBeInTheDocument()
     })
   })
 })

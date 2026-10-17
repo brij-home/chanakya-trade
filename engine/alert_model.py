@@ -4,6 +4,7 @@ Core AutoAlert data model and Indian expiry calendar mapping.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import asdict, dataclass, field
@@ -11,6 +12,8 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from config.constants import IST_ZONE as IST
+
+logger = logging.getLogger(__name__)
 
 from engine.alert_expiry import (
     get_expiry_metadata,
@@ -257,13 +260,17 @@ class AutoAlert:
                     self.initial_stop_loss = float(
                         self.actionable_plan["option_plan"]["sl_premium"]
                     )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             elif self.actionable_plan and self.actionable_plan.get("invalidation_stop"):
                 try:
                     self.initial_stop_loss = float(self.actionable_plan["invalidation_stop"])
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             elif self.stop_loss is not None and self.stop_loss > 0:
                 self.initial_stop_loss = float(self.stop_loss)
 
@@ -277,8 +284,10 @@ class AutoAlert:
                     self.initial_entry_premium = float(
                         self.actionable_plan["option_plan"]["entry_premium"]
                     )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             elif self.option_premium is not None and self.option_premium > 0:
                 self.initial_entry_premium = float(self.option_premium)
             elif (self.strike or self.option_type) and self.trigger_level > 0:
@@ -322,8 +331,10 @@ class AutoAlert:
                     m_sp = re.findall(r"[\d.]+", str(spot_anchor).replace(",", ""))
                     if m_sp:
                         self.structural_spot_sl = float(m_sp[0])
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         if self.underlying_sl is None and self.structural_spot_sl is not None:
             self.underlying_sl = self.structural_spot_sl
@@ -388,8 +399,8 @@ class AutoAlert:
                     contract=contract_val or "",
                     created_at=self.created_at,
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
         if not self.segment:
             try:
                 from engine.alert_preferences import classify_alert_segment
@@ -401,8 +412,10 @@ class AutoAlert:
             if self.metrics and "lot_size" in self.metrics and self.metrics["lot_size"]:
                 try:
                     self.lot_size = int(self.metrics["lot_size"])
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if (
                 self.lot_size is None
                 and self.actionable_plan
@@ -411,8 +424,10 @@ class AutoAlert:
             ):
                 try:
                     self.lot_size = int(self.actionable_plan["lot_size"])
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if self.lot_size is None:
                 try:
                     from engine.position_sizer import get_lot_size
@@ -420,8 +435,10 @@ class AutoAlert:
                     ls = get_lot_size(self.contract_symbol or self.symbol)
                     if ls and ls > 1:
                         self.lot_size = ls
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if self.lot_size is None:
                 from market.instruments import STANDARD_LOT_SIZES
 
@@ -683,8 +700,8 @@ class AutoAlert:
                     logging.getLogger(__name__).debug(
                         "Alert ID invariant notice for %s: %s", self.alert_id, reason
                     )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
 
         # Record data invariant audit if validation fails
         is_data_valid, val_reason = self.validate_data_integrity()
@@ -771,8 +788,10 @@ class AutoAlert:
                             False,
                             f"Option Coordinate Veto: Put premium (₹{ltp:,.2f}) cannot exceed strike (₹{stk:,.2f})",
                         )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         has_trailing_ratchet = bool(
             getattr(self, "should_trail", False)
@@ -872,18 +891,24 @@ class AutoAlert:
             if raw_t1:
                 try:
                     t1_f = float(str(raw_t1).replace(",", "").replace("₹", "").replace("$", ""))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if raw_t2:
                 try:
                     t2_f = float(str(raw_t2).replace(",", "").replace("₹", "").replace("$", ""))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if raw_t3:
                 try:
                     t3_f = float(str(raw_t3).replace(",", "").replace("₹", "").replace("$", ""))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # Check if the trade plan itself is buying an option (even if direction is BEARISH)
             is_buying_option = bool(
@@ -989,10 +1014,12 @@ class AutoAlert:
                                 f"Historical Expiry Veto: Expiry date {self.expiry_date} is in the past (< {today.isoformat()})",
                             )
                         break
-                    except ValueError:
-                        pass
-            except Exception:
-                pass
+                    except ValueError as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                        )
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
 
         return True, ""
 
@@ -1106,8 +1133,10 @@ class AutoAlert:
                     if entry_ref > 100 and num < (entry_ref * 0.5) and not is_short:
                         continue
                     target_sources.append(num)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         # Collect raw target candidates from target_sources
         candidates: list[float] = []
@@ -1121,8 +1150,8 @@ class AutoAlert:
                 if clean_num > 0 and clean_num not in candidates:
                     if not any(abs(clean_num - c) < 0.05 for c in candidates):
                         candidates.append(clean_num)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
 
         if candidates:
             # Directional filter: profit targets must extend beyond entry
@@ -1179,8 +1208,10 @@ class AutoAlert:
                             continue
                         if not any(abs(num - c) < 0.05 for c in opt_candidates):
                             opt_candidates.append(num)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             if opt_candidates:
                 if opt_entry_val > 0:
@@ -1246,8 +1277,10 @@ class AutoAlert:
                     if now >= exp_dt:
                         return True
                     break
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         # 2. Check creation timestamp for intraday cutoff, TTL, and time-stops
         created_dt = None
@@ -1257,8 +1290,10 @@ class AutoAlert:
                 try:
                     created_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
                     break
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         if created_dt:
             # 2a. Explicit Time-To-Live (TTL)
@@ -1289,8 +1324,10 @@ class AutoAlert:
                             if exp_dt.date() > now.date():
                                 has_future_expiry = True
                             break
-                        except ValueError:
-                            pass
+                        except ValueError as e_suppressed:
+                            logger.debug(
+                                f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
                 is_active_deriv = (
                     is_deriv
@@ -1600,8 +1637,8 @@ class AutoAlert:
                 m = re.findall(r"[\d.]+", str(plan.get("spot_target_1")).replace(",", ""))
                 if m and float(m[0]) > 0:
                     return float(m[0])
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
 
         t1_val = plan.get("target_1")
         if t1_val:
@@ -1624,8 +1661,8 @@ class AutoAlert:
                             return float(self.target_level)
                     else:
                         return val
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
 
         # If not explicitly defined as target_1, compute canonical +2R milestone if entry & SL exist
         sl = getattr(self, "initial_stop_loss", None) or self.stop_loss
@@ -1674,8 +1711,8 @@ class AutoAlert:
                 m = re.findall(r"[\d.]+", str(fallback).replace(",", ""))
                 if m:
                     return float(m[0])
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
         return self.target_level if (self.target_level and self.target_level > 0) else None
 
     @property
@@ -1697,8 +1734,8 @@ class AutoAlert:
                 m = re.findall(r"[\d.]+", str(plan.get("spot_target_2")).replace(",", ""))
                 if m and float(m[0]) > 0:
                     return float(m[0])
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
 
         t2_val = plan.get("target_2")
         t2_num = None
@@ -1720,8 +1757,8 @@ class AutoAlert:
                         t2_num = None
                     else:
                         t2_num = val
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
         t1 = self.target_1
         ep = self.entry_price
         sl = getattr(self, "initial_stop_loss", None) or self.stop_loss

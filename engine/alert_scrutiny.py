@@ -154,8 +154,10 @@ class AlertScrutinyAuditor:
                     is_data_valid, val_reason = res[0], res[1]
                     if not is_data_valid:
                         return False, f"Signal Data Integrity Veto: {val_reason}", flags
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # 0.5. Closed-Loop Detector Degradation Circuit Breaker Enforcement
         raw_atype = str(getattr(alert, "alert_type", "") or "")
@@ -536,8 +538,10 @@ class AlertScrutinyAuditor:
                         try:
                             clean_ts = str(alert.created_at).replace(" IST", "").strip()
                             ref_dt = datetime.fromisoformat(clean_ts).replace(tzinfo=IST)
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
                     decision = evaluate_equity_adaptive_regime(
                         symbol=target_eval_sym,
@@ -644,8 +648,10 @@ class AlertScrutinyAuditor:
                 if isinstance(opt_p, dict) and opt_p.get("t2_premium"):
                     try:
                         t2_val = float(opt_p["t2_premium"])
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 if t2_val is None and "target_2" in plan:
                     raw_t2 = plan["target_2"]
                     if isinstance(raw_t2, (int, float)):
@@ -655,23 +661,29 @@ class AlertScrutinyAuditor:
                         if clean_t2:
                             try:
                                 t2_val = float(clean_t2)
-                            except ValueError:
-                                pass
+                            except ValueError as e_suppressed:
+                                logger.debug(
+                                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                 if t2_val is None:
                     tp_dict = plan.get("trade_plan")
                     if isinstance(tp_dict, dict) and tp_dict.get("target_2"):
                         try:
                             t2_val = float(tp_dict["target_2"])
-                        except (ValueError, TypeError):
-                            pass
+                        except (ValueError, TypeError) as e_suppressed:
+                            logger.debug(
+                                f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
             if t2_val is None:
                 metrics = getattr(alert, "metrics", {}) or {}
                 if isinstance(metrics, dict) and metrics.get("t2_premium"):
                     try:
                         t2_val = float(metrics["t2_premium"])
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
             if t2_val is not None and risk_pts > 0 and rr_ratio >= 1.0:
                 if is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY"):
@@ -732,8 +744,10 @@ class AlertScrutinyAuditor:
                     )
                     if is_rollover:
                         flags["rollover_protected"] = True
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # 4d. MCX High-Impact Scheduled Inventory Blackout Gate
         if clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI"):
@@ -758,8 +772,10 @@ class AlertScrutinyAuditor:
                         alert_dt = datetime.fromisoformat(
                             clean_ts.replace("Z", "+00:00")
                         ).astimezone(IST)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if not alert_dt:
                 alert_dt = datetime.now(IST)
 
@@ -854,8 +870,10 @@ class AlertScrutinyAuditor:
                                 f"Global Macro Divergence: Henry Hub Natural Gas surging +{ng_c:.2f}% disallows domestic MCX shorts.",
                                 flags,
                             )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # 4f. Obstacle Runway Gate (Eliminate Stuck Signals hitting immediate brick walls)
         # Verifies that Target 1 is not obstructed by an immediate heavy resistance / Max OI wall
@@ -933,8 +951,10 @@ class AlertScrutinyAuditor:
                         f_oc = float(oc)
                         if f_oc > ltp:
                             valid_res.append(f_oc)
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
             valid_sup = []
             for uc in underlying_candidates:
@@ -943,8 +963,10 @@ class AlertScrutinyAuditor:
                         f_uc = float(uc)
                         if 0 < f_uc < ltp:
                             valid_sup.append(f_uc)
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
             nearest_res = min(valid_res) if valid_res else None
             nearest_sup = max(valid_sup) if valid_sup else None
@@ -1011,8 +1033,10 @@ class AlertScrutinyAuditor:
                         flags["hvn_congestion_risk"] = True
                     else:
                         flags["lvn_vacuum_clear"] = True
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             elif metrics.get("is_lvn_vacuum"):
                 flags["lvn_vacuum_clear"] = True
 
@@ -1067,8 +1091,10 @@ class AlertScrutinyAuditor:
                             f"Deep OTM Index Option: Strike {stk:,.0f} is {dist_pct * 100:.2f}% away from spot {spt:,.1f} (>1.2% theta decay trap)",
                             flags,
                         )
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         # 6b. Order Book Bid-Ask Spread & Exit Liquidity Gate:
         # Veto illiquid contracts with wide bid-ask spread (> 2.5% for index, > 4.5% for stock options)
         # or contracts with zero bid (total lack of exit liquidity).
@@ -1087,8 +1113,10 @@ class AlertScrutinyAuditor:
                                 f"Zero Bid Liquidity Veto: Contract has Ask ₹{a_f:,.2f} but ₹0.00 Bid. Complete lack of exit liquidity.",
                                 flags,
                             )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if spread_pct is not None:
                 max_spr = 2.5 if is_index_sym else 4.5
                 if spread_pct > max_spr:
@@ -1172,8 +1200,8 @@ class AlertScrutinyAuditor:
                     f"Learning Engine Lockout Active: {lock_reason}",
                     flags,
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}")
 
         # 7b. Opposing Major Zone Collision Gate (Truncated Headroom):
         # Prevent buying right beneath a major overhead supply zone (PDH/Day High) or shorting right above major demand (PDL/Day Low)
@@ -1327,8 +1355,10 @@ class AlertScrutinyAuditor:
         if isinstance(metrics_dict, dict) and metrics_dict.get("spot_to_vwap_pct") is not None:
             try:
                 spot_vwap_pct = float(metrics_dict["spot_to_vwap_pct"])
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if spot_vwap_pct is None:
             m_vwap = float(
                 (metrics_dict.get("vwap") if isinstance(metrics_dict, dict) else 0.0) or 0.0
@@ -1436,13 +1466,17 @@ class AlertScrutinyAuditor:
                     try:
                         rsi_val = float(metrics_dict[k])
                         break
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
         if rsi_val is None and hasattr(alert, "rsi") and alert.rsi is not None:
             try:
                 rsi_val = float(alert.rsi)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if rsi_val is not None and rsi_val > 0:
             is_put_option = (
@@ -1513,8 +1547,10 @@ class AlertScrutinyAuditor:
                                 f"Mean Reversion Risk: Extended {dist_from_ema / atr_f:.1f}x ATR from 20-EMA (₹{ema20_f:,.1f}) without structural base",
                                 flags,
                             )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         # 10. Multi-Timeframe (15m) Trend Alignment Gate:
         # Reject 5m counter-trend scalps if higher timeframe (15m) is in conflicting structural markdown/markup,
@@ -1595,8 +1631,10 @@ class AlertScrutinyAuditor:
                             f"Slippage Hazard Veto: Bid-Ask Spread ({spread_pct * 100:.2f}%) exceeds institutional threshold ({max_spread * 100:.1f}%) [Bid: Rs.{b:,.2f}, Ask: Rs.{a:,.2f}]",
                             flags,
                         )
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         flags["spread_valid"] = True
 
         # 12. Stock Option Illiquidity Gate:
@@ -1693,8 +1731,10 @@ class AlertScrutinyAuditor:
                                         alert_dt = datetime.fromisoformat(
                                             clean_ts.replace("Z", "+00:00")
                                         )
-                            except Exception:
-                                pass
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                         if not alert_dt:
                             alert_dt = datetime.now(IST)
                         elif alert_dt.tzinfo is None:
@@ -1722,8 +1762,10 @@ class AlertScrutinyAuditor:
                                 f"Stock Option Illiquidity Trap: Strike Daily Volume ({contracts_vol:,.0f}) < {min_vol} contracts (Illiquid execution trap)",
                                 flags,
                             )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         flags["liquidity_valid"] = True
 
         # 13. Midday Lunch Lull RVOL Expansion Filter (11:30 - 13:15 IST):
@@ -1756,8 +1798,10 @@ class AlertScrutinyAuditor:
                             alert_dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S")
                         except ValueError:
                             alert_dt = datetime.fromisoformat(clean_ts.replace("Z", "+00:00"))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if not alert_dt:
                 alert_dt = datetime.now(IST)
             elif alert_dt.tzinfo is None:
@@ -1787,8 +1831,10 @@ class AlertScrutinyAuditor:
                                 f"Midday False Breakout Trap: Breakout attempted during lunch lull (11:30-13:15 IST) with low relative volume (RVOL {rvol_f:.2f}x < 1.8x). Mandate institutional volume expansion.",
                                 flags,
                             )
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                        )
         flags["midday_rvol_valid"] = True
 
         # 14. Macro Benchmark Gravitational Veto (NIFTY 50 Intraday Regime Alignment):
@@ -1879,8 +1925,10 @@ class AlertScrutinyAuditor:
                                         (n_ltp < n_vwap) if n_vwap > 0 else (n_chg < 0)
                                     )
                                     break
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # Live fallback if cache lookup was empty
             if nifty_change is None and not is_test_runner:
@@ -1895,8 +1943,10 @@ class AlertScrutinyAuditor:
                         n_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
                         nifty_change = float(nq.change_pct)
                         nifty_below_vwap = (n_ltp < n_vwap) if n_vwap > 0 else (nifty_change < 0)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             if nifty_change is None and not is_test_runner:
                 try:
@@ -1910,8 +1960,10 @@ class AlertScrutinyAuditor:
                             if getattr(idx_snap, "vwap", 0.0) > 0
                             else (nifty_change < 0)
                         )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             if nifty_change is not None:
                 try:
@@ -2113,8 +2165,10 @@ class AlertScrutinyAuditor:
                             if isinstance(metrics_dict, dict):
                                 metrics_dict["decoupler_status"] = "VERIFIED_DECOUPLER"
 
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         flags["macro_regime_aligned"] = True
         flags.setdefault("benchmark_regime_valid", True)
 
@@ -2154,8 +2208,10 @@ class AlertScrutinyAuditor:
                                 n_vwap = float(getattr(q_obj, "vwap", 0.0) or 0.0)
                                 n_chg = float(getattr(q_obj, "change_pct", 0.0) or 0.0)
                                 break
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             is_index_bearish = (
                 direction in ("BEARISH", "SHORT", "SELL")
@@ -2378,8 +2434,10 @@ class AlertScrutinyAuditor:
                                 f"Locomotive Tug-of-War Veto: {pol.summary} Naked directional options in low-vol chop (VIX {vix_val:.1f}) suffer rapid theta decay; mandate defined-risk spread.",
                                 flags,
                             )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # Heavyweight Breadth Confluence Matrix (HBCM) Gate for Index setups:
             hbcm_meta = metrics_dict.get("hbcm") if isinstance(metrics_dict, dict) else None
@@ -2511,8 +2569,10 @@ class AlertScrutinyAuditor:
                 try:
                     clean_ts = alert.created_at.replace(" IST", "").strip()
                     alert_dt = datetime.fromisoformat(clean_ts).replace(tzinfo=IST)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             enforce_friday = os.environ.get("ENFORCE_TEST_FRIDAY_GATE") == "1"
             if (
@@ -2557,8 +2617,10 @@ class AlertScrutinyAuditor:
             try:
                 clean_ts = str(alert.created_at).replace(" IST", "").strip()
                 alert_time = datetime.fromisoformat(clean_ts).time()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if alert_time is None:
             alert_time = datetime.now(IST).time()
 
@@ -2624,8 +2686,10 @@ class AlertScrutinyAuditor:
                         f"Parabolic Velocity Climax: Asset expanded {m_val:.1f}x ATR over last 3 bars without consolidation. Disallow market chase; mandate limit order on 20-EMA/VWAP pullback.",
                         flags,
                     )
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         flags["velocity_sustainable"] = True
 
         # 16. Intraday Sector Relative Performance / Breadth Sanity Gate:
@@ -2681,8 +2745,10 @@ class AlertScrutinyAuditor:
                                 f"Intraday Sector Tailwind Veto: Parent sector outperforming NIFTY by +{sec_rs_f:.2f}% intraday (strong institutional bid). Disallow short breakdown into surging sector tailwinds.",
                                 flags,
                             )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         flags["sector_aligned"] = True
 
         # 17. Order Book Level-2 Depth Imbalance Gate:
@@ -2812,8 +2878,10 @@ class AlertScrutinyAuditor:
                                     f"Developing Value Area Rejection: Price (₹{ltp:,.1f}) is trading above intraday Value Area High (₹{dh:,.1f}). Mandate price acceptance below value area before short entry.",
                                     flags,
                                 )
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Auction Market Theory: Developing POC Directional Migration Check
         poc_mig = None
@@ -2971,8 +3039,10 @@ class AlertScrutinyAuditor:
                             f"Disallow short breakdown into aggressive institutional buying accumulation.",
                             flags,
                         )
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         flags["cvd_flow_valid"] = True
 
         # 20. ADR (Average Daily Range) Exhaustion Gate:
@@ -3023,8 +3093,10 @@ class AlertScrutinyAuditor:
                                 f"ADR Exhaustion Trap: Asset has consumed {c_pct:.1f}% of its 14-day Average Daily Range (₹{float(adr_val):,.1f}); entry at day's low lacks expansion runway for Target 1.",
                                 flags,
                             )
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
         flags["adr_exhaustion_valid"] = True
 
         # 21. Circuit Limit Headroom Gate (Cash Equities & Price Bands):
@@ -3453,8 +3525,8 @@ class AlertScrutinyAuditor:
             cb_summary = cb_m.to_dict()
             if cb_m.sample_count >= 5:
                 p_win = max(0.40, min(0.85, cb_m.win_rate))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}")
 
         # Friction drag (bid-ask slippage + STT/exchange transaction fees)
         is_fno = bool(
@@ -3810,8 +3882,10 @@ class AlertScrutinyAuditor:
                 full_json = json_candidate[: end_idx + 1]
                 try:
                     return json.loads(full_json)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # If truncated or malformed, attempt bracket and quote repair
             repaired = json_candidate
@@ -3823,8 +3897,10 @@ class AlertScrutinyAuditor:
                 repaired += "}"
             try:
                 return json.loads(repaired)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Resilient field extraction (works even when JSON is cut off mid-sentence)
         data: dict[str, Any] = {}
@@ -3843,8 +3919,10 @@ class AlertScrutinyAuditor:
         if sm:
             try:
                 data["score"] = int(sm.group(1))
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         return data
 
@@ -3969,8 +4047,10 @@ class AlertScrutinyAuditor:
                     us10y_s = f"US 10Y: {snap.us_10y or 'N/A'}%"
                     usdinr_s = f"USD/INR: ₹{snap.usdinr or 'N/A'}"
                     macro_ctx = f"{dxy_s} | {brent_s} | {gold_s} | {us10y_s} | {usdinr_s}"
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             return f"""You are a senior commodity macro trader and CRO at an institutional MCX desk.
 Perform strict pre-dispatch scrutiny of this LIVE MCX commodity momentum alert:
@@ -4037,8 +4117,8 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
             regime_ctx = (
                 f"{r_obj.regime} (India VIX {r_obj.vix:.1f}, Trend {r_obj.trend_score:.1f})"
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}")
 
         # 2. SMC & Market Structure Vector
         smc_features = []

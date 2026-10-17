@@ -325,8 +325,10 @@ def get_default_core_grid(
                         format_fyers_option_symbol("SENSEX", s_weekly_exp, atm_val, "PE"),
                     ]
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.fyers_tbt_manager] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Strict Single-Writer Invariant: eliminate any duplicate between core and todays_exp
         todays_exp = [s for s in todays_exp if s not in core]
@@ -482,10 +484,14 @@ class FyersTbtManager:
                     if ws_obj and hasattr(ws_obj, "close"):
                         try:
                             ws_obj.close()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[market.fyers_tbt_manager] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.fyers_tbt_manager] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             t = threading.Thread(target=_close, daemon=True)
             t.start()
@@ -640,14 +646,18 @@ class FyersTbtManager:
                     with _quote_cache_lock:
                         _QUOTE_CACHE[symbol] = (now_w, q_obj)
                         _QUOTE_CACHE[clean_sym] = (now_w, q_obj)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.fyers_tbt_manager] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             for cb in self._callbacks:
                 try:
                     cb(symbol, parsed)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.fyers_tbt_manager] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         except Exception as e:
             logger.debug(f"Error parsing 50-depth packet for {symbol}: {e}")
 
@@ -1059,8 +1069,10 @@ class FyersTbtManager:
                 for r in rows:
                     if r and r[0]:
                         active_symbols.add(str(r[0]))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[market.fyers_tbt_manager] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         try:
             from brokers.session import get_execution_broker
@@ -1070,8 +1082,10 @@ class FyersTbtManager:
                 for p in broker.get_positions():
                     if getattr(p, "quantity", 0) != 0:
                         active_symbols.add(str(p.symbol))
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[market.fyers_tbt_manager] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         self.sync_in_flight_with_active_symbols(active_symbols)
 
@@ -1241,8 +1255,10 @@ class FyersTbtManager:
                     if self._connected and self._ws:
                         try:
                             self._ws.unsubscribe(symbols=to_remove, channelNo="1")
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[market.fyers_tbt_manager] Non-fatal exception suppressed: {e_suppressed}"
+                            )
 
     def sample_symbol(self, symbol: str, duration_sec: float = 120.0) -> bool:
         """
@@ -1321,8 +1337,10 @@ class FyersTbtManager:
                 d = brk.get_market_depth(symbol)
                 if d.get("status") == "ok":
                     return self._convert_l2_to_depth_format(symbol, d)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[market.fyers_tbt_manager] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         return {
             "symbol": symbol,

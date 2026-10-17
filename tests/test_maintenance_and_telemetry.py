@@ -191,12 +191,20 @@ def test_api_diagnostics_and_maintenance_endpoints():
     assert res_sb.status_code == 200
     assert "total_app_data_mb" in res_sb.json()
 
-    # 4. Trigger maintenance purge
-    res_purge = client.post("/api/maintenance/purge")
+    # 4. Trigger maintenance purge (with JSON body vacuum_databases=True)
+    res_purge = client.post("/api/maintenance/purge", json={"vacuum_databases": True})
     assert res_purge.status_code == 200
     purge_data = res_purge.json()
     assert "actions_taken" in purge_data
     assert "storage_after" in purge_data
+    assert any("VACUUM" in act for act in purge_data["actions_taken"])
+
+    # 5. Historical errors query endpoint
+    res_hist = client.get("/api/diagnostics/errors/history?limit=10")
+    assert res_hist.status_code == 200
+    hist_data = res_hist.json()
+    assert "total" in hist_data
+    assert "incidents" in hist_data
 
 
 def test_global_exception_middleware():

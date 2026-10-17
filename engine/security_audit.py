@@ -9,6 +9,10 @@ and financial reconciliations.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.security_audit")
+
 
 import hashlib
 import json
@@ -44,8 +48,10 @@ def _get_audit_pool() -> SQLiteConnectionPool:
                 if _AUDIT_POOL and not _AUDIT_POOL._closed:
                     try:
                         _AUDIT_POOL.close()
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.security_audit] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 _AUDIT_POOL = SQLiteConnectionPool(current_path, max_conns=5)
     return _AUDIT_POOL
 

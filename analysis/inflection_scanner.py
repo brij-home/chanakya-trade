@@ -25,6 +25,10 @@ Timing Radar Classification:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.inflection_scanner")
+
 
 import concurrent.futures
 from dataclasses import asdict, dataclass, field
@@ -39,13 +43,17 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+            )
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
 import numpy as np
 import pandas as pd
@@ -226,8 +234,10 @@ def evaluate_single_stock_inflection(
             from engine.eod_store import get_cached_ohlcv
 
             df = get_cached_ohlcv(clean_sym, days=504)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     if (df is None or len(df) == 0) and allow_network:
         try:
@@ -316,8 +326,10 @@ def evaluate_single_stock_inflection(
                 sector_tailwind = tailwind.tailwind_score
             if sector_name in ("Broad Market", "BROAD_MARKET") and tailwind.sector:
                 sector_name = tailwind.sector
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         try:
             if forensics_data:
@@ -391,8 +403,10 @@ def evaluate_single_stock_inflection(
     smc_rep = None
     try:
         smc_rep = analyze_market_structure(clean_sym, df=df)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
     smc_regime = smc_rep.regime if smc_rep else "CONSOLIDATION"
     smc_setup = smc_rep.setup_type if smc_rep else "RANGE_BOUND"
@@ -564,8 +578,10 @@ def evaluate_single_stock_inflection(
                 from market.history import get_ohlcv
 
                 weekly_df = get_ohlcv(clean_sym, interval="week", days=520)  # ~2Y of weekly bars
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if weekly_df is not None and len(weekly_df) >= 25:
             _ws, _wc = classify_weinstein_stage(weekly_df)
@@ -584,8 +600,10 @@ def evaluate_single_stock_inflection(
                 confluence_factors.append(
                     f"📐 Weekly Stage 1 Accumulation Base (late stage, conf {_wc}/8)"
                 )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
     # ─────────────────────────────────────────────────────────────────
     # 8. TIMING STATE CLASSIFICATION
@@ -982,8 +1000,10 @@ def scan_inflections_universe(
                         cache_state="SQLITE_DAILY_PRECOMPUTED (<20ms)",
                         filtered_out_liquidity_count=0,
                     )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # Fast Liquidity & Minimum Bar Pre-Filter via SQLite Metadata (3ms)
     filtered_out_liquidity_count = 0
@@ -1009,8 +1029,10 @@ def scan_inflections_universe(
                             continue
                     active_symbols.append(s)
                 symbols = active_symbols
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     cache_state = "REST_DIRECT"
     if df_cache is None and use_local_cache:
@@ -1030,8 +1052,10 @@ def scan_inflections_universe(
                     sync_universe_eod(missing, exchange=exchange)
                     newly_cached = get_cached_ohlcv_batch(missing, days=504, copy=False)
                     df_cache.update(newly_cached)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # Pre-fetch sector RRG matrix once to avoid hundreds of repetitive SQLite queries
     rrg_matrix: Optional[dict[str, Any]] = None
@@ -1048,8 +1072,10 @@ def scan_inflections_universe(
         from engine.eod_store import get_cached_forensics_batch
 
         forensics_cache_map = get_cached_forensics_batch(symbols, max_age_days=30)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
     # 2. Parallel Evaluation
     candidates: list[InflectionSetup] = []
@@ -1086,8 +1112,10 @@ def scan_inflections_universe(
             from engine.eod_store import save_cached_inflections_batch
 
             save_cached_inflections_batch([c.to_dict() for c in candidates])
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.inflection_scanner] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # 3. Apply Filters
     filtered: list[InflectionSetup] = []

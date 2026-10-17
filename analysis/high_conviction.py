@@ -14,6 +14,10 @@ Calculates a composite Conviction Score (0–100) and produces actionable trade 
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.high_conviction")
+
 
 import concurrent.futures
 import datetime
@@ -27,13 +31,17 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.high_conviction] Non-fatal exception suppressed: {e_suppressed}"
+            )
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[analysis.high_conviction] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
 import pandas as pd
 
@@ -517,8 +525,10 @@ def scan_high_conviction_opportunities(
                     clean_o = {k: v for k, v in o.items() if k in valid_fields}
                     try:
                         opps.append(HighConvictionOpportunity(**clean_o))
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[analysis.high_conviction] Non-fatal exception suppressed: {e_suppressed}"
+                        )
             if len(opps) > 0:
                 return HighConvictionScanResult(
                     timestamp=cached.get("timestamp", now_ist.strftime("%d %b %Y, %I:%M %p IST")),

@@ -37,6 +37,7 @@ class StorageBreakdown:
     total_app_data_mb: float
     free_ssd_gb: float
     total_ssd_gb: float
+    wal_mb: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -47,7 +48,25 @@ class StorageBreakdown:
             "telemetry_mb": round(self.telemetry_mb, 2),
             "total_app_data_mb": round(self.total_app_data_mb, 2),
             "free_ssd_gb": round(self.free_ssd_gb, 2),
+            "ssd_free_gb": round(self.free_ssd_gb, 2),
             "total_ssd_gb": round(self.total_ssd_gb, 2),
+            "total_size_mb": round(self.total_app_data_mb, 2),
+            "wal_mb": round(self.wal_mb, 2),
+            "tiers": {
+                "business": {
+                    "size_mb": round(self.business_data_mb, 2),
+                    "wal_mb": round(self.wal_mb, 2),
+                },
+                "market_data": {
+                    "size_mb": round(self.market_data_mb, 2),
+                },
+                "analytics": {
+                    "size_mb": round(self.analysis_cache_mb, 2),
+                },
+                "telemetry": {
+                    "size_mb": round(self.telemetry_mb, 2),
+                },
+            },
         }
 
 
@@ -83,8 +102,8 @@ def _file_or_dir_size_bytes(path: Path) -> int:
         for f in files:
             try:
                 total += Path(root, f).stat().st_size
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.maintenance] Non-fatal exception suppressed: {e_suppressed}")
     return total
 
 
@@ -133,6 +152,10 @@ def get_storage_breakdown() -> StorageBreakdown:
         free_ssd_gb = 0.0
         total_ssd_gb = 0.0
 
+    # WAL files size
+    wal_files = list(root.glob("*.db-wal")) + list(Path("data").glob("*.db-wal"))
+    wal_bytes = sum(_file_or_dir_size_bytes(f) for f in wal_files)
+
     return StorageBreakdown(
         business_data_mb=b_bytes / (1024 * 1024),
         market_data_mb=m_bytes / (1024 * 1024),
@@ -142,6 +165,7 @@ def get_storage_breakdown() -> StorageBreakdown:
         total_app_data_mb=total_bytes / (1024 * 1024),
         free_ssd_gb=free_ssd_gb,
         total_ssd_gb=total_ssd_gb,
+        wal_mb=wal_bytes / (1024 * 1024),
     )
 
 
@@ -306,8 +330,15 @@ def run_maintenance_purge(
                 if conn is not None:
                     try:
                         conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.maintenance] Non-fatal exception suppressed: {e_suppressed}"
+                        )
+
+    if vacuum_databases:
+        actions.append(
+            "Checkpointed SQLite WAL logs and executed VACUUM across databases to reclaim fragmented pages."
+        )
 
     after_breakdown = get_storage_breakdown()
     bytes_reclaimed = max(

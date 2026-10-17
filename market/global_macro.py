@@ -217,8 +217,8 @@ def fetch_global_macro_report(
                     as_of=cached["as_of"],
                     data_source=cached.get("data_source", "CACHED_GLOBAL_FEED"),
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.global_macro] Non-fatal exception suppressed: {e_suppressed}")
 
     # Resolve NIFTY 50 spot price for gap math if not provided.  A modelled
     # point estimate is not useful without an actual NIFTY reference price.
@@ -259,8 +259,10 @@ def fetch_global_macro_report(
                             round(float(chg), 2),
                             round(float(chg_pct), 2),
                         )
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.global_macro] Non-fatal exception suppressed: {e_suppressed}"
+                    )
                 return k, None
 
             with ThreadPoolExecutor(max_workers=len(_GLOBAL_TICKERS)) as executor:
@@ -547,8 +549,8 @@ def fetch_global_macro_report(
         cache_payload = report.to_dict()
         cache_payload["data_contract_version"] = 2
         analysis_cache.save_macro(cache_key, cache_payload, ttl_minutes=5)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[market.global_macro] Non-fatal exception suppressed: {e_suppressed}")
 
     return report
 

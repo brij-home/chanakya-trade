@@ -115,8 +115,10 @@ def detect_index_call_setup(
             if hasattr(ohlcv_5m, "iloc") and len(ohlcv_5m) >= 1:
                 col_o = "open" if "open" in ohlcv_5m.columns else "Open"
                 _day_open_price_ce = float(ohlcv_5m[col_o].iloc[0])
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+            )
     _spot_above_open_escape = bool(
         _day_open_price_ce
         and _day_open_price_ce > 0
@@ -725,8 +727,10 @@ def detect_index_call_setup(
         from market.indices import get_vix
 
         vix_val = get_vix()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+        )
     is_low_vix_range = bool(
         vix_val
         and 0 < vix_val < 13.0
@@ -833,8 +837,10 @@ def detect_index_call_setup(
             is_5m_bear_trend = bool(
                 ema9 < (ema20 * 0.9995) and (effective_vwap > 0 and spot < effective_vwap * 0.999)
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # ── Central Pivot Range (CPR) & Camarilla Confluence ────────────────────────
     cpr_data: dict[str, Any] = {}
@@ -1110,8 +1116,10 @@ def detect_index_call_setup(
                     prev_b[col_h]
                 ):
                     _is_recent_flush = True
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         _flush_from_dh_pct = (
             ((day_high - spot) / max(1.0, day_high) * 100.0)
@@ -1555,8 +1563,10 @@ def detect_index_call_setup(
                     upper_wick_pct = (b_h - max(b_c, b_o)) / b_rng * 100.0
                     if upper_wick_pct >= 35.0:
                         has_rejection_wick_upthrust = True
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if has_rejection_wick_upthrust:
                 logger.info(
                     f"[IndexCallSetup] Suppressed DAY_HIGH_BREAKOUT on {clean_sym}: Upper rejection wick "
@@ -1906,8 +1916,10 @@ def detect_index_call_setup(
             today_d = datetime.now(IST).date()
             dte_days = max(0, (exp_d - today_d).days)
             is_0dte = dte_days == 0
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+            )
     if opt_ltp > 0 and exp_date:
         try:
             from analysis.options import compute_greeks
@@ -1917,8 +1929,10 @@ def detect_index_call_setup(
                 opt_delta = round(float(g.delta), 4)
                 opt_gamma = round(float(g.gamma), 6)
                 opt_iv = round(float(g.iv_pct), 2)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # ── Confidence Score ─────────────────────────────────────────
     base_confidence = 58
@@ -2093,8 +2107,10 @@ def detect_index_call_setup(
         )
         vel_regime = v_metric.regime
         vel_score = v_metric.velocity_score
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
     vel_badge = ""
     if vel_regime == "LEADER_EXPANSION":
@@ -2379,8 +2395,10 @@ def detect_index_call_setup(
         exp_meta = get_expiry_metadata(exp_date, exp_type, clean_sym, contract_sym)
         if exp_meta and "dte" in exp_meta:
             dte = max(0, int(exp_meta["dte"]))
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
     iv_val = max(0.10, (vix_val / 100.0) if vix_val else 0.14)
     from engine.options_backtest import bs_delta
@@ -2482,8 +2500,10 @@ def detect_index_call_setup(
                 is_0dte = True
             elif exp_date and exp_date == now_dt.strftime("%Y-%m-%d"):
                 is_0dte = True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         # 0DTE Midday Theta Trap: On expiry day between 11:30 and 13:30, theta decay is at its peak.
         # Naked option buying during this window suffers severe theta drag and mean-reversion whipsaws.

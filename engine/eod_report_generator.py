@@ -3283,8 +3283,10 @@ def is_eod_dispatched_today(today_str: str) -> bool:
             if isinstance(data, dict) and today_str in data:
                 _EOD_GENERATED_TODAY_LOCK.add(today_str)
                 return True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.eod_report_generator] Non-fatal exception suppressed: {e_suppressed}"
+            )
     # Also check if report JSON already exists on disk
     report_json = get_reports_dir() / f"eod_{today_str}.json"
     if report_json.exists():

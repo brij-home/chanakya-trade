@@ -20,6 +20,10 @@ Install extra deps:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("brokers.angelone")
+
 
 import json
 import time
@@ -181,8 +185,10 @@ class AngelOneAPI(BrokerAPI):
                 # Re-attach the saved token to the SDK object
                 try:
                     import logzero  # noqa: F401
-                except ImportError:
-                    pass
+                except ImportError as e_suppressed:
+                    logger.debug(
+                        f"[brokers.angelone] Non-fatal exception suppressed: {e_suppressed}"
+                    )
                 self._obj = obj
                 self._profile_cache = UserProfile(
                     user_id=d.get("client_code", self._client_code),
@@ -190,8 +196,8 @@ class AngelOneAPI(BrokerAPI):
                     email=d.get("email", ""),
                     broker="ANGEL_ONE",
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.angelone] Non-fatal exception suppressed: {e_suppressed}")
 
     def is_authenticated(self) -> bool:
         return bool(self._auth_token)
@@ -200,8 +206,8 @@ class AngelOneAPI(BrokerAPI):
         try:
             if self._obj and self._auth_token:
                 self._obj.terminateSession(self._client_code)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.angelone] Non-fatal exception suppressed: {e_suppressed}")
         self._auth_token = ""
         self._obj = None
         if TOKEN_FILE.exists():
@@ -352,8 +358,8 @@ class AngelOneAPI(BrokerAPI):
                     change=change,
                     change_pct=change_pct,
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.angelone] Non-fatal exception suppressed: {e_suppressed}")
         return result
 
     def get_options_chain(

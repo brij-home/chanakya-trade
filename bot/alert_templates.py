@@ -543,8 +543,8 @@ def _parse_ts_to_dt(ts_str: Optional[str]) -> Optional[datetime]:
     cleaned = ts_str.replace(" IST", "").strip()
     try:
         return datetime.fromisoformat(cleaned)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}")
     for fmt in (
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
@@ -977,8 +977,10 @@ def parse_contract_components(
         if stk is None:
             try:
                 stk = float(stk_raw)
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if not opt:
             opt = opt_found
         if exp_raw and not expiry_date:
@@ -997,8 +999,10 @@ def parse_contract_components(
                 try:
                     exp_dt = datetime.strptime(dt_str, "%Y%m%d").date()
                     expiry_date = exp_dt
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
     # 3. NSE Weekly compact: e.g. NIFTY2692524800CE
     if stk is None:
@@ -1261,8 +1265,8 @@ def _resolve_monotonic_display_targets(
                 val = float(m[0].replace(",", ""))
                 if val > 0 and not any(abs(val - c) < 0.05 for c in candidates):
                     candidates.append(val)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}")
 
     if not candidates:
         return ("", "", "")
@@ -1401,8 +1405,10 @@ class FNOAlertData:
             if m_pr:
                 try:
                     prem = float(m_pr.group(0).replace(",", ""))
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         if prem <= 0.05:
             is_fallback = True
@@ -1499,8 +1505,10 @@ class FNOAlertData:
         elif disaster_floor:
             try:
                 disaster_floor = float(disaster_floor)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         return cls(
             contract=contract,
@@ -1595,8 +1603,10 @@ class EquityAlertData:
                 real_ltp = get_ltp(symbol)
                 if real_ltp and real_ltp > 0:
                     ltp = float(real_ltp)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if ltp <= 0.0:
             is_fallback = True
@@ -1891,13 +1901,17 @@ class MilestoneAlertData:
                         / 2.0,
                         2,
                     )
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             elif len(matches) == 1:
                 try:
                     entry_price = float(matches[0].replace(",", ""))
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         if not entry_price or entry_price == 0.0:
             if is_opt_contract:
                 entry_price = getattr(alert, "option_premium", None) or (
@@ -1933,8 +1947,10 @@ class MilestoneAlertData:
         if getattr(alert, "initial_stop_loss", None):
             try:
                 initial_sl = float(alert.initial_stop_loss)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if (
             not initial_sl
             and is_opt_contract
@@ -1943,13 +1959,17 @@ class MilestoneAlertData:
         ):
             try:
                 initial_sl = float(opt_plan["initial_sl_premium"])
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if not initial_sl and act_plan.get("initial_invalidation_stop"):
             try:
                 initial_sl = float(act_plan["initial_invalidation_stop"])
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if (
             not initial_sl
             and is_opt_contract
@@ -2023,22 +2043,28 @@ class MilestoneAlertData:
                     t0_5_val = float(
                         metrics_dict.get("target_0_5_premium") or metrics_dict.get("t0_5_premium")
                     )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if not t1_val and ("target_1_premium" in metrics_dict or "t1_premium" in metrics_dict):
                 try:
                     t1_val = float(
                         metrics_dict.get("target_1_premium") or metrics_dict.get("t1_premium")
                     )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if not t2_val and ("target_2_premium" in metrics_dict or "t2_premium" in metrics_dict):
                 try:
                     t2_val = float(
                         metrics_dict.get("target_2_premium") or metrics_dict.get("t2_premium")
                     )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             if not moon_val and (
                 "target_3_premium" in metrics_dict or "t3_premium" in metrics_dict
             ):
@@ -2046,8 +2072,10 @@ class MilestoneAlertData:
                     moon_val = float(
                         metrics_dict.get("target_3_premium") or metrics_dict.get("t3_premium")
                     )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         # ONLY for non-option assets (Equity / Commodity / Currency directly), extract from trade_plan.
         # Option contracts must NEVER inherit underlying spot levels from trade_plan!
@@ -3322,13 +3350,17 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
         if fut_sl:
             try:
                 fut_parts.append(f"SL: ₹{float(fut_sl):,.1f}")
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if fut_t1:
             try:
                 fut_parts.append(f"T1: ₹{float(fut_t1):,.1f}")
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
         fut_exec_str = " | ".join(fut_parts)
         if fut_exec_str:
             fut_exec_str = " " + fut_exec_str
@@ -4258,8 +4290,10 @@ def render_milestone_alert(
             if m_ent:
                 try:
                     spread_debit = float(m_ent.group(1).replace(",", ""))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         orig_plan_line = _build_orig_plan(
             entry_p=d.entry_price,
             entry_r=d.entry_range,
@@ -4302,8 +4336,10 @@ def render_milestone_alert(
             if m_ent:
                 try:
                     spread_debit = float(m_ent.group(1).replace(",", ""))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         orig_plan_line = _build_orig_plan(
             entry_p=d.entry_price,
             entry_r=d.entry_range,
@@ -4346,8 +4382,10 @@ def render_milestone_alert(
             if m_ent:
                 try:
                     spread_debit = float(m_ent.group(1).replace(",", ""))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         orig_plan_line = _build_orig_plan(
             entry_p=d.entry_price,
             entry_r=d.entry_range,
@@ -4400,8 +4438,10 @@ def render_milestone_alert(
             if m_ent:
                 try:
                     spread_debit = float(m_ent.group(1).replace(",", ""))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         orig_plan_line = _build_orig_plan(
             entry_p=d.entry_price,
             entry_r=d.entry_range,
@@ -4636,8 +4676,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             if m_t1:
                 try:
                     t1_num = float(m_t1.group(0).replace(",", ""))
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         if not t1_num and entry_p and getattr(alert, "stop_loss", None):
             try:
                 sl_val = float(alert.stop_loss)
@@ -4650,8 +4692,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                         else entry_p - (r_val * 2.0),
                         2,
                     )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         alert_type_raw = str(getattr(alert, "alert_type", "") or "").upper()
         act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
@@ -4705,8 +4749,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 if m_t05:
                     try:
                         t0_5_num = float(m_t05.group(0).replace(",", ""))
-                    except ValueError:
-                        pass
+                    except ValueError as e_suppressed:
+                        logger.debug(
+                            f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                        )
             has_hit_t0_5 = (
                 t0_5_num is not None
                 and t0_5_num > 0
@@ -4761,8 +4807,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             if m_t2:
                 try:
                     t2_num = float(m_t2.group(0).replace(",", ""))
-                except ValueError:
-                    pass
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         alert_type_raw = str(getattr(alert, "alert_type", "") or "").upper()
         act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
@@ -4815,8 +4863,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 if m_t1:
                     try:
                         t1_num = float(m_t1.group(0).replace(",", ""))
-                    except ValueError:
-                        pass
+                    except ValueError as e_suppressed:
+                        logger.debug(
+                            f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                        )
             has_hit_t1 = (
                 t1_num is not None
                 and t1_num > 0
@@ -5248,8 +5298,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                     pts_risk = abs(entry_val - sl_num)
                     if pts_risk > 0:
                         max_loss = pts_risk * int(lot_sz)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
         max_loss_str = (
             f" · [Risk: ₹{float(max_loss):,.0f}/lot]" if max_loss and float(max_loss) > 0 else ""
         )
@@ -5390,13 +5442,17 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                     entry_mcx_num = (
                         float(m_nums[0].replace(",", "")) + float(m_nums[1].replace(",", ""))
                     ) / 2.0
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
             elif len(m_nums) == 1:
                 try:
                     entry_mcx_num = float(m_nums[0].replace(",", ""))
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
         sl = actionable_plan.get("stop_loss", f"₹{getattr(alert, 'stop_loss', 0):,.1f}")
         sl_mcx_num = None
@@ -5404,16 +5460,20 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         if m_sl:
             try:
                 sl_mcx_num = float(m_sl.group(1).replace(",", ""))
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         lot = actionable_plan.get("lot_size", "")
         lot_num = None
         if lot:
             try:
                 lot_num = float(lot)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         is_short_mcx = not is_opt_first and (
             str(act).startswith("SELL")
@@ -5524,8 +5584,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 m_t = re.search(r"(\d{2}):(\d{2})(?::\d{2})?", str(ts_raw))
                 if m_t:
                     t_hour, t_min = int(m_t.group(1)), int(m_t.group(2))
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if (t_hour == 22 and t_min >= 45) or (t_hour == 23 and t_min < 15):
             mins_to_mis = max(1, (23 * 60 + 15) - (t_hour * 60 + t_min))
@@ -5634,8 +5696,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         if m_cds:
             try:
                 entry_cds_num = float(m_cds.group(1).replace(",", ""))
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
+                )
         is_short_cds = str(act).startswith("SELL") or str(
             getattr(alert, "direction", "")
         ).upper() in ("BEARISH", "SHORT")
@@ -5880,8 +5944,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                     f"• <b>T2:</b> <code>₹{tp.target_2:,.1f}</code> ({t_diff_sign}{tp.t2_distance_pts:,.1f} pts | <b>{tp.rr_t2:.1f}R</b>){runner_eq_str}{overrun_warn}\n"
                     f"• <b>R:R:</b> {asym_icon} <b>{tp.rr_t2:.1f}R{asym_verdict_str}</b>{no_chase_inline}"
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}")
 
         if not plan_str and actionable_plan:
             action = actionable_plan.get("action", "BUY")
@@ -6726,8 +6790,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
         if sigs:
             signals_line_str = "• Signals: " + ", ".join(sigs[:6])  # max 6 for mobile
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Final message assembly: action first, context next, meta at bottom ─────
     # Layout:

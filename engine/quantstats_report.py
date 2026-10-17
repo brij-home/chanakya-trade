@@ -18,6 +18,10 @@ Features:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.quantstats_report")
+
 
 import math
 from datetime import datetime
@@ -44,8 +48,8 @@ def _use_headless_backend() -> None:
         import matplotlib
 
         matplotlib.use("Agg", force=True)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.quantstats_report] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def daily_returns(data: Any, freq: str = "auto") -> pd.Series:
@@ -268,8 +272,10 @@ def generate_html_tear_sheet(
                 download_filename=out_file.name,
             )
             return str(out_file)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.quantstats_report] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # High-quality standalone fallback tear sheet
     html = f"""<!DOCTYPE html>

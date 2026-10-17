@@ -122,8 +122,8 @@ def extract_spot_invalidation_anchor(alert: Any) -> Optional[float]:
             m = re.findall(r"[\d.]+", str(val).replace(",", ""))
             if m and float(m[0]) > 0:
                 return float(m[0])
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
         return None
 
     metrics = _safe_get(alert, "metrics") or {}
@@ -299,19 +299,19 @@ def extract_dte(alert: Any) -> Optional[int]:
     if isinstance(metrics, dict) and "dte" in metrics and metrics["dte"] is not None:
         try:
             return int(metrics["dte"])
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
     if hasattr(alert, "dte") and getattr(alert, "dte") is not None:
         try:
             return int(getattr(alert, "dte"))
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
     exp_details = _safe_get(alert, "expiry_details", {}) or {}
     if isinstance(exp_details, dict) and exp_details.get("dte") is not None:
         try:
             return int(exp_details["dte"])
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
     exp_date = _safe_get(alert, "expiry_date", "") or ""
     if exp_date:
         try:
@@ -331,14 +331,16 @@ def extract_dte(alert: Any) -> Optional[int]:
                             ref_date = datetime.strptime(
                                 str(ref_dt_str).strip()[:10], "%Y-%m-%d"
                             ).date()
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                     now_date = ref_date or datetime.now(IST).date()
                     return max(0, (exp_dt - now_date).days)
                 except ValueError:
                     continue
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.synthetic_sl] Non-fatal exception suppressed: {e_suppressed}")
     return None
 
 

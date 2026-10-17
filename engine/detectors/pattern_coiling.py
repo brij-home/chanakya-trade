@@ -103,8 +103,10 @@ def detect_learned_pattern_coiling(
                             [h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1
                         ).max(axis=1)
                         atr20 = float(tr.rolling(14).mean().iloc[-1])
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.detectors.pattern_coiling] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 from engine.dynamic_risk import resolve_price_tier
 
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts

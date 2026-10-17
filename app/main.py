@@ -10,6 +10,10 @@ Run with:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("app.main")
+
 
 import os
 import sys
@@ -20,8 +24,8 @@ if sys.platform == "win32":
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         if sys.stderr and hasattr(sys.stderr, "reconfigure"):
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[app.main] Non-fatal exception suppressed: {e_suppressed}")
 import socket
 from pathlib import Path
 
@@ -144,8 +148,8 @@ def main() -> None:
         from engine.nightly_chain import schedule_nightly_chain
 
         schedule_nightly_chain()
-    except Exception:
-        pass  # Non-critical — never block startup
+    except Exception as e_suppressed:
+        logger.debug(f"[app.main] Non-fatal exception suppressed: {e_suppressed}")
 
     if use_tui:
         # Launch Textual TUI

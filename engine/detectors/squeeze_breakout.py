@@ -363,8 +363,10 @@ def detect_squeeze_breakout(
                 if candle_range > 0.01 and b_open > 0 and b_close > 0:
                     upper_wick_ratio = (b_high - max(b_open, b_close)) / candle_range
                     lower_wick_ratio = (min(b_open, b_close) - b_low) / candle_range
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.squeeze_breakout] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # ── EARLY WARNING (BULLISH): Coiled in squeeze, close below pivot high ───
         if (
@@ -499,8 +501,10 @@ def detect_squeeze_breakout(
                         if n_vwap > 0 and n_ltp >= n_vwap:
                             # NIFTY is green and holding VWAP — suppress counter-trend breakdown trap!
                             return None
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.squeeze_breakout] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             tp = None
             try:
@@ -741,8 +745,10 @@ def detect_squeeze_breakout(
                         if n_vwap > 0 and n_ltp >= n_vwap:
                             # NIFTY is green and holding VWAP — suppress counter-trend breakdown trap!
                             return None
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.squeeze_breakout] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             tp = None
             try:

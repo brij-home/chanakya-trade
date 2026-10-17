@@ -280,8 +280,10 @@ class DetectorCircuitBreaker:
             mtime = self.ledger_file.stat().st_mtime
             if mtime > getattr(self, "_last_mtime", 0.0):
                 self._load()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.detector_circuit_breaker] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     def _save_unlocked(self) -> None:
         """Persists trade history to JSON file."""

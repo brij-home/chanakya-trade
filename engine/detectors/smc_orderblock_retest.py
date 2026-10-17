@@ -70,8 +70,10 @@ def _compute_atr(df: pd.DataFrame, period: int = 14) -> float:
             val = float(atr_series.iloc[-1])
             if val > 0:
                 return round(val, 4)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[engine.detectors.smc_orderblock_retest] Non-fatal exception suppressed: {e_suppressed}"
+        )
     return 0.0
 
 

@@ -318,8 +318,8 @@ def detect_opening_range_breakout(
             calc_atr = float(tr.rolling(14).mean().iloc[-1])
             if calc_atr > 0 and not np.isnan(calc_atr):
                 atr_val = round(calc_atr, 2)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.detectors.orb] Non-fatal exception suppressed: {e_suppressed}")
 
     # Dynamic price-proportional risk floor to prevent low-priced (< ₹100) stocks from having distorted large stops
     price_tier = resolve_price_tier(ltp)

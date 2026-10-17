@@ -73,8 +73,10 @@ class QuoteDispatcher:
                 for s, q in stream_res.items():
                     if q and getattr(q, "last_price", 0.0) > 0:
                         combined[s] = q
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[market.quote_dispatcher] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         unresolved = [
             s for s in unique_syms if s not in combined and s.split(":")[-1] not in combined

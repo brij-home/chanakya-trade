@@ -185,6 +185,16 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         pass
 
     try:
+        from market.websocket import FyersWebSocket
+
+        ws = FyersWebSocket._instance
+        if ws:
+            with ws._lock:
+                ws._ticks.clear()
+    except Exception:
+        pass
+
+    try:
         from market.options import _CHAIN_CACHE, _EXPIRIES_CACHE, _SNAPSHOT_CACHE
 
         _CHAIN_CACHE.clear()

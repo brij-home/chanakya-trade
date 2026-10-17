@@ -378,8 +378,8 @@ def evaluate_institutional_quality_gate(
             from market.indices import get_vix
 
             vix_val = get_vix()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.quality_gate] Non-fatal exception suppressed: {e_suppressed}")
     if vix_val is not None:
         try:
             vix_f = float(vix_val)
@@ -389,8 +389,8 @@ def evaluate_institutional_quality_gate(
                     f"Elevated India VIX ({vix_f:.1f} >= 19.0): Elevated IV crush risk on naked options. "
                     f"Defined-risk vertical spread mandated to neutralize volatility collapse."
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.quality_gate] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── 4. Check 3: Multi-Timeframe Trend & VWAP Anchor Check ─────────────────
     vwap_val = current_vwap
@@ -465,8 +465,8 @@ def evaluate_institutional_quality_gate(
                 notes.append(
                     f"Low Breakout RVOL ({rvol_f:.2f}x < 1.20x): Lack of institutional volume surge; defined-risk spread mandated."
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.quality_gate] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── 6b. Check 5b: Higher-Timeframe Structural Wall & MTF Alignment ────────
     mtf_count = (getattr(alert, "metrics", {}) or {}).get("mtf_alignment_count")
@@ -535,8 +535,8 @@ def evaluate_institutional_quality_gate(
                         "Wait for active market session volume before entering breakout/retest setups.",
                     ],
                 )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.quality_gate] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── 7. Conviction Tier Classification & Execution Mandate ─────────────────
     execution_mandate = "STANDARD"
@@ -563,8 +563,8 @@ def evaluate_institutional_quality_gate(
             verdict_metrics["mtscm"] = mtscm_res.to_dict()
             verdict_metrics["mtscm_score"] = mtscm_res.total_score
             verdict_metrics["mtscm_tier"] = mtscm_res.tier
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.quality_gate] Non-fatal exception suppressed: {e_suppressed}")
 
     if (
         confidence >= 90

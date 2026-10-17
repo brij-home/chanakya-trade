@@ -59,8 +59,10 @@ def _extract_price(obj: Any, *attr_names: str) -> float:
                 f = float(val)
                 if f > 0:
                     return f
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[engine.asymmetric_radar] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
 
 def _compute_atr(df: Optional[pd.DataFrame], ltp: float, period: int = 14) -> float:
@@ -87,8 +89,10 @@ def _compute_atr(df: Optional[pd.DataFrame], ltp: float, period: int = 14) -> fl
                 val = float(atr_series.iloc[-1])
                 if val > 0:
                     return round(val, 2)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.asymmetric_radar] Non-fatal exception suppressed: {e_suppressed}"
+            )
     return round(ltp * 0.015, 2) if ltp > 0 else 1.0
 
 
@@ -199,8 +203,8 @@ def resolve_recommended_option_contract(
         from engine.position_sizer import _SYMBOL_ALIASES
 
         clean_sym = _SYMBOL_ALIASES.get(clean_sym, clean_sym)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.asymmetric_radar] Non-fatal exception suppressed: {e_suppressed}")
     opt_type = "CE" if direction.upper() in ("BULLISH", "BUY", "LONG") else "PE"
     lot_sz = get_lot_size(clean_sym)
     is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
@@ -341,8 +345,10 @@ def resolve_recommended_option_contract(
                 )
                 if quote_ltp and quote_ltp > 0:
                     opt_ltp = float(quote_ltp)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.asymmetric_radar] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # Fallback 2: Contract close or settlement price
         if opt_ltp <= 0.0:
@@ -777,8 +783,10 @@ class AsymmetricOpportunityRadar:
                     and (cur_vol / max_down_vol) < 2.0
                 ):
                     return None  # Drop lagging sector unless volume is extraordinarily high (>2.0x)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.asymmetric_radar] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         score = min(96, int(80 + (cur_vol / max_down_vol) * 5))
 
@@ -1107,8 +1115,10 @@ class AsymmetricOpportunityRadar:
             audit = audit_company_forensics(clean_sym)
             if getattr(audit, "beneish_flagged", False) is True:
                 return None  # Accounting red flags detected!
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.asymmetric_radar] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         # 5. Asymmetric Levels
         atr = _compute_atr(df, ltp)
@@ -1344,8 +1354,10 @@ class AsymmetricOpportunityRadar:
                         f"[AsymmetricRadar] Suppressing 0DTE Gamma breakout for {clean_sym}: {pol.summary}"
                     )
                     return None
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.asymmetric_radar] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         # 2. VIX Volatility Regime Detection:
         vix = 14.0
@@ -1355,8 +1367,10 @@ class AsymmetricOpportunityRadar:
             vix_val = get_vix()
             if vix_val > 0:
                 vix = vix_val
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.asymmetric_radar] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
         is_low_vix = vix < 12.0
         direction = "BULLISH" if is_bullish_unpin else "BEARISH"

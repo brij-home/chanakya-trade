@@ -919,6 +919,12 @@ def save_fundamentals_batch(data_dict: dict[str, dict[str, Any]]) -> int:
     for sym, d in data_dict.items():
         if not d:
             continue
+        if hasattr(d, "as_dict"):
+            d = d.as_dict()
+        elif hasattr(d, "__dataclass_fields__"):
+            import dataclasses
+
+            d = dataclasses.asdict(d)
         clean_sym = _clean_eod_symbol(sym)
         # Guard: In production store, never save test symbols
         if _get_db_path() == DEFAULT_EOD_DB_PATH and (
@@ -1064,6 +1070,12 @@ def save_forensics_batch(data_dict: dict[str, dict[str, Any]]) -> int:
     for sym, d in data_dict.items():
         if not d:
             continue
+        if hasattr(d, "as_dict"):
+            d = d.as_dict()
+        elif hasattr(d, "__dataclass_fields__"):
+            import dataclasses
+
+            d = dataclasses.asdict(d)
         clean_sym = _clean_eod_symbol(sym)
         # Guard: In production store, never save test symbols
         if _get_db_path() == DEFAULT_EOD_DB_PATH and (

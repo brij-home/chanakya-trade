@@ -6,6 +6,10 @@ Docs: https://kite.trade/docs/connect/v3/
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("brokers.zerodha")
+
 
 import json
 import threading
@@ -95,8 +99,8 @@ class ZerodhaAPI(BrokerAPI):
     def logout(self) -> None:
         try:
             self.kite.invalidate_access_token()
-        except KiteException:
-            pass
+        except KiteException as e_suppressed:
+            logger.debug(f"[brokers.zerodha] Non-fatal exception suppressed: {e_suppressed}")
         TOKEN_FILE.unlink(missing_ok=True)
 
     # ── Account ───────────────────────────────────────────────

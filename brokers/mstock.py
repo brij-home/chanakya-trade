@@ -19,6 +19,10 @@ Session token is persisted to ~/.trading_platform/mstock.json and auto-restored.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("brokers.mstock")
+
 
 import base64
 import json
@@ -32,8 +36,8 @@ try:
     import dotenv
 
     dotenv.load_dotenv()
-except ImportError:
-    pass
+except ImportError as e_suppressed:
+    logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
 import httpx
 
@@ -192,8 +196,8 @@ class MStockAPI(BrokerAPI):
         self._load_token()
         try:
             self._ensure_scrip_cache()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Token Resolution Helper ──────────────────────────────
 
@@ -287,8 +291,8 @@ class MStockAPI(BrokerAPI):
                     tok = self._scrip_token_cache[cand_key]
                     self._scrip_token_cache[cache_key] = tok
                     return tok
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
         # 2. Hardcoded fallback (only if scrip master cache miss)
         if clean_sym in _KNOWN_NSE_TOKENS:
@@ -310,8 +314,8 @@ class MStockAPI(BrokerAPI):
                 if disk_data.get("timestamp", 0) > now_ts - 86400 and disk_data.get("tokens"):
                     self._scrip_token_cache.update(disk_data["tokens"])
                     return
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
         if not self._token:
             return
@@ -344,11 +348,13 @@ class MStockAPI(BrokerAPI):
                             json.dumps({"timestamp": now_ts, "tokens": self._scrip_token_cache}),
                             encoding="utf-8",
                         )
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 return
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
         # 3. CSV fallback
         for line in scrip_txt.splitlines():
@@ -388,8 +394,8 @@ class MStockAPI(BrokerAPI):
                             broker="MSTOCK",
                         )
                     return True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return False
 
     def _save_token(self, token: str, expiry_seconds: int = 28800, refresh_token: str = "") -> None:
@@ -406,8 +412,8 @@ class MStockAPI(BrokerAPI):
                     jwt_exp = jwt_payload.get("exp")
                     if jwt_exp:
                         expiry_seconds = max(60, int(jwt_exp - time.time() - 120))
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
             client_name = self._user_profile.name if self._user_profile else "m.Stock Trader"
             payload = {
@@ -420,8 +426,8 @@ class MStockAPI(BrokerAPI):
                 "updated_at": datetime.now().isoformat(),
             }
             TOKEN_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Authentication ────────────────────────────────────────
 
@@ -496,8 +502,10 @@ class MStockAPI(BrokerAPI):
                         import pyotp
 
                         totp_code = pyotp.TOTP(totp_s.strip()).now()
-                    except ImportError:
-                        pass
+                    except ImportError as e_suppressed:
+                        logger.debug(
+                            f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
                 if totp_code and refresh_token and ak:
                     v_url = f"{MSTOCK_BASE_URL}/openapi/typeb/session/verifytotp"
@@ -545,8 +553,8 @@ class MStockAPI(BrokerAPI):
                     self._token_expiry = time.time() + 86400
                     self._save_token(direct_token, refresh_token=refresh_token)
                     return True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return False
 
     def get_login_url(self) -> str:
@@ -607,8 +615,8 @@ class MStockAPI(BrokerAPI):
                     self._token_expiry = time.time() + 86400
                     self._save_token(jwt_token, refresh_token=request_token)
                     return True
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return False
 
     def logout(self) -> None:
@@ -617,20 +625,20 @@ class MStockAPI(BrokerAPI):
             try:
                 url = f"{MSTOCK_BASE_URL}/openapi/typeb/logout"
                 self._fetch_authed("GET", url)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         self._token = ""
         self._user_profile = None
         if TOKEN_FILE.exists():
             try:
                 TOKEN_FILE.unlink()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         if hasattr(self, "_client") and self._client is not None:
             try:
                 self._client.close()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
     def close(self) -> None:
         """Alias for logout to conform to standard resource close protocol."""
@@ -755,8 +763,8 @@ class MStockAPI(BrokerAPI):
                 )
                 total = float(item.get("LIMIT_SOD") or item.get("totalMargin") or (avail + used))
                 return Funds(available_cash=avail, used_margin=used, total_balance=total)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
         return Funds(available_cash=0.0, used_margin=0.0, total_balance=0.0)
 
@@ -809,8 +817,8 @@ class MStockAPI(BrokerAPI):
                         )
                     )
                 return holdings
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
         return []
 
@@ -864,8 +872,8 @@ class MStockAPI(BrokerAPI):
                         )
                     )
                 return positions
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return []
 
     # ── Market Data & Quotes ──────────────────────────────────
@@ -1037,8 +1045,8 @@ class MStockAPI(BrokerAPI):
                             )
                             quotes[orig_inst] = q_obj
                             quotes[target_sym] = q_obj
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
         # 3. Fallback for remaining unresolved instruments
         remaining = [
@@ -1091,8 +1099,8 @@ class MStockAPI(BrokerAPI):
                             )
                             quotes[inst] = q_obj
                             quotes[clean_sym] = q_obj
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
         if is_single:
             return quotes.get(instruments) or Quote(
@@ -1130,8 +1138,8 @@ class MStockAPI(BrokerAPI):
                     "data": master_data,
                 }
                 return master_data
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return {}
 
     def get_expiries(self, underlying: str) -> list[str]:
@@ -1187,8 +1195,10 @@ class MStockAPI(BrokerAPI):
                         d_str = dt.strftime("%Y-%m-%d")
                         if d_str >= today_str:
                             dates.append(d_str)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}"
+                        )
             return sorted(set(dates)) if dates else []
         except Exception:
             return []
@@ -1313,8 +1323,10 @@ class MStockAPI(BrokerAPI):
                                 try:
                                     dt_exp = datetime.strptime(c_model["exp"].strip(), "%d-%b-%Y")
                                     resolved_expiry_str = dt_exp.strftime("%Y-%m-%d")
-                                except Exception:
-                                    pass
+                                except Exception as e_suppressed:
+                                    logger.debug(
+                                        f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}"
+                                    )
 
                             expiry_str = resolved_expiry_str or datetime.fromtimestamp(
                                 chosen_epoch
@@ -1380,8 +1392,10 @@ class MStockAPI(BrokerAPI):
                                         fetched_spot = get_ltp(clean_sym)
                                         if fetched_spot and fetched_spot > 0:
                                             spot_est = float(fetched_spot)
-                                    except Exception:
-                                        pass
+                                    except Exception as e_suppressed:
+                                        logger.debug(
+                                            f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}"
+                                        )
 
                                     if spot_est <= 0 and contracts:
                                         all_strikes = sorted({c.strike for c in contracts})
@@ -1446,15 +1460,17 @@ class MStockAPI(BrokerAPI):
                                                         c.pchange = round(
                                                             ((ltp - close_p) / close_p) * 100.0, 2
                                                         )
-                                except Exception:
-                                    pass
+                                except Exception as e_suppressed:
+                                    logger.debug(
+                                        f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}"
+                                    )
 
                             if contracts and any(
                                 float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in contracts
                             ):
                                 return contracts
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
         if is_bse:
             return []
@@ -1529,8 +1545,8 @@ class MStockAPI(BrokerAPI):
                         df.set_index("timestamp", inplace=True)
                         df.index = df.index.tz_localize(None)
                         return df
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             from market.history import get_history
@@ -1665,8 +1681,8 @@ class MStockAPI(BrokerAPI):
                 if isinstance(data, list) and data:
                     data = data[0]
                 return data.get("data") or data.get("result") or data
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return {}
 
     def get_trade_book(self) -> list[dict]:
@@ -1680,8 +1696,8 @@ class MStockAPI(BrokerAPI):
                 data = resp.json()
                 items = data.get("data") or data.get("result") or []
                 return items if isinstance(items, list) else []
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return []
 
     def get_trade_history(self, from_date: str, to_date: str) -> list[dict]:
@@ -1696,8 +1712,8 @@ class MStockAPI(BrokerAPI):
                 data = resp.json()
                 items = data.get("data") or data.get("result") or []
                 return items if isinstance(items, list) else []
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return []
 
     def get_health_statistics(self) -> dict:
@@ -1707,8 +1723,8 @@ class MStockAPI(BrokerAPI):
             resp = self._client.get(url, headers=self._headers())
             if resp.status_code == 200:
                 return resp.json()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return {}
 
     def get_orders(self) -> list[Order]:
@@ -1766,8 +1782,8 @@ class MStockAPI(BrokerAPI):
                         )
                     )
                 return orders
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return []
 
     def modify_order(
@@ -1852,8 +1868,8 @@ class MStockAPI(BrokerAPI):
             if resp.status_code == 200:
                 data = resp.json()
                 return data.get("data") or data.get("result") or data
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return {}
 
     # ── Top Gainers / Losers API ──────────────────────────────
@@ -1885,8 +1901,8 @@ class MStockAPI(BrokerAPI):
                 data = resp.json()
                 items = data.get("data") or data.get("result") or []
                 return items if isinstance(items, list) else []
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return []
 
     # ── Basket Order APIs ─────────────────────────────────────
@@ -1902,8 +1918,8 @@ class MStockAPI(BrokerAPI):
             resp = self._fetch_authed("POST", url, json=payload)
             if resp.status_code == 200:
                 return resp.json()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return {"status": False, "message": "Failed to create basket"}
 
     def fetch_baskets(self) -> list[dict]:
@@ -1918,8 +1934,8 @@ class MStockAPI(BrokerAPI):
                 data = resp.json()
                 baskets = data.get("data") or data.get("result") or []
                 return baskets if isinstance(baskets, list) else []
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return []
 
     def rename_basket(self, basket_id: str, new_name: str) -> dict:
@@ -1933,8 +1949,8 @@ class MStockAPI(BrokerAPI):
             resp = self._fetch_authed("PUT", url, json=payload)
             if resp.status_code == 200:
                 return resp.json()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return {"status": False, "message": "Failed to rename basket"}
 
     def delete_basket(self, basket_id: str) -> dict:
@@ -1948,8 +1964,8 @@ class MStockAPI(BrokerAPI):
             resp = self._fetch_authed("DELETE", url, json=payload)
             if resp.status_code == 200:
                 return resp.json()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return {"status": False, "message": "Failed to delete basket"}
 
     def calculate_basket(self, params_or_name: dict | str) -> dict:
@@ -1987,8 +2003,8 @@ class MStockAPI(BrokerAPI):
             resp = self._fetch_authed("POST", url, json=payload)
             if resp.status_code == 200:
                 return resp.json()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return {}
 
     # ── Position Conversion ───────────────────────────────────
@@ -2104,8 +2120,8 @@ class MStockAPI(BrokerAPI):
                         df.set_index("timestamp", inplace=True)
                         df.index = df.index.tz_localize(None)
                         return df
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return None
 
     def download_scrip_master(self) -> str:
@@ -2121,6 +2137,6 @@ class MStockAPI(BrokerAPI):
             resp = self._fetch_authed("GET", url)
             if resp.status_code == 200:
                 return resp.text
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return ""

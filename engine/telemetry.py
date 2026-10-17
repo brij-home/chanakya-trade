@@ -14,6 +14,10 @@ Provides structured self-learning summaries and actionable architectural recomme
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.telemetry")
+
 
 import json
 import threading
@@ -103,6 +107,64 @@ _events_buffer: deque[TelemetryEvent] = deque(maxlen=_MAX_IN_MEMORY_EVENTS)
 _lock = threading.Lock()
 
 
+def _get_telemetry_file() -> Path:
+    telemetry_dir = app_data_path("telemetry")
+    telemetry_dir.mkdir(parents=True, exist_ok=True)
+    return telemetry_dir / "events.jsonl"
+
+
+def _load_recent_events_from_disk(limit: int = 250) -> None:
+    """
+    Safely pre-populate in-memory ring buffer with recent incidents from disk on startup.
+    Guarantees zero operational amnesia across process restarts while keeping startup fast and bounded.
+    """
+    try:
+        target_file = _get_telemetry_file()
+        if not target_file.exists():
+            return
+        loaded: list[TelemetryEvent] = []
+        with target_file.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    ev_type = data.get("event_type", "INCIDENT")
+                    comp = data.get("component", "SYSTEM")
+                    sev = data.get("severity", "INFO")
+                    rsn = data.get("reason", "")
+                    prio = data.get("priority")
+                    if not prio or prio not in ("P0", "P1", "P2", "P3"):
+                        prio = derive_priority(ev_type, comp, sev, rsn)
+                    ev = TelemetryEvent(
+                        event_type=ev_type,
+                        component=comp,
+                        action_taken=data.get("action_taken", ""),
+                        reason=rsn,
+                        timestamp=data.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                        details=data.get("details", {}),
+                        severity=sev,
+                        incident_id=data.get("incident_id"),
+                        priority=prio,
+                    )
+                    loaded.append(ev)
+                    if len(loaded) > limit * 2:
+                        loaded = loaded[-limit:]
+                except Exception:
+                    continue
+        with _lock:
+            _events_buffer.clear()
+            for ev in loaded[-limit:]:
+                _events_buffer.append(ev)
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}")
+
+
+# Pre-warm buffer from disk
+_load_recent_events_from_disk(limit=250)
+
+
 def sanitize_sensitive_data(obj: Any) -> Any:
     """Recursively scrub tokens, passwords, and secret keys from logs and payloads."""
     sensitive_substrings = {
@@ -132,12 +194,6 @@ def sanitize_sensitive_data(obj: Any) -> Any:
     return obj
 
 
-def _get_telemetry_file() -> Path:
-    telemetry_dir = app_data_path("telemetry")
-    telemetry_dir.mkdir(parents=True, exist_ok=True)
-    return telemetry_dir / "events.jsonl"
-
-
 def _rotate_logs_if_needed(target_file: Path) -> None:
     """Rotate events.jsonl into events.1.jsonl ... events.5.jsonl if size exceeds cap."""
     if not target_file.exists():
@@ -155,8 +211,8 @@ def _rotate_logs_if_needed(target_file: Path) -> None:
                         old_f.replace(new_f)
             # Move current log to .1
             target_file.replace(target_file.parent / "events.1.jsonl")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def record_event(
@@ -194,9 +250,9 @@ def record_event(
             _rotate_logs_if_needed(target_file)
             with target_file.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(event.to_dict()) + "\n")
-        except Exception:
+        except Exception as e_suppressed:
             # Observability logging should never crash the caller
-            pass
+            logger.debug(f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}")
 
     # Real-time SSE dispatch for critical/high priority incidents
     if resolved_priority in ("P0", "P1"):
@@ -210,8 +266,8 @@ def record_event(
                     "incident": event.to_dict(),
                 },
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}")
 
     return event
 
@@ -236,8 +292,8 @@ def record_exception(
         from engine.memory_guard import get_memory_status
 
         vitals = get_memory_status().to_dict()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}")
 
     details = {
         "incident_id": incident_id,
@@ -374,10 +430,14 @@ def get_prioritized_incidents(
 
     events.reverse()
     results = []
+    target_prio = priority.upper() if priority else None
+    target_comp = component.lower() if component else None
+
     for ev in events:
-        if priority and ev.priority != priority.upper():
+        ev_prio = getattr(ev, "priority", None) or "P3"
+        if target_prio and ev_prio != target_prio:
             continue
-        if component and component.lower() not in ev.component.lower():
+        if target_comp and target_comp not in (ev.component or "").lower():
             continue
         results.append(ev.to_dict())
         if len(results) >= limit:
@@ -385,15 +445,103 @@ def get_prioritized_incidents(
     return results
 
 
-def get_incident_counts() -> dict[str, int]:
-    """Return counts of events segregated by priority level."""
+def get_incident_counts(window_minutes: Optional[int] = None) -> dict[str, int]:
+    """Return counts of events segregated by priority level.
+
+    Args:
+        window_minutes: If specified, counts only events occurring within the
+            last N minutes (for active system health evaluation). If None,
+            counts all events in the in-memory rolling buffer.
+    """
     with _lock:
         events = list(_events_buffer)
     counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
+    now = datetime.now(timezone.utc)
+
     for ev in events:
-        p = getattr(ev, "priority", "P3")
+        if window_minutes is not None:
+            ts_str = getattr(ev, "timestamp", None)
+            if ts_str:
+                try:
+                    ts = datetime.fromisoformat(ts_str)
+                    if (now - ts).total_seconds() > window_minutes * 60:
+                        continue
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+        p = getattr(ev, "priority", None)
+        if not p or p not in counts:
+            p = derive_priority(
+                getattr(ev, "event_type", "INCIDENT"),
+                getattr(ev, "component", "SYSTEM"),
+                getattr(ev, "severity", "INFO"),
+                getattr(ev, "reason", ""),
+            )
         counts[p] = counts.get(p, 0) + 1
     return counts
+
+
+def query_historical_events(
+    limit: int = 100,
+    priority: Optional[str] = None,
+    component: Optional[str] = None,
+    event_type: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """
+    Query historical telemetry events directly from disk archives.
+    Reads newest-to-oldest across events.jsonl and rotated events.1.jsonl ... events.5.jsonl.
+    """
+    results: list[dict[str, Any]] = []
+    target_prio = priority.upper() if priority else None
+    target_comp = component.lower() if component else None
+    target_type = event_type.upper() if event_type else None
+
+    telemetry_dir = app_data_path("telemetry")
+    files_to_check = [telemetry_dir / "events.jsonl"]
+    for i in range(1, MAX_BACKUP_FILES + 1):
+        f = telemetry_dir / f"events.{i}.jsonl"
+        if f.exists():
+            files_to_check.append(f)
+
+    for fpath in files_to_check:
+        if not fpath.exists():
+            continue
+        try:
+            lines = fpath.read_text(encoding="utf-8", errors="ignore").splitlines()
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except Exception:
+                    continue
+
+                ev_prio = data.get("priority")
+                if not ev_prio or ev_prio not in ("P0", "P1", "P2", "P3"):
+                    ev_prio = derive_priority(
+                        data.get("event_type", "INCIDENT"),
+                        data.get("component", "SYSTEM"),
+                        data.get("severity", "INFO"),
+                        data.get("reason", ""),
+                    )
+                    data["priority"] = ev_prio
+
+                if target_prio and ev_prio != target_prio:
+                    continue
+                if target_comp and target_comp not in (data.get("component") or "").lower():
+                    continue
+                if target_type and (data.get("event_type") or "").upper() != target_type:
+                    continue
+
+                results.append(data)
+                if len(results) >= limit:
+                    return results
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}")
+
+    return results
 
 
 def clear_telemetry() -> None:
@@ -401,8 +549,13 @@ def clear_telemetry() -> None:
     with _lock:
         _events_buffer.clear()
         try:
-            target_file = _get_telemetry_file()
+            telemetry_dir = app_data_path("telemetry")
+            target_file = telemetry_dir / "events.jsonl"
             if target_file.exists():
                 target_file.unlink()
-        except Exception:
-            pass
+            for i in range(1, MAX_BACKUP_FILES + 1):
+                bf = telemetry_dir / f"events.{i}.jsonl"
+                if bf.exists():
+                    bf.unlink()
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}")

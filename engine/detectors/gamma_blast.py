@@ -8,7 +8,6 @@ import logging
 import os
 from datetime import datetime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from engine.alert_expiry import classify_expiry_type
 from engine.alert_identity import (
@@ -21,7 +20,7 @@ from engine.alert_model import AutoAlert
 import time
 
 logger = logging.getLogger(__name__)
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST
 
 # Short-term strike snapshot cache: contract_key -> (timestamp, oi, volume)
 _STRIKE_OI_SNAPSHOTS: dict[str, tuple[float, int, int]] = {}
@@ -420,8 +419,10 @@ def detect_gamma_blast(
                             is_hero_unwind and strike_diff_pct <= 0.35
                         ):
                             continue
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.gamma_blast] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             # SEBI Physical Delivery Expiry Week Guard for Single-Stock Options:
             if not is_index:
@@ -763,8 +764,10 @@ def detect_gamma_blast(
                     fetched = get_ltp(contract_sym)
                     if fetched and fetched > 0:
                         opt_ltp = float(fetched)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.gamma_blast] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             is_authentic_opt = bool(opt_ltp and opt_ltp > 0.0)
             alert_env = "LIVE" if is_authentic_opt else "TEST"
@@ -1072,8 +1075,10 @@ def detect_gamma_blast(
                             is_hero_unwind and strike_diff_pct >= -0.35
                         ):
                             continue
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.gamma_blast] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             # SEBI Physical Delivery Expiry Week Guard for Single-Stock Options:
             if not is_index:
@@ -1418,8 +1423,10 @@ def detect_gamma_blast(
                     fetched = get_ltp(contract_sym)
                     if fetched and fetched > 0:
                         opt_ltp = float(fetched)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.detectors.gamma_blast] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             is_authentic_opt = bool(opt_ltp and opt_ltp > 0.0)
             alert_env = "LIVE" if is_authentic_opt else "TEST"

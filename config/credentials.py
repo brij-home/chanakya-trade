@@ -22,6 +22,10 @@ Keys are stored as:   keyring.get_password("chanakya-trade", "KITE_API_KEY")
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("config.credentials")
+
 
 import os
 import sys
@@ -32,13 +36,13 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[config.credentials] Non-fatal exception suppressed: {e_suppressed}")
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[config.credentials] Non-fatal exception suppressed: {e_suppressed}")
 
 from rich.console import Console
 from rich.prompt import Prompt, Confirm
@@ -337,8 +341,8 @@ def get_credential(
                     console.print(
                         "  [yellow]Could not save to keychain — keyring unavailable.[/yellow]\n"
                     )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[config.credentials] Non-fatal exception suppressed: {e_suppressed}")
 
     os.environ[key] = value
     return value

@@ -22,6 +22,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.oms")
+
 
 import hashlib
 import json
@@ -278,8 +282,8 @@ class OrderBook:
                     )
                     self._orders[order.order_id] = order
                     self._idempotency_index[order.idempotency_key] = order.order_id
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.oms] Non-fatal exception suppressed: {e_suppressed}")
 
     def _persist(self, order: Order, event: OrderEvent) -> None:
         """Persist an order event to the append-only audit log."""
@@ -299,8 +303,8 @@ class OrderBook:
                 "orders": {oid: o.to_dict() for oid, o in self._orders.items()},
             }
             self._index_file.write_text(json.dumps(index_data, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.oms] Non-fatal exception suppressed: {e_suppressed}")
 
     def _transition(
         self,

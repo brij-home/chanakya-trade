@@ -21,6 +21,10 @@ Formulas (Crores of Rupee Gamma per 1% underlying move):
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.gex")
+
 
 import math
 from datetime import date, datetime
@@ -246,8 +250,8 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
             try:
                 exp_date = datetime.strptime(str(first_exp)[:10], "%Y-%m-%d").date()
                 dte_days = max(1, (exp_date - date.today()).days)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[analysis.gex] Non-fatal exception suppressed: {e_suppressed}")
 
         # 6. Aggregate by strike
         strike_map: Dict[float, Dict[str, Any]] = {}

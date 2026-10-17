@@ -17,6 +17,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.dcf")
+
 
 from dataclasses import dataclass, field
 from typing import Optional
@@ -248,8 +252,8 @@ def _get_fcf_quality(ticker) -> Optional[dict]:
                 capex=float(capex) / 1e7 if capex else 0,
                 prev_capex=float(prev_capex) / 1e7 if prev_capex else 0,
             )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.dcf] Non-fatal exception suppressed: {e_suppressed}")
     return None
 
 
@@ -266,8 +270,8 @@ def _get_bank_model(snap, beta: float) -> Optional[dict]:
             from market.quotes import get_ltp
 
             ltp = get_ltp(f"NSE:{snap.symbol}")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.dcf] Non-fatal exception suppressed: {e_suppressed}")
         bv = ltp / pb if pb > 0 and ltp > 0 else 0
         if bv <= 0:
             return None
@@ -325,8 +329,8 @@ def dcf_for_symbol(
             fund_data = _fetch_yfinance_data(symbol, fast=True)
             if fund_data and fund_data.get("shares_outstanding"):
                 shares = fund_data.get("shares_outstanding")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.dcf] Non-fatal exception suppressed: {e_suppressed}")
 
         if not shares:
             try:
@@ -336,8 +340,8 @@ def dcf_for_symbol(
                 t = yf.Ticker(_to_yf_symbol(symbol))
                 info = t.info if t else {}
                 shares = info.get("sharesOutstanding")
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[analysis.dcf] Non-fatal exception suppressed: {e_suppressed}")
 
         if not shares:
             return {"error": f"Shares outstanding unavailable for {symbol}"}
@@ -348,8 +352,8 @@ def dcf_for_symbol(
             if not info and t:
                 try:
                     info = t.info if t else {}
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[analysis.dcf] Non-fatal exception suppressed: {e_suppressed}")
 
             # Collect all available growth signals
             trailing_eps = info.get("trailingEps")
@@ -380,8 +384,8 @@ def dcf_for_symbol(
                         candidates.append(
                             (ny_pct, f"analyst consensus: next year EPS growth {ny_pct:.1f}%")
                         )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[analysis.dcf] Non-fatal exception suppressed: {e_suppressed}")
 
             # 2. Forward EPS implied growth (from trailing vs forward EPS)
             if trailing_eps and forward_eps and trailing_eps > 0 and forward_eps > 0:
@@ -429,8 +433,8 @@ def dcf_for_symbol(
             from market.quotes import get_ltp
 
             ltp = get_ltp(f"NSE:{symbol}")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.dcf] Non-fatal exception suppressed: {e_suppressed}")
 
         result = compute_dcf(
             fcf_cr=fcf,

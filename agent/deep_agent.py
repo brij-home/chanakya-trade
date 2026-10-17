@@ -25,6 +25,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("agent.deep_agent")
+
 
 import json
 import time
@@ -336,8 +340,8 @@ class DeepAnalyzer:
             )
             if any(p for p in all_plans.values()):
                 TraderAgent.print_all_plans(all_plans)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.deep_agent] Non-fatal exception suppressed: {e_suppressed}")
 
         # ── Memory ───────────────────────────────────────────
         try:
@@ -352,8 +356,8 @@ class DeepAnalyzer:
             )
             if self.verbose:
                 console.print(f"[dim]  Stored to memory (ID: {record.id})[/dim]")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.deep_agent] Non-fatal exception suppressed: {e_suppressed}")
 
         total = analyst_time + debate_time + risk_debate_time + synthesis_time
         llm_calls = 11 + (3 if risk_debate_time > 0 else 0)
@@ -558,8 +562,10 @@ class DeepAnalyzer:
             if conf_match:
                 try:
                     confidence = int(conf_match.group(1))
-                except (ValueError, IndexError):
-                    pass
+                except (ValueError, IndexError) as e_suppressed:
+                    logger.debug(
+                        f"[agent.deep_agent] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # Match SCORE with flexible formatting:
             # "SCORE: -23", "SCORE : +30", "SCORE: -15"
@@ -567,8 +573,10 @@ class DeepAnalyzer:
             if score_match:
                 try:
                     score = float(score_match.group(1))
-                except (ValueError, IndexError):
-                    pass
+                except (ValueError, IndexError) as e_suppressed:
+                    logger.debug(
+                        f"[agent.deep_agent] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             # Collect key points
             if stripped.startswith("- ") or stripped.startswith("* "):

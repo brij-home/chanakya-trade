@@ -223,8 +223,8 @@ def fetch_nse_bulk_block_deals() -> list[WhaleDeal]:
             try:
                 with open(CACHE_FILE, "w", encoding="utf-8") as f:
                     json.dump([d.to_dict() for d in deals], f, indent=2)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.whale_feed] Non-fatal exception suppressed: {e_suppressed}")
         return deals
 
     # Check cached records
@@ -238,7 +238,7 @@ def fetch_nse_bulk_block_deals() -> list[WhaleDeal]:
                         c["provenance"] = "CACHED_EOD"
                         res.append(WhaleDeal(**c))
                     return res
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[market.whale_feed] Non-fatal exception suppressed: {e_suppressed}")
 
     return []

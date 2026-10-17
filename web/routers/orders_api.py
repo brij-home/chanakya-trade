@@ -67,6 +67,15 @@ class OrderBatchExecuteRequest(BaseModel):
     order_ids: list[str]
 
 
+class OrderModifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: str
+    new_price: Optional[float] = None
+    new_trigger_price: Optional[float] = None
+    new_quantity: Optional[int] = None
+
+
 class RiskPreflightRequest(BaseModel):
     symbol: str
     action: str = "BUY"
@@ -217,6 +226,47 @@ async def api_order_batch_execute(req: OrderBatchExecuteRequest, request: Reques
     except ValueError as exc:
         status_code = 404 if "not found" in str(exc).lower() else 409
         raise HTTPException(status_code, str(exc)) from exc
+
+
+@router.post("/api/orders/modify")
+async def api_order_modify(req: OrderModifyRequest, request: Request):
+    """Modify resting or in-flight order intent with broker sync and audit trail."""
+    from engine.order_lifecycle import modify_order_intent
+    from engine.security_audit import record_audit_event
+
+    actor = "LOCAL"
+    if hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
+
+    try:
+        order = await asyncio.to_thread(
+            modify_order_intent,
+            order_id=req.order_id,
+            new_price=req.new_price,
+            new_trigger_price=req.new_trigger_price,
+            new_quantity=req.new_quantity,
+            actor=actor,
+        )
+        await asyncio.to_thread(
+            record_audit_event,
+            event_type="ORDER_MODIFIED",
+            mode=order.mode,
+            actor=actor,
+            details={
+                "order_id": order.order_id,
+                "status": order.status,
+                "price": order.price,
+                "charges": order.charges,
+            },
+        )
+        return JSONResponse(order.to_dict())
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 409
+        raise HTTPException(status_code, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 @router.post("/api/risk/preflight")

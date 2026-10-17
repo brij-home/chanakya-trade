@@ -24,6 +24,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.backtest_advanced")
+
 
 import math
 from dataclasses import dataclass
@@ -474,9 +478,11 @@ class WalkForward:
                         test_win_rate=test_result.win_rate,
                     )
                 )
-            except Exception:
+            except Exception as e_suppressed:
                 # Skip windows with insufficient data
-                pass
+                logger.debug(
+                    f"[engine.backtest_advanced] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             current += timedelta(days=test_days)
 
@@ -564,7 +570,7 @@ def _run_for_window(
             df = df[df.index <= str(end.date())]
             if len(df) >= 5:
                 bt._df = df
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[engine.backtest_advanced] Non-fatal exception suppressed: {e_suppressed}")
 
     return bt.run(strategy)

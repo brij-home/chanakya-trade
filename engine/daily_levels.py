@@ -251,8 +251,8 @@ class DailyLevelsStore:
                 pwh = float(df_wk[col_h].iloc[-2])
                 pwl = float(df_wk[col_l].iloc[-2])
                 pwc = float(df_wk[col_c].iloc[-2])
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.daily_levels] Non-fatal exception suppressed: {e_suppressed}")
 
         # 4. CPR (Central Pivot Range) Calculation
         cpr_pivot = (pdh + pdl + pdc) / 3.0

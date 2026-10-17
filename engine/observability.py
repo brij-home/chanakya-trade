@@ -18,6 +18,10 @@ Design principles:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.observability")
+
 
 import contextvars
 import logging
@@ -247,8 +251,8 @@ class ProviderFreshnessRecord:
 
             if not is_market_open("NSE"):
                 return False
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             from brokers.session import get_data_broker_key
@@ -257,8 +261,8 @@ class ProviderFreshnessRecord:
             prov_lower = self.provider.lower()
             if primary and prov_lower != primary and prov_lower != "primary":
                 return self.consecutive_errors > 0 and self.stale_count > 0
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
 
         return True
 
@@ -322,8 +326,8 @@ class ObservabilityRegistry:
         try:
             with self._lock:
                 self._correlation_ids.append(cid)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
 
     def recent_correlation_ids(self, limit: int = 20) -> list[str]:
         try:
@@ -359,8 +363,8 @@ class ObservabilityRegistry:
             )
             with self._lock:
                 self._metrics.append(event)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
 
     def get_slo_report(self, journey_id: Optional[str] = None) -> dict[str, Any]:
         """
@@ -446,8 +450,8 @@ class ObservabilityRegistry:
                 rec.last_success_at = time.time()
                 rec.total_requests += 1
                 rec.consecutive_errors = 0
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
 
     def record_provider_error(self, provider: str, is_stale: bool = False) -> None:
         """Record a provider fetch error or stale response."""
@@ -462,8 +466,8 @@ class ObservabilityRegistry:
                 rec.consecutive_errors += 1
                 if is_stale:
                     rec.stale_count += 1
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
 
     def get_provider_health(self) -> dict[str, Any]:
         """Return freshness and health status for all tracked providers."""

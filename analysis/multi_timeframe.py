@@ -16,6 +16,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.multi_timeframe")
+
 
 from dataclasses import dataclass, field
 
@@ -162,8 +166,8 @@ def multi_timeframe_analysis(
         if not df_15.empty and len(df_15) >= 15:
             sig_15 = _analyze_timeframe(df_15, "15m")
             signals.append(sig_15)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.multi_timeframe] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Hourly (60m) ──────────────────────────────────────────
     try:
@@ -171,8 +175,8 @@ def multi_timeframe_analysis(
         if not df_h.empty and len(df_h) >= 20:
             sig_h = _analyze_timeframe(df_h, "1h")
             signals.append(sig_h)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.multi_timeframe] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Daily ────────────────────────────────────────────────
     try:
@@ -180,8 +184,8 @@ def multi_timeframe_analysis(
         if not df_d.empty and len(df_d) >= 20:
             sig_d = _analyze_timeframe(df_d, "1D")
             signals.append(sig_d)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.multi_timeframe] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Confluence ───────────────────────────────────────────
     if not signals:

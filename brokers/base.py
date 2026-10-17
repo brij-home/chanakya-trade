@@ -317,6 +317,20 @@ class BrokerAPI(ABC):
         """Cancel a pending order. Returns True on success."""
         ...
 
+    def modify_order(
+        self,
+        order_id: str,
+        price: Optional[float] = None,
+        qty: Optional[int] = None,
+        trigger_price: Optional[float] = None,
+        order_type: Optional[str] = None,
+    ) -> OrderResponse:
+        """
+        Modify an active pending/resting order on the broker.
+        Subclasses with order modification capabilities should override this.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support order modification")
+
     # ── Historical Data ────────────────────────────────────────
 
     def get_historical_data(

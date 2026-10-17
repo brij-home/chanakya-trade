@@ -29,6 +29,10 @@ Available commands:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("app.repl")
+
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
@@ -637,8 +641,8 @@ def _warn_if_mock(broker: BrokerAPI) -> None:
             console.print(
                 "[yellow dim]  (Demo mode — data below is simulated. Run 'login' to connect a real broker.)[/yellow dim]"
             )
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def cmd_help() -> None:
@@ -774,8 +778,8 @@ def _handle_backtest_command(args: list[str]) -> None:
         from app.commands.strategy import set_last_symbol
 
         set_last_symbol(symbol)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
     strategy_name = clean_args[1].lower() if len(clean_args) > 1 else "rsi"
     strategy_args = clean_args[2:] if len(clean_args) > 2 else []
 
@@ -792,8 +796,8 @@ def _handle_backtest_command(args: list[str]) -> None:
         if idx + 1 < len(clean_args):
             try:
                 num_trades = int(clean_args[idx + 1])
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
             strategy_args = [a for a in strategy_args if a not in ("--trades", clean_args[idx + 1])]
 
     # ── Multi-strategy compare mode ──────────────────────────
@@ -949,8 +953,8 @@ def _handle_memory_command(args: list[str]) -> None:
             llm_provider = get_fast_provider(
                 ToolRegistry(), deep_provider=get_deep_provider(ToolRegistry())
             )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
         console.print(f"[dim]Reflecting on trade {trade_id}...[/dim]")
         lesson = trade_memory.reflect_and_remember(trade_id, llm_provider=llm_provider)
         if not lesson:
@@ -1187,8 +1191,8 @@ def run_repl(broker: BrokerAPI) -> None:
         _registered = auto_register_skills(_skill_registry)
         if _registered:
             console.print(f"[dim]Skills loaded: {', '.join(_registered)}[/dim]")
-    except Exception:
-        pass  # skill loading is best-effort — never block startup
+    except Exception as e_suppressed:
+        logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
 
     # Buffer for post-processing commands (save-pdf, explain, explain-save)
     _last_output: str = ""
@@ -1224,8 +1228,8 @@ def run_repl(broker: BrokerAPI) -> None:
 
             if alert_manager.active_count() > 0:
                 parts.append(f"{alert_manager.active_count()} alert(s)")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
         return " · ".join(parts)
 
     while True:
@@ -1268,50 +1272,50 @@ def run_repl(broker: BrokerAPI) -> None:
                     from engine.alerts import alert_manager
 
                     alert_manager.stop_polling()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                 try:
                     from market.ticker_stream import ticker_stream
 
                     ticker_stream.stop(timeout=1.0)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                 try:
                     from market.tick_store import tick_archive
 
                     tick_archive.stop(timeout=1.0)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                 try:
                     from brokers.session import close_all_brokers
 
                     close_all_brokers()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                 try:
                     from engine.search import analysis_search
 
                     analysis_search.close()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                 try:
                     from market.http_pool import close_http_pools
 
                     close_http_pools()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                 try:
                     from engine.analysis_cache import analysis_cache
 
                     analysis_cache.close()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                 try:
                     from market.instrument_master import close_db
 
                     close_db()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                 console.print("[dim]Goodbye.[/dim]")
                 import os as _os
 
@@ -1429,8 +1433,10 @@ def run_repl(broker: BrokerAPI) -> None:
                             from app.commands.strategy import set_last_symbol
 
                             set_last_symbol(plain[-1])
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[app.repl] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                     cmd_quote(resolved)
 
             # ── Portfolio (unified multi-broker view) ─────────
@@ -1483,8 +1489,8 @@ def run_repl(broker: BrokerAPI) -> None:
                         from app.commands.strategy import set_last_symbol
 
                         set_last_symbol(symbol)
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                     agent = get_agent()
 
                     if inline_context:
@@ -1604,15 +1610,19 @@ def run_repl(broker: BrokerAPI) -> None:
                         if idx + 1 < len(args):
                             try:
                                 growth = float(args[idx + 1])
-                            except ValueError:
-                                pass
+                            except ValueError as e_suppressed:
+                                logger.debug(
+                                    f"[app.repl] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                     if "--wacc" in args:
                         idx = args.index("--wacc")
                         if idx + 1 < len(args):
                             try:
                                 wacc_val = float(args[idx + 1])
-                            except ValueError:
-                                pass
+                            except ValueError as e_suppressed:
+                                logger.debug(
+                                    f"[app.repl] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                     print_dcf(sym, growth_rate=growth, wacc=wacc_val)
 
             elif command == "flows":
@@ -1655,8 +1665,10 @@ def run_repl(broker: BrokerAPI) -> None:
                     if idx + 1 < len(args):
                         try:
                             dte = int(args[idx + 1])
-                        except ValueError:
-                            pass
+                        except ValueError as e_suppressed:
+                            logger.debug(
+                                f"[app.repl] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                 suggestions = compute_roll_suggestions(pg.positions_with_greeks, dte_threshold=dte)
                 print_roll_suggestions(suggestions)
 
@@ -1852,8 +1864,10 @@ def run_repl(broker: BrokerAPI) -> None:
                         if a in ("--top", "-n") and i + 1 < len(args):
                             try:
                                 top_n = int(args[i + 1])
-                            except ValueError:
-                                pass
+                            except ValueError as e_suppressed:
+                                logger.debug(
+                                    f"[app.repl] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                         elif not a.startswith("-") and (
                             i == 0 or args[i - 1] not in ("--top", "-n")
                         ):
@@ -2042,8 +2056,10 @@ def run_repl(broker: BrokerAPI) -> None:
                             raw = args[i + 1].rstrip("d")
                             try:
                                 days = int(raw)
-                            except ValueError:
-                                pass
+                            except ValueError as e_suppressed:
+                                logger.debug(
+                                    f"[app.repl] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                     deleted = clear_exports(days)
                     console.print(f"[dim]Deleted {deleted} export(s) older than {days} days.[/dim]")
 
@@ -2581,18 +2597,18 @@ def run_repl(broker: BrokerAPI) -> None:
                 if args and not args[0].startswith("-"):
                     try:
                         pnl = float(args[0].replace(",", ""))
-                    except ValueError:
-                        pass
+                    except ValueError as e_suppressed:
+                        logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                 if "--days" in args:
                     try:
                         days = int(args[args.index("--days") + 1])
-                    except (ValueError, IndexError):
-                        pass
+                    except (ValueError, IndexError) as e_suppressed:
+                        logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                 if "--segment" in args:
                     try:
                         segment = args[args.index("--segment") + 1].upper()
-                    except (ValueError, IndexError):
-                        pass
+                    except (ValueError, IndexError) as e_suppressed:
+                        logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
                 est = calculate_capital_gains_tax(
                     gross_pnl=pnl, holding_period_days=days, segment=segment
                 )  # type: ignore

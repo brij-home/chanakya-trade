@@ -72,10 +72,14 @@ class FyersOrderStreamManager:
                     if ws_obj and hasattr(ws_obj, "close"):
                         try:
                             ws_obj.close()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[market.fyers_order_stream] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.fyers_order_stream] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
             t = threading.Thread(target=_close, daemon=True)
             t.start()
@@ -159,14 +163,18 @@ class FyersOrderStreamManager:
                         "data": message,
                     },
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.fyers_order_stream] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             for cb in self._callbacks_orders:
                 try:
                     cb(message)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.fyers_order_stream] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         except Exception as e:
             logger.debug(f"Order event parse error: {e}")
 
@@ -185,14 +193,18 @@ class FyersOrderStreamManager:
                         "data": message,
                     },
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.fyers_order_stream] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             for cb in self._callbacks_trades:
                 try:
                     cb(message)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.fyers_order_stream] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         except Exception as e:
             logger.debug(f"Trade event parse error: {e}")
 
@@ -210,14 +222,18 @@ class FyersOrderStreamManager:
                         "data": message,
                     },
                 )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.fyers_order_stream] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
             for cb in self._callbacks_positions:
                 try:
                     cb(message)
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.fyers_order_stream] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         except Exception as e:
             logger.debug(f"Position event parse error: {e}")
 

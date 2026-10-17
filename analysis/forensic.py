@@ -11,6 +11,10 @@ Provides institutional grade quantitative forensic checks for Indian equities:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("analysis.forensic")
+
 
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -251,8 +255,8 @@ def fetch_reported_accounting_inputs(symbol: str) -> dict[str, Any]:
         cached = analysis_cache.get_fundamental(cache_key)
         if cached and isinstance(cached, dict) and cached.get("total_assets") is not None:
             return cached
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.forensic] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. Query statements via yfinance
     try:
@@ -444,8 +448,8 @@ def fetch_reported_accounting_inputs(symbol: str) -> dict[str, Any]:
                 pe = snap.pe
             if pb is None:
                 pb = snap.pb
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.forensic] Non-fatal exception suppressed: {e_suppressed}")
 
     result_inputs = {
         "working_capital": wc,
@@ -482,8 +486,8 @@ def fetch_reported_accounting_inputs(symbol: str) -> dict[str, Any]:
         from engine.analysis_cache import analysis_cache
 
         analysis_cache.save_fundamental(cache_key, result_inputs, ttl_hours=24)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.forensic] Non-fatal exception suppressed: {e_suppressed}")
 
     return result_inputs
 
@@ -516,8 +520,8 @@ def audit_forensics(
                 c.pop("overall_forensic_verdict", None)
                 c.pop("updated_at", None)
                 return ForensicAuditResult(**c)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.forensic] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             from engine.analysis_cache import analysis_cache
@@ -527,8 +531,8 @@ def audit_forensics(
                 cached = dict(cached)
                 cached.pop("overall_forensic_verdict", None)
                 return ForensicAuditResult(**cached)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.forensic] Non-fatal exception suppressed: {e_suppressed}")
 
     # Extract reported accounting inputs dynamically if not provided
     if data is None:
@@ -546,8 +550,8 @@ def audit_forensics(
         sec_id, _ = get_stock_sector(clean_sym)
         if sec_id in ("banking", "financial_services"):
             is_banking_or_financial = True
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.forensic] Non-fatal exception suppressed: {e_suppressed}")
 
     # These models require their published inputs. Summary ratios cannot be
     # reverse-engineered into an accounting score without inventing figures.
@@ -718,15 +722,15 @@ def audit_forensics(
             from engine.analysis_cache import analysis_cache
 
             analysis_cache.save_fundamental(cache_key, result.as_dict(), ttl_hours=24)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.forensic] Non-fatal exception suppressed: {e_suppressed}")
 
         try:
             from engine.eod_store import save_forensics
 
             save_forensics(clean_sym, result.as_dict())
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.forensic] Non-fatal exception suppressed: {e_suppressed}")
 
     return result
 

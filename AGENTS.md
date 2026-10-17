@@ -212,21 +212,33 @@
    - **Anti-Blindspot Protocol**: A patch applied to Call options (e.g., Dead-Cat Bounce Guard) must have its exact mathematical mirror implemented on Put options (e.g., Short-Squeeze Guard), and vice versa. Unilateral patches that leave the opposing side unanchored or over-suppress structural V-reversals violate the institutional symmetry contract.
    - **Tri-Directional Regression Test Defense**: Any change to directional or volatility filters must execute regression tests spanning Bull, Bear, and Neutral setups simultaneously to ensure holistic calibration without cross-regime degradation.
 
+35. **"Right First Time" Contract Parity & Pre-Handoff Smoke Invariant**:
+   - **Zero "Fantasy Mocking"**: Component tests and UI fixtures must NEVER be mocked from imagination. Mock fixtures must mirror the real serialized dictionary produced by backend serializers (`to_dict()`). Mismatches between frontend expectations and backend payloads are strictly prohibited.
+   - **Contract Parity Regression Defense**: All UI views that consume sidecar APIs must be protected by fast contract tests in `tests/test_api_ui_contracts.py`, asserting that 100% of JSON keys and object paths referenced in JSX actually exist in backend payloads.
+   - **Mandatory Pre-Handoff Smoke Protocol**: Before declaring any UI, API, or engine task complete, agents MUST:
+     1. Execute targeted backend and frontend test suites (`pytest` and `vitest`).
+     2. Execute live HTTP queries (`curl` / `httpx`) against the running FastAPI daemon to verify HTTP 200 OK.
+     3. Verify secondary button actions (e.g. sync, reset, clear, purge) actually invoke valid backend methods without runtime exceptions, missing imports, or unhandled 500 errors.
+     4. Never leave the user to discover broken buttons, missing card fields, or runtime import errors.
+
+36. **Temporal Anchoring & Knowledge Currency Standard (October 2026 Mandate)**:
+   - **System Clock SSOT**: Analytical reasoning, quant strategy evaluations, macro commentaries, and backtest evaluations MUST be explicitly anchored to the current calendar date (`datetime.now(IST)` / system prompt anchor, e.g. `2026-10-17`).
+   - **Zero Stale Regulatory / Structural Assumptions**: Never rely on stale pre-trained LLM memory for Indian market regulatory parameters (e.g. lot sizes, weekly expiry cycles, index derivatives frameworks, STT charges). Always resolve them from canonical exchange master feeds (`market/instruments.py`, `market/symbol_master.py`) or verify via live web search (`search_web`).
+   - **Data Provenance Currency**: All market quotes, fundamentals, and forensic scores must carry verifiable timestamped provenance (`REAL/LIVE`, `OFF-MARKET/EOD as of YYYY-MM-DD`). If data is older than the staleness threshold, mark it explicitly as `DEGRADED` rather than presenting stale numbers as current.
+
 ---
 
 ## 3. LLM Model Hierarchy & Multi-Key Resilience
 
-### Groq Cloud Active Models (Verified 31 Aug 2026)
+### Groq Cloud Active Models (Verified 17 Oct 2026)
 
-| Priority | Model ID | Latency | Tool-Calling | Best For |
-| :---: | :--- | :---: | :---: | :--- |
-| 1 | `qwen/qwen3.8-27b` | ~389 ms | ✅ Yes | **Fast-LLM**: Real-time tool calls (quotes, options, VPA), parallel debate rounds |
-| 2 | `openai/gpt-oss-120b` | ~446 ms | ❌ No | **Deep-LLM**: Council consensus synthesis, Fund Manager final verdict |
-| 3 | `openai/gpt-oss-20b` | ~471 ms | ❌ No | Lower-cost fallback for pure-text generation |
-| 4 | `qwen/qwen3.6-27b` | ~660 ms | ❌ No | Secondary fallback when primary models are throttled |
-| 5 | `groq/compound-mini` | — | ❌ No | Cheapest option for non-critical batch jobs |
+| Priority | Model ID | Latency | Tool-Calling | Max Context / TPM | Best For |
+| :---: | :--- | :---: | :---: | :---: | :--- |
+| 1 | `qwen/qwen3.8-27b` | ~389 ms | ✅ Yes | 128k ctx / 30k TPM | **Fast-LLM**: Real-time tool calls (quotes, options, VPA), parallel debate rounds, deep synthesis |
+| 2 | `openai/gpt-oss-120b` | ~446 ms | ❌ No | 8k TPM (on-demand) | **Deep-LLM**: Pure-text reasoning (zero tools attached, <=1.5k tokens) |
+| 3 | `openai/gpt-oss-20b` | ~471 ms | ❌ No | High TPM | High-throughput fallback for text synthesis |
 
-**Deprecated**: `llama-3.3-70b-versatile` was removed from Groq Cloud (returns 404). Do NOT reference it.
+**Deprecated by Groq**: `qwen/qwen3.6-27b`, `groq/compound-mini`, and `llama-3.3-70b-versatile` have been removed from Groq Cloud (return 404). Do NOT reference them.
 
 ### Other Supported LLM Providers
 

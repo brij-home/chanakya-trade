@@ -22,6 +22,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("agent.smart_funnel")
+
 
 import concurrent.futures
 import os
@@ -36,13 +40,13 @@ if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
 from rich.console import Console
 from rich.panel import Panel
@@ -294,8 +298,8 @@ class SmartFunnel:
         tech = {}
         try:
             tech = reg.execute("technical_analyse", {"symbol": symbol, "exchange": exchange}) or {}
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
         ltp = float(tech.get("ltp") or tech.get("close") or 0.0)
         # Immediate guard: if no price or ltp <= 0, stock is invalid/unavailable
@@ -316,8 +320,8 @@ class SmartFunnel:
         if exchange.upper() != "CRYPTO":
             try:
                 fund = reg.execute("fundamental_analyse", {"symbol": symbol, "fast": True}) or {}
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
         # Extract parameters
         rsi = float(tech.get("rsi") or 50.0)
@@ -377,8 +381,8 @@ class SmartFunnel:
                             metrics=metrics,
                         )
                     metrics["weinstein_stage"] = _ws
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
             # Gate B: Minervini 52W proximity — stock >40% below 52W high is a Stage 4 laggard
             if week52_high > 0 and ltp > 0:
@@ -423,8 +427,8 @@ class SmartFunnel:
             if q:
                 chg_pct = float(getattr(q, "change_pct", 0.0) or 0.0)
                 live_vol = int(getattr(q, "volume", 0) or 0)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
         # Wyckoff Spring / V-Shape Liquidity Sweep Signature:
         # Stock emerging from oversold/downtrend with heavy volume absorption or strong price impulse (>=2.0% gain or >=1.2% with vol expansion)
@@ -499,8 +503,8 @@ class SmartFunnel:
                 from analysis.universe import get_stock_sector
 
                 sec_id, _ = get_stock_sector(symbol)
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
             is_financial = sec_id in ("banking", "finance", "financials")
             is_capital_intensive = sec_id in ("energy", "infra", "metals", "realty", "telecom")
 
@@ -583,8 +587,8 @@ class SmartFunnel:
                     positive_flags.append(f"Sector {sec_info.get('sector')} is IMPROVING momentum")
                 elif quad == "LAGGING":
                     score -= 5.0
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
             # ── Market Breadth Gate ──
             try:
@@ -603,8 +607,8 @@ class SmartFunnel:
                     elif ad_ratio >= 1.8:
                         score += 5.0
                         positive_flags.append(f"Broad market tailwind (A/D ratio {ad_ratio:.2f})")
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
             # ── Forensic & Governance Quality Check ──
             try:
@@ -617,8 +621,8 @@ class SmartFunnel:
                 elif audit.quality_rating in ("A+", "A"):
                     score += 5.0
                     positive_flags.append(f"Forensic Quality Rating: {audit.quality_rating}")
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
         final_score = max(0.0, min(100.0, score))
         qualified = final_score >= 60.0 and len(rejection_flags) <= 1
@@ -655,8 +659,8 @@ class SmartFunnel:
 
             batch_keys = [f"{exchange}:{s.strip()}" for s in symbols]
             get_quote(batch_keys)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
         # 2. Batch pre-fetch market breadth and sector RRG matrix once for the entire batch
         rrg_matrix = None
@@ -665,14 +669,14 @@ class SmartFunnel:
                 from market.sentiment import get_market_breadth
 
                 get_market_breadth()
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
             try:
                 from analysis.sector_rotation import get_sector_rrg_matrix
 
                 rrg_matrix = {p.sector: p for p in get_sector_rrg_matrix()}
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
         reports: list[PreFilterReport] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -721,8 +725,8 @@ class SmartFunnel:
         if c_m:
             try:
                 confidence = int(c_m.group(1))
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
         w_m = re.search(r"WINNER:\s*([A-Z]+)", text)
         if w_m:
@@ -825,8 +829,8 @@ class SmartFunnel:
                         if ltp > 0
                         else "—"
                     )
-            except Exception:
-                pass
+            except Exception as e_suppressed:
+                logger.debug(f"[agent.smart_funnel] Non-fatal exception suppressed: {e_suppressed}")
 
         return TradePlanSummary(
             symbol=symbol,

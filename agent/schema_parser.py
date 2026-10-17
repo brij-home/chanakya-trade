@@ -12,6 +12,10 @@ Never raises — always returns a valid SynthesisOutput.
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("agent.schema_parser")
+
 
 import json
 import re
@@ -76,8 +80,8 @@ def _defensive_repair_json(json_str: str) -> dict | None:
     # 2. Direct attempt
     try:
         return json.loads(cleaned)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[agent.schema_parser] Non-fatal exception suppressed: {e_suppressed}")
 
     # 3. Defensive structural repair for truncated JSON
     work = cleaned
@@ -114,8 +118,8 @@ def _defensive_repair_json(json_str: str) -> dict | None:
 
     try:
         return json.loads(work)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[agent.schema_parser] Non-fatal exception suppressed: {e_suppressed}")
 
     # 4. Regex extraction fallback
     fields: dict = {}
@@ -127,8 +131,8 @@ def _defensive_repair_json(json_str: str) -> dict | None:
     if m:
         try:
             fields["confidence"] = _clamp_confidence(int(m.group(1)))
-        except ValueError:
-            pass
+        except ValueError as e_suppressed:
+            logger.debug(f"[agent.schema_parser] Non-fatal exception suppressed: {e_suppressed}")
 
     m = re.search(r'"winner"\s*:\s*"([^"]+)"', cleaned, re.IGNORECASE)
     if m:
@@ -207,8 +211,10 @@ def _parse_text_path(text: str) -> SynthesisOutput:
             raw = stripped.split(":", 1)[1].strip().rstrip("%").strip()
             try:
                 confidence = _clamp_confidence(int(raw))
-            except (ValueError, IndexError):
-                pass
+            except (ValueError, IndexError) as e_suppressed:
+                logger.debug(
+                    f"[agent.schema_parser] Non-fatal exception suppressed: {e_suppressed}"
+                )
             continue
 
         if upper.startswith("WINNER:"):
@@ -339,15 +345,17 @@ def parse_synthesis_output(text: str) -> SynthesisOutput:
                     if "winner" in data and isinstance(data["winner"], str):
                         data["winner"] = _parse_winner(data["winner"])
                     return SynthesisOutput.model_validate(data)
-                except (ValidationError, Exception):
+                except (ValidationError, Exception) as e_suppressed:
                     # JSON validation failed — fall through to text path
-                    pass
+                    logger.debug(
+                        f"[agent.schema_parser] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
     # ── Path 2: Text ──────────────────────────────────────────────────────────
     try:
         return _parse_text_path(text)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[agent.schema_parser] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Path 3: Fallback ──────────────────────────────────────────────────────
     return SynthesisOutput()

@@ -15,6 +15,10 @@ Features:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("engine.analysis_cache")
+
 
 import json
 import sqlite3
@@ -233,8 +237,10 @@ class AnalysisCache:
                         created_dt = datetime.fromisoformat(row["created_at"])
                         if (now_dt - created_dt).total_seconds() > max_age_seconds:
                             return None
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.analysis_cache] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 try:
                     return json.loads(row["data_json"])
                 except Exception:
@@ -277,8 +283,10 @@ class AnalysisCache:
                 for r in rows:
                     try:
                         results[r["cache_key"]] = json.loads(r["data_json"])
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.analysis_cache] Non-fatal exception suppressed: {e_suppressed}"
+                        )
         return results
 
     def save_fundamental(self, key: str, data: Any, ttl_hours: int = 24) -> None:
@@ -351,8 +359,10 @@ class AnalysisCache:
             if deleted > 0:
                 try:
                     conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.analysis_cache] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         return deleted
 
     def get_stats(self) -> dict[str, Any]:

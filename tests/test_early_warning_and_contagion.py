@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from unittest.mock import MagicMock, patch
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -26,7 +25,7 @@ from engine.detectors.gamma_blast import detect_gamma_blast, _STRIKE_OI_SNAPSHOT
 from engine.detectors.squeeze_breakout import detect_squeeze_breakout
 from engine.index_contagion import index_contagion_engine
 
-IST = ZoneInfo("Asia/Kolkata")
+from config.constants import IST
 
 
 class TestTimeOfDayRvol:

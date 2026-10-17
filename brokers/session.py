@@ -210,10 +210,12 @@ def _try_auto_restore_sessions() -> None:
                             threading.Thread(
                                 target=_start_websocket, args=(b,), daemon=True
                             ).start()
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
     if _brokers:
         return
@@ -231,11 +233,13 @@ def _try_auto_restore_sessions() -> None:
                 if not is_testing:
                     try:
                         threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 return
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. Shoonya
     try:
@@ -248,11 +252,13 @@ def _try_auto_restore_sessions() -> None:
                 if not is_testing:
                     try:
                         threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 return
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
     # 3. Kotak Neo
     try:
@@ -265,11 +271,13 @@ def _try_auto_restore_sessions() -> None:
                 if not is_testing:
                     try:
                         threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                    except Exception:
-                        pass
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
+                        )
                 return
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def get_broker() -> BrokerAPI:
@@ -721,8 +729,8 @@ def _poll_sidecar_auth(broker_key: str, port: int, timeout: int = 180) -> dict[s
             broker_status = data.get(status_key, {})
             if broker_status.get("authenticated"):
                 return {"_sidecar": "true"}
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
         time.sleep(2)
 
     return None
@@ -914,8 +922,8 @@ def _recreate_broker_from_token(key: str):
                 b = KotakNeoAPI()
                 if b.is_authenticated():
                     return b
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
     return None
 
 
@@ -1199,9 +1207,9 @@ def login(choice: Optional[str] = None) -> BrokerAPI:
             from market.streaming import start_shoonya_stream
 
             start_shoonya_stream(broker)
-        except Exception:
+        except Exception as e_suppressed:
             # REST remains available and the UI will surface stream degradation.
-            pass
+            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
     if len(_brokers) > 1:
         console.print(
@@ -1315,8 +1323,8 @@ def disconnect_broker(choice: Optional[str] = None) -> None:
             _brokers[key].close()
         elif hasattr(_brokers[key], "logout"):
             _brokers[key].logout()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
     del _brokers[key]
     console.print(f"[yellow]{key.title()} disconnected.[/yellow]")
 
@@ -1328,22 +1336,22 @@ def close_all_brokers() -> None:
         from market.websocket import ws_manager
 
         ws_manager.stop()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
     try:
         from market.fyers_order_stream import fyers_order_stream
 
         fyers_order_stream.stop()
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
     for key, broker in list(_brokers.items()):
         try:
             if hasattr(broker, "stop_websocket"):
                 broker.stop_websocket()
             if hasattr(broker, "close"):
                 broker.close()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
     _brokers = {}
     _primary_key = ""
     _data_key = ""

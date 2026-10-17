@@ -56,8 +56,8 @@ def patch_fyers_websocket_daemon_threads() -> None:
 
         _PATCHED = True
         logger.debug("[FyersSocketPatch] Patched fyers_apiv3 WebSocket SDK threads to daemon=True.")
-    except ImportError:
-        pass
+    except ImportError as e_suppressed:
+        logger.debug(f"[market.fyers_socket_patch] Non-fatal exception suppressed: {e_suppressed}")
     except Exception as exc:
         logger.warning("[FyersSocketPatch] Failed to patch fyers_apiv3: %s", exc)
 

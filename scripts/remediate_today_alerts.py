@@ -13,6 +13,10 @@ Institutional offline data remediation script (AGENTS.md Invariant 18 & 20):
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("scripts.remediate_today_alerts")
+
 
 import json
 import os
@@ -29,8 +33,10 @@ if sys.platform == "win32":
         ctypes.windll.kernel32.SetConsoleOutputCP(65001)
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[scripts.remediate_today_alerts] Non-fatal exception suppressed: {e_suppressed}"
+        )
 
 IST = timezone(timedelta(hours=5, minutes=30))
 now = datetime.now(IST)
@@ -87,8 +93,10 @@ for a in alerts:
         if opt_plan.get("entry_premium"):
             try:
                 cand_entry = float(opt_plan["entry_premium"])
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[scripts.remediate_today_alerts] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if cand_entry is None and plan.get("recommended_entry"):
             m = re.findall(r"[\d,]+(?:\.\d+)?", str(plan["recommended_entry"]))
             if m:
@@ -118,13 +126,17 @@ for a in alerts:
         if opt_plan.get("sl_premium"):
             try:
                 cand_sl = float(opt_plan["sl_premium"])
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[scripts.remediate_today_alerts] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if cand_sl is None and plan.get("invalidation_stop"):
             try:
                 cand_sl = float(plan["invalidation_stop"])
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(
+                    f"[scripts.remediate_today_alerts] Non-fatal exception suppressed: {e_suppressed}"
+                )
         if cand_sl is None and a.get("stop_loss") and a.get("stop_loss") > 0:
             cand_sl = float(a["stop_loss"])
         if cand_sl:
@@ -275,8 +287,10 @@ for a in alerts:
                     print(
                         f"  ✓ [TARGET INVERSION REPAIRED] {aid} ({a.get('symbol')}): T1=₹{t1_f:,.2f}, old T2=₹{t2_f:,.2f} -> new T2=₹{new_t2:,.2f}"
                     )
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[scripts.remediate_today_alerts] Non-fatal exception suppressed: {e_suppressed}"
+            )
 
     # ── 5. Project Schema Invariants ──────────────────────────────
     a["status"] = a.get("stage", "EARLY_WARNING")

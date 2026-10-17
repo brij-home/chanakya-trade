@@ -114,8 +114,10 @@ class VwapSessionCache:
                     if temp_file.exists():
                         try:
                             temp_file.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[market.vwap_session_cache] Non-fatal exception suppressed: {e_suppressed}"
+                            )
             except Exception as exc:
                 logger.warning(
                     f"[VwapCache] Failed to save disk cache {cache_file}: {exc}", exc_info=True
@@ -202,8 +204,10 @@ class VwapSessionCache:
             if cache_file.exists():
                 try:
                     cache_file.unlink()
-                except Exception:
-                    pass
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.vwap_session_cache] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
 
 # Global singleton

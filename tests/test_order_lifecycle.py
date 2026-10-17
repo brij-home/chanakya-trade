@@ -582,3 +582,121 @@ def test_execute_order_batch_live_basket(tmp_path, monkeypatch):
     assert results[0].broker_order_id == "FY_BASKET_1"
     assert results[1].status == "FILLED"
     assert results[1].broker_order_id == "FY_BASKET_2"
+
+
+def test_order_preview_depth_sweep_slippage():
+    """Verify that order preview enriches charges with live BisectDepthBook sweep simulation."""
+    from market.order_book import get_depth_book, clear_depth_books
+
+    clear_depth_books()
+    book = get_depth_book("RELIANCE")
+    # Asks: 10 units @ 2800.0, 20 units @ 2802.0
+    book.update_level("SELL", price=2800.0, quantity=10)
+    book.update_level("SELL", price=2802.0, quantity=20)
+
+    # Preview an aggressive buy for 15 units (sweeping past top of book)
+    intent = preview_order_intent(
+        symbol="RELIANCE",
+        side="BUY",
+        quantity=15,
+        price=2800.0,
+        order_type="MARKET",
+        product="MIS",
+    )
+    assert intent.charges is not None
+    assert "slippage_model" in intent.charges
+    slip = intent.charges["slippage_model"]
+    assert slip["requested_qty"] == 15
+    assert slip["filled_qty"] == 15
+    assert slip["levels_swept"] == 2
+    # 10 @ 2800 + 5 @ 2802 = 28000 + 14010 = 42010 / 15 = 2800.6667
+    assert slip["sweep_vwap"] > 2800.0
+    assert slip["slippage_bps"] > 0.0
+
+    clear_depth_books()
+
+
+def test_modify_order_intent_paper_flow():
+    """Verify modifying price, trigger_price and quantity on an OPEN paper order."""
+    from engine.order_lifecycle import modify_order_intent, _get_orders_db
+
+    intent = preview_order_intent(
+        symbol="INFY",
+        side="SELL",
+        quantity=10,
+        price=1500.0,
+        order_type="SL_LIMIT",
+    )
+    confirm_order_intent(intent.order_id, preview_hash=intent.preview_hash)
+
+    # Manually transition to OPEN to simulate resting SL order
+    with _get_orders_db() as conn:
+        conn.execute(
+            "UPDATE orders_ledger SET status = 'OPEN' WHERE order_id = ?",
+            (intent.order_id,),
+        )
+        conn.commit()
+
+    modified = modify_order_intent(
+        order_id=intent.order_id,
+        new_price=1510.0,
+        new_trigger_price=1510.0,
+        new_quantity=15,
+    )
+
+    assert modified.price == 1510.0
+    assert modified.quantity == 15
+    assert modified.charges.get("trigger_price") == 1510.0
+
+    # Test modifying terminal order raises ValueError
+    with _get_orders_db() as conn:
+        conn.execute(
+            "UPDATE orders_ledger SET status = 'FILLED' WHERE order_id = ?",
+            (intent.order_id,),
+        )
+        conn.commit()
+
+    with pytest.raises(ValueError, match="non-modifiable status"):
+        modify_order_intent(intent.order_id, new_price=1520.0)
+
+
+def test_ratchet_stop_loss_on_milestone():
+    """Verify that milestone ratchet elevates resting SL orders up to breakeven."""
+    from engine.order_lifecycle import ratchet_stop_loss_on_milestone, _get_orders_db
+
+    # Create resting sell SL order for RELIANCE
+    intent = preview_order_intent(
+        symbol="RELIANCE",
+        side="SELL",
+        quantity=20,
+        price=2450.0,
+        order_type="SL_MARKET",
+    )
+    confirm_order_intent(intent.order_id, preview_hash=intent.preview_hash)
+
+    with _get_orders_db() as conn:
+        conn.execute(
+            "UPDATE orders_ledger SET status = 'OPEN' WHERE order_id = ?",
+            (intent.order_id,),
+        )
+        conn.commit()
+
+    # Ratchet to breakeven at 2500.0
+    modified_orders = ratchet_stop_loss_on_milestone(
+        symbol="NSE:RELIANCE",
+        new_stop_loss=2500.0,
+        milestone="T1_ACHIEVED",
+    )
+
+    assert len(modified_orders) == 1
+    assert modified_orders[0].order_id == intent.order_id
+    assert modified_orders[0].price == 2500.0
+    assert modified_orders[0].charges.get("trigger_price") == 2500.0
+
+    # Lower stop loss should be rejected by monotonic ratchet
+    ratchet_lower = ratchet_stop_loss_on_milestone(
+        symbol="RELIANCE",
+        new_stop_loss=2480.0,
+        milestone="T1_ACHIEVED",
+    )
+    assert len(ratchet_lower) == 0

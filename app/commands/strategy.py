@@ -16,6 +16,10 @@ Subcommands:
 """
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("app.commands.strategy")
+
 
 import os
 
@@ -1131,8 +1135,8 @@ def _cmd_learn(args: list[str]) -> None:
         try:
             t = tech_library.get(name)
             is_technical = True
-        except KeyError:
-            pass
+        except KeyError as e_suppressed:
+            logger.debug(f"[app.commands.strategy] Non-fatal exception suppressed: {e_suppressed}")
 
     if t is None:
         # Search both libraries for suggestions
@@ -1229,8 +1233,8 @@ def _learn_technical(t) -> None:
             from engine.backtest_cache import load_result as _cache_load
 
             cached = _cache_load(t.backtest_key)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[app.commands.strategy] Non-fatal exception suppressed: {e_suppressed}")
 
     if t.backtest_key:
         if cached:
@@ -1325,8 +1329,8 @@ def _cmd_use(args: list[str]) -> None:
         try:
             template = tech_library.get(strategy_id)
             is_technical = True
-        except KeyError:
-            pass
+        except KeyError as e_suppressed:
+            logger.debug(f"[app.commands.strategy] Non-fatal exception suppressed: {e_suppressed}")
 
     if template is None:
         opt_matches = strategy_library.search(strategy_id)
@@ -1363,8 +1367,8 @@ def _cmd_use(args: list[str]) -> None:
         ltp = get_ltp(f"NSE:{symbol}")
         if ltp and ltp > 0:
             spot = float(ltp)
-    except Exception:
-        pass
+    except Exception as e_suppressed:
+        logger.debug(f"[app.commands.strategy] Non-fatal exception suppressed: {e_suppressed}")
 
     if not spot:
         try:
@@ -1483,8 +1487,8 @@ def _use_technical(template, symbol: str, raw_args: list[str]) -> None:
         # Persist so 'strategy learn' can show it without re-running
         try:
             _cache_save(template.backtest_key, result, symbol, period)
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[app.commands.strategy] Non-fatal exception suppressed: {e_suppressed}")
 
         # Show last 10 signals in a mini timeline
         try:
@@ -1514,8 +1518,8 @@ def _use_technical(template, symbol: str, raw_args: list[str]) -> None:
                         padding=(0, 2),
                     )
                 )
-        except Exception:
-            pass  # signal panel is best-effort
+        except Exception as e_suppressed:
+            logger.debug(f"[app.commands.strategy] Non-fatal exception suppressed: {e_suppressed}")
 
     except Exception as e:
         console.print(f"[red]Backtest failed: {e}[/red]")
@@ -1531,14 +1535,18 @@ def _parse_use_args(args: list[str]) -> tuple[str, str, int, int]:
         if args[i] == "--lots" and i + 1 < len(args):
             try:
                 lots = int(args[i + 1])
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(
+                    f"[app.commands.strategy] Non-fatal exception suppressed: {e_suppressed}"
+                )
             i += 2
         elif args[i] == "--dte" and i + 1 < len(args):
             try:
                 dte = int(args[i + 1])
-            except ValueError:
-                pass
+            except ValueError as e_suppressed:
+                logger.debug(
+                    f"[app.commands.strategy] Non-fatal exception suppressed: {e_suppressed}"
+                )
             i += 2
         else:
             clean.append(args[i])

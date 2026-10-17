@@ -570,8 +570,8 @@ def get_nearest_weekly_expiry(
     if cur_time is None and ref_date is None:
         try:
             cur_time = datetime.now(IST).time()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.calendar] Non-fatal exception suppressed: {e_suppressed}")
 
     clean = (
         underlying.upper()
@@ -627,8 +627,8 @@ def get_nearest_monthly_expiry(
     if cur_time is None and ref_date is None:
         try:
             cur_time = datetime.now(IST).time()
-        except Exception:
-            pass
+        except Exception as e_suppressed:
+            logger.debug(f"[market.calendar] Non-fatal exception suppressed: {e_suppressed}")
 
     clean = (
         underlying.upper()
