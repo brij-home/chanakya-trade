@@ -223,3 +223,21 @@ def test_global_exception_middleware():
     assert "incident_id" in body
     assert body["incident_id"].startswith("ERR-")
     assert "Intentional diagnostic crash" in body["message"]
+
+
+def test_global_exception_middleware_suppresses_stream_disconnect():
+    """Verify that Starlette SSE client disconnects do not record false incidents."""
+    from web.api import app
+    from engine.telemetry import get_error_incidents
+
+    @app.get("/stream/test-disconnect")
+    def _stream_disconnect():
+        raise RuntimeError("No response returned.")
+
+    initial_incidents = len(get_error_incidents(limit=10))
+    client = TestClient(app, raise_server_exceptions=False)
+    res = client.get("/stream/test-disconnect", headers={"Accept": "text/event-stream"})
+    assert res.status_code == 204
+    # Ensure no new incident was created
+    final_incidents = len(get_error_incidents(limit=10))
+    assert final_incidents == initial_incidents

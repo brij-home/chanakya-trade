@@ -343,6 +343,26 @@ async def global_exception_middleware(request: _Request, call_next):
     try:
         return await call_next(request)
     except Exception as exc:
+        err_msg = str(exc)
+        # Starlette BaseHTTPMiddleware limitation: when a client disconnects from an SSE
+        # stream or long-polling connection, the underlying anyio stream closes, causing
+        # BaseHTTPMiddleware to raise RuntimeError("No response returned.").
+        # This is a normal transport disconnect, NOT an unhandled application failure.
+        is_stream_req = (
+            "stream" in request.url.path
+            or "text/event-stream" in request.headers.get("accept", "").lower()
+        )
+        if (
+            (isinstance(exc, RuntimeError) and "No response returned" in err_msg)
+            or isinstance(exc, asyncio.CancelledError)
+        ) and is_stream_req:
+            logger.debug(
+                f"[web.api] Stream client transport closed cleanly on {request.url.path}: {err_msg}"
+            )
+            from starlette.responses import Response
+
+            return Response(status_code=204)
+
         try:
             from engine.telemetry import record_exception
 
