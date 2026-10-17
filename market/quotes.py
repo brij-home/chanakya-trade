@@ -52,7 +52,9 @@ def clear_quote_cache() -> int:
     with _quote_cache_lock:
         cnt = len(_QUOTE_CACHE)
         _QUOTE_CACHE.clear()
-        return cnt
+    with _in_flight_quote_lock:
+        _in_flight_quote_events.clear()
+    return cnt
 
 
 # Register with memory guard sentinel
@@ -704,7 +706,10 @@ def get_quote(
 
                 tbt = FyersTbtManager()
                 for m_inst in missing:
-                    depth_obj = tbt.get_depth(m_inst)
+                    with tbt._depth_lock:
+                        depth_obj = tbt._depth_cache.get(m_inst) or tbt._depth_cache.get(
+                            m_inst.split(":")[-1]
+                        )
                     if depth_obj and depth_obj.get("ltp", 0.0) > 0:
                         ltp = float(depth_obj.get("ltp") or 0.0)
                         bids = depth_obj.get("bids", [])

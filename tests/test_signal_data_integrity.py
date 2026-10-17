@@ -957,3 +957,149 @@ def test_eod_session_review_suppressed_on_weekends_and_holidays(monkeypatch):
         )
         rep = run_eod_alert_postmortems(auto_engine=engine, force=False, broadcast=False)
         assert rep["status"] == "SKIPPED_WEEKEND_OR_HOLIDAY"
+
+
+def test_get_latest_trading_day_resolution():
+    """Verify get_latest_trading_day resolves weekends, pre-market, and active market correctly."""
+    from market.calendar import get_latest_trading_day
+    from datetime import datetime, date
+    from config.constants import IST
+
+    # 1. Friday post-market (Oct 16, 2026 16:00 IST) -> Friday Oct 16
+    fri_eod = datetime(2026, 10, 16, 16, 0, tzinfo=IST)
+    assert get_latest_trading_day(fri_eod) == date(2026, 10, 16)
+
+    # 2. Saturday midday (Oct 17, 2026 12:00 IST) -> Friday Oct 16
+    sat_noon = datetime(2026, 10, 17, 12, 0, tzinfo=IST)
+    assert get_latest_trading_day(sat_noon) == date(2026, 10, 16)
+
+    # 3. Sunday evening (Oct 18, 2026 20:00 IST) -> Friday Oct 16
+    sun_eve = datetime(2026, 10, 18, 20, 0, tzinfo=IST)
+    assert get_latest_trading_day(sun_eve) == date(2026, 10, 16)
+
+    # 4. Monday pre-market (Oct 19, 2026 08:30 IST) -> Friday Oct 16 (session has not opened)
+    mon_pre = datetime(2026, 10, 19, 8, 30, tzinfo=IST)
+    assert get_latest_trading_day(mon_pre) == date(2026, 10, 16)
+
+    # 5. Monday active market (Oct 19, 2026 09:30 IST) -> Monday Oct 19
+    mon_active = datetime(2026, 10, 19, 9, 30, tzinfo=IST)
+    assert get_latest_trading_day(mon_active) == date(2026, 10, 19)
+
+
+def test_swing_inflection_alert_deterministic_across_weekend():
+    """Formatting a swing alert on Saturday vs Sunday must yield identical session_date and alert_id."""
+    from engine.detectors.swing_inflection import _format_swing_inflection_alert
+    from analysis.inflection_scanner import InflectionSetup
+    from datetime import datetime
+    from config.constants import IST
+
+    setup = InflectionSetup(
+        symbol="SHYAMMETL",
+        name="Shyam Metalics",
+        sector="METALS",
+        sector_icon="⛏️",
+        ltp=850.0,
+        day_change_pct=2.5,
+        inflection_score=88,
+        primary_archetype="STAGE_1_TO_2_EXPANSION",
+        archetype_label="Stage 1 to 2 Base Expansion",
+        timing_state="PULLBACK_RETEST",
+        timing_label="Pullback Retest",
+        weinstein_stage="STAGE_2_MARKUP",
+        vcp_detected=True,
+        vcp_tightness_pct=2.1,
+        vcp_pivot_price=850.0,
+        squeeze_state="COILING",
+        squeeze_duration=5,
+        rvol_20d=2.2,
+        trend_template_passed=8,
+        sector_tailwind_score=85,
+        rrg_quadrant="LEADING",
+        forensic_safe=True,
+        smc_regime="BULLISH",
+        smc_setup="DEMAND_OB_RETEST",
+        entry_price=850.0,
+        stop_loss=810.0,
+        target_1=930.0,
+        target_2=990.0,
+        target_moonshot=1100.0,
+        risk_reward_ratio=2.5,
+        risk_pts=40.0,
+        reward_pts=80.0,
+        confluence_factors=["Minervini Stage 2", "VCP Pivot"],
+        turnover_20d_cr=12.5,
+    )
+
+    sat_dt = datetime(2026, 10, 17, 11, 30, tzinfo=IST)
+    sun_dt = datetime(2026, 10, 18, 16, 45, tzinfo=IST)
+
+    alert_sat = _format_swing_inflection_alert(setup, session_dt=sat_dt, mkt_open=False)
+    alert_sun = _format_swing_inflection_alert(setup, session_dt=sun_dt, mkt_open=False)
+
+    # Both must anchor to Friday 2026-10-16
+    assert "20261016" in alert_sat.alert_id
+    assert alert_sat.alert_id == alert_sun.alert_id
+    assert alert_sat.symbol == "SHYAMMETL"
+
+
+def test_multi_session_swing_alert_suppresses_duplicate_and_survives_calendar_roll():
+    """Multi-session swing setups must never be retired as 'prior session' or duplicated across days."""
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+
+    engine = AutoAlertEngine()
+    engine.clear_alerts()
+
+    # Alert created on Friday
+    friday_alert = AutoAlert(
+        alert_id="aa-stage-1-to-2-expansion-shyammetl-pull-20261016",
+        symbol="SHYAMMETL",
+        alert_type="STAGE_1_TO_2_EXPANSION",
+        direction="BULLISH",
+        stage="PRIMED",
+        time_horizon="SWING_MID",
+        headline="🎯 SHYAMMETL Pullback Retest",
+        summary="Stage 1-to-2 breakout pullback retest",
+        ltp=850.0,
+        trigger_level=850.0,
+        stop_loss=810.0,
+        target_level=930.0,
+        created_at="2026-10-16 16:00:00 IST",
+        confidence=85,
+        is_live=True,
+        environment="LIVE",
+        exchange="NSE",
+    )
+
+    # 1. Record on Friday
+    ok1 = engine.record_alert(friday_alert)
+    assert ok1 is True
+    assert len(engine._alerts) == 1
+
+    # 2. Duplicate candidate on Saturday
+    dup_candidate = AutoAlert(
+        alert_id="aa-stage-1-to-2-expansion-shyammetl-pull-20261016",
+        symbol="SHYAMMETL",
+        alert_type="STAGE_1_TO_2_EXPANSION",
+        direction="BULLISH",
+        stage="PRIMED",
+        time_horizon="SWING_MID",
+        headline="🎯 SHYAMMETL Pullback Retest",
+        summary="Stage 1-to-2 breakout pullback retest",
+        ltp=850.0,
+        trigger_level=850.0,
+        stop_loss=810.0,
+        target_level=930.0,
+        created_at="2026-10-17 11:00:00 IST",
+        confidence=85,
+        is_live=True,
+        environment="LIVE",
+        exchange="NSE",
+    )
+
+    ok2 = engine.record_alert(dup_candidate)
+    assert ok2 is False, "Duplicate EOD alert must be suppressed"
+    assert len(engine._alerts) == 1
+    # Original alert must NOT be marked EXPIRED
+    assert engine._alerts[0].stage == "PRIMED"
+    assert engine._alerts[0].is_archived is False

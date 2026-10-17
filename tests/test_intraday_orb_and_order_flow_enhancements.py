@@ -13,6 +13,7 @@ Comprehensive test suite for:
 from __future__ import annotations
 
 import datetime
+from contextlib import ExitStack
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -256,17 +257,19 @@ def test_early_pre_0930_signals_unmuted_by_orb():
     engine._alerts = []
 
     # Mock scanners returning early signals
-    with (
+    mocked_scanners = [
         patch.object(engine, "_get_cycle_quotes", return_value={}),
         patch.object(engine, "scan_index_micro_scalp", return_value=[]),
         patch.object(engine, "scan_index_call_setups", return_value=[]),
         patch.object(engine, "scan_index_put_setups", return_value=[]),
         patch.object(engine, "scan_opening_drives", return_value=[]),
         patch.object(engine, "scan_index_contagion", return_value=[]),
+        patch.object(engine, "scan_thematic_peer_sympathy", return_value=[]),
         patch.object(engine, "scan_gamma_blasts", return_value=[early_gamma_blast]),
         patch.object(engine, "scan_precursor_radars", return_value=[early_precursor]),
         patch.object(engine, "scan_options_momentum_breakouts", return_value=[]),
         patch.object(engine, "scan_squeeze_breakouts", return_value=[]),
+        patch.object(engine, "scan_afternoon_thrusts", return_value=[]),
         patch.object(engine, "scan_circuits", return_value=[]),
         patch.object(engine, "scan_pattern_coilings", return_value=[]),
         patch.object(engine, "scan_intraday_mover_sparks", return_value=[]),
@@ -276,7 +279,10 @@ def test_early_pre_0930_signals_unmuted_by_orb():
         patch.object(engine, "scan_incubation_triggers", return_value=[]),
         patch.object(engine, "scan_smc_orderblock_retests", return_value=[]),
         patch.object(engine, "scan_swing_inflections", return_value=[]),
-    ):  # ORB returns [] pre-09:30
+    ]
+    with ExitStack() as stack:
+        for p in mocked_scanners:
+            stack.enter_context(p)
         all_morning_alerts = engine.scan_equity_nfo_now()
 
     # Both early alerts pass with 100% fidelity through the pipeline

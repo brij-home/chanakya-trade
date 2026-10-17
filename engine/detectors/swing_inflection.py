@@ -78,7 +78,10 @@ def _format_swing_inflection_alert(
     """Constructs a fully verified, institutional-grade AutoAlert record from an InflectionSetup."""
     now_dt = session_dt or datetime.now(IST)
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
-    session_date = now_dt.date()
+    exchange = "BSE" if (getattr(setup, "exchange", None) == "BSE") else "NSE"
+    from market.calendar import get_latest_trading_day
+
+    session_date = get_latest_trading_day(now_dt, exchange=exchange)
 
     clean_sym = canonical_alert_symbol(setup.symbol)
     time_horizon, eta_label = _resolve_swing_horizon_and_eta(setup)

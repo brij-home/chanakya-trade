@@ -547,6 +547,41 @@ def is_trading_day(target_date: date, exchange: str = "NSE") -> bool:
     return target_date.weekday() < 5 and not is_trading_holiday(target_date, exchange)
 
 
+def get_latest_trading_day(
+    ref_dt: Optional[datetime | date] = None,
+    exchange: str = "NSE",
+) -> date:
+    """
+    Returns the most recent official exchange trading day on or before ref_dt.
+    If ref_dt falls on a weekend, exchange holiday, or (if datetime provided)
+    before the official market opening auction (09:15 IST), rolls backward
+    to the last completed trading day.
+    """
+    if ref_dt is None:
+        ref_dt = datetime.now(IST)
+
+    if isinstance(ref_dt, datetime):
+        if ref_dt.tzinfo is None:
+            ref_dt = ref_dt.replace(tzinfo=IST)
+        else:
+            ref_dt = ref_dt.astimezone(IST)
+        target_date = ref_dt.date()
+        # If it's a weekday trading day but before 09:15 IST, the session has not started.
+        # The latest completed or active market data corresponds to the previous trading day.
+        if is_trading_day(target_date, exchange=exchange):
+            if (ref_dt.hour < 9) or (ref_dt.hour == 9 and ref_dt.minute < 15):
+                target_date -= timedelta(days=1)
+    else:
+        target_date = ref_dt
+
+    for _ in range(30):
+        if is_trading_day(target_date, exchange=exchange):
+            return target_date
+        target_date -= timedelta(days=1)
+
+    return target_date
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. Canonical F&O Expiry Resolvers (SEBI Single Weekly Contract Mandate)
 # ─────────────────────────────────────────────────────────────────────────────

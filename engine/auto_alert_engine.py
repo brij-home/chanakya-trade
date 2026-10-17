@@ -1528,9 +1528,47 @@ class AutoAlertEngine:
                 None,
             )
             if existing_active:
+                _MULTI_SESSION_TYPES = frozenset(
+                    {
+                        "SWING",
+                        "SWING_SHORT",
+                        "SWING_MID",
+                        "LONG_TERM",
+                        "POSITIONAL",
+                        "MULTIBAGGER",
+                    }
+                )
+                is_multi_session = (
+                    (getattr(existing_active, "time_horizon", "") or "").upper()
+                    in _MULTI_SESSION_TYPES
+                    or (getattr(alert, "time_horizon", "") or "").upper() in _MULTI_SESSION_TYPES
+                    or (getattr(existing_active, "setup_style", "") or "").upper()
+                    in ("SWING", "POSITIONAL")
+                    or (getattr(alert, "setup_style", "") or "").upper() in ("SWING", "POSITIONAL")
+                    or alert.alert_type
+                    in (
+                        "STAGE_1_TO_2_EXPANSION",
+                        "VCP_PIVOT_BREAKOUT",
+                        "TTM_SQUEEZE_EXPLOSION",
+                        "SMC_SPRING_SWEEP",
+                        "RRG_SECTOR_ROTATION",
+                        "MULTIBAGGER",
+                    )
+                )
+
                 ex_date = self._alert_date(existing_active)
-                # If existing alert is from a prior calendar session, retire it and treat incoming as fresh!
-                if ex_date and ex_date < alert_dt_date:
+                # Intraday alerts are retired if incoming alert is from a new official trading day.
+                # Multi-session setups (Swing, Positional, Multibagger) span days/weeks and are NEVER retired
+                # simply because a calendar session ended.
+                from market.calendar import is_trading_day
+
+                exch = (alert.exchange or existing_active.exchange or "NSE").upper()
+                if (
+                    not is_multi_session
+                    and ex_date
+                    and ex_date < alert_dt_date
+                    and is_trading_day(alert_dt_date, exchange=exch)
+                ):
                     existing_active.stage = "EXPIRED"
                     existing_active.is_archived = True
                     existing_active.archive_reason = "Prior session record retired"
@@ -12054,18 +12092,27 @@ class AutoAlertEngine:
                 except Exception as _eod_err:
                     logger.debug(f"[AutoAlertEngine] EOD trigger check: {_eod_err}")
 
-                # Off-Market EOD Digest: Automatically screen Swing, Positional, and Multibaggers once post-market (15:45–23:59 IST) or during off-market weekends
+                # Off-Market EOD Digest: Automatically screen Swing, Positional, and Multibaggers once post-market (15:45–23:59 IST) for the completed session.
+                # Strictly runs ONCE per completed market session. Weekend/holiday hours analyze the exact same Friday data,
+                # so scanning repeatedly across Saturday and Sunday produces duplicate alerts on static data.
                 is_offmarket_window = (
                     not session["equity_nfo"] and now_t >= dtime(15, 45)
                 ) or not session.get("is_market_open", False)
                 if is_offmarket_window and not session["equity_nfo"]:
-                    today_str = datetime.now(IST).strftime("%Y%m%d")
-                    if getattr(self, "_last_eod_digest_date", None) != today_str:
+                    from market.calendar import get_latest_trading_day
+
+                    effective_session_d = get_latest_trading_day(now_ist, exchange="NSE")
+                    session_slug = effective_session_d.strftime("%Y%m%d")
+                    if (
+                        getattr(self, "_last_eod_digest_session", None) != session_slug
+                        and getattr(self, "_last_eod_digest_date", None) != session_slug
+                    ):
                         try:
                             self.scan_swing_inflections(
                                 universe="nifty_total_market", min_score=65, top_n=30
                             )
-                            self._last_eod_digest_date = today_str
+                            self._last_eod_digest_session = session_slug
+                            self._last_eod_digest_date = session_slug
                         except Exception as _pm_err:
                             logger.debug(
                                 f"[AutoAlertEngine] Off-market swing scan error: {_pm_err}"
@@ -12600,6 +12647,27 @@ class AutoAlertEngine:
                 self._deduplicate_symbols_unlocked()
                 # 4. Periodically prune stale / invalidated / archived records (30 days in live, 3 in test)
                 self._prune_expired_archived_unlocked(max_age_days=retention_days)
+
+                # 5. Seed EOD digest session tracker if latest completed trading day was already screened
+                try:
+                    from market.calendar import get_latest_trading_day
+
+                    latest_td = get_latest_trading_day(datetime.now(IST), exchange="NSE")
+                    latest_td_str = latest_td.strftime("%Y%m%d")
+                    for a in self._alerts:
+                        aid = getattr(a, "alert_id", "") or ""
+                        if latest_td_str in aid and getattr(a, "time_horizon", "") in (
+                            "SWING_SHORT",
+                            "SWING_MID",
+                            "SWING",
+                            "POSITIONAL",
+                            "MULTIBAGGER",
+                        ):
+                            self._last_eod_digest_session = latest_td_str
+                            self._last_eod_digest_date = latest_td_str
+                            break
+                except Exception as _seed_err:
+                    logger.debug(f"[AutoAlertEngine] EOD digest session seed error: {_seed_err}")
 
             is_test_env = (
                 "PYTEST_CURRENT_TEST" in os.environ

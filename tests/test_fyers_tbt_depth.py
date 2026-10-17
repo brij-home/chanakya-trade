@@ -477,20 +477,27 @@ def test_alert_scrutiny_tbt_microstructure_gate():
     """Verify Tier-1.5 Scrutiny detects iceberg walls and adverse OBI on candidate setups."""
     from engine.alert_model import AutoAlert
     from engine.alert_scrutiny import alert_scrutiny_auditor
-    from market.fyers_tbt_manager import FyersTbtManager
+    from market.fyers_tbt_manager import FyersTbtManager, resolve_tradable_tbt_symbol
 
     mgr = FyersTbtManager()
+    with mgr._depth_lock:
+        mgr._depth_cache.clear()
     try:
         mgr._connected = True
+        trad_sym = resolve_tradable_tbt_symbol("NIFTY")
 
         # 1. Candidate facing a massive resting Ask Wall right above entry
-        mgr._depth_cache["NSE:NIFTY50-INDEX"] = {
+        wall_payload = {
             "status": "LIVE",
             "ltp": 25000.0,
             "obi_50": 0.10,
             "ask_walls": [{"price": 25020.0, "qty": 25000, "level": 3}],
             "bid_walls": [],
         }
+        with mgr._depth_lock:
+            mgr._depth_cache["NSE:NIFTY50-INDEX"] = wall_payload
+            if trad_sym:
+                mgr._depth_cache[trad_sym] = wall_payload
 
         alert = AutoAlert(
             alert_id="aa-test-wall-20261016",
@@ -514,13 +521,17 @@ def test_alert_scrutiny_tbt_microstructure_gate():
         assert flags.get("trap_immediate_resistance") is True
 
         # 2. Candidate with severe adverse Order Book Imbalance (heavy ask dumping)
-        mgr._depth_cache["NSE:NIFTY50-INDEX"] = {
+        obi_payload = {
             "status": "LIVE",
             "ltp": 25000.0,
             "obi_50": -0.55,  # Extreme ask supply
             "ask_walls": [],
             "bid_walls": [],
         }
+        with mgr._depth_lock:
+            mgr._depth_cache["NSE:NIFTY50-INDEX"] = obi_payload
+            if trad_sym:
+                mgr._depth_cache[trad_sym] = obi_payload
 
         passed_obi, reason_obi, flags_obi = alert_scrutiny_auditor.verify_tier1_sanity(alert)
         assert passed_obi is False
@@ -528,7 +539,8 @@ def test_alert_scrutiny_tbt_microstructure_gate():
         assert flags_obi.get("adverse_tbt_imbalance") is True
     finally:
         mgr._connected = False
-        mgr._depth_cache.clear()
+        with mgr._depth_lock:
+            mgr._depth_cache.clear()
 
 
 def test_tbt_scout_priority_scoring():
@@ -891,3 +903,42 @@ def test_fyers_broker_depth_tbt_bridge_zero_network_calls():
     assert depth["ltp"] == 25250.0
     assert depth["total_buy_qty"] == 5000
     assert depth["bids"][0]["price"] == 25249.5
+
+
+def test_fyers_broker_depth_when_sdk_not_installed(monkeypatch):
+    """
+    Ensure that when optional fyers-apiv3 SDK is not installed in the environment:
+    1. In-memory TBT cache resolution works seamlessly with zero SDK calls.
+    2. Fallback REST requests return honest UNAVAILABLE status without unhandled exceptions.
+    """
+    import sys
+    from market.fyers_tbt_manager import FyersTbtManager
+    from brokers.fyers import FyersAPI
+
+    monkeypatch.setitem(sys.modules, "fyers_apiv3", None)
+    monkeypatch.setitem(sys.modules, "fyers_apiv3.fyersModel", None)
+
+    mgr = FyersTbtManager()
+    mgr._depth_cache["NSE:BANKNIFTY26OCTFUT"] = {
+        "symbol": "NSE:BANKNIFTY26OCTFUT",
+        "ltp": 52000.0,
+        "tbq": 2000,
+        "tsq": 1800,
+        "bids": [{"price": 51995.0, "qty": 100, "orders": 3}],
+        "asks": [{"price": 52005.0, "qty": 80, "orders": 2}],
+        "rolling_tick_vwap": 51998.0,
+    }
+
+    broker = FyersAPI(app_id="TEST-100", secret_key="dummy")
+    broker._access_token = "valid_test_token"
+
+    # 1. TBT memory resolution should succeed with 0 SDK calls
+    tbt_res = broker.get_market_depth("NSE:BANKNIFTY26OCTFUT")
+    assert tbt_res["status"] == "ok"
+    assert tbt_res["provider"] == "FYERS_TBT_50"
+    assert tbt_res["ltp"] == 52000.0
+
+    # 2. Uncached symbol should return graceful UNAVAILABLE without unhandled crash
+    rest_res = broker.get_market_depth("NSE:UNCACHEDFUT")
+    assert rest_res["status"] == "UNAVAILABLE"
+    assert "fyers-apiv3" in rest_res["message"]

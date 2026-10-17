@@ -1307,11 +1307,6 @@ class FyersAPI(BrokerAPI):
                 if (now_mono - ts) < effective_ttl:
                     return cached_res
 
-        fyers = self._get_fyers()
-        if not fyers:
-            return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
-        if get_fyers_circuit_breaker().is_tripped():
-            return {"status": "UNAVAILABLE", "message": "Circuit breaker OPEN"}
         clean_upper = symbol.upper().strip()
         if clean_upper.startswith(
             ("BINANCE:", "CRYPTO:", "COINBASE:", "BYBIT:")
@@ -1332,6 +1327,8 @@ class FyersAPI(BrokerAPI):
             }
             with self._depth_cache_lock:
                 self._depth_cache[symbol] = (now_mono, unavail_res)
+            return unavail_res
+
         # Zero-latency L3 TBT stream bridge: check Fyers TBT Manager 50-Depth first (0 REST calls)
         try:
             from market.fyers_tbt_manager import FyersTbtManager
@@ -1386,6 +1383,17 @@ class FyersAPI(BrokerAPI):
                 return depth_res
         except Exception as e_tbt:
             logger.debug(f"[FyersAPI] TBT depth cache check error: {e_tbt}")
+
+        if get_fyers_circuit_breaker().is_tripped():
+            return {"status": "UNAVAILABLE", "message": "Circuit breaker OPEN"}
+
+        try:
+            fyers = self._get_fyers()
+        except RuntimeError as e_sdk:
+            return {"status": "UNAVAILABLE", "message": str(e_sdk)}
+
+        if not fyers:
+            return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
 
         try:
             _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)

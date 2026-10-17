@@ -168,6 +168,8 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
             mq._QUOTE_CACHE = OrderedDict()
         with mq._quote_cache_lock:
             mq._QUOTE_CACHE.clear()
+        with mq._in_flight_quote_lock:
+            mq._in_flight_quote_events.clear()
     except Exception:
         pass
 
