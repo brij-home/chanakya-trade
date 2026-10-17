@@ -406,7 +406,12 @@ class IndexContagionEngine:
             )
             s_date = now_iso[:10] if now_iso and len(now_iso) >= 10 else None
             dl = get_daily_levels(clean_idx, session_date=s_date)
-            if dl and (not s_date or dl.session_date == s_date):
+            session_mismatch = (
+                isinstance(getattr(dl, "session_date", None), str)
+                and bool(s_date)
+                and dl.session_date != s_date
+            )
+            if dl and not session_mismatch:
                 cam = dl.camarilla or {}
                 h5 = float(cam.get("h5", 0.0) or 0.0)
                 l5 = float(cam.get("l5", 0.0) or 0.0)
