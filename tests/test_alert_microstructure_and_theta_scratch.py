@@ -153,17 +153,23 @@ def test_auto_alert_engine_enriches_with_live_l2_depth():
         is_live=False,
     )
 
-    success = engine.record_alert(alert)
-    assert success is True
+    try:
+        success = engine.record_alert(alert)
+        assert success is True
 
-    # Alert should now have enriched L2 spread, OBI, and friction badge
-    assert alert.bid_ask_spread_pct is not None
-    assert alert.bid_ask_spread_pct == pytest.approx(2.67, 0.05)
-    assert alert.order_book_depth_imbalance is not None
-    assert alert.execution_friction_badge == "⚠️ WIDE SPREAD — USE STRICT LIMIT"
-    assert (
-        alert.actionable_plan.get("execution_friction_badge") == "⚠️ WIDE SPREAD — USE STRICT LIMIT"
-    )
+        # Alert should now have enriched L2 spread, OBI, and friction badge
+        assert alert.bid_ask_spread_pct is not None
+        assert alert.bid_ask_spread_pct == pytest.approx(2.67, 0.05)
+        assert alert.order_book_depth_imbalance is not None
+        assert alert.execution_friction_badge == "⚠️ WIDE SPREAD — USE STRICT LIMIT"
+        assert (
+            alert.actionable_plan.get("execution_friction_badge")
+            == "⚠️ WIDE SPREAD — USE STRICT LIMIT"
+        )
+    finally:
+        with engine._lock:
+            engine._alerts = [a for a in engine._alerts if a.alert_id != "aa-test-l2-enrich-002"]
+            engine._save()
 
 
 def test_0dte_afternoon_theta_stagnation_scratch_bailout_evaluator():

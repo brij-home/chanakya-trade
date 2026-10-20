@@ -256,6 +256,12 @@ def test_auto_alert_engine_dispatch_routing(monkeypatch, tmp_path):
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
 
     engine = AutoAlertEngine()
+    with engine._lock:
+        engine._alerts = [a for a in engine._alerts if a.symbol != "NIFTY"]
+        engine._dispatched_milestones.clear()
+        engine._dispatch_cooldowns.clear()
+        engine._daily_index_telegram.clear()
+        engine._hourly_telegram_dispatches["INDEX"].clear()
 
     # 1. Commodity alert -> Should be blocked from Telegram!
     comm_alert = AutoAlert(
@@ -305,20 +311,20 @@ def test_auto_alert_engine_dispatch_routing(monkeypatch, tmp_path):
 
     # 3. Index FNO alert -> Should be sent to Telegram!
     fno_alert = AutoAlert(
-        alert_id="live-fno-001",
+        alert_id="live-fno-dispatch-route-001",
         alert_type="GAMMA_BLAST",
         stage="IGNITED",
         symbol="NIFTY",
         exchange="NFO",
         direction="BULLISH",
-        headline="NIFTY 25000 CE GAMMA SURGE",
+        headline="NIFTY 25100 CE GAMMA SURGE",
         summary="Call OI unwinding",
         ltp=150.0,
         trigger_level=140.0,
         target_level=220.0,
         stop_loss=110.0,
         option_type="CE",
-        strike=25000.0,
+        strike=25100.0,
         confidence=92,
         is_live=True,
         environment="LIVE",
@@ -421,24 +427,35 @@ def test_fno_telegram_destination_routing(monkeypatch):
 
     monkeypatch.setattr("engine.alerts._telegram_notify", mock_tg_notify)
 
+    from engine.alert_preferences import alert_preferences, AlertPreferences
+
+    monkeypatch.setattr(alert_preferences, "_preferences", AlertPreferences())
+
     engine = AutoAlertEngine()
+    with engine._lock:
+        engine._alerts = [a for a in engine._alerts if a.symbol not in ("NIFTY", "RELIANCE")]
+        engine._dispatched_milestones.clear()
+        engine._dispatch_cooldowns.clear()
+        engine._daily_index_telegram.clear()
+        engine._hourly_telegram_dispatches["INDEX"].clear()
+        engine._hourly_telegram_dispatches["FNO_STOCK"].clear()
 
     # 1. F&O Index Alert (NIFTY) -> routes to Premium_Alpha_Vortex_FnO_Index
     fno_index_alert = AutoAlert(
-        alert_id="live-fno-index-routing-001",
+        alert_id="live-fno-index-dest-001",
         alert_type="GAMMA_BLAST",
         stage="IGNITED",
         symbol="NIFTY",
         exchange="NFO",
         direction="BULLISH",
-        headline="NIFTY 25000 CE GAMMA SURGE",
+        headline="NIFTY 25200 CE GAMMA SURGE",
         summary="Call OI unwinding",
         ltp=150.0,
         trigger_level=140.0,
         target_level=220.0,
         stop_loss=110.0,
         option_type="CE",
-        strike=25000.0,
+        strike=25200.0,
         confidence=92,
         is_live=True,
         environment="LIVE",

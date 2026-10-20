@@ -172,7 +172,7 @@ def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
             symbol=test_sym,
             exchange="NSE",
             direction="BULLISH",
-            headline="Breakout",
+            headline="Probation Test Alert",
             summary="Testing probation",
             ltp=2500.0,
             trigger_level=2500.0,
@@ -182,9 +182,13 @@ def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
             is_live=True,
             environment="LIVE",
         )
-        # Mock market hours to avoid off-market suppression during test
+        # Mock market hours and sanity gate to isolate probation logic from market regime
         monkeypatch.setattr("engine.alerts._is_market_hours", lambda exchange: True)
         monkeypatch.setenv("CHANAKYA_TESTING", "1")
+        monkeypatch.setattr(
+            "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+            lambda *args, **kwargs: (True, "", {}),
+        )
         from engine.quality_gate import VetoVerdict
 
         monkeypatch.setattr(
