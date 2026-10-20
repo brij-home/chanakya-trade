@@ -103,7 +103,9 @@ class TestCouncilArbitrator:
         a.metrics = {}
         a.actionable_plan = {}
         a.expiry_date = None
-        a.created_at = datetime.now().isoformat()
+        from config.constants import IST
+
+        a.created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
         a.symbol = "SYM"
         a.alert_type = "GAMMA_BLAST"
         return a

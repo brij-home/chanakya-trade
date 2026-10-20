@@ -145,11 +145,18 @@ def run_council_arbitration(engine: object) -> list:
             continue
         if getattr(a, "stage", "") not in ("IGNITED", "EARLY_WARNING", "ACTIVE", "PRIMED"):
             continue
-        created_at_str = str(getattr(a, "created_at", "") or "").replace(" IST", "")
+        raw_created = getattr(a, "created_at", "") or ""
+        created_at_str = str(raw_created).replace(" IST", "").strip()
         try:
             from dateutil.parser import parse as dateutil_parse
 
-            created_epoch = dateutil_parse(created_at_str).replace(tzinfo=IST).timestamp()
+            parsed_dt = dateutil_parse(created_at_str)
+            if parsed_dt.tzinfo is not None:
+                created_epoch = parsed_dt.timestamp()
+            elif "IST" in str(raw_created):
+                created_epoch = parsed_dt.replace(tzinfo=IST).timestamp()
+            else:
+                created_epoch = parsed_dt.timestamp()
         except Exception:
             created_epoch = now
 

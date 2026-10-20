@@ -225,7 +225,8 @@ def test_tbt_multi_socket_worker_pool_partitioning():
     symbols_15 = [f"NSE:MOCKSYM{i}FUT" for i in range(15)]
     mgr._core_grid = symbols_15[:6]
     mgr._todays_expiry = symbols_15[6:9]
-    mgr._scout = {s: time.time() for s in symbols_15[9:15]}
+    t0 = time.time()
+    mgr._scout = {s: t0 - idx for idx, s in enumerate(symbols_15[9:15])}
 
     mgr.sync_subscriptions()
 

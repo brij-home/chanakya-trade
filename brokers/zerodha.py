@@ -18,8 +18,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from kiteconnect import KiteConnect
-from kiteconnect.exceptions import KiteException
+try:
+    from kiteconnect import KiteConnect
+    from kiteconnect.exceptions import KiteException
+except ImportError:  # pragma: no cover
+    KiteConnect = None
+
+    class KiteException(Exception):
+        pass
+
 
 from .base import (
     BrokerAPI,
@@ -44,13 +51,14 @@ class ZerodhaAPI(BrokerAPI):
     and automatically restored on construction.
     """
 
-    def __init__(self, api_key: str, api_secret: str) -> None:
+    def __init__(self, api_key: str = "", api_secret: str = "") -> None:
         self.api_key = api_key
         self.api_secret = api_secret
-        self.kite = KiteConnect(api_key=api_key)
+        self.kite = KiteConnect(api_key=api_key) if KiteConnect is not None else None
         self._inst_lock = threading.Lock()
         self._instruments_cache: dict[str, tuple[float, list[dict]]] = {}
-        self._restore_token()
+        if self.kite is not None:
+            self._restore_token()
 
     # ── Token management ──────────────────────────────────────
 
@@ -90,6 +98,8 @@ class ZerodhaAPI(BrokerAPI):
         )
 
     def is_authenticated(self) -> bool:
+        if self.kite is None:
+            return False
         try:
             self.kite.profile()
             return True

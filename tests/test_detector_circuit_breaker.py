@@ -184,6 +184,7 @@ def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
         )
         # Mock market hours to avoid off-market suppression during test
         monkeypatch.setattr("engine.alerts._is_market_hours", lambda exchange: True)
+        monkeypatch.setenv("CHANAKYA_TESTING", "1")
         from engine.quality_gate import VetoVerdict
 
         monkeypatch.setattr(

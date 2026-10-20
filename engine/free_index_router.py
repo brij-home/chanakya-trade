@@ -65,8 +65,8 @@ class FreeIndexRouter:
             )
 
         # In live production runtime, default to the canonical Free Index Channel ID.
-        # In test environments (CHANAKYA_TESTING=1), return None unless explicitly set.
-        if os.environ.get("CHANAKYA_TESTING") != "1":
+        # In test environments (CHANAKYA_TESTING=1 or pytest running), return None unless explicitly set.
+        if os.environ.get("CHANAKYA_TESTING") != "1" and "PYTEST_CURRENT_TEST" not in os.environ:
             return DEFAULT_FREE_INDEX_CHAT_ID
         return None
 
@@ -77,6 +77,8 @@ class FreeIndexRouter:
             return False
         if env_flag in ("1", "true", "yes"):
             return True
+        if os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ:
+            return False
         try:
             from engine.alert_preferences import alert_preferences
 
