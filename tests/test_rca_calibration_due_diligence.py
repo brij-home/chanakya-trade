@@ -101,7 +101,11 @@ def test_early_warning_time_stop_due_diligence_missing_quotes():
     alert._force_test_expiry = True
 
     # Case 1: Quotes missing/unavailable (LTP=0.0) -> MUST NOT expire as untriggered!
-    with patch("market.calendar.is_market_open", return_value=True):
+    with (
+        patch("market.calendar.is_market_open", return_value=True),
+        patch("market.quotes.get_quote", return_value={}),
+        patch("market.quotes.get_ltp", return_value=None),
+    ):
         reason = evaluate_alert_invalidation(alert, current_ltp=0.0)
         assert reason is None, "Missing quotes must NOT trigger false Time-Stop expiry"
 

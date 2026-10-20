@@ -83,7 +83,7 @@ def evaluate_alert_invalidation(
     session_high: Optional[float] = None
 
     # Determine current LTP if not provided
-    if current_ltp is None or current_ltp <= 0:
+    if current_ltp is None:
         lookup_sym = ""
         try:
             from market.quotes import get_quote, get_ltp
