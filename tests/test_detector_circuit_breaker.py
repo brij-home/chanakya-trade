@@ -110,8 +110,13 @@ def test_auto_alert_engine_circuit_breaker_halt(monkeypatch):
     from engine.alert_model import AutoAlert
     from engine.detector_circuit_breaker import detector_circuit_breaker
 
-    engine = AutoAlertEngine()
     test_type = "TEST_CIRCUIT_TRIP"
+    detector_circuit_breaker.reset_detector(test_type)
+
+    engine = AutoAlertEngine()
+    with engine._lock:
+        engine._alerts = []
+        engine._cooldowns = {}
 
     # Trip breaker
     for i in range(5):
@@ -139,6 +144,9 @@ def test_auto_alert_engine_circuit_breaker_halt(monkeypatch):
         assert res is False, "Alert from HALTED detector must be rejected"
     finally:
         detector_circuit_breaker.reset_detector(test_type)
+        with engine._lock:
+            engine._alerts = []
+            engine._cooldowns = {}
 
 
 def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
@@ -146,10 +154,61 @@ def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
     from engine.auto_alert_engine import AutoAlertEngine
     from engine.alert_model import AutoAlert
     from engine.detector_circuit_breaker import detector_circuit_breaker
+    from brokers.base import Quote
+    from engine.quality_gate import VetoVerdict
+    import unittest.mock
+    import uuid
 
-    engine = AutoAlertEngine()
     test_type = "TEST_CIRCUIT_PROBATION"
     test_sym = "CIRCUIT_PROB_TEST"
+    detector_circuit_breaker.reset_detector(test_type)
+
+    # Environment isolation
+    monkeypatch.setenv("CHANAKYA_TESTING", "1")
+    monkeypatch.setenv("DEPLOY_MODE", "test")
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda exchange: True)
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+        lambda *args, **kwargs: (True, "", {}),
+    )
+    monkeypatch.setattr(
+        "engine.quality_gate.evaluate_institutional_quality_gate",
+        lambda *args, **kwargs: VetoVerdict(
+            is_vetoed=False,
+            execution_mandate="STANDARD",
+            conviction_tier="HIGH_CONVICTION",
+        ),
+    )
+
+    mock_q = Quote(
+        symbol=test_sym,
+        last_price=2500.0,
+        open=2480.0,
+        high=2520.0,
+        low=2470.0,
+        close=2490.0,
+        volume=500000,
+        provider="mock",
+        source="STREAM",
+        data_state="REALTIME",
+    )
+    monkeypatch.setattr(
+        "market.quotes.get_quote",
+        lambda syms, *args, **kwargs: {
+            (s if isinstance(s, str) else test_sym): mock_q
+            for s in (syms if isinstance(syms, list) else [syms])
+        },
+    )
+    monkeypatch.setattr("market.quotes.get_ltp", lambda *args, **kwargs: 2500.0)
+
+    engine = AutoAlertEngine()
+    with engine._lock:
+        engine._alerts = []
+        engine._cooldowns = {}
+
+    monkeypatch.setattr(engine, "_dispatch", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine, "_save", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine, "_auto_subscribe_stream", lambda *args, **kwargs: None)
 
     # Degrade to probation (5 samples >= min_samples: 1 win of 1.5R, 4 losses of -1.0R with win in middle)
     detector_circuit_breaker.record_outcome("p1", test_sym, test_type, "LOSS", -1.0)
@@ -158,11 +217,7 @@ def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
     detector_circuit_breaker.record_outcome("p4", test_sym, test_type, "LOSS", -1.0)
     detector_circuit_breaker.record_outcome("p5", test_sym, test_type, "LOSS", -1.0)
 
-    import uuid
-
     aid = f"live-test-prob-{uuid.uuid4().hex[:6]}"
-    with engine._lock:
-        engine._alerts = [a for a in engine._alerts if a.symbol != test_sym]
 
     try:
         alert = AutoAlert(
@@ -182,24 +237,6 @@ def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
             is_live=True,
             environment="LIVE",
         )
-        # Mock market hours and sanity gate to isolate probation logic from market regime
-        monkeypatch.setattr("engine.alerts._is_market_hours", lambda exchange: True)
-        monkeypatch.setenv("CHANAKYA_TESTING", "1")
-        monkeypatch.setattr(
-            "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
-            lambda *args, **kwargs: (True, "", {}),
-        )
-        from engine.quality_gate import VetoVerdict
-
-        monkeypatch.setattr(
-            "engine.quality_gate.evaluate_institutional_quality_gate",
-            lambda *args, **kwargs: VetoVerdict(
-                is_vetoed=False,
-                execution_mandate="STANDARD",
-                conviction_tier="HIGH_CONVICTION",
-            ),
-        )
-        import unittest.mock
 
         with unittest.mock.patch.object(engine, "_async_enrich_scrutiny"):
             res = engine.record_alert(alert)
@@ -209,7 +246,8 @@ def test_auto_alert_engine_circuit_breaker_probation(monkeypatch):
     finally:
         detector_circuit_breaker.reset_detector(test_type)
         with engine._lock:
-            engine._alerts = [a for a in engine._alerts if a.symbol != test_sym]
+            engine._alerts = []
+            engine._cooldowns = {}
 
 
 def test_historical_losses_decay_to_probation_on_new_session(temp_breaker):
