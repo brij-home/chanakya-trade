@@ -262,31 +262,36 @@ def test_auto_alert_engine_check_in_flight_theta_stagnation_bailout():
     alert.target_status = "PENDING"
 
     with engine._lock:
-        engine._alerts.append(alert)
+        prior_alerts = list(engine._alerts)
+        engine._alerts = [alert]
 
-    with (
-        patch("engine.alert_evaluator.datetime") as mock_dt1,
-        patch("engine.auto_alert_engine.datetime") as mock_dt2,
-    ):
-        mock_dt1.now.return_value = thursday_afternoon
-        mock_dt1.strptime.side_effect = datetime.strptime
-        mock_dt2.now.return_value = thursday_afternoon
-        mock_dt2.strptime.side_effect = datetime.strptime
+    try:
+        with (
+            patch("engine.alert_evaluator.datetime") as mock_dt1,
+            patch("engine.auto_alert_engine.datetime") as mock_dt2,
+        ):
+            mock_dt1.now.return_value = thursday_afternoon
+            mock_dt1.strptime.side_effect = datetime.strptime
+            mock_dt2.now.return_value = thursday_afternoon
+            mock_dt2.strptime.side_effect = datetime.strptime
 
-        # Current quote is flat / stagnant at 94.0 (-6.0%)
-        quotes_map = {"NFO:NIFTY26SEP24200CE": 94.0, "NSE:NIFTY": 24215.0}
-        warnings = engine.check_and_alert_in_flight_decay(quotes_map=quotes_map)
+            # Current quote is flat / stagnant at 94.0 (-6.0%)
+            quotes_map = {"NFO:NIFTY26SEP24200CE": 94.0, "NSE:NIFTY": 24215.0}
+            warnings = engine.check_and_alert_in_flight_decay(quotes_map=quotes_map)
 
-    assert len(warnings) == 1
-    w_alert = warnings[0]
-    assert w_alert.theta_scratch_recommended is True
-    assert w_alert.trailing_decision == "THETA_STAGNATION_SCRATCH"
-    assert "[THETA SCRATCH BAILOUT]" in w_alert.headline
-    assert "Scratch trade immediately" in w_alert.stagnation_bailout_reason
+        assert len(warnings) == 1
+        w_alert = warnings[0]
+        assert w_alert.theta_scratch_recommended is True
+        assert w_alert.trailing_decision == "THETA_STAGNATION_SCRATCH"
+        assert "[THETA SCRATCH BAILOUT]" in w_alert.headline
+        assert "Scratch trade immediately" in w_alert.stagnation_bailout_reason
 
-    # Audit trail verification
-    audit_events = [a["event_type"] for a in w_alert.audit_trail]
-    assert "THETA_STAGNATION_SCRATCH" in audit_events
+        # Audit trail verification
+        audit_events = [a["event_type"] for a in w_alert.audit_trail]
+        assert "THETA_STAGNATION_SCRATCH" in audit_events
+    finally:
+        with engine._lock:
+            engine._alerts = prior_alerts
 
 
 def test_create_test_in_flight_warning_scratch():

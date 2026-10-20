@@ -4414,111 +4414,114 @@ def test_auto_alert_t0_5_milestone_latch_and_deduplication(monkeypatch):
     engine = AutoAlertEngine(max_buffer=50)
     engine.clear_alerts()
 
-    # 1. Test deduplication preserves newest active alert and contract disambiguation
-    old_alert = AutoAlert(
-        alert_id="yb-old",
-        alert_type="OPENING_DRIVE_IGNITION",
-        stage="IGNITED",
-        symbol="YESBANK",
-        contract_symbol="YESBANK23PE",
-        exchange="NFO",
-        direction="BEARISH",
-        headline="Old Alert",
-        summary="Old",
-        ltp=0.40,
-        trigger_level=0.39,
-        target_level=0.53,
-        stop_loss=0.30,
-        achieved_milestones=[],
-    )
-    new_alert = AutoAlert(
-        alert_id="yb-new",
-        alert_type="OPENING_DRIVE_IGNITION",
-        stage="T0_5_ACHIEVED",
-        symbol="YESBANK",
-        contract_symbol="YESBANK23PE",
-        exchange="NFO",
-        direction="BEARISH",
-        headline="New Alert",
-        summary="New",
-        ltp=0.48,
-        trigger_level=0.39,
-        target_level=0.53,
-        stop_loss=0.39,
-        achieved_milestones=["T0_5_ACHIEVED"],
-    )
-    equity_alert = AutoAlert(
-        alert_id="yb-equity",
-        alert_type="PRECURSOR_RADAR",
-        stage="IGNITED",
-        symbol="YESBANK",
-        contract_symbol=None,
-        exchange="NSE",
-        direction="BULLISH",
-        headline="Equity Alert",
-        summary="Equity",
-        ltp=23.5,
-        trigger_level=23.0,
-        target_level=25.0,
-        stop_loss=22.0,
-        achieved_milestones=[],
-    )
+    try:
+        # 1. Test deduplication preserves newest active alert and contract disambiguation
+        old_alert = AutoAlert(
+            alert_id="yb-old",
+            alert_type="OPENING_DRIVE_IGNITION",
+            stage="IGNITED",
+            symbol="YESBANK",
+            contract_symbol="YESBANK23PE",
+            exchange="NFO",
+            direction="BEARISH",
+            headline="Old Alert",
+            summary="Old",
+            ltp=0.40,
+            trigger_level=0.39,
+            target_level=0.53,
+            stop_loss=0.30,
+            achieved_milestones=[],
+        )
+        new_alert = AutoAlert(
+            alert_id="yb-new",
+            alert_type="OPENING_DRIVE_IGNITION",
+            stage="T0_5_ACHIEVED",
+            symbol="YESBANK",
+            contract_symbol="YESBANK23PE",
+            exchange="NFO",
+            direction="BEARISH",
+            headline="New Alert",
+            summary="New",
+            ltp=0.48,
+            trigger_level=0.39,
+            target_level=0.53,
+            stop_loss=0.39,
+            achieved_milestones=["T0_5_ACHIEVED"],
+        )
+        equity_alert = AutoAlert(
+            alert_id="yb-equity",
+            alert_type="PRECURSOR_RADAR",
+            stage="IGNITED",
+            symbol="YESBANK",
+            contract_symbol=None,
+            exchange="NSE",
+            direction="BULLISH",
+            headline="Equity Alert",
+            summary="Equity",
+            ltp=23.5,
+            trigger_level=23.0,
+            target_level=25.0,
+            stop_loss=22.0,
+            achieved_milestones=[],
+        )
 
-    # In self._alerts (newest first): new_alert is at index 0, old_alert at index 1, equity_alert at index 2
-    engine._alerts = [new_alert, old_alert, equity_alert]
-    purged = engine._deduplicate_symbols_unlocked()
-    assert purged == 1
-    # Check that surviving has 2 alerts: new_alert (kept latest) and equity_alert (kept equity)
-    assert len(engine._alerts) == 2
-    assert engine._alerts[0].alert_id == "yb-new"
-    assert engine._alerts[0].stage == "T0_5_ACHIEVED"
-    assert engine._alerts[1].alert_id == "yb-equity"
+        # In self._alerts (newest first): new_alert is at index 0, old_alert at index 1, equity_alert at index 2
+        engine._alerts = [new_alert, old_alert, equity_alert]
+        purged = engine._deduplicate_symbols_unlocked()
+        assert purged == 1
+        # Check that surviving has 2 alerts: new_alert (kept latest) and equity_alert (kept equity)
+        assert len(engine._alerts) == 2
+        assert engine._alerts[0].alert_id == "yb-new"
+        assert engine._alerts[0].stage == "T0_5_ACHIEVED"
+        assert engine._alerts[1].alert_id == "yb-equity"
 
-    # 2. Test Telegram anti-flood milestone latching for T0_5
-    sent_messages = []
-    monkeypatch.setattr(
-        "engine.alerts._telegram_notify",
-        lambda msg, **k: sent_messages.append(msg),
-    )
-    monkeypatch.setattr(
-        "engine.alerts._is_market_hours",
-        lambda exch: True,
-    )
+        # 2. Test Telegram anti-flood milestone latching for T0_5
+        sent_messages = []
+        monkeypatch.setattr(
+            "engine.alerts._telegram_notify",
+            lambda msg, **k: sent_messages.append(msg),
+        )
+        monkeypatch.setattr(
+            "engine.alerts._is_market_hours",
+            lambda exch: True,
+        )
 
-    # Create active alert with telegram_dispatched=True so lifecycle updates are allowed
-    alert_t0_5 = AutoAlert(
-        alert_id="yb-live-1",
-        alert_type="OPENING_DRIVE_IGNITION",
-        stage="T0_5_ACHIEVED",
-        symbol="YESBANK",
-        contract_symbol="YESBANK23PE",
-        exchange="NFO",
-        direction="BEARISH",
-        headline="TARGET 0.5 (SCALE 1) ACHIEVED: YESBANK 23 PE",
-        summary="Scale 35% partial profit",
-        ltp=0.48,
-        trigger_level=0.39,
-        target_level=0.53,
-        stop_loss=0.39,
-        achieved_milestones=["T0_5_ACHIEVED"],
-        is_live=True,
-        environment="LIVE",
-        telegram_dispatched=True,
-    )
+        # Create active alert with telegram_dispatched=True so lifecycle updates are allowed
+        alert_t0_5 = AutoAlert(
+            alert_id="yb-live-1",
+            alert_type="OPENING_DRIVE_IGNITION",
+            stage="T0_5_ACHIEVED",
+            symbol="YESBANK",
+            contract_symbol="YESBANK23PE",
+            exchange="NFO",
+            direction="BEARISH",
+            headline="TARGET 0.5 (SCALE 1) ACHIEVED: YESBANK 23 PE",
+            summary="Scale 35% partial profit",
+            ltp=0.48,
+            trigger_level=0.39,
+            target_level=0.53,
+            stop_loss=0.39,
+            achieved_milestones=["T0_5_ACHIEVED"],
+            is_live=True,
+            environment="LIVE",
+            telegram_dispatched=True,
+        )
 
-    # First dispatch of T0_5 should succeed
-    engine._dispatch(alert_t0_5)
-    assert len(sent_messages) == 1
+        # First dispatch of T0_5 should succeed
+        engine._dispatch(alert_t0_5)
+        assert len(sent_messages) == 1
 
-    # Second dispatch of T0_5 for the same alert must be blocked by the anti-flood latch
-    engine._dispatch(alert_t0_5)
-    assert len(sent_messages) == 1, (
-        "Duplicate T0_5 milestone dispatch must be suppressed by anti-flood filter"
-    )
+        # Second dispatch of T0_5 for the same alert must be blocked by the anti-flood latch
+        engine._dispatch(alert_t0_5)
+        assert len(sent_messages) == 1, (
+            "Duplicate T0_5 milestone dispatch must be suppressed by anti-flood filter"
+        )
 
-    # 3. Test that T0_5 is latched in _dispatched_milestones
-    assert "YESBANK:OPENING_DRIVE_IGNITION:T0_5" in engine._dispatched_milestones
-    assert "YESBANK23PE:yb-live-1:T0_5" in engine._dispatched_milestones
+        # 3. Test that T0_5 is latched in _dispatched_milestones
+        assert "YESBANK:OPENING_DRIVE_IGNITION:T0_5" in engine._dispatched_milestones
+        assert "YESBANK23PE:yb-live-1:T0_5" in engine._dispatched_milestones
+    finally:
+        engine.clear_alerts()
 
 
 def test_dual_dispatch_dedup_terminal_exit_invariant(monkeypatch):
