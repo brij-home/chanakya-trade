@@ -21,6 +21,7 @@ logger = logging.getLogger("engine.telemetry")
 
 import json
 import threading
+import time
 import traceback
 import uuid
 from collections import Counter, deque
@@ -578,3 +579,81 @@ def clear_telemetry() -> None:
                     bf.unlink()
         except Exception as e_suppressed:
             logger.debug(f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}")
+
+
+class TelemetryLogHandler(logging.Handler):
+    """
+    Automatic logging bridge: Captures application ERROR/CRITICAL logs (and important warnings)
+    and records them as prioritized incidents in engine.telemetry for OpsDeck visibility.
+    """
+
+    _seen_hashes: dict[str, float] = {}
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            # Prevent infinite recursion if logging comes from telemetry itself
+            if record.name.startswith("engine.telemetry"):
+                return
+
+            if record.levelno < logging.WARNING:
+                return
+
+            msg = str(record.getMessage())
+            # Deduplicate frequent identical log messages within 10 seconds
+            import hashlib
+
+            h = hashlib.md5(f"{record.name}:{msg}".encode("utf-8")).hexdigest()
+            now_ts = time.time()
+            last_ts = self._seen_hashes.get(h, 0.0)
+            if now_ts - last_ts < 10.0:
+                return
+            self._seen_hashes[h] = now_ts
+            if len(self._seen_hashes) > 200:
+                cutoff = now_ts - 60.0
+                self._seen_hashes = {k: v for k, v in self._seen_hashes.items() if v > cutoff}
+
+            if record.levelno >= logging.ERROR:
+                severity = "ERROR"
+                priority = "P1"
+            else:
+                severity = "WARNING"
+                priority = "P2"
+
+            record_event(
+                event_type="SYSTEM_LOG",
+                component=record.name,
+                action_taken="LOG_RECORDED",
+                reason=msg[:140],
+                severity=severity,
+                priority=priority,
+                details={
+                    "logger": record.name,
+                    "level": record.levelname,
+                    "message": msg,
+                    "pathname": record.pathname,
+                    "lineno": record.lineno,
+                },
+            )
+        except Exception:
+            self.handleError(record)
+
+
+_telemetry_handler_installed = False
+
+
+def install_telemetry_log_handler() -> None:
+    """Attach TelemetryLogHandler to the root logger to bridge all logs to OpsDeck."""
+    global _telemetry_handler_installed
+    if _telemetry_handler_installed:
+        return
+    try:
+        handler = TelemetryLogHandler()
+        handler.setLevel(logging.WARNING)
+        logging.getLogger().addHandler(handler)
+        _telemetry_handler_installed = True
+    except Exception as exc:
+        logger.debug(f"[engine.telemetry] Could not attach log handler: {exc}")
+
+
+# Auto-install log handler on module load
+install_telemetry_log_handler()

@@ -12,7 +12,9 @@ logger = logging.getLogger("market.indices")
 
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Optional
+from config.constants import IST
 
 
 # ── Key instruments ──────────────────────────────────────────
@@ -632,7 +634,7 @@ def get_premarket_battle_plan(
     from engine.daily_levels import get_daily_levels
     from market.quotes import get_quote
 
-    target_indices = indices or ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
+    target_indices = indices or ["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"]
     results: dict[str, Any] = {}
 
     for name in target_indices:
@@ -649,6 +651,25 @@ def get_premarket_battle_plan(
                 else dl.spot
             )
 
+            bp = dict(dl.blueprint or {})
+            if "bull_contract" not in bp:
+                cam = dl.camarilla or {}
+                h4 = cam.get("h4", round(dl.spot * 1.004, 1))
+                l4 = cam.get("l4", round(dl.spot * 0.996, 1))
+                step = (
+                    50.0
+                    if clean_name in ("NIFTY", "FINNIFTY")
+                    else (25.0 if clean_name == "MIDCPNIFTY" else 100.0)
+                )
+                bull_stk = int(round(h4 / step) * step)
+                bear_stk = int(round(l4 / step) * step)
+                bp["bull_strike"] = bull_stk
+                bp["bear_strike"] = bear_stk
+                bp["bull_contract"] = f"{clean_name} {bull_stk} CE"
+                bp["bear_contract"] = f"{clean_name} {bear_stk} PE"
+                bp["h4_trigger"] = round(h4, 1)
+                bp["l4_trigger"] = round(l4, 1)
+
             results[clean_name] = {
                 "symbol": clean_name,
                 "instrument": inst,
@@ -663,7 +684,7 @@ def get_premarket_battle_plan(
                 "classic_pivots": dl.classic_pivots,
                 "weekly": dl.weekly,
                 "pre_open": dl.pre_open,
-                "blueprint": dl.blueprint,
+                "blueprint": bp,
             }
             continue
 
@@ -731,8 +752,214 @@ def get_premarket_battle_plan(
                 "trend_short": f"Buy PE on 5m close below L4 (₹{cam_l4:,.1f})",
                 "reversal_long": f"Buy CE on bullish rejection wick at L3/PDL (₹{cam_l3:,.1f} - ₹{pdl:,.1f}) with tight SL",
                 "reversal_short": f"Buy PE on bearish rejection wick at H3/PDH (₹{cam_h3:,.1f} - ₹{pdh:,.1f}) with tight SL",
+                "bull_strike": int(round(cam_h4 / 50.0) * 50),
+                "bear_strike": int(round(cam_l4 / 50.0) * 50),
+                "bull_contract": f"{clean_name} {int(round(cam_h4 / 50.0) * 50)} CE",
+                "bear_contract": f"{clean_name} {int(round(cam_l4 / 50.0) * 50)} PE",
+                "h4_trigger": round(cam_h4, 1),
+                "l4_trigger": round(cam_l4, 1),
                 "action_guidance": "Wait for spot to reach key boundary. Never chase in the middle between L3 and H3.",
             },
         }
 
     return results
+
+
+def format_premarket_strike_radar(plan: Optional[dict[str, Any]] = None) -> str:
+    """
+    Formats the 09:10 IST Pre-Market Strike Radar into an institutional,
+    two-sided battle plan for Telegram and Terminal display.
+    Provides the exact CE and PE strikes to pre-populate in watchlists BEFORE 09:15.
+    """
+    if plan is None:
+        plan = get_premarket_battle_plan(["NIFTY", "BANKNIFTY", "SENSEX"])
+
+    now_str = datetime.now(IST).strftime("%d-%b-%Y %H:%M IST")
+    lines = [
+        "🎯 <b>PRE-MARKET INDEX STRIKE RADAR</b>",
+        f"📅 <i>{now_str} · Watchlist Pre-Flight Preparation</i>",
+        "──────────────────────────────",
+        "⚡ <b>Action Required:</b> Add both ready-to-execute strikes to your broker watchlist NOW before the 09:15 bell.",
+        "",
+    ]
+
+    for sym in ("NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"):
+        data = plan.get(sym)
+        if not data:
+            continue
+        spot = data.get("spot", 0.0)
+        cpr_info = data.get("cpr", {})
+        regime = cpr_info.get("regime", "AVERAGE_CPR")
+        bp = data.get("blueprint", {})
+        cam = data.get("camarilla", {})
+
+        h4 = bp.get("h4_trigger") or cam.get("h4", round(spot * 1.004, 1))
+        l4 = bp.get("l4_trigger") or cam.get("l4", round(spot * 0.996, 1))
+        h5 = bp.get("h5_target") or round(h4 + (h4 - spot), 1)
+        l5 = bp.get("l5_target") or round(l4 - (spot - l4), 1)
+
+        bull_contract = bp.get("bull_contract") or f"{sym} {int(round(h4 / 50.0) * 50)} CE"
+        bear_contract = bp.get("bear_contract") or f"{sym} {int(round(l4 / 50.0) * 50)} PE"
+
+        regime_badge = (
+            "🟢 Narrow (Trend Day Expected)"
+            if "NARROW" in regime
+            else ("🔴 Wide (Chop/Range Expected)" if "WIDE" in regime else "⚪ Average")
+        )
+
+        lines.append(f"<b>📊 {sym}</b> (Spot Anchor: ₹{spot:,.1f} | CPR: {regime_badge})")
+        lines.append(f"  🟢 <b>BULL TRIGGER:</b> Above ₹{h4:,.1f} (H4 Breakout)")
+        lines.append(
+            f"     👉 <b>Strike:</b> <code>{bull_contract}</code> (T1: ₹{h5:,.1f} | SL: ₹{spot:,.1f})"
+        )
+        lines.append(f"  🔴 <b>BEAR TRIGGER:</b> Below ₹{l4:,.1f} (L4 Breakdown)")
+        lines.append(
+            f"     👉 <b>Strike:</b> <code>{bear_contract}</code> (T1: ₹{l5:,.1f} | SL: ₹{spot:,.1f})"
+        )
+        lines.append(f"  ⚠️ <b>Chop Trap Zone:</b> ₹{l4:,.1f} – ₹{h4:,.1f} (Do not chase)")
+        lines.append("")
+
+    lines.append("──────────────────────────────")
+    lines.append(
+        "💡 <i>Execution Discipline: Once spot breaches a trigger level with 1-min volume expansion, enter the pre-staged strike instantly without manual searching.</i>"
+    )
+    return "\n".join(lines)
+
+
+def get_opening_range_battle_plan(symbols: Optional[list[str]] = None) -> dict[str, Any]:
+    """
+    Computes the 09:18 IST Opening Range Breakout (ORB) Battle Plan using the
+    first 3-minute candle range (09:15 - 09:18 IST).
+    Resolves:
+      - Opening High (ORH) & Opening Low (ORL)
+      - Bullish Trigger (Above ORH) with pre-staged CE strike & SL-Limit order guidance
+      - Bearish Trigger (Below ORL) with pre-staged PE strike & SL-Limit order guidance
+      - Invalidation stops anchored to opposite side of ORB or midpoint
+    """
+    if symbols is None:
+        symbols = ["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"]
+
+    try:
+        from market.quotes import get_quote
+
+        index_inst_map = {
+            "NIFTY": "NSE:NIFTY 50",
+            "BANKNIFTY": "NSE:NIFTY BANK",
+            "FINNIFTY": "NSE:NIFTY FIN SERVICE",
+            "SENSEX": "BSE:SENSEX",
+            "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+        }
+        inst_list = [index_inst_map.get(s, s) for s in symbols]
+        raw_quotes = get_quote(inst_list)
+        quotes: dict[str, Any] = {}
+        for s in symbols:
+            inst = index_inst_map.get(s, s)
+            if inst in raw_quotes:
+                quotes[s] = raw_quotes[inst]
+            elif s in raw_quotes:
+                quotes[s] = raw_quotes[s]
+    except Exception as e:
+        logger.warning(f"[Indices] Opening range battle plan quotes error: {e}")
+        quotes = {}
+
+    results: dict[str, Any] = {}
+    for sym in symbols:
+        clean_name = sym.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
+        q = quotes.get(clean_name) or quotes.get(sym) or quotes.get(f"{clean_name}.NS")
+        spot = getattr(q, "ltp", 0.0) or getattr(q, "close", 0.0) or 0.0
+        if spot <= 0:
+            continue
+
+        day_high = getattr(q, "high", 0.0) or 0.0
+        day_low = getattr(q, "low", 0.0) or 0.0
+        if day_high <= 0 or day_high < spot:
+            day_high = round(spot * 1.002, 1)
+        if day_low <= 0 or day_low > spot:
+            day_low = round(spot * 0.998, 1)
+
+        orb_range = round(day_high - day_low, 1)
+        midpoint = round((day_high + day_low) / 2.0, 1)
+
+        step = 100.0 if clean_name in ("BANKNIFTY", "SENSEX", "BANKEX") else 50.0
+        bull_strike = int(round(day_high / step) * step)
+        bear_strike = int(round(day_low / step) * step)
+
+        bull_trigger = round(day_high, 1)
+        bear_trigger = round(day_low, 1)
+
+        bull_t1 = round(day_high + orb_range, 1)
+        bear_t1 = round(day_low - orb_range, 1)
+
+        results[clean_name] = {
+            "symbol": clean_name,
+            "spot": round(spot, 1),
+            "orh": day_high,
+            "orl": day_low,
+            "orb_range": orb_range,
+            "midpoint": midpoint,
+            "bull_strike": bull_strike,
+            "bear_strike": bear_strike,
+            "bull_contract": f"{clean_name} {bull_strike} CE",
+            "bear_contract": f"{clean_name} {bear_strike} PE",
+            "bull_trigger": bull_trigger,
+            "bear_trigger": bear_trigger,
+            "bull_t1": bull_t1,
+            "bear_t1": bear_t1,
+            "sl": midpoint,
+        }
+
+    return results
+
+
+def format_opening_range_radar(plan: Optional[dict[str, Any]] = None) -> str:
+    """
+    Formats the 09:18 IST Opening Range Radar into an institutional,
+    two-sided battle plan for Telegram and Terminal display.
+    """
+    if plan is None:
+        plan = get_opening_range_battle_plan(["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"])
+
+    now_str = datetime.now(IST).strftime("%d-%b-%Y %H:%M IST")
+    lines = [
+        "⚡ <b>OPENING RANGE RADAR (09:18 IST)</b>",
+        f"📅 <i>{now_str} · First 3-Min Opening Bracket Defined</i>",
+        "──────────────────────────────",
+        "🎯 <b>Pre-Staged Action:</b> Opening High/Low brackets are locked. Set your SL-Limit trigger orders now for instant breakout execution with zero lag!",
+        "",
+    ]
+
+    for sym in ("NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"):
+        data = plan.get(sym)
+        if not data:
+            continue
+        spot = data.get("spot", 0.0)
+        orh = data.get("orh", 0.0)
+        orl = data.get("orl", 0.0)
+        rng = data.get("orb_range", 0.0)
+        mid = data.get("midpoint", 0.0)
+        b_c = data.get("bull_contract", "")
+        p_c = data.get("bear_contract", "")
+        b_t1 = data.get("bull_t1", 0.0)
+        p_t1 = data.get("bear_t1", 0.0)
+
+        lines.append(
+            f"<b>📊 {sym}</b> (Spot: ₹{spot:,.1f} | 3m Range: ₹{orl:,.1f} – ₹{orh:,.1f} [{rng:,.0f} pts])"
+        )
+        lines.append(f"  🟢 <b>BULL TRIGGER:</b> Above ₹{orh:,.1f} (ORH Breach)")
+        lines.append(
+            f"     👉 <b>Strike:</b> <code>{b_c}</code> (T1: ₹{b_t1:,.1f} | SL: ₹{mid:,.1f})"
+        )
+        lines.append(f"  🔴 <b>BEAR TRIGGER:</b> Below ₹{orl:,.1f} (ORL Breakdown)")
+        lines.append(
+            f"     👉 <b>Strike:</b> <code>{p_c}</code> (T1: ₹{p_t1:,.1f} | SL: ₹{mid:,.1f})"
+        )
+        lines.append(
+            f"  ⚠️ <b>Chop Zone:</b> Inside ₹{orl:,.1f} – ₹{orh:,.1f} (Do not chase inside bracket)"
+        )
+        lines.append("")
+
+    lines.append("──────────────────────────────")
+    lines.append(
+        "💡 <i>Zero-Latency Execution: Place pending SL-Limit orders in broker now. Order auto-fills on candle breach without manual searching.</i>"
+    )
+    return "\n".join(lines)

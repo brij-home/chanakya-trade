@@ -226,6 +226,14 @@
    - **Zero Stale Regulatory / Structural Assumptions**: Never rely on stale pre-trained LLM memory for Indian market regulatory parameters (e.g. lot sizes, weekly expiry cycles, index derivatives frameworks, STT charges). Always resolve them from canonical exchange master feeds (`market/instruments.py`, `market/symbol_master.py`) or verify via live web search (`search_web`).
    - **Data Provenance Currency**: All market quotes, fundamentals, and forensic scores must carry verifiable timestamped provenance (`REAL/LIVE`, `OFF-MARKET/EOD as of YYYY-MM-DD`). If data is older than the staleness threshold, mark it explicitly as `DEGRADED` rather than presenting stale numbers as current.
 
+37. **SEBI Single-Weekly Index Expiry Mandate (Strictly 2 Weekly Expiries: NIFTY & SENSEX)**:
+   - Under SEBI Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136:
+     - **NSE**: ONLY `NIFTY 50` offers weekly options (Thursday expiry).
+     - **BSE**: ONLY `SENSEX` offers weekly options (Friday expiry).
+     - `BANKNIFTY`, `MIDCPNIFTY`, `FINNIFTY`, `BANKEX`, and single-stock equities offer **strictly MONTHLY** options (last Thursday/Wednesday of the month).
+   - NEVER refer to, simulate, or apply 0DTE logic (afternoon theta cliff, breakeven lock, midday theta trap) on Monday, Tuesday, or Wednesday (unless it is the final monthly settlement day).
+   - Mon–Wed trading sessions have ZERO weekly 0DTE index expiries; options traded on those days are monthly contracts with standard monthly Greeks and wider strike spacing.
+
 ---
 
 ## 3. LLM Model Hierarchy & Multi-Key Resilience

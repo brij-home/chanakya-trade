@@ -1006,8 +1006,10 @@ class PatternLearningEngine:
                 hh, mm = map(int, t_part.split(":"))
                 if (hh == 9 and mm < 25) or (hh < 9):
                     is_opening_bell = True
-                elif (hh == 15 and mm >= 10) or (
-                    hh > 15 and getattr(alert, "exchange", "NSE") in ("NSE", "BSE", "NFO")
+                elif (hh == 15 and 10 <= mm <= 30) and getattr(alert, "exchange", "NSE") in (
+                    "NSE",
+                    "BSE",
+                    "NFO",
                 ):
                     is_late_session = True
             except Exception as e_suppressed:
@@ -1032,6 +1034,110 @@ class PatternLearningEngine:
                 f"Repeated failure ({inv_count}x today): Symbol in choppy sideways range without directional follow-through"
             )
 
+        # 4d. Forensic Check: L2/L3 Order Book Microstructure Attribution
+        exit_micro = (
+            getattr(alert, "exit_microstructure", None)
+            or (alert.get("exit_microstructure") if isinstance(alert, dict) else None)
+            or (
+                alert.metrics.get("exit_microstructure")
+                if hasattr(alert, "metrics") and isinstance(alert.metrics, dict)
+                else None
+            )
+        )
+        if exit_micro is None:
+            try:
+                from market.order_book import get_depth_book
+
+                lookup_sym = getattr(alert, "contract_symbol", None) or clean_sym
+                depth = get_depth_book(lookup_sym)
+                if depth and (depth.best_bid > 0 or depth.best_ask > 0):
+                    spread_bps = (
+                        round(
+                            ((depth.best_ask - depth.best_bid) / max(0.01, depth.mid_price))
+                            * 10000,
+                            1,
+                        )
+                        if depth.mid_price > 0
+                        else 0.0
+                    )
+                    bids = getattr(depth, "bids", []) or []
+                    asks = getattr(depth, "asks", []) or []
+                    is_bull = (
+                        direction in ("BULLISH", "LONG", "BUY")
+                        or getattr(alert, "option_type", "") == "CE"
+                    )
+                    target_levels = asks if is_bull else bids
+                    wall_detected = False
+                    wall_side = None
+                    wall_qty = 0
+                    wall_price = 0.0
+                    wall_ratio = 1.0
+                    if target_levels:
+                        qtys = [float(lvl.qty) for lvl in target_levels[:5]]
+                        avg_q = sum(qtys) / max(1, len(qtys))
+                        max_q = max(qtys)
+                        if avg_q > 0 and (max_q / avg_q >= 2.8) and max_q >= 100:
+                            wall_detected = True
+                            wall_side = "ASK" if is_bull else "BID"
+                            wall_qty = int(max_q)
+                            wall_ratio = round(max_q / avg_q, 2)
+                            wall_lvl = next(
+                                (lvl for lvl in target_levels[:5] if lvl.qty == max_q), None
+                            )
+                            if wall_lvl:
+                                wall_price = float(wall_lvl.price)
+                    exit_micro = {
+                        "symbol": lookup_sym,
+                        "best_bid": float(depth.best_bid),
+                        "best_ask": float(depth.best_ask),
+                        "mid_price": float(depth.mid_price),
+                        "spread_bps": spread_bps,
+                        "obi_5": float(depth.obi(5)),
+                        "obi_50": float(depth.obi(50)),
+                        "has_resting_wall": wall_detected,
+                        "wall_side": wall_side,
+                        "wall_qty": wall_qty,
+                        "wall_price": wall_price,
+                        "wall_ratio": wall_ratio,
+                    }
+            except Exception as e_depth:
+                logger.debug(
+                    f"[LearningEngine] Microstructure snapshot retrieval failed: {e_depth}"
+                )
+
+        if exit_micro:
+            metrics_snapshot["exit_microstructure"] = exit_micro
+            obi_50 = float(exit_micro.get("obi_50", 0.0) or 0.0)
+            spread_bps = float(exit_micro.get("spread_bps", 0.0) or 0.0)
+            wall_detected = bool(exit_micro.get("has_resting_wall", False))
+            wall_side = exit_micro.get("wall_side") or (
+                "ASK" if direction in ("BULLISH", "LONG", "BUY") else "BID"
+            )
+            wall_qty = int(exit_micro.get("wall_qty", 0) or 0)
+            wall_price = float(exit_micro.get("wall_price", 0.0) or 0.0)
+            wall_ratio = float(exit_micro.get("wall_ratio", 1.0) or 1.0)
+
+            if wall_detected:
+                missed_signals.append(
+                    f"Resting fortress {wall_side} wall ({wall_qty:,} contracts @ ₹{wall_price:,.2f}, {wall_ratio:.1f}x depth) absorbed order flow and rejected trade"
+                )
+            if direction in ("BULLISH", "LONG", "BUY") and obi_50 <= -0.35:
+                missed_signals.append(
+                    f"Severe ask book imbalance (OBI50={obi_50:+.2f}) overwhelmed buyers at stop-loss level"
+                )
+            elif direction in ("BEARISH", "SHORT", "SELL") and obi_50 >= 0.35:
+                missed_signals.append(
+                    f"Severe bid book imbalance (OBI50={obi_50:+.2f}) squeezed short setup into stop-loss"
+                )
+            if is_opt and spread_bps >= 450.0:
+                missed_signals.append(
+                    f"Elevated option spread friction ({spread_bps / 100:.1f}%) magnified adverse slippage on exit"
+                )
+            elif not is_opt and spread_bps >= 35.0:
+                missed_signals.append(
+                    f"Elevated equity spread friction ({spread_bps:.1f} bps) amplified adverse slippage on exit"
+                )
+
         # 5. Determine Primary Failure Reason
         if is_opening_bell:
             primary_reason = "OPENING_BELL_AUCTION_CHOP"
@@ -1039,6 +1145,24 @@ class PatternLearningEngine:
             primary_reason = "LATE_SESSION_EXHAUSTION_THETA_DRAG"
         elif inv_count >= 2:
             primary_reason = "CHOPPY_SIDEWAYS_RANGE_TRAP"
+        elif exit_micro and exit_micro.get("has_resting_wall"):
+            primary_reason = "ORDER_BOOK_ABSORPTION_WALL_TRAP"
+        elif exit_micro and (
+            (
+                direction in ("BULLISH", "LONG", "BUY")
+                and float(exit_micro.get("obi_50", 0.0) or 0.0) <= -0.40
+            )
+            or (
+                direction in ("BEARISH", "SHORT", "SELL")
+                and float(exit_micro.get("obi_50", 0.0) or 0.0) >= 0.40
+            )
+        ):
+            primary_reason = "HEAVY_OBI_LIQUIDITY_RUN_IMBALANCE"
+        elif exit_micro and (
+            (is_opt and float(exit_micro.get("spread_bps", 0.0) or 0.0) >= 500.0)
+            or (not is_opt and float(exit_micro.get("spread_bps", 0.0) or 0.0) >= 45.0)
+        ):
+            primary_reason = "EXCESSIVE_SPREAD_FRICTION_DRAG"
         elif intraday_vwap and exit_price < intraday_vwap and actual_sl_pts < min_noise_sl_pts:
             primary_reason = "PREMATURE_ENTRY_BELOW_VWAP_AND_SUB_ATR_STOP"
         elif intraday_vwap and exit_price < intraday_vwap:
@@ -1082,6 +1206,18 @@ class PatternLearningEngine:
             f"Enforcing minimum stop-loss distance floor of 1.2x ATR ({min_noise_sl_pts:.1f} pts).",
             f"Mandated intraday VWAP confirmation filter on subsequent {alert_type.replace('_', ' ')} scans.",
         ]
+        if primary_reason == "ORDER_BOOK_ABSORPTION_WALL_TRAP":
+            corrective_actions.append(
+                "Resting wall avoidance: enforce minimum 2.8x fortress wall clearance before triggering breakout alerts."
+            )
+        elif primary_reason == "HEAVY_OBI_LIQUIDITY_RUN_IMBALANCE":
+            corrective_actions.append(
+                "Regime-aware OBI filter: require OBI50 confirmation > -0.20 for long setups and < +0.20 for short setups."
+            )
+        elif primary_reason == "EXCESSIVE_SPREAD_FRICTION_DRAG":
+            corrective_actions.append(
+                "Spread friction gate: require tighter bid-ask spread (< 30 bps equity / < 4.5% options) to prevent friction loss."
+            )
         metrics_snapshot["reclaim_level"] = round(reclaim_level, 2) if reclaim_level > 0 else None
 
         pm = InvalidationPostMortem(

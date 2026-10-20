@@ -47,6 +47,7 @@ import {
   resolveAlertLifecycle,
   resolveHorizonAndETA,
 } from './alerts'
+import DepthLadderWidget from '../Widgets/DepthLadderWidget'
 
 /**
  * In-place differential merger:
@@ -215,6 +216,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
   const [showPlan, setShowPlan] = useState(false)
   const [showDetails, setShowDetails] = useState(false)
   const [showPredatoryDrawer, setShowPredatoryDrawer] = useState(false)
+  const [showDomLadder, setShowDomLadder] = useState(false)
   const [clearingLockout, setClearingLockout] = useState(false)
   const [lockoutCleared, setLockoutCleared] = useState(false)
 
@@ -324,9 +326,6 @@ const AutoAlertCard = memo(function AutoAlertCard({
                 <span className={`text-[8px] px-1 py-px rounded font-black uppercase ${
                   optType === 'CE' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
                 }`}>{optType}</span>
-              )}
-              {isDerivative && isFuture && (
-                <span className="text-[8px] px-1 py-px rounded font-black uppercase bg-blue-500/20 text-blue-300">FUT</span>
               )}
               {isDerivative && moneyness && !isFuture && (
                 <span className={`text-[8px] px-1 py-px rounded font-black ${
@@ -464,6 +463,21 @@ const AutoAlertCard = memo(function AutoAlertCard({
                 🛑 NoChase ₹{Number(alert.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
               </span>
             )}
+            {alert.is_apex_confluence && (
+              <span className="text-[9px] font-mono font-black px-1.5 py-px rounded bg-purple-500/20 text-purple-300 border border-purple-500/40 whitespace-nowrap shadow-sm" title="Multi-detector institutional apex confluence confirmed">
+                💎 APEX
+              </span>
+            )}
+            {alert.execution_friction_badge && (
+              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-amber-500/15 text-amber-300 border border-amber-500/35 whitespace-nowrap" title={`Microstructure L2 Friction: ${alert.execution_friction_badge}${alert.estimated_slippage_bps ? ` (${alert.estimated_slippage_bps} bps slippage)` : ''}`}>
+                {alert.execution_friction_badge}
+              </span>
+            )}
+            {alert.theta_scratch_recommended && (
+              <span className="text-[9px] font-mono font-black px-1.5 py-px rounded bg-rose-500/25 text-rose-300 border border-rose-500/50 whitespace-nowrap animate-pulse" title={`0DTE Theta Stagnation Bailout: ${alert.stagnation_bailout_reason || 'Bailout recommended'}`}>
+                🛑 THETA SCRATCH
+              </span>
+            )}
           </div>
         </div>
 
@@ -565,6 +579,18 @@ const AutoAlertCard = memo(function AutoAlertCard({
               🏛️ Council {showPredatoryDrawer ? '▲' : '▼'}
             </button>
           )}
+
+          <button
+            onClick={() => setShowDomLadder((v) => !v)}
+            className={`btn btn-xs text-[10px] font-bold px-2 border transition-all ${
+              showDomLadder
+                ? 'bg-cyan-500/25 text-cyan-300 border-cyan-500/50 shadow-sm'
+                : 'bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300/90 border-cyan-500/30 hover:border-cyan-500/50'
+            }`}
+            title="Toggle L2/L3 Order Book DOM Ladder & Microstructure"
+          >
+            📊 DOM {showDomLadder ? '▲' : '▼'}
+          </button>
 
 
           <button
@@ -769,6 +795,51 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   </span>
                 </div>
               </div>
+
+              {/* Order Book Exit Microstructure Attribution */}
+              {(alert.exit_microstructure || alert.metrics?.exit_microstructure) && (() => {
+                const exitMicro = alert.exit_microstructure || alert.metrics?.exit_microstructure
+                return (
+                  <div className="space-y-1 bg-surface/70 p-2 rounded-lg border border-rose-500/25 mt-1.5">
+                    <div className="flex items-center justify-between flex-wrap gap-1">
+                      <span className="text-[10px] font-black text-rose-300 uppercase tracking-wider flex items-center gap-1">
+                        <span>🔬</span> Exit Microstructure Snapshot (L2/L3 Order Book):
+                      </span>
+                      {exitMicro.has_resting_wall && (
+                        <span className="text-[8px] font-black font-mono px-1.5 py-0.5 rounded bg-amber-500/25 text-amber-300 border border-amber-500/40 uppercase">
+                          🏰 {exitMicro.wall_side} WALL ({exitMicro.wall_ratio}x)
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[9px] font-mono pt-0.5">
+                      <div className="p-1 rounded bg-panel/80 border border-border/40">
+                        <span className="text-muted block text-[8px] uppercase">Spread</span>
+                        <span className={`font-bold ${exitMicro.spread_bps > 45 ? 'text-rose-400' : 'text-zinc-200'}`}>
+                          {exitMicro.spread_bps != null ? `${Number(exitMicro.spread_bps).toFixed(1)} bps` : '—'}
+                        </span>
+                      </div>
+                      <div className="p-1 rounded bg-panel/80 border border-border/40">
+                        <span className="text-muted block text-[8px] uppercase">Exit OBI (50L)</span>
+                        <span className={`font-bold ${exitMicro.obi_50 < -0.3 ? 'text-rose-400' : exitMicro.obi_50 > 0.3 ? 'text-emerald-400' : 'text-zinc-200'}`}>
+                          {exitMicro.obi_50 != null ? `${exitMicro.obi_50 > 0 ? '+' : ''}${Number(exitMicro.obi_50).toFixed(2)}` : '—'}
+                        </span>
+                      </div>
+                      <div className="p-1 rounded bg-panel/80 border border-border/40">
+                        <span className="text-muted block text-[8px] uppercase">Best Bid / Ask</span>
+                        <span className="font-bold text-zinc-200">
+                          ₹{exitMicro.best_bid || '—'} / ₹{exitMicro.best_ask || '—'}
+                        </span>
+                      </div>
+                      <div className="p-1 rounded bg-panel/80 border border-border/40">
+                        <span className="text-muted block text-[8px] uppercase">Resting Wall</span>
+                        <span className={`font-bold ${exitMicro.has_resting_wall ? 'text-amber-300' : 'text-zinc-400'}`}>
+                          {exitMicro.has_resting_wall ? `${exitMicro.wall_qty} @ ₹${exitMicro.wall_price}` : 'None'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
             </div>
           )}
         </div>
@@ -780,6 +851,38 @@ const AutoAlertCard = memo(function AutoAlertCard({
           <span className="font-bold flex-shrink-0 text-amber-700 dark:text-amber-300">⚠️ Trap Risk:</span>
           <span className="truncate flex-1 font-sans" title={alert.metrics.scrutiny.trap_risk_warning}>
             {alert.metrics.scrutiny.trap_risk_warning}
+          </span>
+        </div>
+      )}
+
+      {/* ── Institutional Apex Confluence Banner ── */}
+      {alert.is_apex_confluence && !isInvalidated && (
+        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-purple-500/15 border border-purple-500/35 text-[11px] text-purple-200">
+          <span className="font-bold flex-shrink-0 text-purple-300">💎 Apex Confluence:</span>
+          <span className="truncate flex-1 font-sans" title="Multiple quantitative detectors confirmed identical setup within active window">
+            Institutional multi-model confirmation (+10% conviction boost).
+          </span>
+        </div>
+      )}
+
+      {/* ── Microstructure Execution Friction & Order Mandate Banner ── */}
+      {alert.execution_friction_badge && !isInvalidated && (
+        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/35 text-[11px] text-amber-200">
+          <span className="font-bold flex-shrink-0 text-amber-300">⚠️ Execution Mandate:</span>
+          <span className="truncate flex-1 font-sans" title={alert.execution_friction_badge}>
+            {alert.execution_friction_badge}
+            {alert.estimated_slippage_bps ? ` · Est. Slippage: ${alert.estimated_slippage_bps} bps` : ''}
+            {alert.order_book_depth_imbalance !== undefined && alert.order_book_depth_imbalance !== null ? ` · Depth Imbalance: ${alert.order_book_depth_imbalance > 0 ? '+' : ''}${alert.order_book_depth_imbalance}` : ''}
+          </span>
+        </div>
+      )}
+
+      {/* ── 0DTE Afternoon Theta Stagnation Bailout Banner ── */}
+      {alert.theta_scratch_recommended && !isInvalidated && (
+        <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-rose-500/20 border border-rose-500/40 text-[11px] text-rose-200 animate-pulse">
+          <span className="font-bold flex-shrink-0 text-rose-300">🛑 0DTE Bailout Alert:</span>
+          <span className="truncate flex-1 font-sans font-medium" title={alert.stagnation_bailout_reason}>
+            {alert.stagnation_bailout_reason || '0DTE Option Stagnant post-13:30 IST. Scratch position at market immediately.'}
           </span>
         </div>
       )}
@@ -798,6 +901,28 @@ const AutoAlertCard = memo(function AutoAlertCard({
         expiryInfo={expiryInfo}
         densityMode={densityMode}
       />
+
+      {/* ── L2/L3 Order Book DOM Ladder ── */}
+      {showDomLadder && (
+        <div className="rounded-xl border border-cyan-500/30 overflow-hidden bg-panel/90 shadow-md">
+          <DepthLadderWidget
+            symbol={alert.contract_symbol || alert.symbol}
+            compact={densityMode === 'compact'}
+            currentPrice={currentPrice}
+            stopLoss={executionLevels?.sl || alert.stop_loss}
+            target={executionLevels?.t1 || alert.target_level}
+            noChaseBoundary={alert.no_chase_boundary}
+            onPriceSelect={(selectedPrice) => {
+              if (onOpenTicket) {
+                onOpenTicket({
+                  ...alert,
+                  price: selectedPrice,
+                })
+              }
+            }}
+          />
+        </div>
+      )}
 
       {/* ── 6-Seat Predatory Execution Pipeline Diagnostic Drawer ── */}
       {showPredatoryDrawer && (
@@ -2451,12 +2576,17 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       : (seg === 'COMMODITY' || seg === 'CURRENCY' ? (alt.lot_size || INDEX_LOT_SIZES[cleanSym] || null) : null)
 
     const execTicket = actPlan.execution_ticket || null
+    const isPrimed = alt.stage === 'PRIMED' || actPlan.broker_order_type === 'BUY SL-LIMIT' || actPlan.sl_limit_trigger != null
+    const slLimitTrigger = actPlan.sl_limit_trigger != null ? Number(actPlan.sl_limit_trigger) : undefined
+    const slLimitPrice = actPlan.sl_limit_price != null ? Number(actPlan.sl_limit_price) : undefined
 
     const ticketData = {
       symbol: execTicket?.symbol || targetSym,
       contract_symbol: execTicket?.symbol || targetSym,
       exchange: targetExchange,
-      price: execTicket?.limit_price != null ? Number(execTicket.limit_price) : (targetPrice != null && !isNaN(targetPrice) ? Number(targetPrice) : undefined),
+      orderType: isPrimed ? 'SL_LIMIT' : (execTicket?.order_type || 'LIMIT'),
+      triggerPrice: slLimitTrigger,
+      price: slLimitPrice != null ? slLimitPrice : (execTicket?.limit_price != null ? Number(execTicket.limit_price) : (targetPrice != null && !isNaN(targetPrice) ? Number(targetPrice) : undefined)),
       target: execTicket?.target_price != null ? Number(execTicket.target_price) : (targetTP != null && !isNaN(targetTP) ? Number(targetTP) : undefined),
       stopLoss: execTicket?.stop_loss != null ? Number(execTicket.stop_loss) : (targetSL != null && !isNaN(targetSL) ? Number(targetSL) : undefined),
       lotSize: execTicket?.lot_size != null ? Number(execTicket.lot_size) : (lotSize != null && !isNaN(lotSize) ? Number(lotSize) : undefined),
@@ -2568,6 +2698,20 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         if (seenIds.has(id)) return false
         seenIds.add(id)
       }
+
+      // 0. Zero-Futures Invariant Gate: Purge all futures contracts/signals
+      const isFut = Boolean(
+        a.derivative_type === 'FUT' ||
+        a.preferred_vehicle === 'FUTURES' ||
+        a.instrument_type === 'FUTURES' ||
+        a.primary_deriv === 'FUT' ||
+        a.contract_symbol?.toUpperCase().endsWith('FUT') ||
+        a.contract_symbol?.toUpperCase().includes(':FUT') ||
+        a.symbol?.toUpperCase().endsWith('FUT') ||
+        a.alert_id?.toLowerCase().includes('-fut-') ||
+        a.alert_id?.toLowerCase().endsWith('-fut')
+      )
+      if (isFut) return false
 
       // 1. Primary Filter: View Mode
       if (autoViewMode === 'ACTIVE' && !isAlertActive(a)) return false

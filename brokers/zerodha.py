@@ -16,7 +16,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from kiteconnect import KiteConnect
 from kiteconnect.exceptions import KiteException
@@ -195,6 +195,86 @@ class ZerodhaAPI(BrokerAPI):
             )
         return result
 
+    def get_market_depth(self, symbol: str) -> dict[str, Any]:
+        """
+        Level 2 Market Depth (5-level Order Book) from Zerodha Kite quote.
+        Bridges into central BisectDepthBook in market.order_book.
+        """
+        if not symbol:
+            return {
+                "symbol": "",
+                "bids": [],
+                "asks": [],
+                "spread": 0.0,
+                "total_buy_qty": 0,
+                "total_sell_qty": 0,
+                "status": "UNAVAILABLE",
+            }
+
+        clean_sym = symbol.replace(".NS", "").strip()
+        kite_sym = clean_sym if ":" in clean_sym else f"NSE:{clean_sym}"
+
+        try:
+            raw = self.kite.quote([kite_sym])
+            q = raw.get(kite_sym) or raw.get(clean_sym) or {}
+            depth = q.get("depth", {})
+            buy_levels = depth.get("buy", [])
+            sell_levels = depth.get("sell", [])
+
+            bids = []
+            asks = []
+            tot_b = 0
+            tot_s = 0
+
+            for i, b in enumerate(buy_levels):
+                p = float(b.get("price") or 0.0)
+                qty = int(b.get("quantity") or 0)
+                orders = int(b.get("orders") or 1)
+                if p > 0 and qty > 0:
+                    bids.append({"level": i + 1, "price": p, "quantity": qty, "orders": orders})
+                    tot_b += qty
+
+            for i, s in enumerate(sell_levels):
+                p = float(s.get("price") or 0.0)
+                qty = int(s.get("quantity") or 0)
+                orders = int(s.get("orders") or 1)
+                if p > 0 and qty > 0:
+                    asks.append({"level": i + 1, "price": p, "quantity": qty, "orders": orders})
+                    tot_s += qty
+
+            spread = round(asks[0]["price"] - bids[0]["price"], 2) if (bids and asks) else 0.0
+
+            # Bridge into in-memory BisectDepthBook
+            try:
+                from market.order_book import get_depth_book
+
+                get_depth_book(symbol).batch_update(bids, asks)
+                get_depth_book(clean_sym.split(":")[-1]).batch_update(bids, asks)
+            except Exception as e_bridge:
+                logger.debug(f"[Zerodha] BisectDepthBook bridge error: {e_bridge}")
+
+            return {
+                "symbol": symbol,
+                "bids": bids,
+                "asks": asks,
+                "spread": spread,
+                "total_buy_qty": tot_b,
+                "total_sell_qty": tot_s,
+                "status": "LIVE_L2" if (bids or asks) else "UNAVAILABLE",
+            }
+        except Exception as e:
+            logger.warning(f"[Zerodha] get_market_depth failed for {symbol}: {e}")
+            return {
+                "symbol": symbol,
+                "bids": [],
+                "asks": [],
+                "spread": 0.0,
+                "total_buy_qty": 0,
+                "total_sell_qty": 0,
+                "status": "UNAVAILABLE",
+                "message": str(e),
+            }
+
     def _get_instruments(self, exch: str = "NFO") -> list[dict]:
         now = time.time()
         with self._inst_lock:
@@ -334,6 +414,76 @@ class ZerodhaAPI(BrokerAPI):
             order_id=order_id,
         )
         return True
+
+    # ── Good-Till-Triggered (GTT) Orders ───────────────────────
+
+    def place_gtt(self, req: Any) -> Any:
+        """Standardized BrokerAPI implementation for Zerodha Kite server-side GTT/OCO."""
+        from brokers.base import GTTResponse
+
+        try:
+            kite = self.kite
+            is_oco = str(req.trigger_type).upper() == "OCO" and req.leg2 is not None
+            trigger_type = (
+                getattr(kite, "GTT_TYPE_OCO", "two-leg")
+                if is_oco
+                else getattr(kite, "GTT_TYPE_SINGLE", "single")
+            )
+
+            orders = [
+                {
+                    "transaction_type": req.transaction_type.upper(),
+                    "quantity": int(req.leg1.quantity),
+                    "order_type": getattr(kite, "ORDER_TYPE_LIMIT", "LIMIT"),
+                    "product": req.product.upper(),
+                    "price": float(req.leg1.price),
+                }
+            ]
+            trigger_values = [float(req.leg1.trigger_price)]
+
+            if is_oco and req.leg2:
+                orders.append(
+                    {
+                        "transaction_type": req.transaction_type.upper(),
+                        "quantity": int(req.leg2.quantity),
+                        "order_type": getattr(kite, "ORDER_TYPE_LIMIT", "LIMIT"),
+                        "product": req.product.upper(),
+                        "price": float(req.leg2.price),
+                    }
+                )
+                trigger_values.append(float(req.leg2.trigger_price))
+
+            last_price = float(req.leg1.price)
+            res = kite.place_gtt(
+                trigger_type=trigger_type,
+                tradingsymbol=req.symbol.upper(),
+                exchange=req.exchange.upper(),
+                trigger_values=trigger_values,
+                last_price=last_price,
+                orders=orders,
+            )
+            trigger_id = str(res.get("trigger_id", res) if isinstance(res, dict) else res)
+            return GTTResponse(
+                gtt_id=trigger_id,
+                status="ACTIVE",
+                raw=res if isinstance(res, dict) else None,
+            )
+        except Exception as e:
+            return GTTResponse(gtt_id="", status="REJECTED", message=str(e))
+
+    def get_gtts(self) -> list[dict[str, Any]]:
+        try:
+            data = self.kite.get_gtts()
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def cancel_gtt(self, gtt_id: str) -> bool:
+        try:
+            self.kite.cancel_gtt(int(gtt_id) if str(gtt_id).isdigit() else gtt_id)
+            return True
+        except Exception:
+            return False
 
     # ── Historical Data ──────────────────────────────────────
 

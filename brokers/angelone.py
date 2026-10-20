@@ -29,7 +29,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from brokers.base import (
     BrokerAPI,
@@ -361,6 +361,120 @@ class AngelOneAPI(BrokerAPI):
             except Exception as e_suppressed:
                 logger.debug(f"[brokers.angelone] Non-fatal exception suppressed: {e_suppressed}")
         return result
+
+    def get_market_depth(self, symbol: str) -> dict[str, Any]:
+        """
+        Level 2 Market Depth (5-level Order Book) from Angel One SmartAPI.
+        Bridges into central BisectDepthBook in market.order_book.
+        """
+        if not symbol:
+            return {
+                "symbol": "",
+                "bids": [],
+                "asks": [],
+                "spread": 0.0,
+                "total_buy_qty": 0,
+                "total_sell_qty": 0,
+                "status": "UNAVAILABLE",
+            }
+
+        if not self._obj:
+            return {
+                "symbol": symbol,
+                "bids": [],
+                "asks": [],
+                "spread": 0.0,
+                "total_buy_qty": 0,
+                "total_sell_qty": 0,
+                "status": "UNAVAILABLE",
+                "message": "Not authenticated with Angel One",
+            }
+
+        clean_sym = symbol.replace(".NS", "").strip()
+        exch = "NSE"
+        sym = clean_sym
+        if ":" in clean_sym:
+            exch, sym = clean_sym.split(":", 1)
+
+        token = ""
+        try:
+            from market.instrument_master import get_verified_contract
+
+            vc = get_verified_contract(symbol) or get_verified_contract(sym)
+            if vc:
+                token = str(vc.get("provider_token") or "")
+        except Exception:
+            token = ""
+
+        try:
+            depth_data = {}
+            if hasattr(self._obj, "getMarketData") and token:
+                res = self._obj.getMarketData(mode="FULL", exchangeTokens={exch: [token]})
+                fetched = res.get("data", {}).get("fetched", []) if res else []
+                if fetched:
+                    depth_data = fetched[0].get("depth", {})
+            elif hasattr(self._obj, "getMarketData") and not token:
+                res = self._obj.getMarketData(mode="FULL", exchangeTokens={exch: [sym]})
+                fetched = res.get("data", {}).get("fetched", []) if res else []
+                if fetched:
+                    depth_data = fetched[0].get("depth", {})
+
+            buy_levels = depth_data.get("buy", []) if isinstance(depth_data, dict) else []
+            sell_levels = depth_data.get("sell", []) if isinstance(depth_data, dict) else []
+
+            bids = []
+            asks = []
+            tot_b = 0
+            tot_s = 0
+
+            for i, b in enumerate(buy_levels):
+                p = float(b.get("price") or 0.0)
+                qty = int(b.get("quantity") or 0)
+                orders = int(b.get("orders") or 1)
+                if p > 0 and qty > 0:
+                    bids.append({"level": i + 1, "price": p, "quantity": qty, "orders": orders})
+                    tot_b += qty
+
+            for i, s in enumerate(sell_levels):
+                p = float(s.get("price") or 0.0)
+                qty = int(s.get("quantity") or 0)
+                orders = int(s.get("orders") or 1)
+                if p > 0 and qty > 0:
+                    asks.append({"level": i + 1, "price": p, "quantity": qty, "orders": orders})
+                    tot_s += qty
+
+            spread = round(asks[0]["price"] - bids[0]["price"], 2) if (bids and asks) else 0.0
+
+            # Bridge into in-memory BisectDepthBook
+            try:
+                from market.order_book import get_depth_book
+
+                get_depth_book(symbol).batch_update(bids, asks)
+                get_depth_book(clean_sym.split(":")[-1]).batch_update(bids, asks)
+            except Exception as e_bridge:
+                logger.debug(f"[AngelOne] BisectDepthBook bridge error: {e_bridge}")
+
+            return {
+                "symbol": symbol,
+                "bids": bids,
+                "asks": asks,
+                "spread": spread,
+                "total_buy_qty": tot_b,
+                "total_sell_qty": tot_s,
+                "status": "LIVE_L2" if (bids or asks) else "UNAVAILABLE",
+            }
+        except Exception as e:
+            logger.warning(f"[AngelOne] get_market_depth failed for {symbol}: {e}")
+            return {
+                "symbol": symbol,
+                "bids": [],
+                "asks": [],
+                "spread": 0.0,
+                "total_buy_qty": 0,
+                "total_sell_qty": 0,
+                "status": "UNAVAILABLE",
+                "message": str(e),
+            }
 
     def get_options_chain(
         self,

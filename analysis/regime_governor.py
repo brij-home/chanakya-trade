@@ -131,13 +131,15 @@ def classify_market_regime(
     if vix_val is None or vix_val <= 0:
         vix_val = 13.5  # Neutral institutional baseline
 
-    # 2. Check Expiry Session (Post 13:15 IST on active index expiry days)
-    weekday = (
-        now_ist.weekday()
-    )  # 0=Mon (Midcap), 1=Tue (Finnifty), 2=Wed (BankNifty), 3=Thu (Nifty), 4=Fri (Sensex)
-    is_expiry_day = weekday in (0, 1, 2, 3, 4)
+    # 2. Check Expiry Session (Post 13:15 IST on active index weekly expiry days: Nifty Thu, Sensex Fri)
+    from market.calendar import is_expiry_day
+
+    cur_d = now_ist.date()
+    is_active_expiry = is_expiry_day("NIFTY", ref_date=cur_d) or is_expiry_day(
+        "SENSEX", ref_date=cur_d, exchange="BSE"
+    )
     now_t = now_ist.time()
-    is_afternoon_expiry = is_expiry_day and now_t >= dtime(13, 15) and now_t <= dtime(15, 30)
+    is_afternoon_expiry = is_active_expiry and now_t >= dtime(13, 15) and now_t <= dtime(15, 30)
 
     # 3. Check ORB Trapping (Opening 30-min range containment between 10:30 and 14:00 IST)
     is_orb_trapped = False

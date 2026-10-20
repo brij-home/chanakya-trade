@@ -388,6 +388,42 @@ export function TradeExecutionMatrix({
         ) : null}
       </div>
 
+      {/* ── Institutional Broker Pre-Order (STAGE PRIMED) ── */}
+      {(alert?.stage === 'PRIMED' || alert?.actionable_plan?.broker_order_type === 'BUY SL-LIMIT' || alert?.actionable_plan?.sl_limit_trigger) && (
+        <div className="p-2 rounded-lg bg-amber-500/15 border border-amber-400/50 flex flex-col gap-1.5 text-[9.5px]">
+          <div className="flex items-center justify-between">
+            <span className="font-black text-amber-300 flex items-center gap-1.5 uppercase tracking-wide">
+              <span>⚡</span> BROKER PRE-ORDER: {alert?.actionable_plan?.broker_order_type || 'BUY SL-LIMIT'}
+            </span>
+            <span className="text-[8.5px] font-mono font-bold text-amber-200 bg-amber-500/25 px-2 py-0.5 rounded border border-amber-400/40">
+              STAGE PRIMED · ZERO LATENCY
+            </span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[9px] font-mono">
+            <div className="bg-surface/80 border border-amber-500/30 px-2 py-1 rounded">
+              <span className="text-muted block text-[7.5px] uppercase">Trigger</span>
+              <span className="font-black text-amber-300">{currSym}{formatNum(alert?.actionable_plan?.sl_limit_trigger || levels.entry)}</span>
+            </div>
+            <div className="bg-surface/80 border border-amber-500/30 px-2 py-1 rounded">
+              <span className="text-muted block text-[7.5px] uppercase">Limit Price</span>
+              <span className="font-black text-text">{currSym}{formatNum(alert?.actionable_plan?.sl_limit_price || levels.entry)}</span>
+            </div>
+            <div className="bg-surface/80 border border-rose-500/30 px-2 py-1 rounded">
+              <span className="text-muted block text-[7.5px] uppercase">Stop Loss</span>
+              <span className="font-black text-rose-400">{currSym}{formatNum(levels.sl)}</span>
+            </div>
+            <div className="bg-surface/80 border border-emerald-500/30 px-2 py-1 rounded">
+              <span className="text-muted block text-[7.5px] uppercase">Target 1 (+2R)</span>
+              <span className="font-black text-emerald-300">{currSym}{formatNum(levels.t1)}</span>
+            </div>
+          </div>
+          <div className="text-[8.5px] text-amber-200/90 flex items-center gap-1 font-sans">
+            <span>💡</span>
+            <span>Stage pending SL-Limit order in broker OMS now. Exchange matching engine will auto-fill on breach with zero execution latency.</span>
+          </div>
+        </div>
+      )}
+
       {/* ── Institutional Defined-Risk Vertical Spread Blueprint ── */}
       {hedgedSpread && (
         <div className="p-2 rounded-lg bg-sky-950/40 border border-sky-500/30 flex flex-col gap-1.5 text-[9.5px]">

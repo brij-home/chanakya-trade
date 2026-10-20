@@ -320,6 +320,9 @@ def is_alert_option_premium_level(alert: Any) -> bool:
 
     # Underlying stock/index setups are anchored to spot even if an option recommendation is attached
     if atype in (
+        "BREAKOUT",
+        "BREAKDOWN",
+        "MOMENTUM_BREAKOUT",
         "ASYMMETRIC_OPPORTUNITY",
         "SQUEEZE_BREAKOUT",
         "SQUEEZE_BREAKDOWN",

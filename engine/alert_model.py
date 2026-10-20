@@ -75,6 +75,10 @@ class ActionableBlueprint:
     structural_spot_sl: Optional[str] = None  # e.g. "24,820.0 Spot breach"
     disaster_stop_floor: Optional[str] = None  # e.g. "-32% (₹95.00 hard exit)"
     dual_invalidation: Optional[dict[str, Any]] = None
+    execution_friction_badge: Optional[str] = None  # e.g. "⚠️ WIDE SPREAD — USE STRICT LIMIT"
+    bid_ask_spread_pct: Optional[float] = None
+    estimated_slippage_bps: Optional[float] = None
+    order_book_depth_imbalance: Optional[float] = None
     extra_details: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -108,6 +112,10 @@ class ActionableBlueprint:
             "structural_spot_sl": self.structural_spot_sl,
             "disaster_stop_floor": self.disaster_stop_floor,
             "dual_invalidation": self.dual_invalidation,
+            "execution_friction_badge": self.execution_friction_badge,
+            "bid_ask_spread_pct": self.bid_ask_spread_pct,
+            "estimated_slippage_bps": self.estimated_slippage_bps,
+            "order_book_depth_imbalance": self.order_book_depth_imbalance,
         }
         if self.extra_details:
             d.update(self.extra_details)
@@ -201,6 +209,7 @@ class AutoAlert:
     telegram_suppression_reason: Optional[str] = None
     telegram_message_id: Optional[int] = None
     telegram_root_message_id: Optional[int] = None
+    strike_clock_sent: bool = False
     trace_id: Optional[str] = None
     correlation_id: Optional[str] = None
     quant_snapshot: Optional[dict[str, Any]] = None
@@ -209,7 +218,14 @@ class AutoAlert:
         None  # "OPTIMAL" | "MODERATE" | "WIDE_SPREAD_CAUTION" | "ILLIQUID"
     )
     bid_ask_spread_pct: Optional[float] = None
+    execution_friction_badge: Optional[str] = None  # e.g. "⚠️ WIDE SPREAD — USE STRICT LIMIT"
+    estimated_slippage_bps: Optional[float] = None
+    order_book_depth_imbalance: Optional[float] = None
+    exit_microstructure: Optional[dict[str, Any]] = None
+    theta_scratch_recommended: bool = False
+    stagnation_bailout_reason: Optional[str] = None
     strike_roll_recommendation: Optional[dict[str, Any]] = None
+    revolve_advisory: Optional[dict[str, Any]] = None
     initial_stop_loss: Optional[float] = None
     initial_entry_premium: Optional[float] = None
     update_count: int = 0
@@ -234,6 +250,7 @@ class AutoAlert:
         evt = {
             "timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
             "event_type": event_type,
+            "action": event_type,
             "message": message,
             "actor": actor,
             "stage": self.stage,
@@ -250,6 +267,23 @@ class AutoAlert:
         return evt
 
     def __post_init__(self) -> None:
+        if (not self.strike or not self.option_type) and (self.headline or self.contract_symbol):
+            text_to_search = f"{self.headline or ''} {self.contract_symbol or ''}"
+            m_opt = re.search(r"\b(\d{3,6}(?:\.\d+)?)\s*(CE|PE)\b", text_to_search, re.IGNORECASE)
+            if m_opt:
+                if not self.strike:
+                    try:
+                        self.strike = float(m_opt.group(1))
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                        )
+                if not self.option_type:
+                    self.option_type = m_opt.group(2).upper()
+                if not self.contract_symbol and self.strike:
+                    s_val = int(self.strike) if self.strike.is_integer() else self.strike
+                    self.contract_symbol = f"{self.symbol} {s_val} {self.option_type}"
+
         if self.initial_stop_loss is None:
             if (
                 self.actionable_plan
@@ -680,6 +714,106 @@ class AutoAlert:
                 # Cash Equity / Futures standard 1.2% institutional buffer
                 mult = 0.988 if is_short_trade else 1.012
                 self.no_chase_boundary = round(self.trigger_level * mult, 2)
+
+        # Derive and sync execution friction badge and microstructure depth metrics
+        if (
+            self.bid_ask_spread_pct is None
+            and self.actionable_plan
+            and isinstance(self.actionable_plan, dict)
+            and self.actionable_plan.get("bid_ask_spread_pct") is not None
+        ):
+            try:
+                self.bid_ask_spread_pct = float(self.actionable_plan["bid_ask_spread_pct"])
+            except (ValueError, TypeError) as e:
+                logger.debug(f"[AlertModel] Failed to cast bid_ask_spread_pct: {e}")
+
+        if (
+            self.estimated_slippage_bps is None
+            and self.actionable_plan
+            and isinstance(self.actionable_plan, dict)
+            and self.actionable_plan.get("estimated_slippage_bps") is not None
+        ):
+            try:
+                self.estimated_slippage_bps = float(self.actionable_plan["estimated_slippage_bps"])
+            except (ValueError, TypeError) as e:
+                logger.debug(f"[AlertModel] Failed to cast estimated_slippage_bps: {e}")
+
+        if self.execution_friction_badge is None:
+            if (
+                self.actionable_plan
+                and isinstance(self.actionable_plan, dict)
+                and self.actionable_plan.get("execution_friction_badge")
+            ):
+                self.execution_friction_badge = str(
+                    self.actionable_plan["execution_friction_badge"]
+                )
+            elif self.bid_ask_spread_pct is not None:
+                if self.bid_ask_spread_pct > 1.5:
+                    self.execution_friction_badge = "⚠️ WIDE SPREAD — USE STRICT LIMIT"
+                elif self.bid_ask_spread_pct <= 0.5:
+                    self.execution_friction_badge = "⚡ PRIME LIQUIDITY — TIGHT SPREAD"
+                else:
+                    self.execution_friction_badge = "✓ LIQUID — NORMAL DEPTH"
+            elif self.metrics and isinstance(self.metrics, dict):
+                sp = (self.metrics.get("liquidity", {}) or {}).get(
+                    "bid_ask_spread_pct"
+                ) or self.metrics.get("bid_ask_spread_pct")
+                if sp is not None:
+                    try:
+                        self.bid_ask_spread_pct = float(sp)
+                        if self.bid_ask_spread_pct > 1.5:
+                            self.execution_friction_badge = "⚠️ WIDE SPREAD — USE STRICT LIMIT"
+                        elif self.bid_ask_spread_pct <= 0.5:
+                            self.execution_friction_badge = "⚡ PRIME LIQUIDITY — TIGHT SPREAD"
+                        else:
+                            self.execution_friction_badge = "✓ LIQUID — NORMAL DEPTH"
+                    except (ValueError, TypeError) as e:
+                        logger.debug(f"[AlertModel] Failed to cast metric bid_ask_spread_pct: {e}")
+
+        if self.estimated_slippage_bps is None and self.bid_ask_spread_pct is not None:
+            self.estimated_slippage_bps = round(self.bid_ask_spread_pct * 100.0, 1)
+
+        if self.order_book_depth_imbalance is None:
+            if (
+                self.actionable_plan
+                and isinstance(self.actionable_plan, dict)
+                and self.actionable_plan.get("order_book_depth_imbalance") is not None
+            ):
+                try:
+                    self.order_book_depth_imbalance = float(
+                        self.actionable_plan["order_book_depth_imbalance"]
+                    )
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"[AlertModel] Failed to cast order_book_depth_imbalance: {e}")
+            elif self.metrics and isinstance(self.metrics, dict):
+                obi_val = self.metrics.get("obi_5") or self.metrics.get("order_book_imbalance")
+                if obi_val is not None:
+                    try:
+                        self.order_book_depth_imbalance = float(obi_val)
+                    except (ValueError, TypeError) as e:
+                        logger.debug(f"[AlertModel] Failed to cast metric obi: {e}")
+
+        if self.actionable_plan and isinstance(self.actionable_plan, dict):
+            if (
+                self.execution_friction_badge
+                and "execution_friction_badge" not in self.actionable_plan
+            ):
+                self.actionable_plan["execution_friction_badge"] = self.execution_friction_badge
+            if (
+                self.bid_ask_spread_pct is not None
+                and "bid_ask_spread_pct" not in self.actionable_plan
+            ):
+                self.actionable_plan["bid_ask_spread_pct"] = self.bid_ask_spread_pct
+            if (
+                self.estimated_slippage_bps is not None
+                and "estimated_slippage_bps" not in self.actionable_plan
+            ):
+                self.actionable_plan["estimated_slippage_bps"] = self.estimated_slippage_bps
+            if (
+                self.order_book_depth_imbalance is not None
+                and "order_book_depth_imbalance" not in self.actionable_plan
+            ):
+                self.actionable_plan["order_book_depth_imbalance"] = self.order_book_depth_imbalance
 
         if self.stage == "IGNITED" and not self.triggered_at:
             self.triggered_at = self.created_at
@@ -1521,6 +1655,11 @@ class AutoAlert:
             "DE_RISK_0_5R",
             "T0_5_ACHIEVED",
             "BREAKEVEN_LOCKED",
+        ):
+            return True
+        if (
+            self.stage == "INVALIDATED"
+            and getattr(self, "target_status", "") != "SETUP_DISQUALIFIED"
         ):
             return True
         milestones = getattr(self, "achieved_milestones", None) or []

@@ -69,6 +69,10 @@ class DepthLevel:
     quantity: int
     orders: int = 1
 
+    @property
+    def qty(self) -> int:
+        return self.quantity
+
 
 class BisectDepthBook:
     """
@@ -168,6 +172,13 @@ class BisectDepthBook:
         return 0.0
 
     @property
+    def mid_price(self) -> float:
+        """Arithmetic midpoint of best bid and best ask."""
+        if self._bids and self._asks:
+            return (self.best_bid + self.best_ask) / 2.0
+        return self.best_bid or self.best_ask or 0.0
+
+    @property
     def micro_price(self) -> float:
         """Volume-weighted micro-price based on top of book."""
         if not self._bids or not self._asks:
@@ -189,6 +200,14 @@ class BisectDepthBook:
     def total_ask_qty(self) -> int:
         return self._total_ask_qty
 
+    @property
+    def bids(self) -> list[DepthLevel]:
+        return [DepthLevel(price=b[1], quantity=b[2], orders=b[3]) for b in self._bids]
+
+    @property
+    def asks(self) -> list[DepthLevel]:
+        return [DepthLevel(price=a[0], quantity=a[1], orders=a[2]) for a in self._asks]
+
     def obi(self, n: int = 5) -> float:
         """Calculate Order Book Imbalance across top N levels."""
         top_bids = self._bids[:n]
@@ -199,6 +218,10 @@ class BisectDepthBook:
         if tot <= 0:
             return 0.0
         return round((b_vol - a_vol) / tot, 4)
+
+    def get_imbalance(self, n: int = 5) -> float:
+        """Alias for obi(n) to maintain backward-compatibility with OMS order preview."""
+        return self.obi(n=n)
 
     def get_bids(self, n: int = 50) -> list[dict[str, Any]]:
         return [
@@ -312,6 +335,10 @@ class BisectDepthBook:
             "worst_price": worst_p,
         }
 
+    def simulate_market_order(self, side: str, quantity: int) -> dict[str, Any]:
+        """Alias for simulate_sweep for compatibility with pretrade validation."""
+        return self.simulate_sweep(side=side, quantity=quantity)
+
     def record_tick(self, price: float, volume: int = 1, timestamp: Optional[float] = None) -> None:
         """Record a price/volume tick into the internal circular ring buffer in O(1)."""
         if price > 0:
@@ -358,6 +385,12 @@ class OrderBookSnapshot:
     captured_at: str = ""
     rolling_tick_vwap: Optional[float] = None
     rolling_tick_volatility: Optional[float] = None
+    has_resting_wall: bool = False
+    wall_side: Optional[str] = None  # "BID" | "ASK"
+    wall_price: Optional[float] = None
+    wall_qty: int = 0
+    wall_ratio: float = 1.0
+    greeks: Optional[dict[str, Any]] = None
 
     def simulate_sweep(self, side: str, quantity: int) -> dict[str, Any]:
         """Simulate pre-trade slippage and market sweep across snapshot depth."""
@@ -373,6 +406,87 @@ class OrderBookSnapshot:
         return asdict(self)
 
 
+def resolve_option_greeks(symbol: str, ltp: float = 0.0) -> Optional[dict[str, Any]]:
+    """
+    Resolve and compute option Greeks (delta, gamma, theta, vega, iv) if symbol is an option.
+    Uses Black-Scholes analytical formulas with underlying spot resolution.
+    """
+    import re
+
+    clean = (
+        symbol.replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("NFO:", "")
+        .replace("MCX:", "")
+        .strip()
+        .upper()
+    )
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(CE|PE)$", clean)
+    if not match:
+        return None
+    try:
+        from analysis.options import compute_greeks
+        from market.quotes import get_quote
+
+        strike = float(match.group(1))
+        opt_type = match.group(2)
+        prefix_part = clean[: match.start()].strip()
+        und_match = re.match(r"^([A-Za-z0-9_&]+?)(?:\d{2}[A-Z]{3}|\d{2}\d{2}|\d{5})?$", prefix_part)
+        und = (
+            und_match.group(1).upper()
+            if und_match
+            else re.split(r"\d", prefix_part)[0].upper().strip()
+        )
+        if not und:
+            und = "NIFTY"
+
+        spot_p = strike
+        try:
+            spot_q = get_quote([und])
+            q_obj = spot_q.get(und) if isinstance(spot_q, dict) else spot_q
+            if q_obj and getattr(q_obj, "ltp", 0.0) > 0:
+                spot_p = float(q_obj.ltp)
+        except Exception as e_suppressed:
+            logger.debug(f"[market.order_book] Spot quote lookup suppressed: {e_suppressed}")
+
+        from datetime import date, timedelta
+
+        today = date.today()
+        days_to_thu = (3 - today.weekday()) % 7
+        if days_to_thu == 0:
+            days_to_thu = 7
+        exp_date = (today + timedelta(days=days_to_thu)).isoformat()
+
+        eval_ltp = (
+            ltp
+            if ltp > 0
+            else max(
+                0.5,
+                abs(spot_p - strike)
+                if (opt_type == "CE" and spot_p > strike) or (opt_type == "PE" and spot_p < strike)
+                else 20.0,
+            )
+        )
+
+        g = compute_greeks(
+            spot=spot_p, strike=strike, expiry=exp_date, option_type=opt_type, ltp=eval_ltp
+        )
+        return {
+            "delta": round(g.delta, 3),
+            "gamma": round(g.gamma, 5),
+            "theta": round(g.theta, 2),
+            "vega": round(g.vega, 2),
+            "iv_pct": round(g.iv_pct, 1),
+            "spot": spot_p,
+            "strike": strike,
+            "option_type": opt_type,
+            "dte": days_to_thu,
+        }
+    except Exception as e:
+        logger.debug(f"[market.order_book] Failed computing Greeks for {symbol}: {e}")
+        return None
+
+
 def compute_order_book_metrics(
     symbol: str,
     raw_depth: Union[dict[str, Any], BisectDepthBook],
@@ -380,6 +494,7 @@ def compute_order_book_metrics(
     recent_trades_volume: Optional[float] = None,
     live_broker_connected: bool = False,
     provenance: str = "LIVE_BROKER_L2",
+    greeks: Optional[dict[str, Any]] = None,
 ) -> OrderBookSnapshot:
     """
     Computes institutional microstructure metrics from standard broker 5-depth or 20-depth dict,
@@ -491,6 +606,32 @@ def compute_order_book_metrics(
     else:
         liq_status = "NORMAL"
 
+    # 6. Resting fortress wall detection (>= 2.8x average depth)
+    has_resting_wall = False
+    wall_side = None
+    wall_qty = 0
+    wall_price = None
+    wall_ratio = 1.0
+    avg_bid_depth = tot_bid_qty / max(1, len(bids)) if bids else 0
+    avg_ask_depth = tot_ask_qty / max(1, len(asks)) if asks else 0
+    for b in bids:
+        if avg_bid_depth > 0 and b.quantity / avg_bid_depth >= 2.8 and b.quantity >= 100:
+            has_resting_wall = True
+            wall_side = "BID"
+            wall_qty = b.quantity
+            wall_price = b.price
+            wall_ratio = round(b.quantity / avg_bid_depth, 1)
+            break
+    if not has_resting_wall:
+        for a in asks:
+            if avg_ask_depth > 0 and a.quantity / avg_ask_depth >= 2.8 and a.quantity >= 100:
+                has_resting_wall = True
+                wall_side = "ASK"
+                wall_qty = a.quantity
+                wall_price = a.price
+                wall_ratio = round(a.quantity / avg_ask_depth, 1)
+                break
+
     # Record micro-price tick into book's RollingTickBuffer
     tick_p = book.micro_price if book.micro_price > 0 else calc_ltp
     if tick_p > 0:
@@ -500,6 +641,9 @@ def compute_order_book_metrics(
     rolling_vol = (
         round(book.rolling_tick_volatility, 4) if book.rolling_tick_volatility > 0 else 0.0
     )
+
+    if greeks is None:
+        greeks = resolve_option_greeks(symbol, calc_ltp)
 
     return OrderBookSnapshot(
         symbol=symbol,
@@ -522,90 +666,210 @@ def compute_order_book_metrics(
         asks=[asdict(a) for a in asks],
         rolling_tick_vwap=rolling_vwap,
         rolling_tick_volatility=rolling_vol,
+        has_resting_wall=has_resting_wall,
+        wall_side=wall_side,
+        wall_price=wall_price,
+        wall_qty=wall_qty,
+        wall_ratio=wall_ratio,
+        greeks=greeks,
     )
 
 
-def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
+def analyze_symbol_order_book(
+    symbol: str,
+    *,
+    allow_rest_fallback: bool = False,
+) -> OrderBookSnapshot:
     """
     Fetches real-time quote depth for symbol from in-memory stream, active broker integration, or market engine.
     Prioritizes sub-millisecond in-memory streaming depth book populated by WebSocket ticks.
+
+    Args:
+        symbol: Ticker or canonical exchange symbol (e.g. "RELIANCE", "MCX:CRUDEOIL26NOVFUT").
+        allow_rest_fallback: If False (institutional default), resolves strictly from RAM (WebSocket
+            BisectDepthBook, TBT 50-level cache, or in-memory quote cache) with ZERO REST API consumption.
+            Set to True only on deliberate single-symbol user requests.
     """
     is_mcx = symbol.upper().startswith("MCX:")
     is_bse = symbol.upper().startswith("BSE:")
+    is_cds = symbol.upper().startswith("CDS:")
     clean_sym = (
         symbol.replace("NSE:", "")
         .replace("BSE:", "")
         .replace("NFO:", "")
         .replace("MCX:", "")
+        .replace("CDS:", "")
         .strip()
         .upper()
     )
-    query_sym = symbol if is_mcx else clean_sym
+    if is_mcx or clean_sym.startswith(
+        ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "ZINC", "ALUMINIUM")
+    ):
+        is_mcx = True
+        query_sym = f"MCX:{clean_sym}" if not symbol.upper().startswith("MCX:") else symbol
+        sym_to_report = query_sym
+    elif is_cds or clean_sym.startswith(("USDINR", "EURINR", "GBPINR", "JPYINR")):
+        is_cds = True
+        query_sym = symbol if symbol.upper().startswith(("NSE:", "CDS:")) else f"NSE:{clean_sym}"
+        sym_to_report = symbol if symbol.upper().startswith("CDS:") else f"CDS:{clean_sym}"
+    else:
+        query_sym = symbol if is_bse else clean_sym
+        sym_to_report = clean_sym
 
     # 1. Fast in-memory check: Sub-millisecond live WebSocket streaming BisectDepthBook
     cached_book = get_depth_book(clean_sym)
+    if not (cached_book.best_bid > 0 and cached_book.best_ask > 0):
+        cached_book = get_depth_book(query_sym)
     if cached_book.best_bid > 0 and cached_book.best_ask > 0:
         stream_ltp = cached_book.rolling_tick_vwap or (
             (cached_book.best_bid + cached_book.best_ask) / 2.0
         )
         return compute_order_book_metrics(
-            clean_sym,
+            sym_to_report,
             cached_book,
             ltp=stream_ltp,
             live_broker_connected=True,
             provenance="LIVE_STREAM_L2",
         )
 
+    # 1b. Check Fyers TBT 50-Level Depth cache (sub-millisecond L3 memory resolution, 0 REST calls)
+    try:
+        from market.fyers_tbt_manager import FyersTbtManager
+
+        tbt = FyersTbtManager()
+        with tbt._depth_lock:
+            tbt_obj = (
+                tbt._depth_cache.get(symbol)
+                or tbt._depth_cache.get(query_sym)
+                or tbt._depth_cache.get(clean_sym)
+                or tbt._depth_cache.get(f"NSE:{clean_sym}")
+                or tbt._depth_cache.get(f"BSE:{clean_sym}")
+                or tbt._depth_cache.get(f"MCX:{clean_sym}")
+                or tbt._depth_cache.get(f"CDS:{clean_sym}")
+            )
+        if tbt_obj and (tbt_obj.get("bids") or tbt_obj.get("asks")):
+            raw_depth = {
+                "buy": [
+                    {"price": b["price"], "quantity": b["qty"], "orders": b.get("orders", 1)}
+                    for b in tbt_obj.get("bids", [])
+                ],
+                "sell": [
+                    {"price": a["price"], "quantity": a["qty"], "orders": a.get("orders", 1)}
+                    for a in tbt_obj.get("asks", [])
+                ],
+            }
+            return compute_order_book_metrics(
+                sym_to_report,
+                raw_depth,
+                tbt_obj.get("ltp", 0.0),
+                live_broker_connected=True,
+                provenance="LIVE_STREAM_TBT_50",
+            )
+    except Exception as e_tbt:
+        logger.debug(f"[market.order_book] TBT depth lookup suppressed: {e_tbt}")
+
+    # 1c. Broker in-memory depth cache lookup (0 REST calls, checks RAM cache)
     try:
         from brokers.session import get_data_broker, get_execution_broker
 
         brk = None
         try:
             brk = get_data_broker()
-        except Exception as e_suppressed:
-            logger.debug(f"[market.order_book] Non-fatal exception suppressed: {e_suppressed}")
+        except Exception as e:
+            logger.debug(f"[market.order_book] get_data_broker lookup suppressed: {e}")
         if not brk:
             try:
                 brk = get_execution_broker()
+            except Exception as e:
+                logger.debug(f"[market.order_book] get_execution_broker lookup suppressed: {e}")
+        if brk and hasattr(brk, "_depth_cache") and hasattr(brk, "_depth_cache_lock"):
+            with brk._depth_cache_lock:
+                cand_cached = (
+                    brk._depth_cache.get(symbol)
+                    or brk._depth_cache.get(query_sym)
+                    or brk._depth_cache.get(clean_sym)
+                    or brk._depth_cache.get(f"MCX:{clean_sym}")
+                )
+                if cand_cached:
+                    ts, depth_dict = cand_cached
+                    import time as _t
+
+                    # Accept cached depth if within 30.0s
+                    if (
+                        (_t.monotonic() - ts) < 30.0
+                        and depth_dict
+                        and (depth_dict.get("bids") or depth_dict.get("buy"))
+                    ):
+                        raw_depth = {
+                            "buy": depth_dict.get("bids") or depth_dict.get("buy", []),
+                            "sell": depth_dict.get("asks") or depth_dict.get("sell", []),
+                        }
+                        return compute_order_book_metrics(
+                            sym_to_report,
+                            raw_depth,
+                            depth_dict.get("ltp", 0.0),
+                            live_broker_connected=True,
+                            provenance=f"CACHED_{brk.name.upper()}_L2"
+                            if hasattr(brk, "name")
+                            else "CACHED_BROKER_L2",
+                        )
+    except Exception as e_cache:
+        logger.debug(f"[market.order_book] Broker depth cache lookup error: {e_cache}")
+
+    # 2. Broker REST fallback — ONLY if explicitly requested (e.g. single-symbol manual inspection)
+    if allow_rest_fallback:
+        try:
+            from brokers.session import get_data_broker, get_execution_broker
+
+            brk = None
+            try:
+                brk = get_data_broker()
             except Exception as e_suppressed:
                 logger.debug(f"[market.order_book] Non-fatal exception suppressed: {e_suppressed}")
+            if not brk:
+                try:
+                    brk = get_execution_broker()
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[market.order_book] Non-fatal exception suppressed: {e_suppressed}"
+                    )
 
-        if brk and hasattr(brk, "get_market_depth"):
-            depth_dict = brk.get_market_depth(query_sym)
-            if depth_dict and (depth_dict.get("bids") or depth_dict.get("buy")):
-                raw_depth = {
-                    "buy": depth_dict.get("bids") or depth_dict.get("buy", []),
-                    "sell": depth_dict.get("asks") or depth_dict.get("sell", []),
-                }
-                return compute_order_book_metrics(
-                    clean_sym,
-                    raw_depth,
-                    depth_dict.get("ltp", 0.0),
-                    live_broker_connected=True,
-                    provenance=f"LIVE_{brk.name.upper()}_L2"
-                    if hasattr(brk, "name")
-                    else "LIVE_BROKER_L2",
-                )
+            if brk and hasattr(brk, "get_market_depth"):
+                depth_dict = brk.get_market_depth(query_sym)
+                if depth_dict and (depth_dict.get("bids") or depth_dict.get("buy")):
+                    raw_depth = {
+                        "buy": depth_dict.get("bids") or depth_dict.get("buy", []),
+                        "sell": depth_dict.get("asks") or depth_dict.get("sell", []),
+                    }
+                    return compute_order_book_metrics(
+                        sym_to_report,
+                        raw_depth,
+                        depth_dict.get("ltp", 0.0),
+                        live_broker_connected=True,
+                        provenance=f"LIVE_{brk.name.upper()}_L2"
+                        if hasattr(brk, "name")
+                        else "LIVE_BROKER_L2",
+                    )
 
-        if brk and hasattr(brk, "get_quote"):
-            q = brk.get_quote(query_sym)
-            if q and hasattr(q, "depth") and q.depth:
-                return compute_order_book_metrics(
-                    clean_sym,
-                    q.depth,
-                    getattr(q, "last_price", 0.0),
-                    live_broker_connected=True,
-                    provenance="LIVE_BROKER_L2",
-                )
-    except Exception as e:
-        logger.debug("Failed fetching broker depth for %s: %s", clean_sym, e)
+            if brk and hasattr(brk, "get_quote"):
+                q = brk.get_quote(query_sym)
+                if q and hasattr(q, "depth") and q.depth:
+                    return compute_order_book_metrics(
+                        sym_to_report,
+                        q.depth,
+                        getattr(q, "last_price", 0.0),
+                        live_broker_connected=True,
+                        provenance="LIVE_BROKER_L2",
+                    )
+        except Exception as e:
+            logger.debug("Failed fetching broker depth for %s: %s", clean_sym, e)
 
-    # Fallback to market.quotes
+    # 3. Fast in-memory quote / tick fallback (WS-only if allow_rest_fallback is False)
     try:
         from market.quotes import get_quote
 
         q_sym = symbol if is_mcx else (f"BSE:{clean_sym}" if is_bse else f"NSE:{clean_sym}")
-        q_dict = get_quote([q_sym])
+        q_dict = get_quote([q_sym], ws_only=(not allow_rest_fallback))
         q = q_dict.get(q_sym) or q_dict.get(clean_sym)
         if q:
             ltp = float(getattr(q, "last_price", 0.0) or 0.0)
@@ -618,21 +882,23 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
                     live_broker_connected=False,
                     provenance="FEED_L1_DEPTH",
                 )
-            # If no market depth available in quote, return an honest disconnected snapshot with last price
-            return OrderBookSnapshot(
-                symbol=clean_sym,
-                ltp=ltp,
-                spread=0.0,
-                spread_pct=0.0,
-                total_bid_qty=0,
-                total_ask_qty=0,
-                obi_5=0.0,
-                obi_weighted=0.0,
-                bias="BALANCED",
-                liquidity_status="THIN_BOOK",
-                live_broker_connected=False,
-                provenance="SYNTHETIC_L1_DISCONNECTED",
-            )
+            if ltp > 0:
+                is_stream = getattr(q, "source", "") == "STREAM"
+                return OrderBookSnapshot(
+                    symbol=clean_sym,
+                    ltp=ltp,
+                    spread=0.0,
+                    spread_pct=0.0,
+                    total_bid_qty=0,
+                    total_ask_qty=0,
+                    obi_5=0.0,
+                    obi_weighted=0.0,
+                    bias="BALANCED",
+                    liquidity_status="THIN_BOOK",
+                    live_broker_connected=is_stream,
+                    provenance="LIVE_STREAM_L1" if is_stream else "CACHED_L1",
+                    greeks=resolve_option_greeks(clean_sym, ltp),
+                )
     except Exception as e:
         logger.debug("Quote depth fallback error for %s: %s", clean_sym, e)
 
@@ -649,6 +915,7 @@ def analyze_symbol_order_book(symbol: str) -> OrderBookSnapshot:
         liquidity_status="THIN_BOOK",
         live_broker_connected=False,
         provenance="DISCONNECTED",
+        greeks=resolve_option_greeks(clean_sym, 0.0),
     )
 
 

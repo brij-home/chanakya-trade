@@ -95,3 +95,127 @@ def test_ws_subscription_manager_seed_active_derivatives():
             # Verified that index options are now in desired subscriptions
             assert any("NIFTY" in s and ("CE" in s or "PE" in s) for s in desired)
             mock_ws.subscribe.assert_called_once()
+
+
+def test_parse_contract_expiry_and_is_contract_expired():
+    from datetime import date, datetime
+    from config.constants import IST_ZONE as IST
+    from market.ws_subscription_manager import parse_contract_expiry, is_contract_expired
+
+    # 1. Weekly Options
+    exp_w = parse_contract_expiry("NSE:NIFTY26O1922900CE")
+    assert exp_w == date(2026, 10, 19)
+
+    # 2. Monthly Options
+    exp_m = parse_contract_expiry("NSE:NIFTY26OCT23000CE")
+    assert exp_m == date(2026, 10, 29)  # Last Thursday of Oct 2026
+
+    # 3. Futures
+    exp_f = parse_contract_expiry("NSE:NIFTY26OCTFUT")
+    assert exp_f == date(2026, 10, 29)
+
+    # 4. Non-derivatives
+    assert parse_contract_expiry("NSE:RELIANCE-EQ") is None
+    assert parse_contract_expiry("NSE:NIFTY50-INDEX") is None
+    assert parse_contract_expiry("MCX:CRUDEOIL") is None
+
+    # 5. Expired contracts vs Active contracts
+    # October 2024 contract is definitely expired as of 2026
+    ref_dt = datetime(2026, 10, 19, 12, 0, tzinfo=IST)
+    assert is_contract_expired("NSE:NIFTY24O1725000CE", ref_dt=ref_dt) is True
+    # December 2026 contract is not expired
+    assert is_contract_expired("NSE:NIFTY26D3126000CE", ref_dt=ref_dt) is False
+    # Cash equities never expire
+    assert is_contract_expired("NSE:RELIANCE-EQ", ref_dt=ref_dt) is False
+
+    # 6. Expiry day session cutoff
+    # On expiry day before 15:30 IST -> active
+    ref_day_active = datetime(2026, 10, 19, 14, 0, tzinfo=IST)
+    assert is_contract_expired("NSE:NIFTY26O1922900CE", ref_dt=ref_day_active) is False
+    # On expiry day after 15:30 IST -> expired
+    ref_day_closed = datetime(2026, 10, 19, 15, 35, tzinfo=IST)
+    assert is_contract_expired("NSE:NIFTY26O1922900CE", ref_dt=ref_day_closed) is True
+
+
+def test_cleanse_expired_derivatives():
+    from market.ws_subscription_manager import WsSubscriptionManager
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        sub_file = Path(tmp_dir) / "sub.json"
+        with patch("market.ws_subscription_manager._get_cache_path", return_value=sub_file):
+            mgr = WsSubscriptionManager(max_subscriptions=5000)
+            mock_ws = MagicMock()
+
+            # Seed an expired contract and a future active contract
+            expired_sym = "NSE:NIFTY24O1725000CE"  # 2024
+            active_sym = "NSE:NIFTY26D3126000CE"  # Dec 2026
+
+            mgr.add_subscriptions([expired_sym, active_sym], ws_client=mock_ws)
+            desired = mgr.get_all_desired_subscriptions()
+            assert expired_sym in desired
+            assert active_sym in desired
+
+            # Run cleanse
+            purged = mgr.cleanse_expired_derivatives(ws_client=mock_ws)
+            assert expired_sym in purged
+            assert active_sym not in purged
+            mock_ws.unsubscribe.assert_called_with([expired_sym])
+
+            # Check memory state
+            desired_after = mgr.get_all_desired_subscriptions()
+            assert expired_sym not in desired_after
+            assert active_sym in desired_after
+            # Core equities strictly retained
+            assert "NSE:RELIANCE-EQ" in desired_after
+
+            # Check disk state on restart
+            mgr2 = WsSubscriptionManager(max_subscriptions=5000)
+            desired_reloaded = mgr2.get_all_desired_subscriptions()
+            assert expired_sym not in desired_reloaded
+            assert active_sym in desired_reloaded
+
+
+def test_websocket_tick_staleness_and_zero_ltp_guard():
+    import time
+    from market.websocket import WebSocketManager, Tick
+
+    # 1. Tick staleness test
+    now = time.time()
+    fresh_tick = Tick(symbol="NSE:TEST-EQ", ltp=100.0, timestamp=now)
+    stale_tick = Tick(symbol="NSE:TEST-EQ", ltp=100.0, timestamp=now - 120.0)
+
+    assert fresh_tick.is_stale(max_age_seconds=60.0) is False
+    assert stale_tick.is_stale(max_age_seconds=60.0) is True
+
+    # 2. WebSocketManager get_tick staleness filter
+    ws_mgr = WebSocketManager()
+    with ws_mgr._lock:
+        ws_mgr._ticks["NSE:FRESH-EQ"] = fresh_tick
+        ws_mgr._ticks["NSE:STALE-EQ"] = stale_tick
+
+    assert ws_mgr.get_tick("NSE:FRESH-EQ", max_age_seconds=60.0) is not None
+    assert ws_mgr.get_tick("NSE:STALE-EQ", max_age_seconds=60.0) is None
+    # Without filter, returns the cached tick
+    assert ws_mgr.get_tick("NSE:STALE-EQ") is not None
+
+    # 3. Zero-LTP overwrite poisoning guard
+    # First message: valid trade
+    ws_mgr._on_message([{"symbol": "NSE:GUARD-EQ", "ltp": 500.0, "exch_feed_time": now}])
+    assert ws_mgr.get_tick("NSE:GUARD-EQ").ltp == 500.0
+
+    # Second message: depth or heartbeat packet with ltp=0
+    ws_mgr._on_message([{"symbol": "NSE:GUARD-EQ", "ltp": 0.0, "bid": 499.5, "ask": 500.5}])
+    # Invariant: valid traded price must NOT be overwritten by 0.0
+    tick_after = ws_mgr.get_tick("NSE:GUARD-EQ")
+    assert tick_after.ltp == 500.0
+    assert tick_after.bid == 499.5
+    assert tick_after.ask == 500.5
+
+    # 4. Cleanse stale ticks
+    with ws_mgr._lock:
+        ws_mgr._ticks["NSE:VERY_OLD-EQ"] = Tick(
+            symbol="NSE:VERY_OLD-EQ", ltp=50.0, timestamp=now - 100000.0
+        )
+    purged_count = ws_mgr.cleanse_stale_ticks(max_age_seconds=86400.0)
+    assert purged_count >= 1
+    assert ws_mgr.get_tick("NSE:VERY_OLD-EQ") is None

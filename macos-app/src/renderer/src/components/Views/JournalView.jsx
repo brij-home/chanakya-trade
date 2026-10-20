@@ -6,14 +6,14 @@ import UnavailableState from '../Common/UnavailableState'
 const money = (value) => `₹${Number(value || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
 
 function Metric({ label, value, tone = 'var(--color-text)' }) {
-  return <div className="rounded-xl p-3" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}><div className="text-[9px] font-bold uppercase tracking-wider" style={{ color: 'var(--color-muted)' }}>{label}</div><div className="text-sm font-mono font-black mt-1" style={{ color: tone }}>{value}</div></div>
+  return <div className="rounded-xl p-3" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}><div className="text-[9px] font-bold uppercase tracking-wider" style={{ color: 'var(--color-muted)' }}>{label}</div><div className="text-sm font-mono font-black mt-1 tabular-nums" style={{ color: tone }}>{value}</div></div>
 }
 
 function TradeRow({ entry, onAnalyze }) {
   const pnl = Number(entry.realized_pnl || 0)
   const isOpen = entry.status === 'OPEN'
   const tone = isOpen ? 'var(--color-gold)' : pnl >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)'
-  return <div className="grid items-center px-4 py-3 border-b gap-2" style={{ gridTemplateColumns: '1.5fr 0.8fr 0.9fr 1fr 0.8fr', borderColor: 'var(--color-border-subtle)' }}><div><div className="text-xs font-bold">{entry.symbol}</div><div className="text-[9px] mt-0.5" style={{ color: 'var(--color-muted)' }}>{entry.setup_type || '—'} · {entry.direction}</div></div><span className="text-[10px] font-mono" style={{ color: 'var(--color-muted)' }}>{entry.entry_time_ist || '—'}</span><span className="text-xs font-mono">{money(entry.entry_price)}</span><span className="text-xs font-mono font-bold" style={{ color: tone }}>{isOpen ? 'OPEN' : `${pnl >= 0 ? '+' : ''}${money(pnl)}`}</span><button onClick={() => onAnalyze(entry)} className="text-[10px] px-2 py-1 rounded-lg font-bold" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-muted)' }}>Review</button></div>
+  return <div className="grid items-center px-4 py-3 border-b gap-2" style={{ gridTemplateColumns: '1.5fr 0.8fr 0.9fr 1fr 0.8fr', borderColor: 'var(--color-border-subtle)' }}><div><div className="text-xs font-bold">{entry.symbol}</div><div className="text-[9px] mt-0.5" style={{ color: 'var(--color-muted)' }}>{entry.setup_type || '—'} · {entry.direction}</div></div><span className="text-[10px] font-mono tabular-nums" style={{ color: 'var(--color-muted)' }}>{entry.entry_time_ist || '—'}</span><span className="text-xs font-mono tabular-nums">{money(entry.entry_price)}</span><span className="text-xs font-mono font-bold tabular-nums" style={{ color: tone }}>{isOpen ? 'OPEN' : `${pnl >= 0 ? '+' : ''}${money(pnl)}`}</span><button onClick={() => onAnalyze(entry)} className="text-[10px] px-2 py-1 rounded-lg font-bold cursor-pointer hover:brightness-110" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-muted)' }}>Review</button></div>
 }
 
 export default function JournalView() {

@@ -42,8 +42,9 @@ def detect_circuit_proximity(
         abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
         risk_pts = max(abs_risk_floor, round(ltp * 0.015, 2))
         sl_price = round(ltp - risk_pts, 2)
-        t1_price = round(upper_circuit + (1.8 * risk_pts), 2)
-        t2_price = round(upper_circuit + (3.2 * risk_pts), 2)
+        t1_price = round(upper_circuit + (2.0 * risk_pts), 2)
+        t2_price = round(upper_circuit + (3.5 * risk_pts), 2)
+        runner_price = round(upper_circuit + (5.5 * risk_pts), 2)
         rr_str = f"1:{round((t1_price - ltp) / risk_pts, 1)}"
 
         return AutoAlert(
@@ -70,18 +71,25 @@ def detect_circuit_proximity(
                 "circuit_band_pct": circuit_band_pct,
                 "continuation_t1": t1_price,
                 "continuation_t2": t2_price,
+                "runner_target": runner_price,
+                "no_chase_boundary": upper_circuit,
             },
             actionable_plan={
                 "action": "BUY_LIMIT_CIRCUIT",
                 "price": f"₹{ltp:.1f}",
                 "entry_range": f"₹{round(ltp * 0.998, 1):.1f} – ₹{upper_circuit:.1f}",
                 "circuit_ceiling": f"₹{upper_circuit:.1f}",
+                "no_chase_boundary": f"₹{upper_circuit:,.1f}",
                 "target": f"₹{t1_price:.1f} (Next Session Continuation)",
+                "target_1": f"₹{t1_price:.1f}",
                 "target_2": f"₹{t2_price:.1f}",
+                "target_3": f"₹{runner_price:.1f}",
+                "runner_target": f"₹{runner_price:.1f}",
                 "stop_loss": f"₹{sl_price:.1f}",
                 "risk_reward": rr_str,
                 "profit_rule": "Lock in before seller liquidity evaporates; ride continuation into next session opening auction.",
             },
+            no_chase_boundary=upper_circuit,
             confidence=88,
             created_at=now_iso,
         )

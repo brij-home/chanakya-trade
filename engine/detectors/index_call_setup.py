@@ -47,6 +47,8 @@ _SETUP_ICONS = {
     "VWAP_BREAKOUT": "🚀",
     "CPR_DEMAND_BOUNCE": "🟢",
     "CAMARILLA_H4_BREAKOUT": "🚀",
+    "CAMARILLA_H4_PROXIMITY": "⚡",
+    "DAY_HIGH_PROXIMITY": "⚡",
     "DEMAND_ZONE_SWEEP": "⚡",
     "BEARISH_EXHAUSTION_CE": "🎯",
     "DOUBLE_BOTTOM_BREAKOUT": "🟢",
@@ -414,16 +416,16 @@ def detect_index_call_setup(
         else None
     )
 
-    # Veto only when: PCR < 0.65 AND writers are actively adding new calls (ceiling building)
+    # Veto when: PCR < 0.65 AND writers are NOT unwinding (call ceiling building/holding)
     # NOT when writers are unwinding (short squeeze = CE rally signal)
-    _pcr_writers_adding_ce = ce_oi_change_sum > 0
-    if chain_pcr is not None and chain_pcr < 0.65 and _pcr_writers_adding_ce:
+    _pcr_writers_unwinding = ce_oi_change_sum < 0
+    if chain_pcr is not None and chain_pcr < 0.65 and not _pcr_writers_unwinding:
         logger.info(
             f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Active Call Writing Wall "
-            f"(PCR: {chain_pcr:.2f} < 0.65, CE OI adding {ce_oi_change_sum:+,}). Ceiling-building writers resist breakout."
+            f"(PCR: {chain_pcr:.2f} < 0.65, CE OI change {ce_oi_change_sum:+,}). Ceiling-building writers resist breakout."
         )
         return []
-    elif chain_pcr is not None and chain_pcr < 0.65 and not _pcr_writers_adding_ce:
+    elif chain_pcr is not None and chain_pcr < 0.65 and _pcr_writers_unwinding:
         logger.debug(
             f"[IndexCallSetup] PCR={chain_pcr:.2f} < 0.65 but ce_oi_change={ce_oi_change_sum:+,} (unwinding) "
             f"→ NOT a ceiling, this is a short-squeeze signal. Allowing CE setup to proceed."
@@ -744,10 +746,23 @@ def detect_index_call_setup(
     # If spot is right underneath Previous Day High or Day High, buying CE collides directly
     # into overhead supply UNLESS breaking out with true momentum.
     # If spot has just pierced PDH by < 0.15% without momentum, it's a high-probability Bull Trap sweep.
+    # PROXIMITY WATCH EXCEPTION: Do not suppress when spot is within 0.35% of PDH, Day High, or Cam H4 for pre-breakout watch.
+    _cam_h4_ref = 0.0
+    if prev_day_high and prev_day_low and prev_day_high > prev_day_low > 0:
+        _ref_c = (
+            prev_close if (prev_close and prev_close > 0) else (prev_day_high + prev_day_low) / 2.0
+        )
+        _cam_h4_ref = _ref_c + ((prev_day_high - prev_day_low) * 0.55)
+
+    _is_proximity_watch = (
+        (day_high and spot and abs(day_high - spot) / max(1.0, spot) * 100.0 <= 0.35)
+        or (prev_day_high and spot and abs(prev_day_high - spot) / max(1.0, spot) * 100.0 <= 0.35)
+        or (_cam_h4_ref > 0 and spot and abs(_cam_h4_ref - spot) / max(1.0, spot) * 100.0 <= 0.35)
+    )
     if prev_day_high and prev_day_high > 0:
         if spot < prev_day_high:
             pdh_headroom_pct = (prev_day_high - spot) / spot * 100.0
-            if pdh_headroom_pct < 0.25 and not is_breakout_momentum:
+            if pdh_headroom_pct < 0.25 and not is_breakout_momentum and not _is_proximity_watch:
                 logger.debug(
                     f"[IndexCallSetup] Suppressed CE: Spot ₹{spot:,.1f} is within {pdh_headroom_pct:.2f}% of PDH ₹{prev_day_high:,.1f} (Opposing Supply Collision)"
                 )
@@ -767,7 +782,7 @@ def detect_index_call_setup(
         and ((day_high - day_low) / max(1.0, spot)) >= 0.003
     ):
         dh_headroom_pct = (day_high - spot) / spot * 100.0
-        if dh_headroom_pct < 0.15 and not is_breakout_momentum:
+        if dh_headroom_pct < 0.15 and not is_breakout_momentum and not _is_proximity_watch:
             logger.debug(
                 f"[IndexCallSetup] Suppressed CE: Spot ₹{spot:,.1f} is within {dh_headroom_pct:.2f}% of Day High ₹{day_high:,.1f} (Headroom Truncated)"
             )
@@ -948,6 +963,40 @@ def detect_index_call_setup(
                     "breakout_pct": round((spot - cam_h4) / cam_h4 * 100.0, 3),
                     "is_narrow_cpr": is_narrow_cpr,
                 }
+        elif spot < cam_h4 and (cam_h4 - spot) / cam_h4 * 100.0 <= 0.35 and not is_5m_bear_trend:
+            # Camarilla H4 Proximity Surveillance (STAGE_PRIMED Pre-Breakout Alert)
+            # Spot approaching within 0.35% below H4; enables trader staging 2-3 mins ahead of violent breakout.
+            if effective_vwap <= 0 or spot >= effective_vwap * 0.998:
+                has_valid_h4_prox = True
+                if (
+                    active_ohlcv is not None
+                    and hasattr(active_ohlcv, "iloc")
+                    and len(active_ohlcv) >= 1
+                ):
+                    try:
+                        col_h = "high" if "high" in active_ohlcv.columns else "High"
+                        col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                        col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                        col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                        last_b = active_ohlcv.iloc[-1]
+                        b_h = float(last_b[col_h])
+                        b_l = float(last_b[col_l])
+                        b_c = float(last_b[col_c])
+                        b_o = float(last_b[col_o])
+                        b_rng = max(0.1, b_h - b_l)
+                        u_wick_pct = (b_h - max(b_c, b_o)) / b_rng * 100.0
+                        if u_wick_pct >= 40.0 and b_c < b_o:
+                            has_valid_h4_prox = False
+                    except Exception:
+                        has_valid_h4_prox = True
+
+                if has_valid_h4_prox:
+                    signals.append("CAMARILLA_H4_PROXIMITY")
+                    signal_tags["camarilla_h4_proximity"] = {
+                        "cam_h4": round(cam_h4, 1),
+                        "proximity_pct": round((cam_h4 - spot) / cam_h4 * 100.0, 3),
+                        "is_narrow_cpr": is_narrow_cpr,
+                    }
 
         # CPR Demand Bounce Check: Spot tested CPR Top and is bouncing with demand confirmation
         cpr_top_prox = abs(spot - cpr_top) / max(1.0, cpr_top) * 100.0
@@ -1535,42 +1584,59 @@ def detect_index_call_setup(
     # When spot is testing or breaking out through session high with VWAP support and CE momentum
     if day_high and day_high > 0 and "DAY_HIGH_BREAKOUT" not in signals and not is_opening_buffer:
         dh_dist_pct = (spot - day_high) / day_high * 100.0
-        # Within 0.15% below day high, or broke out above day high up to 0.50%
-        if -0.15 <= dh_dist_pct <= 0.50 and (
+        # Wyckoff Upthrust Rejection Wick Filter:
+        # If the latest 5m candle has a long upper rejection wick (>= 35% of total candle range),
+        # this breakout is an institutional liquidity sweep / bull trap (UTAD). Do NOT enter CE into an upthrust!
+        has_rejection_wick_upthrust = False
+        upper_wick_pct = 0.0
+        if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+            try:
+                col_h = "high" if "high" in active_ohlcv.columns else "High"
+                col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                last_b = active_ohlcv.iloc[-1]
+                b_h = float(last_b[col_h])
+                b_l = float(last_b[col_l])
+                b_c = float(last_b[col_c])
+                b_o = float(last_b[col_o])
+                b_rng = max(0.1, b_h - b_l)
+                upper_wick_pct = (b_h - max(b_c, b_o)) / b_rng * 100.0
+                if upper_wick_pct >= 35.0:
+                    has_rejection_wick_upthrust = True
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+                )
+
+        if has_rejection_wick_upthrust:
+            logger.info(
+                f"[IndexCallSetup] Suppressed DAY_HIGH_BREAKOUT/PROXIMITY on {clean_sym}: Upper rejection wick "
+                f"({upper_wick_pct:.1f}%) detected on bar. Wyckoff upthrust bull trap active."
+            )
+        # Spot crossing or trading at/above Day High (Breakout)
+        elif -0.02 <= dh_dist_pct <= 0.50 and (
             spot >= (effective_vwap * 0.998) if effective_vwap > 0 else True
         ):
-            # Wyckoff Upthrust Rejection Wick Filter:
-            # If the latest 5m candle has a long upper rejection wick (>= 35% of total candle range),
-            # this breakout is an institutional liquidity sweep / bull trap (UTAD). Do NOT enter CE into an upthrust!
-            has_rejection_wick_upthrust = False
-            upper_wick_pct = 0.0
-            if (
-                active_ohlcv is not None
-                and hasattr(active_ohlcv, "iloc")
-                and len(active_ohlcv) >= 1
-            ):
-                try:
-                    col_h = "high" if "high" in active_ohlcv.columns else "High"
-                    col_l = "low" if "low" in active_ohlcv.columns else "Low"
-                    col_c = "close" if "close" in active_ohlcv.columns else "Close"
-                    col_o = "open" if "open" in active_ohlcv.columns else "Open"
-                    last_b = active_ohlcv.iloc[-1]
-                    b_h = float(last_b[col_h])
-                    b_l = float(last_b[col_l])
-                    b_c = float(last_b[col_c])
-                    b_o = float(last_b[col_o])
-                    b_rng = max(0.1, b_h - b_l)
-                    upper_wick_pct = (b_h - max(b_c, b_o)) / b_rng * 100.0
-                    if upper_wick_pct >= 35.0:
-                        has_rejection_wick_upthrust = True
-                except Exception as e_suppressed:
-                    logger.debug(
-                        f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
-                    )
-            if has_rejection_wick_upthrust:
+            # SMT Inter-Index Non-Confirmation Sentinel:
+            smt_res = None
+            try:
+                from engine.smt_divergence import evaluate_smt_divergence
+
+                smt_res = evaluate_smt_divergence(
+                    clean_sym,
+                    "BULLISH",
+                    spot,
+                    primary_day_high=day_high,
+                    primary_day_low=day_low,
+                    primary_vwap=effective_vwap,
+                )
+            except Exception as e_smt:
+                logger.debug(f"[IndexCallSetup] SMT check bypassed: {e_smt}")
+
+            if smt_res and smt_res.is_trap:
                 logger.info(
-                    f"[IndexCallSetup] Suppressed DAY_HIGH_BREAKOUT on {clean_sym}: Upper rejection wick "
-                    f"({upper_wick_pct:.1f}%) detected on breakout bar. Wyckoff upthrust bull trap active."
+                    f"[IndexCallSetup] Suppressed DAY_HIGH_BREAKOUT on {clean_sym}: {smt_res.rationale}"
                 )
             elif is_breakout_momentum or (active_ohlcv is not None and len(active_ohlcv) >= 3):
                 signals.append("DAY_HIGH_BREAKOUT")
@@ -1580,6 +1646,25 @@ def detect_index_call_setup(
                     "dh_dist_pct": round(dh_dist_pct, 3),
                     "ce_pchange": cand_ce_pchange,
                     "vol_oi": cand_ce_vol_oi,
+                    "smt_divergence": smt_res.divergence_type if smt_res else None,
+                }
+        elif (
+            -0.35 <= dh_dist_pct < -0.05
+            and not is_5m_bear_trend
+            and (spot >= (effective_vwap * 0.998) if effective_vwap > 0 else True)
+        ):
+            # Day High Proximity Surveillance (STAGE_PRIMED)
+            if (
+                "DAY_HIGH_PROXIMITY" not in signals
+                and "DAY_HIGH_BREAKOUT" not in signals
+                and "CAMARILLA_H4_PROXIMITY" not in signals
+                and "CAMARILLA_H4_BREAKOUT" not in signals
+            ):
+                signals.append("DAY_HIGH_PROXIMITY")
+                signal_tags["day_high_proximity"] = {
+                    "day_high": round(day_high, 1),
+                    "spot": spot,
+                    "proximity_pct": round(abs(dh_dist_pct), 3),
                 }
 
     # 10. Institutional Expansion Thrust (Parabolic Momentum Squeeze)
@@ -1948,6 +2033,9 @@ def detect_index_call_setup(
         "DOUBLE_BOTTOM_BREAKOUT": 8,
         "VCP_COILING": 7,  # Pre-breakout, lower confidence since not yet confirmed
         "DAY_HIGH_BREAKOUT": 12,
+        "DAY_HIGH_PROXIMITY": 16,
+        "CAMARILLA_H4_BREAKOUT": 16,
+        "CAMARILLA_H4_PROXIMITY": 18,
         "INSTITUTIONAL_EXPANSION_THRUST": 16,
         "SHORT_SQUEEZE_UNWIND": 16,
         "PUT_WRITING_FLOOR": 8,
@@ -1974,7 +2062,9 @@ def detect_index_call_setup(
     # Narrow CPR Breakout Confluence Boost
     if is_narrow_cpr and (
         "DAY_HIGH_BREAKOUT" in signals
+        or "DAY_HIGH_PROXIMITY" in signals
         or "CAMARILLA_H4_BREAKOUT" in signals
+        or "CAMARILLA_H4_PROXIMITY" in signals
         or is_institutional_thrust
     ):
         confidence += 6
@@ -1982,11 +2072,20 @@ def detect_index_call_setup(
     confidence = min(98, confidence)
 
     # Single-signal unconfirmed guard: if only 1 signal and without explosive momentum, cap at 72%
-    if len(signals) == 1 and not is_explosive_momentum:
+    # (Exempt PRIMED proximity surveillance setups which require >= 85 confidence for advance heads-up dispatch)
+    if (
+        len(signals) == 1
+        and not is_explosive_momentum
+        and "CAMARILLA_H4_PROXIMITY" not in signals
+        and "DAY_HIGH_PROXIMITY" not in signals
+    ):
         confidence = min(72, confidence)
 
-    # VCP_COILING is always EARLY_WARNING (fires before the breakout candle)
-    if signals == ["VCP_COILING"]:
+    # Determine stage:
+    if any(s in signals for s in ("CAMARILLA_H4_PROXIMITY", "DAY_HIGH_PROXIMITY")):
+        stage = "PRIMED"
+        confidence = max(85, confidence)
+    elif signals == ["VCP_COILING"]:
         stage = "EARLY_WARNING"
     elif is_institutional_thrust:
         stage = "IGNITED"
@@ -2122,7 +2221,25 @@ def detect_index_call_setup(
     primary_signal = signals[0]
     icon = _SETUP_ICONS.get(primary_signal, "🟢")
 
-    if "INSTITUTIONAL_EXPANSION_THRUST" in signals:
+    if "CAMARILLA_H4_PROXIMITY" in signals and stage == "PRIMED":
+        h4_info = signal_tags.get("camarilla_h4_proximity", {})
+        headline = (
+            f"⚡ [PRIMED PROXIMITY] CAMARILLA H4 BREAKOUT WATCH: {clean_sym} {int(strike)} CE"
+        )
+        summary = (
+            f"Pre-Breakout Proximity Watch: Spot (₹{spot:,.1f}) approaching Camarilla H4 (₹{h4_info.get('cam_h4', 0):,.1f}, "
+            f"{h4_info.get('proximity_pct', 0.2):.2f}% below). Stage contract now in broker watchlist to capture immediate momentum on breach. "
+            f"Entry Trigger: Spot ₹{h4_info.get('cam_h4', 0):,.1f} (Est. Prem ₹{opt_ltp:,.1f}) | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "DAY_HIGH_PROXIMITY" in signals and stage == "PRIMED":
+        dh_info = signal_tags.get("day_high_proximity", {})
+        headline = f"⚡ [PRIMED PROXIMITY] DAY HIGH BREAKOUT WATCH: {clean_sym} {int(strike)} CE"
+        summary = (
+            f"Pre-Breakout Proximity Watch: Spot (₹{spot:,.1f}) approaching Session High (₹{dh_info.get('day_high', 0):,.1f}, "
+            f"{dh_info.get('proximity_pct', 0.2):.2f}% below). Stage contract now in broker watchlist to capture immediate momentum on breach. "
+            f"Entry Trigger: Spot ₹{dh_info.get('day_high', 0):,.1f} (Est. Prem ₹{opt_ltp:,.1f}) | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "INSTITUTIONAL_EXPANSION_THRUST" in signals:
         iet = signal_tags.get("institutional_expansion_thrust", {})
         headline = f"🚀 INSTITUTIONAL EXPANSION THRUST: {clean_sym} {int(strike)} CE"
         summary = (
@@ -2679,6 +2796,11 @@ def detect_index_call_setup(
         )
     )
 
+    primed_sl_limit_trigger = round(opt_ltp * 1.025, 1) if opt_ltp > 0 else 0.0
+    primed_sl_limit_price = (
+        round(primed_sl_limit_trigger * 1.015, 1) if primed_sl_limit_trigger > 0 else 0.0
+    )
+
     if "VALUE_BASE_ACCUMULATION" in signals:
         exec_trigger_str = f"LIMIT_IN_OTE_ZONE_₹{entry_range_str}"
         conf_rule_str = "LIMIT_ON_PULLBACK_OTE"
@@ -2700,6 +2822,24 @@ def detect_index_call_setup(
         exec_notes_str = (
             f"Pullback/Bounce Execution: Enter on limit or demand rejection in OTE zone ({entry_range_str}). "
             f"Invalidation stop anchored at ₹{sl_premium:,.1f}."
+        )
+    elif "CAMARILLA_H4_PROXIMITY" in signals:
+        h4_lvl = signal_tags.get("camarilla_h4_proximity", {}).get("cam_h4", spot)
+        exec_trigger_str = f"BUY_ON_CAMARILLA_H4_BREACH_₹{h4_lvl:,.1f}"
+        conf_rule_str = "BREACH_OR_1M_CLOSE_ABOVE_H4"
+        exec_notes_str = (
+            f"⚡ Pre-Breakout Proximity: Stage contract in broker terminal now. "
+            f"Place pending BUY SL-LIMIT (Trigger: ₹{primed_sl_limit_trigger:,.1f}, Limit: ₹{primed_sl_limit_price:,.1f}) "
+            f"or execute when spot crosses Camarilla H4 (₹{h4_lvl:,.1f}). Invalidation stop anchored at ₹{sl_premium:,.1f}."
+        )
+    elif "DAY_HIGH_PROXIMITY" in signals:
+        dh_lvl = signal_tags.get("day_high_proximity", {}).get("day_high", spot)
+        exec_trigger_str = f"BUY_ON_DAY_HIGH_BREACH_₹{dh_lvl:,.1f}"
+        conf_rule_str = "BREACH_OR_1M_CLOSE_ABOVE_DAY_HIGH"
+        exec_notes_str = (
+            f"⚡ Pre-Breakout Proximity: Stage contract in broker terminal now. "
+            f"Place pending BUY SL-LIMIT (Trigger: ₹{primed_sl_limit_trigger:,.1f}, Limit: ₹{primed_sl_limit_price:,.1f}) "
+            f"or execute when spot crosses Session High (₹{dh_lvl:,.1f}). Invalidation stop anchored at ₹{sl_premium:,.1f}."
         )
     elif is_breakout_type:
         exec_trigger_str = f"ABOVE_₹{opt_ltp:,.1f}_ON_1M_CLOSE" if opt_ltp else "ON_BREAKOUT_CLOSE"
@@ -2836,8 +2976,15 @@ def detect_index_call_setup(
             )
             if hedge_plan
             else ("DEEP_ITM_OR_SPREAD" if is_high_iv_risk else "NAKED_OPTION"),
+            "broker_order_type": "BUY SL-LIMIT" if stage == "PRIMED" else "LIMIT_OR_MARKET",
+            "sl_limit_trigger": f"₹{primed_sl_limit_trigger:,.1f}"
+            if (stage == "PRIMED" and primed_sl_limit_trigger > 0)
+            else None,
+            "sl_limit_price": f"₹{primed_sl_limit_price:,.1f}"
+            if (stage == "PRIMED" and primed_sl_limit_price > 0)
+            else None,
             "iv_crush_defense": (
-                f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65), Bull Call Vertical Spreads, or Futures."
+                f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65) or Bull Call Vertical Spreads (Zero Futures Intraday Rule)."
                 if is_high_iv_risk
                 else None
             ),

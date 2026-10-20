@@ -22,7 +22,7 @@ logger = logging.getLogger("engine.options_backtest")
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import numpy as np
@@ -155,6 +155,8 @@ class OptionsLeg:
     lot_size: int = 1
     lots: int = 1
     pnl: float = 0.0
+    provenance: str = "SYNTHETIC_BLACK_SCHOLES"
+    symbol: str = ""
 
 
 @dataclass
@@ -170,6 +172,7 @@ class OptionsTrade:
     combined_pnl_pct: float  # % return on margin/premium deployed
     hold_days: int
     strategy_name: str = ""
+    data_provenance: str = "SYNTHETIC_BLACK_SCHOLES"
 
 
 @dataclass
@@ -194,6 +197,9 @@ class OptionsBacktestResult:
     sharpe_ratio: float = 0.0
     avg_hold_days: float = 0.0
     trades: list[OptionsTrade] = field(default_factory=list)
+    equity_curve: list[float] = field(default_factory=list)
+    data_provenance: str = "SYNTHETIC_BLACK_SCHOLES"
+    real_fno_candle_count: int = 0
 
     def print_summary(self) -> None:
         ret_style = "green" if self.total_pnl >= 0 else "red"
@@ -201,6 +207,7 @@ class OptionsBacktestResult:
             f"  Strategy       : [bold]{self.strategy_name}[/bold]",
             f"  Underlying     : {self.underlying}",
             f"  Period         : {self.start_date} → {self.end_date}",
+            f"  Data Source    : {self.data_provenance} ({self.real_fno_candle_count} real bars)",
             "",
             "  [bold]Returns[/bold]",
             f"  Total P&L      : [{ret_style}]₹{self.total_pnl:,.0f}[/{ret_style}]",
@@ -586,14 +593,151 @@ class OptionsBacktester:
         capital: float = 100000,
         lot_size: Optional[int] = None,
         strike_step: Optional[float] = None,
+        use_real_fno: bool = True,
     ) -> None:
         self.underlying = underlying.upper()
         self.period = period
         self.initial_capital = capital
         self.lot_size = lot_size or LOT_SIZES.get(self.underlying, 1)
         self.strike_step = strike_step or STRIKE_STEPS.get(self.underlying, 50)
+        self.use_real_fno = use_real_fno
         self._spot_data: Optional[pd.DataFrame] = None
         self._vix_data: Optional[pd.DataFrame] = None
+        self._option_candles_cache: dict[str, pd.DataFrame] = {}
+
+    def _format_candidate_option_symbols(
+        self,
+        underlying: str,
+        expiry: date,
+        strike: float,
+        option_type: str,
+    ) -> list[str]:
+        """
+        Builds candidate exchange/Fyers option symbols for historical contract lookups.
+        Examples for NIFTY 24500 CE on 2024-10-31 (monthly):
+          - NSE:NIFTY24OCT24500CE
+          - NFO:NIFTY24OCT24500CE
+        Examples for weekly expiry e.g. 2024-10-17:
+          - NSE:NIFTY24O1724500CE
+        """
+        clean_u = (
+            underlying.upper()
+            .replace("NSE:", "")
+            .replace("NFO:", "")
+            .replace("BSE:", "")
+            .replace("-INDEX", "")
+            .replace(" ", "")
+            .replace("_", "")
+        )
+        if clean_u in ("NIFTY50", "NIFTY_50"):
+            clean_u = "NIFTY"
+        elif clean_u in ("NIFTYBANK", "BANK_NIFTY"):
+            clean_u = "BANKNIFTY"
+
+        yy = expiry.strftime("%y")
+        mmm = expiry.strftime("%b").upper()
+        dd = expiry.strftime("%d")
+        strike_str = f"{int(strike)}" if strike == int(strike) else f"{strike:.1f}"
+        opt = option_type.upper()
+
+        monthly_sym = f"NSE:{clean_u}{yy}{mmm}{strike_str}{opt}"
+        monthly_nfo = f"NFO:{clean_u}{yy}{mmm}{strike_str}{opt}"
+
+        month_chars = {
+            1: "1",
+            2: "2",
+            3: "3",
+            4: "4",
+            5: "5",
+            6: "6",
+            7: "7",
+            8: "8",
+            9: "9",
+            10: "O",
+            11: "N",
+            12: "D",
+        }
+        m_char = month_chars.get(expiry.month, mmm[0])
+        weekly_fyers = f"NSE:{clean_u}{yy}{m_char}{dd}{strike_str}{opt}"
+        weekly_fyers_nfo = f"NFO:{clean_u}{yy}{m_char}{dd}{strike_str}{opt}"
+
+        return [monthly_sym, weekly_fyers, monthly_nfo, weekly_fyers_nfo]
+
+    def _resolve_option_premium(
+        self,
+        underlying: str,
+        strike: float,
+        opt_type: str,
+        dt_date: date,
+        dte: int,
+        iv: float,
+        spot: float,
+        expiry: Optional[date] = None,
+    ) -> tuple[float, str, str]:
+        """
+        Resolves option premium for backtesting.
+        Attempts to fetch real historical F&O contract candles from broker/cache.
+        Falls back smoothly to Black-Scholes formula if real candles are unavailable.
+
+        Returns:
+            tuple[float, str, str]: (premium, provenance, contract_symbol)
+        """
+        if self.use_real_fno and expiry is not None:
+            symbols_to_try = self._format_candidate_option_symbols(
+                underlying, expiry, strike, opt_type
+            )
+            for sym in symbols_to_try:
+                df_opt = self._option_candles_cache.get(sym)
+                if df_opt is None:
+                    try:
+                        from brokers.session import get_data_broker
+
+                        broker = get_data_broker()
+                        if broker and not getattr(broker, "_is_mock", False):
+                            fetch_fn = getattr(broker, "get_expired_fno_history", None) or getattr(
+                                broker, "get_historical_data", None
+                            )
+                            if callable(fetch_fn):
+                                from_dt = datetime.combine(
+                                    expiry - timedelta(days=35), datetime.min.time()
+                                )
+                                to_dt = datetime.combine(
+                                    expiry + timedelta(days=1), datetime.max.time()
+                                )
+                                raw = fetch_fn(
+                                    symbol=sym,
+                                    interval="day",
+                                    from_date=from_dt,
+                                    to_date=to_dt,
+                                )
+                                if raw:
+                                    df_parsed = pd.DataFrame(raw)
+                                    if "date" in df_parsed.columns and "close" in df_parsed.columns:
+                                        df_parsed["date_norm"] = pd.to_datetime(
+                                            df_parsed["date"]
+                                        ).dt.date
+                                        df_parsed.set_index("date_norm", inplace=True)
+                                        self._option_candles_cache[sym] = df_parsed
+                                        df_opt = df_parsed
+                    except Exception as e_broker:
+                        logger.debug(
+                            f"[OptionsBacktest] Real F&O fetch error for {sym}: {e_broker}"
+                        )
+
+                if df_opt is not None and not df_opt.empty:
+                    if dt_date in df_opt.index:
+                        row = df_opt.loc[dt_date]
+                        close_p = float(
+                            row["close"].iloc[0]
+                            if isinstance(row["close"], pd.Series)
+                            else row["close"]
+                        )
+                        if close_p > 0:
+                            return (round(close_p, 2), "REAL_EXPIRED_FNO", sym)
+
+        # Fallback to Black-Scholes
+        bs_p = bs_premium(spot, strike, max(dte, 0), iv, opt_type)
+        return (round(bs_p, 2), "SYNTHETIC_BLACK_SCHOLES", "")
 
     def _load_data(self) -> None:
         """Load historical spot + VIX data."""
@@ -653,6 +797,7 @@ class OptionsBacktester:
         capital = self.initial_capital
         trades: list[OptionsTrade] = []
         equity = [capital]
+        real_fno_candle_count = 0
 
         # Position state
         in_position = False
@@ -683,7 +828,18 @@ class OptionsBacktester:
 
                     for spec in legs_spec:
                         strike = atm_strike + spec["strike_offset"]
-                        premium = bs_premium(spot, strike, dte, iv, spec["type"])
+                        premium, prov, leg_sym = self._resolve_option_premium(
+                            self.underlying,
+                            strike,
+                            spec["type"],
+                            dt_date,
+                            dte,
+                            iv,
+                            spot,
+                            nearest_exp,
+                        )
+                        if prov == "REAL_EXPIRED_FNO":
+                            real_fno_candle_count += 1
                         sign = 1 if spec["transaction"] == "BUY" else -1
                         entry_premium_total += sign * premium * self.lot_size
 
@@ -692,6 +848,8 @@ class OptionsBacktester:
                                 **spec,
                                 "strike": strike,
                                 "entry_premium": premium,
+                                "provenance": prov,
+                                "symbol": leg_sym,
                             }
                         )
 
@@ -702,7 +860,16 @@ class OptionsBacktester:
                 # Calculate unrealised P&L
                 unrealised = 0.0
                 for leg in active_legs:
-                    current_prem = bs_premium(spot, leg["strike"], max(dte, 0), iv, leg["type"])
+                    current_prem, _, _ = self._resolve_option_premium(
+                        self.underlying,
+                        leg["strike"],
+                        leg["type"],
+                        dt_date,
+                        max(dte, 0),
+                        iv,
+                        spot,
+                        nearest_exp,
+                    )
                     sign = 1 if leg["transaction"] == "BUY" else -1
                     pnl_per_unit = sign * (current_prem - leg["entry_premium"])
                     unrealised += pnl_per_unit * self.lot_size
@@ -720,8 +887,25 @@ class OptionsBacktester:
                     # Close all legs
                     trade_legs = []
                     combined_pnl = 0.0
+                    trade_provenance = "SYNTHETIC_BLACK_SCHOLES"
+
                     for leg in active_legs:
-                        exit_prem = bs_premium(spot, leg["strike"], max(dte, 0), iv, leg["type"])
+                        exit_prem, exit_prov, _ = self._resolve_option_premium(
+                            self.underlying,
+                            leg["strike"],
+                            leg["type"],
+                            dt_date,
+                            max(dte, 0),
+                            iv,
+                            spot,
+                            nearest_exp,
+                        )
+                        if exit_prov == "REAL_EXPIRED_FNO":
+                            trade_provenance = "REAL_EXPIRED_FNO"
+                            real_fno_candle_count += 1
+                        elif leg.get("provenance") == "REAL_EXPIRED_FNO":
+                            trade_provenance = "REAL_EXPIRED_FNO"
+
                         sign = 1 if leg["transaction"] == "BUY" else -1
                         leg_pnl = sign * (exit_prem - leg["entry_premium"]) * self.lot_size
 
@@ -734,6 +918,8 @@ class OptionsBacktester:
                                 exit_premium=round(exit_prem, 2),
                                 lot_size=self.lot_size,
                                 pnl=round(leg_pnl, 2),
+                                provenance=leg.get("provenance", "SYNTHETIC_BLACK_SCHOLES"),
+                                symbol=leg.get("symbol", ""),
                             )
                         )
                         combined_pnl += leg_pnl
@@ -752,6 +938,7 @@ class OptionsBacktester:
                             combined_pnl_pct=round(pnl_pct, 1),
                             hold_days=days_held,
                             strategy_name=strategy.name,
+                            data_provenance=trade_provenance,
                         )
                     )
 
@@ -783,6 +970,10 @@ class OptionsBacktester:
         dd = (eq - peak) / peak * 100
         max_dd = float(dd.min()) if not dd.empty else 0
 
+        overall_provenance = (
+            "REAL_EXPIRED_FNO" if real_fno_candle_count > 0 else "SYNTHETIC_BLACK_SCHOLES"
+        )
+
         return OptionsBacktestResult(
             underlying=self.underlying,
             strategy_name=strategy.name,
@@ -801,6 +992,9 @@ class OptionsBacktester:
             sharpe_ratio=round(sharpe, 2),
             avg_hold_days=round(avg_hold, 1),
             trades=trades,
+            equity_curve=equity,
+            data_provenance=overall_provenance,
+            real_fno_candle_count=real_fno_candle_count,
         )
 
 

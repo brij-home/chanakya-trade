@@ -472,7 +472,26 @@ class TradeLifecycleManager:
         alert.r_multiple = eval_res.r_multiple
         alert.pnl_pct = eval_res.pnl_pct
         if getattr(eval_res, "strike_roll_recommendation", None):
-            alert.strike_roll_recommendation = eval_res.strike_roll_recommendation
+            roll_rec = eval_res.strike_roll_recommendation
+            alert.strike_roll_recommendation = roll_rec
+            alert.revolve_advisory = roll_rec
+            if hasattr(alert, "record_audit"):
+                alert.record_audit(
+                    "STRIKE_REVOLVE_ADVISORY",
+                    f"Strike Revolve Recommended: {roll_rec.get('action', 'ROLL')} to {roll_rec.get('recommended_contract')}",
+                    actor="StrikeRevolver",
+                    details={
+                        "milestone": getattr(eval_res, "new_milestone", ""),
+                        "action": roll_rec.get("action"),
+                        "current_strike": roll_rec.get("current_strike"),
+                        "recommended_strike": roll_rec.get("recommended_strike"),
+                        "recommended_contract": roll_rec.get("recommended_contract"),
+                        "reinvest_capital_pts": roll_rec.get("reinvest_capital_pts"),
+                        "locked_profit_pts": roll_rec.get("locked_profit_pts"),
+                        "risk_free_guarantee": roll_rec.get("risk_free_guarantee"),
+                        "target_delta": roll_rec.get("target_delta"),
+                    },
+                )
 
         env_tag = "[TEST]" if (alert.environment == "TEST" or not alert.is_live) else "[REAL/LIVE]"
         is_crypto = (

@@ -4,6 +4,7 @@ tests/test_order_book.py
 Unit tests for market.order_book OBI, iceberg detection, and depth metrics.
 """
 
+import pytest
 from market.order_book import (
     BisectDepthBook,
     compute_order_book_metrics,
@@ -263,3 +264,50 @@ def test_live_streaming_depth_book_registry():
     assert flow_snap.top_asks[0]["price"] == 500.5
 
     clear_depth_books()
+
+
+def test_resolve_option_greeks_on_option_contract():
+    """Verify OrderBookSnapshot resolves Option Greeks for derivative option symbols."""
+    from market.order_book import analyze_symbol_order_book, resolve_option_greeks
+
+    # Test direct helper
+    g = resolve_option_greeks("NIFTY 25000 CE", ltp=150.0)
+    assert g is not None
+    assert "delta" in g
+    assert "gamma" in g
+    assert "theta" in g
+    assert "vega" in g
+    assert "iv_pct" in g
+    assert g["option_type"] == "CE"
+    assert g["strike"] == 25000.0
+    assert 0.0 <= g["delta"] <= 1.0
+
+    # Test attached to snapshot
+    snap = analyze_symbol_order_book("NFO:NIFTY26OCT25000CE")
+    assert snap.greeks is not None
+    assert snap.greeks["strike"] == 25000.0
+
+
+def test_order_book_stream_route_registered():
+    """Verify /api/market/order-book/{symbol}/stream is registered in FastAPI."""
+    from web.api import app
+
+    paths = []
+    for r in app.routes:
+        if hasattr(r, "path"):
+            paths.append(r.path)
+        if hasattr(r, "original_router") and hasattr(r.original_router, "routes"):
+            paths.extend([sub_r.path for sub_r in r.original_router.routes])
+    assert "/api/market/order-book/{symbol}/stream" in paths
+
+
+@pytest.mark.anyio
+async def test_order_book_stream_generator():
+    """Verify stream_order_book_endpoint yields real-time SSE formatted event stream."""
+    from web.routers.market_data import stream_order_book_endpoint
+
+    resp = await stream_order_book_endpoint("RELIANCE")
+    assert resp.media_type == "text/event-stream"
+    gen = resp.body_iterator
+    first_chunk = await anext(gen)
+    assert "data: " in first_chunk or ": heartbeat" in first_chunk

@@ -2050,7 +2050,11 @@ class EODReportGenerator:
 
             stage = a.get("stage") or "NEW"
             milestones = a.get("achieved_milestones") or []
-            is_inv = bool(a.get("is_invalidated", False))
+            is_inv = bool(
+                a.get("is_invalidated", False)
+                or a.get("stage") in ("INVALIDATED", "STOPPED", "STOP_LOSS_HIT")
+                or a.get("target_status") in ("INVALIDATED", "STOPPED")
+            )
             target_status = a.get("target_status") or "PENDING"
             ltp = float(a.get("ltp") or 0.0)
             entry = float(a.get("trigger_level") or a.get("entry_price") or ltp)
@@ -2110,6 +2114,12 @@ class EODReportGenerator:
                 or "prior to trigger" in lower_inv
                 or "never entered" in lower_inv
                 or "anchor breached before trigger" in lower_inv
+                or "gap_over_sl" in lower_inv
+                or "pre-open indicative" in lower_inv
+                or "gapped below stop loss" in lower_inv
+                or "gapped above stop loss" in lower_inv
+                or "gapped over stop loss" in lower_inv
+                or (not a.get("triggered_at") and "gapped" in lower_inv)
             )
             is_untriggered = (
                 (
@@ -2140,6 +2150,23 @@ class EODReportGenerator:
             )
             # Long bias: options (both CE & PE long) and bullish equity are long. Only non-option bearish is short.
             is_long = is_option or (direction == "BULLISH")
+
+            # Enforce Option Scale Separation Invariant (Invariant 14):
+            # If an option alert's stop-loss is contaminated by spot index levels, sanitize it.
+            is_sl_contaminated = is_option and (
+                (entry < 500.0 and sl >= 1000.0) or (entry > 0 and sl > 3.5 * entry)
+            )
+            if is_sl_contaminated:
+                extracted_sl = None
+                m_sl = re.search(r"SL\s*(?:Rs\.)?\s*([\d.]+)", inv_reason, re.IGNORECASE)
+                if m_sl:
+                    try:
+                        p_sl = float(m_sl.group(1))
+                        if not (p_sl >= 1000.0 and entry < 500.0):
+                            extracted_sl = p_sl
+                    except ValueError as e:
+                        logger.debug(f"[EODReportGenerator] SL float conversion suppressed: {e}")
+                sl = extracted_sl if extracted_sl is not None else round(entry * 0.72, 1)
 
             # Check T0.5 milestone presence
             has_t05 = bool(
@@ -2543,22 +2570,34 @@ class EODReportGenerator:
                     a.get("initial_invalidation_stop") or (entry * 0.28 if is_option else risk)
                 )
                 init_risk_pts = abs(entry - init_risk) if abs(entry - init_risk) > 0.01 else risk
+
+                # Enforce Scale Separation Invariant (Invariant 14):
+                # Detect if option stop-loss was contaminated with underlying spot index/stock price
+                is_sl_contaminated = is_option and (
+                    (entry < 500.0 and sl >= 1000.0) or (entry > 0 and sl > 3.5 * entry)
+                )
                 if is_long:
                     realized_gain_pts = (
                         max(0.0, sl - entry)
-                        if sl > entry
+                        if (sl > entry and not is_sl_contaminated)
                         else float(a.get("locked_profit_pts") or 0.0)
                     )
                 else:
                     realized_gain_pts = (
                         max(0.0, entry - sl)
-                        if (sl < entry and sl > 0)
+                        if (sl < entry and sl > 0 and not is_sl_contaminated)
                         else float(a.get("locked_profit_pts") or 0.0)
                     )
-                if realized_gain_pts <= 0 and gain_pct > 0:
+                if realized_gain_pts <= 0 and gain_pct > 0 and not is_sl_contaminated:
                     realized_gain_pts = max(0.0, abs(gain_pts))
                 if realized_gain_pts <= 0 and float(a.get("pnl_pct") or 0.0) > 0:
                     realized_gain_pts = max(0.0, entry * (float(a.get("pnl_pct")) / 100.0))
+                if (
+                    realized_gain_pts <= 0
+                    and a.get("r_multiple")
+                    and float(a.get("r_multiple")) > 0
+                ):
+                    realized_gain_pts = init_risk_pts * float(a.get("r_multiple"))
 
                 r_achieved = (
                     max(0.3, min(4.0, round(realized_gain_pts / init_risk_pts, 2)))
@@ -2586,7 +2625,11 @@ class EODReportGenerator:
                     detector_stats[det]["ui_net_r"] += r_achieved
                     ui_gross_profit_r += r_achieved
 
-                exit_price = ltp if ltp > 0 else (sl if sl > 0 else entry)
+                exit_price = (
+                    ltp
+                    if (ltp > 0 and not (is_option and ltp >= 1000.0 and entry < 500.0))
+                    else (sl if (sl > 0 and not is_sl_contaminated) else entry)
+                )
                 calc_pnl = (
                     gain_pct
                     if gain_pct > 0
@@ -2649,13 +2692,34 @@ class EODReportGenerator:
                     f"Stop-loss breached: {inv_reason[:65] if inv_reason else 'Risk limit reached'}"
                 )
 
+                # Enforce Scale Separation Invariant (Invariant 14):
+                # Detect if option stop-loss was contaminated with underlying spot index/stock price
+                is_sl_contaminated = is_option and (
+                    (entry < 500.0 and sl >= 1000.0) or (entry > 0 and sl > 3.5 * entry)
+                )
+                clean_sl = sl
+                if is_sl_contaminated:
+                    clean_sl = round(entry * 0.72, 1)
+
+                clean_exit = clean_sl
+                m_ltp = re.search(r"LTP\s*(?:Rs\.)?\s*([\d.]+)", inv_reason, re.IGNORECASE)
+                if m_ltp:
+                    try:
+                        parsed_exit = float(m_ltp.group(1))
+                        if not (is_option and parsed_exit >= 1000.0 and entry < 500.0):
+                            clean_exit = parsed_exit
+                    except ValueError as e:
+                        logger.debug(
+                            f"[EODReportGenerator] Exit LTP float conversion suppressed: {e}"
+                        )
+
                 summary = TradeOutcomeSummary(
                     alert_id=a.get("alert_id", ""),
                     symbol=display_symbol,
                     segment=seg,
                     direction=direction,
                     entry_level=entry,
-                    stop_loss=sl,
+                    stop_loss=clean_sl,
                     target_level=target,
                     peak_gain_pct=gain_pct,
                     realized_r=-1.0,
@@ -2664,7 +2728,7 @@ class EODReportGenerator:
                     headline=a.get("headline", ""),
                     invalidation_reason=inv_reason,
                     strategy=det,
-                    exit_level=sl,
+                    exit_level=clean_exit,
                     pnl_pct=-abs(risk / entry * 100.0) if entry > 0 else -5.0,
                     time_str=time_part,
                     verdict_note=verdict_note,

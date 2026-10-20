@@ -1274,6 +1274,22 @@ def calculate_option_execution_plan(
         else (getattr(trade_plan, "entry_price", None) or strike or option_ltp)
     )
 
+    # ── Institutional Event Volatility & Hedging Vector ──────────
+    event_hedge_plan = None
+    try:
+        from analysis.event_volatility import evaluate_event_volatility_strategy
+
+        dir_hint = "BULLISH" if option_type.upper() == "CE" else "BEARISH"
+        ev_obj = evaluate_event_volatility_strategy(
+            symbol=clean_contract,
+            spot=entry_spot,
+            direction=dir_hint,
+        )
+        if ev_obj:
+            event_hedge_plan = ev_obj.to_dict()
+    except Exception as e_ev:
+        logger.debug("[OptionPlan] Event volatility hedge check non-fatal: %s", e_ev)
+
     try:
         from analysis.options import compute_greeks
 
@@ -1359,7 +1375,7 @@ def calculate_option_execution_plan(
 
     # ── Expiry-Day Detection ──────────────────────────────────────
     # On the expiry day, a small spot move = massive option gain (near-zero extrinsic).
-    # Weekly NIFTY/BANKNIFTY CE: 50 pts spot move = 200%+ option gain.
+    # Expiry-day index contracts (Weekly NIFTY or Monthly BANKNIFTY): 50 pts spot move = 200%+ option gain.
     # Remove all hardcoded multiplier ceilings so real Greek-driven targets are shown.
     is_expiry_day = False
     try:
@@ -1828,6 +1844,8 @@ def calculate_option_execution_plan(
         "t3_eta": getattr(trade_plan, "eta_t3_str", "~80 mins"),
         # Hedged Defined-Risk Spread Blueprint (Theta Neutralization & Wall Monetization)
         "hedged_spread": hedged_spread_plan,
+        # Institutional Event Volatility & Hedging Blueprint
+        "event_hedge_plan": event_hedge_plan,
         # Free-Roll Execution Protocol (+2R Scale 50% & Zero-Risk Runner)
         "free_roll_plan": free_roll_plan,
         "time_stop_minutes": time_stop_mins,

@@ -214,6 +214,38 @@ class Order:
     tag: Optional[str] = None
 
 
+@dataclass
+class GTTLeg:
+    """A single conditional trigger leg (Stop Loss or Profit Target)."""
+
+    price: float
+    trigger_price: float
+    quantity: int
+
+
+@dataclass
+class GTTRequest:
+    """Request to place a server-side Good-Till-Triggered (GTT) or One-Cancels-Other (OCO) order."""
+
+    symbol: str
+    exchange: str
+    transaction_type: str  # "BUY" or "SELL"
+    trigger_type: str  # "SINGLE" or "OCO"
+    product: str  # "CNC", "MIS", "NRML"
+    leg1: GTTLeg  # Primary trigger leg (typically Stop Loss)
+    leg2: Optional[GTTLeg] = None  # Secondary trigger leg (Target for OCO bracket)
+
+
+@dataclass
+class GTTResponse:
+    """Result of placing or updating a server-side GTT order."""
+
+    gtt_id: str
+    status: str  # "ACTIVE", "REJECTED", "CANCELLED", "TRIGGERED"
+    message: str = ""
+    raw: Optional[dict[str, Any]] = None
+
+
 # ── Abstract broker interface ─────────────────────────────────────────────────
 
 
@@ -300,6 +332,30 @@ class BrokerAPI(ABC):
         """
         ...
 
+    def get_market_depth(self, symbol: str) -> dict[str, Any]:
+        """
+        Return Level 2 market depth (5-depth or 20-depth order book).
+        Standardized across all broker implementations:
+          {
+             "symbol": str,
+             "bids": [{"price": float, "quantity": int, "orders": int}, ...],
+             "asks": [{"price": float, "quantity": int, "orders": int}, ...],
+             "spread": float,
+             "total_buy_qty": int,
+             "total_sell_qty": int,
+             "status": str ("LIVE_L2" | "UNAVAILABLE")
+          }
+        """
+        return {
+            "symbol": symbol,
+            "bids": [],
+            "asks": [],
+            "spread": 0.0,
+            "total_buy_qty": 0,
+            "total_sell_qty": 0,
+            "status": "UNAVAILABLE",
+        }
+
     # ── Orders ────────────────────────────────────────────────
 
     @abstractmethod
@@ -330,6 +386,23 @@ class BrokerAPI(ABC):
         Subclasses with order modification capabilities should override this.
         """
         raise NotImplementedError(f"{self.__class__.__name__} does not support order modification")
+
+    # ── Good-Till-Triggered (GTT) Orders ───────────────────────
+
+    def place_gtt(self, req: GTTRequest) -> GTTResponse:
+        """
+        Place a server-side Good-Till-Triggered (GTT) or One-Cancels-Other (OCO) order.
+        Subclasses override if the broker supports native server-side conditional orders.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support native GTT orders")
+
+    def get_gtts(self) -> list[dict[str, Any]]:
+        """Fetch active server-side GTT orders."""
+        return []
+
+    def cancel_gtt(self, gtt_id: str) -> bool:
+        """Cancel an active server-side GTT order."""
+        return False
 
     # ── Historical Data ────────────────────────────────────────
 

@@ -745,6 +745,29 @@ class MStockWebSocket:
                 f"[market.mstock_websocket] Non-fatal exception suppressed: {e_suppressed}"
             )
 
+        # Ingest into Columnar Parquet Tick Warehouse
+        try:
+            from engine.tick_warehouse import get_tick_warehouse
+
+            ts_ms = int(tick.timestamp * 1000) if tick.timestamp and tick.timestamp > 0 else None
+            b_price = tick.bids[0].price if tick.bids else 0.0
+            a_price = tick.asks[0].price if tick.asks else 0.0
+            b_qty = tick.bids[0].quantity if tick.bids else 0
+            a_qty = tick.asks[0].quantity if tick.asks else 0
+            get_tick_warehouse().record_tick(
+                symbol=tick.symbol,
+                ltp=tick.ltp,
+                bid=b_price,
+                ask=a_price,
+                bid_qty=b_qty,
+                ask_qty=a_qty,
+                volume=int(tick.volume or 0),
+                flag="L2_TICK",
+                timestamp_ms=ts_ms,
+            )
+        except Exception as e_wh:
+            logger.debug(f"[market.mstock_websocket] TickWarehouse ingestion error: {e_wh}")
+
         # Update live BisectDepthBook in RAM if market depth or tick is present
         if tick.bids or tick.asks:
             try:

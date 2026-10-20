@@ -367,10 +367,10 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                           </div>
 
                           {/* Live Market Price & Distance */}
-                          <div className="flex items-center justify-between px-2.5 py-1 rounded-lg text-[10px] font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}>
+                          <div className="flex items-center justify-between px-2.5 py-1 rounded-lg text-[10px] font-mono tabular-nums" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}>
                             <div className="flex items-center gap-1.5">
                               <span style={{ color: 'var(--color-muted)' }}>LTP:</span>
-                              <span className="font-bold font-mono" style={{ color: 'var(--color-text)' }}>
+                              <span className="font-bold font-mono tabular-nums" style={{ color: 'var(--color-text)' }}>
                                 {livePrice ? `₹${Number(livePrice).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}` : (entry ? `₹${Number(entry).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}` : '—')}
                               </span>
                               {livePrice ? (
@@ -384,14 +384,14 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                               )}
                             </div>
                             {distPct != null && (
-                              <span className="text-[9px] font-bold" style={{ color: isStopBreached ? 'var(--color-rose)' : Math.abs(distPct) <= 1 ? 'var(--color-emerald)' : distPct > 0 ? 'var(--color-gold)' : 'var(--color-rose)' }}>
+                              <span className="text-[9px] font-bold tabular-nums" style={{ color: isStopBreached ? 'var(--color-rose)' : Math.abs(distPct) <= 1 ? 'var(--color-emerald)' : distPct > 0 ? 'var(--color-gold)' : 'var(--color-rose)' }}>
                                 {isStopBreached ? '⚠️ STOP HIT' : distPct > 0 ? `+${distPct.toFixed(1)}% entry` : `${distPct.toFixed(1)}% entry`}
                               </span>
                             )}
                           </div>
 
                           {/* Price levels */}
-                          <div className="grid grid-cols-3 gap-1 text-[9px] font-mono">
+                          <div className="grid grid-cols-3 gap-1 text-[9px] font-mono tabular-nums">
                             {[
                               { label: 'ENTRY', value: entry ? `₹${Number(entry).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—', color: 'var(--color-text)' },
                               { label: 'SL', value: sl ? `₹${Number(sl).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—', color: 'var(--color-rose)' },
@@ -399,14 +399,14 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                             ].map(({ label, value, color }) => (
                               <div key={label} className="text-center px-1 py-1 rounded" style={{ background: 'var(--color-elevated)' }}>
                                 <span className="block text-[8px]" style={{ color: 'var(--color-muted)' }}>{label}</span>
-                                <span className="font-bold" style={{ color }}>{value}</span>
+                                <span className="font-bold tabular-nums" style={{ color }}>{value}</span>
                               </div>
                             ))}
                           </div>
 
                           {/* R:R + Action — omit badges when backend provides no confirmed data */}
                           <div className="flex items-center justify-between">
-                            <span className="text-[10px] font-mono font-bold" style={{ color: 'var(--color-gold)' }}>
+                            <span className="text-[10px] font-mono tabular-nums font-bold" style={{ color: 'var(--color-gold)' }}>
                               {rr != null ? `R:R 1:${rr}` : <span style={{ color: 'var(--color-muted)' }}>R:R —</span>}
                             </span>
                             {action && (
@@ -421,6 +421,7 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                           <div className="flex gap-1.5">
                             <button
                               onClick={() => {
+                                const act = action && action.includes('SHORT') ? 'SELL' : 'BUY'
                                 if (onOpenOrderTicket) {
                                   onOpenOrderTicket({
                                     symbol,
@@ -428,9 +429,11 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                                     price: livePrice ?? entry,
                                     stopLoss: sl,
                                     target: t1,
-                                    action: action && action.includes('SHORT') ? 'SELL' : 'BUY',
+                                    action: act,
                                     _priceSource: livePrice ? 'LIVE' : 'EOD_ENTRY',
                                   })
+                                } else {
+                                  sendDraft(`trade ${act} 1 ${symbol} at ${livePrice ?? entry ?? 'market'} sl ${sl ?? ''} tgt ${t1 ?? ''}`)
                                 }
                                 onClose()
                               }}

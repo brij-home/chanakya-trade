@@ -31,7 +31,9 @@ const SECTIONS = [
   {
     title: '💼 Trade Desk',
     keys: [
-      { keys: ['T'],              desc: 'Open Order Ticket' },
+      { keys: ['Shift', 'B'],     desc: 'Stage BUY order ticket (active symbol)' },
+      { keys: ['Shift', 'S'],     desc: 'Stage SELL order ticket (active symbol)' },
+      { keys: ['Ctrl', 'T'],      desc: 'Toggle Order Ticket' },
       { keys: ['P'],              desc: 'Show Position Tracker' },
       { keys: ['R'],              desc: 'Risk Gate Assessment' },
       { keys: ['Ctrl', 'Enter'],  desc: 'Submit / Send command' },

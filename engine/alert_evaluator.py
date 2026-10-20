@@ -844,153 +844,86 @@ def calculate_strike_roll_recommendation(
     is_bullish: bool,
 ) -> Optional[dict[str, Any]]:
     """
-    Computes institutional strike roll recommendation when an option hits T2 / Final target.
-    Prevents holding deep ITM options with delta ~ 1.0, wide bid-ask spread, and low liquidity.
-    Suggests rolling to an active liquid ATM strike.
+    Computes institutional strike roll / revolve recommendation for active options.
+    Delegates to engine.strike_revolver.evaluate_strike_revolving to guarantee:
+      1. Gamma & convexity reset (Delta 0.72+ -> ATM Delta ~0.50).
+      2. Extraction of locked profits with 100% risk-free compounding.
+      3. Strict bid-ask spread liquidity gating (<=3.0%).
+      4. 0DTE afternoon rollover protection.
     """
-    sym = (
-        (getattr(alert, "symbol", "") or "")
-        .replace("NSE:", "")
-        .replace("NFO:", "")
-        .replace("BSE:", "")
-        .strip()
-        .upper()
-    )
-    cur_strike = getattr(alert, "strike", None)
-    opt_type = getattr(alert, "option_type", None)
-    if not cur_strike or not opt_type:
-        return None
+    try:
+        from engine.strike_revolver import evaluate_strike_revolving
 
-    # Underlying spot price reference — cascade through all available sources
-    spot = getattr(alert, "underlying_spot", None)
-    if not spot or spot <= 0:
-        metrics = getattr(alert, "metrics", {}) or {}
-        spot = metrics.get("spot") or metrics.get("underlying_spot")
-    if not spot or spot <= 0:
-        plan = getattr(alert, "actionable_plan", {}) or {}
-        spot = plan.get("spot") or plan.get("underlying_spot")
-    if (
-        not spot or spot <= 0
-    ) and current_ltp > 0:  # FIX: explicit parenthesis — operator precedence guard
-        # Intrinsic-value approximation: only safe when the option premium is extremely large
-        # (i.e., deep ITM confirmed by premium > 15% of strike).  For OTM options with small
-        # premiums the approximation inverts spot and makes OTM appear deep ITM → wrong roll.
-        premium_pct = current_ltp / cur_strike if cur_strike > 0 else 0.0
-        if (
-            premium_pct >= 0.10
-        ):  # Only approximate spot when premium >= 10% of strike (deep ITM proxy)
-            if "PE" in str(opt_type).upper():
-                spot = max(1.0, cur_strike - current_ltp)
-            else:
-                spot = cur_strike + current_ltp
-        # else: leave spot as None / 0 → will return None below (no spurious roll for OTM options)
-    if not spot or spot <= 0:
-        return None
-
-    # Strike step determination
-    step = 50.0
-    if sym in ("BANKNIFTY", "SENSEX", "BANKEX"):
-        step = 100.0
-    elif sym == "FINNIFTY":
-        step = 50.0
-    elif sym == "MIDCPNIFTY":
-        step = 25.0
-    elif sym == "NIFTY":
-        step = 50.0
-    else:
-        # Stock options strike step heuristic
-        if spot >= 5000:
-            step = 100.0
-        elif spot >= 2500:
-            step = 50.0
-        elif spot >= 1000:
-            step = 20.0
-        elif spot >= 500:
-            step = 10.0
-        elif spot >= 200:
-            step = 5.0
-        else:
-            step = 2.5
-
-    # An institutional strike roll is strictly recommended to manage deep ITM exposure
-    # (avoiding delta ~ 1.0, wide spreads, and locked intrinsic capital).
-    # If the option is NOT ITM (e.g. Call when Spot <= Strike, or Put when Spot >= Strike),
-    # rolling to ATM does NOT lock ITM gains and is mathematically invalid.
-    is_pe = "PE" in str(opt_type).upper()
-    is_itm = (cur_strike > spot) if is_pe else (cur_strike < spot)
-    if not is_itm:
-        return None
-
-    # Institutional Invariant: Strike rolling is ONLY warranted when harvesting substantial
-    # ITM profit (pnl_pct >= 25.0) and deep in the money (at least 1.0 - 1.25 strike steps into the money).
-    # Small gains (<25%) or near-ATM options suffer severe friction, bid-ask spread loss,
-    # and unnecessary transaction costs.
-    if pnl_pct is None or pnl_pct < 25.0:
-        return None
-
-    min_itm_steps = 1.0 if pnl_pct >= 30.0 else 1.25
-    itm_dist = abs(cur_strike - spot)
-    if itm_dist < (step * min_itm_steps):
-        return None
-
-    # Compute fresh ATM strike
-    atm_strike = round(spot / step) * step
-
-    # If current strike is already near ATM (e.g. within 0.5 step), rolling is not needed
-    if abs(cur_strike - atm_strike) < (step * 0.5):
-        return None
-
-    if atm_strike > cur_strike:
-        action_type = "ROLL_UP"
-        action_desc = "up"
-    elif atm_strike < cur_strike:
-        action_type = "ROLL_DOWN"
-        action_desc = "down"
-    else:
-        action_type = "ROLL_DOWN" if is_pe else "ROLL_UP"
-        action_desc = "down" if is_pe else "up"
-
-    roll_target_strike = atm_strike
-
-    # Derive new contract symbol
-    exp_date = getattr(alert, "expiry_date", None)
-    cur_contract = getattr(alert, "contract_symbol", "")
-    new_contract = None
-    if cur_contract:
-        # 1. Spaced format: e.g. "NIFTY 25000 CE" or "HAL 4800 PE"
-        pattern_spaced = re.compile(
-            r"\b" + re.escape(str(int(cur_strike))) + r"\s+(CE|PE)\b", re.IGNORECASE
+        advisory = evaluate_strike_revolving(
+            alert=alert,
+            current_ltp=current_ltp,
+            pnl_pct=pnl_pct,
+            is_bullish=is_bullish,
         )
-        if pattern_spaced.search(cur_contract):
-            new_contract = pattern_spaced.sub(f"{int(roll_target_strike)} \\1", cur_contract)
+        if advisory:
+            res_dict = advisory.to_dict()
+            if hasattr(alert, "revolve_advisory"):
+                setattr(alert, "revolve_advisory", res_dict)
+            if hasattr(alert, "strike_roll_recommendation"):
+                setattr(alert, "strike_roll_recommendation", res_dict)
+            return res_dict
+    except Exception as e:
+        logger.warning(f"[AlertEvaluator] Strike revolve evaluation error: {e}", exc_info=True)
+
+    return None
+
+
+def resolve_iceberg_trailing_anchor(
+    symbol: str,
+    direction_is_bullish: bool,
+    current_ltp: float,
+    current_stop: float,
+) -> tuple[Optional[float], Optional[str]]:
+    """
+    Inspects Fyers TBT 50-Depth for resting institutional iceberg walls between current_stop
+    and current_ltp to anchor trailing stops with physical depth armor.
+    Returns (anchored_stop_level, rationale_note).
+    """
+    try:
+        from market.fyers_tbt_manager import FyersTbtManager, resolve_tradable_tbt_symbol
+
+        tbt_mgr = FyersTbtManager()
+        if not tbt_mgr.is_connected:
+            return None, None
+
+        lookup = resolve_tradable_tbt_symbol(symbol) or symbol
+        depth = tbt_mgr.get_50_depth(lookup)
+        if not depth or depth.get("status") in ("UNAVAILABLE", None):
+            return None, None
+
+        if direction_is_bullish:
+            bid_walls = depth.get("bid_walls", [])
+            valid_walls = [
+                w for w in bid_walls if current_stop < float(w["price"]) <= (current_ltp * 0.9995)
+            ]
+            if valid_walls:
+                top_wall = max(valid_walls, key=lambda w: float(w["price"]))
+                wall_p = float(top_wall["price"])
+                wall_q = int(top_wall["qty"])
+                anchored_stop = round(wall_p * 0.999, 2)
+                note = f"🧱 Institutional Bid Wall Shield: Trailed behind {wall_q:,} resting contracts at ₹{wall_p:,.2f}"
+                return anchored_stop, note
         else:
-            # 2. Compact exchange format: e.g. "NIFTY26OCT25000CE", "NIFTY2692425000CE", "M&M202610272950PE"
-            pattern_compact = re.compile(
-                re.escape(str(int(cur_strike))) + r"(CE|PE)$", re.IGNORECASE
-            )
-            if pattern_compact.search(cur_contract):
-                new_contract = pattern_compact.sub(f"{int(roll_target_strike)}\\1", cur_contract)
-            else:
-                new_contract = cur_contract.replace(
-                    str(int(cur_strike)), str(int(roll_target_strike))
-                )
-    else:
-        new_contract = f"{sym} {int(roll_target_strike)} {opt_type}"
-    return {
-        "action": action_type,
-        "current_strike": cur_strike,
-        "recommended_strike": roll_target_strike,
-        "recommended_contract": new_contract,
-        "underlying_spot": spot,
-        "expiry_date": exp_date,
-        "pnl_pct": round(pnl_pct, 1),
-        "reason": (
-            f"Lock in deep ITM option gains (+{pnl_pct:.1f}%). "
-            f"Roll {action_desc} to liquid ATM {int(roll_target_strike)} {opt_type} "
-            f"to restore gamma leverage and avoid wide bid-ask slippage."
-        ),
-        "status": "RECOMMENDED",
-    }
+            ask_walls = depth.get("ask_walls", [])
+            valid_walls = [
+                w for w in ask_walls if (current_ltp * 1.0005) <= float(w["price"]) < current_stop
+            ]
+            if valid_walls:
+                top_wall = min(valid_walls, key=lambda w: float(w["price"]))
+                wall_p = float(top_wall["price"])
+                wall_q = int(top_wall["qty"])
+                anchored_stop = round(wall_p * 1.001, 2)
+                note = f"🧱 Institutional Ask Wall Shield: Trailed behind {wall_q:,} resting contracts at ₹{wall_p:,.2f}"
+                return anchored_stop, note
+    except Exception as e:
+        logger.debug(f"[AlertEvaluator] Iceberg anchor resolution skipped: {e}")
+
+    return None, None
 
 
 def evaluate_alert_targets_and_trailing(
@@ -1011,19 +944,19 @@ def evaluate_alert_targets_and_trailing(
         return None
 
     is_option = is_alert_option_premium_level(alert)
+    raw_sym = str(getattr(alert, "symbol", "") or "")
+    c_sym = str(getattr(alert, "contract_symbol", "") or "")
+    exch = getattr(alert, "exchange", "NSE") or "NSE"
+
+    if is_option and c_sym:
+        lookup_sym = c_sym if ":" in c_sym else f"{exch}:{c_sym}"
+    else:
+        lookup_sym = f"{exch}:{raw_sym}" if (raw_sym and ":" not in raw_sym) else raw_sym
 
     if current_ltp is None or current_ltp <= 0:
         try:
             from market.quotes import get_ltp
 
-            if is_option:
-                lookup_sym = getattr(alert, "contract_symbol", None) or (
-                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
-                )
-            else:
-                lookup_sym = (
-                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
-                )
             current_ltp = get_ltp(lookup_sym)
         except Exception:
             current_ltp = None
@@ -1685,6 +1618,20 @@ def evaluate_alert_targets_and_trailing(
             locked_pts = abs(rec_stop - entry)
             locked_pct = 0.2
 
+        # Dynamic TBT Resting Iceberg Liquidity Wall Stop Anchoring
+        iceberg_stop, iceberg_note = resolve_iceberg_trailing_anchor(
+            lookup_sym, is_bullish, current_ltp=current_ltp, current_stop=rec_stop
+        )
+        if iceberg_stop:
+            if is_bullish and iceberg_stop > rec_stop:
+                rec_stop = iceberg_stop
+                locked_pts = rec_stop - entry
+                locked_pct = round((locked_pts / entry) * 100, 2)
+            elif not is_bullish and iceberg_stop < rec_stop:
+                rec_stop = iceberg_stop
+                locked_pts = entry - rec_stop
+                locked_pct = round((locked_pts / entry) * 100, 2)
+
         next_tgt = t2_level or target_final
 
         roll_rec = (
@@ -1722,6 +1669,8 @@ def evaluate_alert_targets_and_trailing(
             f"DECISION: BOOK 50% PARTIAL PROFIT NOW & TRAIL STOP-LOSS TO {trail_label}{spot_trail_note}. "
             f"Trade is now 100% risk-free. Hold remaining 50% runner for Target 2 (+4R / ₹{next_tgt:,.2f})."
         )
+        if iceberg_note:
+            rationale += f" | {iceberg_note}"
         if roll_rec:
             rationale += f" | 🔄 OPTION ROLL: {roll_rec['reason']}"
 
@@ -1814,6 +1763,12 @@ def evaluate_alert_targets_and_trailing(
                 guaranteed_floor = max(guaranteed_floor, round(entry + (initial_risk * 0.25), 2))
 
             higher_trail = round(max(guaranteed_floor, current_ltp - trail_dist), 2)
+            iceberg_stop, iceberg_note = resolve_iceberg_trailing_anchor(
+                lookup_sym, is_bullish, current_ltp=current_ltp, current_stop=higher_trail
+            )
+            if iceberg_stop and iceberg_stop > higher_trail:
+                higher_trail = iceberg_stop
+
             min_dist = 0.5 if is_option else 2.0
             if (
                 higher_trail >= round(alert.trailing_stop * 1.0075, 2)
@@ -1822,10 +1777,11 @@ def evaluate_alert_targets_and_trailing(
                 locked_pts = higher_trail - entry
                 locked_pct = round((locked_pts / entry) * 100, 2)
                 unit_str = "pts" if is_option else "/sh"
+                wall_text = f" | {iceberg_note}" if iceberg_note else ""
                 if locked_pts > 0:
                     rationale = (
                         f"Price expanded to ₹{current_ltp:,.2f}. "
-                        f"DECISION: RATCHET TRAILING STOP HIGHER from ₹{alert.trailing_stop:,.2f} to ₹{higher_trail:,.2f}. "
+                        f"DECISION: RATCHET TRAILING STOP HIGHER from ₹{alert.trailing_stop:,.2f} to ₹{higher_trail:,.2f}{wall_text}. "
                         f"Guaranteed locked profit increased to +₹{locked_pts:,.2f} {unit_str} (+{locked_pct:.1f}%)."
                     )
                 else:
@@ -1833,7 +1789,7 @@ def evaluate_alert_targets_and_trailing(
                     risk_pct = abs(locked_pct)
                     rationale = (
                         f"Price expanded to ₹{current_ltp:,.2f}. "
-                        f"DECISION: RATCHET TRAILING STOP HIGHER from ₹{alert.trailing_stop:,.2f} to ₹{higher_trail:,.2f}. "
+                        f"DECISION: RATCHET TRAILING STOP HIGHER from ₹{alert.trailing_stop:,.2f} to ₹{higher_trail:,.2f}{wall_text}. "
                         f"Downside risk compressed to ₹{risk_rem:,.2f} {unit_str} (-{risk_pct:.1f}% max loss from entry)."
                     )
                 return TargetTrailingEvaluation(
@@ -1859,6 +1815,12 @@ def evaluate_alert_targets_and_trailing(
                 guaranteed_floor = min(guaranteed_floor, round(entry - (initial_risk * 0.3), 2))
 
             lower_trail = round(min(guaranteed_floor, current_ltp + trail_dist), 2)
+            iceberg_stop, iceberg_note = resolve_iceberg_trailing_anchor(
+                lookup_sym, is_bullish, current_ltp=current_ltp, current_stop=lower_trail
+            )
+            if iceberg_stop and iceberg_stop < lower_trail:
+                lower_trail = iceberg_stop
+
             min_dist = 0.5 if is_option else 2.0
             if (
                 lower_trail <= round(alert.trailing_stop * 0.9925, 2)
@@ -1867,10 +1829,11 @@ def evaluate_alert_targets_and_trailing(
                 locked_pts = entry - lower_trail
                 locked_pct = round((locked_pts / entry) * 100, 2)
                 unit_str = "pts" if is_option else "/sh"
+                wall_text = f" | {iceberg_note}" if iceberg_note else ""
                 if locked_pts > 0:
                     rationale = (
                         f"Price dropped to ₹{current_ltp:,.2f}. "
-                        f"DECISION: RATCHET TRAILING STOP LOWER from ₹{alert.trailing_stop:,.2f} to ₹{lower_trail:,.2f}. "
+                        f"DECISION: RATCHET TRAILING STOP LOWER from ₹{alert.trailing_stop:,.2f} to ₹{lower_trail:,.2f}{wall_text}. "
                         f"Guaranteed locked profit increased to +₹{locked_pts:,.2f} {unit_str} (+{locked_pct:.1f}%)."
                     )
                 else:
@@ -1878,7 +1841,7 @@ def evaluate_alert_targets_and_trailing(
                     risk_pct = abs(locked_pct)
                     rationale = (
                         f"Price dropped to ₹{current_ltp:,.2f}. "
-                        f"DECISION: RATCHET TRAILING STOP LOWER from ₹{alert.trailing_stop:,.2f} to ₹{lower_trail:,.2f}. "
+                        f"DECISION: RATCHET TRAILING STOP LOWER from ₹{alert.trailing_stop:,.2f} to ₹{lower_trail:,.2f}{wall_text}. "
                         f"Downside risk compressed to ₹{risk_rem:,.2f} {unit_str} (-{risk_pct:.1f}% max loss from entry)."
                     )
                 return TargetTrailingEvaluation(
@@ -2754,13 +2717,22 @@ def evaluate_alert_in_flight_decay(
                 hedge_plan = None
 
             if is_afternoon_0dte:
-                headline = f"⏳ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (0DTE Theta Cliff: {elapsed_mins}m No Progress)"
-                summary = (
-                    f"0DTE option position active for {elapsed_mins}m post-13:30 IST with zero momentum (P&L: {pnl_pct:+.1f}%).{extra_vwap} "
-                    f"Rapid afternoon pin-risk & gamma collapse underway. "
-                    f"DECISION: EXIT 0DTE OPTION IMMEDIATELY TO AVOID PIN-RISK PREMIUM EVAPORATION."
-                )
-                decision_action = "EXIT_0DTE_OPTION_IMMEDIATELY"
+                if elapsed_secs >= 900.0:
+                    headline = f"⚡ {env_tag} [THETA SCRATCH BAILOUT] {alert.symbol}: Post-13:30 Stagnation Scratch ({elapsed_mins}m)"
+                    summary = (
+                        f"0DTE afternoon theta cliff: Position active for {elapsed_mins}m post-13:30 IST with spot stagnant (±0.15%) without reaching T1.{extra_vwap} "
+                        f"DECISION: THETA_STAGNATION_SCRATCH. Scratch trade immediately at {pnl_pct:+.1f}% (-5% to -10%) to prevent terminal pin-risk premium evaporation."
+                    )
+                    decision_action = "THETA_STAGNATION_SCRATCH"
+                    decay_profile = "THETA_STAGNATION_SCRATCH"
+                else:
+                    headline = f"⏳ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (0DTE Theta Cliff: {elapsed_mins}m No Progress)"
+                    summary = (
+                        f"0DTE option position active for {elapsed_mins}m post-13:30 IST with zero momentum (P&L: {pnl_pct:+.1f}%).{extra_vwap} "
+                        f"Rapid afternoon pin-risk & gamma collapse underway. "
+                        f"DECISION: EXIT 0DTE OPTION IMMEDIATELY TO AVOID PIN-RISK PREMIUM EVAPORATION."
+                    )
+                    decision_action = "EXIT_0DTE_OPTION_IMMEDIATELY"
             elif is_0dte:
                 headline = f"⏳ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (0DTE Decay: {elapsed_mins}m No Progress)"
                 summary = (
@@ -2799,6 +2771,22 @@ def evaluate_alert_in_flight_decay(
     # 7. Trigger C: Institutional VWAP Band Reversion Alert (±1.0σ Band Breach)
     # Detects when underlying asset breaks below the intraday Volume-Weighted Standard Deviation floor,
     # confirming institutional order flow abandonment BEFORE nominal Stop-Loss is breached.
+    # Guard: Trigger C is strictly an INTRADAY order flow check. Positional, Swing, and Multibagger
+    # setups must NOT be warned or scratched by 1-minute/session VWAP fluctuations.
+    alert_type_upper = str(getattr(alert, "alert_type", "")).upper()
+    timeframe_upper = str(getattr(alert, "timeframe", "")).upper()
+    time_horizon_upper = str(getattr(alert, "time_horizon", "")).upper()
+    if (
+        "MULTIBAGGER" in alert_type_upper
+        or "COMPOUNDER" in alert_type_upper
+        or "SWING" in timeframe_upper
+        or "POSITIONAL" in timeframe_upper
+        or "DAILY" in timeframe_upper
+        or "WEEKLY" in timeframe_upper
+        or time_horizon_upper in ("SWING", "POSITIONAL", "LONG_TERM", "MULTIBAGGER")
+    ):
+        return None
+
     spot_price = None
     if is_option:
         spot_price = getattr(alert, "underlying_spot", None) or (

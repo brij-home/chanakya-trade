@@ -739,3 +739,35 @@ def test_telegram_stocks_daily_limit_env_override():
         alert_apex.metrics["sector_id"] = "pharma"
         passed, reason = engine._eval_telegram_apex_gate(alert_apex, in_market=True)
         assert passed, f"Expected APEX setup to pass with daily expansion, got: {reason}"
+
+
+def test_telegram_index_reversal_bypass_allowed():
+    """When index hourly pacing is saturated by one direction (e.g. 5 Puts),
+    a high-conviction structural reversal in the opposing direction (Call)
+    is granted the Reversal Bypass so the trader is not blinded.
+    """
+    engine = AutoAlertEngine()
+    engine._hourly_telegram_dispatches = {"INDEX": [], "STOCKS": []}
+    engine._hourly_index_directional = []
+
+    now_t = time.time()
+    # Simulate 5 BEARISH index put alerts dispatched in the last 20 minutes (e.g. morning down-flush)
+    for i in range(5):
+        t_disp = now_t - (i * 200.0)
+        engine._hourly_telegram_dispatches["INDEX"].append(t_disp)
+        engine._hourly_index_directional.append((t_disp, "BEARISH"))
+
+    # 1. Another BEARISH alert arrives -> Must be throttled
+    bear_alert = _make_dummy_alert(
+        "idx-bear-6", "NIFTY", direction="BEARISH", opt_type="PE", confidence=92
+    )
+    passed_bear, reason_bear = engine._eval_telegram_apex_gate(bear_alert, in_market=True)
+    assert not passed_bear
+    assert "hourly pacing limit reached" in reason_bear
+
+    # 2. A high-conviction BULLISH reversal alert arrives (e.g. BANKNIFTY CE at V-bottom)
+    bull_alert = _make_dummy_alert(
+        "idx-bull-rev", "BANKNIFTY", direction="BULLISH", opt_type="CE", confidence=93
+    )
+    passed_bull, reason_bull = engine._eval_telegram_apex_gate(bull_alert, in_market=True)
+    assert passed_bull, f"Expected reversal bypass to grant dispatch, but got: {reason_bull}"

@@ -23,6 +23,32 @@ const TIMING_TABS = [
   { id: 'PULLBACK_RETEST', label: '🎯 Retest Zone' },
 ]
 
+/**
+ * Mathematically grounds candidate entry, stop-loss, targets and R:R.
+ * Replaces arbitrary multipliers with verified levels and ATR risk-based targets.
+ */
+function resolveCandidateRiskLevels(c) {
+  const af = c.anti_fomo || {}
+  const entry = Number(c.entry_price || af.fair_value_anchor || c.ltp || 0)
+  const stop = Number(c.stop_loss || af.invalidation_stop || (entry > 0 ? entry * 0.93 : 0))
+  const risk = Math.max(0.1, entry > stop ? entry - stop : entry * 0.07)
+  const t1 = Number(c.target_1 || (entry > 0 ? entry + 2 * risk : 0))
+  const t2 = Number(c.target_2 || (entry > 0 ? entry + 4 * risk : 0))
+  const target_moonshot = Number(c.target_moonshot || (entry > 0 ? entry + 8 * risk : 0))
+  const rr = c.risk_reward_ratio != null
+    ? Number(c.risk_reward_ratio)
+    : (risk > 0 && t1 > entry ? Number(((t1 - entry) / risk).toFixed(1)) : 2.0)
+
+  return {
+    entry_price: entry,
+    stop_loss: stop,
+    target_1: t1,
+    target_2: t2,
+    target_moonshot,
+    risk_reward_ratio: rr,
+  }
+}
+
 export default function InflectionScannerView({
   onOpenOrderTicket,
   onNavigateToTerminal,
@@ -1486,6 +1512,7 @@ export default function InflectionScannerView({
                     const te = c.twin_engines || {}
                     const af = c.anti_fomo || {}
                     const is100x = (c.compounder_tier === '100X_CENTURY' || c.compounder_tier === '1000X_POTENTIAL')
+                    const levels = resolveCandidateRiskLevels(c)
                     return (
                       <tr
                         key={c.symbol}
@@ -1497,12 +1524,12 @@ export default function InflectionScannerView({
                           ltp: c.ltp,
                           inflection_score: c.century_score,
                           primary_archetype: 'STAGE_1_TO_2_EXPANSION',
-                          entry_price: af.fair_value_anchor || c.ltp,
-                          stop_loss: af.invalidation_stop,
-                          target_1: (af.fair_value_anchor || c.ltp) * 2.0,
-                          target_2: (af.fair_value_anchor || c.ltp) * 4.0,
-                          target_moonshot: (af.fair_value_anchor || c.ltp) * 10.0,
-                          risk_reward_ratio: 4.5,
+                          entry_price: levels.entry_price,
+                          stop_loss: levels.stop_loss,
+                          target_1: levels.target_1,
+                          target_2: levels.target_2,
+                          target_moonshot: levels.target_moonshot,
+                          risk_reward_ratio: levels.risk_reward_ratio,
                         })}
                       >
                         {/* Symbol / MCap */}
@@ -1627,26 +1654,29 @@ export default function InflectionScannerView({
                           <div className="flex items-center justify-end gap-1.5">
                             <button
                               type="button"
-                              onClick={() => handleAddToIncubation({
-                                symbol: c.symbol,
-                                name: c.symbol,
-                                sector: 'Quality Microcap',
-                                horizon: 'LONG_TERM',
-                                cycle_state: 'STAGE_1_ACCUMULATION',
-                                eta_days: 15,
-                                eta_label: 'Stage 1 Base',
-                                entry_price: af.fair_value_anchor || c.ltp,
-                                ltp: c.ltp,
-                                stop_loss: af.invalidation_stop,
-                                target_1: (af.fair_value_anchor || c.ltp) * 2.0,
-                                target_2: (af.fair_value_anchor || c.ltp) * 4.0,
-                                target_moonshot: (af.fair_value_anchor || c.ltp) * 10.0,
-                                risk_reward_ratio: 4.5,
-                                inflection_score: c.century_score,
-                                primary_archetype: 'STAGE_1_TO_2_EXPANSION',
-                                catalyst_badges: c.catalyst_badges || [],
-                                catalyst_summary: c.summary,
-                              })}
+                              onClick={() => {
+                                const levels = resolveCandidateRiskLevels(c)
+                                handleAddToIncubation({
+                                  symbol: c.symbol,
+                                  name: c.symbol,
+                                  sector: 'Quality Microcap',
+                                  horizon: 'LONG_TERM',
+                                  cycle_state: 'STAGE_1_ACCUMULATION',
+                                  eta_days: 15,
+                                  eta_label: 'Stage 1 Base',
+                                  entry_price: levels.entry_price,
+                                  ltp: c.ltp,
+                                  stop_loss: levels.stop_loss,
+                                  target_1: levels.target_1,
+                                  target_2: levels.target_2,
+                                  target_moonshot: levels.target_moonshot,
+                                  risk_reward_ratio: levels.risk_reward_ratio,
+                                  inflection_score: c.century_score,
+                                  primary_archetype: 'STAGE_1_TO_2_EXPANSION',
+                                  catalyst_badges: c.catalyst_badges || [],
+                                  catalyst_summary: c.summary,
+                                })
+                              }}
                               className="p-1 px-1.5 rounded-lg border border-purple-500/40 bg-purple-500/10 text-[10px] font-bold text-purple-600 dark:text-purple-400 hover:bg-purple-500/20 transition-all cursor-pointer"
                               title="Retain in Incubation Pipeline"
                             >
@@ -1805,26 +1835,29 @@ export default function InflectionScannerView({
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => handleAddToIncubation({
-                          symbol: c.symbol,
-                          name: c.symbol,
-                          sector: 'Quality Microcap',
-                          horizon: 'LONG_TERM',
-                          cycle_state: 'STAGE_1_ACCUMULATION',
-                          eta_days: 15,
-                          eta_label: 'Stage 1 Base',
-                          entry_price: af.fair_value_anchor || c.ltp,
-                          ltp: c.ltp,
-                          stop_loss: af.invalidation_stop,
-                          target_1: (af.fair_value_anchor || c.ltp) * 2.0,
-                          target_2: (af.fair_value_anchor || c.ltp) * 4.0,
-                          target_moonshot: (af.fair_value_anchor || c.ltp) * 10.0,
-                          risk_reward_ratio: 4.5,
-                          inflection_score: c.century_score,
-                          primary_archetype: 'STAGE_1_TO_2_EXPANSION',
-                          catalyst_badges: c.catalyst_badges || [],
-                          catalyst_summary: c.summary,
-                        })}
+                        onClick={() => {
+                          const levels = resolveCandidateRiskLevels(c)
+                          handleAddToIncubation({
+                            symbol: c.symbol,
+                            name: c.symbol,
+                            sector: 'Quality Microcap',
+                            horizon: 'LONG_TERM',
+                            cycle_state: 'STAGE_1_ACCUMULATION',
+                            eta_days: 15,
+                            eta_label: 'Stage 1 Base',
+                            entry_price: levels.entry_price,
+                            ltp: c.ltp,
+                            stop_loss: levels.stop_loss,
+                            target_1: levels.target_1,
+                            target_2: levels.target_2,
+                            target_moonshot: levels.target_moonshot,
+                            risk_reward_ratio: levels.risk_reward_ratio,
+                            inflection_score: c.century_score,
+                            primary_archetype: 'STAGE_1_TO_2_EXPANSION',
+                            catalyst_badges: c.catalyst_badges || [],
+                            catalyst_summary: c.summary,
+                          })
+                        }}
                         className="px-2.5 py-1 rounded-lg border border-purple-500/40 bg-purple-500/15 text-xs font-semibold text-purple-600 dark:text-purple-400 hover:bg-purple-500/25 transition-all cursor-pointer flex items-center gap-1"
                         title="Retain in Incubation Pipeline"
                       >

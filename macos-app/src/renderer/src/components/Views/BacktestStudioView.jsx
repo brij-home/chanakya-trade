@@ -562,15 +562,34 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
             </div>
           </div>
 
-          <div className="pt-2 border-t border-border/50">
+          <div className="pt-2 border-t border-border/50 flex flex-col sm:flex-row gap-2">
             <button
               onClick={() => {
                 const exch = getSymbolExchange(symbol)
                 sendDraft(`analyze ${symbol}${exch !== 'NSE' ? ' ' + exch : ''}`)
               }}
-              className="w-full py-1.5 rounded-lg bg-elevated hover:bg-elevated/80 border border-border text-text font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              className="flex-1 py-1.5 rounded-lg bg-elevated hover:bg-elevated/80 border border-border text-text font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5"
             >
-              <span>🔍</span> Open Deep AI Copilot Analysis
+              <span>🔍</span> Deep AI Copilot Analysis
+            </button>
+            <button
+              onClick={() => {
+                const exch = getSymbolExchange(symbol)
+                if (onOpenOrderTicket) {
+                  onOpenOrderTicket({
+                    symbol: symbol,
+                    exchange: exch,
+                    price: null,
+                    action: 'BUY',
+                    quantity: 1,
+                  })
+                } else {
+                  sendDraft(`trade BUY 1 ${symbol} (${strategy.toUpperCase()})`)
+                }
+              }}
+              className="py-1.5 px-3 rounded-lg bg-amber text-black font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5 hover:brightness-110 shadow-xs"
+            >
+              <span>⚡</span> Stage Live Order
             </button>
           </div>
         </div>
@@ -645,7 +664,7 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
 
         {/* Table */}
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs font-mono">
+          <table className="w-full text-left text-xs font-mono tabular-nums">
             <thead>
               <tr className="text-[10px] uppercase text-muted border-b border-border/50">
                 <th className="py-1.5 px-2.5">#</th>
@@ -664,7 +683,7 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
                 const tradeIsWin = t.pnl > 0
                 return (
                   <tr key={idx} className="hover:bg-elevated/40 transition-colors">
-                    <td className="py-1.5 px-2.5 text-muted">{(tradePage - 1) * pageSize + idx + 1}</td>
+                    <td className="py-1.5 px-2.5 text-muted tabular-nums">{(tradePage - 1) * pageSize + idx + 1}</td>
                     <td className="py-1.5 px-2.5 text-text font-ui">{t.date}</td>
                     <td className="py-1.5 px-2.5">
                       <span className={`px-1.5 py-0.2 rounded text-[9.5px] font-extrabold ${
@@ -673,15 +692,15 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
                         {t.type}
                       </span>
                     </td>
-                    <td className="py-1.5 px-2.5 text-text">₹{Number(t.entry).toFixed(2)}</td>
-                    <td className="py-1.5 px-2.5 text-text">₹{Number(t.exit).toFixed(2)}</td>
-                    <td className={`py-1.5 px-2.5 font-bold ${tradeIsWin ? 'text-green' : 'text-red'}`}>
+                    <td className="py-1.5 px-2.5 text-text tabular-nums">₹{Number(t.entry).toFixed(2)}</td>
+                    <td className="py-1.5 px-2.5 text-text tabular-nums">₹{Number(t.exit).toFixed(2)}</td>
+                    <td className={`py-1.5 px-2.5 font-bold tabular-nums ${tradeIsWin ? 'text-green' : 'text-red'}`}>
                       {tradeIsWin ? '+' : ''}{formatINR(t.pnl)}
                     </td>
-                    <td className={`py-1.5 px-2.5 font-bold ${tradeIsWin ? 'text-green' : 'text-red'}`}>
+                    <td className={`py-1.5 px-2.5 font-bold tabular-nums ${tradeIsWin ? 'text-green' : 'text-red'}`}>
                       {tradeIsWin ? '+' : ''}{t.pct.toFixed(2)}%
                     </td>
-                    <td className="py-1.5 px-2.5 font-bold text-amber">
+                    <td className="py-1.5 px-2.5 font-bold text-amber tabular-nums">
                       {t.r >= 0 ? `+${t.r.toFixed(1)}R` : `${t.r.toFixed(1)}R`}
                     </td>
                     <td className="py-1.5 px-2.5 text-muted text-[10.5px] font-ui">{t.reason}</td>

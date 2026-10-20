@@ -23,15 +23,55 @@ logger = logging.getLogger(__name__)
 
 FYERS_MAX_CHUNK_SIZE = 1000
 SAFE_HTTP_MAX_CHUNK_SIZE = (
-    300  # Clamped to 300 symbols to avoid HTTP 414 URI Too Long on GET queries
+    300  # Clamped to at most 300 symbols to avoid HTTP 414 URI Too Long on GET queries
 )
+SAFE_URL_MAX_CHARS = (
+    5500  # Conservative safe byte/char budget for HTTP GET query string (< 8KB buffer)
+)
+
+
+def chunk_symbols_for_quotes(
+    symbols: list[str],
+    max_symbols: int = SAFE_HTTP_MAX_CHUNK_SIZE,
+    max_chars: int = SAFE_URL_MAX_CHARS,
+) -> list[list[str]]:
+    """
+    Dynamically batch symbols for Fyers API v3 GET /data/quotes endpoint.
+    Optimizes batch density up to max_symbols (up to 300 for Prime, 50 for Standard)
+    while strictly respecting URL query string limits (max_chars <= 5,500 chars) to prevent
+    HTTP 414 URI Too Long errors.
+    """
+    if not symbols:
+        return []
+
+    chunks: list[list[str]] = []
+    current_chunk: list[str] = []
+    current_chars = 0
+
+    for s in symbols:
+        s_len = len(s) + 1  # symbol + comma separator
+        if current_chunk and (
+            len(current_chunk) >= max_symbols or (current_chars + s_len) > max_chars
+        ):
+            chunks.append(current_chunk)
+            current_chunk = [s]
+            current_chars = len(s)
+        else:
+            current_chunk.append(s)
+            current_chars += s_len
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
 
 
 class QuoteDispatcher:
     """
     Serialized, priority-aware quote dispatcher.
     Eliminates parallel thread bursts against Fyers quotes API.
-    Supports up to 300 symbols/request batching for Fyers Prime (50 for Standard).
+    Supports up to 300 symbols/request batching for Fyers Prime (50 for Standard),
+    dynamically packed by character budget to guarantee immunity from HTTP 414.
     """
 
     def __init__(self, chunk_size: Optional[int] = None) -> None:
@@ -50,6 +90,7 @@ class QuoteDispatcher:
         """
         Fetch quotes for a list of symbols in serialized chunks under rate gate control.
         Coalesces duplicate symbols and guarantees sequential, non-bursting dispatch.
+        Leverages in-memory L2 WebSocket (up to 5,000 streaming symbols) before REST.
         """
         if not symbols:
             return {}
@@ -83,11 +124,10 @@ class QuoteDispatcher:
         ]
 
         if unresolved:
-            # Chunk unresolved symbols into slices of <= 50
-            chunks = [
-                unresolved[i : i + self._chunk_size]
-                for i in range(0, len(unresolved), self._chunk_size)
-            ]
+            # Dynamically chunk unresolved symbols by symbol count AND URL byte budget
+            chunks = chunk_symbols_for_quotes(
+                unresolved, max_symbols=self._chunk_size, max_chars=SAFE_URL_MAX_CHARS
+            )
 
             with self._dispatch_lock:
                 for chunk in chunks:

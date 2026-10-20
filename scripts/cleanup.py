@@ -73,7 +73,7 @@ def cleanup_orphaned_processes() -> int:
             ) as e_suppressed:
                 logger.debug(f"[scripts.cleanup] Non-fatal exception suppressed: {e_suppressed}")
     except ImportError:
-        # Fallback using PowerShell CIM on Windows
+        # Fallback without psutil: OS-specific process discovery
         if sys.platform == "win32":
             cmd = [
                 "powershell",
@@ -93,15 +93,35 @@ def cleanup_orphaned_processes() -> int:
                 killed_count = len(pids)
             except Exception as e_suppressed:
                 logger.debug(f"[scripts.cleanup] Non-fatal exception suppressed: {e_suppressed}")
+        elif sys.platform in ("darwin", "linux"):
+            import shutil
+
+            if shutil.which("pkill"):
+                for pattern in ["exec(eval(sys.stdin", "uvicorn.*web.api:app"]:
+                    try:
+                        res = subprocess.run(
+                            ["pkill", "-f", pattern],
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        if res.returncode == 0:
+                            killed_count += 1
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[scripts.cleanup] Non-fatal exception suppressed: {e_suppressed}"
+                        )
     return killed_count
 
 
 def release_port(port: int = 8765) -> bool:
-    """Release TCP port 8765 if bound."""
+    """Release TCP port if bound across Windows, macOS, and Linux."""
     if not is_port_in_use(port):
         return False
 
     released = False
+    current_pid = os.getpid()
+
     if sys.platform == "win32":
         cmd = [
             "powershell",
@@ -110,6 +130,7 @@ def release_port(port: int = 8765) -> bool:
             (
                 f"Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | "
                 "Select-Object -ExpandProperty OwningProcess -Unique | "
+                f"Where-Object {{ $_ -and $_ -ne 0 -and $_ -ne {current_pid} }} | "
                 "ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue; Write-Output $_ }"
             ),
         ]
@@ -119,6 +140,32 @@ def release_port(port: int = 8765) -> bool:
                 released = True
         except Exception as e_suppressed:
             logger.debug(f"[scripts.cleanup] Non-fatal exception suppressed: {e_suppressed}")
+    elif sys.platform in ("darwin", "linux"):
+        import shutil
+        import signal
+
+        if shutil.which("lsof"):
+            try:
+                out = subprocess.check_output(["lsof", "-ti", f":{port}"], text=True)
+                pids = [int(line.strip()) for line in out.splitlines() if line.strip().isdigit()]
+                for p in pids:
+                    if p not in (current_pid, 0, 1):
+                        os.kill(p, signal.SIGKILL)
+                        released = True
+            except Exception as e_suppressed:
+                logger.debug(f"[scripts.cleanup] Non-fatal exception suppressed: {e_suppressed}")
+        elif shutil.which("fuser"):
+            try:
+                res = subprocess.run(
+                    ["fuser", "-k", f"{port}/tcp"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                if res.returncode == 0:
+                    released = True
+            except Exception as e_suppressed:
+                logger.debug(f"[scripts.cleanup] Non-fatal exception suppressed: {e_suppressed}")
     return released
 
 
@@ -161,10 +208,11 @@ def main():
     else:
         print(" [v] No orphaned worker processes found.")
 
-    if release_port(8765):
-        print(" [+] Released stuck port 8765 listener.")
-    else:
-        print(" [v] Port 8765 is clear.")
+    for p in (8765, 5173):
+        if release_port(p):
+            print(f" [+] Released stuck port {p} listener.")
+        else:
+            print(f" [v] Port {p} is clear.")
 
     n_files = cleanup_stale_cache_files()
     if n_files > 0:

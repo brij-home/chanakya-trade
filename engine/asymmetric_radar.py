@@ -421,6 +421,15 @@ def resolve_recommended_option_contract(
     if not expiry_date and fut_exp_date:
         expiry_date = fut_exp_date.strftime("%Y-%m-%d")
 
+    # ── Adaptive IV Rank & Defined-Risk Routing ───────────────────
+    iv_rank_val = None
+    try:
+        from analysis.options import compute_iv_rank_from_history
+
+        iv_rank_val = compute_iv_rank_from_history(clean_sym)
+    except Exception as e_iv:
+        logger.debug(f"[asymmetric_radar] IV rank lookup failed for {clean_sym}: {e_iv}")
+
     # ── Institutional Defined-Risk Hedged Spread ─────────────────
     hedge_plan = None
     try:
@@ -441,6 +450,15 @@ def resolve_recommended_option_contract(
         )
     except Exception as e:
         logger.debug(f"Failed to build defined-risk hedge plan for {clean_sym}: {e}")
+
+    primary_exec_style = "OUTRIGHT_OPTION"
+    exec_mandate = None
+    if iv_rank_val is not None and iv_rank_val >= 60.0 and hedge_plan:
+        primary_exec_style = "DEFINED_RISK_SPREAD"
+        exec_mandate = (
+            f"HIGH IV REGIME (IV Rank {iv_rank_val:.0f}%): Primary vehicle routed as Defined-Risk Spread "
+            f"to neutralize volatility crush and capture positive gamma/theta asymmetry."
+        )
 
     # ── Futures Overnight Risk Mitigation (Protective Collar) ─────
     futures_hedge = None
@@ -494,6 +512,9 @@ def resolve_recommended_option_contract(
         "futures_recommendation": (
             "Delta 1.0 zero-decay vehicle for positional swing" if is_positional else None
         ),
+        "iv_rank": iv_rank_val,
+        "primary_execution_style": primary_exec_style,
+        "execution_style_mandate": exec_mandate,
         "hedge_plan": hedge_plan,
         "futures_hedge": futures_hedge,
     }
@@ -555,6 +576,9 @@ class AsymmetricOpportunity:
     derivative_safeguard: Optional[str] = None
     hedge_plan: Optional[dict[str, Any]] = None
     futures_hedge: Optional[dict[str, Any]] = None
+    iv_rank: Optional[float] = None
+    primary_execution_style: Optional[str] = None
+    execution_style_mandate: Optional[str] = None
 
     # Compatibility Aliases
     moonshot_target: float = 0.0
@@ -807,7 +831,11 @@ class AsymmetricOpportunityRadar:
         setup_lbl = "⚡ Pocket Pivot Base Accumulation"
         if opt_info and opt_info.get("contract_symbol"):
             suffix = f" [{opt_info['contract_symbol']}]"
-            if opt_info.get("is_next_month_routed"):
+            if opt_info.get("primary_execution_style") == "DEFINED_RISK_SPREAD":
+                suffix = (
+                    f" [🛡️ DEFINED-RISK DEBIT SPREAD · IV Rank {opt_info.get('iv_rank', 0):.0f}%]"
+                )
+            elif opt_info.get("is_next_month_routed"):
                 suffix = f" [{opt_info['contract_symbol']} · 🎯 NEXT-MONTH ROLLOVER]"
             setup_lbl = f"{setup_lbl}{suffix}"
 
@@ -859,6 +887,9 @@ class AsymmetricOpportunityRadar:
             derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
             hedge_plan=opt_info.get("hedge_plan") if opt_info else None,
             futures_hedge=opt_info.get("futures_hedge") if opt_info else None,
+            iv_rank=opt_info.get("iv_rank") if opt_info else None,
+            primary_execution_style=opt_info.get("primary_execution_style") if opt_info else None,
+            execution_style_mandate=opt_info.get("execution_style_mandate") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -977,7 +1008,11 @@ class AsymmetricOpportunityRadar:
         )
         if opt_info and opt_info.get("contract_symbol"):
             suffix = f" [{opt_info['contract_symbol']}]"
-            if opt_info.get("is_next_month_routed"):
+            if opt_info.get("primary_execution_style") == "DEFINED_RISK_SPREAD":
+                suffix = (
+                    f" [🛡️ DEFINED-RISK DEBIT SPREAD · IV Rank {opt_info.get('iv_rank', 0):.0f}%]"
+                )
+            elif opt_info.get("is_next_month_routed"):
                 suffix = f" [{opt_info['contract_symbol']} · 🎯 NEXT-MONTH ROLLOVER]"
             setup_name = f"{setup_name}{suffix}"
 
@@ -1025,6 +1060,9 @@ class AsymmetricOpportunityRadar:
             derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
             hedge_plan=opt_info.get("hedge_plan") if opt_info else None,
             futures_hedge=opt_info.get("futures_hedge") if opt_info else None,
+            iv_rank=opt_info.get("iv_rank") if opt_info else None,
+            primary_execution_style=opt_info.get("primary_execution_style") if opt_info else None,
+            execution_style_mandate=opt_info.get("execution_style_mandate") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -1172,7 +1210,11 @@ class AsymmetricOpportunityRadar:
         setup_lbl = "🧲 Rubber Band 200-EMA Deep Value"
         if opt_info and opt_info.get("contract_symbol"):
             suffix = f" [{opt_info['contract_symbol']}]"
-            if opt_info.get("is_next_month_routed"):
+            if opt_info.get("primary_execution_style") == "DEFINED_RISK_SPREAD":
+                suffix = (
+                    f" [🛡️ DEFINED-RISK DEBIT SPREAD · IV Rank {opt_info.get('iv_rank', 0):.0f}%]"
+                )
+            elif opt_info.get("is_next_month_routed"):
                 suffix = f" [{opt_info['contract_symbol']} · 🎯 NEXT-MONTH ROLLOVER]"
             setup_lbl = f"{setup_lbl}{suffix}"
 
@@ -1224,6 +1266,9 @@ class AsymmetricOpportunityRadar:
             derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
             hedge_plan=opt_info.get("hedge_plan") if opt_info else None,
             futures_hedge=opt_info.get("futures_hedge") if opt_info else None,
+            iv_rank=opt_info.get("iv_rank") if opt_info else None,
+            primary_execution_style=opt_info.get("primary_execution_style") if opt_info else None,
+            execution_style_mandate=opt_info.get("execution_style_mandate") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -1237,7 +1282,7 @@ class AsymmetricOpportunityRadar:
         expiry_date: Optional[str] = None,
     ) -> Optional[AsymmetricOpportunity]:
         """
-        Detects 0DTE expiry gamma unpinning on major indices (NIFTY, BANKNIFTY)
+        Detects 0DTE expiry gamma unpinning on major index expiries (Weekly NIFTY/SENSEX, or Monthly Settlement Day)
         when spot price breaks out of the ATM Straddle break-even range.
         """
         clean_sym = symbol.upper().replace("^", "").strip()
@@ -1776,7 +1821,11 @@ class AsymmetricOpportunityRadar:
         setup_lbl = "🐢 ICT Turtle Soup Liquidity Sweep Short"
         if opt_info and opt_info.get("contract_symbol"):
             suffix = f" [{opt_info['contract_symbol']}]"
-            if opt_info.get("is_next_month_routed"):
+            if opt_info.get("primary_execution_style") == "DEFINED_RISK_SPREAD":
+                suffix = (
+                    f" [🛡️ DEFINED-RISK DEBIT SPREAD · IV Rank {opt_info.get('iv_rank', 0):.0f}%]"
+                )
+            elif opt_info.get("is_next_month_routed"):
                 suffix = f" [{opt_info['contract_symbol']} · 🎯 NEXT-MONTH ROLLOVER]"
             setup_lbl = f"{setup_lbl}{suffix}"
 
@@ -1829,6 +1878,9 @@ class AsymmetricOpportunityRadar:
             derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
             hedge_plan=opt_info.get("hedge_plan") if opt_info else None,
             futures_hedge=opt_info.get("futures_hedge") if opt_info else None,
+            iv_rank=opt_info.get("iv_rank") if opt_info else None,
+            primary_execution_style=opt_info.get("primary_execution_style") if opt_info else None,
+            execution_style_mandate=opt_info.get("execution_style_mandate") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 

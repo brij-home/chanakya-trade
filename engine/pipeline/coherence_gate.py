@@ -298,7 +298,24 @@ class CoherenceGate:
         # Check for positional / swing trades
         timeframe = str(getattr(alert, "timeframe", "") or "").upper()
         holding_period = str(getattr(alert, "holding_period", "") or "").upper()
-        if timeframe in ("DAILY", "SWING", "WEEKLY") or holding_period in ("SWING", "POSITIONAL"):
+        time_horizon = str(getattr(alert, "time_horizon", "") or "").upper()
+        setup_style = str(getattr(alert, "setup_style", "") or "").upper()
+        _SWING_TYPES = {
+            "DAILY",
+            "SWING",
+            "SWING_SHORT",
+            "SWING_MID",
+            "WEEKLY",
+            "POSITIONAL",
+            "LONG_TERM",
+            "MULTIBAGGER",
+        }
+        if (
+            timeframe in _SWING_TYPES
+            or holding_period in _SWING_TYPES
+            or time_horizon in _SWING_TYPES
+            or setup_style in _SWING_TYPES
+        ):
             return True, "Positional/Swing setup: exempt from intraday entry cutoff"
 
         # Check for defined-risk hedged spreads

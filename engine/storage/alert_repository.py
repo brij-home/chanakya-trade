@@ -360,6 +360,33 @@ class AlertRepository:
                 logger.info(f"[AlertRepository] Purged quarantined alert {a.alert_id} ({a.symbol})")
                 continue
 
+            # 1b. Zero-Futures Invariant Gate: Purge all futures alerts and contracts
+            _c_sym = str(getattr(a, "contract_symbol", "") or "").upper()
+            _d_type = str(getattr(a, "derivative_type", "") or "").upper()
+            _p_veh = str(getattr(a, "preferred_vehicle", "") or "").upper()
+            _i_type = str(getattr(a, "instrument_type", "") or "").upper()
+            _p_deriv = str(getattr(a, "primary_deriv", "") or "").upper()
+            _aid_u = str(getattr(a, "alert_id", "") or "").upper()
+            _sym_u = str(getattr(a, "symbol", "") or "").upper()
+            if (
+                _d_type == "FUT"
+                or _p_veh == "FUTURES"
+                or _i_type == "FUTURES"
+                or _p_deriv == "FUT"
+                or _c_sym.endswith("FUT")
+                or _c_sym.endswith("-FUT")
+                or ":FUT" in _c_sym
+                or ":FUT" in _sym_u
+                or _sym_u.endswith("FUT")
+                or "-FUT-" in _aid_u
+                or _aid_u.endswith("-FUT")
+            ):
+                purged += 1
+                logger.info(
+                    f"[AlertRepository] Purged legacy futures alert {a.alert_id} ({a.symbol} / {_c_sym})"
+                )
+                continue
+
             # 2. Gate for Index GAMMA_BLAST: Must have >= 15,000 OI and <= 5/8 DTE
             if a.alert_type == "GAMMA_BLAST":
                 is_index = a.symbol.upper() in (

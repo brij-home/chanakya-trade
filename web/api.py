@@ -874,6 +874,8 @@ async def api_fyers_budget():
         with vwap_cache._lock:
             cached_vwap_count = len(vwap_cache._memory_cache)
 
+        ws_diag = ws_mgr.get_diagnostics()
+
         return {
             "status": "HEALTHY" if not cb_diag["is_tripped"] else "DEGRADED",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -882,6 +884,10 @@ async def api_fyers_budget():
             "websocket_subscriptions": {
                 "total_count": len(all_subs),
                 "max_limit": ws_mgr._max_subscriptions,
+                "core_count": ws_diag.get("core_count", 0),
+                "dynamic_count": ws_diag.get("dynamic_count", 0),
+                "utilization_pct": ws_diag.get("utilization_pct", 0.0),
+                "anchored_spots": ws_diag.get("anchored_spots", {}),
                 "symbols": all_subs,
             },
             "vwap_session_cache": {
@@ -920,6 +926,61 @@ async def api_fyers_recalibrate(plan: str = "PRIME", reset_exhaustion: bool = Tr
             "data_socket_symbols": gate.data_socket_symbols,
             "tbt_socket_symbols": gate.tbt_socket_symbols,
             "circuit_breaker_state": get_fyers_circuit_breaker().state.value,
+        }
+
+    res = await asyncio.to_thread(_do)
+    return JSONResponse(res)
+
+
+@app.post("/api/market/subscriptions/cleanse", tags=["Market"])
+async def api_market_subscriptions_cleanse():
+    """
+    Sanitize WebSocket subscription registry and RAM tick cache.
+    Evicts expired F&O options and futures contracts, cleanses stale ticks (>24h),
+    and synchronizes persistent subscription registry to disk.
+    """
+
+    def _do():
+        from market.ws_subscription_manager import get_ws_subscription_manager
+        from market.websocket import ws_manager
+
+        sub_mgr = get_ws_subscription_manager()
+        purged_contracts = sub_mgr.cleanse_expired_derivatives(ws_client=ws_manager)
+        purged_stale_ticks = ws_manager.cleanse_stale_ticks()
+        diag = sub_mgr.get_diagnostics()
+
+        return {
+            "status": "SUCCESS",
+            "purged_contracts_count": len(purged_contracts),
+            "purged_contracts": purged_contracts,
+            "purged_stale_ticks_count": purged_stale_ticks,
+            "current_total_subscribed": diag["total_subscribed"],
+            "utilization_pct": diag["utilization_pct"],
+        }
+
+    res = await asyncio.to_thread(_do)
+    return JSONResponse(res)
+
+
+@app.post("/api/market/subscriptions/revolve", tags=["Market"])
+async def api_market_subscriptions_revolve(drift_pct: float = 1.0):
+    """
+    Revolve active Index Options grid around current spot levels.
+    Detects underlying spot movement (NIFTY, BANKNIFTY, SENSEX, FINNIFTY, MIDCPNIFTY),
+    subscribes new ATM strikes on spot drift >= drift_pct, and purges expired contracts.
+    """
+
+    def _do():
+        from market.ws_subscription_manager import get_ws_subscription_manager
+        from market.websocket import ws_manager
+
+        sub_mgr = get_ws_subscription_manager()
+        result = sub_mgr.revolve_active_derivatives(
+            ws_client=ws_manager, drift_pct_threshold=drift_pct
+        )
+        return {
+            "status": "SUCCESS",
+            **result,
         }
 
     res = await asyncio.to_thread(_do)
@@ -1106,8 +1167,13 @@ async def get_system_health_hub(
     from engine.memory_guard import get_memory_status
     from engine.maintenance import get_storage_breakdown
 
+    from market.fyers_rate_gate import get_fyers_rate_gate
+    from market.fyers_tbt_manager import fyers_tbt_manager
+
     cb_diag = get_fyers_circuit_breaker().get_diagnostics()
     ws_diag = get_ws_subscription_manager().get_diagnostics()
+    rate_gate_diag = get_fyers_rate_gate().get_diagnostics()
+    tbt_diag = await asyncio.to_thread(fyers_tbt_manager.get_active_slots_status)
     broker_statuses = _compute_status()
     obs_reg = get_registry()
     provider_health = obs_reg.get_provider_health()
@@ -1124,6 +1190,7 @@ async def get_system_health_hub(
         active_counts.get("P0", 0) > 0
         or cb_diag.get("state") == "OPEN"
         or provider_health.get("overall_health") == "UNHEALTHY"
+        or rate_gate_diag.get("status") == "EXHAUSTED"
     ):
         overall_status = "CRITICAL"
     elif (
@@ -1131,6 +1198,7 @@ async def get_system_health_hub(
         or cb_diag.get("state") == "HALF_OPEN"
         or provider_health.get("overall_health") == "DEGRADED"
         or slo_report.get("overall_status") == "BREACHED"
+        or rate_gate_diag.get("status") in ("WARNING", "SATURATED")
     ):
         overall_status = "DEGRADED"
     else:
@@ -1142,6 +1210,8 @@ async def get_system_health_hub(
             "incident_counts": incident_counts,
             "active_incident_counts": active_counts,
             "circuit_breaker": cb_diag,
+            "rate_gate": rate_gate_diag,
+            "tbt": tbt_diag,
             "websocket": ws_diag,
             "brokers": broker_statuses,
             "provider_health": provider_health,
@@ -3410,6 +3480,9 @@ async def api_smart_route(request: Request, body: dict):
     ask = float(body.get("ask_price", 0.0)) if body.get("ask_price") else None
     lot_size = int(body.get("lot_size", 1))
     urgency = str(body.get("urgency", "NORMAL"))
+    routing_mode = body.get("routing_mode")
+    duration_min = int(body.get("duration_minutes", 30))
+    target_pov = float(body.get("target_pov_pct", 0.10))
 
     plan = build_smart_execution_plan(
         symbol=symbol,
@@ -3420,8 +3493,94 @@ async def api_smart_route(request: Request, body: dict):
         ask_price=ask,
         lot_size=lot_size,
         urgency=urgency,
+        routing_mode_override=routing_mode,
+        duration_minutes=duration_min,
+        target_pov_pct=target_pov,
     )
     return plan.to_dict()
+
+
+@app.get("/api/options/vol-surface/{symbol}")
+async def api_get_volatility_surface(
+    symbol: str,
+    request: Request,
+    expiry: Optional[str] = None,
+    beta: float = 0.7,
+):
+    """Calibrates Hagan's SABR (2002) Volatility Surface, extracts parameter smile, and flags strike mispricings."""
+    _require_localhost(request)
+    from analysis.vol_surface import analyze_volatility_surface
+
+    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    result = await asyncio.to_thread(analyze_volatility_surface, clean_sym, expiry, beta)
+    if not result:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "status": "UNAVAILABLE",
+                "message": f"Options chain or quote unavailable for {clean_sym}",
+            },
+        )
+
+    return {
+        "status": "OK",
+        "underlying": result.underlying,
+        "forward_price": result.forward_price,
+        "expiry_years": result.expiry_years,
+        "dte_days": result.dte_days,
+        "skew_verdict": result.skew_verdict,
+        "parameters": {
+            "alpha": round(result.parameters.alpha, 4),
+            "beta": round(result.parameters.beta, 2),
+            "rho": round(result.parameters.rho, 4),
+            "nu": round(result.parameters.nu, 4),
+            "rmse": result.parameters.rmse,
+            "mae": result.parameters.mae,
+            "converged": result.parameters.converged,
+        },
+        "mispricings": [
+            {
+                "strike": m.strike,
+                "market_iv": m.market_iv,
+                "sabr_iv": m.sabr_iv,
+                "iv_edge_pts": m.iv_edge_pts,
+                "edge_pct": m.edge_pct,
+                "verdict": m.verdict,
+                "recommendation": m.recommendation,
+            }
+            for m in result.mispricings
+        ],
+        "fitted_curve": [
+            {"strike": round(k, 1), "iv": iv}
+            for k, iv in zip(result.fitted_strikes, result.fitted_ivs)
+        ],
+    }
+
+
+@app.get("/api/warehouse/stats")
+async def api_get_warehouse_stats(request: Request):
+    """Returns local Columnar Parquet Tick Warehouse storage statistics and partition count."""
+    _require_localhost(request)
+    from engine.tick_warehouse import get_tick_warehouse
+
+    wh = get_tick_warehouse()
+    return await asyncio.to_thread(wh.get_storage_stats)
+
+
+@app.post("/api/warehouse/purge")
+async def api_purge_warehouse_partitions(request: Request, retention_days: Optional[int] = None):
+    """Enforces retention by purging expired tick partitions older than retention_days."""
+    _require_localhost(request)
+    from engine.tick_warehouse import get_tick_warehouse
+
+    wh = get_tick_warehouse()
+    purged = await asyncio.to_thread(wh.purge_expired_partitions, retention_days)
+    stats = await asyncio.to_thread(wh.get_storage_stats)
+    return {
+        "status": "OK",
+        "purged_partitions": purged,
+        "storage_stats": stats,
+    }
 
 
 class PaperSquareOffRequest(BaseModel):

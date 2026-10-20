@@ -29,7 +29,7 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, date
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from brokers.base import (
     BrokerAPI,
@@ -61,6 +61,7 @@ DEFAULT_STATE: dict = {
     "holdings": {},  # symbol → {qty, avg_price, product}
     "positions": {},  # symbol → {qty, avg_price, product, exchange}
     "orders": [],  # list of order record dicts
+    "gtts": [],  # list of active/triggered conditional GTT order dicts
 }
 
 
@@ -206,6 +207,25 @@ class PaperBroker(BrokerAPI):
                 )
             )
         return result
+
+    def square_off_intraday_positions(self) -> list[str]:
+        """Auto square off any remaining MIS (intraday) positions at current market price."""
+        closed = []
+        for sym, p in list(self._state["positions"].items()):
+            if p.get("product") == "MIS" and p.get("qty", 0) != 0:
+                qty = p["qty"]
+                side = "SELL" if qty > 0 else "BUY"
+                req = OrderRequest(
+                    symbol=sym,
+                    exchange=p.get("exchange", "NSE"),
+                    transaction_type=side,
+                    quantity=abs(qty),
+                    order_type="MARKET",
+                    product="MIS",
+                )
+                self.place_order(req)
+                closed.append(sym)
+        return closed
 
     # ── Orders ────────────────────────────────────────────────
 
@@ -397,3 +417,109 @@ class PaperBroker(BrokerAPI):
                 # 'message' not in Order dataclass — kept in raw state only
             }
         )
+
+    # ── Good-Till-Triggered (GTT) Orders ───────────────────────
+
+    def place_gtt(self, req: Any) -> Any:
+        """Place a simulated server-side GTT or OCO order in PaperBroker."""
+        from brokers.base import GTTResponse
+
+        gtt_id = f"GTT-PAPER-{uuid.uuid4().hex[:8].upper()}"
+        gtt_record = {
+            "gtt_id": gtt_id,
+            "symbol": req.symbol.upper(),
+            "exchange": req.exchange,
+            "transaction_type": req.transaction_type.upper(),
+            "trigger_type": req.trigger_type.upper(),
+            "product": req.product.upper(),
+            "status": "ACTIVE",
+            "leg1": {
+                "price": float(req.leg1.price),
+                "trigger_price": float(req.leg1.trigger_price),
+                "quantity": int(req.leg1.quantity),
+            },
+            "created_at": datetime.now().isoformat(),
+        }
+        if str(req.trigger_type).upper() == "OCO" and req.leg2:
+            gtt_record["leg2"] = {
+                "price": float(req.leg2.price),
+                "trigger_price": float(req.leg2.trigger_price),
+                "quantity": int(req.leg2.quantity),
+            }
+        if "gtts" not in self._state:
+            self._state["gtts"] = []
+        self._state["gtts"].append(gtt_record)
+        self._save()
+        return GTTResponse(gtt_id=gtt_id, status="ACTIVE", raw=gtt_record)
+
+    def get_gtts(self) -> list[dict[str, Any]]:
+        """Fetch active server-side GTT orders."""
+        return [g for g in self._state.get("gtts", []) if g.get("status") == "ACTIVE"]
+
+    def cancel_gtt(self, gtt_id: str) -> bool:
+        """Cancel an active server-side GTT order."""
+        for g in self._state.get("gtts", []):
+            if g.get("gtt_id") == gtt_id and g.get("status") == "ACTIVE":
+                g["status"] = "CANCELLED"
+                g["cancelled_at"] = datetime.now().isoformat()
+                self._save()
+                return True
+        return False
+
+    def evaluate_gtts(self, quotes: dict[str, float]) -> list[str]:
+        """
+        Check active GTT triggers against latest market prices.
+        Executes paper market fill order when stop or target level is breached.
+        """
+        triggered_ids = []
+        for g in self._state.get("gtts", []):
+            if g.get("status") != "ACTIVE":
+                continue
+            sym = str(g.get("symbol", "")).upper()
+            ltp = quotes.get(sym) or quotes.get(f"{g.get('exchange', 'NSE')}:{sym}")
+            if ltp is None or ltp <= 0:
+                continue
+
+            side = g.get("transaction_type", "SELL").upper()
+            leg1 = g.get("leg1", {})
+            leg2 = g.get("leg2")
+
+            # For SELL exit (closing LONG): stop triggers if ltp <= stop_trigger, target triggers if ltp >= target_trigger
+            # For BUY exit (closing SHORT): stop triggers if ltp >= stop_trigger, target triggers if ltp <= target_trigger
+            hit_leg = None
+            if side == "SELL":
+                if leg1 and ltp <= float(leg1.get("trigger_price", 0)):
+                    hit_leg = ("STOP_LOSS", leg1)
+                elif leg2 and ltp >= float(leg2.get("trigger_price", float("inf"))):
+                    hit_leg = ("TARGET", leg2)
+            else:  # BUY exit
+                if leg1 and ltp >= float(leg1.get("trigger_price", float("inf"))):
+                    hit_leg = ("STOP_LOSS", leg1)
+                elif leg2 and ltp <= float(leg2.get("trigger_price", 0)):
+                    hit_leg = ("TARGET", leg2)
+
+            if hit_leg:
+                leg_name, target_leg = hit_leg
+                g["status"] = "TRIGGERED"
+                g["triggered_leg"] = leg_name
+                g["triggered_at"] = datetime.now().isoformat()
+                g["triggered_price"] = ltp
+
+                order_req = OrderRequest(
+                    symbol=sym,
+                    exchange=g.get("exchange", "NSE"),
+                    transaction_type=side,
+                    order_type="MARKET",
+                    product=g.get("product", "MIS"),
+                    quantity=int(target_leg.get("quantity", 1)),
+                    price=float(target_leg.get("price", ltp)),
+                )
+                try:
+                    self.place_order(order_req)
+                except Exception as e_fill:
+                    logger.warning(f"[PaperBroker] GTT execution order failed for {sym}: {e_fill}")
+                triggered_ids.append(g["gtt_id"])
+
+        if triggered_ids:
+            self._save()
+        return triggered_ids

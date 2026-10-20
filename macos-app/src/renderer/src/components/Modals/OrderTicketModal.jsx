@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAPI } from '../../hooks/useAPI'
+import DepthLadderWidget from '../Widgets/DepthLadderWidget'
+import { INDIAN_UNIVERSE } from '../../data/universeData'
+import { playOrderFillSound, playWarningTone } from '../../utils/audioFeedback'
 
 function createOrderIntentKey() {
   if (globalThis.crypto?.randomUUID) return `ORDER-${globalThis.crypto.randomUUID()}`
@@ -36,11 +39,13 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const [exchange, setExchange] = useState(initialData.exchange || 'NSE')
   const [action, setAction] = useState(initialData.action || initialData.side || initialData.orderType || 'BUY')
   const [orderType, setOrderType] = useState('LIMIT')
+  const [triggerPrice, setTriggerPrice] = useState(initialData.triggerPrice ?? initialData.trigger_price ?? initialData.sl_limit_trigger ?? '')
   const [product, setProduct] = useState(initialData.product || 'MIS') // MIS (Intraday) | CNC (Delivery) | NRML (F&O)
   const [lotSize, setLotSize] = useState(initialData.lotSize || initialData.lot_size || 1)
   const [price, setPrice] = useState(initialData.price ?? '')
   const [stopLoss, setStopLoss] = useState(initialData.stopLoss ?? initialData.stop_loss ?? '')
   const [target, setTarget] = useState(initialData.target ?? initialData.target_1 ?? '')
+  const [autoRatchetBreakeven, setAutoRatchetBreakeven] = useState(true)
   const [capital, setCapital] = useState(200000)
   const [riskPct, setRiskPct] = useState(1.0)
   const [qty, setQty] = useState(initialData.qty ?? initialData.quantity ?? '')
@@ -55,6 +60,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const [noChaseLimit, setNoChaseLimit] = useState(null)
   const [isExtendedChase, setIsExtendedChase] = useState(false)
   const [optimalEntryZone, setOptimalEntryZone] = useState(null)
+  const [showDomLadder, setShowDomLadder] = useState(false)
 
   // Sync state whenever modal opens or initialData changes
   useEffect(() => {
@@ -67,12 +73,20 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
       const act = initialData.action || initialData.side || initialData.orderType || 'BUY'
       setAction(act)
 
+      const cleanSym = sym.replace(/^(NSE:|BSE:|MCX:|CDS:)/, '').trim()
+      const uMatch = INDIAN_UNIVERSE.find(u => u.symbol === cleanSym || cleanSym.startsWith(u.symbol))
       const resolvedLot = Math.max(
         1,
         Number(
           initialData.lotSize ||
           initialData.lot_size ||
-          (sym.includes('BANKNIFTY') ? 30 : sym.includes('NIFTY') ? 65 : sym.includes('SENSEX') ? 20 : 1)
+          uMatch?.lotSize ||
+          (cleanSym.includes('MIDCPNIFTY') ? 120 :
+           cleanSym.includes('FINNIFTY') ? 60 :
+           cleanSym.includes('BANKNIFTY') ? 30 :
+           cleanSym.includes('SENSEX') ? 20 :
+           cleanSym.includes('BANKEX') ? 30 :
+           cleanSym.includes('NIFTY') ? 65 : 1)
         )
       )
       setLotSize(resolvedLot)
@@ -95,6 +109,15 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
       )
       setIsExtendedChase(isExtended)
 
+      const rawOT = String(initialData.orderType || initialData.order_type || '').toUpperCase()
+      const rawTrig = initialData.triggerPrice ?? initialData.trigger_price ?? initialData.sl_limit_trigger ?? ''
+      const hasTrigger = rawTrig !== '' && !isNaN(Number(rawTrig)) && Number(rawTrig) > 0
+      const resolvedOT = (rawOT.includes('SL') || hasTrigger)
+        ? 'SL_LIMIT'
+        : (rawOT === 'MARKET' ? 'MARKET' : 'LIMIT')
+
+      setTriggerPrice(hasTrigger ? Number(rawTrig) : '')
+
       if (isExtended) {
         // Enforce Anti-FOMO Discipline: Lock to LIMIT order at retest level
         setOrderType('LIMIT')
@@ -104,6 +127,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
           setPrice(p > 0 ? p : (initialData.price ?? ''))
         }
       } else {
+        setOrderType(resolvedOT)
         setPrice(p > 0 ? p : (initialData.price ?? ''))
       }
 
@@ -183,6 +207,12 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const riskRewardRatio = riskAmount > 0 ? (rewardAmount / riskAmount).toFixed(2) : 0
   const orderValue = (Number(price) || 0) * (Number(qty) || 0)
 
+  const isFO = exchange === 'NFO' || lotSize > 1 || symbol.includes(' CE') || symbol.includes(' PE')
+  const hasSpreadInfo = Boolean(initialData.bid && initialData.ask && Number(initialData.ask) > Number(initialData.bid))
+  const spreadAmt = hasSpreadInfo ? (Number(initialData.ask) - Number(initialData.bid)) : null
+  const spreadPct = hasSpreadInfo && Number(initialData.bid) > 0 ? (spreadAmt / Number(initialData.bid)) * 100 : null
+  const isWideSpread = (hasSpreadInfo && spreadPct > 3.0) || (orderType === 'MARKET' && isFO)
+
   const handleActionChange = (newAct) => {
     setAction(newAct)
     const p = Number(price || 0)
@@ -207,9 +237,16 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
       })
       return
     }
+    if (orderType === 'SL_LIMIT' && (!Number.isFinite(Number(triggerPrice)) || Number(triggerPrice) <= 0)) {
+      setStatusMsg({
+        type: 'error',
+        text: 'Enter a valid positive trigger price for SL-LIMIT order.',
+      })
+      return
+    }
     setIsValidatingRisk(true)
 
-    const requestSignature = [symbol, action, qty, price, orderType, product].join('|')
+    const requestSignature = [symbol, action, qty, price, orderType, product, triggerPrice].join('|')
     if (pendingPreviewRef.current?.signature !== requestSignature) {
       pendingPreviewRef.current = {
         signature: requestSignature,
@@ -234,7 +271,12 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
           price,
           order_type: orderType,
           product,
+          trigger_price: orderType === 'SL_LIMIT' && Number(triggerPrice) > 0 ? Number(triggerPrice) : null,
           idempotency_key: pendingPreviewRef.current.key,
+          stop_loss: Number(stopLoss) > 0 ? Number(stopLoss) : null,
+          target: Number(target) > 0 ? Number(target) : null,
+          auto_gtt_oco: true,
+          auto_ratchet_breakeven: autoRatchetBreakeven,
         }),
       ])
 
@@ -327,12 +369,14 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
         type: 'success',
         text: `✓ ${modeLabel} Placed [${orderIdDisplay}]: ${status.replace('_', ' ')} @ ₹${Number(price).toFixed(2)} [SL: ₹${stopLoss}, TGT: ₹${target}]`,
       })
+      playOrderFillSound()
 
       setTimeout(() => {
         setStep(1)
         onClose()
       }, 1600)
     } catch (err) {
+      playWarningTone()
       setStatusMsg({ type: 'error', text: err.message || 'Order rejected by Risk Gate' })
     } finally {
       setIsSubmitting(false)
@@ -476,10 +520,71 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                 </div>
               </div>
 
-              {/* Price, Stop-Loss, Target */}
-              <div className="grid grid-cols-3 gap-2">
+              {/* Order Type & Execution Class Selector */}
+              <div className="flex items-center justify-between p-1 rounded-xl bg-elevated border border-border/70 text-xs">
+                <span className="text-muted text-[10px] uppercase font-ui font-semibold px-2">Order Type</span>
+                <div className="flex items-center gap-1">
+                  {[
+                    { id: 'LIMIT', label: 'LIMIT' },
+                    { id: 'MARKET', label: 'MARKET' },
+                    { id: 'SL_LIMIT', label: '⚡ SL-LIMIT' },
+                  ].map((ot) => (
+                    <button
+                      key={ot.id}
+                      type="button"
+                      onClick={() => setOrderType(ot.id)}
+                      className={`px-3 py-1 rounded-lg font-bold text-xs transition-all cursor-pointer ${
+                        orderType === ot.id
+                          ? ot.id === 'SL_LIMIT'
+                            ? 'bg-amber text-black font-extrabold shadow-sm'
+                            : 'bg-primary text-text shadow-sm'
+                          : 'text-muted hover:text-text'
+                      }`}
+                    >
+                      {ot.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Wide Bid-Ask Spread / Options Market Order Warning */}
+              {isWideSpread && (
+                <div className="bg-amber-500/10 border border-amber-500/40 rounded-xl p-2.5 flex items-start gap-2 text-xs">
+                  <span className="text-amber-400 text-sm mt-0.5">⚠️</span>
+                  <div className="flex-1">
+                    <div className="font-bold text-amber-300 text-[10.5px] uppercase tracking-wide">
+                      F&O Execution Slippage Warning
+                    </div>
+                    <p className="text-[10px] text-amber-200/90 leading-tight mt-0.5">
+                      {hasSpreadInfo
+                        ? `Current Bid-Ask Spread is ₹${spreadAmt.toFixed(2)} (${spreadPct.toFixed(1)}%). `
+                        : 'Market orders on options contracts can incur severe execution slippage outside top-of-book depth. '}
+                      Institutional best practice: use <strong>LIMIT</strong> or <strong>Passive Peg</strong> at or inside the bid-ask.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Price, Trigger Price (for SL-LIMIT), Stop-Loss, Target */}
+              <div className={`grid ${orderType === 'SL_LIMIT' ? 'grid-cols-4' : 'grid-cols-3'} gap-2`}>
+                {orderType === 'SL_LIMIT' && (
+                  <div className="space-y-1">
+                    <span className="text-[10px] uppercase font-bold text-amber">Trigger Price</span>
+                    <input
+                      type="number"
+                      step="0.05"
+                      value={triggerPrice}
+                      onChange={(e) => setTriggerPrice(e.target.value === '' ? '' : Number(e.target.value))}
+                      className="w-full bg-panel border-2 border-amber/60 rounded px-2.5 py-1.5 text-amber font-mono font-bold text-xs"
+                      aria-label="Trigger price"
+                      placeholder="Trigger ₹"
+                    />
+                  </div>
+                )}
                 <div className="space-y-1">
-                  <span className="text-[10px] uppercase font-bold" style={{ color: 'var(--color-muted)' }}>Entry Price</span>
+                  <span className="text-[10px] uppercase font-bold" style={{ color: 'var(--color-muted)' }}>
+                    {orderType === 'SL_LIMIT' ? 'Limit Price' : 'Entry Price'}
+                  </span>
                   <input
                     type="number"
                     step="0.05"
@@ -548,6 +653,24 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                   />
                 </div>
               </div>
+
+              {/* Auto-Ratchet Breakeven Bracket Toggle */}
+              {Number(stopLoss) > 0 && Number(target) > 0 && (
+                <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-emerald-950/25 border border-emerald-500/30 text-[10.5px] font-mono">
+                  <label className="flex items-center gap-2 cursor-pointer text-emerald-300 font-semibold select-none">
+                    <input
+                      type="checkbox"
+                      checked={autoRatchetBreakeven}
+                      onChange={(e) => setAutoRatchetBreakeven(e.target.checked)}
+                      className="rounded border-emerald-500/50 text-emerald-500 focus:ring-0 cursor-pointer"
+                    />
+                    <span>🛡️ Auto-Ratchet Breakeven at T1 (+2R)</span>
+                  </label>
+                  <span className="text-[9px] text-emerald-400/80 hidden sm:inline">
+                    {autoRatchetBreakeven ? 'SL moves to Entry upon T1 fill' : 'Manual SL management'}
+                  </span>
+                </div>
+              )}
 
               {/* Quantity & Lot Sizing Section */}
               <div className="grid grid-cols-2 gap-3 p-2.5 rounded-xl bg-panel/70 border border-border/60 items-center">
@@ -661,6 +784,43 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                 </div>
               )}
 
+              {/* Institutional L2/L3 DOM Depth Ladder */}
+              <div className="space-y-1.5 p-2 rounded-xl bg-panel/70 border border-border/60">
+                <div className="flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => setShowDomLadder((prev) => !prev)}
+                    className="flex items-center gap-1.5 text-[11px] font-mono font-bold text-cyan-400 hover:text-cyan-300 transition-colors cursor-pointer"
+                  >
+                    <span>{showDomLadder ? '▼ Hide' : '▶ Show'} L2/L3 DOM Depth Ladder</span>
+                    <span className="text-[9px] px-1.5 py-0.2 bg-cyan-950/70 border border-cyan-800/50 rounded text-cyan-300 font-bold">
+                      Order Book & OBI
+                    </span>
+                  </button>
+                  {showDomLadder && (
+                    <span className="text-[9px] text-muted font-mono">
+                      Click any depth level to set limit price
+                    </span>
+                  )}
+                </div>
+                {showDomLadder && (
+                  <div className="mt-1 rounded-xl border border-border/80 overflow-hidden bg-panel/90">
+                    <DepthLadderWidget
+                      symbol={symbol}
+                      compact={true}
+                      currentPrice={Number(price) || null}
+                      stopLoss={Number(stopLoss) || null}
+                      target={Number(target) || null}
+                      noChaseBoundary={noChaseLimit}
+                      onPriceSelect={(selectedPrice) => {
+                        setPrice(selectedPrice)
+                        setOrderType('LIMIT')
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+
               {/* Risk Sizing Card */}
               <div className="bg-panel/60 border border-border/50 rounded-xl p-3 space-y-2">
                 <div className="flex justify-between items-center text-[11px] font-ui">
@@ -684,17 +844,17 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                 <div className="grid grid-cols-3 gap-2 pt-1 border-t border-border/30 text-[11px]">
                   <div>
                     <span className="text-muted text-[10px] block font-ui">Calculated Qty</span>
-                    <span className="text-text font-bold text-sm font-mono">
+                    <span className="text-text font-bold text-sm font-mono tabular-nums">
                       {qty || 0} {lotSize > 1 ? `(${Math.max(1, Math.round((Number(qty) || 0) / lotSize))}L)` : ''}
                     </span>
                   </div>
                   <div>
                     <span className="text-muted text-[10px] block font-ui">Max Risk</span>
-                    <span className="text-red font-semibold font-mono">₹{riskAmount.toFixed(0)}</span>
+                    <span className="text-red font-semibold font-mono tabular-nums">₹{riskAmount.toFixed(0)}</span>
                   </div>
                   <div>
                     <span className="text-muted text-[10px] block font-ui">Risk:Reward</span>
-                    <span className="text-green font-bold font-mono">1:{riskRewardRatio}</span>
+                    <span className="text-green font-bold font-mono tabular-nums">1:{riskRewardRatio}</span>
                   </div>
                 </div>
               </div>
@@ -758,7 +918,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                 )}
 
                 {/* Order Breakdown */}
-                <div className="space-y-1.5 font-mono text-[11px] bg-panel p-3 rounded-lg border border-border/50">
+                <div className="space-y-1.5 font-mono tabular-nums text-[11px] bg-panel p-3 rounded-lg border border-border/50">
                   <div className="flex justify-between">
                     <span className="text-muted">Order Details:</span>
                     <span className={`font-bold ${action === 'BUY' ? 'text-green' : 'text-red'}`}>
@@ -767,7 +927,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                   </div>
                   <div className="flex justify-between">
                     <span className="text-muted">Trade Value:</span>
-                    <span className="text-text font-bold">₹{orderValue.toLocaleString('en-IN')}</span>
+                    <span className="text-text font-bold tabular-nums">₹{orderValue.toLocaleString('en-IN')}</span>
                   </div>
                   {previewOrder?.order_id && (
                     <div className="flex justify-between text-[10px]">
@@ -784,17 +944,27 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                   {totalCharges > 0 && (
                     <div className="flex justify-between text-[10px] text-muted">
                       <span>Statutory Indian Charges:</span>
-                      <span className="font-semibold text-text">₹{totalCharges.toFixed(2)} (STT, GST, SEBI)</span>
+                      <span className="font-semibold text-text tabular-nums">₹{totalCharges.toFixed(2)} (STT, GST, SEBI)</span>
                     </div>
                   )}
                   <div className="flex justify-between">
                     <span className="text-muted">Stop Loss &amp; Max Risk:</span>
-                    <span className="text-red font-semibold">₹{stopLoss} (-₹{riskAmount.toFixed(0)})</span>
+                    <span className="text-red font-semibold tabular-nums">₹{stopLoss} (-₹{riskAmount.toFixed(0)})</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-muted">Target Objective:</span>
-                    <span className="text-green font-semibold">₹{target} (+₹{rewardAmount.toFixed(0)})</span>
+                    <span className="text-green font-semibold tabular-nums">₹{target} (+₹{rewardAmount.toFixed(0)})</span>
                   </div>
+                  {Number(stopLoss) > 0 && (
+                    <div className="flex justify-between items-center bg-emerald-950/40 border border-emerald-500/30 rounded p-1.5 text-[10px] text-emerald-300 font-mono">
+                      <span className="flex items-center gap-1 font-bold">
+                        <span>🛡️</span> Broker-Side GTT OCO Bracket:
+                      </span>
+                      <span className="bg-emerald-500/20 px-1.5 py-0.5 rounded text-[9px] font-bold">
+                        AUTO-ARM ON FILL (SL: ₹{stopLoss}{Number(target) > 0 ? ` | TGT: ₹${target}` : ''}{autoRatchetBreakeven ? ' | 🛡️ BE @ T1' : ''})
+                      </span>
+                    </div>
+                  )}
                   <div className="flex justify-between pt-1 border-t border-border/30 text-[10px]">
                     <span className="text-muted">Execution Venue:</span>
                     {isLiveMode ? (

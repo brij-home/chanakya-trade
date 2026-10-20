@@ -64,7 +64,7 @@ function BreadthBar({ advancing, declining, unchanged }) {
 
   return (
     <div className="space-y-2">
-      <div className="flex justify-between text-[10px] font-mono">
+      <div className="flex justify-between text-[10px] font-mono tabular-nums">
         <span style={{ color: 'var(--color-emerald)' }}>▲ {advancing} ADV ({aP}%)</span>
         <span style={{ color: 'var(--color-muted)' }}>{unchanged ?? 0} UNCH</span>
         <span style={{ color: 'var(--color-rose)' }}>▼ {declining} DEC ({dP}%)</span>
@@ -85,7 +85,7 @@ function FlowBar({ label, value, max = 3000 }) {
   const pct = Math.min(100, Math.abs(value) / Math.max(1, max) * 100)
   return (
     <div className="space-y-1">
-      <div className="flex justify-between text-[10px] font-mono">
+      <div className="flex justify-between text-[10px] font-mono tabular-nums">
         <span style={{ color: 'var(--color-muted)' }}>{label}</span>
         <span style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)', fontWeight: 700 }}>
           {isPos ? '+' : ''}₹{Math.abs(value).toLocaleString('en-IN')} Cr
@@ -284,12 +284,12 @@ export default function OverviewView() {
                           </span>
                         )}
                       </div>
-                      <div className="text-xs font-mono font-bold" style={{ color: 'var(--color-text)' }}>
+                      <div className="text-xs font-mono font-bold tabular-nums" style={{ color: 'var(--color-text)' }}>
                         {Number(m.ltp).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
                         <span className="text-[9px] font-normal text-muted ml-0.5">{m.unit}</span>
                       </div>
                       <div
-                        className="text-[10px] font-mono font-bold flex items-center justify-between"
+                        className="text-[10px] font-mono font-bold tabular-nums flex items-center justify-between"
                         style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)' }}
                       >
                         <span>{isPos ? '+' : ''}{Number(m.change_pct).toFixed(2)}%</span>
@@ -412,7 +412,7 @@ export default function OverviewView() {
                     <FlowBar label="NET" value={fiiNet + diiNet} max={5000} />
                   </div>
                   <div className="text-[9.5px]" style={{ color: 'var(--color-muted)' }}>
-                    Combined: <span style={{ color: (fiiNet + diiNet) >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)', fontWeight: 700 }}>
+                    Combined: <span className="font-mono tabular-nums" style={{ color: (fiiNet + diiNet) >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)', fontWeight: 700 }}>
                       {(fiiNet + diiNet) >= 0 ? '+' : ''}₹{(fiiNet + diiNet).toLocaleString('en-IN')} Cr
                     </span>
                   </div>
@@ -460,7 +460,7 @@ export default function OverviewView() {
                       <div className="text-xs font-bold truncate" style={{ color: 'var(--color-text)' }}>{s.name || s.sector}</div>
                       <div className="text-[10px] font-bold" style={{ color: cfg.color }}>{cfg.label.split(' ')[0]}</div>
                       {chgVal != null ? (
-                        <div className="text-[11px] font-mono font-bold" style={{ color: chgVal >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)' }}>
+                        <div className="text-[11px] font-mono font-bold tabular-nums" style={{ color: chgVal >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)' }}>
                           {chgVal >= 0 ? '+' : ''}{Number(chgVal).toFixed(1)}%
                         </div>
                       ) : (

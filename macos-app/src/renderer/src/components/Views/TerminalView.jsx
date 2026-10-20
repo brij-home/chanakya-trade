@@ -1056,16 +1056,16 @@ export default function TerminalView({
                         <span className="text-[10px] text-muted font-mono truncate max-w-[110px] block">{item.name}</span>
                       </div>
 
-                      <div className="text-right font-mono flex-shrink-0">
-                        <span className="text-xs font-bold font-mono">
+                      <div className="text-right font-mono tabular-nums flex-shrink-0">
+                        <span className="text-xs font-bold font-mono tabular-nums">
                           {formatLivePrice(item.ltp, item.cat === 'CRYPTO' || item.symbol === 'BTC' ? '$' : item.cat === 'FOREX' ? '' : '₹')}
                         </span>
                         {item.change_pct != null ? (
-                          <span className={`text-[10px] font-semibold ${Number(item.change_pct) >= 0 ? 'text-green' : 'text-red'}`}>
+                          <span className={`text-[10px] font-semibold tabular-nums ${Number(item.change_pct) >= 0 ? 'text-green' : 'text-red'}`}>
                             {formatLiveChange(null, item.change_pct).pctText}
                           </span>
                         ) : (
-                          <span className="text-[10px] text-muted font-mono">—</span>
+                          <span className="text-[10px] text-muted font-mono tabular-nums">—</span>
                         )}
                       </div>
                     </button>
@@ -1268,7 +1268,7 @@ export default function TerminalView({
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-border/40 text-xs font-mono">
               <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
                 <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">UNMITIGATED OB</span>
-                <span className="font-bold text-emerald-400 text-[11px] truncate block">
+                <span className="font-bold text-emerald-400 text-[11px] truncate block tabular-nums">
                   {(data?.order_block?.bottom && data?.order_block?.top)
                     ? `₹${data.order_block.bottom} – ₹${data.order_block.top}`
                     : (setupRaw?.order_block?.bottom && setupRaw?.order_block?.top
@@ -1279,7 +1279,7 @@ export default function TerminalView({
               </div>
               <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
                 <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">POC (Max Volume)</span>
-                <span className="font-bold text-amber text-[11px] truncate block">
+                <span className="font-bold text-amber text-[11px] truncate block tabular-nums">
                   {(data?.volume_profile?.poc || setupRaw?.volume_profile?.poc)
                     ? `₹${data?.volume_profile?.poc || setupRaw?.volume_profile?.poc}`
                     : '—'}
@@ -1288,7 +1288,7 @@ export default function TerminalView({
               </div>
               <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
                 <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">VALUE AREA (70%)</span>
-                <span className="font-bold text-blue-400 text-[11px] truncate block">
+                <span className="font-bold text-blue-400 text-[11px] truncate block tabular-nums">
                   {(data?.volume_profile?.val && data?.volume_profile?.vah)
                     ? `₹${data.volume_profile.val} – ₹${data.volume_profile.vah}`
                     : (setupRaw?.volume_profile?.val && setupRaw?.volume_profile?.vah
@@ -1299,7 +1299,7 @@ export default function TerminalView({
               </div>
               <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
                 <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">14D ATR VOLATILITY</span>
-                <span className="font-bold text-purple-400 text-[11px] truncate block">
+                <span className="font-bold text-purple-400 text-[11px] truncate block tabular-nums">
                   {data?.atr != null && data.atr > 0 ? `₹${Number(data.atr).toFixed(2)}` : '—'}
                 </span>
                 <span className="text-[9px] text-muted block">Risk Range Per Bar</span>
@@ -1312,7 +1312,7 @@ export default function TerminalView({
                 {/* Put-Call Ratio (PCR) with Sentiment Tag */}
                 <div className="flex items-center gap-1.5">
                   <span className="text-[9px] uppercase font-bold text-muted">PCR:</span>
-                  <span className="font-bold text-emerald-400">
+                  <span className="font-bold text-emerald-400 tabular-nums">
                     {data?.pcr != null ? Number(data.pcr).toFixed(2) : '—'}
                   </span>
                   {data?.pcr != null && (
@@ -1325,7 +1325,7 @@ export default function TerminalView({
                 {/* Expiry Max Pain Pin */}
                 <div className="flex items-center gap-1.5">
                   <span className="text-[9px] uppercase font-bold text-muted">Max Pain:</span>
-                  <span className="font-bold text-amber">
+                  <span className="font-bold text-amber tabular-nums">
                     {data?.max_pain ? `₹${data.max_pain}` : '—'}
                   </span>
                   {data?.max_pain && <span className="text-[9px] text-muted">Expiry Pin</span>}
@@ -1334,11 +1334,11 @@ export default function TerminalView({
                 {/* Intraday VWAP Benchmark */}
                 <div className="flex items-center gap-1.5 hidden md:flex">
                   <span className="text-[9px] uppercase font-bold text-muted">VWAP:</span>
-                  <span className="font-bold text-cyan-400">
+                  <span className="font-bold text-cyan-400 tabular-nums">
                     {data?.vwap != null ? `₹${Number(data.vwap).toFixed(1)}` : '—'}
                   </span>
                   {data?.vwap != null && curLtp != null && (
-                    <span className={`text-[9px] font-bold ${curLtp >= data.vwap ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    <span className={`text-[9px] font-bold tabular-nums ${curLtp >= data.vwap ? 'text-emerald-400' : 'text-rose-400'}`}>
                       {curLtp >= data.vwap ? `Above (+${(((curLtp - data.vwap) / data.vwap) * 100).toFixed(1)}%)` : `Below (${(((curLtp - data.vwap) / data.vwap) * 100).toFixed(1)}%)`}
                     </span>
                   )}
@@ -1867,24 +1867,27 @@ export default function TerminalView({
                     {/* Elevated Primary Execute Button */}
                     <button
                       onClick={() => {
-                        if (onOpenOrderTicket) {
-                          const riskPtsNum = Number(setup.risk_points) > 0 ? Number(setup.risk_points) : Math.abs(Number(setup.entry) - Number(setup.stop_loss))
-                          const isFo = Boolean(universeStock?.isFO || universeStock?.lotSize)
-                          const lotSz = universeStock?.lotSize || 1
-                          const riskPerLot = riskPtsNum > 0 ? riskPtsNum * lotSz : 1
-                          const lots = isFo && riskPtsNum > 0 ? Math.max(1, Math.floor(riskBudget / riskPerLot)) : null
-                          const quantQty = riskPtsNum > 0 ? (isFo ? (lots * lotSz) : Math.max(1, Math.floor(riskBudget / riskPtsNum))) : 1
+                        const riskPtsNum = Number(setup.risk_points) > 0 ? Number(setup.risk_points) : Math.abs(Number(setup.entry) - Number(setup.stop_loss))
+                        const isFo = Boolean(universeStock?.isFO || universeStock?.lotSize)
+                        const lotSz = universeStock?.lotSize || 1
+                        const riskPerLot = riskPtsNum > 0 ? riskPtsNum * lotSz : 1
+                        const lots = isFo && riskPtsNum > 0 ? Math.max(1, Math.floor(riskBudget / riskPerLot)) : null
+                        const quantQty = riskPtsNum > 0 ? (isFo ? (lots * lotSz) : Math.max(1, Math.floor(riskBudget / riskPtsNum))) : 1
+                        const act = setup.action.includes('SHORT') ? 'SELL' : 'BUY'
 
+                        if (onOpenOrderTicket) {
                           onOpenOrderTicket({
                             symbol: selectedSymbol,
                             exchange: getSymbolExchange(selectedSymbol),
                             price: setup.entry,
                             stopLoss: setup.stop_loss,
                             target: setup.target_1,
-                            action: setup.action.includes('SHORT') ? 'SELL' : 'BUY',
+                            action: act,
                             quantity: quantQty,
                             lotSize: universeStock?.lotSize || null,
                           })
+                        } else {
+                          sendDraft(`trade ${act} ${quantQty} ${selectedSymbol} at ${setup.entry} sl ${setup.stop_loss} tgt ${setup.target_1}`)
                         }
                       }}
                       className="w-full mt-2 py-3 px-4 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all shadow-lg cursor-pointer flex items-center justify-center gap-2 hover:brightness-110 active:scale-[0.98]"
@@ -1951,6 +1954,8 @@ export default function TerminalView({
                           target: null,
                           action: 'BUY',
                         })
+                      } else {
+                        sendDraft(`trade BUY 1 ${selectedSymbol} at ${curLtp || 'market'}`)
                       }
                     }}
                     className="w-full py-2.5 px-3 rounded-xl bg-amber hover:brightness-110 text-black text-xs font-bold transition-all cursor-pointer shadow-md flex items-center justify-center gap-1.5"

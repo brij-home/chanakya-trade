@@ -16,6 +16,7 @@ Validation gates (in order):
   7. Holdings sufficiency (for SELL orders)
   8. Stale data gate (prices must be fresh within threshold)
   9. Portfolio risk gate (per-symbol concentration, daily loss cap)
+  10. Anti-FOMO & No-Chase gate (prevents buying climax extensions or market runaway)
 
 Returns a structured PreTradeValidationResult with:
   - is_eligible: bool
@@ -29,10 +30,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import logging
 from typing import Any, Optional
 
 from engine.kill_switch import get_kill_switch_registry
 from engine.observability import new_correlation_id
+
+logger = logging.getLogger(__name__)
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -436,6 +440,166 @@ def _gate_portfolio_risk(
     return GateResult(gate="portfolio_risk", passed=True), warnings
 
 
+def _gate_no_chase(
+    side: str,
+    order_type: str,
+    ltp: Optional[float],
+    price: Optional[float] = None,
+    no_chase_boundary: Optional[float] = None,
+    trigger_price: Optional[float] = None,
+    max_chase_pct: Optional[float] = None,
+    segment: str = "EQ",
+    depth_sweep_vwap: Optional[float] = None,
+    is_fully_fillable: Optional[bool] = None,
+    unfilled_qty: Optional[int] = None,
+) -> GateResult:
+    """
+    Gate 10: Anti-FOMO & No-Chase Gate.
+
+    Protects traders from chasing extended breakouts, buying at the peak of momentum thrusts,
+    or executing aggressive market orders when price has run away past setup bounds.
+    Now enriched with multi-lot L2/L3 depth-sweep VWAP simulation to prevent execution slippage FOMO.
+    """
+    effective_ltp = ltp if (ltp is not None and ltp > 0) else depth_sweep_vwap
+    if effective_ltp is None or effective_ltp <= 0:
+        return GateResult(
+            gate="no_chase", passed=True, reason="LTP not provided — no-chase check skipped"
+        )
+
+    is_buy = side.upper() in ("BUY", "LONG")
+    seg = segment.upper()
+    is_derivative = seg in ("OPT", "OPTIONS", "FUT", "FUTURES")
+    default_chase_pct = 8.0 if is_derivative else 1.25  # Max 1.25% for equity, 8% for options
+    allowed_chase = (
+        max_chase_pct if max_chase_pct is not None and max_chase_pct > 0 else default_chase_pct
+    )
+
+    # 1. Explicit No-Chase Boundary Validation on top-of-book LTP
+    if no_chase_boundary is not None and no_chase_boundary > 0:
+        if is_buy and ltp is not None and ltp > no_chase_boundary:
+            return GateResult(
+                gate="no_chase",
+                passed=False,
+                reason=(
+                    f"FOMO Violation: Live price ₹{ltp:,.2f} exceeds no-chase boundary ₹{no_chase_boundary:,.2f}. "
+                    f"Chasing extended moves destroys risk:reward asymmetry."
+                ),
+                details={"ltp": ltp, "no_chase_boundary": no_chase_boundary, "side": side},
+            )
+        elif not is_buy and ltp is not None and ltp < no_chase_boundary:
+            return GateResult(
+                gate="no_chase",
+                passed=False,
+                reason=(
+                    f"FOMO Violation: Live price ₹{ltp:,.2f} has dropped below no-chase boundary ₹{no_chase_boundary:,.2f}. "
+                    f"Downside extension exhausted."
+                ),
+                details={"ltp": ltp, "no_chase_boundary": no_chase_boundary, "side": side},
+            )
+
+    # 2. Multi-Lot Depth Sweep VWAP vs No-Chase Boundary Validation
+    # Even if top-of-book LTP is compliant, sweeping through the book to fill the entire order
+    # must not push the volume-weighted average fill price past the no-chase boundary.
+    if (
+        depth_sweep_vwap is not None
+        and depth_sweep_vwap > 0
+        and no_chase_boundary is not None
+        and no_chase_boundary > 0
+    ):
+        if is_buy and depth_sweep_vwap > no_chase_boundary:
+            slip_pct = ((depth_sweep_vwap / ltp) - 1.0) * 100.0 if (ltp and ltp > 0) else 0.0
+            return GateResult(
+                gate="no_chase",
+                passed=False,
+                reason=(
+                    f"FOMO Depth Sweep Violation: Simulated fill VWAP ₹{depth_sweep_vwap:,.2f} sweeps past "
+                    f"no-chase boundary ₹{no_chase_boundary:,.2f} (top-of-book LTP: ₹{ltp:,.2f}, slippage: +{slip_pct:.2f}%). "
+                    f"Multi-lot market impact causes excessive slippage and destroys risk:reward asymmetry."
+                ),
+                details={
+                    "ltp": ltp,
+                    "depth_sweep_vwap": depth_sweep_vwap,
+                    "no_chase_boundary": no_chase_boundary,
+                    "slippage_pct": round(slip_pct, 2),
+                    "is_fully_fillable": is_fully_fillable,
+                    "unfilled_qty": unfilled_qty,
+                    "side": side,
+                },
+            )
+        elif not is_buy and depth_sweep_vwap < no_chase_boundary:
+            slip_pct = ((ltp / depth_sweep_vwap) - 1.0) * 100.0 if (ltp and ltp > 0) else 0.0
+            return GateResult(
+                gate="no_chase",
+                passed=False,
+                reason=(
+                    f"FOMO Depth Sweep Violation: Simulated fill VWAP ₹{depth_sweep_vwap:,.2f} sweeps below "
+                    f"no-chase boundary ₹{no_chase_boundary:,.2f} (top-of-book LTP: ₹{ltp:,.2f}, slippage: -{slip_pct:.2f}%). "
+                    f"Downside extension exhausted."
+                ),
+                details={
+                    "ltp": ltp,
+                    "depth_sweep_vwap": depth_sweep_vwap,
+                    "no_chase_boundary": no_chase_boundary,
+                    "slippage_pct": round(slip_pct, 2),
+                    "is_fully_fillable": is_fully_fillable,
+                    "unfilled_qty": unfilled_qty,
+                    "side": side,
+                },
+            )
+
+    # 3. Market Order Runaway / Climax Chase Validation (evaluates both LTP and Depth Sweep VWAP)
+    # If executing a MARKET order, verify price has not run far above intended trigger/baseline
+    ref_price = trigger_price if (trigger_price and trigger_price > 0) else price
+    if order_type.upper() == "MARKET" and ref_price and ref_price > 0:
+        check_price = depth_sweep_vwap if (depth_sweep_vwap and depth_sweep_vwap > 0) else ltp
+        if check_price is not None:
+            price_desc = "Simulated fill VWAP" if depth_sweep_vwap else "Live price"
+            if is_buy and check_price > (ref_price * (1.0 + allowed_chase / 100.0)):
+                chase_dist_pct = ((check_price / ref_price) - 1.0) * 100.0
+                return GateResult(
+                    gate="no_chase",
+                    passed=False,
+                    reason=(
+                        f"FOMO Market Order Violation: {price_desc} ₹{check_price:,.2f} has run +{chase_dist_pct:.2f}% "
+                        f"above baseline ₹{ref_price:,.2f} (max chase: {allowed_chase:.1f}%). Mandate Limit on Pullback."
+                    ),
+                    details={
+                        "ltp": ltp,
+                        "depth_sweep_vwap": depth_sweep_vwap,
+                        "baseline_price": ref_price,
+                        "chase_pct": round(chase_dist_pct, 2),
+                        "max_allowed_pct": allowed_chase,
+                    },
+                )
+            elif not is_buy and check_price < (ref_price * (1.0 - allowed_chase / 100.0)):
+                chase_dist_pct = ((ref_price / check_price) - 1.0) * 100.0
+                return GateResult(
+                    gate="no_chase",
+                    passed=False,
+                    reason=(
+                        f"FOMO Market Order Violation: {price_desc} ₹{check_price:,.2f} has dumped -{chase_dist_pct:.2f}% "
+                        f"below baseline ₹{ref_price:,.2f} (max chase: {allowed_chase:.1f}%). Mandate Limit on Pullback."
+                    ),
+                    details={
+                        "ltp": ltp,
+                        "depth_sweep_vwap": depth_sweep_vwap,
+                        "baseline_price": ref_price,
+                        "chase_pct": round(chase_dist_pct, 2),
+                        "max_allowed_pct": allowed_chase,
+                    },
+                )
+
+    return GateResult(
+        gate="no_chase",
+        passed=True,
+        details={
+            "ltp": ltp,
+            "depth_sweep_vwap": depth_sweep_vwap,
+            "no_chase_boundary": no_chase_boundary,
+        },
+    )
+
+
 # ── Main Validation Entry Point ───────────────────────────────────────────────
 
 
@@ -462,6 +626,13 @@ def validate_pretrade(
     lot_size: int = 1,
     tick_size: float = DEFAULT_TICK_SIZE,
     price_band_pct: float = NSE_DEFAULT_PRICE_BAND_PCT,
+    # Anti-FOMO & No-Chase context
+    no_chase_boundary: Optional[float] = None,
+    trigger_price: Optional[float] = None,
+    max_chase_pct: Optional[float] = None,
+    depth_sweep_vwap: Optional[float] = None,
+    is_fully_fillable: Optional[bool] = None,
+    unfilled_qty: Optional[int] = None,
     # Control
     skip_session_check: bool = False,  # Set True in tests / after-hours paper
     correlation_id: Optional[str] = None,
@@ -489,6 +660,12 @@ def validate_pretrade(
         lot_size: Instrument lot size (default 1 for equities)
         tick_size: Instrument tick size (default ₹0.05)
         price_band_pct: Circuit filter band % (default ±20%)
+        no_chase_boundary: Optional price boundary beyond which trades are blocked
+        trigger_price: Original setup entry/trigger price for runaway market check
+        max_chase_pct: Maximum allowed % runaway from trigger price
+        depth_sweep_vwap: Simulated fill VWAP across L2/L3 depth book
+        is_fully_fillable: True if book has sufficient depth to fill entire quantity
+        unfilled_qty: Shortfall units if book depth is insufficient
         skip_session_check: Skip market hours validation (for paper/test)
         correlation_id: Optional pre-existing correlation ID
 
@@ -499,6 +676,31 @@ def validate_pretrade(
     blocking: list[str] = []
     all_warnings: list[str] = []
     gate_results: dict[str, GateResult] = {}
+
+    # Auto-resolve depth sweep if not explicitly provided and quantity > 0
+    if depth_sweep_vwap is None and quantity > 0:
+        try:
+            from market.order_book import get_depth_book
+
+            clean_sym = symbol.split(":")[-1].upper() if ":" in symbol else symbol.upper()
+            book = get_depth_book(symbol)
+            if not (book and (book.bids or book.asks)) and clean_sym != symbol:
+                book = get_depth_book(clean_sym)
+            if book and (book.bids or book.asks):
+                sweep_sim = book.simulate_market_order(side, quantity)
+                if sweep_sim.get("sweep_vwap"):
+                    depth_sweep_vwap = sweep_sim["sweep_vwap"]
+                    is_fully_fillable = sweep_sim.get("is_fully_fillable", True)
+                    unfilled_qty = sweep_sim.get("unfilled_qty", 0)
+        except Exception as e_book:
+            logger.debug(
+                f"[pretrade] BisectDepthBook auto-resolution skipped for {symbol}: {e_book}"
+            )
+
+    if is_fully_fillable is False and unfilled_qty and unfilled_qty > 0:
+        all_warnings.append(
+            f"Thin Book Warning: Requested quantity {quantity} exceeds visible depth by {unfilled_qty} units; high partial fill risk."
+        )
 
     # Gate 1: Kill switch
     ks_gate = _gate_kill_switch(broker, account, user, strategy, symbol.upper())
@@ -553,6 +755,24 @@ def validate_pretrade(
     )
     gate_results["portfolio_risk"] = risk_gate
     all_warnings.extend(risk_warnings)
+
+    # Gate 10: Anti-FOMO & No-Chase
+    no_chase_gate = _gate_no_chase(
+        side=side,
+        order_type=order_type,
+        ltp=ltp,
+        price=price,
+        no_chase_boundary=no_chase_boundary,
+        trigger_price=trigger_price,
+        max_chase_pct=max_chase_pct,
+        segment=segment,
+        depth_sweep_vwap=depth_sweep_vwap,
+        is_fully_fillable=is_fully_fillable,
+        unfilled_qty=unfilled_qty,
+    )
+    gate_results["no_chase"] = no_chase_gate
+    if no_chase_gate.blocked:
+        blocking.append(no_chase_gate.reason or "No-chase violation")
 
     return PreTradeValidationResult(
         correlation_id=cid,

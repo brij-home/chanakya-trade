@@ -116,7 +116,7 @@ class FyersCircuitBreaker:
                 or "per day" in err_lower
             )
 
-            # Check 429 Too Many Requests or -360 Rate Limit (10 req/s or 200 req/min rolling window)
+            # Check 429 Too Many Requests or -360 Rate Limit (10 req/s or 500 req/min rolling window on Prime)
             is_rate_limit = (
                 is_429
                 or status_code in (429, -360, 360)
@@ -130,12 +130,16 @@ class FyersCircuitBreaker:
                 trip_needed = True
                 self._daily_quota_exhausted = True
                 self._active_cooldown_sec = _seconds_until_midnight_ist()
-                reason = f"Fyers REST Daily Quota Limit Exceeded (5,000 req/day Standard Plan): {error_message}"
                 try:
                     from market.fyers_rate_gate import get_fyers_rate_gate
 
-                    get_fyers_rate_gate().record_external_exhaustion()
+                    gate = get_fyers_rate_gate()
+                    plan_name = gate.plan
+                    max_day = int(gate._max_per_day)
+                    reason = f"Fyers REST Daily Quota Limit Exceeded ({max_day:,} req/day {plan_name} Plan): {error_message}"
+                    gate.record_external_exhaustion()
                 except Exception as e_suppressed:
+                    reason = f"Fyers REST Daily Quota Limit Exceeded: {error_message}"
                     logger.debug(
                         f"[market.fyers_circuit_breaker] Non-fatal exception suppressed: {e_suppressed}"
                     )

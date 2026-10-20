@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import PayoffSimulatorCard from '../Cards/PayoffSimulatorCard'
@@ -82,7 +83,7 @@ function BlastActionPopover({
 
   return (
     <div
-      className="p-3.5 rounded-2xl shadow-modal font-mono border backdrop-blur-xl max-w-sm w-full animate-in fade-in zoom-in-95 duration-150 text-text bg-panel"
+      className="p-3.5 rounded-2xl shadow-modal font-mono border max-w-sm w-full animate-in fade-in zoom-in-95 duration-150 text-text bg-panel"
       style={{
         borderColor: isCall ? 'rgba(34, 211, 238, 0.6)' : 'rgba(244, 63, 94, 0.6)',
         boxShadow: isCall ? '0 12px 48px -8px rgba(6, 182, 212, 0.35)' : '0 12px 48px -8px rgba(244, 63, 94, 0.35)',
@@ -240,6 +241,20 @@ export default function OptionsDeskView({
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isPayoffModalOpen, setIsPayoffModalOpen] = useState(false)
   const [activeBlastPopover, setActiveBlastPopover] = useState(null)
+
+  // Auto-dismiss Blast popover on scroll or resize to prevent viewport detachment
+  useEffect(() => {
+    if (!activeBlastPopover) return
+    const handleScrollDismiss = () => {
+      setActiveBlastPopover(null)
+    }
+    window.addEventListener('scroll', handleScrollDismiss, true)
+    window.addEventListener('resize', handleScrollDismiss)
+    return () => {
+      window.removeEventListener('scroll', handleScrollDismiss, true)
+      window.removeEventListener('resize', handleScrollDismiss)
+    }
+  }, [activeBlastPopover])
   const [telegramStatus, setTelegramStatus] = useState(null)
   const [strikeFilter, setStrikeFilter] = useState('ATM_10')
   const [chainSort, setChainSort] = useState('strike_asc')
@@ -817,7 +832,7 @@ export default function OptionsDeskView({
             <div className="flex items-center gap-1">
               <span className="text-muted text-[11px] font-bold">Underlying:</span>
               <div className="flex items-center gap-0.5 bg-elevated rounded-lg p-0.5 border border-border/70 flex-wrap">
-                {['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'RELIANCE', 'HDFCBANK', 'BTC', 'ETH'].map((inst) => (
+                {['NIFTY', 'BANKNIFTY', 'MIDCPNIFTY', 'SENSEX', 'RELIANCE', 'HDFCBANK', 'BTC', 'ETH'].map((inst) => (
                   <button
                     key={inst}
                     onClick={() => handleSelectSymbol(inst)}
@@ -831,7 +846,7 @@ export default function OptionsDeskView({
                   </button>
                 ))}
 
-                {!['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'RELIANCE', 'HDFCBANK', 'BTC', 'ETH'].includes(underlying) && (
+                {!['NIFTY', 'BANKNIFTY', 'MIDCPNIFTY', 'SENSEX', 'RELIANCE', 'HDFCBANK', 'BTC', 'ETH'].includes(underlying) && (
                   <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber text-black shadow-xs">
                     {underlying}
                   </span>
@@ -1385,11 +1400,15 @@ export default function OptionsDeskView({
           const rawDelta = deltaHedge?.net_delta != null ? Number(deltaHedge.net_delta) : 0
           const scaledDelta = Number((rawDelta * deskPosScale).toFixed(2))
           const hasActiveDelta = Math.abs(scaledDelta) >= 0.05
-          const hedgeAction = scaledDelta > 0 ? 'SELL' : 'BUY'
+          const strikeStep = underlying === 'BANKNIFTY' ? 100 : underlying === 'SENSEX' ? 100 : underlying === 'MIDCPNIFTY' ? 25 : underlying === 'FINNIFTY' ? 50 : 50
+          const atmStrike = spot ? Math.round(spot / strikeStep) * strikeStep : null
+          const hedgeOptType = scaledDelta > 0 ? 'PE' : 'CE'
+          const hedgeContract = atmStrike ? `${underlying} ${atmStrike} ${hedgeOptType}` : `${underlying} ATM ${hedgeOptType}`
+          const hedgeAction = 'BUY'
           const hedgeLots = Math.max(1, Math.round(Math.abs(scaledDelta)))
           const hedgeQty = hedgeLots * resolvedLotSize
           const lossPer1Pct = Math.abs(Math.round(scaledDelta * resolvedLotSize * (spot || 0) * 0.01))
-          const estMargin = Math.round(hedgeQty * (spot || 0) * 0.12)
+          const estMargin = Math.round(hedgeQty * (spot || 0) * 0.02)
 
           return (
             <div className="lg:col-span-4 bg-panel border border-border/80 rounded-xl p-3 shadow-xs space-y-2">
@@ -1462,8 +1481,8 @@ export default function OptionsDeskView({
                   </div>
                   <span className="font-bold text-emerald-600 dark:text-emerald-400 text-[11px] block truncate mt-0.5">
                     {hasActiveDelta
-                      ? `${hedgeAction} ${hedgeLots} Lot${hedgeLots > 1 ? 's' : ''} (${hedgeQty} Qty) ${underlying} FUT`
-                      : '✅ Delta Balanced (No Directional Futures Hedge Required)'}
+                      ? `${hedgeAction} ${hedgeLots} Lot${hedgeLots > 1 ? 's' : ''} (${hedgeQty} Qty) ${hedgeContract}`
+                      : '✅ Delta Balanced (No Directional Options Hedge Required)'}
                   </span>
                 </div>
 
@@ -1503,20 +1522,20 @@ export default function OptionsDeskView({
                       onClick={() => {
                         if (onOpenOrderTicket) {
                           onOpenOrderTicket({
-                            symbol: `${underlying} FUT`,
+                            symbol: hedgeContract,
                             exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                            price: spot,
+                            price: undefined,
                             quantity: hedgeQty,
                             side: hedgeAction,
-                            segment: 'FUTURES',
+                            segment: 'OPTIONS',
                           })
                         } else {
-                          sendDraft(`execute delta hedge: ${hedgeAction} ${hedgeLots} lots (${hedgeQty} qty) ${underlying} FUT`)
+                          sendDraft(`execute delta hedge: ${hedgeAction} ${hedgeLots} lots (${hedgeQty} qty) ${hedgeContract}`)
                         }
                       }}
                       className="w-full py-1.5 px-2.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 text-black font-bold text-[11px] uppercase tracking-wide transition-all shadow-xs cursor-pointer flex items-center justify-center gap-1"
                     >
-                      <span>⚡</span> Stage 1-Click Hedge ({hedgeLots} Lot{hedgeLots > 1 ? 's' : ''})
+                      <span>⚡</span> Stage 1-Click Option Hedge ({hedgeLots} Lot{hedgeLots > 1 ? 's' : ''})
                     </button>
                   ) : (
                     <button
@@ -2583,10 +2602,11 @@ export default function OptionsDeskView({
       )}
 
       {/* Floating Actionable Blast Alert Popover */}
-      {activeBlastPopover && (
+      {/* Institutional Screen-Adaptive Blast Action Popover Portal */}
+      {activeBlastPopover && typeof document !== 'undefined' && createPortal(
         <>
           <div
-            className="fixed inset-0 z-50 bg-black/20 dark:bg-black/40 backdrop-blur-[1px]"
+            className="fixed inset-0 z-50 bg-black/40 backdrop-blur-[1px]"
             onClick={() => setActiveBlastPopover(null)}
           />
           <div
@@ -2594,7 +2614,7 @@ export default function OptionsDeskView({
               position: 'fixed',
               left: activeBlastPopover.x,
               top: activeBlastPopover.y,
-              zIndex: 55,
+              zIndex: 99999,
             }}
           >
             <BlastActionPopover
@@ -2608,7 +2628,8 @@ export default function OptionsDeskView({
               onSendCopilot={(b) => sendDraft(`Analyze ${b.contract} blast surge`)}
             />
           </div>
-        </>
+        </>,
+        document.body
       )}
 
       {/* Telegram Toast Notification */}

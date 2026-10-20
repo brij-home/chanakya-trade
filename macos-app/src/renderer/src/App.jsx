@@ -530,15 +530,39 @@ export default function App() {
     return () => clearInterval(timer)
   }, [port])
 
+  const handleOpenOrderTicket = useCallback((ticketData) => {
+    if (ticketData) {
+      setOrderTicketData(ticketData)
+    }
+    setIsOrderTicketOpen(true)
+  }, [])
+
   // ── Global keybindings ───────────────────────────────────────────────────
   useEffect(() => {
     function onKeyDown(e) {
+      const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable
+
       // ? → hotkey reference
-      if (e.key === '?' && !['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)) {
+      if (e.key === '?' && !isInput) {
         e.preventDefault()
         setShowHotkeyRef((v) => !v)
         return
       }
+
+      // Institutional trader shortcuts: Shift+B / Shift+S (stage BUY / SELL order ticket for active symbol)
+      if (!isInput && !e.metaKey && !e.ctrlKey) {
+        if (e.shiftKey && (e.key === 'B' || e.key === 'b')) {
+          e.preventDefault()
+          handleOpenOrderTicket({ symbol: ctxSymbol || 'NIFTY', side: 'BUY' })
+          return
+        }
+        if (e.shiftKey && (e.key === 'S' || e.key === 's')) {
+          e.preventDefault()
+          handleOpenOrderTicket({ symbol: ctxSymbol || 'NIFTY', side: 'SELL' })
+          return
+        }
+      }
+
       if (e.metaKey || e.ctrlKey) {
         const handlers = {
           '1': () => setActiveView('terminal'),
@@ -568,14 +592,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [createSession, setActiveView])
-
-  const handleOpenOrderTicket = useCallback((ticketData) => {
-    if (ticketData) {
-      setOrderTicketData(ticketData)
-    }
-    setIsOrderTicketOpen(true)
-  }, [])
+  }, [createSession, setActiveView, handleOpenOrderTicket, ctxSymbol])
 
   // Global listener for opening order ticket from toasts or external triggers
   useEffect(() => {
@@ -817,7 +834,7 @@ export default function App() {
               {activeView === 'journal'    && <JournalView />}
               {activeView === 'alerts'     && <AlertsView onOpenOrderTicket={handleOpenOrderTicket} />}
               {activeView === 'backtest'   && <BacktestStudioView onOpenOrderTicket={handleOpenOrderTicket} />}
-              {activeView === 'ops'        && <OpsDeckView />}
+              {activeView === 'ops'        && <OpsDeckView onOpenOrderTicket={handleOpenOrderTicket} />}
               {activeView === 'settings'   && <SettingsPanel onClose={() => setActiveView('terminal')} />}
             </Suspense>
 

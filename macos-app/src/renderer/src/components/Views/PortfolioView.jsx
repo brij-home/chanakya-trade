@@ -21,7 +21,7 @@ function Metric({ label, value, tone }) {
   )
 }
 
-export default function PortfolioView() {
+export default function PortfolioView({ onOpenOrderTicket }) {
   const { get, call } = useAPI()
   const getRef = useRef(get)
   const callRef = useRef(call)
@@ -567,10 +567,10 @@ export default function PortfolioView() {
                         )}
                       </div>
                     </div>
-                    <span className="text-xs font-mono text-text">{row.qty}</span>
-                    <span className="text-xs font-mono text-muted">{money(row.avg_price)}</span>
-                    <span className="text-xs font-mono font-bold text-text">{money(row.ltp)}</span>
-                    <span className="text-xs font-mono font-bold" style={{ color: tone }}>
+                    <span className="text-xs font-mono tabular-nums text-text">{row.qty}</span>
+                    <span className="text-xs font-mono tabular-nums text-muted">{money(row.avg_price)}</span>
+                    <span className="text-xs font-mono tabular-nums font-bold text-text">{money(row.ltp)}</span>
+                    <span className="text-xs font-mono tabular-nums font-bold" style={{ color: tone }}>
                       {pnl >= 0 ? '+' : ''}
                       {money(pnl)}
                     </span>
@@ -582,6 +582,25 @@ export default function PortfolioView() {
                       >
                         ⚡ Health / SL
                       </button>
+                      {onOpenOrderTicket && (
+                        <button
+                          onClick={() => {
+                            const isShort = Number(row.qty || 0) < 0
+                            onOpenOrderTicket({
+                              symbol: row.symbol,
+                              action: isShort ? 'BUY' : 'SELL',
+                              quantity: Math.abs(Number(row.qty || 1)),
+                              entry_price: row.ltp || row.avg_price,
+                              order_type: 'MARKET',
+                              product: row.product || 'INTRADAY',
+                            })
+                          }}
+                          className="text-[10px] px-2 py-1 rounded-lg font-bold text-rose-400 border border-rose-500/30 hover:bg-rose-500/10 transition-all cursor-pointer"
+                          title="Stage 1-click Exit / Square-off in Order Ticket"
+                        >
+                          ⚡ Exit
+                        </button>
+                      )}
                       {isPaper && (
                         <button
                           onClick={() => handleSquareOffPaper(row.symbol)}

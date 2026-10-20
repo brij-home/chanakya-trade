@@ -103,6 +103,26 @@ OLLAMA_DEFAULT_MODEL = "llama3.3"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
 GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b,openai/gpt-oss-120b,openai/gpt-oss-20b"
 
+# Core market tools for rate-constrained cloud inference endpoints (e.g. Groq 7k TPM ceiling)
+GROQ_CORE_TOOLS: set[str] = {
+    "get_quote",
+    "get_market_snapshot",
+    "get_funds",
+    "get_positions",
+    "get_holdings",
+    "get_orders",
+    "get_vix",
+    "get_gift_nifty",
+    "get_options_chain",
+    "get_pcr",
+    "get_max_pain",
+    "technical_analyse",
+    "fundamental_analyse",
+    "web_search",
+    "get_market_news",
+    "list_alerts",
+}
+
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
 OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-chat"
 CEREBRAS_DEFAULT_MODEL = "llama-3.3-70b"
@@ -251,6 +271,11 @@ class LLMProvider(ABC):
     @abstractmethod
     def provider_name(self) -> str:
         """Human-readable name shown in the UI."""
+
+    @property
+    def model_name(self) -> str:
+        """Alias for self.model for uniform attribute access."""
+        return self.model
 
 
 class CascadingLLMProvider(LLMProvider):
@@ -667,8 +692,25 @@ class OpenAIProvider(LLMProvider):
         **kwargs,
     ) -> str:
         # OpenAI takes system message inline
-        oai = [{"role": "system", "content": self.system_prompt}] + list(messages)
-        tools = self.registry.openai_schema(include=tool_names) if enable_tools else None
+        custom_system = kwargs.get("system_prompt")
+        has_system = any(m.get("role") == "system" for m in messages)
+        if custom_system:
+            oai = [{"role": "system", "content": custom_system}] + [
+                m for m in messages if m.get("role") != "system"
+            ]
+        elif has_system:
+            oai = list(messages)
+        else:
+            oai = [{"role": "system", "content": self.system_prompt}] + list(messages)
+
+        # Token-safe tool scoping:
+        # If running against Groq Cloud (7,000 ITPM ceiling) and no specific tool set requested,
+        # prune to high-utility core market tools instead of dumping all 79 tools (~9,150 tokens)
+        active_tools = tool_names
+        if enable_tools and active_tools is None and "groq.com" in (self._base_url or "").lower():
+            active_tools = GROQ_CORE_TOOLS
+
+        tools = self.registry.openai_schema(include=active_tools) if enable_tools else None
         final = ""
         effective_max_tokens = max_tokens or kwargs.get("max_tokens")
 
@@ -2450,8 +2492,15 @@ class GeminiProvider(LLMProvider):
 
         # Build chat config with tools (optionally filtered) and system instruction
         active_tools = self._build_gemini_tools(include=tool_names) if enable_tools else []
+        custom_system = kwargs.get("system_prompt")
+        if not custom_system and messages:
+            sys_msgs = [m.get("content") for m in messages if m.get("role") == "system"]
+            if sys_msgs:
+                custom_system = sys_msgs[0]
+        sys_inst = custom_system or self.system_prompt
+
         config_kwargs = {
-            "system_instruction": self.system_prompt,
+            "system_instruction": sys_inst,
             "tools": active_tools or None,
             "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
         }
@@ -2459,9 +2508,12 @@ class GeminiProvider(LLMProvider):
             config_kwargs["max_output_tokens"] = effective_max_tokens
         config = types.GenerateContentConfig(**config_kwargs)
 
-        # Convert history to Gemini format
-        gemini_history = self._to_gemini_history(messages[:-1]) if len(messages) > 1 else []
-        last_msg = messages[-1]["content"] if messages else ""
+        # Convert history to Gemini format (filtering out system messages handled via system_instruction)
+        non_system_msgs = [m for m in messages if m.get("role") != "system"]
+        gemini_history = (
+            self._to_gemini_history(non_system_msgs[:-1]) if len(non_system_msgs) > 1 else []
+        )
+        last_msg = non_system_msgs[-1]["content"] if non_system_msgs else ""
 
         active_model_str = self.model or GEMINI_DEFAULT_MODEL
         client_idx, active_client = self._get_active_client()
@@ -2710,6 +2762,8 @@ class GeminiProvider(LLMProvider):
         """Convert our message format to Gemini history format."""
         history = []
         for msg in messages:
+            if msg.get("role") == "system":
+                continue
             role = "user" if msg["role"] == "user" else "model"
             content = msg["content"] if isinstance(msg["content"], str) else str(msg["content"])
             history.append({"role": role, "parts": [{"text": content}]})
@@ -3013,7 +3067,12 @@ def get_provider(
         return prov_cls(model, registry, sys_prompt)
 
     try:
-        return _build_provider(chosen, chosen_model, reg, system)
+        primary = _build_provider(chosen, chosen_model, reg, system)
+        if not explicit_provider:
+            fallbacks = _build_fallback_fast_providers(chosen, reg, system)
+            if fallbacks:
+                return CascadingLLMProvider([primary] + fallbacks)
+        return primary
     except RuntimeError as exc:
         if explicit_provider:
             raise

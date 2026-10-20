@@ -27,7 +27,12 @@ class OrderPreviewRequest(BaseModel):
     price: float = Field(gt=0)
     order_type: str = "LIMIT"
     product: str = "MIS"
+    trigger_price: Optional[float] = None
     idempotency_key: Optional[str] = None
+    no_chase_boundary: Optional[float] = None
+    stop_loss: Optional[float] = None
+    target: Optional[float] = None
+    auto_gtt_oco: bool = True
 
     @field_validator("symbol")
     @classmethod
@@ -113,7 +118,12 @@ async def api_order_preview(req: OrderPreviewRequest, request: Request):
             price=req.price,
             order_type=req.order_type,  # type: ignore
             product=req.product,  # type: ignore
+            trigger_price=req.trigger_price,
             idempotency_key=req.idempotency_key,
+            no_chase_boundary=req.no_chase_boundary,
+            stop_loss=req.stop_loss,
+            target=req.target,
+            auto_gtt_oco=req.auto_gtt_oco,
         )
 
         await asyncio.to_thread(
@@ -419,3 +429,43 @@ async def api_reconciliation_baseline(req: ReconciliationBaselineRequest):
         "opening_cash": req.opening_cash,
         "message": "Independent ledger baseline saved. Run reconciliation to compare it with the broker.",
     }
+
+
+@router.get("/api/orders/gtt")
+async def api_get_gtts():
+    """Fetch active server-side GTT orders from the active broker or paper engine."""
+    from engine.modes import get_trading_mode
+    from engine.paper import PaperBroker
+    from brokers.session import get_execution_broker
+
+    mode = get_trading_mode()
+    if mode.is_execute:
+        broker = get_execution_broker()
+        if broker is None or not hasattr(broker, "get_gtts"):
+            return {"status": "ok", "mode": "LIVE", "gtts": []}
+        gtts = await asyncio.to_thread(broker.get_gtts)
+        return {"status": "ok", "mode": "LIVE", "gtts": gtts}
+    else:
+        paper = PaperBroker()
+        gtts = await asyncio.to_thread(paper.get_gtts)
+        return {"status": "ok", "mode": "PAPER", "gtts": gtts}
+
+
+@router.delete("/api/orders/gtt/{gtt_id}")
+async def api_cancel_gtt(gtt_id: str):
+    """Cancel an active server-side GTT order."""
+    from engine.modes import get_trading_mode
+    from engine.paper import PaperBroker
+    from brokers.session import get_execution_broker
+
+    mode = get_trading_mode()
+    if mode.is_execute:
+        broker = get_execution_broker()
+        if broker is None or not hasattr(broker, "cancel_gtt"):
+            raise HTTPException(503, "Live broker GTT cancellation not available")
+        success = await asyncio.to_thread(broker.cancel_gtt, gtt_id)
+        return {"status": "ok" if success else "error", "gtt_id": gtt_id, "cancelled": success}
+    else:
+        paper = PaperBroker()
+        success = await asyncio.to_thread(paper.cancel_gtt, gtt_id)
+        return {"status": "ok" if success else "error", "gtt_id": gtt_id, "cancelled": success}

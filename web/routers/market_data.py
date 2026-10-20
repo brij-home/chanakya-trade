@@ -13,6 +13,8 @@ import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+import json
 
 logger = logging.getLogger("chanakya.web.routers.market_data")
 router = APIRouter(tags=["Market Intelligence", "Market Data"])
@@ -32,8 +34,112 @@ async def get_order_book_endpoint(symbol: str):
     """Returns real-time Order Book Imbalance (OBI) and depth analytics."""
     from market.order_book import analyze_symbol_order_book
 
-    snapshot = await asyncio.to_thread(analyze_symbol_order_book, symbol)
+    snapshot = await asyncio.to_thread(analyze_symbol_order_book, symbol, allow_rest_fallback=True)
     return {"status": "ok", "data": snapshot.to_dict()}
+
+
+@router.get("/api/market/order-book/{symbol}/stream")
+async def stream_order_book_endpoint(symbol: str):
+    """
+    Sub-100ms real-time SSE stream of L2/L3 order book depth, OBI, resting walls, and Greeks.
+    Yields initial snapshot immediately upon connect, then streams reactive updates.
+    """
+    from market.order_book import analyze_symbol_order_book
+
+    # Auto-subscribe / sample to TBT 50-depth (NSE only) and WebSocket L2 on client connect
+    try:
+        from market.fyers_tbt_manager import fyers_tbt_manager
+
+        if symbol.startswith("NSE:"):
+            fyers_tbt_manager.sample_symbol(symbol, duration_sec=300.0)
+    except Exception as e_tbt:
+        logger.debug(f"[web.routers.market_data] TBT auto-sample notice for {symbol}: {e_tbt}")
+
+    try:
+        from market.websocket import ws_manager
+
+        ws_manager.subscribe([symbol])
+    except Exception as e_ws:
+        logger.debug(f"[web.routers.market_data] WS L2 auto-sub notice for {symbol}: {e_ws}")
+
+    async def _book_generator():
+        last_hash = None
+        # Push initial snapshot immediately
+        poll_interval = 0.5
+        try:
+            initial_snap = await asyncio.to_thread(
+                analyze_symbol_order_book, symbol, allow_rest_fallback=True
+            )
+            snap_dict = initial_snap.to_dict()
+            last_hash = (
+                snap_dict.get("ltp"),
+                snap_dict.get("spread"),
+                snap_dict.get("obi_5"),
+                snap_dict.get("has_resting_wall"),
+                len(snap_dict.get("bids", [])),
+            )
+            prov = snap_dict.get("provenance", "")
+            if prov not in ("LIVE_STREAM_TBT_50", "LIVE_STREAM_L2"):
+                poll_interval = 2.5
+            yield f"data: {json.dumps({'status': 'ok', 'data': snap_dict})}\n\n"
+        except Exception as e:
+            logger.warning(
+                f"[web.routers.market_data] Initial depth stream error for {symbol}: {e}"
+            )
+
+        is_mcx_live = False
+        try:
+            from market.calendar import is_market_open
+
+            is_mcx_live = bool(symbol.upper().startswith("MCX:") and is_market_open("MCX"))
+        except Exception as e:
+            logger.debug(f"[web.routers.market_data] MCX calendar check suppressed: {e}")
+
+        # Stream reactive delta updates (WS ticks in RAM; coalesced depth refresh for active MCX)
+        while True:
+            try:
+                await asyncio.sleep(poll_interval)
+                snap = await asyncio.to_thread(
+                    analyze_symbol_order_book, symbol, allow_rest_fallback=is_mcx_live
+                )
+                snap_dict = snap.to_dict()
+                curr_hash = (
+                    snap_dict.get("ltp"),
+                    snap_dict.get("spread"),
+                    snap_dict.get("obi_5"),
+                    snap_dict.get("has_resting_wall"),
+                    len(snap_dict.get("bids", [])),
+                )
+                if curr_hash != last_hash:
+                    last_hash = curr_hash
+                    yield f"data: {json.dumps({'status': 'ok', 'data': snap_dict})}\n\n"
+                else:
+                    yield ": heartbeat\n\n"
+
+                prov = snap_dict.get("provenance", "")
+                if prov in ("LIVE_STREAM_TBT_50", "LIVE_STREAM_L2"):
+                    poll_interval = 0.5
+                elif is_mcx_live:
+                    poll_interval = 3.0
+                else:
+                    poll_interval = 2.5
+            except asyncio.CancelledError:
+                break
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[web.routers.market_data] Stream heartbeat error for {symbol}: {e_suppressed}"
+                )
+                yield ": heartbeat\n\n"
+
+    return StreamingResponse(
+        _book_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("/api/market/whale-deals")
@@ -1209,6 +1315,59 @@ async def get_fyers_tbt_status_endpoint():
     return {"status": "ok", "data": status}
 
 
+@router.post("/api/fyers/tbt-evict", tags=["Fyers 50-Depth TBT"])
+async def post_fyers_tbt_evict_endpoint(
+    req: Optional[dict[str, Any]] = None,
+    symbol: Optional[str] = None,
+    cooldown_seconds: float = 300.0,
+):
+    """
+    Manually evict a symbol/strike from 15-slot TBT market depth.
+    Unsubscribes from WebSocket and applies an eviction cooldown.
+    """
+    from market.fyers_tbt_manager import fyers_tbt_manager
+
+    target = symbol or (req.get("symbol") if req else None) or ""
+    if not target:
+        raise HTTPException(status_code=400, detail="Symbol is required for eviction")
+
+    cd = float(
+        req.get("cooldown_seconds") if req and "cooldown_seconds" in req else cooldown_seconds
+    )
+    res = await asyncio.to_thread(fyers_tbt_manager.evict_symbol, target, cooldown_sec=cd)
+    return res
+
+
+@router.post("/api/fyers/tbt-rebalance", tags=["Fyers 50-Depth TBT"])
+async def post_fyers_tbt_rebalance_endpoint(req: Optional[dict[str, Any]] = None):
+    """Manually rebalance the 15-slot TBT grid and cleanse stale scouts."""
+    from market.fyers_tbt_manager import fyers_tbt_manager
+
+    session = req.get("session") if req else None
+    res = await asyncio.to_thread(fyers_tbt_manager.rebalance_grid_now, session=session)
+    return res
+
+
+@router.post("/api/fyers/tbt-focus", tags=["Fyers 50-Depth TBT"])
+async def post_fyers_tbt_focus_endpoint(req: dict[str, Any]):
+    """Set primary focus index for TBT depth ('NIFTY', 'BANKNIFTY', 'SENSEX', or null/balanced)."""
+    from market.fyers_tbt_manager import fyers_tbt_manager
+
+    focus = req.get("focus") or req.get("index") or None
+    await asyncio.to_thread(fyers_tbt_manager.set_primary_focus, index_name=focus)
+    status = await asyncio.to_thread(fyers_tbt_manager.get_active_slots_status)
+    return {"status": "ok", "primary_focus": focus, "data": status}
+
+
+@router.get("/api/fyers/rate-gate-status", tags=["Fyers Prime Rate Gate"])
+async def get_fyers_rate_gate_status_endpoint():
+    """Returns real-time Fyers sliding-window rate limit consumption (req/sec, req/min, daily budget)."""
+    from market.fyers_rate_gate import get_fyers_rate_gate
+
+    diag = get_fyers_rate_gate().get_diagnostics()
+    return {"status": "ok", "data": diag}
+
+
 @router.get("/api/market/symbol/search", tags=["Symbol Master"])
 async def search_symbols_endpoint(q: str, limit: int = 10):
     """Fast token-free symbol search across public Fyers master."""
@@ -1328,4 +1487,33 @@ async def prime_daily_levels_endpoint(payload: Optional[dict] = None):
         "status": "ok",
         "primed_count": len(results),
         "symbols": list(results.keys()),
+    }
+
+
+@router.get("/api/market/depth-radar", tags=["Market Data", "Market Intelligence"])
+async def get_depth_radar_endpoint(
+    segment: Optional[str] = "ALL",
+    query: Optional[str] = None,
+    limit: int = 60,
+    allow_rest: bool = True,
+):
+    """
+    Returns real-time L2 Market Depth Radar across curated market universe.
+    Includes OBI, micro-price skew, spread friction, depth notional (₹ Cr),
+    resting walls, and actionable decision blueprints.
+    """
+    from market.universe_depth_radar import get_universe_depth_radar
+
+    rows = await asyncio.to_thread(
+        get_universe_depth_radar,
+        segment=segment or "ALL",
+        query=query,
+        limit=min(100, max(10, limit)),
+        allow_rest_fallback=allow_rest,
+    )
+    return {
+        "status": "ok",
+        "segment": segment,
+        "count": len(rows),
+        "data": rows,
     }

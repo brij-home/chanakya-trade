@@ -150,6 +150,7 @@ def detect_pre_inflection_dryup(
                 f"Accumulate between ₹{accum_low:,.1f} and ₹{accum_high:,.1f}. "
                 f"If price gaps above ₹{no_chase_limit:,.1f}, DO NOT CHASE — place limit order at ₹{pullback_limit:,.1f}."
             ),
+            "no_chase_boundary": f"₹{no_chase_limit:,.1f}",
         }
 
         return AutoAlert(
@@ -165,6 +166,7 @@ def detect_pre_inflection_dryup(
             trigger_level=fair_value,
             target_level=target_1,
             stop_loss=sl,
+            no_chase_boundary=no_chase_limit,
             metrics={
                 "vol_dryup_ratio": round(vol_dryup_ratio, 2),
                 "avg_range_pct": round(avg_range_pct, 2),
@@ -172,6 +174,7 @@ def detect_pre_inflection_dryup(
                 "fair_value_source": fv_name,
                 "pivot_high": pivot_high,
                 "no_chase_limit": no_chase_limit,
+                "no_chase_boundary": no_chase_limit,
             },
             actionable_plan=actionable_plan,
             confidence=score,

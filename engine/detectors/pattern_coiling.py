@@ -132,6 +132,7 @@ def detect_learned_pattern_coiling(
             act_plan = {
                 "action": res.recommended_entry_action,
                 "entry_range": entry_rg,
+                "no_chase_boundary": f"₹{e_max:,.1f}",
                 "target": f"₹{t1:.1f}",
                 "stop_loss": f"₹{sl:.1f}",
                 "risk_reward": rr_str,
@@ -152,6 +153,7 @@ def detect_learned_pattern_coiling(
                 trigger_level=ltp,
                 target_level=t1,
                 stop_loss=sl,
+                no_chase_boundary=e_max,
                 metrics={
                     "similarity_score": res.similarity_score,
                     "closest_archetype": res.closest_archetype,
@@ -160,6 +162,7 @@ def detect_learned_pattern_coiling(
                     "atr": round(atr20, 2),
                     "atr_14": round(atr20, 2),
                     "min_noise_sl_pts": round(min_sl_dist, 2),
+                    "no_chase_boundary": e_max,
                 },
                 actionable_plan=act_plan,
                 confidence=res.similarity_score,

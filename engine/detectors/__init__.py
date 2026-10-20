@@ -27,7 +27,13 @@ from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
 from engine.detectors.defined_risk_neutral import detect_defined_risk_neutral
 from engine.detectors.pairs_arbitrage import detect_pairs_arbitrage
 from engine.detectors.turtle_soup import detect_turtle_soup_sweep
+from engine.detectors.liquidity_sweep import detect_predator_liquidity_sweep
 from engine.detectors.swing_inflection import detect_swing_inflection_setups
+from engine.detectors.order_book_thrust import detect_order_book_thrust, OrderBookThrustDetector
+from engine.detectors.gamma_unpin_squeezer import (
+    detect_0dte_gamma_unpin,
+    GammaUnpinSqueezerDetector,
+)
 
 from engine.detection_context import (
     BaseDetector,
@@ -71,5 +77,10 @@ __all__ = [
     "detect_defined_risk_neutral",
     "detect_pairs_arbitrage",
     "detect_turtle_soup_sweep",
+    "detect_predator_liquidity_sweep",
     "detect_swing_inflection_setups",
+    "detect_order_book_thrust",
+    "OrderBookThrustDetector",
+    "detect_0dte_gamma_unpin",
+    "GammaUnpinSqueezerDetector",
 ]

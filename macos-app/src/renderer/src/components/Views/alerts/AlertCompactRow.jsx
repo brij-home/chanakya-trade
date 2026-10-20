@@ -196,7 +196,6 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
             {optType}
           </span>
         )}
-        {isDerivative && isFuture && <span className="text-[8px] px-1 py-px rounded font-black bg-blue-500/20 text-blue-300">FUT</span>}
         {isDerivative && (expiryInfo?.fullDisplay || expiryShort) && (
           <span
             className={`text-[8px] font-mono px-1.5 py-px rounded font-bold whitespace-nowrap border ${
@@ -407,7 +406,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         {/* Cheetah Free-Roll Active Badge */}
         {(alert.metrics?.free_roll_locked || alert.metrics?.predatory_pipeline?.cheetah?.status === 'FREE_ROLL_ACTIVE') && (
           <span
-            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-emerald-500/25 text-emerald-300 border border-emerald-500/50 animate-pulse hidden sm:inline"
+            className="text-[8.5px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-emerald-500/25 text-emerald-300 border border-emerald-500/50 animate-pulse hidden sm:inline"
             title="🐆 CHEETAH FREE-ROLL: Stop ratcheted to cost/breakeven. Zero downside risk."
           >
             🐆 FREE-ROLL
@@ -417,7 +416,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         {/* Expected Value (EV) Badge */}
         {(alert.metrics?.expected_value_r !== undefined || alert.metrics?.predatory_pipeline?.expected_value_r !== undefined) && (
           <span
-            className={`text-[7px] px-1.5 py-px rounded font-black font-mono uppercase whitespace-nowrap border hidden sm:inline ${
+            className={`text-[8.5px] px-1.5 py-px rounded font-black font-mono tabular-nums uppercase whitespace-nowrap border hidden sm:inline ${
               Number(alert.metrics?.expected_value_r ?? alert.metrics?.predatory_pipeline?.expected_value_r) >= 0.85
                 ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                 : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
@@ -431,7 +430,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         {/* Multi-Horizon Confluence Alignment */}
         {confluenceAlignment === 'TRIPLE_HORIZON' && (
           <span
-            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-gradient-to-r from-amber-500/25 via-emerald-500/25 to-sky-500/25 text-amber-300 border border-amber-400/50 shadow-sm hidden sm:inline"
+            className="text-[8.5px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-gradient-to-r from-amber-500/25 via-emerald-500/25 to-sky-500/25 text-amber-300 border border-amber-400/50 shadow-sm hidden sm:inline"
             title="Institutional Triple-Horizon Confluence: Intraday + Swing + Multibagger all mutually aligned in trend and volume structure."
           >
             👑 TRIPLE CONFLUENCE
@@ -439,7 +438,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         )}
         {confluenceAlignment === 'DUAL_HORIZON' && (
           <span
-            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hidden sm:inline"
+            className="text-[8.5px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hidden sm:inline"
             title="Dual-Horizon Alignment: Multi-timeframe trend and volume confirmation across time horizons."
           >
             ⚡ DUAL CONFLUENCE
@@ -449,7 +448,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         {/* Pre-Market Opening Gap Sentinel */}
         {gapRisk === 'GAP_OVER_SL' && (
           <span
-            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-pulse hidden sm:inline"
+            className="text-[8.5px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-pulse hidden sm:inline"
             title="Pre-market Sentinel: Opening price gapped beyond invalidation stop-loss."
           >
             🛑 GAP OVER SL
@@ -457,7 +456,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         )}
         {gapRisk === 'GAP_NO_CHASE' && (
           <span
-            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-amber-500/25 text-amber-300 border border-amber-500/50 hidden sm:inline"
+            className="text-[8.5px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-amber-500/25 text-amber-300 border border-amber-500/50 hidden sm:inline"
             title="Pre-market Sentinel: Opening price gapped beyond maximum entry boundary. Do not chase."
           >
             ⚠️ NO CHASE
@@ -467,7 +466,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         {/* Stagnation & Chop Defense Sentinel */}
         {stagnationWarning && (
           <span
-            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-amber-500/15 text-amber-300 border border-amber-500/35 cursor-help hidden sm:inline"
+            className="text-[8.5px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-amber-500/15 text-amber-300 border border-amber-500/35 cursor-help hidden sm:inline"
             title={typeof stagnationWarning === 'string' ? stagnationWarning : 'Consolidated in chop without reaching T1 (+2R). Trailing stop held at breakeven.'}
           >
             ⏳ STAGNANT
@@ -477,7 +476,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         {/* SEBI Physical Settlement Risk */}
         {physicalRisk && (
           <span
-            className="text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/20 text-rose-300 border border-rose-500/40 cursor-help hidden sm:inline"
+            className="text-[8.5px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap bg-rose-500/20 text-rose-300 border border-rose-500/40 cursor-help hidden sm:inline"
             title={typeof physicalRisk === 'object' && physicalRisk.advisory ? physicalRisk.advisory : (typeof physicalRisk === 'string' ? physicalRisk : 'SEBI Physical Settlement risk: Contract within 4 days of expiry. Margin escalation active. Square off or roll contract.')}
           >
             ⚠️ PHYSICAL RISK
@@ -485,7 +484,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         )}
 
         <span
-          className="text-[7px] font-black px-1 py-px rounded whitespace-nowrap hidden sm:inline"
+          className="text-[8.5px] font-black px-1.5 py-px rounded whitespace-nowrap hidden sm:inline"
           style={{ color: style.color, background: style.bg, border: `1px solid ${style.border}` }}
         >
           {style.label.replace('GAMMA BLAST', 'Γ-Blast').replace('SQUEEZE BREAKOUT', 'Squeeze').replace('SMC LIQUIDITY', 'SMC').replace('CIRCUIT WARNING', 'Circuit').replace('CONFLUENCE INFLECTION', 'Confluence').replace('OPTIONS MOMENTUM', 'Opt Mom').replace('ASYMMETRIC R:R', 'Asym').replace('PRECURSOR RADAR', 'Precursor').replace('COMMODITY MOMENTUM', 'Commodity').replace('CURRENCY BREAKOUT', 'Currency').replace('CVD ORDER FLOW', 'CVD Flow')}
@@ -494,7 +493,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         {/* Smart Order Routing Badge */}
         {plan.execution_ticket?.smart_routing && (
           <span
-            className={`text-[7px] px-1 py-px rounded font-black uppercase whitespace-nowrap border hidden sm:inline ${
+            className={`text-[8.5px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap border hidden sm:inline ${
               plan.execution_ticket.smart_routing.routing_mode === 'ICEBERG'
                 ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
                 : plan.execution_ticket.smart_routing.routing_mode === 'PASSIVE_PEG'
@@ -567,7 +566,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
       <div className="flex items-center gap-1.5 min-w-0 flex-wrap mt-0.5">
         {/* Spot Price */}
         {isDerivative && spotNum && (
-          <span className="text-[9px] font-mono text-zinc-400 whitespace-nowrap">
+          <span className="text-[9px] font-mono tabular-nums text-zinc-400 whitespace-nowrap">
             Spot <span className="text-text font-bold">{currSym}{fmt(spotNum)}</span>
           </span>
         )}
@@ -575,14 +574,14 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         {/* Real-time Live Option Premium or Equity Price with Flash */}
         {isDerivative ? (
           premiumNum && (
-            <span className={`text-[9px] font-mono px-1 py-0.5 rounded transition-all duration-200 whitespace-nowrap ${flashClass || 'bg-panel'}`}>
+            <span className={`text-[9px] font-mono tabular-nums px-1 py-0.5 rounded transition-all duration-200 whitespace-nowrap ${flashClass || 'bg-panel'}`}>
               Prem <span className="text-gold font-black">{currSym}{fmtP(premiumNum)}</span>
               {liveContract?.ltp && !isTerminal ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
             </span>
           )
         ) : (
           currentPrice && (
-            <span className={`text-[9px] font-mono px-1 py-0.5 rounded transition-all duration-200 whitespace-nowrap ${flashClass || 'bg-panel'}`}>
+            <span className={`text-[9px] font-mono tabular-nums px-1 py-0.5 rounded transition-all duration-200 whitespace-nowrap ${flashClass || 'bg-panel'}`}>
               LTP <span className="text-text font-black">{currSym}{fmt(currentPrice)}</span>
               {liveSpot?.ltp && !isTerminal ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
             </span>
@@ -591,7 +590,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
 
         {/* SL Level (Highlighted if hit) */}
         {slNum && (
-          <span className={`text-[9px] font-mono whitespace-nowrap font-bold px-1 py-px rounded ${
+          <span className={`text-[9px] font-mono tabular-nums whitespace-nowrap font-bold px-1 py-px rounded ${
             isSLHit ? 'bg-rose-500/25 text-rose-300 border border-rose-500/50' : 'text-rose-600 dark:text-rose-400'
           }`}>
             {isSLHit ? '🛑 SL ' : 'SL '}{currSym}{fmtP(slNum)}
@@ -600,14 +599,14 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
 
         {/* Entry Level */}
         {entryNum && (
-          <span className="text-[9px] font-mono text-amber-600 dark:text-amber-400 whitespace-nowrap font-bold">
+          <span className="text-[9px] font-mono tabular-nums text-amber-600 dark:text-amber-400 whitespace-nowrap font-bold">
             Entry {currSym}{fmtP(entryNum)}
           </span>
         )}
 
         {(alert.entry_range || alert.optimal_entry_range) && (
           <span
-            className="text-[8px] font-mono font-bold text-amber-700 dark:text-amber-300 bg-amber-500/10 dark:bg-amber-500/15 px-1 py-px rounded border border-amber-300/60 dark:border-amber-500/30 whitespace-nowrap hidden md:inline"
+            className="text-[8.5px] font-mono tabular-nums font-bold text-amber-700 dark:text-amber-300 bg-amber-500/10 dark:bg-amber-500/15 px-1 py-px rounded border border-amber-300/60 dark:border-amber-500/30 whitespace-nowrap hidden md:inline"
             title="Optimal Trade Entry (OTE) pullback range"
           >
             OTE {alert.entry_range || alert.optimal_entry_range}
@@ -616,7 +615,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
 
         {alert.no_chase_boundary && (
           <span
-            className="text-[8px] font-mono font-bold text-rose-700 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/15 px-1 py-px rounded border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap hidden sm:inline"
+            className="text-[8.5px] font-mono tabular-nums font-bold text-rose-700 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/15 px-1 py-px rounded border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap hidden sm:inline"
             title="No-Chase limit: Entries beyond this price are mathematically disqualified"
           >
             NoChase {currSym}{fmtP(alert.no_chase_boundary)}
@@ -625,7 +624,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
 
         {(alert.actionable_plan?.sniper_plan || alert.metrics?.sniper_plan) && (
           <span
-            className="text-[8px] font-mono font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 dark:bg-emerald-500/15 px-1 py-px rounded border border-emerald-300/60 dark:border-emerald-500/30 whitespace-nowrap hidden sm:inline"
+            className="text-[8.5px] font-mono tabular-nums font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 dark:bg-emerald-500/15 px-1 py-px rounded border border-emerald-300/60 dark:border-emerald-500/30 whitespace-nowrap hidden sm:inline"
             title={`🎯 SNIPER PLAN: OTE ₹${(alert.actionable_plan?.sniper_plan || alert.metrics?.sniper_plan).optimal_entry_zone} | Time Stop: ${(alert.actionable_plan?.sniper_plan || alert.metrics?.sniper_plan).time_stop_minutes}m | SL Rule: ${(alert.actionable_plan?.sniper_plan || alert.metrics?.sniper_plan).stop_loss_rule}`}
           >
             🎯 SNIPER 1:{(alert.actionable_plan?.sniper_plan || alert.metrics?.sniper_plan).risk_reward_ratio || '3.0'}
@@ -634,7 +633,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
 
         {(plan.max_loss_capped || alert.metrics?.max_loss_rupees) && (
           <span
-            className="text-[8px] font-mono font-bold text-rose-300/90 bg-rose-500/15 px-1 py-px rounded border border-rose-500/30 whitespace-nowrap hidden lg:inline"
+            className="text-[8.5px] font-mono tabular-nums font-bold text-rose-300/90 bg-rose-500/15 px-1 py-px rounded border border-rose-500/30 whitespace-nowrap hidden lg:inline"
             title="Monetary risk per lot based on Stop-Loss"
           >
             Risk {currSym}{Number(plan.max_loss_capped || alert.metrics?.max_loss_rupees).toLocaleString('en-IN')}
@@ -643,7 +642,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
 
         {(plan.net_risk_reward || alert.metrics?.net_risk_reward) && (
           <span
-            className="text-[8px] font-mono font-bold text-sky-300/90 bg-sky-500/15 px-1 py-px rounded border border-sky-500/30 whitespace-nowrap hidden xl:inline"
+            className="text-[8.5px] font-mono tabular-nums font-bold text-sky-300/90 bg-sky-500/15 px-1 py-px rounded border border-sky-500/30 whitespace-nowrap hidden xl:inline"
             title="Net friction-adjusted R:R (accounting for STT and slippage)"
           >
             Net {plan.net_risk_reward || alert.metrics?.net_risk_reward}
@@ -652,7 +651,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
 
         {/* Target Levels (Highlighted with Checkmarks when hit) */}
         {t1Num && (
-          <span className="text-[9px] font-mono whitespace-nowrap flex items-center gap-1">
+          <span className="text-[9px] font-mono tabular-nums whitespace-nowrap flex items-center gap-1">
             <span className={`px-1 py-px rounded font-bold transition-all ${
               isT1Hit ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 shadow-sm' : 'text-emerald-500 dark:text-emerald-400'
             }`}>

@@ -4,12 +4,16 @@ market/fyers_rate_gate.py
 Unified prioritized sliding-window rate gate and budget governor for Fyers API v3.
 
 Fyers API Hard Constraints:
-  - Maximum 10 requests / second
-  - Maximum 200 requests / minute (3 strikes in 1 day = account blocked for the entire day)
-
-ChanakyaTrade Safe Operating Parameters:
-  - Hard cap: 8.0 req/sec (20% safety margin)
-  - Hard cap: 160.0 req/min (20% safety margin)
+  - Fyers Prime Plan:
+      * 10 requests / second (Safe operating cap: 8.0 - 9.0 req/s)
+      * 500 requests / minute (Safe operating cap: 400.0 - 450.0 req/min)
+      * 500,000 requests / day (Safe operating cap: 480,000 req/day)
+      * Up to 1,000 symbols per quotes request (clamped to 300 to avoid HTTP 414 URI Length)
+      * Up to 5,000 symbols on real-time Data WebSocket
+  - Fyers Standard Plan:
+      * 5 requests / second (Safe operating cap: 4.0 req/s)
+      * 50 requests / minute (Safe operating cap: 40.0 req/min)
+      * 5,000 requests / day (Safe operating cap: 4,500 req/day)
 
 Priority Tiers (Lower value = Higher priority):
   - Tier 0: ORDER           (Execution, cancel, modify; never starved by queries)
@@ -52,7 +56,7 @@ _QUOTA_FILE = _get_quota_file()
 FYERS_PLAN_PRESETS: dict[str, dict[str, Any]] = {
     "PRIME": {
         "max_per_sec": 8.0,  # Official limit: 10 req/s (20% institutional cushion to prevent micro-burst trips)
-        "max_per_min": 360.0,  # Official limit: 500 req/min (140 req/min headroom)
+        "max_per_min": 360.0,  # Official limit: 500 req/min (140 req/min headroom to prevent rolling window trips)
         "max_per_day": 480_000.0,  # Official limit: 500,000 req/day (20k emergency buffer)
         "order_emergency_cap": 498_000.0,
         "quotes_chunk_size": 1000,  # Official limit: 1,000 symbols/request
@@ -101,9 +105,25 @@ class UnifiedFyersRateGate:
         self._plan = selected_plan
         preset = FYERS_PLAN_PRESETS[selected_plan]
 
-        self._max_per_sec = float(max_per_sec if max_per_sec is not None else preset["max_per_sec"])
-        self._max_per_min = float(max_per_min if max_per_min is not None else preset["max_per_min"])
-        self._max_per_day = float(max_per_day if max_per_day is not None else preset["max_per_day"])
+        env_sec = os.environ.get("FYERS_MAX_PER_SEC")
+        env_min = os.environ.get("FYERS_MAX_PER_MIN")
+        env_day = os.environ.get("FYERS_MAX_PER_DAY")
+
+        self._max_per_sec = float(
+            max_per_sec
+            if max_per_sec is not None
+            else (float(env_sec) if env_sec else preset["max_per_sec"])
+        )
+        self._max_per_min = float(
+            max_per_min
+            if max_per_min is not None
+            else (float(env_min) if env_min else preset["max_per_min"])
+        )
+        self._max_per_day = float(
+            max_per_day
+            if max_per_day is not None
+            else (float(env_day) if env_day else preset["max_per_day"])
+        )
         self._order_emergency_cap = float(preset["order_emergency_cap"])
         self._quotes_chunk_size = int(preset["quotes_chunk_size"])
         self._data_socket_symbols = int(preset["data_socket_symbols"])

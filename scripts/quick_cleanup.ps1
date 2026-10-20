@@ -5,6 +5,9 @@ Write-Host "=======================================================" -Foreground
 Write-Host "   Antigravity IDE & AI Agent Quick Environment Cleanup" -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 
+$currentPid = $PID
+$killedCount = 0
+
 # 1. Immediately release stale local socket bindings & locks on ports 8765 and 5173 (< 30ms)
 try {
     $ports = @(8765, 5173)

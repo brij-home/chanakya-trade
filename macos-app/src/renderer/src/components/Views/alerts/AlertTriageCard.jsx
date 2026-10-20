@@ -110,9 +110,6 @@ export const AlertTriageCard = memo(function AlertTriageCard({
               optType === 'CE' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
             }`}>{optType}</span>
           )}
-          {isFuture && (
-            <span className="text-[8px] px-1 py-px rounded font-black uppercase bg-blue-500/20 text-blue-300">FUT</span>
-          )}
           <span className={`text-[8px] font-black px-1.5 py-0.5 rounded ${
             isBull ? 'text-emerald-400 bg-emerald-500/15' :
             isNeutral ? 'text-purple-400 bg-purple-500/15' :

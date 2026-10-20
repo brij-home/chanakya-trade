@@ -648,6 +648,40 @@ async def cmd_brief(update, context) -> None:
         await update.message.reply_text(f"Brief failed: {e}")
 
 
+async def cmd_strike_radar(update, context) -> None:
+    """Handle /strikes or /battleplan — 09:10 IST Pre-Market Index Strike Radar."""
+    try:
+        from market.indices import get_premarket_battle_plan, format_premarket_strike_radar
+
+        loop = asyncio.get_running_loop()
+
+        def _get():
+            plan = get_premarket_battle_plan(["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"])
+            return format_premarket_strike_radar(plan)
+
+        text = await loop.run_in_executor(None, _get)
+        await update.message.reply_text(text, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Strike radar failed: {e}")
+
+
+async def cmd_orb_radar(update, context) -> None:
+    """Handle /orb — 09:18 IST Opening Range Breakout (ORB) Radar."""
+    try:
+        from market.indices import get_opening_range_battle_plan, format_opening_range_radar
+
+        loop = asyncio.get_running_loop()
+
+        def _get():
+            plan = get_opening_range_battle_plan(["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"])
+            return format_opening_range_radar(plan)
+
+        text = await loop.run_in_executor(None, _get)
+        await update.message.reply_text(text, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Opening range radar failed: {e}")
+
+
 async def cmd_eod(update, context) -> None:
     """Handle /eod [date] — daily institutional post-market audit & strategic report."""
     target_date = context.args[0].strip() if (context.args and len(context.args) > 0) else None
@@ -2541,6 +2575,9 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("analyze", _track_command(cmd_analyze)))
     app.add_handler(CommandHandler("deepanalyze", _track_command(cmd_deepanalyze)))
     app.add_handler(CommandHandler("brief", _track_command(cmd_brief)))
+    app.add_handler(CommandHandler("strikes", _track_command(cmd_strike_radar)))
+    app.add_handler(CommandHandler("battleplan", _track_command(cmd_strike_radar)))
+    app.add_handler(CommandHandler("orb", _track_command(cmd_orb_radar)))
     app.add_handler(CommandHandler("eod", _track_command(cmd_eod)))
     app.add_handler(CommandHandler("conviction", _track_command(cmd_conviction)))
     app.add_handler(CommandHandler("movers", _track_command(cmd_movers)))

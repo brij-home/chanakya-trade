@@ -69,8 +69,12 @@ _FYERS_INDEX_MAP = {
     "NIFTY 50": "NSE:NIFTY50-INDEX",
     "NIFTY": "NSE:NIFTY50-INDEX",
     "NIFTY50": "NSE:NIFTY50-INDEX",
+    "NIFTY-INDEX": "NSE:NIFTY50-INDEX",
+    "NSE:NIFTY-INDEX": "NSE:NIFTY50-INDEX",
     "NIFTY BANK": "NSE:NIFTYBANK-INDEX",
     "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    "BANKNIFTY-INDEX": "NSE:NIFTYBANK-INDEX",
+    "NSE:BANKNIFTY-INDEX": "NSE:NIFTYBANK-INDEX",
     "INDIA VIX": "NSE:INDIAVIX-INDEX",
     "VIX": "NSE:INDIAVIX-INDEX",
     "SENSEX": "BSE:SENSEX-INDEX",
@@ -1157,10 +1161,21 @@ class FyersAPI(BrokerAPI):
             _warn_circuit_breaker_open("get_quote")
             return {}
 
-        # Chunk in batches up to plan limit (clamped to 300 symbols/request to prevent HTTP 414 URI Too Long)
-        CHUNK_SIZE = min(getattr(_fyers_rate_limiter, "quotes_chunk_size", 1000), 300)
-        for i in range(0, len(unique_fyers_symbols), CHUNK_SIZE):
-            chunk = unique_fyers_symbols[i : i + CHUNK_SIZE]
+        # Chunk in batches up to plan limit (clamped to 300 symbols/request and URL byte budget to prevent HTTP 414 URI Too Long)
+        from market.quote_dispatcher import (
+            chunk_symbols_for_quotes,
+            SAFE_HTTP_MAX_CHUNK_SIZE,
+            SAFE_URL_MAX_CHARS,
+        )
+
+        max_symbols = min(
+            getattr(_fyers_rate_limiter, "quotes_chunk_size", 1000),
+            SAFE_HTTP_MAX_CHUNK_SIZE,
+        )
+        chunks = chunk_symbols_for_quotes(
+            unique_fyers_symbols, max_symbols=max_symbols, max_chars=SAFE_URL_MAX_CHARS
+        )
+        for chunk in chunks:
             try:
                 if not rate_gate_acquired:
                     _fyers_rate_limiter.acquire(category=category)
@@ -2497,6 +2512,59 @@ class FyersAPI(BrokerAPI):
             return data.get("s") == "ok"
         except Exception:
             return False
+
+    def place_gtt(self, req: Any) -> Any:
+        """Standardized BrokerAPI implementation for Fyers server-side GTT/OCO."""
+        from brokers.base import GTTResponse
+
+        fyers = self._get_fyers()
+        fyers_sym = _to_fyers_symbol(req.symbol)
+        side = 1 if str(req.transaction_type).upper() == "BUY" else -1
+        order_info: dict[str, Any] = {
+            "leg1": {
+                "price": float(req.leg1.price),
+                "triggerPrice": float(req.leg1.trigger_price),
+                "qty": int(req.leg1.quantity),
+            }
+        }
+        if str(req.trigger_type).upper() == "OCO" and req.leg2:
+            order_info["leg2"] = {
+                "price": float(req.leg2.price),
+                "triggerPrice": float(req.leg2.trigger_price),
+                "qty": int(req.leg2.quantity),
+            }
+
+        product = (
+            "CNC"
+            if str(req.product).upper() == "CNC"
+            else ("INTRADAY" if str(req.product).upper() == "MIS" else "MARGIN")
+        )
+        payload = {
+            "side": side,
+            "symbol": fyers_sym,
+            "productType": product,
+            "orderInfo": order_info,
+        }
+        try:
+            res = fyers.place_gtt_order(payload)
+            if isinstance(res, dict) and (res.get("s") == "ok" or "id" in res):
+                gtt_id = str(res.get("id") or res.get("order_id") or "FYERS-GTT")
+                return GTTResponse(gtt_id=gtt_id, status="ACTIVE", raw=res)
+            msg = res.get("message", "GTT placement failed") if isinstance(res, dict) else str(res)
+            return GTTResponse(
+                gtt_id="",
+                status="REJECTED",
+                message=msg,
+                raw=res if isinstance(res, dict) else None,
+            )
+        except Exception as e:
+            return GTTResponse(gtt_id="", status="REJECTED", message=str(e))
+
+    def get_gtts(self) -> list[dict[str, Any]]:
+        return self.get_gtt_orders()
+
+    def cancel_gtt(self, gtt_id: str) -> bool:
+        return self.cancel_gtt_order(gtt_id)
 
     def create_smart_trailing_order(
         self,

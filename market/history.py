@@ -228,6 +228,108 @@ def get_ohlcv(
         except Exception as e_suppressed:
             logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
+    # Tier 1.6: High-Performance Local Parquet Warehouse (Intraday & Daily)
+    if not as_of:
+        try:
+            from engine.historical_warehouse import historical_warehouse
+
+            if historical_warehouse.has_bars(clean_sym, interval=kite_interval, min_bars=5):
+                wh_df = historical_warehouse.load_bars(
+                    clean_sym,
+                    interval=kite_interval,
+                    from_date=from_date,
+                    to_date=to_date,
+                    days=days,
+                )
+                if kite_interval == "day":
+                    min_expected = max(10, int(days * 0.5))
+                elif "15m" in kite_interval or "15minute" in kite_interval:
+                    min_expected = max(20, int(days * 12))
+                elif "5m" in kite_interval or "5minute" in kite_interval:
+                    min_expected = max(50, int(days * 35))
+                elif "60m" in kite_interval or "60minute" in kite_interval or "1h" in kite_interval:
+                    min_expected = max(10, int(days * 3))
+                else:
+                    min_expected = max(20, int(days * 10))
+
+                # Date coverage guard: Check if warehouse covers the requested historical start horizon
+                req_start = from_date or (to_date - timedelta(days=days))
+                if hasattr(req_start, "to_pydatetime"):
+                    req_start = req_start.to_pydatetime()
+                wh_covers_horizon = True
+                if not wh_df.empty:
+                    wh_start_dt = wh_df.index[0]
+                    if hasattr(wh_start_dt, "to_pydatetime"):
+                        wh_start_dt = wh_start_dt.to_pydatetime()
+                    if wh_start_dt.date() > (req_start.date() + timedelta(days=5)):
+                        wh_covers_horizon = False
+
+                # Data Freshness Guard: For intraday bars during active market hours,
+                # do not return stale cached bars older than 3 intervals.
+                is_stale = False
+                if kite_interval != "day" and not wh_df.empty:
+                    try:
+                        from market.calendar import is_market_open, get_latest_trading_day
+
+                        latest_bar = wh_df.index[-1]
+                        if hasattr(latest_bar, "to_pydatetime"):
+                            latest_bar = latest_bar.to_pydatetime()
+                        latest_bar_date = latest_bar.date()
+                        latest_completed_session = get_latest_trading_day(exchange=exchange)
+
+                        # If cached warehouse bars don't reach the latest completed trading session date,
+                        # the warehouse is stale and must refresh from live broker or feed.
+                        if latest_bar_date < latest_completed_session:
+                            is_stale = True
+                        elif is_market_open(exchange):
+                            now_loc = datetime.now().replace(tzinfo=None)
+                            age_sec = abs((now_loc - latest_bar).total_seconds())
+                            intv_sec = 300
+                            if kite_interval in ("1m", "1minute", "minute"):
+                                intv_sec = 60
+                            elif kite_interval in ("3m", "3minute"):
+                                intv_sec = 180
+                            elif kite_interval in ("5m", "5minute"):
+                                intv_sec = 300
+                            elif kite_interval in ("15m", "15minute"):
+                                intv_sec = 900
+                            elif kite_interval in ("30m", "30minute"):
+                                intv_sec = 1800
+                            elif kite_interval in ("60m", "60minute", "1h"):
+                                intv_sec = 3600
+                            if age_sec > max(intv_sec * 3, 900):
+                                is_stale = True
+                    except Exception as e_stale:
+                        logger.debug(f"[market.history] Freshness evaluation error: {e_stale}")
+
+                if (
+                    not is_stale
+                    and wh_covers_horizon
+                    and not wh_df.empty
+                    and len(wh_df) >= min_expected
+                ):
+                    res_df = wh_df.copy()
+                    if include_live_candle:
+                        res_df = inject_live_tick(
+                            res_df, symbol=symbol, exchange=exchange, interval=kite_interval
+                        )
+                    res_df.attrs["provenance"] = {
+                        "data_source": "LIVE_ENRICHED"
+                        if include_live_candle
+                        else "LOCAL_PARQUET_WAREHOUSE",
+                        "provider": "historical_warehouse",
+                        "as_of": to_date.isoformat(),
+                        "snapshot_id": None,
+                        "reproducible": not include_live_candle,
+                    }
+                    with _df_memory_cache_lock:
+                        while len(_df_memory_cache) >= MAX_MEMORY_DFS:
+                            _df_memory_cache.popitem(last=False)
+                        _df_memory_cache[cache_key] = (now_ts, res_df.copy())
+                    return res_df
+        except Exception as e_suppressed:
+            logger.debug(f"[market.history] Warehouse load non-fatal exception: {e_suppressed}")
+
     # Tier 2: Fast SQLite analysis_cache for recent daily candles (15m TTL)
     raw = None
     if kite_interval == "day":
@@ -428,6 +530,17 @@ def get_ohlcv(
         except Exception as e_suppressed:
             logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
+    # Save into local Parquet Warehouse (both intraday and daily) with normalized IST timestamps
+    if not df.empty and len(df) >= 5 and not as_of:
+        try:
+            from engine.historical_warehouse import historical_warehouse
+
+            historical_warehouse.save_bars(
+                clean_sym, interval=kite_interval, df=df.copy(), provider=provider_name
+            )
+        except Exception as e_suppressed:
+            logger.debug(f"[market.history] Warehouse save non-fatal exception: {e_suppressed}")
+
     # Save into Tier 1 In-Memory Cache (bounded LRU max MAX_MEMORY_DFS)
     if not df.empty:
         with _df_memory_cache_lock:
@@ -449,10 +562,17 @@ def inject_live_tick(
 ) -> pd.DataFrame:
     """
     Overlays the current second's live tick (LTP, Day High/Low, Volume) onto the OHLCV DataFrame.
-    Ensures all quantitative models evaluate the latest real-time market state for both daily and intraday charts.
+    Strictly gates execution by active market trading hours: never synthesizes or injects phantom
+    candles when the market is closed, on weekends, or on trading holidays.
     """
     try:
+        from market.calendar import is_market_open
+
+        if not is_market_open(exchange):
+            return df
+
         from market.quotes import get_quote
+        import zoneinfo
 
         if hasattr(df.index, "tz") and df.index.tz is not None:
             df.index = df.index.tz_localize(None)
@@ -463,7 +583,8 @@ def inject_live_tick(
         if not q or q.last_price <= 0:
             return df
 
-        now = datetime.now()
+        ist_zone = zoneinfo.ZoneInfo("Asia/Kolkata")
+        now = datetime.now(ist_zone).replace(tzinfo=None)
         today_date = pd.Timestamp(now.date())
 
         is_intraday = str(interval).lower() in {
@@ -524,12 +645,9 @@ def inject_live_tick(
             elif "60m" in low_inv or "1h" in low_inv:
                 interval_mins = 60
 
-            from datetime import timezone
+            mins_elapsed = (now - last_idx).total_seconds() / 60.0
 
-            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-            mins_elapsed = (now_utc - last_idx).total_seconds() / 60.0
-
-            if mins_elapsed < interval_mins and last_date == now_utc.date():
+            if mins_elapsed < interval_mins and last_date == now.date():
                 # Still within the active candle: update high, low, close with physical envelope
                 cur_close = float(q.last_price)
                 df.loc[last_idx, "close"] = cur_close
@@ -537,9 +655,9 @@ def inject_live_tick(
                 df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), cur_close)
             else:
                 # Interval elapsed: start new bucketed bar
-                bucket_min = (now_utc.minute // interval_mins) * interval_mins
-                new_bar_time = now_utc.replace(minute=bucket_min, second=0, microsecond=0)
-                if new_bar_time > last_idx:
+                bucket_min = (now.minute // interval_mins) * interval_mins
+                new_bar_time = now.replace(minute=bucket_min, second=0, microsecond=0)
+                if new_bar_time > last_idx and new_bar_time.date() == now.date():
                     bar_open = float(q.open or q.last_price)
                     bar_close = float(q.last_price)
                     bar_high = max(float(q.high or q.last_price), bar_open, bar_close)
@@ -575,8 +693,8 @@ def inject_live_tick(
                 df.loc[last_idx, "low"] = min(prev_low, raw_low, cur_close)
                 if q.volume and q.volume > 0:
                     df.loc[last_idx, "volume"] = float(q.volume)
-            else:
-                # Append today's active bar with physical envelope
+            elif now.date() > last_date and is_market_open(exchange):
+                # Append today's active bar with physical envelope during market open only
                 bar_open = float(q.open or q.last_price)
                 bar_close = float(q.last_price)
                 bar_high = max(float(q.high or q.last_price), bar_open, bar_close)

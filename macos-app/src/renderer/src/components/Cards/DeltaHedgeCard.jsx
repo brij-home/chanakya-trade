@@ -15,7 +15,7 @@ export default function DeltaHedgeCard({ data, onOpenOrderTicket }) {
   
   const [posMultiplier, setPosMultiplier] = useState(1) // 1, 2, 5, 10 lots
   const [hedgeRatio, setHedgeRatio] = useState(1.0) // 50%, 75%, 100%
-  const [activeRecipeTab, setActiveRecipeTab] = useState('FUTURES') // FUTURES vs OPTIONS vs COLLAR
+  const [activeRecipeTab, setActiveRecipeTab] = useState('OPTIONS') // OPTIONS vs COLLAR vs RATIO (Strictly Zero Futures)
   const [activeExplainerTab, setActiveExplainerTab] = useState('WHY') // WHY vs WHEN vs HOW
 
   const hasVerifiedInputs = !demo
@@ -53,35 +53,21 @@ export default function DeltaHedgeCard({ data, onOpenOrderTicket }) {
   const pointMove1Pct = spotPrice * 0.01
   const cashSensitivity1Pct = Math.round(currentDeltaQty * pointMove1Pct)
 
-  // Calculate required hedge quantity
-  const hedgeSide = gapQty > 0 ? 'SELL' : 'BUY'
-  const futureLots = Math.max(1, Math.round(Math.abs(gapQty) / lotSize))
-  const futureQty = futureLots * lotSize
+  // Calculate required hedge quantity (Strictly Defined-Risk Options - Zero Futures)
+  const baseLots = Math.max(1, Math.round(Math.abs(gapQty) / lotSize))
   const optionStrike = gapQty > 0
-    ? Math.floor(spotPrice / 50) * 50 - 50 // OTM Put for Long Delta hedge
-    : Math.ceil(spotPrice / 50) * 50 + 50  // OTM Call for Short Delta hedge
+    ? Math.floor(spotPrice / 50) * 50 // ATM Put for Long Delta hedge
+    : Math.ceil(spotPrice / 50) * 50  // ATM Call for Short Delta hedge
+  const otmStrike = gapQty > 0 ? optionStrike - 100 : optionStrike + 100
   const optionType = gapQty > 0 ? 'PE' : 'CE'
-  const optionLots = Math.max(1, Math.round(futureLots * 1.5))
+  const optionLots = Math.max(1, Math.round(baseLots * 1.5))
   const optionQty = optionLots * lotSize
 
-  // Pre-calculated recipes
+  // Pre-calculated recipes (Strictly Options - Zero Futures)
   const recipes = [
     {
-      id: 'FUTURES',
-      title: 'Direct Futures Lock',
-      badge: 'Exact & Zero Theta Bleed',
-      action: hedgeSide,
-      instrument: `${underlying} FUT`,
-      lots: futureLots,
-      quantity: futureQty,
-      deltaImpact: `${gapQty > 0 ? '-' : '+'}${(futureLots * lotSize).toFixed(0)} shares`,
-      estMargin: Math.round(futureLots * lotSize * spotPrice * 0.11),
-      desc: `Instantly offsets ${Math.abs(gapQty).toFixed(0)} delta shares with 0 time-decay (theta) risk.`,
-      icon: '⚡',
-    },
-    {
       id: 'OPTIONS',
-      title: 'Asymmetric Option Shield',
+      title: 'ATM Option Shield',
       badge: 'Defined-Risk Tail Hedge',
       action: 'BUY',
       instrument: `${underlying} ${optionStrike} ${optionType}`,
@@ -89,7 +75,7 @@ export default function DeltaHedgeCard({ data, onOpenOrderTicket }) {
       quantity: optionQty,
       deltaImpact: `${gapQty > 0 ? '-' : '+'}${(optionLots * lotSize * 0.5).toFixed(0)} shares`,
       estMargin: Math.round(optionQty * (spotPrice * 0.008)),
-      desc: `Protects downside crash risk while preserving upside tail profit with capped maximum loss.`,
+      desc: `Protects downside/upside drift with capped maximum loss and zero unlimited margin risk.`,
       icon: '🛡️',
     },
     {
@@ -97,13 +83,26 @@ export default function DeltaHedgeCard({ data, onOpenOrderTicket }) {
       title: 'Zero-Cost Delta Collar',
       badge: 'Financed Premium Spread',
       action: 'SPREAD',
-      instrument: `BUY ${optionStrike} ${optionType} + SELL ${optionStrike + (gapQty > 0 ? 300 : -300)} ${gapQty > 0 ? 'CE' : 'PE'}`,
-      lots: futureLots,
-      quantity: futureQty,
-      deltaImpact: `${gapQty > 0 ? '-' : '+'}${(futureLots * lotSize * 0.85).toFixed(0)} shares`,
-      estMargin: Math.round(futureQty * (spotPrice * 0.002)),
+      instrument: `BUY ${optionStrike} ${optionType} + SELL ${otmStrike} ${gapQty > 0 ? 'CE' : 'PE'}`,
+      lots: baseLots,
+      quantity: baseLots * lotSize,
+      deltaImpact: `${gapQty > 0 ? '-' : '+'}${(baseLots * lotSize * 0.85).toFixed(0)} shares`,
+      estMargin: Math.round(baseLots * lotSize * (spotPrice * 0.002)),
       desc: `Low-cost delta hedge using a funded OTM credit spread.`,
       icon: '🎯',
+    },
+    {
+      id: 'RATIO',
+      title: 'Dynamic Ratio Spread',
+      badge: 'Vega/Theta Harvest',
+      action: 'SPREAD',
+      instrument: `BUY ${optionStrike} ${optionType} + SELL 2x ${otmStrike} ${optionType}`,
+      lots: baseLots,
+      quantity: baseLots * lotSize,
+      deltaImpact: `${gapQty > 0 ? '-' : '+'}${(baseLots * lotSize * 0.70).toFixed(0)} shares`,
+      estMargin: Math.round(baseLots * lotSize * (spotPrice * 0.004)),
+      desc: `Neutralizes delta while monetizing implied volatility decay across strikes.`,
+      icon: '⚖️',
     },
   ]
 

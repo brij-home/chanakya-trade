@@ -122,6 +122,7 @@ class AlertScrutinyAuditor:
             "rr_valid": False,
             "risk_within_bounds": False,
             "no_chase": False,
+            "order_book_sanctity_valid": True,
         }
 
         # Bypass strict sanity for simulation/test alerts only when non-live and not in test runner
@@ -197,7 +198,13 @@ class AlertScrutinyAuditor:
             .replace("CDS:", "")
             .strip()
         )
-        is_index_sym = clean_sym in INDEX_MIN_SL_FLOORS
+        underlying_idx = clean_sym if clean_sym in INDEX_MIN_SL_FLOORS else None
+        if not underlying_idx:
+            for idx_k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
+                if clean_sym.startswith(idx_k):
+                    underlying_idx = idx_k
+                    break
+        is_index_sym = bool(clean_sym in INDEX_MIN_SL_FLOORS or underlying_idx)
 
         atype = str(getattr(alert, "alert_type", "") or "")
         has_opt_marker = bool(
@@ -212,12 +219,15 @@ class AlertScrutinyAuditor:
             "INDEX_CALL_SETUP",
         ):
             is_option_premium_levels = True
-        elif atype in ("GAMMA_BLAST", "SQUEEZE_BREAKOUT", "SQUEEZE_BREAKDOWN") and getattr(
+        elif atype in ("GAMMA_BLAST",) and getattr(alert, "option_type", None):
+            is_option_premium_levels = True
+        elif atype in ("SQUEEZE_BREAKOUT", "SQUEEZE_BREAKDOWN") and getattr(
             alert, "option_type", None
         ):
-            is_option_premium_levels = True
-        elif not has_opt_marker:
-            is_option_premium_levels = False
+            if alert.strike and abs(ltp - float(alert.strike)) < (float(alert.strike) * 0.35):
+                is_option_premium_levels = False
+            else:
+                is_option_premium_levels = True
         elif getattr(alert, "option_premium", None) is not None:
             # Check if ltp is close to option_premium (within 15% tolerance for intraday movement)
             is_option_premium_levels = abs(ltp - float(alert.option_premium)) < max(
@@ -226,8 +236,55 @@ class AlertScrutinyAuditor:
         elif is_index_sym and getattr(alert, "option_type", None) in ("CE", "PE") and ltp < 4000:
             # Index spot is >= 10,000 pts; an LTP < 4,000 with CE/PE marker is always an option contract
             is_option_premium_levels = True
+        elif not has_opt_marker:
+            is_option_premium_levels = False
         else:
             is_option_premium_levels = False
+
+        # Session Runway & Dynamic Cutoff Perimeter Gate
+        if not is_test_runner:
+            try:
+                from engine.session_runway import is_session_runway_sufficient
+
+                metrics_d = getattr(alert, "metrics", {}) or {}
+                seg = str(
+                    getattr(alert, "segment", "") or (metrics_d or {}).get("segment", "") or ""
+                ).upper()
+                exch = str(getattr(alert, "exchange", "") or "").upper()
+                if (
+                    seg in ("COMMODITY", "MCX")
+                    or exch == "MCX"
+                    or atype in ("COMMODITY_MOMENTUM", "COMMODITY_BREAKOUT")
+                ):
+                    asset_cls = "COMMODITY"
+                elif seg in ("CURRENCY", "CDS") or exch == "CDS" or atype in ("CURRENCY_BREAKOUT",):
+                    asset_cls = "CURRENCY"
+                elif (
+                    seg in ("CRYPTO", "CRYPTO_MAJORS")
+                    or exch in ("CRYPTO", "BINANCE", "DERIBIT")
+                    or atype.startswith("CRYPTO")
+                ):
+                    asset_cls = "CRYPTO"
+                elif is_option_premium_levels or has_opt_marker:
+                    asset_cls = "OPTIONS"
+                elif clean_sym in INDEX_MIN_SL_FLOORS or underlying_idx:
+                    asset_cls = "INDEX"
+                else:
+                    asset_cls = "EQUITY"
+
+                is_0d = bool(isinstance(metrics_d, dict) and metrics_d.get("is_0dte"))
+                th = str(getattr(alert, "time_horizon", "") or "")
+                runway_ok, runway_reason = is_session_runway_sufficient(
+                    alert_type=atype,
+                    asset_class=asset_cls,
+                    is_0dte=is_0d,
+                    time_horizon=th,
+                )
+                if not runway_ok:
+                    flags["risk_within_bounds"] = False
+                    return False, runway_reason, flags
+            except Exception as e_runway:
+                logger.debug(f"[AlertScrutiny] Session runway check error: {e_runway}")
 
         # 2. Geometric Level Coherence
         entry_anchor = float(
@@ -427,7 +484,12 @@ class AlertScrutinyAuditor:
 
         # 3d. Index Benchmark Intraday VWAP Direction Sanity Gate
         # Prevent taking Bullish setups when spot is trapped below VWAP, or Bearish setups when spot is riding above VWAP
-        if clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
+        target_idx_vwap = (
+            clean_sym
+            if clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+            else underlying_idx
+        )
+        if target_idx_vwap in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
             metrics_d = getattr(alert, "metrics", {}) or {}
             u_spot = float(
                 getattr(alert, "underlying_spot", 0.0)
@@ -1040,25 +1102,76 @@ class AlertScrutinyAuditor:
             elif metrics.get("is_lvn_vacuum"):
                 flags["lvn_vacuum_clear"] = True
 
-        # 5. Strict "No Chase" Gate
-        # Disqualify if price has already blown past trigger by >2.5% without retest
-        if trigger > 0 and ltp > 0:
-            if (is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY")) and ltp > (
-                trigger * 1.025
-            ):
+        # 5. Strict "No Chase" Gate (Anti-FOMO Invariant 12)
+        # Disqualify if price has already blown past explicit no_chase_boundary or trigger extension
+        no_chase_bound = getattr(alert, "no_chase_boundary", None)
+        if not isinstance(no_chase_bound, (int, float, str)):
+            no_chase_bound = None
+        if no_chase_bound is None:
+            plan_d = getattr(alert, "actionable_plan", {}) or {}
+            if isinstance(plan_d, dict):
+                no_chase_bound = plan_d.get("no_chase_boundary")
+        if no_chase_bound is None:
+            metrics_d = getattr(alert, "metrics", {}) or {}
+            if isinstance(metrics_d, dict):
+                no_chase_bound = metrics_d.get("no_chase_boundary") or metrics_d.get(
+                    "no_chase_limit"
+                )
+        if isinstance(no_chase_bound, str):
+            clean_bound = re.sub(r"[^\d.]", "", no_chase_bound)
+            try:
+                no_chase_bound = float(clean_bound) if clean_bound else None
+            except ValueError:
+                no_chase_bound = None
+        elif not isinstance(no_chase_bound, (int, float)):
+            no_chase_bound = None
+
+        if no_chase_bound is not None and no_chase_bound > 0:
+            if (
+                is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY")
+            ) and ltp > no_chase_bound:
+                flags["no_chase"] = False
+                chase_pct = ((ltp / trigger) - 1.0) * 100.0 if trigger > 0 else 0.0
                 return (
                     False,
-                    f"No-Chase Violation: Price already extended {((ltp / trigger) - 1) * 100:.2f}% above trigger",
+                    f"No-Chase Violation (FOMO Trap Veto): Live price ₹{ltp:,.2f} has already exceeded No-Chase Boundary ₹{no_chase_bound:,.2f} "
+                    f"(+{chase_pct:.2f}% from trigger). Do not chase climax breakouts; wait for pullback limit.",
                     flags,
                 )
             elif (
                 direction in ("BEARISH", "SHORT", "SELL")
                 and not is_option_premium_levels
-                and ltp < (trigger * 0.975)
+                and ltp < no_chase_bound
             ):
+                flags["no_chase"] = False
+                chase_pct = ((trigger / ltp) - 1.0) * 100.0 if ltp > 0 else 0.0
                 return (
                     False,
-                    f"No-Chase Violation: Price already extended {((trigger / ltp) - 1) * 100:.2f}% below trigger",
+                    f"No-Chase Violation (FOMO Trap Veto): Live price ₹{ltp:,.2f} has dropped below No-Chase Boundary ₹{no_chase_bound:,.2f} "
+                    f"(-{chase_pct:.2f}% from trigger). Do not chase extended selloffs; wait for pullback.",
+                    flags,
+                )
+        elif trigger > 0 and ltp > 0:
+            # Fallback when explicit no_chase_boundary was unpopulated: max 1.25% for equity, 2.5% for options
+            max_pct = 0.025 if is_option_premium_levels else 0.0125
+            if (is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY")) and ltp > (
+                trigger * (1.0 + max_pct)
+            ):
+                flags["no_chase"] = False
+                return (
+                    False,
+                    f"No-Chase Violation: Price already extended {((ltp / trigger) - 1) * 100:.2f}% above trigger (limit {max_pct * 100:.1f}%)",
+                    flags,
+                )
+            elif (
+                direction in ("BEARISH", "SHORT", "SELL")
+                and not is_option_premium_levels
+                and ltp < (trigger * (1.0 - max_pct))
+            ):
+                flags["no_chase"] = False
+                return (
+                    False,
+                    f"No-Chase Violation: Price already extended {((trigger / ltp) - 1) * 100:.2f}% below trigger (limit {max_pct * 100:.1f}%)",
                     flags,
                 )
 
@@ -1457,6 +1570,60 @@ class AlertScrutinyAuditor:
         except Exception as e:
             logger.debug(f"[AlertScrutiny] TBT depth microstructure evaluation passed through: {e}")
 
+        # 7e. Institutional SMT Inter-Index Non-Confirmation Gate:
+        # Vetoes index breakout/breakdown setups when sibling index displays severe SMT non-confirmation.
+        target_idx_smt = clean_sym if clean_sym in INDEX_MIN_SL_FLOORS else underlying_idx
+        if target_idx_smt and target_idx_smt in (
+            "NIFTY",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "SENSEX",
+            "BANKEX",
+        ):
+            is_breakout_type = any(
+                b in atype
+                for b in ("BREAKOUT", "BREAKDOWN", "DRIVE", "EXPANSION", "THRUST", "MOMENTUM")
+            )
+            if is_breakout_type:
+                try:
+                    from engine.smt_divergence import evaluate_smt_divergence
+
+                    u_spot = float(
+                        getattr(alert, "underlying_spot", 0.0)
+                        or (metrics_dict.get("spot") if isinstance(metrics_dict, dict) else 0.0)
+                        or ltp
+                    )
+                    u_vwap = float(
+                        (metrics_dict.get("vwap") if isinstance(metrics_dict, dict) else 0.0)
+                        or getattr(alert, "vwap", 0.0)
+                        or 0.0
+                    )
+                    u_high = float(
+                        metrics_dict.get("day_high", 0.0) if isinstance(metrics_dict, dict) else 0.0
+                    )
+                    u_low = float(
+                        metrics_dict.get("day_low", 0.0) if isinstance(metrics_dict, dict) else 0.0
+                    )
+
+                    smt_res = evaluate_smt_divergence(
+                        target_idx_smt,
+                        direction,
+                        primary_spot=u_spot,
+                        primary_day_high=u_high,
+                        primary_day_low=u_low,
+                        primary_vwap=u_vwap,
+                    )
+                    if smt_res and smt_res.is_trap:
+                        flags["smt_divergence_trap"] = True
+                        return (
+                            False,
+                            smt_res.rationale,
+                            flags,
+                        )
+                except Exception as e_smt:
+                    logger.debug(f"[AlertScrutiny] SMT divergence check bypassed: {e_smt}")
+
         # 8. Climax / Overbought Exhaustion Filter:
         # Prevent buying the top of a parabolic blow-off or shorting the very bottom of a capitulation
         rsi_val = None
@@ -1617,15 +1784,35 @@ class AlertScrutinyAuditor:
                     )
                 if a > b > 0 and ltp > 0:
                     spread_pct = (a - b) / ltp
-                    max_spread = (
-                        0.06
-                        if (
-                            is_option_premium_levels or atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
-                        )
-                        else 0.015
+                    is_idx_opt = clean_sym in (
+                        "NIFTY",
+                        "BANKNIFTY",
+                        "FINNIFTY",
+                        "MIDCPNIFTY",
+                        "SENSEX",
+                        "BANKEX",
                     )
+                    if is_option_premium_levels or atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST"):
+                        if is_idx_opt:
+                            max_spread = 0.06
+                        else:
+                            # Priority 3: Stock Option spread threshold 2.0% (2.5% if Apex)
+                            is_apex = bool(
+                                flags.get("is_apex")
+                                or getattr(alert, "confidence", 0) >= 90
+                                or (
+                                    (metrics_dict or {}).get("conviction_tier") == "APEX_CONFLUENCE"
+                                )
+                            )
+                            max_spread = 0.025 if is_apex else 0.020
+                    else:
+                        max_spread = 0.015
                     if spread_pct > max_spread:
                         flags["spread_valid"] = False
+                        if not is_idx_opt and (
+                            is_option_premium_levels or atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+                        ):
+                            flags["downgrade_to_cash"] = True
                         return (
                             False,
                             f"Slippage Hazard Veto: Bid-Ask Spread ({spread_pct * 100:.2f}%) exceeds institutional threshold ({max_spread * 100:.1f}%) [Bid: Rs.{b:,.2f}, Ask: Rs.{a:,.2f}]",
@@ -1685,7 +1872,7 @@ class AlertScrutinyAuditor:
                             lot_sz = 1
                     lot_sz = lot_sz or 1
 
-                    # 1. Normalize OI to contracts
+                    # 1. Open Interest severe dead-contract check
                     contracts_oi = None
                     if opt_oi is not None:
                         oi_f = float(opt_oi)
@@ -1762,11 +1949,64 @@ class AlertScrutinyAuditor:
                                 f"Stock Option Illiquidity Trap: Strike Daily Volume ({contracts_vol:,.0f}) < {min_vol} contracts (Illiquid execution trap)",
                                 flags,
                             )
+
+                    # 3. Priority 3: Institutional Open Interest Floor (OI >= 1,000 contracts)
+                    if contracts_oi is not None and contracts_oi < 1000:
+                        flags["liquidity_valid"] = False
+                        flags["downgrade_to_cash"] = True
+                        return (
+                            False,
+                            f"Stock Option Illiquidity Trap: Strike Open Interest ({contracts_oi:,.0f}) < 1,000 contracts (Institutional liquidity threshold not met; mandate Cash/Futures)",
+                            flags,
+                        )
                 except (ValueError, TypeError) as e_suppressed:
                     logger.debug(
                         f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
                     )
         flags["liquidity_valid"] = True
+
+        # 12b. Implied Volatility (IV) Percentile / Vega Crush Guard (Priority 4)
+        # Option buyers into extreme IV Percentile (> 75%) face severe vega/theta crush
+        # even with favorable directional movement.
+        ivp_val = None
+        if isinstance(metrics_dict, dict):
+            ivp_val = (
+                metrics_dict.get("iv_percentile")
+                or metrics_dict.get("iv_rank")
+                or metrics_dict.get("ivp")
+                or metrics_dict.get("iv")
+            )
+        if ivp_val is None and hasattr(alert, "iv_percentile"):
+            ivp_val = getattr(alert, "iv_percentile", None)
+
+        if ivp_val is not None:
+            try:
+                ivp_float = float(ivp_val)
+                flags["iv_percentile"] = ivp_float
+                if ivp_float > 75.0 and (
+                    is_option_premium_levels or atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+                ):
+                    action_plan = getattr(alert, "actionable_plan", {}) or {}
+                    is_spread = bool(
+                        (
+                            isinstance(action_plan, dict)
+                            and action_plan.get("strategy_type")
+                            in ("VERTICAL_SPREAD", "SPREAD", "BULL_CALL_SPREAD", "BEAR_PUT_SPREAD")
+                        )
+                        or (isinstance(metrics_dict, dict) and metrics_dict.get("spread_structure"))
+                    )
+                    if not is_spread:
+                        flags["iv_crush_hazard"] = True
+                        flags["risk_within_bounds"] = False
+                        return (
+                            False,
+                            f"IV Crush Hazard Veto: Contract IV Percentile ({ivp_float:.1f}%) > 75.0%. "
+                            f"Naked option buying into elevated volatility faces severe vega/theta crush. "
+                            f"Mandate Defined-Risk Vertical Spread.",
+                            flags,
+                        )
+            except (ValueError, TypeError) as e_suppressed:
+                logger.debug(f"[engine.alert_scrutiny] Non-fatal IV check error: {e_suppressed}")
 
         # 13. Midday Lunch Lull RVOL Expansion Filter (11:30 - 13:15 IST):
         # Breakouts attempted during midday lull without institutional volume frequently collapse into fakeouts.
@@ -3432,6 +3672,247 @@ class AlertScrutinyAuditor:
                 logger.debug(f"[Scrutiny] Physical expiry gate bypassed: {e_pexp}")
         flags["physical_expiry_valid"] = True
 
+        # 25. Institutional L2/L3 Order Book Microstructure & Resting Wall Barrier Gate:
+        # Prevents buying into massive institutional resting ask walls capping upside before Target 1,
+        # or buying into a disappearing bid wall (spoof/rugpull alert), and vice-versa for short setups.
+        l3_data = None
+        if isinstance(metrics_dict, dict):
+            l3_data = metrics_dict.get("l3_microstructure") or metrics_dict.get("order_book_audit")
+        if (
+            not l3_data
+            and hasattr(alert, "extra_metrics")
+            and isinstance(alert.extra_metrics, dict)
+        ):
+            l3_data = alert.extra_metrics.get("l3_microstructure") or alert.extra_metrics.get(
+                "order_book_audit"
+            )
+
+        # Fall back to in-memory FyersTbtManager depth cache if active
+        if not l3_data and not is_non_equity_desk:
+            try:
+                from market.fyers_tbt_manager import fyers_tbt_manager
+
+                with fyers_tbt_manager._depth_lock:
+                    l3_data = fyers_tbt_manager._depth_cache.get(
+                        clean_sym
+                    ) or fyers_tbt_manager._depth_cache.get(sym)
+            except Exception as e:
+                logger.debug(f"[AlertScrutiny] Depth cache lookup suppressed: {e}")
+
+        if l3_data and isinstance(l3_data, dict):
+            is_call_side = (
+                direction in ("BULLISH", "LONG", "BUY") or getattr(alert, "option_type", "") == "CE"
+            )
+            is_put_side = (
+                direction in ("BEARISH", "SHORT", "SELL")
+                or getattr(alert, "option_type", "") == "PE"
+            )
+
+            # 25a. Order Book Spoof / Fleeing Wall Trap
+            fleeing_bid = bool(l3_data.get("fleeing_bid_wall_detected"))
+            fleeing_ask = bool(l3_data.get("fleeing_ask_wall_detected"))
+            spoof_msg = l3_data.get("spoof_trap_warning")
+
+            if is_call_side and (fleeing_bid or (spoof_msg and "BID_SPOOF" in spoof_msg)):
+                flags["order_book_sanctity_valid"] = False
+                return (
+                    False,
+                    "Order Book Spoof Trap: Resting institutional bid floor abruptly fled as price approached. "
+                    "Disallow long entry into an artificial liquidity rugpull.",
+                    flags,
+                )
+            elif is_put_side and (fleeing_ask or (spoof_msg and "ASK_SPOOF" in spoof_msg)):
+                flags["order_book_sanctity_valid"] = False
+                return (
+                    False,
+                    "Order Book Spoof Trap: Resting institutional ask ceiling abruptly fled as price approached. "
+                    "Disallow short entry into an artificial bear trap.",
+                    flags,
+                )
+
+            # 25b. Immovable Fortress Wall Blocking Target 1 / Entry Headroom
+            fortress_ask = bool(l3_data.get("fortress_ask_wall_confirmed"))
+            fortress_bid = bool(l3_data.get("fortress_bid_wall_confirmed"))
+            ask_walls = l3_data.get("ask_walls", [])
+            bid_walls = l3_data.get("bid_walls", [])
+
+            if is_call_side and fortress_ask:
+                near_ask_walls = [
+                    w
+                    for w in ask_walls
+                    if ltp > 0
+                    and (w.get("strength") in ("FORTRESS", "STRONG"))
+                    and (float(w.get("price", 0)) <= max(t1, ltp * 1.025))
+                    and (float(w.get("price", 0)) >= ltp)
+                ]
+                if near_ask_walls:
+                    w_obj = near_ask_walls[0]
+                    flags["order_book_sanctity_valid"] = False
+                    return (
+                        False,
+                        f"Institutional Fortress Ask Wall Veto: Immovable resting ask wall holding at ₹{w_obj.get('price')} "
+                        f"({w_obj.get('qty', 0):,} contracts, {w_obj.get('book_share_pct', 0)}% book share) "
+                        f"caps upside before Target 1 (₹{t1:,.2f}).",
+                        flags,
+                    )
+
+            elif is_put_side and fortress_bid:
+                near_bid_walls = [
+                    w
+                    for w in bid_walls
+                    if ltp > 0
+                    and (w.get("strength") in ("FORTRESS", "STRONG"))
+                    and (float(w.get("price", 0)) >= min(t1, ltp * 0.975))
+                    and (float(w.get("price", 0)) <= ltp)
+                ]
+                if near_bid_walls:
+                    w_obj = near_bid_walls[0]
+                    flags["order_book_sanctity_valid"] = False
+                    return (
+                        False,
+                        f"Institutional Fortress Bid Floor Veto: Immovable resting bid floor holding at ₹{w_obj.get('price')} "
+                        f"({w_obj.get('qty', 0):,} contracts, {w_obj.get('book_share_pct', 0)}% book share) "
+                        f"blocks downside before Target 1 (₹{t1:,.2f}).",
+                        flags,
+                    )
+
+            # 25c. Dynamic Regime-Aware Order Book Imbalance (OBI-50) Against the Trade
+            obi_val = l3_data.get("obi_50") or l3_data.get("obi")
+            if obi_val is not None:
+                try:
+                    obi_f = float(obi_val)
+                    flags["l3_obi_50"] = obi_f
+
+                    # Adaptive OBI threshold calibration based on market regime
+                    base_threshold = 0.45
+                    time_mult = 1.0
+                    try:
+                        now_ist = datetime.now(IST).time()
+                        # Opening Impulse (09:15-09:45 IST): order books naturally flash thin on breakouts
+                        if (now_ist.hour == 9 and now_ist.minute >= 15) or (
+                            now_ist.hour == 9 and now_ist.minute <= 45
+                        ):
+                            time_mult = 1.20
+                        # Lunch Doldrums (11:30-13:30 IST): tighten against fake low-volume traps
+                        elif (
+                            (now_ist.hour == 11 and now_ist.minute >= 30)
+                            or (now_ist.hour == 12)
+                            or (now_ist.hour == 13 and now_ist.minute <= 30)
+                        ):
+                            time_mult = 0.80
+                        # Closing Drive (14:30-15:30 IST): short-covering liquidity expansion
+                        elif (now_ist.hour == 14 and now_ist.minute >= 30) or (
+                            now_ist.hour == 15 and now_ist.minute <= 30
+                        ):
+                            time_mult = 1.10
+                    except Exception:
+                        time_mult = 1.0
+
+                    vix_mult = 1.0
+                    try:
+                        from market.indices import get_vix
+
+                        vix_val = get_vix()
+                        if vix_val and vix_val >= 20.0:
+                            vix_mult = 1.20
+                        elif vix_val and vix_val <= 12.0:
+                            vix_mult = 0.85
+                    except Exception:
+                        vix_mult = 1.0
+
+                    adaptive_threshold = round(
+                        min(0.60, max(0.30, base_threshold * time_mult * vix_mult)), 2
+                    )
+                    flags["l3_adaptive_threshold"] = adaptive_threshold
+
+                    if is_call_side and obi_f <= -adaptive_threshold:
+                        flags["order_book_sanctity_valid"] = False
+                        return (
+                            False,
+                            f"Order Book Imbalance Veto: Severe ask supply overhead (OBI-50: {obi_f:+.2f} vs adaptive limit -{adaptive_threshold:.2f}). "
+                            f"Total visible ask depth heavily overwhelms bids by >2.5x.",
+                            flags,
+                        )
+                    elif is_put_side and obi_f >= +adaptive_threshold:
+                        flags["order_book_sanctity_valid"] = False
+                        return (
+                            False,
+                            f"Order Book Imbalance Veto: Heavy bid demand support (OBI-50: {obi_f:+.2f} vs adaptive limit +{adaptive_threshold:.2f}). "
+                            f"Total visible bid depth heavily absorbs selling by >2.5x.",
+                            flags,
+                        )
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"[AlertScrutiny] OBI parsing suppressed: {e}")
+
+        flags["order_book_sanctity_valid"] = True
+
+        # 26. Option Contract Bid-Ask Spread Friction & Depth Sanity Gate:
+        # Prevents recommending illiquid option strikes with excessive bid-ask spreads
+        # (>4.5% of mid for index options, >8.0% for stock options), where immediate
+        # execution slippage destroys the mathematical risk:reward asymmetry.
+        is_opt_contract = (
+            getattr(alert, "option_type", "") in ("CE", "PE")
+            or getattr(alert, "segment", "") in ("OPT", "OPTIONS", "FNO_OPTIONS")
+            or (
+                getattr(alert, "contract_symbol", "")
+                and (
+                    "CE" in getattr(alert, "contract_symbol", "")
+                    or "PE" in getattr(alert, "contract_symbol", "")
+                )
+            )
+        )
+        if is_opt_contract:
+            try:
+                opt_sym = getattr(alert, "contract_symbol", None) or getattr(alert, "symbol", "")
+                opt_book = None
+                from market.order_book import get_depth_book
+
+                if opt_sym:
+                    clean_opt = opt_sym.split(":")[-1].strip().upper()
+                    opt_book = get_depth_book(opt_sym)
+                    if (
+                        not (opt_book and (opt_book.best_bid > 0 or opt_book.best_ask > 0))
+                        and clean_opt != opt_sym
+                    ):
+                        opt_book = get_depth_book(clean_opt)
+
+                bid_p = 0.0
+                ask_p = 0.0
+                if opt_book and opt_book.best_bid > 0 and opt_book.best_ask > 0:
+                    bid_p = opt_book.best_bid
+                    ask_p = opt_book.best_ask
+                elif isinstance(metrics_dict, dict):
+                    bid_p = float(metrics_dict.get("bid") or metrics_dict.get("best_bid") or 0.0)
+                    ask_p = float(metrics_dict.get("ask") or metrics_dict.get("best_ask") or 0.0)
+
+                if bid_p > 0 and ask_p > 0 and ask_p >= bid_p:
+                    mid_p = (bid_p + ask_p) / 2.0
+                    spread_val = ask_p - bid_p
+                    spread_pct = (spread_val / mid_p) * 100.0 if mid_p > 0 else 0.0
+                    flags["option_spread_pct"] = round(spread_pct, 2)
+                    flags["option_bid"] = bid_p
+                    flags["option_ask"] = ask_p
+
+                    is_index_opt = any(
+                        idx in str(opt_sym).upper()
+                        for idx in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
+                    )
+                    max_allowed_spread = 4.5 if is_index_opt else 8.0
+
+                    if spread_pct > max_allowed_spread:
+                        flags["option_spread_friction_valid"] = False
+                        return (
+                            False,
+                            f"Option Bid-Ask Spread Friction Veto: Spread of ₹{spread_val:,.2f} ({spread_pct:.1f}% of mid ₹{mid_p:,.2f}) "
+                            f"exceeds maximum allowable threshold ({max_allowed_spread:.1f}% for {'Index' if is_index_opt else 'Stock'} options). "
+                            f"Punitive execution slippage destroys setup edge.",
+                            flags,
+                        )
+            except Exception as e_opt_spread:
+                logger.debug(f"[Scrutiny] Option spread friction check error: {e_opt_spread}")
+
+        flags["option_spread_friction_valid"] = True
+
         return True, "", flags
 
     def compile_predatory_pipeline_dossier(
@@ -3489,6 +3970,29 @@ class AlertScrutinyAuditor:
             and flags.get("decoupler_status") != "VERIFIED_DECOUPLER"
         ):
             is_eagle_aligned = False
+
+        # Macro Lead-Lag Cross-Asset Fast-Pulse Check
+        lead_lag_shock = None
+        try:
+            from market.cross_asset_lead_lag import cross_asset_lead_lag_sentinel
+
+            clean_und_sym = str(
+                getattr(alert, "symbol", "")
+                or (alert.get("symbol", "") if isinstance(alert, dict) else "")
+            )
+            trade_dir = str(
+                getattr(alert, "direction", "BULLISH")
+                or (alert.get("direction", "BULLISH") if isinstance(alert, dict) else "BULLISH")
+            )
+            lead_lag_shock = cross_asset_lead_lag_sentinel.evaluate_lead_lag_shock(
+                symbol=clean_und_sym, direction=trade_dir
+            )
+            flags["lead_lag_shock"] = lead_lag_shock.to_dict()
+            metrics["lead_lag_shock"] = lead_lag_shock.to_dict()
+            if lead_lag_shock.veto_recommended:
+                is_eagle_aligned = False
+        except Exception as e_ll:
+            logger.debug(f"[Eagle] Cross-asset lead-lag check non-fatal: {e_ll}")
 
         # 2. 🐅 TIGER
         prox_pct = round(abs(ltp - trigger) / trigger * 100.0, 2) if trigger > 0 else 0.0
@@ -3573,9 +4077,72 @@ class AlertScrutinyAuditor:
         poc_clear = flags.get("lvn_vacuum_clear", True) and not flags.get(
             "hvn_congestion_risk", False
         )
+
+        # Check VPOC Liquidity Vacuum Speedway
+        speedway = flags.get("vpoc_speedway") or metrics.get("vpoc_speedway")
+        if not speedway:
+            try:
+                from analysis.vpoc_speedway import check_alert_speedway
+
+                speedway = check_alert_speedway(alert)
+                if speedway:
+                    flags["vpoc_speedway"] = speedway
+                    metrics["vpoc_speedway"] = speedway
+            except Exception as e_speedway:
+                logger.debug(
+                    f"[compile_predatory_pipeline_dossier] Speedway check non-fatal: {e_speedway}"
+                )
+
+        if speedway:
+            poc_clear = True
+
         is_elephant_footprint = (
-            (rvol_val >= 1.8 and cvd_ratio >= 1.5) or (rvol_val >= 2.0) or has_ob or has_fvg
+            (rvol_val >= 1.8 and cvd_ratio >= 1.5)
+            or (rvol_val >= 2.0)
+            or has_ob
+            or has_fvg
+            or bool(speedway)
         )
+
+        # Check Autonomous Intraday Regime Shift (CPR & ADR Exhaustion)
+        regime_shift = flags.get("session_regime") or metrics.get("session_regime")
+        if not regime_shift:
+            try:
+                from engine.session_regime_sentinel import check_alert_session_regime
+
+                reg_obj = check_alert_session_regime(alert)
+                if reg_obj:
+                    regime_shift = reg_obj.to_dict()
+                    flags["session_regime"] = regime_shift
+                    metrics["session_regime"] = regime_shift
+            except Exception as e_reg:
+                logger.debug(f"[Pipeline] Session regime check non-fatal: {e_reg}")
+
+        # Check Institutional Event Volatility & Hedging Architecture
+        event_hedge = flags.get("event_hedge_plan") or metrics.get("event_hedge_plan")
+        if not event_hedge:
+            try:
+                from analysis.event_volatility import evaluate_event_volatility_strategy
+
+                clean_und_sym = str(
+                    getattr(alert, "symbol", "")
+                    or (alert.get("symbol", "") if isinstance(alert, dict) else "")
+                )
+                trade_dir = str(
+                    getattr(alert, "direction", "BULLISH")
+                    or (alert.get("direction", "BULLISH") if isinstance(alert, dict) else "BULLISH")
+                )
+                ev_plan = evaluate_event_volatility_strategy(
+                    symbol=clean_und_sym,
+                    spot=ltp,
+                    direction=trade_dir,
+                )
+                if ev_plan:
+                    event_hedge = ev_plan.to_dict()
+                    flags["event_hedge_plan"] = event_hedge
+                    metrics["event_hedge_plan"] = event_hedge
+            except Exception as e_ev:
+                logger.debug(f"[Pipeline] Event volatility check non-fatal: {e_ev}")
 
         # 7. 🏛️ CROSS-DESK CALIBRATION & PREDATORY STRIKE CLOCK
         now_time = datetime.now(IST).time()
@@ -3595,10 +4162,20 @@ class AlertScrutinyAuditor:
             timing_eff = 90
             clock_action = "European session open: Trap inversion & trend resumption inflection."
         elif dtime(13, 45) <= now_time <= dtime(15, 15):
-            strike_zone = "AFTERNOON_GAMMA_POWER_HOUR"
-            is_kz = True
-            timing_eff = 96
-            clock_action = "Power Hour: Gamma blasts & institutional index settlement drive."
+            is_idx_gamma = is_fno and any(
+                idx in str(getattr(alert, "symbol", "") or "").upper()
+                for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCP", "SENSEX", "BANKEX")
+            )
+            if now_time >= dtime(14, 0) and not is_idx_gamma:
+                strike_zone = "SESSION_RUNWAY_EXHAUSTION"
+                is_kz = False
+                timing_eff = 40
+                clock_action = "Late afternoon session cutoff risk (<75m remaining). Intraday equities face square-off liquidation."
+            else:
+                strike_zone = "AFTERNOON_GAMMA_POWER_HOUR"
+                is_kz = True
+                timing_eff = 96
+                clock_action = "Power Hour: Gamma blasts & institutional index settlement drive."
         else:
             strike_zone = "OFF_PEAK_AUCTION"
             is_kz = False
@@ -3630,12 +4207,14 @@ class AlertScrutinyAuditor:
             "status": "APPROVED_PREDATORY_SANCTIONED",
             "expected_value_r": ev_r,
             "circuit_breaker": cb_summary,
+            "session_regime": regime_shift,
             "eagle": {
                 "seat": "🦅 EAGLE",
                 "status": "ALIGNED" if is_eagle_aligned else "HEADWIND_VETO",
                 "nifty_change_pct": nifty_c,
                 "sector_rrg_phase": sec_phase,
                 "macro_aligned": is_eagle_aligned,
+                "lead_lag_shock": lead_lag_shock.to_dict() if lead_lag_shock else None,
             },
             "tiger": {
                 "seat": "🐅 TIGER",
@@ -3691,6 +4270,7 @@ class AlertScrutinyAuditor:
                 "strike_clock_efficiency": timing_eff,
                 "clock_action": clock_action,
             },
+            "event_hedge": event_hedge,
         }
 
     # ── Tier 2: AI Devil's Advocate & Scrutiny ─────────────────────────────────
@@ -3768,6 +4348,14 @@ class AlertScrutinyAuditor:
                     m["cheetah_mandate"] = flags["cheetah_mandate"]
                 if "falcon_environment" in flags:
                     m["falcon_environment"] = flags["falcon_environment"]
+                if "lead_lag_shock" in flags:
+                    m["lead_lag_shock"] = flags["lead_lag_shock"]
+                if "vpoc_speedway" in flags:
+                    m["vpoc_speedway"] = flags["vpoc_speedway"]
+                if "session_regime" in flags:
+                    m["session_regime"] = flags["session_regime"]
+                if "event_hedge_plan" in flags:
+                    m["event_hedge_plan"] = flags["event_hedge_plan"]
         elif hasattr(alert, "metrics"):
             if not isinstance(alert.metrics, dict):
                 alert.metrics = {}
@@ -3779,6 +4367,66 @@ class AlertScrutinyAuditor:
                 alert.metrics["cheetah_mandate"] = flags["cheetah_mandate"]
             if "falcon_environment" in flags:
                 alert.metrics["falcon_environment"] = flags["falcon_environment"]
+            if "lead_lag_shock" in flags:
+                alert.metrics["lead_lag_shock"] = flags["lead_lag_shock"]
+            if "vpoc_speedway" in flags:
+                alert.metrics["vpoc_speedway"] = flags["vpoc_speedway"]
+            if "session_regime" in flags:
+                alert.metrics["session_regime"] = flags["session_regime"]
+            if "event_hedge_plan" in flags:
+                alert.metrics["event_hedge_plan"] = flags["event_hedge_plan"]
+
+        # Step 1.3: Detector Degradation Circuit Breaker Veto (Rolling Kelly Governor)
+        cb_info = pred_dossier.get("circuit_breaker") or {}
+        if cb_info.get("status") == "HALTED":
+            veto_msg = f"Detector Circuit Breaker HALTED for '{atype}': {cb_info.get('consecutive_losses', 0)} consecutive losses."
+            logger.warning(f"[AlertScrutiny] 🛑 Circuit Breaker VETO on {atype}: {veto_msg}")
+            return _commit_cache(
+                ScrutinyResult(
+                    status="REJECTED",
+                    score=15,
+                    logic_confirmation="Halted by Rolling Kelly Governor",
+                    trap_risk_warning=veto_msg,
+                    actionable_guidance="Hold capital; detector is degraded until market regime normalizes.",
+                    sanctity_matrix=flags,
+                    rejection_reason=veto_msg,
+                    auditor_model="QUANT_CIRCUIT_BREAKER",
+                )
+            )
+
+        # Step 1.4: Session Runway & Market Dynamic Adaptation Gate
+        try:
+            from engine.session_runway import evaluate_session_runway
+
+            horiz = getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY"
+            seg = getattr(alert, "segment", "EQUITY") or "EQUITY"
+            alert_rvol = float(flags.get("rvol", 1.0) or getattr(alert, "rvol", 1.0) or 1.0)
+            runway_eval = evaluate_session_runway(
+                symbol=sym,
+                alert_type=atype,
+                time_horizon=horiz,
+                segment=seg,
+                rvol=alert_rvol,
+                direction=direction,
+            )
+            if not runway_eval.is_allowed:
+                logger.info(
+                    f"[AlertScrutiny] 🛑 Session Runway VETO for {sym} ({atype}): {runway_eval.veto_reason}"
+                )
+                return _commit_cache(
+                    ScrutinyResult(
+                        status="REJECTED",
+                        score=20,
+                        logic_confirmation="Session runway check failed.",
+                        trap_risk_warning=f"Runway Veto: {runway_eval.veto_reason}",
+                        actionable_guidance="Do not enter intraday trades without viable runway before 15:15 IST cutoff.",
+                        sanctity_matrix=flags,
+                        rejection_reason=runway_eval.veto_reason,
+                        auditor_model="SESSION_RUNWAY_GATE",
+                    )
+                )
+        except Exception as e_runway:
+            logger.debug(f"[AlertScrutiny] Session runway check skipped: {e_runway}")
 
         # Step 1.5: Adaptive Regime-Aware Conviction Gate
         # In compressed VIX regimes (<12.5) or ORB-trapped Nifty days, raise the minimum
@@ -3939,8 +4587,16 @@ class AlertScrutinyAuditor:
             provider = get_fast_provider()
             if not provider:
                 return ""
+            system_msg = (
+                "You are an institutional quantitative market risk auditor. "
+                "Analyze the trade setup strictly and return a valid JSON object ONLY with keys: "
+                "verdict (APPROVED|REJECTED), score (0-100), logic_confirmation, trap_risk_warning, actionable_guidance."
+            )
             resp = provider.chat(
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt},
+                ],
                 stream=False,
                 enable_tools=False,
                 max_tokens=300,
@@ -4135,6 +4791,11 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
                 smc_features.append(f"OB: {metrics['order_block']}")
             if metrics.get("fvg"):
                 smc_features.append("FAIR_VALUE_GAP")
+            if metrics.get("vpoc_speedway"):
+                sp = metrics["vpoc_speedway"]
+                smc_features.append(
+                    f"VPOC_SPEEDWAY (Target ₹{sp.get('target_vpoc')} {sp.get('vacuum_spread_pct')}%)"
+                )
         smc_summary = (
             ", ".join(smc_features) if smc_features else "Standard Price Action / VWAP Expansion"
         )
@@ -4231,7 +4892,87 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
         if is_option_buy or (isinstance(metrics, dict) and metrics.get("has_options_chain")):
             score += 3
 
-        score = min(92, max(75, score))
+        # VPOC Liquidity Vacuum Speedway bonus
+        speedway = flags.get("vpoc_speedway") or (
+            metrics.get("vpoc_speedway") if isinstance(metrics, dict) else None
+        )
+        if speedway:
+            score += 6
+
+        # Institutional Event Volatility & Defined-Risk Hedge bonus
+        ev_hedge = flags.get("event_hedge_plan") or (
+            metrics.get("event_hedge_plan") if isinstance(metrics, dict) else None
+        )
+        if ev_hedge:
+            score += 5
+
+        # Macro Lead-Lag Conviction Adjustment & Veto
+        ll_dict = flags.get("lead_lag_shock") or (
+            metrics.get("lead_lag_shock") if isinstance(metrics, dict) else None
+        )
+        if ll_dict:
+            score += ll_dict.get("conviction_adj", 0)
+            if ll_dict.get("is_headwind") and ll_dict.get("veto_recommended"):
+                return ScrutinyResult(
+                    status="REJECTED",
+                    score=min(45, score),
+                    logic_confirmation="Macro Lead-Lag Transmission Veto tripped.",
+                    trap_risk_warning=ll_dict.get("rationale", "Adverse macro shock detected."),
+                    actionable_guidance="Do not take trade. Cross-asset lead indicator signals acute repricing shock.",
+                    sanctity_matrix=flags,
+                    rejection_reason=ll_dict.get("rationale"),
+                    auditor_model="QUANT_FALLBACK",
+                )
+
+        # Autonomous Intraday Regime Shift (CPR & ADR Exhaustion)
+        reg_dict = flags.get("session_regime") or (
+            metrics.get("session_regime") if isinstance(metrics, dict) else None
+        )
+        is_breakout = (
+            alert_type
+            in (
+                "BREAKOUT",
+                "ORB_BREAKOUT",
+                "MOMENTUM",
+                "INTRADAY_MOVER_IGNITED",
+                "STAGE_1_TO_2_EXPANSION",
+                "OPTIONS_MOMENTUM",
+            )
+            or "BREAKOUT" in alert_type
+            or "ORB" in alert_type
+        )
+        is_fade = (
+            alert_type
+            in (
+                "MEAN_REVERSION",
+                "VWAP_BOUNCE",
+                "REVERSAL",
+                "TURTLE_SOUP",
+                "CAMARILLA_FADE",
+            )
+            or "REVERSAL" in alert_type
+            or "FADE" in alert_type
+        )
+        if reg_dict:
+            if is_breakout and reg_dict.get("veto_breakout_chase"):
+                return ScrutinyResult(
+                    status="REJECTED",
+                    score=35,
+                    logic_confirmation="Intraday ADR Exhaustion Veto tripped.",
+                    trap_risk_warning=reg_dict.get(
+                        "rationale", "ADR exhausted on wide CPR session."
+                    ),
+                    actionable_guidance="Do not chase breakouts at session extremes. High probability of false breakout trap; mandate mean-reversion fade to VWAP.",
+                    sanctity_matrix=flags,
+                    rejection_reason=reg_dict.get("rationale"),
+                    auditor_model="QUANT_FALLBACK",
+                )
+            elif is_fade and reg_dict.get("favor_mean_reversion"):
+                score += 6
+            elif is_breakout and reg_dict.get("regime") == "TREND_EXPANSION":
+                score += 5
+
+        score = min(96, max(75, score))
 
         # Respect mathematical sanity flag vetoes in quant fallback
         if not flags.get("rr_valid", True):
@@ -4430,6 +5171,21 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
             guidance = (
                 f"Enter near ₹{ltp:,.1f}; strictly invalidate if candle closes below ₹{sl:,.1f}."
             )
+
+        if speedway:
+            badge = str(speedway.get("summary_badge", "")).strip()
+            if badge:
+                logic = f"{badge} {logic}"
+
+        if ll_dict and ll_dict.get("is_tailwind"):
+            rat = str(ll_dict.get("rationale", "")).strip()
+            if rat:
+                logic = f"{rat} {logic}"
+
+        if reg_dict and reg_dict.get("favor_mean_reversion") and is_fade:
+            logic = f"⚡ CHOP REGIME CONVERGENCE: {reg_dict.get('rationale', '')} {logic}"
+        elif reg_dict and reg_dict.get("regime") == "TREND_EXPANSION" and is_breakout:
+            logic = f"⚡ NARROW CPR TREND RUNWAY: {reg_dict.get('rationale', '')} {logic}"
 
         return ScrutinyResult(
             status="APPROVED",

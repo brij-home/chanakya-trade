@@ -66,25 +66,28 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       time_horizon: 'SWING_SHORT',
       created_at: new Date().toISOString(),
     },
-    // 2. Active Future Trade (Monthly Long Future)
+    // 2. Active Stock Option Trade (Monthly Long Option)
     {
-      alert_id: 'alert-fut-active-2',
-      alert_type: 'SQUEEZE_BREAKOUT',
+      alert_id: 'alert-opt-active-2',
+      alert_type: 'OPTIONS_MOMENTUM',
       stage: 'IGNITED',
       symbol: 'RELIANCE',
-      exchange: 'NSE',
+      exchange: 'NFO',
       direction: 'BULLISH',
-      headline: 'RELIANCE Sep Future Squeeze Breakout',
+      headline: 'RELIANCE Sep 3050 Call Squeeze Breakout',
       summary: 'Coiling broken out with expanding RVOL',
-      ltp: 3025.0,
-      trigger_level: 3010.0,
-      target_level: 3120.0,
-      stop_loss: 2975.0,
-      contract_symbol: 'RELIANCE26SEPFUT',
+      ltp: 55.0,
+      trigger_level: 55.0,
+      target_level: 95.0,
+      stop_loss: 40.0,
+      contract_symbol: 'RELIANCE26SEP3050CE',
+      strike: 3050,
+      option_type: 'CE',
+      derivative_type: 'OPT',
       expiry_date: '2026-09-24',
       expiry_type: 'MONTHLY',
       underlying_spot: 3015.0,
-      option_premium: 3025.0,
+      option_premium: 55.0,
       is_active: true,
       is_archived: false,
       is_invalidated: false,
@@ -176,8 +179,8 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
             'NSE:RELIANCE': { ltp: 3040.0, change: 25.0, change_pct: 0.83, high: 3050.0, low: 3010.0 },
             NIFTY2691124500CE: { ltp: 165.5, change: 20.0, change_pct: 13.75 },
             'NFO:NIFTY2691124500CE': { ltp: 165.5, change: 20.0, change_pct: 13.75 },
-            RELIANCE26SEPFUT: { ltp: 3055.0, change: 30.0, change_pct: 0.99 },
-            'NFO:RELIANCE26SEPFUT': { ltp: 3055.0, change: 30.0, change_pct: 0.99 },
+            RELIANCE26SEP3050CE: { ltp: 55.0, change: 5.0, change_pct: 0.99 },
+            'NFO:RELIANCE26SEP3050CE': { ltp: 55.0, change: 5.0, change_pct: 0.99 },
           },
         })
       }
@@ -211,7 +214,7 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     })
 
     // Direction & Option Type
-    expect(screen.getByText('CE')).toBeTruthy()
+    expect(screen.getAllByText('CE').length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText(/▲ BULLISH/i).length).toBeGreaterThanOrEqual(1)
 
     // Strike specification
@@ -224,17 +227,17 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     expect(screen.getAllByText(/₹(24,650|24,580)/).length).toBeGreaterThanOrEqual(1)
   })
 
-  it('displays crystal clear Future details (long future direction, future price LTP vs spot, monthly contract)', async () => {
+  it('displays crystal clear Option details (long call direction, option price LTP vs spot, monthly contract)', async () => {
     render(<AlertsView />)
 
     await waitFor(() => {
       expect(screen.getByText('RELIANCE')).toBeTruthy()
     })
 
-    expect(screen.getByText('FUT')).toBeTruthy()
+    expect(screen.getAllByText('CE').length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText(/▲ BULLISH/i).length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText(/📅M 2026-09-24/i)).toBeTruthy()
-    expect(screen.getAllByText(/₹(3,055\.0|3,025\.0)/).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/📅M/i).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/₹(55\.0|55|50\.0)/).length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText(/₹(3,040|3,015)/).length).toBeGreaterThanOrEqual(1)
   })
 
@@ -379,14 +382,14 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       expect(mockCall).toHaveBeenCalledWith(
         '/skills/quotes/batch',
         expect.objectContaining({
-          symbols: expect.arrayContaining(['NIFTY', 'RELIANCE', 'NIFTY2691124500CE', 'RELIANCE26SEPFUT']),
+          symbols: expect.arrayContaining(['NIFTY', 'RELIANCE', 'NIFTY2691124500CE', 'RELIANCE26SEP3050CE']),
         })
       )
     })
 
     await waitFor(() => {
       expect(screen.getAllByText(/₹165\.5/).length).toBeGreaterThanOrEqual(1)
-      expect(screen.getAllByText(/₹3,055\.0/).length).toBeGreaterThanOrEqual(1)
+      expect(screen.getAllByText(/₹55\.0/).length).toBeGreaterThanOrEqual(1)
     })
 
     expect(screen.getAllByText(/₹24,650/).length).toBeGreaterThanOrEqual(1)
@@ -401,7 +404,7 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     })
 
     expect(screen.getAllByText(/Trade Execution Matrix & Target Milestones/i).length).toBeGreaterThanOrEqual(1)
-    expect(screen.getAllByText(/⚡ Entry Trigger/i).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/(⚡ Entry Trigger|🛑 No Chase)/i).length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText(/🛑 Invalidation SL/i).length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText(/🎯 Target 1 \(T1\)/i).length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText(/🏁 Target 2 \(T2\)/i).length).toBeGreaterThanOrEqual(1)

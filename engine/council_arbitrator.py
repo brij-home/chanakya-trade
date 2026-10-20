@@ -67,7 +67,7 @@ def _score_alert(alert: object, nifty_posture: str = "NEUTRAL") -> float:
             try:
                 from dateutil.parser import parse as dateutil_parse
 
-                exp_dt = dateutil_parse(expiry_date)
+                exp_dt = dateutil_parse(str(expiry_date).replace(" IST", ""))
                 days_to_exp = (exp_dt.date() - datetime.now(IST).date()).days
                 if 0 < days_to_exp <= 2:
                     expiry_bonus = 3.0
@@ -145,11 +145,11 @@ def run_council_arbitration(engine: object) -> list:
             continue
         if getattr(a, "stage", "") not in ("IGNITED", "EARLY_WARNING", "ACTIVE", "PRIMED"):
             continue
-        created_at_str = getattr(a, "created_at", "") or ""
+        created_at_str = str(getattr(a, "created_at", "") or "").replace(" IST", "")
         try:
             from dateutil.parser import parse as dateutil_parse
 
-            created_epoch = dateutil_parse(created_at_str).timestamp()
+            created_epoch = dateutil_parse(created_at_str).replace(tzinfo=IST).timestamp()
         except Exception:
             created_epoch = now
 

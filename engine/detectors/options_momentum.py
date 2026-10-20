@@ -1454,17 +1454,25 @@ def detect_options_momentum_breakouts(
             ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
         )
         _opt_pacing_limit = int(os.environ.get("OPTIONS_MOMENTUM_STOCK_PACING", "0"))
+        is_apex = bool(
+            (alert.metrics or {}).get("is_apex_confluence")
+            or getattr(alert, "confidence", 0) >= 90
+            or ((alert.metrics or {}).get("conviction_tier") == "APEX_CONFLUENCE")
+        )
+        effective_limit = (
+            (_opt_pacing_limit + 1) if (is_apex and _opt_pacing_limit > 0) else _opt_pacing_limit
+        )
         if (
-            _opt_pacing_limit > 0
+            effective_limit > 0
             and is_stock
-            and (recent_options_count + len(found)) >= _opt_pacing_limit
+            and (recent_options_count + len(found)) >= effective_limit
         ):
             if (
                 alert.confidence < 88
                 and alert.metrics.get("decoupler_status") != "VERIFIED_DECOUPLER"
             ):
                 logger.debug(
-                    f"[OptionsBreakout] Paced options alert {alert.symbol}: Rolling 5m limit reached (score {q_score:.1f}, conf {alert.confidence})"
+                    f"[OptionsBreakout] Paced options alert {alert.symbol}: Rolling 5m limit reached (score {q_score:.1f}, conf {alert.confidence}, limit {effective_limit})"
                 )
                 continue
 

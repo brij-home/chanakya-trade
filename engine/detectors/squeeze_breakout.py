@@ -342,6 +342,27 @@ def detect_squeeze_breakout(
         # Compute 14-period ADX trend energy
         adx_val, adx_slope = compute_adx(df, period=14)
 
+        # Sector RRG Alignment Gate (Institutional Predatory Edge)
+        clean_sym = canonical_alert_symbol(symbol)
+        is_idx_sym = clean_sym in (
+            "NIFTY",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "SENSEX",
+            "BANKEX",
+        )
+        sector_align = None
+        if not is_idx_sym:
+            try:
+                from analysis.sector_rotation import get_stock_sector_alignment
+
+                sector_align = get_stock_sector_alignment(clean_sym)
+            except Exception as e_sec:
+                logger.debug(
+                    f"[SqueezeBreakout] Sector alignment check skipped for {clean_sym}: {e_sec}"
+                )
+
         # Compute recent candle wick ratios (Exhaustion & Wick Trap Filter)
         upper_wick_ratio = 0.0
         lower_wick_ratio = 0.0
@@ -374,6 +395,16 @@ def detect_squeeze_breakout(
             and (min_coiling_dist <= dist_to_pivot_pct <= max_coiling_dist)
             and not (upper_wick_ratio >= 0.60 and candle_range >= 0.50 * atr20)
         ):
+            if sector_align and not is_test_env:
+                sec_quad = sector_align.get("quadrant")
+                sec_align_str = sector_align.get("alignment")
+                if (sec_quad == "LAGGING" or sec_align_str == "SEVERE_HEADWIND") and rvol < 2.2:
+                    logger.info(
+                        f"[SqueezeBreakout] 🛑 Suppressed bullish coiling for {clean_sym}: "
+                        f"Parent sector {sector_align.get('sector')} is in {sec_quad} ({sec_align_str}) "
+                        f"and RVOL {rvol:.2f}x < 2.20x institutional decoupling threshold."
+                    )
+                    return None
             tp = None
             try:
                 from engine.trade_plan import calculate_trade_plan
@@ -398,10 +429,20 @@ def detect_squeeze_breakout(
                 if (ltp - sl) < 1.25 * atr20:
                     sl = round(ltp - 1.25 * atr20, 1)
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
+                risk_pts = max(abs_risk_floor, round(ltp - sl, 1))
+                # Institutional invariant: Guarantee target provides at least 1:2.0 R:R
+                if (target - ltp) < 2.0 * risk_pts:
+                    target = round(ltp + 2.0 * risk_pts, 1)
                 if target_2 <= target:
-                    target_2 = round(target + 1.5 * max(abs_risk_floor, ltp - sl), 1)
-                rr_str = f"1:{tp.rr_t1}"
+                    target_2 = round(target + 1.5 * risk_pts, 1)
+                real_rr = round((target - ltp) / risk_pts, 1)
+                rr_str = f"1:{real_rr}"
                 tp_dict = tp.as_dict()
+                tp_dict["invalidation_stop"] = sl
+                tp_dict["target_1"] = target
+                tp_dict["target_2"] = target_2
+                tp_dict["risk_reward"] = rr_str
+                tp_dict["rr_t1"] = real_rr
             else:
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 risk_pts = max(
@@ -450,6 +491,12 @@ def detect_squeeze_breakout(
                 "sma20": round(sma20, 1),
                 "atr20": round(atr20, 1),
             }
+            if sector_align:
+                metrics["sector"] = sector_align.get("sector")
+                metrics["sector_quadrant"] = sector_align.get("quadrant")
+                metrics["sector_alignment"] = sector_align.get("alignment")
+                if sector_align.get("quadrant") in ("LEADING", "IMPROVING"):
+                    confidence_val = min(92, confidence_val + 5)
 
             return _format_squeeze_alert(
                 symbol=symbol,
@@ -479,16 +526,16 @@ def detect_squeeze_breakout(
             and (min_coiling_dist <= dist_to_low_pct <= max_coiling_dist)
             and not (lower_wick_ratio >= 0.60 and candle_range >= 0.50 * atr20)
         ):
+            if sector_align and not is_test_env:
+                sec_quad = sector_align.get("quadrant")
+                if sec_quad == "LEADING" and rvol < 2.2:
+                    logger.info(
+                        f"[SqueezeBreakout] 🛑 Suppressed bearish coiling for {clean_sym}: "
+                        f"Parent sector {sector_align.get('sector')} is LEADING benchmark."
+                    )
+                    return None
+
             # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance)
-            clean_sym = canonical_alert_symbol(symbol)
-            is_idx_sym = clean_sym in (
-                "NIFTY",
-                "BANKNIFTY",
-                "FINNIFTY",
-                "MIDCPNIFTY",
-                "SENSEX",
-                "BANKEX",
-            )
             if not is_test_env and not is_idx_sym:
                 try:
                     from market.quotes import get_quote
@@ -530,10 +577,20 @@ def detect_squeeze_breakout(
                 if (sl - ltp) < 1.25 * atr20:
                     sl = round(ltp + 1.25 * atr20, 1)
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
+                risk_pts = max(abs_risk_floor, round(sl - ltp, 1))
+                # Institutional invariant: Guarantee target provides at least 1:2.0 R:R
+                if (ltp - target) < 2.0 * risk_pts:
+                    target = round(ltp - 2.0 * risk_pts, 1)
                 if target_2 >= target:
-                    target_2 = round(target - 1.5 * max(abs_risk_floor, sl - ltp), 1)
-                rr_str = f"1:{tp.rr_t1}"
+                    target_2 = round(target - 1.5 * risk_pts, 1)
+                real_rr = round((ltp - target) / risk_pts, 1)
+                rr_str = f"1:{real_rr}"
                 tp_dict = tp.as_dict()
+                tp_dict["invalidation_stop"] = sl
+                tp_dict["target_1"] = target
+                tp_dict["target_2"] = target_2
+                tp_dict["risk_reward"] = rr_str
+                tp_dict["rr_t1"] = real_rr
             else:
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 risk_pts = max(
@@ -584,6 +641,12 @@ def detect_squeeze_breakout(
                 "sma20": round(sma20, 1),
                 "atr20": round(atr20, 1),
             }
+            if sector_align:
+                metrics["sector"] = sector_align.get("sector")
+                metrics["sector_quadrant"] = sector_align.get("quadrant")
+                metrics["sector_alignment"] = sector_align.get("alignment")
+                if sector_align.get("quadrant") == "LAGGING":
+                    confidence_bear_ew = min(92, confidence_bear_ew + 5)
 
             return _format_squeeze_alert(
                 symbol=symbol,
@@ -616,6 +679,16 @@ def detect_squeeze_breakout(
             and not (upper_wick_ratio >= 0.40 and candle_range >= 0.40 * atr20)
             and (is_test_env or adx_val >= 21.0 or adx_slope > 1.0)
         ):
+            if sector_align and not is_test_env:
+                sec_quad = sector_align.get("quadrant")
+                sec_align_str = sector_align.get("alignment")
+                if (sec_quad == "LAGGING" or sec_align_str == "SEVERE_HEADWIND") and rvol < 2.2:
+                    logger.info(
+                        f"[SqueezeBreakout] 🛑 Suppressed bullish breakout for {clean_sym}: "
+                        f"Parent sector {sector_align.get('sector')} is in {sec_quad} ({sec_align_str}) "
+                        f"and RVOL {rvol:.2f}x < 2.20x institutional decoupling threshold."
+                    )
+                    return None
             tp = None
             try:
                 from engine.trade_plan import calculate_trade_plan
@@ -641,10 +714,20 @@ def detect_squeeze_breakout(
                 if (ltp - sl) < 1.25 * atr20:
                     sl = round(ltp - 1.25 * atr20, 1)
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
+                risk_pts = max(abs_risk_floor, round(ltp - sl, 1))
+                # Institutional invariant: Guarantee target provides at least 1:2.0 R:R
+                if (target - ltp) < 2.0 * risk_pts:
+                    target = round(ltp + 2.0 * risk_pts, 1)
                 if target_2 <= target:
-                    target_2 = round(target + 1.5 * max(abs_risk_floor, ltp - sl), 1)
-                rr_str = f"1:{tp.rr_t1}"
+                    target_2 = round(target + 1.5 * risk_pts, 1)
+                real_rr = round((target - ltp) / risk_pts, 1)
+                rr_str = f"1:{real_rr}"
                 tp_dict = tp.as_dict()
+                tp_dict["invalidation_stop"] = sl
+                tp_dict["target_1"] = target
+                tp_dict["target_2"] = target_2
+                tp_dict["risk_reward"] = rr_str
+                tp_dict["rr_t1"] = real_rr
             else:
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 risk_pts = max(
@@ -691,6 +774,12 @@ def detect_squeeze_breakout(
                 "adx_slope": adx_slope,
                 "breakout_pct": round(((ltp - pivot_high) / pivot_high) * 100, 2),
             }
+            if sector_align:
+                metrics["sector"] = sector_align.get("sector")
+                metrics["sector_quadrant"] = sector_align.get("quadrant")
+                metrics["sector_alignment"] = sector_align.get("alignment")
+                if sector_align.get("quadrant") in ("LEADING", "IMPROVING"):
+                    confidence_ignited = min(92, confidence_ignited + 5)
 
             return _format_squeeze_alert(
                 symbol=symbol,
@@ -723,16 +812,16 @@ def detect_squeeze_breakout(
             and not (lower_wick_ratio >= 0.40 and candle_range >= 0.40 * atr20)
             and (is_test_env or adx_val >= 21.0 or adx_slope > 1.0)
         ):
+            if sector_align and not is_test_env:
+                sec_quad = sector_align.get("quadrant")
+                if sec_quad == "LEADING" and rvol < 2.2:
+                    logger.info(
+                        f"[SqueezeBreakout] 🛑 Suppressed bearish breakdown for {clean_sym}: "
+                        f"Parent sector {sector_align.get('sector')} is LEADING benchmark."
+                    )
+                    return None
+
             # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance)
-            clean_sym = canonical_alert_symbol(symbol)
-            is_idx_sym = clean_sym in (
-                "NIFTY",
-                "BANKNIFTY",
-                "FINNIFTY",
-                "MIDCPNIFTY",
-                "SENSEX",
-                "BANKEX",
-            )
             if not is_test_env and not is_idx_sym:
                 try:
                     from market.quotes import get_quote
@@ -775,10 +864,20 @@ def detect_squeeze_breakout(
                 if (sl - ltp) < 1.25 * atr20:
                     sl = round(ltp + 1.25 * atr20, 1)
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
+                risk_pts = max(abs_risk_floor, round(sl - ltp, 1))
+                # Institutional invariant: Guarantee target provides at least 1:2.0 R:R
+                if (ltp - target) < 2.0 * risk_pts:
+                    target = round(ltp - 2.0 * risk_pts, 1)
                 if target_2 >= target:
-                    target_2 = round(target - 1.5 * max(abs_risk_floor, sl - ltp), 1)
-                rr_str = f"1:{tp.rr_t1}"
+                    target_2 = round(target - 1.5 * risk_pts, 1)
+                real_rr = round((ltp - target) / risk_pts, 1)
+                rr_str = f"1:{real_rr}"
                 tp_dict = tp.as_dict()
+                tp_dict["invalidation_stop"] = sl
+                tp_dict["target_1"] = target
+                tp_dict["target_2"] = target_2
+                tp_dict["risk_reward"] = rr_str
+                tp_dict["rr_t1"] = real_rr
             else:
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 risk_pts = max(abs_risk_floor, round(max(1.35 * atr20, pivot_low * 1.015 - ltp), 1))
@@ -823,6 +922,12 @@ def detect_squeeze_breakout(
                 "adx_slope": adx_slope,
                 "breakdown_pct": round(((pivot_low - ltp) / pivot_low) * 100, 2),
             }
+            if sector_align:
+                metrics["sector"] = sector_align.get("sector")
+                metrics["sector_quadrant"] = sector_align.get("quadrant")
+                metrics["sector_alignment"] = sector_align.get("alignment")
+                if sector_align.get("quadrant") == "LAGGING":
+                    confidence_bear_ig = min(92, confidence_bear_ig + 5)
 
             return _format_squeeze_alert(
                 symbol=symbol,

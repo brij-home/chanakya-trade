@@ -288,7 +288,26 @@ def evaluate_institutional_quality_gate(
                 elif is_mcx_golden_hours_window(now_dt):
                     verdict_metrics["mcx_golden_hours"] = True
         else:
-            if is_eod_close_window(now_dt):
+            _SWING_TYPES = {
+                "DAILY",
+                "SWING",
+                "SWING_SHORT",
+                "SWING_MID",
+                "WEEKLY",
+                "POSITIONAL",
+                "LONG_TERM",
+                "MULTIBAGGER",
+            }
+            time_horizon = str(getattr(alert, "time_horizon", "") or "").upper()
+            setup_style = str(getattr(alert, "setup_style", "") or "").upper()
+            timeframe = str(getattr(alert, "timeframe", "") or "").upper()
+            is_swing_or_positional = (
+                time_horizon in _SWING_TYPES
+                or setup_style in _SWING_TYPES
+                or timeframe in _SWING_TYPES
+            )
+
+            if not is_swing_or_positional and is_eod_close_window(now_dt):
                 return VetoVerdict(
                     is_vetoed=True,
                     veto_reason="EOD Terminal Window (Post-15:00 IST): Intraday directional option buying prohibited due to pin-risk & MTM auction distortion.",
@@ -301,7 +320,7 @@ def evaluate_institutional_quality_gate(
                     ],
                 )
 
-            if is_lunchtime_theta_window(now_dt):
+            if not is_swing_or_positional and is_lunchtime_theta_window(now_dt):
                 # Lunchtime Theta Trap: Mandate defined-risk spread unless exceptional conviction (>=92)
                 if confidence < 92:
                     notes.append(
