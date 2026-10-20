@@ -3024,6 +3024,10 @@ def test_underlying_directional_cooldown_suppresses_duplicate(tmp_path, monkeypa
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+        lambda *args, **kwargs: (True, "", {}),
+    )
     engine = AutoAlertEngine(max_buffer=20)
     engine.clear_alerts()
 
