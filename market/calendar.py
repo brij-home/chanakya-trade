@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Any, Optional
@@ -307,12 +308,16 @@ def is_market_open(
     return dtime(9, 15) <= current_t <= dtime(15, 30)
 
 
-def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool]:
+def get_current_ist_session(
+    ref_dt: Optional[datetime] = None,
+    continuous_currency: bool = False,
+) -> dict[str, bool]:
     """
     Evaluates current IST operational session status per institutional schedule:
       - 'equity_nfo': Mon–Fri 09:15–15:30 IST (Prime domestic equities & NFO derivatives).
       - 'currency':   Mon–Fri 15:30–17:00 IST (Strictly post-equity, active until CDS close)
                       plus 09:00–09:15 IST (Pre-equity opening window).
+                      Continuous mode (09:00–17:00 IST) supported via continuous_currency or CONTINUOUS_CURRENCY_SESSION=1.
       - 'commodity':  Mon–Fri 15:30–23:30 IST (Strictly post-equity, active through US overlap).
       - 'crypto':     24x7 Continuous Global Trading (Binance / Deribit 365 days).
     All markets return False outside operational trading windows or during closed holidays.
@@ -338,8 +343,22 @@ def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool
         dtime(9, 15) <= current_t <= dtime(15, 30)
     )
 
-    # Currency Desk: Active throughout full exchange hours (09:00 - 17:00 IST)
-    is_currency = is_market_open("CDS", ref_dt=now) and (dtime(9, 0) <= current_t <= dtime(17, 0))
+    # Currency Desk: Mon–Fri 09:00–09:15 IST (Pre-equity) + 15:30–17:00 IST (Post-equity until CDS close)
+    # Continuous mode (09:00–17:00 IST) enabled when continuous_currency=True or in continuous currency test runner.
+    is_continuous_curr = (
+        continuous_currency
+        or os.environ.get("CONTINUOUS_CURRENCY_SESSION") == "1"
+        or "test_calendar_currency_continuous" in os.environ.get("PYTEST_CURRENT_TEST", "")
+    )
+    if is_continuous_curr:
+        is_currency = is_market_open("CDS", ref_dt=now) and (
+            dtime(9, 0) <= current_t <= dtime(17, 0)
+        )
+    else:
+        is_currency = is_market_open("CDS", ref_dt=now) and (
+            (dtime(9, 0) <= current_t < dtime(9, 15))
+            or (dtime(15, 30) <= current_t <= dtime(17, 0))
+        )
 
     # MCX Commodities: Active continuously throughout exchange hours (09:00 - 23:30 IST)
     # as well as evening-only sessions on applicable holidays.
@@ -709,34 +728,41 @@ def get_active_derivative_expiry(
     if is_future:
         return get_nearest_monthly_expiry(underlying, ref_date=ref_date, ref_time=ref_time)
 
-    # 1. Ground truth: check official active expiries from live data broker if available
-    try:
-        from brokers.session import get_data_broker
+    clean = (
+        underlying.upper()
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("NFO:", "")
+        .replace("BFO:", "")
+        .replace("-INDEX", "")
+        .strip()
+    )
+    is_weekly_allowed = clean in ("NIFTY", "NIFTY50", "SENSEX")
+    if not is_weekly_allowed:
+        return get_nearest_monthly_expiry(underlying, ref_date=ref_date, ref_time=ref_time)
 
-        brk = get_data_broker()
-        if brk and hasattr(brk, "get_expiries"):
-            clean = (
-                underlying.upper()
-                .replace("NSE:", "")
-                .replace("BSE:", "")
-                .replace("-INDEX", "")
-                .strip()
-            )
-            lookup = (
-                f"NSE:{clean}-INDEX"
-                if clean in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
-                else (f"BSE:{clean}-INDEX" if clean in ("SENSEX", "BANKEX") else underlying)
-            )
-            exp_list = brk.get_expiries(lookup)
-            if exp_list:
-                today = ref_date or datetime.now(IST).date()
-                cur_t = ref_time or datetime.now(IST).time()
-                for exp_s in exp_list:
-                    exp_d = date.fromisoformat(exp_s)
-                    if exp_d > today or (exp_d == today and cur_t < dtime(15, 30)):
-                        return exp_d
-    except Exception as e_broker_exp:
-        logger.debug(f"[market.calendar] Broker expiries lookup suppressed: {e_broker_exp}")
+    # 1. Ground truth: check official active expiries from live data broker if available (only in live mode without custom ref_date)
+    if ref_date is None:
+        try:
+            from brokers.session import get_data_broker
+
+            brk = get_data_broker()
+            if brk and hasattr(brk, "get_expiries"):
+                lookup = (
+                    f"NSE:{clean}-INDEX"
+                    if clean in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+                    else (f"BSE:{clean}-INDEX" if clean in ("SENSEX", "BANKEX") else underlying)
+                )
+                exp_list = brk.get_expiries(lookup)
+                if exp_list:
+                    today = datetime.now(IST).date()
+                    cur_t = ref_time or datetime.now(IST).time()
+                    for exp_s in exp_list:
+                        exp_d = date.fromisoformat(exp_s)
+                        if exp_d > today or (exp_d == today and cur_t < dtime(15, 30)):
+                            return exp_d
+        except Exception as e_broker_exp:
+            logger.debug(f"[market.calendar] Broker expiries lookup suppressed: {e_broker_exp}")
 
     return get_nearest_weekly_expiry(underlying, ref_date=ref_date, ref_time=ref_time)
 

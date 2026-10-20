@@ -1950,13 +1950,21 @@ class AlertScrutinyAuditor:
                                 flags,
                             )
 
-                    # 3. Priority 3: Institutional Open Interest Floor (OI >= 1,000 contracts)
-                    if contracts_oi is not None and contracts_oi < 1000:
+                    # 3. Priority 3: Institutional Open Interest Floor (OI >= 1,000 contracts, 100 for verified decouplers)
+                    is_decoupler = bool(
+                        flags.get("decoupler_status") == "VERIFIED_DECOUPLER"
+                        or (
+                            isinstance(metrics_dict, dict)
+                            and metrics_dict.get("decoupler_status") == "VERIFIED_DECOUPLER"
+                        )
+                    )
+                    min_contracts_oi = 100 if is_decoupler else 1000
+                    if contracts_oi is not None and contracts_oi < min_contracts_oi:
                         flags["liquidity_valid"] = False
                         flags["downgrade_to_cash"] = True
                         return (
                             False,
-                            f"Stock Option Illiquidity Trap: Strike Open Interest ({contracts_oi:,.0f}) < 1,000 contracts (Institutional liquidity threshold not met; mandate Cash/Futures)",
+                            f"Stock Option Illiquidity Trap: Strike Open Interest ({contracts_oi:,.0f}) < {min_contracts_oi:,} contracts (Institutional liquidity threshold not met; mandate Cash/Futures)",
                             flags,
                         )
                 except (ValueError, TypeError) as e_suppressed:

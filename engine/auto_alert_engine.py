@@ -519,19 +519,27 @@ class AutoAlertEngine:
             from analysis.universe import THEMATIC_PRESETS
 
             # 1. Complete liquid NSE F&O Universe (single-stock equities, excluding indices)
+            _INDEX_SET = frozenset(
+                {
+                    "NIFTY",
+                    "BANKNIFTY",
+                    "FINNIFTY",
+                    "MIDCPNIFTY",
+                    "SENSEX",
+                    "BANKEX",
+                    "NIFTYNXT50",
+                    "NIFTYFPI",
+                }
+            )
             fno_all = THEMATIC_PRESETS.get("fno_universe", {}).get("symbols", [])
             for s in fno_all:
-                if (
-                    s not in symbols
-                    and s not in self._watched_indices
-                    and s not in ("NIFTYFPI", "NIFTYNXT50")
-                ):
+                if s not in symbols and s not in self._watched_indices and s not in _INDEX_SET:
                     symbols.append(s)
 
             most_liquid = THEMATIC_PRESETS.get("most_liquid_today", {}).get("symbols", [])
             vol_surges = THEMATIC_PRESETS.get("volume_surges_rvol", {}).get("symbols", [])
             for s in most_liquid + vol_surges:
-                if s not in symbols:
+                if s not in symbols and s not in self._watched_indices and s not in _INDEX_SET:
                     symbols.append(s)
 
             # High-turnover liquid F&O leaders across key sectors
@@ -618,6 +626,34 @@ class AutoAlertEngine:
             except ValueError as e_suppressed:
                 logger.debug(f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}")
         return None
+
+    @staticmethod
+    def _alert_age_seconds(al: AutoAlert, ref_time_epoch: Optional[float] = None) -> float:
+        if ref_time_epoch is None:
+            ref_time_epoch = datetime.now(IST).timestamp()
+        ts_str = al.created_at or al.triggered_at or ""
+        if not ts_str:
+            return 999999.0
+        try:
+            clean_ts = ts_str.replace(" IST", "").strip()
+            dt_val = datetime.fromisoformat(clean_ts)
+            if dt_val.tzinfo is None:
+                dt_val = dt_val.replace(tzinfo=IST)
+            return max(0.0, ref_time_epoch - dt_val.timestamp())
+        except Exception:
+            return 999999.0
+
+    @classmethod
+    def _is_same_session(
+        cls,
+        al: AutoAlert,
+        alert_dt_date: Optional[datetime.date],
+        max_age_seconds: float = 12 * 3600,
+    ) -> bool:
+        al_date = cls._alert_date(al)
+        if al_date is None or alert_dt_date is None or al_date == alert_dt_date:
+            return True
+        return cls._alert_age_seconds(al) < max_age_seconds
 
     def is_pure_equity(self, alert: AutoAlert) -> bool:
         """
@@ -913,9 +949,34 @@ class AutoAlertEngine:
         try:
             if getattr(alert, "contract_symbol", None) or getattr(alert, "strike", None):
                 return
-            if str(getattr(alert, "exchange", "") or "").upper() == "MCX" or str(
-                getattr(alert, "segment", "") or ""
-            ).upper() in ("COMMODITY", "CURRENCY", "CRYPTO"):
+            atype = str(getattr(alert, "alert_type", "") or "")
+            if atype in (
+                "INDEX_CALL_SETUP",
+                "INDEX_PUT_SETUP",
+                "OPTIONS_MOMENTUM",
+                "OPTION_WRITE",
+                "GAMMA_BLAST",
+                "INDEX_MICRO_SCALP",
+                "MULTIBAGGER",
+                "STAGE_1_TO_2_EXPANSION",
+                "RRG_SECTOR_ROTATION",
+                "DCF_UNDERVALUED",
+                "FORENSIC_GEM",
+            ):
+                return
+            sym_raw = str(getattr(alert, "symbol", "") or "").upper()
+            if sym_raw.startswith(("MCX:", "CRYPTO:", "BINANCE:", "DERIBIT:")):
+                return
+            if str(getattr(alert, "exchange", "") or "").upper() in (
+                "MCX",
+                "CRYPTO",
+                "BINANCE",
+                "DERIBIT",
+            ) or str(getattr(alert, "segment", "") or "").upper() in (
+                "COMMODITY",
+                "CURRENCY",
+                "CRYPTO",
+            ):
                 return
             if str(getattr(alert, "derivative_type", "") or "").upper() in ("FUT", "COMMODITY"):
                 return
@@ -935,13 +996,13 @@ class AutoAlertEngine:
             else:
                 return
 
-            ltp = float(alert.ltp or 0.0)
-            if ltp <= 0:
+            spot = float(alert.underlying_spot or alert.ltp or 0.0)
+            if spot <= 0:
                 return
 
             resolved = resolve_option_contract(
                 symbol=clean_sym,
-                spot=ltp,
+                spot=spot,
                 direction=direction,
                 underlying_sl=getattr(alert, "sl_price", None),
                 underlying_target=getattr(alert, "target_price", None),
@@ -977,6 +1038,7 @@ class AutoAlertEngine:
         """
         self._enrich_fno_contract_if_applicable(alert)
         _alert_date = self._alert_date
+        _is_same_session = self._is_same_session
         now = time.time()
         now_t = datetime.now(IST).time()
         to_dispatch = None
@@ -2282,6 +2344,7 @@ class AutoAlertEngine:
                     not is_multi_session
                     and ex_date
                     and ex_date < alert_dt_date
+                    and not _is_same_session(existing_active, alert_dt_date)
                     and is_trading_day(alert_dt_date, exchange=exch)
                 ):
                     existing_active.stage = "EXPIRED"
@@ -2380,9 +2443,7 @@ class AutoAlertEngine:
                                 "TARGET_ACHIEVED",
                                 "RUNNER_EXIT",
                             )
-                            and (
-                                self._alert_date(a) is None or self._alert_date(a) == alert_dt_date
-                            )
+                            and (_is_same_session(a, alert_dt_date))
                         ),
                         None,
                     )
@@ -2490,7 +2551,7 @@ class AutoAlertEngine:
                             and a.direction != alert.direction
                             and a.direction in ("BULLISH", "BEARISH")
                             and alert.direction in ("BULLISH", "BEARISH")
-                            and (_alert_date(a) is None or _alert_date(a) == alert_dt_date)
+                            and _is_same_session(a, alert_dt_date)
                         ),
                         None,
                     )
@@ -2925,7 +2986,7 @@ class AutoAlertEngine:
                             and not a.is_invalidated
                             and _is_recent_unbanked_trade(a)
                             and a.alert_id != alert.alert_id
-                            and (_alert_date(a) is None or _alert_date(a) == alert_dt_date)
+                            and _is_same_session(a, alert_dt_date)
                         ),
                         None,
                     )
@@ -3078,7 +3139,7 @@ class AutoAlertEngine:
                                 and a.direction == alert.direction
                                 and a.is_active
                                 and a.alert_id != alert.alert_id
-                                and (_alert_date(a) is None or _alert_date(a) == alert_dt_date)
+                                and _is_same_session(a, alert_dt_date)
                                 for a in self._alerts
                             )
                             if has_active_today:
@@ -3168,7 +3229,7 @@ class AutoAlertEngine:
                             "RUNNER_EXIT",
                             "PROFIT_SECURED",
                         )
-                        and (_alert_date(a) is None or _alert_date(a) == alert_dt_date)
+                        and _is_same_session(a, alert_dt_date)
                     ]
 
                     # 1. Quality Floor: Reject low-conviction index noise (< 80 confidence)
@@ -3833,8 +3894,11 @@ class AutoAlertEngine:
                         .upper()
                         == clean_target
                         and a.alert_id != alert.alert_id
+                        and not getattr(a, "is_invalidated", False)
+                        and a.stage not in ("INVALIDATED", "CLOSED", "COMPLETED", "RUNNER_EXIT")
                         and _alert_date(a) is not None
                         and _alert_date(a) < alert_dt_date
+                        and not _is_same_session(a, alert_dt_date)
                     ):
                         a.stage = "EXPIRED"
                         a.is_archived = True
@@ -3854,6 +3918,7 @@ class AutoAlertEngine:
                         and not a.is_active
                         and _alert_date(a) is not None
                         and _alert_date(a) < alert_dt_date
+                        and not _is_same_session(a, alert_dt_date)
                     )
                 ]
                 # Stamp original_call_time on first insertion (immutable anchor for milestone 'Call Given:' display)
@@ -4351,92 +4416,90 @@ class AutoAlertEngine:
                                     f"Active trade campaign already in flight for {target_sym_clean} {int(target_strike)} {target_op} (ID: {existing.alert_id})",
                                 )
 
-                # 4e. Segment-Specific Sector Hourly Pacing:
-                is_milestone_update = (
-                    alert.stage
-                    in (
-                        "TARGET_1",
-                        "TARGET_2",
-                        "TARGET_3",
-                        "PARTIAL_PROFIT_TAKEN",
-                        "PROFIT_SECURED",
-                        "RUNNER_EXIT",
-                        "STOP_LOSS",
-                        "INVALIDATED",
-                        "TIME_STOP",
-                    )
-                    or bool(alert.achieved_milestones)
-                    or bool(getattr(alert, "is_invalidated", False))
+            # 4e. Segment-Specific Sector Hourly Pacing:
+            is_milestone_update = (
+                alert.stage
+                in (
+                    "TARGET_1",
+                    "TARGET_2",
+                    "TARGET_3",
+                    "PARTIAL_PROFIT_TAKEN",
+                    "PROFIT_SECURED",
+                    "RUNNER_EXIT",
+                    "STOP_LOSS",
+                    "INVALIDATED",
+                    "TIME_STOP",
                 )
-                if not is_milestone_update:
-                    _sec_id_pacing = str(
-                        (getattr(alert, "metrics", {}) or {}).get("sector_id", "")
-                        or (getattr(alert, "metrics", {}) or {}).get("sector", "")
-                        or getattr(alert, "sector", "")
-                        or ""
-                    ).lower()
-                    if not _sec_id_pacing:
-                        try:
-                            from analysis.universe import get_stock_sector
+                or bool(alert.achieved_milestones)
+                or bool(getattr(alert, "is_invalidated", False))
+            )
+            if not is_milestone_update:
+                _sec_id_pacing = str(
+                    (getattr(alert, "metrics", {}) or {}).get("sector_id", "")
+                    or (getattr(alert, "metrics", {}) or {}).get("sector", "")
+                    or getattr(alert, "sector", "")
+                    or ""
+                ).lower()
+                if not _sec_id_pacing:
+                    try:
+                        from analysis.universe import get_stock_sector
 
-                            _sec_id_pacing, _ = get_stock_sector(alert.symbol)
-                            _sec_id_pacing = (_sec_id_pacing or "").lower()
-                        except Exception:
-                            _sec_id_pacing = ""
+                        _sec_id_pacing, _ = get_stock_sector(alert.symbol)
+                        _sec_id_pacing = (_sec_id_pacing or "").lower()
+                    except Exception:
+                        _sec_id_pacing = ""
 
-                    if _sec_id_pacing and _sec_id_pacing != "index":
-                        _base_sec_hourly_env = os.environ.get(
-                            "TELEGRAM_MAX_STOCK_HOURLY_PER_SECTOR"
+                if _sec_id_pacing and _sec_id_pacing != "index":
+                    _base_sec_hourly_env = os.environ.get("TELEGRAM_MAX_STOCK_HOURLY_PER_SECTOR")
+                    if _base_sec_hourly_env and int(_base_sec_hourly_env) > 0:
+                        _base_sec_hourly = int(_base_sec_hourly_env)
+                        self._sector_hourly_telegram[_sec_id_pacing] = [
+                            t
+                            for t in self._sector_hourly_telegram.get(_sec_id_pacing, [])
+                            if (now_ts - t) < 3600.0
+                        ]
+                        sec_h_count = len(self._sector_hourly_telegram[_sec_id_pacing])
+                        _apex_sec_hourly = int(
+                            os.environ.get(
+                                "TELEGRAM_MAX_STOCK_APEX_PER_SECTOR",
+                                str(_base_sec_hourly + 2),
+                            )
                         )
-                        if _base_sec_hourly_env and int(_base_sec_hourly_env) > 0:
-                            _base_sec_hourly = int(_base_sec_hourly_env)
-                            self._sector_hourly_telegram[_sec_id_pacing] = [
-                                t
-                                for t in self._sector_hourly_telegram.get(_sec_id_pacing, [])
-                                if (now_ts - t) < 3600.0
-                            ]
-                            sec_h_count = len(self._sector_hourly_telegram[_sec_id_pacing])
-                            _apex_sec_hourly = int(
-                                os.environ.get(
-                                    "TELEGRAM_MAX_STOCK_APEX_PER_SECTOR",
-                                    str(_base_sec_hourly + 2),
-                                )
+                        max_sec_hourly = (
+                            _apex_sec_hourly if is_apex_opportunity else _base_sec_hourly
+                        )
+                        if sec_h_count >= max_sec_hourly:
+                            return (
+                                False,
+                                f"Telegram sector hourly pacing limit reached for '{_sec_id_pacing}' ({sec_h_count}/{max_sec_hourly} in last 60m)",
                             )
-                            max_sec_hourly = (
-                                _apex_sec_hourly if is_apex_opportunity else _base_sec_hourly
+                    else:
+                        if is_fno_stock:
+                            sec_key = f"fno:{_sec_id_pacing}"
+                            _base_sec_hourly = int(
+                                os.environ.get("TELEGRAM_MAX_FNO_STOCK_SECTOR_HOURLY", "3")
                             )
-                            if sec_h_count >= max_sec_hourly:
-                                return (
-                                    False,
-                                    f"Telegram sector hourly pacing limit reached for '{_sec_id_pacing}' ({sec_h_count}/{max_sec_hourly} in last 60m)",
-                                )
+                            seg_name = "Stocks F&O"
                         else:
-                            if is_fno_stock:
-                                sec_key = f"fno:{_sec_id_pacing}"
-                                _base_sec_hourly = int(
-                                    os.environ.get("TELEGRAM_MAX_FNO_STOCK_SECTOR_HOURLY", "3")
-                                )
-                                seg_name = "Stocks F&O"
-                            else:
-                                sec_key = f"eq:{_sec_id_pacing}"
-                                _base_sec_hourly = int(
-                                    os.environ.get("TELEGRAM_MAX_EQUITY_SECTOR_HOURLY", "5")
-                                )
-                                seg_name = "Cash Equity"
+                            sec_key = f"eq:{_sec_id_pacing}"
+                            _base_sec_hourly = int(
+                                os.environ.get("TELEGRAM_MAX_EQUITY_SECTOR_HOURLY", "5")
+                            )
+                            seg_name = "Cash Equity"
 
-                            self._sector_hourly_telegram[sec_key] = [
-                                t
-                                for t in self._sector_hourly_telegram.get(sec_key, [])
-                                if (now_ts - t) < 3600.0
-                            ]
-                            sec_h_count = len(self._sector_hourly_telegram[sec_key])
-                            max_sec_hourly = _base_sec_hourly + (1 if is_apex_opportunity else 0)
+                        self._sector_hourly_telegram[sec_key] = [
+                            t
+                            for t in self._sector_hourly_telegram.get(sec_key, [])
+                            if (now_ts - t) < 3600.0
+                        ]
+                        sec_h_count = len(self._sector_hourly_telegram[sec_key])
+                        max_sec_hourly = _base_sec_hourly + (1 if is_apex_opportunity else 0)
 
-                            if sec_h_count >= max_sec_hourly:
-                                return (
-                                    False,
-                                    f"Telegram {seg_name} sector hourly limit reached for '{_sec_id_pacing.upper()}' ({sec_h_count}/{max_sec_hourly} in last 60m)",
-                                )
+                        if sec_h_count >= max_sec_hourly:
+                            return (
+                                False,
+                                f"Telegram {seg_name} sector hourly limit reached for '{_sec_id_pacing.upper()}' ({sec_h_count}/{max_sec_hourly} in last 60m)",
+                            )
 
         # 5. Conviction Floor
         _quant_model_whitelist = (
@@ -9311,6 +9374,21 @@ class AutoAlertEngine:
             sorted_equities = list(self.watched_equities)
 
         for s in sorted_equities:
+            if not index_allowed and (
+                s in self._watched_indices
+                or s
+                in (
+                    "NIFTY",
+                    "BANKNIFTY",
+                    "FINNIFTY",
+                    "MIDCPNIFTY",
+                    "SENSEX",
+                    "BANKEX",
+                    "NIFTYNXT50",
+                    "NIFTYFPI",
+                )
+            ):
+                continue
             if s not in targets:
                 targets.append(s)
 

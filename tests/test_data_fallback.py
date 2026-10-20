@@ -320,6 +320,13 @@ class TestHoldingsCache:
 
 
 class TestOhlcvCache:
+    @pytest.fixture(autouse=True)
+    def _isolate_warehouse(self, monkeypatch):
+        monkeypatch.setattr(
+            "engine.historical_warehouse.historical_warehouse.has_bars",
+            lambda *a, **kw: False,
+        )
+
     def test_history_falls_back_to_yfinance(self, monkeypatch):
         """When broker fails, yfinance is called and returns DataFrame."""
         from market import history as hist_mod
