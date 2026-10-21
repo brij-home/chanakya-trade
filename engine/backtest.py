@@ -25,6 +25,8 @@ Usage:
 from __future__ import annotations
 import logging
 
+from config.constants import DEFAULT_PAIR_MAX_ADVERSE_PCT
+
 logger = logging.getLogger("engine.backtest")
 
 
@@ -1221,7 +1223,7 @@ class MultiBacktester:
         exchange: str = "NSE",
         period: str = "1y",
         capital: float = 100000,
-        max_adverse_pct: float = 5.0,
+        max_adverse_pct: float = DEFAULT_PAIR_MAX_ADVERSE_PCT,
     ) -> None:
         self.symbols = [s.upper() for s in symbols]
         self.exchange = exchange.upper()

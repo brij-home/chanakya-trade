@@ -23,19 +23,14 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
+from config.constants import IST, MIN_SYMPATHY_FOLLOWER_RVOL
 from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("chanakya.thematic_sympathy")
-
-try:
-    IST = ZoneInfo("Asia/Kolkata")
-except Exception:
-    IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _extract_float(obj: Any, *attr_names: str, default: float = 0.0) -> float:
@@ -231,9 +226,7 @@ class ThematicPeerSympathyEngine:
                 # Sympathy Validation Rules: Strict VWAP alignment, proven momentum & institutional volume confirmation
                 # Eliminates thin sympathy follower traps where dead stocks get dragged along without institutional orderflow
                 # (RCA: -14.6R loss on sympathy followers due to STRUCTURAL_ORDERFLOW_FAILURE).
-                is_volume_confirmed = (
-                    dyn_rvol >= 0.80 or avg_vol <= 0 or os.environ.get("CHANAKYA_TESTING") == "1"
-                )
+                is_volume_confirmed = dyn_rvol >= MIN_SYMPATHY_FOLLOWER_RVOL or avg_vol <= 0
 
                 is_qualified = False
                 if is_volume_confirmed:

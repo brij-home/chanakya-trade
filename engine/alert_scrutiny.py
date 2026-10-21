@@ -32,7 +32,11 @@ import time
 from typing import Any, Optional
 
 logger = logging.getLogger("engine.alert_scrutiny")
-from config.constants import IST
+from config.constants import (
+    IST,
+    MIN_OPTION_PREMIUM_SL_PTS,
+    MIN_OPTION_PREMIUM_SL_PCT,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Institutional MCX Commodity Minimum Stop-Loss Volatility Floors (Points)
@@ -422,14 +426,16 @@ class AlertScrutinyAuditor:
         if is_option_premium_levels:
             # Institutional Minimum Option Premium Volatility Floor:
             # Indian equity and index options experience bid-ask spread friction and intraday delta/gamma ticks.
-            # Stop loss distance narrower than max(3.0 pts, 10% of premium) leads to high-frequency whipsaw stop-outs
-            # (RCA: 30% of historical postmortems attributed to SUB_ATR_NOISE_WHIPSAW).
-            opt_min_floor = max(3.0, round(entry_anchor * 0.10, 1))
+            # Stop loss distance narrower than max(MIN_OPTION_PREMIUM_SL_PTS, MIN_OPTION_PREMIUM_SL_PCT of premium)
+            # leads to high-frequency whipsaw stop-outs (RCA: 30% of historical postmortems).
+            opt_min_floor = max(
+                MIN_OPTION_PREMIUM_SL_PTS, round(entry_anchor * MIN_OPTION_PREMIUM_SL_PCT, 1)
+            )
             if risk_pts < (opt_min_floor * 0.95):  # 5% precision tolerance
                 flags["risk_within_bounds"] = False
                 return (
                     False,
-                    f"Sub-ATR Option Noise Trap: {clean_sym} option stop-loss ({risk_pts:.1f} pts) < minimum premium volatility floor ({opt_min_floor:.1f} pts / 10%). Mandate wider premium stop to absorb bid-ask noise.",
+                    f"Sub-ATR Option Noise Trap: {clean_sym} option stop-loss ({risk_pts:.1f} pts) < minimum premium volatility floor ({opt_min_floor:.1f} pts / {MIN_OPTION_PREMIUM_SL_PCT * 100:.0f}%). Mandate wider premium stop to absorb bid-ask noise.",
                     flags,
                 )
 

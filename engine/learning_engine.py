@@ -553,6 +553,41 @@ class PatternLearningEngine:
         )
         return lockout
 
+    @staticmethod
+    def resolve_derivative_underlying(clean_sym: str) -> Optional[str]:
+        """
+        Extracts the canonical underlying index or equity from a derivative contract symbol.
+        Consults canonical INDEX_SYMBOLS and exchange _OPTION_PATTERN to prevent ad-hoc hardcoding.
+        """
+        if not clean_sym:
+            return None
+        from engine.option_resolver import INDEX_SYMBOLS
+
+        for idx in sorted(INDEX_SYMBOLS, key=len, reverse=True):
+            if clean_sym.startswith(idx) and len(clean_sym) > len(idx):
+                return idx
+
+        try:
+            from market.quotes import _OPTION_PATTERN
+
+            m = _OPTION_PATTERN.match(clean_sym)
+            if m:
+                und = m.group("underlying")
+                if und and und != clean_sym:
+                    return und
+        except Exception as e_opt:
+            logger.debug(
+                f"[engine.learning_engine] Option regex extraction error for {clean_sym}: {e_opt}"
+            )
+
+        m_std = re.match(r"^([A-Za-z0-9&_-]+?)(?:\d{2}[A-Z]{3}|\d{5})", clean_sym)
+        if m_std:
+            und = m_std.group(1)
+            if und and und != clean_sym:
+                return und
+
+        return None
+
     def is_symbol_locked_out(
         self,
         symbol: str,
@@ -583,15 +618,7 @@ class PatternLearningEngine:
         lockout = self._symbol_lockouts.get(clean_sym)
         if not lockout:
             # Check if underlying index/equity is locked out if clean_sym is a derivative contract
-            underlying = None
-            for idx in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX", "NIFTY", "SENSEX"):
-                if clean_sym.startswith(idx) and len(clean_sym) > len(idx):
-                    underlying = idx
-                    break
-            if not underlying:
-                m = re.match(r"^([A-Z]+)(?:\d{2}[A-Z]{3}|\d{5})", clean_sym)
-                if m:
-                    underlying = m.group(1)
+            underlying = self.resolve_derivative_underlying(clean_sym)
             if underlying and underlying in self._symbol_lockouts:
                 return self.is_symbol_locked_out(
                     underlying, direction=direction, ltp=None, vwap=None
@@ -1255,16 +1282,7 @@ class PatternLearningEngine:
             reclaim_level=reclaim_level,
         )
 
-        underlying_clean = None
-        for idx in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX", "NIFTY", "SENSEX"):
-            if clean_sym.startswith(idx) and len(clean_sym) > len(idx):
-                underlying_clean = idx
-                break
-        if not underlying_clean:
-            m = re.match(r"^([A-Z]+)(?:\d{2}[A-Z]{3}|\d{5})", clean_sym)
-            if m:
-                underlying_clean = m.group(1)
-
+        underlying_clean = self.resolve_derivative_underlying(clean_sym)
         if underlying_clean and underlying_clean != clean_sym:
             self.set_symbol_lockout(
                 underlying_clean,
