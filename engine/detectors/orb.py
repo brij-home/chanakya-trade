@@ -197,8 +197,9 @@ def detect_opening_range_breakout(
     min_rvol = 1.30 if is_index else 1.45
     rvol_val = float(rvol or 1.5)
 
+    vwap_tol = 0.0 if is_index else 0.002
     if ltp >= orb_high:
-        if vwap and vwap > 0 and ltp < (vwap * 0.998):
+        if vwap and vwap > 0 and ltp < (vwap * (1.0 - vwap_tol)):
             # Fighting intraday VWAP, reject long
             is_bullish = False
         elif ltp > max_bull_chase:
@@ -211,7 +212,7 @@ def detect_opening_range_breakout(
             is_bullish = True
 
     elif ltp <= orb_low:
-        if vwap and vwap > 0 and ltp > (vwap * 1.002):
+        if vwap and vwap > 0 and ltp > (vwap * (1.0 + vwap_tol)):
             # Fighting intraday VWAP, reject short
             is_bearish = False
         elif ltp < max_bear_chase:
@@ -228,14 +229,45 @@ def detect_opening_range_breakout(
         # 4.0 Pre-Breakout PRIMED Surveillance: Spot coiling within 0.35% of Range Boundary
         primed_prox_pts = round(0.0035 * ltp, 2)
         if (orb_high - primed_prox_pts) <= ltp < orb_high and ltp > orb_mid and rvol_val >= 1.15:
-            is_primed = True
-            primed_direction = "BULLISH"
+            # Primed long must not fight intraday VWAP
+            if not (vwap and vwap > 0 and ltp < (vwap * (1.0 - vwap_tol))):
+                is_primed = True
+                primed_direction = "BULLISH"
         elif orb_low < ltp <= (orb_low + primed_prox_pts) and ltp < orb_mid and rvol_val >= 1.15:
-            is_primed = True
-            primed_direction = "BEARISH"
+            # Primed short must not fight intraday VWAP
+            if not (vwap and vwap > 0 and ltp > (vwap * (1.0 + vwap_tol))):
+                is_primed = True
+                primed_direction = "BEARISH"
 
     if not (is_bullish or is_bearish or is_primed):
         return None
+
+    # 4.05 Directional Momentum & Velocity Veto for Index ORB
+    if is_index and df is not None:
+        try:
+            from engine.index_velocity import calculate_roc_momentum
+
+            roc = calculate_roc_momentum(df, symbol=symbol)
+            if (
+                (is_bullish or (is_primed and primed_direction == "BULLISH"))
+                and roc.is_accelerating_down
+                and roc.roc_3bar <= -0.10
+            ):
+                logger.info(
+                    f"[ORB] Suppressed Bullish ORB on {symbol}: Downside ROC acceleration active ({roc.summary})"
+                )
+                return None
+            if (
+                (is_bearish or (is_primed and primed_direction == "BEARISH"))
+                and roc.is_accelerating_up
+                and roc.roc_3bar >= 0.10
+            ):
+                logger.info(
+                    f"[ORB] Suppressed Bearish ORB on {symbol}: Upside ROC acceleration active ({roc.summary})"
+                )
+                return None
+        except Exception as e_roc:
+            logger.debug(f"[ORB] Index ROC check skipped: {e_roc}")
 
     # 4.1 Candlestick Pattern Confirmation & Divergence Trap Veto
     conf_candle = None
@@ -484,7 +516,7 @@ def detect_opening_range_breakout(
             alert_type=alert_type,
             stage=stage_val,
             symbol=clean_sym,
-            exchange="NFO",
+            exchange="BFO" if clean_sym in ("SENSEX", "BANKEX") else "NFO",
             direction=direction,
             headline=opt_headline,
             summary=summary,
@@ -521,6 +553,9 @@ def detect_opening_range_breakout(
                 "atr": round(atr_val, 2),
                 "atr_14": round(atr_val, 2),
                 "min_noise_sl_pts": round(min_orb_risk, 2),
+                "spot": ltp,
+                "underlying_ltp": ltp,
+                "underlying_symbol": clean_sym,
             },
             actionable_plan=act_plan,
         )

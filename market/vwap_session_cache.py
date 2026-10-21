@@ -157,6 +157,21 @@ class VwapSessionCache:
             self._memory_cache[clean] = (now, float(vwap_val))
         self._save_to_disk()
 
+    def is_cached_fresh(self, symbol: str) -> tuple[bool, Optional[float]]:
+        """Check if symbol is cached (including negative cache). Returns (is_fresh, value_or_none)."""
+        clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        now = time.time()
+        with self._lock:
+            entry = self._memory_cache.get(clean)
+            if entry:
+                computed_ts, val = entry
+                now_ist = datetime.now(IST)
+                market_closed = (now_ist.hour > 15) or (now_ist.hour == 15 and now_ist.minute >= 30)
+                ttl = self._ttl_seconds if val > 0 else 300.0
+                if market_closed or (now - computed_ts < ttl):
+                    return True, (val if val > 0 else None)
+        return False, None
+
     def get_or_compute(
         self,
         symbol: str,
@@ -167,9 +182,9 @@ class VwapSessionCache:
         Get cached VWAP or compute using single-flight deduplication.
         Prevents multiple threads from simultaneously computing VWAP for the same symbol.
         """
-        cached = self.get(symbol)
-        if cached is not None:
-            return cached
+        is_fresh, val = self.is_cached_fresh(symbol)
+        if is_fresh:
+            return val
 
         clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
         lock = self._get_in_flight_lock(clean)
@@ -177,9 +192,9 @@ class VwapSessionCache:
         # Single-flight gate
         with lock:
             # Re-check cache after acquiring lock
-            cached = self.get(clean)
-            if cached is not None:
-                return cached
+            is_fresh, val = self.is_cached_fresh(clean)
+            if is_fresh:
+                return val
 
             # Compute via caller function
             try:
@@ -187,10 +202,16 @@ class VwapSessionCache:
                 if computed_val and computed_val > 0:
                     self.put(clean, computed_val)
                     return computed_val
+                else:
+                    # Negative caching: suppress re-fetching for 5 minutes
+                    with self._lock:
+                        self._memory_cache[clean] = (time.time(), -1.0)
             except Exception as exc:
                 logger.warning(
                     f"[VwapCache] Error computing VWAP for {clean}: {exc}", exc_info=True
                 )
+                with self._lock:
+                    self._memory_cache[clean] = (time.time(), -1.0)
 
         return None
 

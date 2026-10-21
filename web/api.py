@@ -1174,7 +1174,7 @@ async def get_system_health_hub(
     ws_diag = get_ws_subscription_manager().get_diagnostics()
     rate_gate_diag = get_fyers_rate_gate().get_diagnostics()
     tbt_diag = await asyncio.to_thread(fyers_tbt_manager.get_active_slots_status)
-    broker_statuses = _compute_status()
+    broker_statuses = await asyncio.to_thread(_compute_status)
     obs_reg = get_registry()
     provider_health = obs_reg.get_provider_health()
     slo_report = obs_reg.get_slo_report()
@@ -1198,7 +1198,7 @@ async def get_system_health_hub(
         or cb_diag.get("state") == "HALF_OPEN"
         or provider_health.get("overall_health") == "DEGRADED"
         or slo_report.get("overall_status") == "BREACHED"
-        or rate_gate_diag.get("status") in ("WARNING", "SATURATED")
+        or rate_gate_diag.get("status") == "SATURATED"
     ):
         overall_status = "DEGRADED"
     else:
@@ -1261,8 +1261,10 @@ async def probe_circuit_breaker_endpoint():
 async def clear_incidents_endpoint():
     """Clear in-memory and disk telemetry error logs."""
     from engine.telemetry import clear_telemetry
+    from engine.observability import get_registry
 
     clear_telemetry()
+    get_registry().clear_metrics()
     return JSONResponse(
         {"status": "SUCCESS", "message": "Telemetry incidents cleared successfully"}
     )

@@ -120,6 +120,14 @@ def evaluate_session_runway(
     )
     is_equity_intraday = (segment == "EQUITY") and not is_swing
     is_fno_stock_intraday = (segment in ("FNO_STOCK", "FNO_STK")) and not is_swing
+    is_fno_index = (
+        (segment in ("FNO_INDEX", "INDEX"))
+        or alert_type in ("INDEX_CALL_SETUP", "INDEX_PUT_SETUP", "SMT_SWEEP", "INDEX_MICRO_SCALP")
+        or any(
+            idx in symbol.upper()
+            for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+        )
+    )
 
     # In test environment, bypass time-of-day blocks unless specifically testing runway
     if is_test_env and os.environ.get("FORCE_RUNWAY_CHECK") != "1":
@@ -225,27 +233,31 @@ def evaluate_session_runway(
             )
 
     # 4. Morning Reversal Trap Gate (10:15 - 11:00 IST)
-    # Institutional counter-trend absorption zone: require institutional RVOL (>= 2.2x)
+    # Institutional counter-trend absorption zone: require institutional RVOL (>= 2.2x) for single stocks.
+    # Exemption: Benchmark index setups (FNO_INDEX) driven by structural SMC/SMT models are allowed when rvol >= 1.0.
     if phase == "MORNING_REVERSAL_ZONE":
-        if rvol < 2.2:
+        min_rvol_mrz = 1.0 if is_fno_index else 2.2
+        if rvol < min_rvol_mrz:
             return RunwayEvaluation(
                 is_allowed=False,
                 phase=phase,
                 runway_minutes=runway_mins,
-                veto_reason=f"Morning Reversal Trap (10:15-11:00 IST): RVOL {rvol:.2f}x < 2.20x institutional confirmation floor.",
-                elevated_rvol_required=2.20,
+                veto_reason=f"Morning Reversal Trap (10:15-11:00 IST): RVOL {rvol:.2f}x < {min_rvol_mrz:.2f}x institutional confirmation floor.",
+                elevated_rvol_required=min_rvol_mrz,
             )
 
     # 5. Midday Compression Lull (11:00 - 13:15 IST)
-    # Lunchtime chop: require institutional momentum RVOL >= 1.8x
+    # Lunchtime chop: require institutional momentum RVOL >= 1.8x for single-stock equity options.
+    # Exemption: Benchmark index setups (FNO_INDEX) with structural alignment or defined-risk spreads allowed when rvol >= 1.0.
     if phase == "MIDDAY_COMPRESSION":
-        if rvol < 1.8 and not is_swing:
+        min_rvol_mc = 1.0 if is_fno_index else 1.8
+        if rvol < min_rvol_mc and not is_swing:
             return RunwayEvaluation(
                 is_allowed=False,
                 phase=phase,
                 runway_minutes=runway_mins,
-                veto_reason=f"Midday Compression Lull (11:00-13:15 IST): RVOL {rvol:.2f}x < 1.80x floor to prevent theta/whipsaw decay.",
-                elevated_rvol_required=1.80,
+                veto_reason=f"Midday Compression Lull (11:00-13:15 IST): RVOL {rvol:.2f}x < {min_rvol_mc:.2f}x floor to prevent theta/whipsaw decay.",
+                elevated_rvol_required=min_rvol_mc,
             )
 
     # 6. Hard Runway Gate (After 14:00 IST):

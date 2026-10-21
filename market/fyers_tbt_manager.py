@@ -79,6 +79,10 @@ def resolve_stock_future(symbol: str) -> str:
     if not clean:
         return ""
 
+    # Corporate Action & Demerger Alias Mapping: Tata Motors F&O derivatives trade under TMPV
+    if clean == "TATAMOTORS":
+        clean = "TMPV"
+
     from market.instruments import STANDARD_LOT_SIZES
 
     if clean not in STANDARD_LOT_SIZES:
@@ -457,7 +461,8 @@ def get_default_core_grid(
 
             c_ltp = get_ltp("MCX:CRUDEOIL") or 6500.0
             c_atm = int(round(c_ltp / 50.0) * 50)
-            c_dt = now if now.day <= 18 else now + timedelta(days=20)
+            # Crude Oil options expire ~2 business days before futures; roll on day 15 to guarantee active front-month options.
+            c_dt = now if now.day <= 15 else now + timedelta(days=20)
             c_suffix = c_dt.strftime("%y%b").upper()
             core.extend(
                 [
@@ -1083,7 +1088,10 @@ class FyersTbtManager:
                     try:
                         from market.calendar import is_market_open
 
-                        is_active_market = is_market_open("NSE") or is_market_open("MCX")
+                        # Fyers TBT strictly streams NSE Equity (CM) and NFO (Futures & Options).
+                        # MCX is not on TBT. Silence watchdog must check NSE trading hours (09:15-15:30 IST)
+                        # so pre-market (09:00-09:15 IST) does not trigger false packet freeze alarms.
+                        is_active_market = is_market_open("NSE")
                     except Exception:
                         is_active_market = False
 
@@ -1802,37 +1810,30 @@ class FyersTbtManager:
                 # Reset ATM strike cache and primary focus for fresh morning index open
                 self._last_atm_strikes.clear()
                 self._primary_focus_index = None
+                try:
+                    from market.ws_subscription_manager import get_ws_subscription_manager
+
+                    get_ws_subscription_manager().seed_active_derivatives()
+                except Exception as e_seed:
+                    logger.debug(f"[TbtManager] Morning seed derivatives notice: {e_seed}")
 
             elif session_name == "COMMODITY_CDS":
-                # Evening Handover (15:30 IST): Evict closed daytime equity/NFO scouts
-                to_evict = [
-                    s
-                    for s in self._scout
-                    if not (
-                        s.startswith("MCX:")
-                        or "USDINR" in s
-                        or any(
-                            c in s
-                            for c in (
-                                "CRUDE",
-                                "NATURAL",
-                                "GOLD",
-                                "SILVER",
-                                "COPPER",
-                                "ZINC",
-                                "ALUMINIUM",
-                            )
-                        )
-                    )
-                ]
-                for s in to_evict:
-                    del self._scout[s]
-                if to_evict:
-                    logger.info(
-                        f"[TbtManager] Evicted {len(to_evict)} closed daytime equity scouts for evening commodity session: {to_evict}"
-                    )
+                # Evening Handover (15:30 IST): Flush closed daytime equity/NFO scouts & in-flight positions
+                evicted_count = len(self._scout) + len(self._in_flight)
+                self._scout.clear()
+                self._in_flight.clear()
                 self._last_atm_strikes.clear()
                 self._primary_focus_index = None
+                if evicted_count > 0:
+                    logger.info(
+                        f"[TbtManager] Evicted {evicted_count} closed daytime equity/NFO slots for evening commodity session"
+                    )
+                try:
+                    from market.ws_subscription_manager import get_ws_subscription_manager
+
+                    get_ws_subscription_manager().cleanse_closed_session_derivatives()
+                except Exception as e_cleanse:
+                    logger.debug(f"[TbtManager] L1 closed session cleanse notice: {e_cleanse}")
 
         self.refresh_grid(session=session_name)
 
@@ -2041,15 +2042,25 @@ class FyersTbtManager:
                 tradable = resolve_tradable_tbt_symbol(s)
                 if not tradable:
                     continue
-                # In equity/daytime session, reject non-NSE symbols from TBT to prevent stalled slots
-                if self._current_session in (
-                    "EQUITY_NFO",
-                    "OFF_MARKET",
-                ) and not is_tbt_eligible_symbol(tradable):
+                # Versova TBT WebSocket physically only supports NSE instruments (CM & NFO)
+                if not is_tbt_eligible_symbol(tradable) and not (
+                    tradable.endswith("-EQ") or tradable.endswith(":EQ")
+                ):
                     logger.debug(
-                        f"[TbtManager] Skipping non-NSE symbol {tradable} from TBT scout pool: routed to L2."
+                        f"[TbtManager] Skipping non-NSE symbol {tradable} from TBT: Versova TBT strictly supports NSE only."
                     )
                     continue
+
+                # In evening/off-market sessions, NSE markets are closed: reject closed daytime equities/options from TBT slots
+                if self._current_session in ("COMMODITY_CDS", "OFF_MARKET"):
+                    import os
+
+                    if not os.environ.get("CHANAKYA_TESTING"):
+                        logger.debug(
+                            f"[TbtManager] NSE closed in session {self._current_session}. Skipping {tradable} from active TBT streaming slots."
+                        )
+                        continue
+
                 # If a cash equity of an F&O stock is subscribed, upgrade to active Stock Future for 50-depth TBT
                 if tradable.endswith("-EQ") or tradable.endswith(":EQ"):
                     stock_fut = resolve_stock_future(tradable)
@@ -2484,6 +2495,16 @@ class FyersTbtManager:
                 "workers_active": sum(1 for w in self._workers if w.connected),
                 "workers_total": len(self._workers),
                 "current_session": self._current_session,
+                "session_state": (
+                    "STANDBY_EOD"
+                    if self._current_session in ("COMMODITY_CDS", "OFF_MARKET")
+                    else "STREAMING_LIVE"
+                ),
+                "session_note": (
+                    "NSE Equity & NFO closed at 15:30 IST. Versova L3 TBT socket on standby. Live evening depth for MCX Commodities is active on L2 Market Depth Radar."
+                    if self._current_session in ("COMMODITY_CDS", "OFF_MARKET")
+                    else "L3 50-Depth TBT streaming active on NSE benchmarks and dynamic scouts."
+                ),
                 "primary_focus": self._primary_focus_index,
                 "last_atm_strikes": dict(self._last_atm_strikes),
                 "in_flight": list(self._in_flight),

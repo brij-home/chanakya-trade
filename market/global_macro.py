@@ -275,6 +275,24 @@ def fetch_global_macro_report(
         logger.warning(f"Error fetching global macro ticks from yfinance: {e}")
 
     missing = sorted(set(_GLOBAL_TICKERS) - set(raw_data))
+    if missing:
+        try:
+            from engine.analysis_cache import analysis_cache
+
+            cached_macro = analysis_cache.get_macro("global_macro_report")
+            if cached_macro and isinstance(cached_macro, dict) and cached_macro.get("items"):
+                for m in list(missing):
+                    c_item = cached_macro["items"].get(m)
+                    if c_item and isinstance(c_item, dict) and c_item.get("ltp", 0) > 0:
+                        raw_data[m] = (
+                            float(c_item["ltp"]),
+                            float(c_item.get("change", 0.0)),
+                            float(c_item.get("change_pct", 0.0)),
+                        )
+                        missing.remove(m)
+        except Exception as e_backfill:
+            logger.debug(f"[market.global_macro] Cached macro backfill skipped: {e_backfill}")
+
     if missing or not nifty_spot:
         details = []
         if missing:

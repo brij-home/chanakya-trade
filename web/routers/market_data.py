@@ -34,6 +34,18 @@ async def get_order_book_endpoint(symbol: str):
     """Returns real-time Order Book Imbalance (OBI) and depth analytics."""
     from market.order_book import analyze_symbol_order_book
 
+    # Auto-sample user inspected symbol into TBT Scout pool for zero-REST streaming depth (daytime NSE only)
+    try:
+        from market.fyers_tbt_manager import fyers_tbt_manager, is_tbt_eligible_symbol
+        from market.calendar import is_market_open
+
+        if (is_tbt_eligible_symbol(symbol) or "-EQ" in symbol) and is_market_open("NSE"):
+            fyers_tbt_manager.sample_symbol(symbol, duration_sec=120.0)
+    except Exception as e_tbt:
+        logger.debug(
+            f"[web.routers.market_data] Order book TBT sample notice for {symbol}: {e_tbt}"
+        )
+
     snapshot = await asyncio.to_thread(analyze_symbol_order_book, symbol, allow_rest_fallback=True)
     return {"status": "ok", "data": snapshot.to_dict()}
 
@@ -49,8 +61,9 @@ async def stream_order_book_endpoint(symbol: str):
     # Auto-subscribe / sample to TBT 50-depth (NSE only) and WebSocket L2 on client connect
     try:
         from market.fyers_tbt_manager import fyers_tbt_manager
+        from market.calendar import is_market_open
 
-        if symbol.startswith("NSE:"):
+        if symbol.startswith("NSE:") and is_market_open("NSE"):
             fyers_tbt_manager.sample_symbol(symbol, duration_sec=300.0)
     except Exception as e_tbt:
         logger.debug(f"[web.routers.market_data] TBT auto-sample notice for {symbol}: {e_tbt}")
@@ -1516,4 +1529,21 @@ async def get_depth_radar_endpoint(
         "segment": segment,
         "count": len(rows),
         "data": rows,
+    }
+
+
+@router.get("/api/market/strategic-horizon", tags=["Market Intelligence", "Market Data"])
+async def get_strategic_horizon_endpoint(symbol: Optional[str] = "NIFTY"):
+    """
+    Returns proactive, forward-looking Strategic Horizon battleground synthesis for an index.
+    Synthesizes live coordinates, SMT alignment, Locomotive Polarization, option walls,
+    and key structural invalidation levels.
+    """
+    from engine.strategic_horizon import generate_strategic_horizon
+
+    clean = (symbol or "NIFTY").upper().strip()
+    report = await asyncio.to_thread(generate_strategic_horizon, clean)
+    return {
+        "status": "ok",
+        "data": report.to_dict(),
     }

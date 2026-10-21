@@ -509,28 +509,30 @@ class AlertScrutinyAuditor:
                         or metrics_d.get("choch")
                         or metrics_d.get("mss")
                         or metrics_d.get("v_bottom")
+                        or any(
+                            sig in (metrics_d.get("signals") or [])
+                            for sig in (
+                                "DAY_HIGH_SUPPLY_REJECTION",
+                                "SUPPLY_REJECTION",
+                                "DAY_LOW_ABSORPTION",
+                                "ABSORPTION",
+                                "REVERSAL",
+                            )
+                        )
                     )
                 )
-                if (
-                    direction in ("BULLISH", "LONG", "BUY")
-                    and u_spot < (u_vwap * 0.998)
-                    and not is_rev
-                ):
+                if direction in ("BULLISH", "LONG", "BUY") and u_spot < u_vwap and not is_rev:
                     flags["level_coherence"] = False
                     return (
                         False,
-                        f"Anti-Trend VWAP Trap: Bullish index signal while spot (Rs.{u_spot:,.1f}) is trapped below intraday VWAP (Rs.{u_vwap:,.1f}) without structural reversal.",
+                        f"Anti-Trend VWAP Trap: Bullish index signal while spot (₹{u_spot:,.1f}) is trapped below intraday VWAP (₹{u_vwap:,.1f}) without structural reversal.",
                         flags,
                     )
-                elif (
-                    direction in ("BEARISH", "SHORT", "SELL")
-                    and u_spot > (u_vwap * 1.002)
-                    and not is_rev
-                ):
+                elif direction in ("BEARISH", "SHORT", "SELL") and u_spot > u_vwap and not is_rev:
                     flags["level_coherence"] = False
                     return (
                         False,
-                        f"Anti-Trend VWAP Trap: Bearish index signal while spot (Rs.{u_spot:,.1f}) is trading above intraday VWAP (Rs.{u_vwap:,.1f}) without structural rejection.",
+                        f"Anti-Trend VWAP Trap: Bearish index signal while spot (₹{u_spot:,.1f}) is trading above intraday VWAP (₹{u_vwap:,.1f}) without structural rejection.",
                         flags,
                     )
 
@@ -1318,7 +1320,11 @@ class AlertScrutinyAuditor:
 
         # 7b. Opposing Major Zone Collision Gate (Truncated Headroom):
         # Prevent buying right beneath a major overhead supply zone (PDH/Day High) or shorting right above major demand (PDL/Day Low)
-        ref_spot = float(spot_val or (ltp if not is_option_premium_levels else 0.0))
+        ref_spot = float(
+            spot_val
+            or (getattr(alert, "strike", 0.0) if is_option_premium_levels else 0.0)
+            or (ltp if not is_option_premium_levels else 0.0)
+        )
         if ref_spot > 0:
             is_bull_setup = direction in ("BULLISH", "LONG", "BUY") or (
                 has_opt_marker and getattr(alert, "option_type", "") == "CE"
@@ -1482,6 +1488,41 @@ class AlertScrutinyAuditor:
         if spot_vwap_pct is not None:
             is_idx = clean_sym in INDEX_MIN_SL_FLOORS
             max_ext = 0.65 if is_idx else 1.40
+            if is_idx:
+                # Dynamic ATR & Trend Scaling for Indices:
+                # On high-conviction trend days (A/D <= 0.45, locomotive polarization, SMT sweep, or institutional thrust),
+                # spot legitimately expands 1.0% to 1.6% from VWAP. Scale max_ext adaptively.
+                is_trend_expansion = bool(
+                    (
+                        metrics_dict.get("is_institutional_thrust")
+                        if isinstance(metrics_dict, dict)
+                        else False
+                    )
+                    or (
+                        metrics_dict.get("is_locomotive_polarized")
+                        if isinstance(metrics_dict, dict)
+                        else False
+                    )
+                    or (
+                        float(flags.get("ad_ratio", 1.0) or 1.0) <= 0.45
+                        and (
+                            direction in ("BEARISH", "SHORT", "SELL")
+                            or getattr(alert, "option_type", "") == "PE"
+                        )
+                    )
+                    or (
+                        float(flags.get("ad_ratio", 1.0) or 1.0) >= 2.0
+                        and (
+                            direction in ("BULLISH", "LONG", "BUY")
+                            or getattr(alert, "option_type", "") == "CE"
+                        )
+                    )
+                    or getattr(alert, "entry_type", "") == "MOMENTUM_STOP_LIMIT"
+                    or getattr(alert, "alert_type", "") == "SMT_SWEEP"
+                )
+                if is_trend_expansion:
+                    max_ext = 1.60 if clean_sym in ("BANKNIFTY", "SENSEX", "MIDCPNIFTY") else 1.25
+
             if (
                 direction in ("BULLISH", "LONG", "BUY") or getattr(alert, "option_type", "") == "CE"
             ) and spot_vwap_pct > max_ext:
@@ -1500,19 +1541,30 @@ class AlertScrutinyAuditor:
                     flags,
                 )
 
-        # 7d. Institutional TBT 50-Depth Micro-Structure & Iceberg Wall Gate:
-        # If candidate setup has live 50-depth TBT telemetry:
+        # 7d. Institutional TBT 50-Depth Microstructure & L2 Order Book Gate:
         # 1. Reject setups trading straight into a massive resting Iceberg Ask/Bid wall within <= 0.20% headroom
-        # 2. Reject setups with severe adverse Order Book Imbalance (OBI-50 <= -0.40 on BUY or >= +0.40 on SELL)
+        # 2. Reject setups with severe adverse Order Book Imbalance (OBI-50 <= -0.20 for index, -0.35 for stock on BUY; opposite on SELL)
+        # 3. Reject setups with confirmed Bid/Ask Spoof (fleeing liquidity rugpull risk)
+        # 4. Reject setups capped by confirmed Fortress Ask/Bid walls
+        # 5. Seamlessly fallback to L2 5-depth BisectDepthBook for BSE (SENSEX/BANKEX) or when TBT is unavailable
         try:
             from market.fyers_tbt_manager import FyersTbtManager, resolve_tradable_tbt_symbol
 
             tbt_mgr = FyersTbtManager()
             depth = None
+            is_index_sym = clean_sym in INDEX_MIN_SL_FLOORS or any(
+                idx in clean_sym
+                for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+            )
+            # Calibrated OBI thresholds: in index futures, -0.20 represents 60% sellers across 50 tiers
+            obi_limit_buy = -0.20 if is_index_sym else -0.35
+            obi_limit_sell = 0.20 if is_index_sym else 0.35
+
+            tradable_sym = resolve_tradable_tbt_symbol(alert.symbol) or resolve_tradable_tbt_symbol(
+                clean_sym
+            )
+
             if tbt_mgr.is_connected:
-                tradable_sym = resolve_tradable_tbt_symbol(
-                    alert.symbol
-                ) or resolve_tradable_tbt_symbol(clean_sym)
                 for sym_cand in (tradable_sym, alert.symbol, clean_sym):
                     if sym_cand and not depth:
                         d = tbt_mgr.get_50_depth(sym_cand)
@@ -1520,53 +1572,113 @@ class AlertScrutinyAuditor:
                             depth = d
                             break
 
-                if depth and depth.get("status") != "UNAVAILABLE":
-                    obi_50 = float(depth.get("obi_50", 0.0) or 0.0)
-                    ltp_d = float(depth.get("ltp", 0.0) or 0.0)
-                    if is_bull_setup and not is_bear_setup:
-                        # Adverse order book imbalance
-                        if obi_50 <= -0.40:
-                            flags["adverse_tbt_imbalance"] = True
+            if depth and depth.get("status") != "UNAVAILABLE":
+                obi_50 = float(depth.get("obi_50", 0.0) or 0.0)
+                ltp_d = float(depth.get("ltp", 0.0) or 0.0)
+                if is_bull_setup and not is_bear_setup:
+                    # Spoof / Rugpull Warning Veto
+                    spoof_msg = depth.get("spoof_trap_warning")
+                    if spoof_msg or depth.get("fleeing_bid_wall_detected"):
+                        flags["spoof_rugpull_detected"] = True
+                        return (
+                            False,
+                            f"TBT L3 Spoof Rugpull Veto: {spoof_msg or 'Resting buy wall fled as price approached (deceptive liquidity).'}",
+                            flags,
+                        )
+                    # Fortress Ask Wall Veto
+                    if depth.get("fortress_ask_wall_confirmed"):
+                        flags["fortress_ask_wall"] = True
+                        return (
+                            False,
+                            "TBT L3 Fortress Ask Wall Veto: Confirmed immovable institutional ask wall blocking upside.",
+                            flags,
+                        )
+                    # Adverse order book imbalance
+                    if obi_50 <= obi_limit_buy:
+                        flags["adverse_tbt_imbalance"] = True
+                        return (
+                            False,
+                            f"TBT Order Book Imbalance Veto: Severe ask pressure overhead (OBI-50: {obi_50:+.2f} <= {obi_limit_buy:+.2f}). Heavy institutional supply on 50-depth book.",
+                            flags,
+                        )
+                    # Resting iceberg ask walls
+                    ask_walls = depth.get("ask_walls", [])
+                    if ask_walls and ltp_d > 0:
+                        closest_wall = ask_walls[0]["price"]
+                        wall_headroom_pct = ((closest_wall - ltp_d) / ltp_d) * 100.0
+                        if 0.0 < wall_headroom_pct <= 0.20:
+                            wall_qty = ask_walls[0]["qty"]
+                            flags["trap_immediate_resistance"] = True
                             return (
                                 False,
-                                f"TBT Order Book Imbalance Veto: Severe ask pressure overhead (OBI-50: {obi_50:+.2f}). Heavy institutional supply on 50-depth book.",
+                                f"TBT Iceberg Wall Veto: Massive resting ask wall ({wall_qty:,} contracts at ₹{closest_wall:,.1f}, only {wall_headroom_pct:.2f}% headroom). High rejection risk.",
                                 flags,
                             )
-                        # Resting iceberg ask walls
-                        ask_walls = depth.get("ask_walls", [])
-                        if ask_walls and ltp_d > 0:
-                            closest_wall = ask_walls[0]["price"]
-                            wall_headroom_pct = ((closest_wall - ltp_d) / ltp_d) * 100.0
-                            if 0.0 < wall_headroom_pct <= 0.20:
-                                wall_qty = ask_walls[0]["qty"]
-                                flags["trap_immediate_resistance"] = True
-                                return (
-                                    False,
-                                    f"TBT Iceberg Wall Veto: Massive resting ask wall ({wall_qty:,} contracts at ₹{closest_wall:,.1f}, only {wall_headroom_pct:.2f}% headroom). High rejection risk.",
-                                    flags,
-                                )
-                    elif is_bear_setup and not is_bull_setup:
-                        # Adverse order book imbalance
-                        if obi_50 >= 0.40:
-                            flags["adverse_tbt_imbalance"] = True
+                elif is_bear_setup and not is_bull_setup:
+                    # Spoof / Rugpull Warning Veto
+                    spoof_msg = depth.get("spoof_trap_warning")
+                    if spoof_msg or depth.get("fleeing_ask_wall_detected"):
+                        flags["spoof_rugpull_detected"] = True
+                        return (
+                            False,
+                            f"TBT L3 Spoof Rugpull Veto: {spoof_msg or 'Resting ask wall fled as price approached (deceptive liquidity).'}",
+                            flags,
+                        )
+                    # Fortress Bid Wall Veto
+                    if depth.get("fortress_bid_wall_confirmed"):
+                        flags["fortress_bid_wall"] = True
+                        return (
+                            False,
+                            "TBT L3 Fortress Bid Wall Veto: Confirmed immovable institutional bid wall blocking downside.",
+                            flags,
+                        )
+                    # Adverse order book imbalance
+                    if obi_50 >= obi_limit_sell:
+                        flags["adverse_tbt_imbalance"] = True
+                        return (
+                            False,
+                            f"TBT Order Book Imbalance Veto: Severe bid absorption beneath (OBI-50: {obi_50:+.2f} >= {obi_limit_sell:+.2f}). Heavy institutional demand on 50-depth book.",
+                            flags,
+                        )
+                    # Resting iceberg bid walls
+                    bid_walls = depth.get("bid_walls", [])
+                    if bid_walls and ltp_d > 0:
+                        closest_wall = bid_walls[0]["price"]
+                        wall_headroom_pct = ((ltp_d - closest_wall) / ltp_d) * 100.0
+                        if 0.0 < wall_headroom_pct <= 0.20:
+                            wall_qty = bid_walls[0]["qty"]
+                            flags["trap_immediate_support"] = True
                             return (
                                 False,
-                                f"TBT Order Book Imbalance Veto: Severe bid absorption beneath (OBI-50: {obi_50:+.2f}). Heavy institutional demand on 50-depth book.",
+                                f"TBT Iceberg Wall Veto: Massive resting bid wall ({wall_qty:,} contracts at ₹{closest_wall:,.1f}, only {wall_headroom_pct:.2f}% headroom). High bounce risk.",
                                 flags,
                             )
-                        # Resting iceberg bid walls
-                        bid_walls = depth.get("bid_walls", [])
-                        if bid_walls and ltp_d > 0:
-                            closest_wall = bid_walls[0]["price"]
-                            wall_headroom_pct = ((ltp_d - closest_wall) / ltp_d) * 100.0
-                            if 0.0 < wall_headroom_pct <= 0.20:
-                                wall_qty = bid_walls[0]["qty"]
-                                flags["trap_immediate_support"] = True
-                                return (
-                                    False,
-                                    f"TBT Iceberg Wall Veto: Massive resting bid wall ({wall_qty:,} contracts at ₹{closest_wall:,.1f}, only {wall_headroom_pct:.2f}% headroom). High bounce risk.",
-                                    flags,
-                                )
+            else:
+                # L2 5-depth fallback for BSE/MCX or when TBT stream is not available
+                try:
+                    from market.order_book import get_depth_book
+
+                    book = get_depth_book(tradable_sym or clean_sym)
+                    if book and book.total_bid_qty > 0 and book.total_ask_qty > 0:
+                        obi_5 = book.obi(5)
+                        l2_limit_buy = -0.22 if is_index_sym else -0.35
+                        l2_limit_sell = 0.22 if is_index_sym else 0.35
+                        if is_bull_setup and not is_bear_setup and obi_5 <= l2_limit_buy:
+                            flags["adverse_l2_imbalance"] = True
+                            return (
+                                False,
+                                f"L2 Order Book Imbalance Veto: Heavy ask dominance on 5-depth book (OBI-5: {obi_5:+.2f} <= {l2_limit_buy:+.2f}).",
+                                flags,
+                            )
+                        elif is_bear_setup and not is_bull_setup and obi_5 >= l2_limit_sell:
+                            flags["adverse_l2_imbalance"] = True
+                            return (
+                                False,
+                                f"L2 Order Book Imbalance Veto: Heavy bid dominance on 5-depth book (OBI-5: {obi_5:+.2f} >= {l2_limit_sell:+.2f}).",
+                                flags,
+                            )
+                except Exception as e_l2:
+                    logger.debug(f"[AlertScrutiny] L2 fallback depth check skipped: {e_l2}")
         except Exception as e:
             logger.debug(f"[AlertScrutiny] TBT depth microstructure evaluation passed through: {e}")
 
@@ -2130,6 +2242,9 @@ class AlertScrutinyAuditor:
         is_commodity_or_curr = is_non_equity_desk
 
         if not is_index and not is_commodity_or_curr:
+            is_test_runner = (
+                os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+            )
             nifty_data = (
                 metrics_dict.get("nifty_regime") if isinstance(metrics_dict, dict) else None
             )
@@ -2146,7 +2261,7 @@ class AlertScrutinyAuditor:
                     nifty_below_vwap = metrics_dict["nifty_below_vwap"]
 
             # If benchmark context wasn't passed directly, attempt in-memory quote cache lookup, then quote fallback
-            if nifty_change is None:
+            if nifty_change is None and not is_test_runner:
                 try:
                     from market.quotes import _QUOTE_CACHE, _quote_cache_lock
 
@@ -3572,12 +3687,25 @@ class AlertScrutinyAuditor:
             try:
                 is_index_sym = (
                     sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+                    or clean_sym in INDEX_MIN_SL_FLOORS
+                    or any(
+                        idx in sym
+                        for idx in (
+                            "NIFTY",
+                            "BANKNIFTY",
+                            "FINNIFTY",
+                            "MIDCPNIFTY",
+                            "SENSEX",
+                            "BANKEX",
+                        )
+                    )
                     or getattr(alert, "segment", "") == "FNO_INDEX"
                 )
-                if not is_index_sym and sym:
+                target_stock = clean_sym if clean_sym else sym
+                if not is_index_sym and target_stock:
                     from analysis.sector_rotation import get_stock_tailwind
 
-                    tw = get_stock_tailwind(sym)
+                    tw = get_stock_tailwind(target_stock)
                     if tw and getattr(tw, "status", "") != "UNAVAILABLE":
                         is_call_side = (
                             direction in ("BULLISH", "LONG", "BUY")
@@ -3920,6 +4048,76 @@ class AlertScrutinyAuditor:
                 logger.debug(f"[Scrutiny] Option spread friction check error: {e_opt_spread}")
 
         flags["option_spread_friction_valid"] = True
+
+        # 16. Directional Momentum & Velocity Sanctity Gate (ROC & Premium Velocity)
+        # When underlying ROC velocity is actively accelerating against trade direction, or option premium
+        # is in rapid liquidation bleed, reject early at Tier-1 math/momentum boundary.
+        metrics_v = getattr(alert, "metrics", {}) or {}
+        if not isinstance(metrics_v, dict) and isinstance(alert, dict):
+            metrics_v = alert.get("metrics", {}) or {}
+        roc_dict = (
+            metrics_v.get("roc_momentum")
+            or (
+                metrics_v.get("signal_tags", {}).get("roc_momentum")
+                if isinstance(metrics_v.get("signal_tags"), dict)
+                else None
+            )
+            if isinstance(metrics_v, dict)
+            else None
+        )
+        prem_vel = (
+            metrics_v.get("premium_velocity")
+            or (
+                metrics_v.get("signal_tags", {}).get("premium_velocity")
+                if isinstance(metrics_v.get("signal_tags"), dict)
+                else None
+            )
+            if isinstance(metrics_v, dict)
+            else None
+        )
+        dir_str = str(direction or "").upper()
+        type_str = str(
+            getattr(alert, "alert_type", "")
+            or (alert.get("alert_type", "") if isinstance(alert, dict) else "")
+        ).upper()
+        if dir_str in ("BULLISH", "BUY") or "CALL" in type_str or "CE" in type_str:
+            if (
+                roc_dict
+                and roc_dict.get("is_accelerating_down")
+                and float(roc_dict.get("roc_3bar", 0.0) or 0.0) <= -0.10
+            ):
+                flags["velocity_sustainable"] = False
+                return (
+                    False,
+                    f"Downside ROC acceleration veto ({roc_dict.get('summary', 'negative ROC')})",
+                    flags,
+                )
+            if prem_vel is not None and float(prem_vel) <= -10.0:
+                flags["velocity_sustainable"] = False
+                return (
+                    False,
+                    f"Option premium liquidation veto (premium velocity {float(prem_vel):.1f} pts/min)",
+                    flags,
+                )
+        elif dir_str in ("BEARISH", "SELL") or "PUT" in type_str or "PE" in type_str:
+            if (
+                roc_dict
+                and roc_dict.get("is_accelerating_up")
+                and float(roc_dict.get("roc_3bar", 0.0) or 0.0) >= 0.10
+            ):
+                flags["velocity_sustainable"] = False
+                return (
+                    False,
+                    f"Upside ROC acceleration veto ({roc_dict.get('summary', 'positive ROC')})",
+                    flags,
+                )
+            if prem_vel is not None and float(prem_vel) <= -10.0:
+                flags["velocity_sustainable"] = False
+                return (
+                    False,
+                    f"Option premium liquidation veto (premium velocity {float(prem_vel):.1f} pts/min)",
+                    flags,
+                )
 
         return True, "", flags
 
@@ -4932,6 +5130,92 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
                     auditor_model="QUANT_FALLBACK",
                 )
 
+        # Directional Momentum & Velocity Sanctity Check (ROC & Premium Velocity)
+        roc_dict = (
+            metrics.get("roc_momentum")
+            or (
+                metrics.get("signal_tags", {}).get("roc_momentum")
+                if isinstance(metrics.get("signal_tags"), dict)
+                else None
+            )
+            if isinstance(metrics, dict)
+            else None
+        )
+        prem_vel = (
+            metrics.get("premium_velocity")
+            or (
+                metrics.get("signal_tags", {}).get("premium_velocity")
+                if isinstance(metrics.get("signal_tags"), dict)
+                else None
+            )
+            if isinstance(metrics, dict)
+            else None
+        )
+
+        dir_str = str(direction or "").upper()
+        type_str = str(alert_type or "").upper()
+        # 1. Bullish Veto: Underlying ROC actively accelerating DOWN or Option Premium collapsing
+        if dir_str in ("BULLISH", "BUY") or "CALL" in type_str:
+            if (
+                roc_dict
+                and roc_dict.get("is_accelerating_down")
+                and float(roc_dict.get("roc_3bar", 0.0) or 0.0) <= -0.10
+            ):
+                flags["velocity_sustainable"] = False
+                return ScrutinyResult(
+                    status="REJECTED",
+                    score=25,
+                    logic_confirmation="Downside ROC acceleration detected on underlying index.",
+                    trap_risk_warning=f"Underlying price velocity is accelerating downwards ({roc_dict.get('summary', 'negative ROC')}). Buying calls catches a falling knife in institutional liquidation.",
+                    actionable_guidance="Suppressed long call setup. Await confirmed bottom absorption candle before considering reversal.",
+                    sanctity_matrix=flags,
+                    rejection_reason=f"Downside ROC acceleration veto ({roc_dict.get('summary')})",
+                    auditor_model="QUANT_FALLBACK",
+                )
+            if prem_vel is not None and float(prem_vel) <= -10.0:
+                flags["velocity_sustainable"] = False
+                return ScrutinyResult(
+                    status="REJECTED",
+                    score=25,
+                    logic_confirmation="Option premium collapsing in rapid liquidation.",
+                    trap_risk_warning=f"Call option premium velocity is negative ({float(prem_vel):.1f} pts/min <= -10.0). Violent option bleed trap active.",
+                    actionable_guidance="Suppressed long call setup. Do not buy bleeding call options during intraday liquidation.",
+                    sanctity_matrix=flags,
+                    rejection_reason=f"Option premium liquidation veto (premium velocity {float(prem_vel):.1f} pts/min)",
+                    auditor_model="QUANT_FALLBACK",
+                )
+
+        # 2. Bearish Veto: Underlying ROC actively accelerating UP or Put Option Premium collapsing
+        elif dir_str in ("BEARISH", "SELL") or "PUT" in type_str:
+            if (
+                roc_dict
+                and roc_dict.get("is_accelerating_up")
+                and float(roc_dict.get("roc_3bar", 0.0) or 0.0) >= 0.10
+            ):
+                flags["velocity_sustainable"] = False
+                return ScrutinyResult(
+                    status="REJECTED",
+                    score=25,
+                    logic_confirmation="Upside ROC acceleration detected on underlying index.",
+                    trap_risk_warning=f"Underlying price velocity is accelerating upwards ({roc_dict.get('summary', 'positive ROC')}). Buying puts fights institutional buying thrust.",
+                    actionable_guidance="Suppressed long put setup. Await confirmed topping exhaustion before considering short entry.",
+                    sanctity_matrix=flags,
+                    rejection_reason=f"Upside ROC acceleration veto ({roc_dict.get('summary')})",
+                    auditor_model="QUANT_FALLBACK",
+                )
+            if prem_vel is not None and float(prem_vel) <= -10.0:
+                flags["velocity_sustainable"] = False
+                return ScrutinyResult(
+                    status="REJECTED",
+                    score=25,
+                    logic_confirmation="Put option premium collapsing in rapid liquidation.",
+                    trap_risk_warning=f"Put option premium velocity is negative ({float(prem_vel):.1f} pts/min <= -10.0). Violent option bleed trap active.",
+                    actionable_guidance="Suppressed long put setup. Do not buy bleeding put options during intraday short covering.",
+                    sanctity_matrix=flags,
+                    rejection_reason=f"Option premium liquidation veto (premium velocity {float(prem_vel):.1f} pts/min)",
+                    auditor_model="QUANT_FALLBACK",
+                )
+
         # Autonomous Intraday Regime Shift (CPR & ADR Exhaustion)
         reg_dict = flags.get("session_regime") or (
             metrics.get("session_regime") if isinstance(metrics, dict) else None
@@ -5208,3 +5492,8 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
 
 # Global singleton instance
 alert_scrutiny_auditor = AlertScrutinyAuditor()
+
+
+def scrutinize_alert(alert: Any, timeout: float = 2.5) -> ScrutinyResult:
+    """Convenience module function dispatching to global alert_scrutiny_auditor."""
+    return alert_scrutiny_auditor.scrutinize_alert(alert, timeout=timeout)

@@ -440,6 +440,7 @@ def register_default_detectors() -> None:
     from engine.detectors.liquidity_sweep import detect_predator_liquidity_sweep
     from engine.detectors.afternoon_thrust import detect_afternoon_thrust
     from engine.detectors.index_micro_scalp import detect_index_micro_scalp
+    from engine.detectors.smt_sweep import detect_smt_sweep
 
     def _circuit_adapter(ctx: DetectionContext):
         if ctx.ltp > 0 and ctx.prev_close and ctx.prev_close > 0:
@@ -685,6 +686,22 @@ def register_default_detectors() -> None:
             )
         return None
 
+    def _smt_sweep_adapter(ctx: DetectionContext):
+        if ctx.segment == "FNO_INDEX" and ctx.option_chain and ctx.ltp > 0:
+            return detect_smt_sweep(
+                underlying=ctx.canonical_symbol,
+                spot=ctx.ltp,
+                chain=ctx.option_chain,
+                vwap=ctx.vwap,
+                day_high=ctx.day_high,
+                day_low=ctx.day_low,
+                prev_day_high=ctx.prev_day_high,
+                prev_day_low=ctx.prev_day_low,
+                ohlcv_5m=ctx.candles_5m,
+                ref_time=ctx.timestamp,
+            )
+        return None
+
     adapters = [
         FunctionalDetectorAdapter(
             "afternoon_thrust",
@@ -697,6 +714,12 @@ def register_default_detectors() -> None:
             "Institutional Index Micro Scalp",
             ("FNO_INDEX",),
             _index_micro_scalp_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "smt_sweep",
+            "SMT Liquidity Sweep & Polarization Reversal",
+            ("FNO_INDEX",),
+            _smt_sweep_adapter,
         ),
         FunctionalDetectorAdapter(
             "predator_liquidity_sweep",

@@ -61,7 +61,7 @@ TOP_FNO_STOCKS = [
     "SBIN",
     "BHARTIARTL",
     "LT",
-    "TATAMOTORS",
+    "TMPV",
     "AXISBANK",
     "KOTAKBANK",
     "ITC",
@@ -87,7 +87,7 @@ TOP_FNO_STOCKS = [
 
 _RADAR_CACHE_LOCK = threading.Lock()
 _RADAR_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-_RADAR_CACHE_TTL = 4.0  # Seconds in-memory coalescing cache window
+_RADAR_CACHE_TTL = 10.0  # 10.0s in-memory coalescing cache window (zero REST during UI polling)
 
 
 def _get_active_commodity_symbols() -> list[str]:
@@ -112,6 +112,17 @@ def _get_active_currency_symbols() -> list[str]:
         return [f"CDS:{c}FUT" for c in CORE_CURRENCIES]
 
 
+def _get_active_fno_stock_symbols() -> list[str]:
+    """Retrieve active near-month contracts for core F&O stocks with real derivative depth."""
+    try:
+        from market.fyers_tbt_manager import resolve_stock_future
+
+        return [resolve_stock_future(s) or f"NSE:{s}-EQ" for s in TOP_FNO_STOCKS]
+    except Exception as e:
+        logger.debug(f"[universe_depth_radar] Stock future resolution error: {e}")
+        return [f"NSE:{s}-EQ" for s in TOP_FNO_STOCKS]
+
+
 def _get_active_radar_symbols() -> list[str]:
     """Retrieve symbols from active alerts in auto_alerts.json."""
     active_syms: list[str] = []
@@ -123,14 +134,8 @@ def _get_active_radar_symbols() -> list[str]:
             status = getattr(a, "status", "")
             sym = getattr(a, "canonical_symbol", "") or getattr(a, "symbol", "")
             if status in ("VALID_UNTRIGGERED", "TRIGGERED", "RUNNING") and sym:
-                clean = (
-                    sym.replace("NSE:", "")
-                    .replace("BSE:", "")
-                    .replace("NFO:", "")
-                    .replace("MCX:", "")
-                    .strip()
-                    .upper()
-                )
+                # Keep canonical prefix intact (e.g. NSE:RELIANCE26OCTFUT)
+                clean = sym.strip().upper()
                 if clean not in active_syms:
                     active_syms.append(clean)
     except Exception as e:
@@ -150,13 +155,101 @@ def _build_l2_decision_intel(
     wall_ratio: float,
     iceberg_detected: bool,
     iceberg_side: Optional[str],
+    tbt_depth: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
-    Translates raw L2 metrics into structured, actionable institutional intelligence.
+    Translates raw L2 metrics correlated with L3 TBT order flow into structured,
+    actionable institutional intelligence without false signal contradictions.
     """
-    # 1. Wall presence takes high precedence
+    # 0. L3 Order Flow Precedence (Catches Spoofing & Liquidity Rugpulls)
+    if isinstance(tbt_depth, dict) and tbt_depth.get("status") != "UNAVAILABLE":
+        spoof_msg = tbt_depth.get("spoof_trap_warning")
+        fleeing_bid = bool(tbt_depth.get("fleeing_bid_wall_detected", False)) or (
+            bool(spoof_msg and "BID_SPOOF" in str(spoof_msg))
+        )
+        fleeing_ask = bool(tbt_depth.get("fleeing_ask_wall_detected", False)) or (
+            bool(spoof_msg and "ASK_SPOOF" in str(spoof_msg))
+        )
+        obi_50 = float(tbt_depth.get("obi_50", 0.0) or 0.0)
+
+        # L3 Bid Spoof / Bull Trap Override:
+        # A resting buy wall fled as price approached. The L2 "Buy Floor" is an illusion.
+        if fleeing_bid:
+            f_p = wall_price or (tbt_depth.get("recent_fleeing_event") or {}).get("price")
+            p_txt = f" near ₹{float(f_p):,.2f}" if f_p else ""
+            return {
+                "bias": "CAUTION_BEAR",
+                "badge": "⚠️ BULL TRAP / RUGPULL RISK",
+                "tag": "BID SPOOF (L3)",
+                "headline": f"Fake Bids Pulled{p_txt} (L3 Negates L2 Wall)",
+                "meaning": (
+                    f"A large resting buy wall vanished the moment spot approached{p_txt}. "
+                    f"L3 Tick-by-Tick depth confirms fake liquidity intended to lure retail longs. "
+                    f"Net 50-depth OBI is {obi_50:+.2f}."
+                ),
+                "decision": (
+                    "DO NOT CHASE LONGS. High probability of a swift downward dump now that fake support is gone. "
+                    "Favor Put setups or await genuine structural absorption."
+                ),
+            }
+
+        # L3 Ask Spoof / Bear Trap Override:
+        # A resting sell wall fled as price approached. The L2 "Sell Wall" is an illusion.
+        if fleeing_ask:
+            f_p = wall_price or (tbt_depth.get("recent_fleeing_event") or {}).get("price")
+            p_txt = f" near ₹{float(f_p):,.2f}" if f_p else ""
+            return {
+                "bias": "BULLISH",
+                "badge": "🚀 BEAR TRAP / SHORT SQUEEZE",
+                "tag": "ASK SPOOF (L3)",
+                "headline": f"Fake Asks Pulled{p_txt} (L3 Negates L2 Wall)",
+                "meaning": (
+                    f"A large resting sell wall vanished as spot approached{p_txt}. "
+                    f"Bluffing short sellers pulled their orders, removing overhead resistance."
+                ),
+                "decision": (
+                    "FAVOR LONGS / CALLS. The overhead ceiling was an illusion. Expect accelerated upward "
+                    "breakout as trapped shorts are forced to cover."
+                ),
+            }
+
+        # L3 Net Distribution Override:
+        # If L3 50-depth OBI is heavily negative (<= -0.30), a local 5-depth bid wall is fragile bait.
+        if has_resting_wall and wall_side == "BID" and obi_50 <= -0.30:
+            return {
+                "bias": "CAUTION_BEAR",
+                "badge": "⚠️ FRAGILE BID WALL / TRAP",
+                "tag": f"WALL BID ({wall_ratio}x) + L3 NET SELL",
+                "headline": f"Resting Buy Floor @ ₹{wall_price:,.2f} under Heavy Supply (OBI-50: {obi_50:+.2f})",
+                "meaning": (
+                    f"Substantial bids clustered at ₹{wall_price:,.2f}, BUT broad 50-level book is overwhelmingly "
+                    f"dominated by sellers (OBI-50: {obi_50:+.2f}). High risk of bid wall collapse."
+                ),
+                "decision": (
+                    "AVOID LONGS: Isolated bid floor will likely be overwhelmed by persistent institutional ask distribution. "
+                    "Watch for breakdown continuation."
+                ),
+            }
+
+    # 1. Wall presence with OBI Consistency Check
     if has_resting_wall and wall_price:
         if wall_side == "BID":
+            # Conflict Check: If L2 overall OBI is negative (<= -0.15), Asks outweigh Bids despite the local cluster
+            if obi <= -0.15:
+                return {
+                    "bias": "CAUTION_BEAR",
+                    "badge": "⚠️ FRAGILE BID WALL / TRAP",
+                    "tag": f"WALL BID ({wall_ratio}x) + SUPPLY OVERHANG",
+                    "headline": f"Isolated Buy Floor @ ₹{wall_price:,.2f} under Heavy Supply ({obi * 100:+.1f}% OBI)",
+                    "meaning": (
+                        f"Limit bids clustered at ₹{wall_price:,.2f}, BUT overall order book imbalance is negative "
+                        f"({obi * 100:+.1f}%). High risk of absorption failure against broad selling volume."
+                    ),
+                    "decision": (
+                        "AVOID CALLS / WATCH FOR BREAKDOWN: Do not buy into an isolated bid wall against broad supply overhang. "
+                        "If price breaches this floor, expect rapid downward cascade."
+                    ),
+                }
             return {
                 "bias": "BULLISH",
                 "badge": "🛡️ BULLISH DEMAND FLOOR",
@@ -172,6 +265,22 @@ def _build_l2_decision_intel(
                 ),
             }
         elif wall_side == "ASK":
+            # Conflict Check: If L2 overall OBI is positive (>= +0.15), Bids outweigh Asks despite the local cluster
+            if obi >= 0.15:
+                return {
+                    "bias": "BULLISH",
+                    "badge": "⚠️ FRAGILE ASK WALL / SQUEEZE",
+                    "tag": f"WALL ASK ({wall_ratio}x) + DEMAND SURGE",
+                    "headline": f"Isolated Sell Wall @ ₹{wall_price:,.2f} under Heavy Demand ({obi * 100:+.1f}% OBI)",
+                    "meaning": (
+                        f"Limit offers clustered at ₹{wall_price:,.2f}, BUT overall order book imbalance is positive "
+                        f"({obi * 100:+.1f}%). High risk of ask blowout / short squeeze."
+                    ),
+                    "decision": (
+                        "DO NOT SHORT: Overhead wall is vulnerable to upside squeeze against aggressive buying. "
+                        "Wait for genuine ceiling or trade the breakout."
+                    ),
+                }
             return {
                 "bias": "BEARISH",
                 "badge": "🏰 BEARISH SUPPLY CEILING",
@@ -308,64 +417,90 @@ def get_universe_depth_radar(
 
     is_evening_session = bool(mcx_open and not nse_open)
 
-    # In evening session or when explicitly requested, prioritize MCX Commodities and CDS Currencies at the top
-    if norm_seg in ("ALL", "COMMODITIES", "COMMODITY", "MCX") and (
-        norm_seg != "ALL" or is_evening_session
-    ):
-        for sym in _get_active_commodity_symbols():
-            candidates.append((sym, "COMMODITY_MCX"))
-
-    if norm_seg in ("ALL", "CURRENCY", "CURRENCIES", "CDS") and (
-        norm_seg != "ALL" or is_evening_session
-    ):
-        for sym in _get_active_currency_symbols():
-            candidates.append((sym, "CURRENCY_CDS"))
-
-    if norm_seg in ("ALL", "INDICES"):
-        for sym in CORE_INDICES:
-            candidates.append((sym, "INDEX_FNO"))
-
-    if norm_seg in ("ALL", "STOCK_FNO", "STOCKS"):
-        for sym in TOP_FNO_STOCKS:
-            candidates.append((sym, "STOCK_FNO"))
-
-    if norm_seg in ("ALL", "ACTIVE_RADAR", "ALERTS"):
-        for sym in _get_active_radar_symbols():
-            if not any(c[0] == sym for c in candidates):
-                candidates.append((sym, "ACTIVE_RADAR"))
-
-    # During daytime sessions (when nse_open), append commodities & currency after stocks in ALL
-    if norm_seg == "ALL" and not is_evening_session:
-        for sym in _get_active_commodity_symbols():
-            if not any(c[0] == sym for c in candidates):
+    # In evening session or when explicitly requested, prioritize MCX Commodities and CDS Currencies
+    if is_evening_session:
+        # ── Evening Session (15:30 - 23:30 IST): Active MCX Commodities & CDS Currencies ────
+        if norm_seg in ("ALL", "COMMODITIES", "COMMODITY", "MCX"):
+            for sym in _get_active_commodity_symbols():
                 candidates.append((sym, "COMMODITY_MCX"))
-        for sym in _get_active_currency_symbols():
-            if not any(c[0] == sym for c in candidates):
+
+        if norm_seg in ("ALL", "CURRENCY", "CURRENCIES", "CDS"):
+            for sym in _get_active_currency_symbols():
                 candidates.append((sym, "CURRENCY_CDS"))
 
-    # Also check active Fyers TBT slots to include live ATM strikes
-    try:
-        from market.fyers_tbt_manager import FyersTbtManager
+        if norm_seg in ("ALL", "ACTIVE_RADAR", "ALERTS"):
+            for sym in _get_active_radar_symbols():
+                if not any(c[0] == sym for c in candidates):
+                    candidates.append((sym, "ACTIVE_RADAR"))
 
-        tbt = FyersTbtManager()
-        active_status = tbt.get_active_slots_status()
-        slots_list = (
-            active_status.get("slots", [])
-            if isinstance(active_status, dict)
-            else (active_status or [])
-        )
-        for slot in slots_list:
-            sym = slot.get("symbol")
-            if sym and not any(c[0] == sym for c in candidates):
-                role = slot.get("role", "TBT_STREAM")
-                tag = "ACTIVE_TBT" if role != "PRIMARY_CORE" else "INDEX_CORE"
-                candidates.append((sym, tag))
-    except Exception as e_tbt:
-        logger.debug(f"[universe_depth_radar] TBT slot lookup: {e_tbt}")
+        # In evening, include daytime equities/indices for ALL or when specifically selected
+        if norm_seg in ("ALL", "INDICES"):
+            from market.fyers_tbt_manager import resolve_tradable_tbt_symbol
+
+            for sym in CORE_INDICES:
+                fut_sym = resolve_tradable_tbt_symbol(sym) or sym
+                if not any(c[0] == fut_sym for c in candidates):
+                    candidates.append((fut_sym, "INDEX_FUT"))
+
+        if norm_seg in ("ALL", "STOCK_FNO", "STOCKS"):
+            for sym in _get_active_fno_stock_symbols():
+                if not any(c[0] == sym for c in candidates):
+                    candidates.append((sym, "STOCK_FNO"))
+
+    else:
+        # ── Daytime Session (09:15 - 15:30 IST): Full Indian Market Universe ───────────────
+        if norm_seg in ("ALL", "INDICES"):
+            from market.fyers_tbt_manager import resolve_tradable_tbt_symbol
+
+            for sym in CORE_INDICES:
+                fut_sym = resolve_tradable_tbt_symbol(sym) or sym
+                candidates.append((fut_sym, "INDEX_FUT"))
+
+        if norm_seg in ("ALL", "STOCK_FNO", "STOCKS"):
+            for sym in _get_active_fno_stock_symbols():
+                candidates.append((sym, "STOCK_FNO"))
+
+        if norm_seg in ("ALL", "ACTIVE_RADAR", "ALERTS"):
+            for sym in _get_active_radar_symbols():
+                if not any(c[0] == sym for c in candidates):
+                    candidates.append((sym, "ACTIVE_RADAR"))
+
+        if norm_seg in ("ALL", "COMMODITIES", "COMMODITY", "MCX"):
+            for sym in _get_active_commodity_symbols():
+                if not any(c[0] == sym for c in candidates):
+                    candidates.append((sym, "COMMODITY_MCX"))
+
+        if norm_seg in ("ALL", "CURRENCY", "CURRENCIES", "CDS"):
+            for sym in _get_active_currency_symbols():
+                if not any(c[0] == sym for c in candidates):
+                    candidates.append((sym, "CURRENCY_CDS"))
+
+    # Also check active Fyers TBT slots during daytime to include live ATM strikes
+    if nse_open:
+        try:
+            from market.fyers_tbt_manager import FyersTbtManager
+
+            tbt = FyersTbtManager()
+            active_status = tbt.get_active_slots_status()
+            slots_list = (
+                active_status.get("slots", [])
+                if isinstance(active_status, dict)
+                else (active_status or [])
+            )
+            for slot in slots_list:
+                sym = slot.get("symbol")
+                if sym and not any(c[0] == sym for c in candidates):
+                    role = slot.get("role", "TBT_STREAM")
+                    tag = "ACTIVE_TBT" if role != "PRIMARY_CORE" else "INDEX_CORE"
+                    candidates.append((sym, tag))
+        except Exception as e_tbt:
+            logger.debug(f"[universe_depth_radar] TBT slot lookup: {e_tbt}")
 
     # Apply symbol search query filter if provided
     if query:
         q_upper = query.upper().strip()
+        if q_upper == "TATAMOTORS":
+            q_upper = "TMPV"
         candidates = [c for c in candidates if q_upper in c[0].upper()]
 
     candidates = candidates[: max(10, limit)]
@@ -383,18 +518,74 @@ def get_universe_depth_radar(
     except Exception as e_sub:
         logger.debug(f"[universe_depth_radar] Auto-subscribe error: {e_sub}")
 
+    # Auto-subscribe eligible candidate futures/equities to Fyers TBT Scout pool ONLY during daytime when NSE is open
+    if nse_open:
+        try:
+            from market.fyers_tbt_manager import fyers_tbt_manager, is_tbt_eligible_symbol
+
+            tbt_cand = [
+                c[0]
+                for c in candidates
+                if (is_tbt_eligible_symbol(c[0]) or "-EQ" in c[0]) and not c[0].startswith("MCX:")
+            ]
+            if tbt_cand:
+                fyers_tbt_manager.subscribe(tbt_cand[:12])
+        except Exception as e_tbt_sub:
+            logger.debug(f"[universe_depth_radar] TBT auto-subscribe error: {e_tbt_sub}")
+
+    # Bulk Quote Pre-Warming in RAM:
+    # Instead of making N separate single-symbol REST calls, pre-warm missing candidate quotes
+    # in ONE grouped bulk HTTP request leveraging Fyers Prime's 500,000 req/day bulk quota.
+    try:
+        import os
+        from market.quotes import get_quote, _QUOTE_CACHE, _quote_cache_lock
+
+        with _quote_cache_lock:
+            missing_warm = [c[0] for c in candidates if c[0] not in _QUOTE_CACHE]
+        if missing_warm and not os.environ.get("CHANAKYA_TESTING"):
+            get_quote(missing_warm[:60], ws_only=False)
+    except Exception as e_warm:
+        logger.debug(f"[universe_depth_radar] Bulk quotes pre-warm: {e_warm}")
+
     from market.order_book import analyze_symbol_order_book
 
     from concurrent.futures import ThreadPoolExecutor
 
-    def _process_candidate(cand: tuple[str, str]) -> Optional[dict[str, Any]]:
+    # Bounded cold-miss budget for REST depth warming per radar sweep:
+    # Allows progressive in-memory cache warming for symbols not in TBT
+    # while strictly honoring Fyers Prime API limits.
+    warm_cap = min(40, len(candidates))
+    rest_warm_budget = [warm_cap] if allow_rest_fallback else [0]
+    rest_budget_lock = threading.Lock()
+
+    def _process_candidate(cand: tuple[str, str], idx: int = 0) -> Optional[dict[str, Any]]:
         sym, seg_tag = cand
         try:
-            # During MCX hours, for MCX commodities, allow_rest_fallback=True so they fetch live 5-depth
-            # (coalesced by the broker's 5-second TTL cache, using only ~35 req/min total across 7 commodities)
-            is_commodity = seg_tag == "COMMODITY_MCX" or sym.startswith("MCX:")
-            allow_rest = bool(allow_rest_fallback and is_commodity and mcx_open)
-            snap = analyze_symbol_order_book(sym, allow_rest_fallback=allow_rest)
+            # 1. Fast in-memory check (TBT stream, TBT cache, or broker depth cache)
+            snap = analyze_symbol_order_book(sym, allow_rest_fallback=False)
+
+            # 2. If depth is absent in RAM (not in TBT, and cold miss in broker cache),
+            # check if cold-miss cache-warming budget is available for this candidate
+            if (
+                allow_rest_fallback
+                and not snap.bids
+                and not snap.asks
+                and snap.total_bid_qty == 0
+                and snap.total_ask_qty == 0
+            ):
+                should_warm = False
+                with rest_budget_lock:
+                    if rest_warm_budget[0] > 0:
+                        rest_warm_budget[0] -= 1
+                        should_warm = True
+                if should_warm:
+                    try:
+                        snap = analyze_symbol_order_book(sym, allow_rest_fallback=True)
+                    except Exception as e_warm:
+                        logger.debug(
+                            f"[universe_depth_radar] REST depth warming notice for {sym}: {e_warm}"
+                        )
+
             ltp = float(snap.ltp or 0.0)
             spread = float(snap.spread or 0.0)
             spread_bps = round((spread / ltp * 10000), 1) if ltp > 0 else 0.0
@@ -449,7 +640,17 @@ def get_universe_depth_radar(
             iceberg_side = getattr(snap, "iceberg_side", None)
             iceberg_price = getattr(snap, "iceberg_price", None)
 
-            # Decision intel
+            # Query Level-3 TBT order flow status to eliminate wall contradictions
+            tbt_depth = None
+            try:
+                from market.fyers_tbt_manager import FyersTbtManager
+
+                tbt_mgr = FyersTbtManager()
+                tbt_depth = tbt_mgr.get_50_depth(sym)
+            except Exception as e_tbt_lookup:
+                logger.debug(f"[universe_depth_radar] TBT lookup notice for {sym}: {e_tbt_lookup}")
+
+            # Decision intel correlated with L3 TBT order flow
             decision_intel = _build_l2_decision_intel(
                 symbol=sym,
                 ltp=ltp,
@@ -462,6 +663,7 @@ def get_universe_depth_radar(
                 wall_ratio=wall_ratio,
                 iceberg_detected=iceberg_detected,
                 iceberg_side=iceberg_side,
+                tbt_depth=tbt_depth,
             )
 
             # Top 5 bids & asks formatted for DepthLadderWidget compatibility
@@ -482,9 +684,19 @@ def get_universe_depth_radar(
                 for a in asks[:5]
             ]
 
+            is_open = (
+                nse_open
+                if seg_tag in ("INDEX_FUT", "STOCK_FNO", "INDEX_CORE", "ACTIVE_TBT")
+                else mcx_open
+            )
+            provenance_val = getattr(snap, "provenance", "BROKER_L2")
+            if not is_open:
+                provenance_val = "EOD_SETTLEMENT"
+
             return {
                 "symbol": sym,
                 "segment": seg_tag,
+                "is_market_open": is_open,
                 "ltp": ltp,
                 "spread": round(spread, 2),
                 "spread_bps": spread_bps,
@@ -509,15 +721,21 @@ def get_universe_depth_radar(
                 "decision_intel": decision_intel,
                 "bids": formatted_bids,
                 "asks": formatted_asks,
-                "provenance": getattr(snap, "provenance", "BROKER_L2"),
+                "provenance": provenance_val,
                 "updated_at": time.strftime("%H:%M:%S"),
             }
         except Exception as e_row:
             logger.debug(f"[universe_depth_radar] Error computing depth for {sym}: {e_row}")
             return None
 
-    with ThreadPoolExecutor(max_workers=min(10, len(candidates) or 1)) as executor:
-        computed = list(executor.map(_process_candidate, candidates))
+    indexed_candidates = list(enumerate(candidates))
+
+    def _worker(item: tuple[int, tuple[str, str]]) -> Optional[dict[str, Any]]:
+        idx, cand = item
+        return _process_candidate(cand, idx=idx)
+
+    with ThreadPoolExecutor(max_workers=min(4, len(candidates) or 1)) as executor:
+        computed = list(executor.map(_worker, indexed_candidates))
 
     rows = [r for r in computed if r is not None]
 

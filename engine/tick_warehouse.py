@@ -13,6 +13,7 @@ Institutional Invariants:
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import threading
 import time
@@ -235,18 +236,27 @@ class TickWarehouse:
                     table = pa.Table.from_pylist(dicts, schema=TICK_SCHEMA)
                     file_path = self._get_parquet_file(s, date_str)
 
+                    temp_file = file_path.with_name(
+                        f"{file_path.stem}_{os.getpid()}_{time.time_ns()}.tmp.parquet"
+                    )
+                    target_table = table
                     if file_path.exists():
                         try:
                             existing = pq.read_table(file_path, partitioning=None)
-                            combined = pa.concat_tables([existing, table])
-                            pq.write_table(combined, file_path, compression="SNAPPY")
+                            target_table = pa.concat_tables([existing, table])
                         except Exception as e_concat:
                             logger.warning(
                                 f"[engine.tick_warehouse] Could not append to {file_path}, rewriting: {e_concat}"
                             )
-                            pq.write_table(table, file_path, compression="SNAPPY")
-                    else:
-                        pq.write_table(table, file_path, compression="SNAPPY")
+                            target_table = table
+
+                    pq.write_table(target_table, temp_file, compression="SNAPPY")
+                    try:
+                        temp_file.replace(file_path)
+                    except Exception:
+                        import shutil
+
+                        shutil.move(str(temp_file), str(file_path))
 
                     total_flushed += len(records)
                 except Exception as e:

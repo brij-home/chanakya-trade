@@ -21,7 +21,7 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
     try {
       setLoading(true)
       const res = await fetch(`${getBaseUrl(port)}/api/system/health-hub?limit=30`, {
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(10000),
       })
       if (res.ok) {
         const json = await res.json()
@@ -121,13 +121,18 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
 
   if (!isOpen) return null
 
-  const overall = data?.overall_status || 'UNKNOWN'
+  const overall = data?.overall_status || (loading ? 'SYNCING…' : 'NOMINAL')
   const cb = data?.circuit_breaker || {}
   const ws = data?.websocket || {}
   const counts = data?.incident_counts || { P0: 0, P1: 0, P2: 0, P3: 0 }
   const incidents = data?.incidents || []
 
-  const statusColor = overall === 'HEALTHY' ? 'var(--color-emerald)' : overall === 'DEGRADED' ? 'var(--color-gold)' : 'var(--color-rose)'
+  const statusColor =
+    overall === 'HEALTHY' || overall === 'NOMINAL'
+      ? 'var(--color-emerald)'
+      : overall === 'DEGRADED' || overall === 'SYNCING…'
+        ? 'var(--color-gold)'
+        : 'var(--color-rose)'
 
   return (
     <div
@@ -205,7 +210,7 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
               </span>
               <div className="flex items-center gap-2 mt-0.5">
                 <span
-                  className="w-2.5 h-2.5 rounded-full"
+                  className={`w-2.5 h-2.5 rounded-full ${loading ? 'animate-pulse' : ''}`}
                   style={{ background: statusColor, boxShadow: `0 0 8px ${statusColor}` }}
                 />
                 <span className="text-sm font-mono font-black" style={{ color: statusColor }}>

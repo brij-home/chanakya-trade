@@ -227,6 +227,31 @@ def compute_piotroski_f_score(data: dict[str, Any]) -> tuple[int, list[str]]:
     return score, checks
 
 
+def is_non_corporate_asset(symbol: str) -> bool:
+    """Return True if symbol is a cryptocurrency, commodity, or spot index without corporate financial statements."""
+    if not symbol or not isinstance(symbol, str):
+        return True
+    clean = (
+        symbol.upper()
+        .replace(".NS", "")
+        .replace(".BO", "")
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("CRYPTO:", "")
+        .replace("MCX:", "")
+        .strip()
+    )
+    if (
+        clean in ("BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "USDT")
+        or clean.endswith(("-USD", "USDT"))
+        or "-INDEX" in clean
+        or clean
+        in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "GOLD", "SILVER", "CRUDEOIL")
+    ):
+        return True
+    return False
+
+
 def fetch_reported_accounting_inputs(symbol: str) -> dict[str, Any]:
     """
     Dynamically extract reported multi-year financial statements (balance sheet,
@@ -246,6 +271,9 @@ def fetch_reported_accounting_inputs(symbol: str) -> dict[str, Any]:
         .replace("BSE:", "")
         .strip()
     )
+
+    if is_non_corporate_asset(clean_sym):
+        return {}
 
     # 1. Check SQLite fundamental cache (24-hour TTL)
     cache_key = f"acct_inputs_v1_{clean_sym}"
@@ -502,6 +530,19 @@ def audit_forensics(
     Persists results in analysis_cache with 24-hour TTL.
     """
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    if is_non_corporate_asset(clean_sym):
+        return ForensicAuditResult(
+            symbol=clean_sym,
+            beneish_m_score=None,
+            is_manipulator_risk=False,
+            altman_z_score=None,
+            distress_zone="UNAVAILABLE",
+            piotroski_f_score=None,
+            quality_rating="UNAVAILABLE",
+            summary_text="Forensic corporate audit not applicable for non-corporate asset (crypto/index/commodity).",
+            available=False,
+            unavailable_reasons=["Non-corporate asset has no statutory balance sheet filings"],
+        )
     # Versioned cache prevents historical synthetic-score entries from being
     # reused after the truthful-input contract was introduced.
     cache_key = f"forensic_audit_v2_{clean_sym}"

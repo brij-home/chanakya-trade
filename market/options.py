@@ -37,7 +37,7 @@ _CHAIN_CACHE_TTL_LIVE = (
 _CHAIN_CACHE_TTL_SCRAPER = 30.0  # 30s for scraper fallback
 _CHAIN_CACHE_TTL_EMPTY = 60.0  # 60s negative cache when options chain is empty or broker is tripped
 _EXPIRIES_CACHE: dict[str, tuple[float, list[str]]] = {}
-_EXPIRIES_CACHE_TTL = 300.0  # 5 minutes cache for expiry dates
+_EXPIRIES_CACHE_TTL = 43200.0  # 12 hours cache for expiry dates (immutable exchange schedules)
 
 
 def get_chain_cache_ttl(is_broker: bool = True, is_empty: bool = False, symbol: str = "") -> float:
@@ -205,32 +205,8 @@ def get_options_chain(
     is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
     is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
 
-    # Institutional Single-Stock Physical Expiry Rollover:
-    # Under SEBI regulations, single-stock options are physically settled. In the final 4 trading
-    # days before the last Thursday, near-month stock options are subject to 100% physical delivery
-    # margin surges and severe gamma/theta collapse.
-    # Therefore, when expiry is not specified for an F&O stock during monthly expiry week,
-    # always select the next-month monthly expiry contract and its live data.
-    if not is_commodity and not is_index and expiry is None:
-        try:
-            avail_exps = get_expiries(clean_sym)
-            if alert_expiry.is_monthly_physical_expiry_week(
-                symbol=clean_sym, available_expiries=avail_exps
-            ):
-                exp_res = alert_expiry.resolve_recommended_derivative_expiry(
-                    symbol=clean_sym,
-                    instrument_type="OPTION",
-                    available_expiries=avail_exps,
-                )
-                if exp_res.get("is_next_month_routed"):
-                    expiry = exp_res.get("recommended_expiry")
-                    logger.info(
-                        f"[Options] Single-stock {clean_sym} in physical expiry week: "
-                        f"routed to next-month contract {expiry} and its live data."
-                    )
-        except Exception as e_exp:
-            logger.debug(f"[Options] Physical expiry check error for {clean_sym}: {e_exp}")
-
+    # ── Fast-path in-memory chain cache check ──
+    # If the default/nearest chain is already cached and valid, return it instantly with zero REST calls
     cache_key = f"{clean_sym}:{expiry or 'nearest'}"
     now = time.time()
     with _CHAIN_CACHE_LOCK:
@@ -257,6 +233,44 @@ def get_options_chain(
                 except Exception as e_tick:
                     logger.debug(f"[market.options] Quote overlay suppressed: {e_tick}")
                 return cached_chain
+
+    # Institutional Single-Stock Physical Expiry Rollover:
+    # Under SEBI regulations, single-stock options are physically settled. In the final 4 trading
+    # days before the last Thursday, near-month stock options are subject to 100% physical delivery
+    # margin surges and severe gamma/theta collapse.
+    # CRITICAL: Check pure calendar math first (zero API calls) before querying expiries.
+    if not is_commodity and not is_index and expiry is None:
+        try:
+            if alert_expiry.is_monthly_physical_expiry_week():
+                avail_exps = get_expiries(clean_sym)
+                if alert_expiry.is_monthly_physical_expiry_week(
+                    symbol=clean_sym, available_expiries=avail_exps
+                ):
+                    exp_res = alert_expiry.resolve_recommended_derivative_expiry(
+                        symbol=clean_sym,
+                        instrument_type="OPTION",
+                        available_expiries=avail_exps,
+                    )
+                    if exp_res.get("is_next_month_routed"):
+                        expiry = exp_res.get("recommended_expiry")
+                        cache_key = f"{clean_sym}:{expiry}"
+                        logger.info(
+                            f"[Options] Single-stock {clean_sym} in physical expiry week: "
+                            f"routed to next-month contract {expiry} and its live data."
+                        )
+                        # Re-check cache for the resolved next-month contract
+                        with _CHAIN_CACHE_LOCK:
+                            if cache_key in _CHAIN_CACHE:
+                                cached_at, cached_chain = _CHAIN_CACHE[cache_key]
+                                ttl = get_chain_cache_ttl(
+                                    is_broker=True,
+                                    is_empty=not bool(cached_chain),
+                                    symbol=clean_sym,
+                                )
+                                if (now - cached_at) < ttl:
+                                    return cached_chain
+        except Exception as e_exp:
+            logger.debug(f"[Options] Physical expiry check error for {clean_sym}: {e_exp}")
 
     # Single-Flight: Coalesce concurrent requests for the exact same underlying option chain
     is_leader = False
@@ -408,12 +422,20 @@ def get_options_chain(
             evt.set()
             try:
                 from engine.observability import get_registry
+                from market.calendar import is_market_open
+
+                is_live = is_market_open("NSE")
+                is_success = bool(chain_result) or not is_live
 
                 get_registry().record_metric(
                     journey_id="options_chain",
                     latency_ms=(time.time() - t0) * 1000.0,
-                    success=bool(chain_result),
-                    metadata={"symbol": clean_sym, "count": len(chain_result)},
+                    success=is_success,
+                    metadata={
+                        "symbol": clean_sym,
+                        "count": len(chain_result),
+                        "off_market": not is_live,
+                    },
                 )
             except Exception as e_suppressed:
                 logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")

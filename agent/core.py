@@ -862,7 +862,8 @@ class OpenAIProvider(LLMProvider):
                                 action_taken=f"Context ceiling/TPM exceeded for {current_model}; failing over to next candidate model",
                                 reason=err_str[:120],
                                 details={"failed_model": current_model, "base_url": self._base_url},
-                                severity="WARNING",
+                                severity="INFO",
+                                priority="P3",
                             )
                         except Exception as e_suppressed:
                             logger.debug(
@@ -929,7 +930,8 @@ class OpenAIProvider(LLMProvider):
                                 action_taken=f"Failing over from {current_model} to next candidate model",
                                 reason=err_str[:120],
                                 details={"failed_model": current_model, "base_url": self._base_url},
-                                severity="WARNING",
+                                severity="INFO",
+                                priority="P3",
                             )
                         except Exception as e_suppressed:
                             logger.debug(
@@ -2684,7 +2686,8 @@ class GeminiProvider(LLMProvider):
                                                 "fallback_model": fb_model,
                                                 "key_index": c_idx,
                                             },
-                                            severity="WARNING",
+                                            severity="INFO",
+                                            priority="P3",
                                         )
                                     except Exception as e_suppressed:
                                         logger.debug(
@@ -3126,6 +3129,17 @@ def _first_time_provider_setup() -> str:
     Saves the choice to the OS keychain so it's never asked again.
     Returns the chosen provider name string.
     """
+    import sys
+
+    if (
+        not sys.stdin
+        or not getattr(sys.stdin, "isatty", lambda: False)()
+        or os.environ.get("CHANAKYA_TESTING") == "1"
+        or "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("DEPLOY_MODE") == "test"
+    ):
+        return "none"
+
     import shutil
     from rich.console import Console
     from rich.panel import Panel

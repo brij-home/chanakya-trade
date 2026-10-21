@@ -632,31 +632,48 @@ class PrecursorRadarScanner:
             sector_name = "Commodities"
 
         # E. Options Gamma & Call Unwinding [0–15 pts]
-        if sym_seg not in ("CRYPTO", "COMMODITY"):
+        # Only query options chain if candidate is an active F&O symbol AND score is >= 60
+        if sym_seg not in ("CRYPTO", "COMMODITY") and score >= 60:
             try:
-                from market.options import get_options_chain
+                from engine.position_sizer import get_lot_size
 
-                if chain is None:
-                    chain = get_options_chain(clean_sym)
-                if chain:
-                    ce_shedding = []
-                    for c in chain:
-                        if getattr(c, "option_type", "") == "CE":
-                            oi = getattr(c, "oi", 0)
-                            doi = getattr(c, "oi_change", 0)
-                            if doi < 0 and oi > 0:
-                                pct = (doi / max(1, oi - doi)) * 100.0
-                                ce_shedding.append(pct)
-                    if ce_shedding and min(ce_shedding) <= -15.0:
-                        score += 15
-                        matched_factors.append(
-                            f"Call writers shedding {abs(min(ce_shedding)):.1f}% OI (Gamma Trap primed for squeeze)"
+                is_fno = clean_sym in (
+                    "NIFTY",
+                    "BANKNIFTY",
+                    "FINNIFTY",
+                    "MIDCPNIFTY",
+                    "SENSEX",
+                    "BANKEX",
+                ) or (get_lot_size(clean_sym) > 1)
+                if is_fno:
+                    try:
+                        from market.options import get_options_chain
+
+                        if chain is None:
+                            chain = get_options_chain(clean_sym)
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[precursor_radar] Options chain lookup suppressed for {clean_sym}: {e_suppressed}"
                         )
-                    elif ce_shedding and min(ce_shedding) <= -8.0:
-                        score += 10
-                        matched_factors.append(
-                            f"Call OI liquidation detected ({abs(min(ce_shedding)):.1f}%)"
-                        )
+                    if chain:
+                        ce_shedding = []
+                        for c in chain:
+                            if getattr(c, "option_type", "") == "CE":
+                                oi = getattr(c, "oi", 0)
+                                doi = getattr(c, "oi_change", 0)
+                                if doi < 0 and oi > 0:
+                                    pct = (doi / max(1, oi - doi)) * 100.0
+                                    ce_shedding.append(pct)
+                        if ce_shedding and min(ce_shedding) <= -15.0:
+                            score += 15
+                            matched_factors.append(
+                                f"Call writers shedding {abs(min(ce_shedding)):.1f}% OI (Gamma Trap primed for squeeze)"
+                            )
+                        elif ce_shedding and min(ce_shedding) <= -8.0:
+                            score += 10
+                            matched_factors.append(
+                                f"Call OI liquidation detected ({abs(min(ce_shedding)):.1f}%)"
+                            )
             except Exception as e_suppressed:
                 logger.debug(
                     f"[engine.precursor_radar] Non-fatal exception suppressed: {e_suppressed}"

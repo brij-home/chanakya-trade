@@ -219,3 +219,39 @@ def test_websocket_tick_staleness_and_zero_ltp_guard():
     purged_count = ws_mgr.cleanse_stale_ticks(max_age_seconds=86400.0)
     assert purged_count >= 1
     assert ws_mgr.get_tick("NSE:VERY_OLD-EQ") is None
+
+
+def test_mcx_tender_auto_roll_resolution():
+    """
+    Assert 48-hour pre-tender period auto-roll logic:
+    - Crude Oil futures roll to next month from day 17 (tender starts ~17th).
+    - Natural Gas futures roll to next month from day 23 (tender starts ~23rd).
+    - Crude Oil options roll to next month from day 16 (options expire 2 days before futures).
+    """
+    import datetime as dt
+    from brokers.fyers import _resolve_commodity_contract
+    from market.ws_subscription_manager import get_active_commodity_grid
+
+    # Case A: Crude Oil before day 17 -> current month
+    mid_month = dt.datetime(2026, 5, 10, 10, 0, 0)
+    res_crude_early = _resolve_commodity_contract("CRUDEOIL", ref_time=mid_month)
+    assert res_crude_early == "MCX:CRUDEOIL26MAYFUT"
+
+    # Case B: Crude Oil on day 17 -> rolled to next month (JUN)
+    tender_crude = dt.datetime(2026, 5, 17, 10, 0, 0)
+    res_crude_tender = _resolve_commodity_contract("CRUDEOIL", ref_time=tender_crude)
+    assert res_crude_tender == "MCX:CRUDEOIL26JUNFUT"
+
+    # Case C: Natural Gas before day 23 -> current month (MAY)
+    mid_gas = dt.datetime(2026, 5, 20, 10, 0, 0)
+    res_gas_early = _resolve_commodity_contract("NATURALGAS", ref_time=mid_gas)
+    assert res_gas_early == "MCX:NATURALGAS26MAYFUT"
+
+    # Case D: Natural Gas on day 23 -> rolled to next month (JUN)
+    tender_gas = dt.datetime(2026, 5, 23, 10, 0, 0)
+    res_gas_tender = _resolve_commodity_contract("NATURALGAS", ref_time=tender_gas)
+    assert res_gas_tender == "MCX:NATURALGAS26JUNFUT"
+
+    # Case E: Crude Oil options grid rolls on day 16
+    grid_rolled = get_active_commodity_grid(ref_time=dt.datetime(2026, 5, 16, 10, 0, 0))
+    assert any("MCX:CRUDEOIL26JUN" in s and ("CE" in s or "PE" in s) for s in grid_rolled)

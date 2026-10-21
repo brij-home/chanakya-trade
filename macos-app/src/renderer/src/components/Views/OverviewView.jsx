@@ -4,6 +4,7 @@ import { useChatStore } from '../../store/chatStore'
 import SkeletonCard from '../Loading/SkeletonCard'
 import DataStateBadge from '../Common/DataStateBadge'
 import UnavailableState from '../Common/UnavailableState'
+import StrategicHorizonBattleground from './StrategicHorizonBattleground'
 
 // ── P0-A: This view NEVER uses hardcoded numeric fallbacks for production data.
 // When data is unavailable (API down, provider error), we show UnavailableState.
@@ -334,7 +335,10 @@ export default function OverviewView() {
             )}
           </div>
 
-          {/* Row 2: VIX + Breadth + FII/DII — P0-A: show UnavailableState when data is missing */}
+          {/* Row 2: Institutional Strategic Horizon Battleground */}
+          <StrategicHorizonBattleground />
+
+          {/* Row 3: VIX + Breadth + FII/DII — P0-A: show UnavailableState when data is missing */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
             {/* VIX Gauge */}
             <div

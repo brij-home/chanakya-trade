@@ -41,6 +41,7 @@ import json
 import logging
 import threading
 import time
+import datetime as dt
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -359,24 +360,24 @@ def _warn_circuit_breaker_open(op: str, target: str = "") -> None:
         logger.debug(f"[FyersAPI] Circuit breaker is OPEN. Suppressing {op} for {target}.")
 
 
-def _resolve_commodity_contract(symbol: str) -> str:
+def _resolve_commodity_contract(symbol: str, ref_time: dt.datetime | None = None) -> str:
     """
     Resolve generic commodity symbol (e.g. 'GOLD', 'CRUDEOIL', 'SILVER', 'NATURALGAS')
     to the active near-month Fyers MCX futures contract symbol.
     """
-    import datetime as dt
-
-    now = dt.datetime.now()
+    now = ref_time or dt.datetime.now()
     clean = symbol.upper().replace("MCX:", "").replace("-FUT", "").replace("_FUT", "").strip()
 
-    # CRUDEOIL: monthly, expires ~19th of each month
+    # CRUDEOIL: monthly, futures expire ~19th (tender period starts ~17th).
+    # 48h pre-tender auto-roll activates on day 17 to shift liquidity to the active front month.
     if clean in ("CRUDEOIL", "CRUDEOILM"):
-        target_dt = now if now.day <= 18 else now + dt.timedelta(days=20)
+        target_dt = now if now.day <= 16 else now + dt.timedelta(days=20)
         return f"MCX:{clean}{target_dt.strftime('%y%b').upper()}FUT"
 
-    # NATURALGAS: monthly, expires ~25th of each month
+    # NATURALGAS: monthly, expires ~25th (tender period starts ~23rd).
+    # 48h pre-tender auto-roll activates on day 23.
     if clean in ("NATURALGAS", "NATURALGASM"):
-        target_dt = now if now.day <= 24 else now + dt.timedelta(days=15)
+        target_dt = now if now.day <= 22 else now + dt.timedelta(days=15)
         return f"MCX:{clean}{target_dt.strftime('%y%b').upper()}FUT"
 
     # GOLD: active contract months: FEB(2), APR(4), JUN(6), AUG(8), OCT(10), DEC(12)
@@ -632,7 +633,8 @@ class FyersAPI(BrokerAPI):
         self._screener_cache_lock = threading.Lock()
         self._depth_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._depth_cache_lock = threading.Lock()
-        self._depth_cache_ttl: float = 5.0
+        self._depth_cache_ttl: float = 25.0
+        self._market_status_cache: tuple[float, dict[str, Any]] = (0.0, {})
         self.name: str = "fyers"
         self._load_token()
 
@@ -1475,17 +1477,25 @@ class FyersAPI(BrokerAPI):
 
     def get_market_status(self) -> dict[str, Any]:
         """Real-time market status for Indian exchanges (NSE, BSE, MCX, CDS)."""
+        now_ts = time.time()
+        if hasattr(self, "_market_status_cache"):
+            cached_ts, cached_res = self._market_status_cache
+            if (now_ts - cached_ts) < 30.0 and cached_res:
+                return cached_res
+
         fyers = self._get_fyers()
         if not fyers:
             return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
         try:
-            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
+            _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
             res = fyers.market_status()
             if isinstance(res, dict) and res.get("s") == "ok":
-                return {
+                status_res = {
                     "status": "ok",
                     "marketStatus": res.get("marketStatus", []),
                 }
+                self._market_status_cache = (now_ts, status_res)
+                return status_res
             return {"status": "error", "raw": res}
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -1666,8 +1676,7 @@ class FyersAPI(BrokerAPI):
                                 str(exp_val),
                             )
             res = sorted(set(dates))
-            if res:
-                self._expiries_dates_cache[fyers_sym] = (now_ts, res)
+            self._expiries_dates_cache[fyers_sym] = (now_ts, res)
             return res
         except Exception as exc:
             logger.warning(
@@ -2146,7 +2155,7 @@ class FyersAPI(BrokerAPI):
         if not fyers:
             return []
         try:
-            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
+            _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
             res = (
                 fyers.get_smartexit_triggers(filters or {})
                 if filters

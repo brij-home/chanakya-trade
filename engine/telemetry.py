@@ -78,12 +78,35 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
     comp = (component or "").upper()
     rsn = (reason or "").upper()
 
+    # Multi-key LLM failover, Guardian screening vetoes, risk suppressions, delisted/expired symbols,
+    # in-flight trade coaching/warnings, and self-healing rewrites are informational audits (P3)
+    if event_type == EVENT_LLM_FAILOVER or any(
+        k in rsn
+        for k in (
+            "VETO",
+            "CODE -300",
+            "INVALID_SYMBOLS",
+            "PLEASE PROVIDE A VALID SYMBOL",
+            "DELISTED",
+            "EXPIRED",
+            "SUPPRESS",
+            "POLARIZATION",
+            "REWRITING",
+            "IN-FLIGHT WARNING",
+            "NO PRICE DATA FOUND",
+            "POSSIBLY DELISTED",
+            "FAILOVER TO FALLBACK",
+            "THROTTLED OR HIGH DEMAND",
+        )
+    ):
+        return "P3"
+
     if (
         sev == "CRITICAL"
         or "ORDER" in comp
         or "EXECUTION" in comp
         or "FREEZE" in rsn
-        or "CIRCUIT" in rsn
+        or "CIRCUIT BREAKER" in rsn
         or "LOCKOUT" in rsn
     ):
         return "P0"
@@ -135,11 +158,61 @@ def _load_recent_events_from_disk(limit: int = 250) -> None:
                     comp = data.get("component", "SYSTEM")
                     sev = data.get("severity", "INFO")
                     rsn = data.get("reason", "")
-                    # Suppress spurious Starlette SSE client disconnect artifacts from historical memory
-                    if "RuntimeError: No response returned." in rsn:
+                    # Suppress spurious Starlette SSE client disconnect or Windows socket teardown artifacts from historical memory
+                    if any(
+                        s in rsn
+                        for s in (
+                            "RuntimeError: No response returned.",
+                            "Accept failed on a socket",
+                            "IocpProactor.accept",
+                            "Task exception was never retrieved",
+                        )
+                    ):
                         continue
                     prio = data.get("priority")
-                    if not prio or prio not in ("P0", "P1", "P2", "P3"):
+                    comp_lower = comp.lower()
+                    is_ext = any(
+                        ign in comp_lower
+                        for ign in (
+                            "yfinance",
+                            "urllib3",
+                            "websocket",
+                            "fyerswebsocket",
+                            "fyersdatasocket",
+                            "httpcore",
+                            "starlette",
+                        )
+                    )
+                    is_rate_lim = (
+                        "429" in rsn
+                        or "RATE LIMIT" in rsn.upper()
+                        or "TOO MANY REQUESTS" in rsn.upper()
+                    )
+                    if is_ext and not is_rate_lim:
+                        prio = "P3" if sev != "ERROR" else "P2"
+                    elif ev_type == EVENT_LLM_FAILOVER or any(
+                        k in rsn.upper()
+                        for k in (
+                            "VETO",
+                            "CODE -300",
+                            "INVALID_SYMBOLS",
+                            "PLEASE PROVIDE A VALID SYMBOL",
+                            "DELISTED",
+                            "EXPIRED",
+                            "SUPPRESS",
+                            "POLARIZATION",
+                            "REWRITING",
+                            "IN-FLIGHT WARNING",
+                            "THROTTLED OR HIGH DEMAND",
+                        )
+                    ):
+                        prio = "P3"
+                    elif (
+                        not prio
+                        or prio not in ("P0", "P1", "P2", "P3")
+                        or "CIRCUIT" in rsn.upper()
+                        or "VETO" in rsn.upper()
+                    ):
                         prio = derive_priority(ev_type, comp, sev, rsn)
                     ev = TelemetryEvent(
                         event_type=ev_type,
@@ -568,6 +641,7 @@ def clear_telemetry() -> None:
     """Clear in-memory and disk telemetry logs."""
     with _lock:
         _events_buffer.clear()
+        TelemetryLogHandler._seen_hashes.clear()
         try:
             telemetry_dir = app_data_path("telemetry")
             target_file = telemetry_dir / "events.jsonl"
@@ -599,6 +673,8 @@ class TelemetryLogHandler(logging.Handler):
                 return
 
             msg = str(record.getMessage())
+            rec_name = str(record.name or "")
+
             # Deduplicate frequent identical log messages within 10 seconds
             import hashlib
 
@@ -612,12 +688,72 @@ class TelemetryLogHandler(logging.Handler):
                 cutoff = now_ts - 60.0
                 self._seen_hashes = {k: v for k, v in self._seen_hashes.items() if v > cutoff}
 
-            if record.levelno >= logging.ERROR:
-                severity = "ERROR"
-                priority = "P1"
+            # Ignore routine process shutdown socket teardowns
+            if any(
+                s in msg
+                for s in (
+                    "Accept failed on a socket",
+                    "IocpProactor.accept",
+                    "RuntimeError: No response returned.",
+                )
+            ):
+                return
+
+            # Benign external scraper noise or normal socket closures should not trigger P1 critical alert
+            is_external_noise = any(
+                ign in rec_name.lower()
+                for ign in (
+                    "yfinance",
+                    "urllib3",
+                    "websocket",
+                    "httpcore",
+                    "starlette",
+                    "fyerswebsocket",
+                    "fyersdatasocket",
+                )
+            )
+            is_rate_limit = (
+                "429" in msg or "RATE LIMIT" in msg.upper() or "TOO MANY REQUESTS" in msg.upper()
+            )
+
+            if is_external_noise and not is_rate_limit:
+                # Scraper ticker misses or routine socket drops are operational diagnostics
+                # Fyers broker socket invalid_symbols feedback is P3 informational audit
+                if any(
+                    k in msg.upper()
+                    for k in ("CODE -300", "INVALID_SYMBOLS", "PLEASE PROVIDE A VALID SYMBOL")
+                ):
+                    severity = "INFO"
+                    priority = "P3"
+                else:
+                    severity = "INFO" if record.levelno < logging.ERROR else "WARNING"
+                    priority = "P3" if record.levelno < logging.ERROR else "P2"
             else:
-                severity = "WARNING"
-                priority = "P2"
+                prio = derive_priority("SYSTEM_LOG", record.name, record.levelname, msg)
+                if any(
+                    k in msg.upper()
+                    for k in (
+                        "VETO",
+                        "CODE -300",
+                        "INVALID_SYMBOLS",
+                        "PLEASE PROVIDE A VALID SYMBOL",
+                        "DELISTED",
+                        "EXPIRED",
+                        "SUPPRESS",
+                        "POLARIZATION",
+                        "REWRITING",
+                        "IN-FLIGHT WARNING",
+                        "THROTTLED OR HIGH DEMAND",
+                    )
+                ):
+                    severity = "INFO"
+                    priority = "P3"
+                elif record.levelno >= logging.ERROR:
+                    severity = "ERROR"
+                    priority = prio if prio in ("P0", "P1") else "P1"
+                else:
+                    severity = "WARNING"
+                    priority = prio if prio in ("P2", "P3") else "P2"
 
             record_event(
                 event_type="SYSTEM_LOG",

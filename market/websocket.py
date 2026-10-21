@@ -672,11 +672,11 @@ class WebSocketManager:
                             from engine.telemetry import record_event
 
                             record_event(
-                                event_type="WEBSOCKET_ERROR",
+                                event_type="WEBSOCKET_INFO",
                                 component="fyers_websocket",
-                                reason=f"Fyers rejected invalid symbols: {invalid_syms}",
-                                severity="WARNING",
-                                priority="P2",
+                                reason=f"Fyers purged invalid symbols: {invalid_syms}",
+                                severity="INFO",
+                                priority="P3",
                                 details={"invalid_symbols": invalid_syms, "response": data},
                             )
                         except Exception as e:

@@ -3755,6 +3755,7 @@ class AutoAlertEngine:
                     "INDEX_CALL_SETUP",
                     "INDEX_PUT_SETUP",
                     "INDEX_MICRO_SCALP",
+                    "SMT_SWEEP",
                     # ── Commodity & currency: macro-aware AI scrutiny filters session noise ───
                     "COMMODITY_MOMENTUM",
                     "CURRENCY_BREAKOUT",
@@ -9635,6 +9636,30 @@ class AutoAlertEngine:
             return (local_idx, local_stock)
 
         if eval_targets:
+            # Prioritize Top 8 single-stock gamma candidates to prevent massive parallel chain queries
+            is_testing = (
+                os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+            )
+            idx_eval = [t for t in eval_targets if t[5]]  # is_sym_index
+            stk_eval = [t for t in eval_targets if not t[5]]
+            if not is_testing and len(stk_eval) > 8:
+
+                def _stk_gamma_rank(item):
+                    q = item[4]
+                    c_pct = abs(float(getattr(q, "change_pct", 0.0) or 0.0)) if q else 0.0
+                    s = item[3]
+                    hi = item[7]
+                    lo = item[8]
+                    score = c_pct * 3.0
+                    if s > 0 and hi > 0 and abs(s - hi) / hi <= 0.003:
+                        score += 15.0
+                    elif s > 0 and lo > 0 and abs(s - lo) / lo <= 0.003:
+                        score += 15.0
+                    return score
+
+                stk_eval.sort(key=_stk_gamma_rank, reverse=True)
+                eval_targets = idx_eval + stk_eval[:8]
+
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(
@@ -9825,6 +9850,23 @@ class AutoAlertEngine:
             return local_sq_alerts
 
         if eval_squeeze_targets:
+            is_testing = (
+                os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+            )
+            idx_sq = [t for t in eval_squeeze_targets if t[0] in self._watched_indices]
+            stk_sq = [t for t in eval_squeeze_targets if t[0] not in self._watched_indices]
+            if not is_testing and len(stk_sq) > 10:
+
+                def _sq_rank(item):
+                    s_name = item[0]
+                    q = quotes_map.get(s_name) if quotes_map else None
+                    c_pct = abs(float(getattr(q, "change_pct", 0.0) or 0.0)) if q else 0.0
+                    vol = float(getattr(q, "volume", 0.0) or 0.0) if q else 0.0
+                    return c_pct * 5.0 + min(10.0, vol / 500000.0)
+
+                stk_sq.sort(key=_sq_rank, reverse=True)
+                eval_squeeze_targets = idx_sq + stk_sq[:10]
+
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(
@@ -12651,6 +12693,9 @@ class AutoAlertEngine:
                         "INTRADAY_CAPITULATION_TOP",
                         "TREND_PULLBACK_REJECTION",
                         "CALL_WRITING_CEILING",
+                        "SMT_BEARISH_DIVERGENCE",
+                        "LOCOMOTIVE_POLARIZATION_DISTRIBUTION",
+                        "LIQUIDITY_SWEEP_REVERSAL",
                     }
                     validated_alerts = []
                     for a in alerts:
@@ -12961,6 +13006,130 @@ class AutoAlertEngine:
 
         return found
 
+    def scan_smt_sweeps(
+        self,
+        quotes_map: Optional[dict[str, Any]] = None,
+        chains_map: Optional[dict[str, Any]] = None,
+    ) -> list[AutoAlert]:
+        """
+        Scans liquid index options for institutional SMT Liquidity Sweep and
+        Locomotive Polarization Extremum Reversals (at Day Highs & Day Lows).
+        """
+        from engine.detectors.smt_sweep import detect_smt_sweep
+        from market.options import get_options_chain
+        from market.history import get_ohlcv
+        from market.quotes import get_quote
+        from engine.alert_preferences import alert_preferences
+
+        if not alert_preferences.is_segment_allowed("FNO_INDEX"):
+            return []
+
+        now_dt = datetime.now(IST)
+        from market.calendar import is_market_open
+
+        is_test_runner = (
+            os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+        )
+        is_active = is_market_open("FNO", ref_dt=now_dt) and (
+            (now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 20))
+            and (now_dt.hour < 15 or (now_dt.hour == 15 and now_dt.minute <= 10))
+        )
+        if not is_active and not is_test_runner:
+            return []
+
+        found: list[AutoAlert] = []
+        _INDEX_SYMS = [
+            s
+            for s in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+            if s in self._watched_indices
+        ]
+
+        if quotes_map is None:
+            quotes_map = self._get_cycle_quotes(_INDEX_SYMS)
+
+        def _eval_index_smt(sym: str) -> list[AutoAlert]:
+            local_alerts: list[AutoAlert] = []
+            try:
+                exch = self._resolve_index_exchange(sym)
+                lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
+                q_obj = (quotes_map.get(lookup_sym) or quotes_map.get(sym)) if quotes_map else None
+                if q_obj is None:
+                    raw_q = get_quote(lookup_sym)
+                    q_obj = (
+                        raw_q.get(lookup_sym) or raw_q.get(sym)
+                        if isinstance(raw_q, dict)
+                        else raw_q
+                    )
+
+                spot = self._extract_quote_val(q_obj, "last_price", "ltp")
+                if spot <= 0:
+                    return local_alerts
+
+                vwap_val = self._extract_quote_val(q_obj, "vwap", "average_price")
+                day_high_val = self._extract_quote_val(q_obj, "high")
+                day_low_val = self._extract_quote_val(q_obj, "low")
+                prev_day_high = None
+                prev_day_low = None
+                from engine.daily_levels import get_daily_levels
+
+                dl = get_daily_levels(sym)
+                if dl and dl.pdh > 0:
+                    prev_day_high = dl.pdh
+                    prev_day_low = dl.pdl
+
+                df_5m = None
+                try:
+                    df_5m = get_ohlcv(
+                        sym, exchange=exch, interval="5m", days=1, include_live_candle=True
+                    )
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+
+                chain = chains_map.get(sym) if chains_map is not None else None
+                if chain is None:
+                    chain = get_options_chain(sym)
+                    if chains_map is not None and chain:
+                        chains_map[sym] = chain
+                if not chain:
+                    return local_alerts
+
+                alerts = detect_smt_sweep(
+                    underlying=sym,
+                    spot=spot,
+                    chain=chain,
+                    vwap=vwap_val if vwap_val > 0 else None,
+                    day_high=day_high_val if day_high_val > 0 else None,
+                    day_low=day_low_val if day_low_val > 0 else None,
+                    prev_day_high=prev_day_high,
+                    prev_day_low=prev_day_low,
+                    ohlcv_5m=df_5m,
+                    ref_time=now_dt,
+                    quotes_map=quotes_map,
+                )
+                local_alerts.extend(alerts)
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] SMT sweep scan error for {sym}: {e}")
+            return local_alerts
+
+        if _INDEX_SYMS:
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(5, len(_INDEX_SYMS))
+            ) as executor:
+                for alerts_sub in executor.map(_eval_index_smt, _INDEX_SYMS):
+                    for a in alerts_sub:
+                        if self.record_alert(a):
+                            found.append(a)
+                            logger.info(
+                                f"[AutoAlertEngine] 🎯 SMT Liquidity Sweep fired: {a.headline} "
+                                f"LTP={a.ltp} SL={a.stop_loss} T1={a.target_level}"
+                            )
+
+        return found
+
     def scan_equity_nfo_now(self) -> list[AutoAlert]:
         """Runs all daytime Equity and NFO derivative detectors (09:15 - 15:30 IST)."""
         session = get_current_ist_session()
@@ -12977,6 +13146,7 @@ class AutoAlertEngine:
 
         # Step 1: Pre-fetch cycle quotes map (< 300ms) for watched universe
         quotes_map = self._get_cycle_quotes()
+        chains_map: dict[str, Any] = {}
 
         # Step 2: Concurrent evaluation of all orthogonal detectors (bounded max_workers=12)
         import concurrent.futures
@@ -12990,16 +13160,32 @@ class AutoAlertEngine:
                 return []
 
         tasks = [
-            ("index_micro_scalp", lambda: self.scan_index_micro_scalp(quotes_map=quotes_map)),
-            ("index_calls", lambda: self.scan_index_call_setups(quotes_map=quotes_map)),
-            ("index_puts", lambda: self.scan_index_put_setups(quotes_map=quotes_map)),
+            (
+                "index_micro_scalp",
+                lambda: self.scan_index_micro_scalp(quotes_map=quotes_map, chains_map=chains_map),
+            ),
+            (
+                "smt_sweeps",
+                lambda: self.scan_smt_sweeps(quotes_map=quotes_map, chains_map=chains_map),
+            ),
+            (
+                "index_calls",
+                lambda: self.scan_index_call_setups(quotes_map=quotes_map, chains_map=chains_map),
+            ),
+            (
+                "index_puts",
+                lambda: self.scan_index_put_setups(quotes_map=quotes_map, chains_map=chains_map),
+            ),
             ("opening_drives", lambda: self.scan_opening_drives(quotes_map=quotes_map)),
             ("index_contagion", lambda: self.scan_index_contagion(quotes_map=quotes_map)),
             (
                 "thematic_sympathy",
                 lambda: self.scan_thematic_peer_sympathy(quotes_map=quotes_map),
             ),
-            ("gamma_blasts", lambda: self.scan_gamma_blasts(quotes_map=quotes_map)),
+            (
+                "gamma_blasts",
+                lambda: self.scan_gamma_blasts(quotes_map=quotes_map, chains_map=chains_map),
+            ),
             (
                 "options_momentum",
                 lambda: self.scan_options_momentum_breakouts(quotes_map=quotes_map),
@@ -13283,6 +13469,13 @@ class AutoAlertEngine:
                     )
 
                 # Prevent spot price leak: never evaluate option targets or option premium SL using spot price!
+                continue
+
+            # Case 1b: Underlying alert denominated in SPOT terms, but tick is for the OPTION contract
+            # (e.g. alert has symbol=LT, entry=3687.7, but contract_symbol=NSE:LT26OCT3650CE, tick ltp=44.7)
+            if not is_opt and is_contract_match and not is_underlying_match:
+                alert.option_premium = ltp
+                # Prevent option premium leak: never evaluate spot targets or spot SL using option contract price!
                 continue
 
             # Case 2: Option contract tick OR Cash/Spot Equity alert tick

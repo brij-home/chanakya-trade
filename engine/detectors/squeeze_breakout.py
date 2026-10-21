@@ -120,6 +120,9 @@ def _format_squeeze_alert(
         opt_entry_min = round(max(opt_plan.sl_premium + 0.5, opt_plan.entry_premium * 0.97), 1)
         opt_entry_rg = f"₹{opt_entry_min:,.1f} – ₹{opt_entry_max:,.1f}"
         metrics["no_chase_boundary"] = opt_no_chase
+        metrics["spot"] = ltp
+        metrics["underlying_ltp"] = ltp
+        metrics["underlying_symbol"] = clean_sym
         act_plan = {
             "action": f"BUY {opt_plan.option_type}",
             "contract": opt_plan.contract_symbol,
@@ -153,7 +156,7 @@ def _format_squeeze_alert(
             alert_type="SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
             stage=stage,
             symbol=clean_sym,
-            exchange="NFO",
+            exchange="BFO" if clean_sym in ("SENSEX", "BANKEX") else "NFO",
             direction=direction,
             headline=opt_headline,
             summary=summary,
@@ -363,6 +366,16 @@ def detect_squeeze_breakout(
                     f"[SqueezeBreakout] Sector alignment check skipped for {clean_sym}: {e_sec}"
                 )
 
+        # Index Directional Momentum & Velocity Calculation
+        roc_metric = None
+        if is_idx_sym and df is not None:
+            try:
+                from engine.index_velocity import calculate_roc_momentum
+
+                roc_metric = calculate_roc_momentum(df, symbol=clean_sym)
+            except Exception as e_roc:
+                logger.debug(f"[SqueezeBreakout] ROC momentum calculation skipped: {e_roc}")
+
         # Compute recent candle wick ratios (Exhaustion & Wick Trap Filter)
         upper_wick_ratio = 0.0
         lower_wick_ratio = 0.0
@@ -395,6 +408,17 @@ def detect_squeeze_breakout(
             and (min_coiling_dist <= dist_to_pivot_pct <= max_coiling_dist)
             and not (upper_wick_ratio >= 0.60 and candle_range >= 0.50 * atr20)
         ):
+            if is_idx_sym:
+                if vwap and vwap > 0 and ltp < (vwap * 0.9985):
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bullish Early Warning on {clean_sym}: Spot ₹{ltp:,.1f} below VWAP ₹{vwap:,.1f}"
+                    )
+                    return None
+                if roc_metric and roc_metric.is_accelerating_down and roc_metric.roc_3bar <= -0.10:
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bullish Early Warning on {clean_sym}: Downside ROC acceleration active ({roc_metric.summary})"
+                    )
+                    return None
             if sector_align and not is_test_env:
                 sec_quad = sector_align.get("quadrant")
                 sec_align_str = sector_align.get("alignment")
@@ -526,6 +550,17 @@ def detect_squeeze_breakout(
             and (min_coiling_dist <= dist_to_low_pct <= max_coiling_dist)
             and not (lower_wick_ratio >= 0.60 and candle_range >= 0.50 * atr20)
         ):
+            if is_idx_sym:
+                if vwap and vwap > 0 and ltp > (vwap * 1.0015):
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bearish Early Warning on {clean_sym}: Spot ₹{ltp:,.1f} above VWAP ₹{vwap:,.1f}"
+                    )
+                    return None
+                if roc_metric and roc_metric.is_accelerating_up and roc_metric.roc_3bar >= 0.10:
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bearish Early Warning on {clean_sym}: Upside ROC acceleration active ({roc_metric.summary})"
+                    )
+                    return None
             if sector_align and not is_test_env:
                 sec_quad = sector_align.get("quadrant")
                 if sec_quad == "LEADING" and rvol < 2.2:
@@ -679,6 +714,17 @@ def detect_squeeze_breakout(
             and not (upper_wick_ratio >= 0.40 and candle_range >= 0.40 * atr20)
             and (is_test_env or adx_val >= 21.0 or adx_slope > 1.0)
         ):
+            if is_idx_sym:
+                if vwap and vwap > 0 and ltp < (vwap * 0.9985):
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bullish Breakout on {clean_sym}: Spot ₹{ltp:,.1f} below VWAP ₹{vwap:,.1f}"
+                    )
+                    return None
+                if roc_metric and roc_metric.is_accelerating_down and roc_metric.roc_3bar <= -0.10:
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bullish Breakout on {clean_sym}: Downside ROC acceleration active ({roc_metric.summary})"
+                    )
+                    return None
             if sector_align and not is_test_env:
                 sec_quad = sector_align.get("quadrant")
                 sec_align_str = sector_align.get("alignment")
@@ -812,6 +858,17 @@ def detect_squeeze_breakout(
             and not (lower_wick_ratio >= 0.40 and candle_range >= 0.40 * atr20)
             and (is_test_env or adx_val >= 21.0 or adx_slope > 1.0)
         ):
+            if is_idx_sym:
+                if vwap and vwap > 0 and ltp > (vwap * 1.0015):
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bearish Breakdown on {clean_sym}: Spot ₹{ltp:,.1f} above VWAP ₹{vwap:,.1f}"
+                    )
+                    return None
+                if roc_metric and roc_metric.is_accelerating_up and roc_metric.roc_3bar >= 0.10:
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bearish Breakdown on {clean_sym}: Upside ROC acceleration active ({roc_metric.summary})"
+                    )
+                    return None
             if sector_align and not is_test_env:
                 sec_quad = sector_align.get("quadrant")
                 if sec_quad == "LEADING" and rvol < 2.2:

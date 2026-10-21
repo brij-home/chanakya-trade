@@ -54,7 +54,34 @@ def get_depth_book(symbol: str, max_depth: int = 50) -> BisectDepthBook:
     with _DEPTH_LOCK:
         if canonical not in _DEPTH_BOOKS:
             _DEPTH_BOOKS[canonical] = BisectDepthBook(max_depth=max_depth)
-        return _DEPTH_BOOKS[canonical]
+        book = _DEPTH_BOOKS[canonical]
+        # Benchmark Spot Indices (-INDEX) do not have limit order books on any exchange.
+        # If the spot index book is empty, transparently link to its active near-month Futures book.
+        if book.total_bid_qty == 0 and book.total_ask_qty == 0:
+            if canonical in (
+                "NIFTY",
+                "BANKNIFTY",
+                "MIDCPNIFTY",
+                "SENSEX",
+                "FINNIFTY",
+                "BANKEX",
+            ) or canonical.endswith("INDEX"):
+                try:
+                    from market.fyers_tbt_manager import resolve_tradable_tbt_symbol
+
+                    fut_name = resolve_tradable_tbt_symbol(canonical)
+                    fut_clean = (
+                        str(fut_name).upper().replace("NSE:", "").replace("BSE:", "").strip()
+                    )
+                    if fut_clean and fut_clean != canonical and fut_clean in _DEPTH_BOOKS:
+                        fut_book = _DEPTH_BOOKS[fut_clean]
+                        if fut_book.total_bid_qty > 0 or fut_book.total_ask_qty > 0:
+                            return fut_book
+                except Exception as e_fut_sample:
+                    logger.debug(
+                        f"[market.order_book] Fallback fut book suppressed: {e_fut_sample}"
+                    )
+        return book
 
 
 def clear_depth_books() -> None:
@@ -716,6 +743,38 @@ def analyze_symbol_order_book(
         query_sym = symbol if is_bse else clean_sym
         sym_to_report = clean_sym
 
+    # 0. Canonical Spot Index Resolution:
+    # Benchmark indices (NIFTY 50, BANK NIFTY, SENSEX, etc.) are synthetic mathematical calculations;
+    # they do not have an exchange order book (no limit bids or asks).
+    # To obtain real institutional market depth, transparently resolve to the benchmark's
+    # active near-month Futures contract.
+    is_index_spot = (
+        clean_sym
+        in (
+            "NIFTY",
+            "BANKNIFTY",
+            "MIDCPNIFTY",
+            "SENSEX",
+            "FINNIFTY",
+            "BANKEX",
+        )
+        or clean_sym.endswith("-INDEX")
+        or "-INDEX" in symbol.upper()
+    )
+    if is_index_spot:
+        try:
+            from market.fyers_tbt_manager import resolve_tradable_tbt_symbol
+
+            fut_sym = resolve_tradable_tbt_symbol(clean_sym)
+            if fut_sym and fut_sym != symbol and fut_sym != clean_sym:
+                snap = analyze_symbol_order_book(fut_sym, allow_rest_fallback=allow_rest_fallback)
+                snap.symbol = clean_sym
+                return snap
+        except Exception as e_idx_proxy:
+            logger.debug(
+                f"[analyze_symbol_order_book] Index future resolution fallback: {e_idx_proxy}"
+            )
+
     # 1. Fast in-memory check: Sub-millisecond live WebSocket streaming BisectDepthBook
     cached_book = get_depth_book(clean_sym)
     if not (cached_book.best_bid > 0 and cached_book.best_ask > 0):
@@ -747,6 +806,17 @@ def analyze_symbol_order_book(
                 or tbt._depth_cache.get(f"MCX:{clean_sym}")
                 or tbt._depth_cache.get(f"CDS:{clean_sym}")
             )
+            if not tbt_obj:
+                try:
+                    from market.fyers_tbt_manager import resolve_stock_future
+
+                    stk_fut = resolve_stock_future(clean_sym)
+                    if stk_fut:
+                        tbt_obj = tbt._depth_cache.get(stk_fut)
+                except Exception as e_stk_resolve:
+                    logger.debug(
+                        f"[market.order_book] resolve_stock_future suppressed: {e_stk_resolve}"
+                    )
         if tbt_obj and (tbt_obj.get("bids") or tbt_obj.get("asks")):
             raw_depth = {
                 "buy": [
@@ -790,6 +860,17 @@ def analyze_symbol_order_book(
                     or brk._depth_cache.get(clean_sym)
                     or brk._depth_cache.get(f"MCX:{clean_sym}")
                 )
+                if not cand_cached:
+                    try:
+                        from market.fyers_tbt_manager import resolve_stock_future
+
+                        stk_fut = resolve_stock_future(clean_sym)
+                        if stk_fut:
+                            cand_cached = brk._depth_cache.get(stk_fut)
+                    except Exception as e_brk_stk:
+                        logger.debug(
+                            f"[market.order_book] brk resolve_stock_future suppressed: {e_brk_stk}"
+                        )
                 if cand_cached:
                     ts, depth_dict = cand_cached
                     import time as _t

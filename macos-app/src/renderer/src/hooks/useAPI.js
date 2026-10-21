@@ -81,30 +81,34 @@ export function useAPI() {
 
     let res
     try {
-      res = await fetch(`${base}${endpoint}`, {
+      const hasBody = !['GET', 'HEAD'].includes(method)
+      const fetchPayload = {
         method,
         headers,
-        body: options.body !== undefined ? options.body : JSON.stringify(body),
         signal: localSignal,
         ...fetchOpts,
         ...options,
-      })
+      }
+      if (hasBody) {
+        fetchPayload.body = options.body !== undefined ? options.body : JSON.stringify(body)
+      } else {
+        delete fetchPayload.body
+      }
+
+      res = await fetch(`${base}${endpoint}`, fetchPayload)
 
       // If 403 on mutation in web mode, try refreshing the CSRF token once and retry
       if (res.status === 403 && isMutation) {
         const freshToken = await fetchCsrfToken(base)
         if (freshToken && freshToken !== headers['X-CSRF-Token']) {
-          res = await fetch(`${base}${endpoint}`, {
-            method,
+          const retryPayload = {
+            ...fetchPayload,
             headers: {
               ...headers,
               'X-CSRF-Token': freshToken,
             },
-            body: options.body !== undefined ? options.body : JSON.stringify(body),
-            signal: localSignal,
-            ...fetchOpts,
-            ...options,
-          })
+          }
+          res = await fetch(`${base}${endpoint}`, retryPayload)
         }
       }
     } finally {

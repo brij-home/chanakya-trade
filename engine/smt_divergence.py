@@ -158,18 +158,33 @@ def evaluate_smt_divergence(
             rationale=f"Sibling index {sibling} telemetry unavailable",
         )
 
-    # Check TBT OBI-50 on sibling if available
+    # Check TBT OBI-50 on sibling if available (or fallback to L2 5-depth)
     s_obi = 0.0
     try:
-        from market.fyers_tbt_manager import FyersTbtManager
+        from market.fyers_tbt_manager import FyersTbtManager, resolve_tradable_tbt_symbol
 
         tbt_mgr = FyersTbtManager()
         if tbt_mgr.is_connected:
-            depth = tbt_mgr.get_50_depth(sibling)
-            if depth and depth.get("status") not in ("UNAVAILABLE", None):
-                s_obi = float(depth.get("obi_50", 0.0) or 0.0)
+            tradable_sibling = resolve_tradable_tbt_symbol(sibling)
+            for sym_cand in (tradable_sibling, sibling):
+                if sym_cand:
+                    depth = tbt_mgr.get_50_depth(sym_cand)
+                    if depth and depth.get("status") not in ("UNAVAILABLE", None):
+                        s_obi = float(depth.get("obi_50", 0.0) or 0.0)
+                        break
     except Exception:
         s_obi = 0.0
+
+    if s_obi == 0.0:
+        # Fallback to L2 5-depth for BSE/Sensex/Bankex or when TBT is unpopulated
+        try:
+            from market.order_book import get_depth_book
+
+            b = get_depth_book(tradable_sibling or sibling)
+            if b and b.total_bid_qty > 0 and b.total_ask_qty > 0:
+                s_obi = b.obi(5)
+        except Exception as e_ob:
+            logger.debug(f"[smt_divergence] Order book sampling suppressed: {e_ob}")
 
     dir_up = direction.upper()
     is_bull = dir_up in ("BULLISH", "BUY", "LONG", "CALL", "CE")
@@ -183,7 +198,7 @@ def evaluate_smt_divergence(
 
         # Check if sibling is failing to confirm:
         # Sibling is trapped below VWAP OR lagging significantly below its day high OR heavy ask OBI
-        sibling_below_vwap = s_vwap > 0 and s_ltp < (s_vwap * 0.998)
+        sibling_below_vwap = s_vwap > 0 and s_ltp < s_vwap
         sibling_lagging_high = False
         if s_high > 0:
             s_dist_to_high_pct = (s_high - s_ltp) / s_high * 100.0
@@ -230,7 +245,7 @@ def evaluate_smt_divergence(
 
         # Check if sibling is failing to confirm:
         # Sibling is holding above VWAP OR holding significantly above its day low OR strong bid OBI
-        sibling_above_vwap = s_vwap > 0 and s_ltp > (s_vwap * 1.002)
+        sibling_above_vwap = s_vwap > 0 and s_ltp > s_vwap
         sibling_holding_low = False
         if s_low > 0:
             s_dist_to_low_pct = (s_ltp - s_low) / s_low * 100.0

@@ -823,3 +823,498 @@ def test_two_stage_reversal_confirmation_above_vwap(monkeypatch):
     assert len(found_routine) == 0, (
         "Routine PE above VWAP without top supply rejection or VWAP breakdown must be filtered"
     )
+
+
+def test_rca_downside_roc_acceleration_vetoes_call(monkeypatch):
+    """
+    RCA Regression Test: Verify that when underlying price velocity is accelerating
+    downwards on 5m bars, buying calls is strictly prohibited.
+    """
+    chain = [
+        MockOptionContract("BANKNIFTY26OCT55700CE", 55700, "CE", 478.0, 50000, 100000, 15.0, 5000),
+        MockOptionContract("BANKNIFTY26OCT55700PE", 55700, "PE", 410.0, 50000, 100000, -5.0, 5000),
+    ]
+    # Accelerating downward momentum: successive bars dropping with expanding point delta (-0.20% ROC)
+    records = []
+    dt_base = datetime.strptime("2026-10-21", "%Y-%m-%d").replace(hour=9, minute=30, tzinfo=IST)
+    curr = 55800.0
+    drops = [10, 10, 10, 10, 10, 10, 10, 15, 20, 25, 35, 50]
+    for i, d in enumerate(drops):
+        t = dt_base + timedelta(minutes=5 * i)
+        o = curr
+        c = o - d
+        curr = c
+        records.append(
+            {"datetime": t, "open": o, "high": o + 5, "low": c - 5, "close": c, "volume": 25000}
+        )
+    df_down = pd.DataFrame(records)
+    df_down.set_index("datetime", inplace=True)
+
+    # Call detector with accelerating downward momentum
+    alerts = detect_index_call_setup(
+        underlying="BANKNIFTY",
+        spot=55730.0,
+        chain=chain,
+        vwap=55714.0,
+        day_high=55867.0,
+        day_low=55595.0,
+        ohlcv_5m=df_down,
+        ignore_time_gate=False,
+    )
+    # Must fail-closed (return empty list)
+    assert len(alerts) == 0, "Downside ROC acceleration must veto long call setups"
+
+
+def test_rca_put_writing_floor_requires_pe_decay(monkeypatch):
+    """
+    RCA Regression Test: True Put Writing requires writers driving premium decay.
+    If PE prices are surging (pchange > 2%), buyers are bidding up puts (bearish breakdown),
+    which must NOT be flagged as a Put Writing Floor.
+    """
+    # Case 1: PE prices surging (+25%) -> NOT a floor
+    surging_pe = MockOptionContract(
+        "BANKNIFTY26OCT55700PE", 55700, "PE", 450.0, 60000, 120000, 25.0, 15000
+    )
+    normal_ce = MockOptionContract(
+        "BANKNIFTY26OCT55700CE", 55700, "CE", 400.0, 30000, 80000, -15.0, 2000
+    )
+    chain_surging = [normal_ce, surging_pe]
+
+    df_stable = _make_dummy_5m_ohlcv(
+        bars=12, base_price=55700.0, trend="FLAT", date_str="2026-10-21"
+    )
+    alerts_surging = detect_index_call_setup(
+        underlying="BANKNIFTY",
+        spot=55700.0,
+        chain=chain_surging,
+        vwap=55700.0,
+        day_high=55800.0,
+        day_low=55650.0,
+        ohlcv_5m=df_stable,
+        ignore_time_gate=True,
+    )
+    # Signals inside must NOT contain PUT_WRITING_FLOOR
+    for a in alerts_surging:
+        signals = a.metrics.get("signals", [])
+        assert "PUT_WRITING_FLOOR" not in signals, (
+            "Surging PE puts must NOT be tagged as PUT_WRITING_FLOOR"
+        )
+
+
+def test_rca_degenerate_cpr_protected():
+    """
+    RCA Regression Test: Verify that identical High, Low, Close (0 width) does NOT
+    get classified as NARROW CPR or spoof TREND_EXPANSION.
+    """
+    from engine.session_regime_sentinel import calculate_cpr, evaluate_symbol_session_regime
+
+    # Degenerate case: High == Low == Close
+    cpr = calculate_cpr(high=55000.0, low=55000.0, close=55000.0, is_index=True)
+    assert cpr.cpr_type != "NARROW", (
+        f"Degenerate 0-width CPR must not be NARROW, got {cpr.cpr_type}"
+    )
+    assert cpr.cpr_width_pct <= 0.005
+
+    # Session regime shift must not trigger TREND_EXPANSION on 0 width
+    reg = evaluate_symbol_session_regime(
+        symbol="BANKNIFTY",
+        current_high=55100.0,
+        current_low=54900.0,
+        current_ltp=55000.0,
+        prev_high=55000.0,
+        prev_low=55000.0,
+        prev_close=55000.0,
+    )
+    assert reg.regime != "TREND_EXPANSION", "Degenerate CPR must not spoof TREND_EXPANSION"
+
+
+def test_rca_scrutiny_velocity_vetoes():
+    """
+    RCA Regression Test: Alert scrutiny must reject alerts with opposite ROC acceleration
+    or collapsing premium velocity.
+    """
+    from engine.alert_scrutiny import scrutinize_alert, alert_scrutiny_auditor
+
+    alert_scrutiny_auditor._cache.clear()
+
+    # Bullish alert with accelerating down ROC
+    bad_roc_alert = AutoAlert(
+        alert_id="test-roc-veto",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="BANKNIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Buy Call Test",
+        summary="Test",
+        ltp=450.0,
+        trigger_level=450.0,
+        target_level=550.0,
+        stop_loss=400.0,
+        strike=55800.0,
+        contract_symbol="BANKNIFTY26OCT55800CE",
+        confidence=85,
+        environment="TEST",
+        metrics={
+            "roc_momentum": {
+                "is_accelerating_down": True,
+                "roc_3bar": -0.22,
+                "summary": "BANKNIFTY 5m ROC: ACCELERATING_DOWN (-0.22%)",
+            },
+            "premium_velocity": -2.0,
+        },
+    )
+    res_roc = scrutinize_alert(bad_roc_alert)
+    assert res_roc.status == "REJECTED"
+    assert "Downside ROC acceleration" in (res_roc.rejection_reason or "")
+
+    alert_scrutiny_auditor._cache.clear()
+    # Bullish alert with collapsing premium velocity (-32.0 pts/min)
+    bad_vel_alert = AutoAlert(
+        alert_id="test-vel-veto",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="BANKNIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Buy Call Test",
+        summary="Test",
+        ltp=450.0,
+        trigger_level=450.0,
+        target_level=550.0,
+        stop_loss=400.0,
+        strike=55700.0,
+        contract_symbol="BANKNIFTY26OCT55700CE",
+        confidence=85,
+        environment="TEST",
+        metrics={
+            "premium_velocity": -32.0,
+        },
+    )
+    res_vel = scrutinize_alert(bad_vel_alert)
+    assert res_vel.status == "REJECTED"
+    assert "Option premium liquidation veto" in (res_vel.rejection_reason or "")
+
+
+def test_rca_day_high_headroom_and_severe_rejection():
+    """
+    RCA Regression Test: Verify Day High headroom (< 0.15%) cannot be bypassed by proximity watch,
+    and severe drop from Day High (>= 0.35%) below VWAP suppresses CE setups.
+    """
+    chain = [
+        MockOptionContract("SENSEX26OCT74600CE", 74600, "CE", 350.0, 50000, 100000, 5.0, 5000),
+        MockOptionContract("SENSEX26OCT74600PE", 74600, "PE", 300.0, 50000, 100000, -5.0, 5000),
+    ]
+    df_stable = _make_dummy_5m_ohlcv(bars=12, base_price=74660.0, trend="UP", date_str="2026-10-21")
+
+    # 1. Collision right into Day High (Spot 74667.62, DH 74682.19 -> 0.019% headroom)
+    alerts_collision = detect_index_call_setup(
+        underlying="SENSEX",
+        spot=74667.62,
+        chain=chain,
+        vwap=74360.0,
+        day_high=74682.19,
+        day_low=74150.0,
+        ohlcv_5m=df_stable,
+        ignore_time_gate=False,
+    )
+    assert len(alerts_collision) == 0, (
+        "Buying into Day High within 0.02% without momentum must be suppressed"
+    )
+
+    # 2. Severe Rejection from Day High below VWAP
+    # DH was 75000, spot tumbled to 74600 (drop = 0.53%), VWAP is 74700 (spot below VWAP)
+    alerts_rejection = detect_index_call_setup(
+        underlying="SENSEX",
+        spot=74600.0,
+        chain=chain,
+        vwap=74700.0,
+        day_high=75000.0,
+        day_low=74500.0,
+        ohlcv_5m=df_stable,
+        ignore_time_gate=False,
+    )
+    assert len(alerts_rejection) == 0, (
+        "Severe rejection from Day High below VWAP must suppress long calls"
+    )
+
+
+def test_rca_gate7d_tbt_calibrated_obi_and_spoof_veto(monkeypatch):
+    """
+    RCA Regression Test: Verify Gate 7d catches:
+    1. Calibrated OBI-50 (e.g. -0.25 on index futures, which failed the old -0.40 threshold).
+    2. Bid spoof / rugpull trap warnings.
+    """
+    from engine.alert_scrutiny import scrutinize_alert, alert_scrutiny_auditor
+
+    class MockTbtManager:
+        is_connected = True
+
+        def __init__(self, obi=-0.25, spoof=None):
+            self._obi = obi
+            self._spoof = spoof
+
+        def get_50_depth(self, sym):
+            return {
+                "symbol": sym,
+                "status": "LIVE",
+                "obi_50": self._obi,
+                "ltp": 23000.0,
+                "spoof_trap_warning": self._spoof,
+                "fleeing_bid_wall_detected": bool(self._spoof),
+                "ask_walls": [],
+                "bid_walls": [],
+            }
+
+    # Case 1: OBI is -0.25 on index future (BankNifty/Nifty today) -> Must be REJECTED
+    monkeypatch.setattr(
+        "market.fyers_tbt_manager.FyersTbtManager", lambda: MockTbtManager(obi=-0.25)
+    )
+    alert_scrutiny_auditor._cache.clear()
+    nifty_call = AutoAlert(
+        alert_id="test-obi-calibrated-veto",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Buy Nifty Call",
+        summary="Test",
+        ltp=150.0,
+        trigger_level=150.0,
+        target_level=200.0,
+        stop_loss=120.0,
+        strike=23000.0,
+        contract_symbol="NIFTY26OCT23000CE",
+        confidence=85,
+        environment="TEST",
+    )
+    res_obi = scrutinize_alert(nifty_call)
+    assert res_obi.status == "REJECTED"
+    assert "TBT Order Book Imbalance Veto" in (res_obi.rejection_reason or "")
+
+    # Case 2: Spoof rugpull warning active on 50-depth book -> Must be REJECTED
+    monkeypatch.setattr(
+        "market.fyers_tbt_manager.FyersTbtManager",
+        lambda: MockTbtManager(
+            obi=-0.05, spoof="BID_SPOOF_RUGPULL_RISK: Resting buy wall fled near 23003.5"
+        ),
+    )
+    alert_scrutiny_auditor._cache.clear()
+    spoof_call = AutoAlert(
+        alert_id="test-spoof-rugpull-veto",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Buy Nifty Call",
+        summary="Test",
+        ltp=150.0,
+        trigger_level=150.0,
+        target_level=200.0,
+        stop_loss=120.0,
+        strike=23050.0,
+        contract_symbol="NIFTY26OCT23050CE",
+        confidence=85,
+        environment="TEST",
+    )
+    res_spoof = scrutinize_alert(spoof_call)
+    assert res_spoof.status == "REJECTED"
+    assert "Spoof Rugpull Veto" in (res_spoof.rejection_reason or "")
+
+
+def test_rca_orb_and_squeeze_vwap_and_roc_safeguards():
+    """
+    RCA Regression Test: Verify ORB and Squeeze Breakout detectors on indices:
+    1. Squeeze breakout cannot ignite bullish when spot is below VWAP.
+    2. ORB primed cannot trigger bullish when spot is below VWAP.
+    """
+    from engine.detectors.squeeze_breakout import detect_squeeze_breakout
+    from engine.detectors.orb import detect_opening_range_breakout
+
+    # 1. Squeeze Breakout: Spot 55000 is below VWAP 55100
+    df_squeeze = _make_dummy_5m_ohlcv(
+        bars=25, base_price=55000.0, trend="FLAT", date_str="2026-10-21"
+    )
+    sq_alert = detect_squeeze_breakout(
+        symbol="BANKNIFTY",
+        df=df_squeeze,
+        ltp=55000.0,
+        exchange="NSE",
+        timeframe="5m",
+        vwap=55150.0,  # Spot is 150 pts BELOW VWAP
+    )
+    assert sq_alert is None or sq_alert.direction != "BULLISH", (
+        "Bullish squeeze breakout must not ignite below session VWAP"
+    )
+
+    # 2. ORB Primed: Spot is above range midpoint but below VWAP
+    df_orb = _make_dummy_5m_ohlcv(bars=12, base_price=74500.0, trend="FLAT", date_str="2026-10-21")
+    orb_alert = detect_opening_range_breakout(
+        symbol="SENSEX",
+        df=df_orb,
+        ltp=74550.0,
+        exchange="BSE",
+        opening_minutes=15,
+        rvol=1.5,
+        vwap=74650.0,  # Spot is 100 pts BELOW VWAP
+        orb_levels=(74600.0, 74400.0, 200.0, 74500.0),  # High 74600, Low 74400, Mid 74500
+    )
+    assert orb_alert is None or orb_alert.direction != "BULLISH", (
+        "Bullish ORB primed must not trigger below session VWAP"
+    )
+
+
+def test_rca_gate3d_strict_vwap_and_gate23_sector_rrg_resolution():
+    """
+    RCA Regression Test:
+    1. Gate 3d: Strict VWAP enforcement on index (spot below VWAP without structural reversal rejected).
+    2. Gate 23: Index options (e.g. NIFTY26OCT23000CE) bypass stock RRG without 404 network lookup.
+    3. Gate 23: Single-stock options (e.g. RELIANCE26OCT2800CE) resolve parent stock cleanly.
+    """
+    from engine.alert_scrutiny import scrutinize_alert
+
+    # 1. Gate 3d: Nifty spot 24990 is 10 points below VWAP 25000 (0.04% below, previously leaked past 0.20% buffer)
+    call_alert_tight_vwap = AutoAlert(
+        alert_id="test-gate3d-vwap-1",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        alert_type="INDEX_INTRADAY_CALL",
+        headline="Nifty Call Setup",
+        summary="Test vwap boundary",
+        trigger_level=24990.0,
+        stop_loss=24950.0,
+        target_level=25080.0,
+        ltp=24990.0,
+        created_at="2026-10-21 10:30:00 IST",
+        metrics={
+            "spot": 24990.0,
+            "vwap": 25000.0,
+            "day_high": 25100.0,
+            "day_low": 24900.0,
+            "rvol": 1.5,
+        },
+    )
+    res_vwap = scrutinize_alert(call_alert_tight_vwap)
+    assert res_vwap.status == "REJECTED"
+    assert "Anti-Trend VWAP Trap" in (res_vwap.rejection_reason or "")
+
+    # 2. Gate 23: Index option NIFTY26OCT23000CE recognized as index sym (sector_rrg_valid is True)
+    idx_opt_alert = AutoAlert(
+        alert_id="test-gate23-idx-opt-1",
+        stage="IGNITED",
+        symbol="NIFTY26OCT23000CE",
+        exchange="NFO",
+        direction="BULLISH",
+        alert_type="OPTIONS_MOMENTUM_BUY",
+        headline="Nifty Option Buy",
+        summary="Test option sector rrg bypass",
+        trigger_level=120.0,
+        stop_loss=90.0,
+        target_level=160.0,
+        ltp=120.0,
+        created_at="2026-10-21 10:30:00 IST",
+        metrics={
+            "spot": 25050.0,
+            "vwap": 25000.0,
+            "day_high": 25100.0,
+            "day_low": 24900.0,
+            "rvol": 1.5,
+        },
+    )
+    res_idx = scrutinize_alert(idx_opt_alert)
+    assert "Sector RRG" not in (res_idx.rejection_reason or "")
+
+
+def test_rca_pwh_rejection_distance_bound_and_adr_exhaustion(monkeypatch):
+    """
+    RCA Regression for #SIG_SENSEX_73400PE_21OCT_1346:
+    1. Prevents stale morning PWH tests from triggering fake 'PWH Supply Rejection' hours later
+       when spot is 1,400 points away at the session low.
+    2. Prevents entering short puts after >= 1.15x ATR terminal downward exhaustion.
+    """
+    monkeypatch.setenv("CHANAKYA_TESTING", "1")
+    ref_time = datetime(2026, 10, 21, 13, 46, tzinfo=IST)
+
+    chain = [
+        MockOptionContract(
+            "BSE:SENSEX26O2273400PE",
+            73400.0,
+            "PE",
+            362.0,
+            volume=50000,
+            oi=30000,
+            pchange=45.0,
+            oi_change=5000,
+        ),
+        MockOptionContract(
+            "BSE:SENSEX26O2273400CE",
+            73400.0,
+            "CE",
+            420.0,
+            volume=40000,
+            oi=25000,
+            pchange=-35.0,
+            oi_change=-2000,
+        ),
+    ]
+
+    ohlcv = _make_dummy_5m_ohlcv(bars=20, base_price=74200.0, trend="DOWN", date_str="2026-10-21")
+
+    # Scenario 1: Stale PWH test (tested at 09:30 AM, but spot is now 73365, 1.8% away from PWH)
+    # Must NOT emit PDH_SUPPLY_REJECTION / PWH supply rejection
+    alerts_stale = detect_index_put_setup(
+        underlying="SENSEX",
+        spot=73365.0,
+        chain=chain,
+        vwap=74167.0,
+        day_high=74682.0,
+        day_low=73280.0,
+        prev_day_high=74850.0,
+        prev_day_low=73900.0,
+        prev_week_high=74778.8,
+        ohlcv_5m=ohlcv,
+        ref_time=ref_time,
+        ignore_time_gate=True,
+    )
+    for alert in alerts_stale:
+        signals = alert.metrics.get("signals", [])
+        assert "PDH_SUPPLY_REJECTION" not in signals, (
+            "Stale PWH test 1.8% away from spot must not trigger PWH supply rejection"
+        )
+
+    # Scenario 2: Active PWH test in real-time (spot tested PWH and is pulling back within 0.10%-0.45%)
+    chain_active = [
+        MockOptionContract(
+            "BSE:SENSEX26O2274600PE",
+            74600.0,
+            "PE",
+            180.0,
+            volume=50000,
+            oi=30000,
+            pchange=15.0,
+            oi_change=3000,
+        ),
+    ]
+    alerts_active = detect_index_put_setup(
+        underlying="SENSEX",
+        spot=74650.0,
+        chain=chain_active,
+        vwap=74600.0,
+        day_high=74770.0,
+        day_low=74500.0,
+        prev_day_high=74950.0,
+        prev_day_low=74200.0,
+        prev_week_high=74778.8,
+        ohlcv_5m=ohlcv,
+        ref_time=datetime(2026, 10, 21, 10, 0, tzinfo=IST),
+        ignore_time_gate=True,
+    )
+    # Should accept clean active rejection of PWH
+    pwh_alerts = [
+        a for a in alerts_active if "PDH_SUPPLY_REJECTION" in a.metrics.get("signals", [])
+    ]
+    assert len(pwh_alerts) >= 1

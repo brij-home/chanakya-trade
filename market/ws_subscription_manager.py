@@ -385,25 +385,26 @@ def get_active_index_options_grid(num_strikes_per_side: int = 8) -> list[str]:
     return grid
 
 
-def get_active_commodity_grid() -> list[str]:
+def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
     """
     Generate active MCX Commodity and Currency CDS futures and near ATM options.
     """
     from datetime import datetime, timedelta
 
-    now = datetime.now()
-    c_dt = now if now.day <= 18 else now + timedelta(days=20)
+    now = ref_time or datetime.now()
+    # Crude Oil options expire ~2 business days before futures; roll on day 15 to guarantee active front-month options.
+    c_dt = now if now.day <= 15 else now + timedelta(days=20)
     c_suffix = c_dt.strftime("%y%b").upper()
 
     from brokers.fyers import _resolve_commodity_contract, _resolve_currency_contract
 
     comm_symbols = [
-        _resolve_commodity_contract("CRUDEOIL"),
-        _resolve_commodity_contract("NATURALGAS"),
-        _resolve_commodity_contract("GOLD"),
-        _resolve_commodity_contract("SILVER"),
-        _resolve_commodity_contract("COPPER"),
-        _resolve_commodity_contract("ZINC"),
+        _resolve_commodity_contract("CRUDEOIL", ref_time=now),
+        _resolve_commodity_contract("NATURALGAS", ref_time=now),
+        _resolve_commodity_contract("GOLD", ref_time=now),
+        _resolve_commodity_contract("SILVER", ref_time=now),
+        _resolve_commodity_contract("COPPER", ref_time=now),
+        _resolve_commodity_contract("ZINC", ref_time=now),
         _resolve_currency_contract("USDINR"),
         _resolve_currency_contract("EURINR"),
     ]
@@ -567,6 +568,79 @@ class WsSubscriptionManager:
                     client.unsubscribe(purged)
                 except Exception as exc:
                     logger.warning(f"[WsSubManager] Failed to unsubscribe purged contracts: {exc}")
+
+            # Purge from live tick cache in RAM
+            try:
+                from market.websocket import ws_manager
+
+                ws_manager.purge_symbols(purged)
+            except Exception as e_purge:
+                logger.debug(f"[WsSubManager] Tick cache purge error: {e_purge}")
+
+        return purged
+
+    def cleanse_closed_session_derivatives(self, ws_client: Optional[Any] = None) -> list[str]:
+        """
+        At 15:30 IST market close, evict closed daytime NSE & BSE derivative contracts (CE/PE/FUT)
+        from both core derivatives and dynamic subscriptions to liberate WebSocket slots and memory
+        for evening commodity and currency trading.
+        Permanent baseline equities, indices, and active MCX commodities are strictly preserved.
+        """
+        try:
+            from market.calendar import is_market_open
+            import os
+
+            if is_market_open("NSE") and not os.environ.get("CHANAKYA_TESTING"):
+                return []
+        except Exception as e_mkt_open:
+            logger.debug(
+                f"[market.ws_subscription_manager] is_market_open suppressed: {e_mkt_open}"
+            )
+
+        def _is_closed_daytime_deriv(s: str) -> bool:
+            return (s.startswith("NSE:") or s.startswith("BSE:")) and (
+                s.endswith("CE") or s.endswith("PE") or s.endswith("FUT")
+            )
+
+        purged: list[str] = []
+        with self._lock:
+            # 1. Cleanse daytime NSE/BSE options and futures from dynamic subscriptions
+            for sym in list(self._dynamic_symbols.keys()):
+                if _is_closed_daytime_deriv(sym):
+                    del self._dynamic_symbols[sym]
+                    purged.append(sym)
+
+            # 2. Cleanse daytime NSE/BSE options and futures from core subscriptions
+            # (CORE_BASE_SYMBOLS like cash equities and benchmark indices are strictly preserved)
+            for sym in list(self._core_symbols):
+                if sym not in CORE_BASE_SYMBOLS and _is_closed_daytime_deriv(sym):
+                    self._core_symbols.discard(sym)
+                    purged.append(sym)
+
+            if purged:
+                self._save_to_disk()
+
+        if purged:
+            logger.info(
+                f"[WsSubManager] Session cleanse purged {len(purged)} closed daytime NSE/BSE derivative contracts from live socket"
+            )
+            client = ws_client
+            if client is None:
+                try:
+                    from market.websocket import ws_manager
+
+                    if ws_manager.connected:
+                        client = ws_manager
+                except Exception:
+                    client = None
+
+            if client and hasattr(client, "unsubscribe"):
+                try:
+                    client.unsubscribe(purged)
+                except Exception as exc:
+                    logger.warning(
+                        f"[WsSubManager] Failed to unsubscribe closed daytime options/futures: {exc}"
+                    )
 
             # Purge from live tick cache in RAM
             try:

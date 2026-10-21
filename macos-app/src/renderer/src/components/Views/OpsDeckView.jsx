@@ -165,7 +165,19 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     if (!port) return
     try {
       setRadarLoading(true)
-      const res = await fetch(`${getBaseUrl(port)}/api/market/depth-radar?segment=ALL&limit=80`, {
+      const backendSeg =
+        radarSegment === 'COMMODITIES'
+          ? 'COMMODITIES'
+          : radarSegment === 'CURRENCY'
+          ? 'CURRENCY'
+          : radarSegment === 'INDICES'
+          ? 'INDICES'
+          : radarSegment === 'STOCKS'
+          ? 'STOCKS'
+          : radarSegment === 'ALERTS'
+          ? 'ALERTS'
+          : 'ALL'
+      const res = await fetch(`${getBaseUrl(port)}/api/market/depth-radar?segment=${backendSeg}&limit=80`, {
         signal: AbortSignal.timeout(9000),
       })
       if (res.ok) {
@@ -179,7 +191,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     } finally {
       setRadarLoading(false)
     }
-  }, [port])
+  }, [port, radarSegment])
 
   useEffect(() => {
     if (activeTab === 'depth_radar') {
@@ -263,7 +275,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     try {
       setLoading(true)
       const res = await fetch(`${getBaseUrl(port)}/api/system/health-hub?limit=150`, {
-        signal: AbortSignal.timeout(4000),
+        signal: AbortSignal.timeout(10000),
       })
       if (res.ok) {
         const json = await res.json()
@@ -532,7 +544,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     })
   }, [data?.incidents, selectedPriority, selectedComponent, searchQuery])
 
-  const overall = data?.overall_status || 'UNKNOWN'
+  const overall = data?.overall_status || (loading ? 'SYNCING…' : 'NOMINAL')
   const cb = data?.circuit_breaker || {}
   const rg = data?.rate_gate || {}
   const tbt = data?.tbt || {}
@@ -545,7 +557,12 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
   const memory = data?.memory || {}
   const storage = data?.storage || {}
 
-  const overallColor = overall === 'HEALTHY' ? 'var(--color-emerald)' : overall === 'DEGRADED' ? 'var(--color-gold)' : 'var(--color-rose)'
+  const overallColor =
+    overall === 'HEALTHY' || overall === 'NOMINAL'
+      ? 'var(--color-emerald)'
+      : overall === 'DEGRADED' || overall === 'SYNCING…'
+        ? 'var(--color-gold)'
+        : 'var(--color-rose)'
 
   return (
     <div className="flex flex-col h-full bg-surface overflow-hidden select-none font-ui">
@@ -1282,7 +1299,9 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
         )}
 
         {/* ─────────── TAB 2.5: 50-DEPTH TBT SLOTS GOVERNOR ─────────── */}
-        {activeTab === 'tbt' && (
+        {activeTab === 'tbt' && (() => {
+          const isTbtStandby = tbt.session_state === 'STANDBY_EOD' || ['COMMODITY_CDS', 'OFF_MARKET'].includes(tbt.current_session)
+          return (
           <div className="space-y-4 max-w-6xl mx-auto">
             {/* Header Control Strip */}
             <div className="p-4 rounded-xl border border-border bg-panel flex flex-col md:flex-row md:items-center justify-between gap-3">
@@ -1304,6 +1323,11 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                   <span className="px-2 py-0.5 rounded font-mono text-[10px] bg-elevated border border-border text-muted">
                     Session: {tbt.current_session || 'EQUITY_NFO'}
                   </span>
+                  {isTbtStandby && (
+                    <span className="px-2 py-0.5 rounded font-mono text-[10px] bg-gold/15 border border-gold/40 text-gold font-bold">
+                      🌙 STANDBY (EOD)
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs font-mono text-muted mt-0.5">
                   Fyers physical 15-slot DOM cap • Real-time 50-level OBI • Resting Fortress Wall & Spoof Trap Sentinel
@@ -1317,15 +1341,14 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                   <select
                     value={tbt.primary_focus || ''}
                     onChange={(e) => handleSetTbtFocus(e.target.value)}
-                    disabled={actionInProgress === 'focus_tbt'}
-                    className="bg-transparent text-xs font-mono font-bold text-text outline-none cursor-pointer"
+                    disabled={actionInProgress === 'focus_tbt' || isTbtStandby}
+                    className="bg-transparent text-xs font-mono font-bold text-text outline-none cursor-pointer disabled:opacity-50"
                   >
                     <option value="" className="bg-panel text-text">Multi-Index Balanced</option>
                     <option value="NIFTY" className="bg-panel text-text">NIFTY (ATM ± 2 Wings)</option>
                     <option value="BANKNIFTY" className="bg-panel text-text">BANKNIFTY</option>
                     <option value="SENSEX" className="bg-panel text-text">SENSEX</option>
                     <option value="MIDCPNIFTY" className="bg-panel text-text">MIDCPNIFTY</option>
-                    <option value="COMMODITY_CDS" className="bg-panel text-text">MCX Commodities</option>
                   </select>
                 </div>
 
@@ -1346,8 +1369,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                 <button
                   type="button"
                   onClick={handleRebalanceTbt}
-                  disabled={actionInProgress === 'rebalance_tbt'}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-elevated hover:bg-highlight border border-border text-text transition-all cursor-pointer"
+                  disabled={actionInProgress === 'rebalance_tbt' || isTbtStandby}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-elevated hover:bg-highlight border border-border text-text transition-all cursor-pointer disabled:opacity-50"
                   title="Recalculate ATM strikes against spot drift and prune expired scouts"
                 >
                   <span>🔄</span>
@@ -1355,6 +1378,36 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                 </button>
               </div>
             </div>
+
+            {/* EOD Standby Banner (Institutional Notice during Evening Session) */}
+            {isTbtStandby && (
+              <div className="p-3.5 rounded-xl border border-gold/40 bg-gold/10 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs font-mono">
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">🌙</span>
+                  <div>
+                    <div className="font-bold text-gold text-xs uppercase tracking-wide flex items-center gap-2">
+                      <span>Versova L3 TBT Standby Mode (EOD)</span>
+                      <span className="px-1.5 py-0.2 rounded text-[9px] bg-gold/20 text-gold border border-gold/30">
+                        NSE CLOSED 15:30 IST
+                      </span>
+                    </div>
+                    <p className="text-muted text-[11px] mt-0.5">
+                      {tbt.session_note || 'NSE Equity & F&O closed at 15:30 IST. Versova TBT socket is in standby mode. Active evening trading is live on MCX Commodities via L2 Depth Radar.'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('depth_radar')
+                    setRadarSegment('COMMODITIES')
+                  }}
+                  className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-sapphire/20 hover:bg-sapphire/30 text-sapphire border border-sapphire/40 cursor-pointer whitespace-nowrap transition-all flex items-center gap-1.5 shrink-0"
+                >
+                  <span>🌊</span> Switch to Live MCX Depth Radar →
+                </button>
+              </div>
+            )}
 
             {/* Quota & Allocation Summary Ribbon */}
             <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
@@ -1391,15 +1444,16 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
               </span>
               <input
                 type="text"
-                placeholder="e.g. NSE:NIFTY26OCT23200CE or MCX:CRUDEOIL26OCT6200PE"
+                placeholder={isTbtStandby ? "NSE closed (15:30 IST) • Versova TBT in EOD standby • Trade MCX via L2 Radar" : "e.g. NSE:NIFTY26OCT23200CE or NSE:RELIANCE-EQ"}
                 value={newTbtSymbol}
                 onChange={(e) => setNewTbtSymbol(e.target.value)}
-                className="flex-1 px-3 py-1.5 rounded-lg text-xs font-mono bg-surface border border-border text-text placeholder-muted/60 outline-none focus:border-gold"
+                disabled={isTbtStandby}
+                className="flex-1 px-3 py-1.5 rounded-lg text-xs font-mono bg-surface border border-border text-text placeholder-muted/60 outline-none focus:border-gold disabled:opacity-50"
               />
               <button
                 type="submit"
-                disabled={!newTbtSymbol.trim() || actionInProgress === 'sub_tbt'}
-                className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-elevated hover:bg-highlight border border-border text-text transition-all cursor-pointer whitespace-nowrap"
+                disabled={isTbtStandby || !newTbtSymbol.trim() || actionInProgress === 'sub_tbt'}
+                className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-elevated hover:bg-highlight border border-border text-text transition-all cursor-pointer whitespace-nowrap disabled:opacity-50"
               >
                 {actionInProgress === 'sub_tbt' ? 'Subscribing…' : '+ Allocate Slot'}
               </button>
@@ -1689,7 +1743,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
               </div>
             </div>
           </div>
-        )}
+          )
+        })()}
 
         {/* ─────────── TAB: UNIVERSE DEPTH RADAR ─────────── */}
         {activeTab === 'depth_radar' && (
@@ -1826,29 +1881,35 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                 </div>
 
                 <div className="flex items-center gap-1 bg-elevated p-1 rounded-lg border border-border flex-wrap">
-                  {[
-                    { id: 'ALL', label: 'All Universe' },
-                    { id: 'INDICES', label: '🏛️ Indices' },
-                    { id: 'STOCKS', label: '⚡ F&O Stocks' },
-                    { id: 'COMMODITIES', label: '🛢️ Commodities (MCX)' },
-                    { id: 'CURRENCY', label: '💱 Currency (CDS)' },
-                    { id: 'ALERTS', label: '🎯 Active Alerts' },
-                    { id: 'HIGH_OBI', label: '🔥 High OBI (≥30%)' },
-                    { id: 'WALLS', label: '🛡️ Walls Active' },
-                  ].map((tab) => (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      onClick={() => setRadarSegment(tab.id)}
-                      className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-bold transition-all cursor-pointer ${
-                        radarSegment === tab.id
-                          ? 'bg-panel text-gold shadow-xs border border-border'
-                          : 'text-muted hover:text-text'
-                      }`}
-                    >
-                      {tab.label}
-                    </button>
-                  ))}
+                  {(() => {
+                    const isEvening = tbt.session_state === 'STANDBY_EOD' || ['COMMODITY_CDS', 'OFF_MARKET'].includes(tbt.current_session)
+                    return [
+                      { id: 'ALL', label: 'All Universe' },
+                      { id: 'COMMODITIES', label: '🛢️ Commodities (MCX)', live: isEvening },
+                      { id: 'CURRENCY', label: '💱 Currency (CDS)' },
+                      { id: 'INDICES', label: isEvening ? '🏛️ Indices (EOD)' : '🏛️ Indices' },
+                      { id: 'STOCKS', label: isEvening ? '⚡ F&O Stocks (EOD)' : '⚡ F&O Stocks' },
+                      { id: 'ALERTS', label: '🎯 Active Alerts' },
+                      { id: 'HIGH_OBI', label: '🔥 High OBI (≥30%)' },
+                      { id: 'WALLS', label: '🛡️ Walls Active' },
+                    ].map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setRadarSegment(tab.id)}
+                        className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                          radarSegment === tab.id
+                            ? 'bg-panel text-gold shadow-xs border border-border'
+                            : 'text-muted hover:text-text'
+                        }`}
+                      >
+                        <span>{tab.label}</span>
+                        {tab.live && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald animate-pulse" title="Active Evening Session" />
+                        )}
+                      </button>
+                    ))
+                  })()}
                 </div>
               </div>
 
@@ -1971,6 +2032,16 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                                       ? '⚡ F&O'
                                       : item.segment || 'EQUITY'}
                                   </span>
+                                  {item.is_market_open === false && (
+                                    <span className="text-[8px] px-1 py-px rounded font-bold uppercase bg-muted/20 text-muted border border-muted/30">
+                                      EOD
+                                    </span>
+                                  )}
+                                  {item.is_market_open === true && item.segment?.includes('COMMODITY') && (
+                                    <span className="text-[8px] px-1 py-px rounded font-bold uppercase bg-emerald/20 text-emerald border border-emerald/40 animate-pulse">
+                                      ● LIVE
+                                    </span>
+                                  )}
                                   <span>{item.provenance || 'L2'}</span>
                                 </div>
                               </td>

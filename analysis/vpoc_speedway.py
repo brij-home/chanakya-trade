@@ -243,11 +243,9 @@ def check_alert_speedway(
     # If df not provided and no candidate VPOCs, attempt to query history feed
     if df is None and not cand_vpocs:
         try:
-            from market.history import get_history_feed
+            from market.history import get_ohlcv
 
-            hist = get_history_feed()
-            if hist:
-                df = hist.get_candles(clean_sym, interval="D", lookback=30)
+            df = get_ohlcv(clean_sym, interval="day", days=30)
         except Exception as e_feed:
             logger.debug(f"[check_alert_speedway] History fetch skipped for {clean_sym}: {e_feed}")
 
