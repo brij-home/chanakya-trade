@@ -631,7 +631,8 @@ class WsSubscriptionManager:
 
                     if ws_manager.connected:
                         client = ws_manager
-                except Exception:
+                except Exception as e_ws_lookup:
+                    logger.debug(f"[WsSubManager] ws_manager lookup error: {e_ws_lookup}")
                     client = None
 
             if client and hasattr(client, "unsubscribe"):
