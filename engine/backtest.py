@@ -1221,11 +1221,13 @@ class MultiBacktester:
         exchange: str = "NSE",
         period: str = "1y",
         capital: float = 100000,
+        max_adverse_pct: float = 5.0,
     ) -> None:
         self.symbols = [s.upper() for s in symbols]
         self.exchange = exchange.upper()
         self.period = period
         self.initial_capital = capital
+        self.max_adverse_pct = max_adverse_pct
         self._data: dict[str, pd.DataFrame] = {}
 
     def _load_data(self) -> dict[str, pd.DataFrame]:
@@ -1347,6 +1349,29 @@ class MultiBacktester:
                         if new_sig == 0 or (new_sig != 0 and new_sig != positions[sym]):
                             should_exit = True
                             break
+
+                # Cointegration Ruin Circuit Breaker:
+                # If cointegration permanently breaks and pairs drift apart without reverting,
+                # exit immediately once combined mark-to-market drawdown exceeds max_adverse_pct.
+                if not should_exit and getattr(self, "max_adverse_pct", 0.0) > 0:
+                    unrealized_pct_sum = 0.0
+                    active_cnt = 0
+                    for sym in self.symbols:
+                        if positions[sym] != 0:
+                            ep = entry_prices[sym]
+                            xp = prices[sym]
+                            if ep > 0:
+                                leg_pct = (
+                                    ((xp - ep) / ep * 100)
+                                    if positions[sym] == 1
+                                    else ((ep - xp) / ep * 100)
+                                )
+                                unrealized_pct_sum += leg_pct
+                                active_cnt += 1
+                    if active_cnt > 0:
+                        avg_dd = unrealized_pct_sum / active_cnt
+                        if avg_dd <= -self.max_adverse_pct:
+                            should_exit = True
 
                 if should_exit:
                     # Close all positions

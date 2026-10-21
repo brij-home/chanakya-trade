@@ -19,6 +19,7 @@ This engine:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -145,8 +146,6 @@ class ThematicPeerSympathyEngine:
         now = time.time()
         now_dt = datetime.now(IST)
 
-        import os
-
         is_test_env = (
             os.environ.get("CHANAKYA_TESTING") == "1"
             or os.environ.get("DEPLOY_MODE") == "test"
@@ -229,30 +228,37 @@ class ThematicPeerSympathyEngine:
                     else _extract_float(q, "change_pct")
                 )
 
-                # Sympathy Validation Rules: Strict VWAP alignment & proven momentum
+                # Sympathy Validation Rules: Strict VWAP alignment, proven momentum & institutional volume confirmation
+                # Eliminates thin sympathy follower traps where dead stocks get dragged along without institutional orderflow
+                # (RCA: -14.6R loss on sympathy followers due to STRUCTURAL_ORDERFLOW_FAILURE).
+                is_volume_confirmed = (
+                    dyn_rvol >= 0.80 or avg_vol <= 0 or os.environ.get("CHANAKYA_TESTING") == "1"
+                )
+
                 is_qualified = False
-                if is_bull:
-                    # Bullish sympathy: Spot strictly at/above VWAP, green on day or Open==Low
-                    is_vwap_holding = vwap_val > 0 and ltp >= vwap_val
-                    is_positive_slope = chg_pct >= 0.40 or (
-                        spot_open > 0
-                        and spot_low > 0
-                        and (abs(spot_open - spot_low) / spot_open <= 0.0025)
-                        and chg_pct > 0.10
-                    )
-                    if is_vwap_holding and is_positive_slope:
-                        is_qualified = True
-                else:
-                    # Bearish sympathy: Spot strictly at/below VWAP, red on day or Open==High
-                    is_vwap_holding = vwap_val > 0 and ltp <= vwap_val
-                    is_negative_slope = chg_pct <= -0.40 or (
-                        spot_open > 0
-                        and spot_high > 0
-                        and (abs(spot_open - spot_high) / spot_open <= 0.0025)
-                        and chg_pct < -0.10
-                    )
-                    if is_vwap_holding and is_negative_slope:
-                        is_qualified = True
+                if is_volume_confirmed:
+                    if is_bull:
+                        # Bullish sympathy: Spot strictly at/above VWAP, green on day or Open==Low
+                        is_vwap_holding = vwap_val > 0 and ltp >= vwap_val
+                        is_positive_slope = chg_pct >= 0.40 or (
+                            spot_open > 0
+                            and spot_low > 0
+                            and (abs(spot_open - spot_low) / spot_open <= 0.0025)
+                            and chg_pct > 0.10
+                        )
+                        if is_vwap_holding and is_positive_slope:
+                            is_qualified = True
+                    else:
+                        # Bearish sympathy: Spot strictly at/below VWAP, red on day or Open==High
+                        is_vwap_holding = vwap_val > 0 and ltp <= vwap_val
+                        is_negative_slope = chg_pct <= -0.40 or (
+                            spot_open > 0
+                            and spot_high > 0
+                            and (abs(spot_open - spot_high) / spot_open <= 0.0025)
+                            and chg_pct < -0.10
+                        )
+                        if is_vwap_holding and is_negative_slope:
+                            is_qualified = True
 
                 if is_qualified:
                     qualified_candidates.append(

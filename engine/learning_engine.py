@@ -582,6 +582,20 @@ class PatternLearningEngine:
         )
         lockout = self._symbol_lockouts.get(clean_sym)
         if not lockout:
+            # Check if underlying index/equity is locked out if clean_sym is a derivative contract
+            underlying = None
+            for idx in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX", "NIFTY", "SENSEX"):
+                if clean_sym.startswith(idx) and len(clean_sym) > len(idx):
+                    underlying = idx
+                    break
+            if not underlying:
+                m = re.match(r"^([A-Z]+)(?:\d{2}[A-Z]{3}|\d{5})", clean_sym)
+                if m:
+                    underlying = m.group(1)
+            if underlying and underlying in self._symbol_lockouts:
+                return self.is_symbol_locked_out(
+                    underlying, direction=direction, ltp=None, vwap=None
+                )
             return False, ""
 
         now = time.time()
@@ -616,15 +630,6 @@ class PatternLearningEngine:
                         f"[PatternLearningEngine] ⚡ Structural Reclaim detected for {clean_sym}! "
                         f"LTP ₹{ltp:,.2f} >= Reclaim Level ₹{reclaim_lvl:,.2f} & VWAP. "
                         f"Lockout automatically cleared to capture genuine explosive reversal."
-                    )
-                    self._symbol_lockouts.pop(clean_sym, None)
-                    return False, ""
-            elif lock_dir == "BEARISH" and ltp <= reclaim_lvl:
-                if vwap is None or ltp <= vwap:
-                    logger.info(
-                        f"[PatternLearningEngine] ⚡ Bearish Structural Reclaim detected for {clean_sym}! "
-                        f"LTP ₹{ltp:,.2f} <= Reclaim Level ₹{reclaim_lvl:,.2f}. "
-                        f"Lockout automatically cleared."
                     )
                     self._symbol_lockouts.pop(clean_sym, None)
                     return False, ""
@@ -1249,6 +1254,25 @@ class PatternLearningEngine:
             reason=f"{primary_reason.replace('_', ' ').title()}",
             reclaim_level=reclaim_level,
         )
+
+        underlying_clean = None
+        for idx in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX", "NIFTY", "SENSEX"):
+            if clean_sym.startswith(idx) and len(clean_sym) > len(idx):
+                underlying_clean = idx
+                break
+        if not underlying_clean:
+            m = re.match(r"^([A-Z]+)(?:\d{2}[A-Z]{3}|\d{5})", clean_sym)
+            if m:
+                underlying_clean = m.group(1)
+
+        if underlying_clean and underlying_clean != clean_sym:
+            self.set_symbol_lockout(
+                underlying_clean,
+                direction=direction,
+                duration_seconds=5400.0,
+                reason=f"{primary_reason.replace('_', ' ').title()} (Option Derivative Trap)",
+                reclaim_level=0.0,
+            )
 
         # Record session trap pivot level to prevent repeat fakeout entries today
         trap_pivot = entry_price if entry_price > 0 else (alert_trig if not is_opt else 0.0)

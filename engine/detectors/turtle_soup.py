@@ -193,6 +193,29 @@ def detect_turtle_soup_sweep(
 
     rr_ratio = round(abs(target_1 - entry_price) / risk, 2)
 
+    # SMT Inter-Market Divergence Confirmation for Benchmark Indices
+    smt_confirmed = False
+    smt_sibling = None
+    if is_index_symbol(clean_sym):
+        try:
+            from engine.smt_divergence import evaluate_smt_divergence
+
+            smt_eval = evaluate_smt_divergence(
+                primary_symbol=clean_sym,
+                direction=direction,
+                primary_spot=curr_ltp,
+                primary_day_high=prior_high,
+                primary_day_low=prior_low,
+                primary_vwap=vwap,
+            )
+            if smt_eval and smt_eval.has_divergence:
+                smt_confirmed = True
+                smt_sibling = smt_eval.sibling_symbol
+                headline += f" | ⚡ SMT Confirmed ({smt_sibling})"
+                summary += f" SMT inter-market divergence confirmed against {smt_sibling} ({smt_eval.rationale})."
+        except Exception as e_smt:
+            logger.debug(f"[TurtleSoup] SMT divergence check skipped: {e_smt}")
+
     # Option Contract Resolution for Index & F&O
     contract_symbol = None
     strike = None
@@ -276,7 +299,7 @@ def detect_turtle_soup_sweep(
         strike=strike,
         option_type=option_type,
         contract_symbol=contract_symbol,
-        confidence=82,
+        confidence=89 if smt_confirmed else 82,
         time_horizon=horizon_val,
         eta_label=eta_desc,
         setup_style=style_val,
@@ -291,6 +314,8 @@ def detect_turtle_soup_sweep(
             "rvol": rvol,
             "rr_ratio": rr_ratio,
             "vwap": vwap,
+            "smt_confirmed": smt_confirmed,
+            "smt_sibling": smt_sibling,
         },
     )
 
