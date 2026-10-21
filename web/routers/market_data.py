@@ -1547,3 +1547,34 @@ async def get_strategic_horizon_endpoint(symbol: Optional[str] = "NIFTY"):
         "status": "ok",
         "data": report.to_dict(),
     }
+
+
+@router.get("/api/backtest/smt-benchmark", tags=["Market Intelligence", "Backtesting"])
+async def get_smt_benchmark_endpoint(
+    symbol: Optional[str] = "NIFTY",
+    sibling: Optional[str] = None,
+    period: Optional[str] = "1y",
+    capital: float = 100000.0,
+):
+    """
+    Returns quantitative backtest benchmark comparing SMT Sweep against
+    baseline strategies (Turtle Soup, Donchian, EMA Cross, RSI, Buy & Hold).
+    Includes post-October 2024 statutory charges, dual win-rates, and risk-adjusted metrics.
+    """
+    from engine.smt_benchmark import run_smt_benchmark
+
+    clean_symbol = (symbol or "NIFTY").upper().strip()
+    clean_sibling = sibling.upper().strip() if sibling else None
+    period_str = (period or "1y").lower().strip()
+
+    benchmark = await asyncio.to_thread(
+        run_smt_benchmark,
+        symbol=clean_symbol,
+        sibling_symbol=clean_sibling,
+        period=period_str,
+        capital=max(10000.0, capital),
+    )
+    return {
+        "status": "ok",
+        "data": benchmark.to_dict(),
+    }
