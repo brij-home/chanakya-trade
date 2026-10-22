@@ -951,6 +951,27 @@ class FyersTbtManager:
 
         self._initialized = True
 
+    def reset_for_testing(self) -> None:
+        """Hermetically reset all internal dynamic slots, caches, and cooldowns for clean testing."""
+        with self._slots_lock:
+            self._in_flight.clear()
+            self._core_grid.clear()
+            self._todays_expiry.clear()
+            self._scout.clear()
+            self._sector_scouts.clear()
+            self._last_sector_scouts_refresh = 0.0
+            self._primary_focus_index = None
+            self._last_atm_strikes.clear()
+            self._evicted_cooldowns.clear()
+            self._slot_allocated_at.clear()
+            self._wall_history.clear()
+            self._subscribed.clear()
+            self._channel_symbols = {"1": set(), "2": set(), "3": set()}
+            self._current_session = "AUTO"
+        with self._depth_lock:
+            self._depth_cache.clear()
+        self._connected = False
+
     @property
     def is_connected(self) -> bool:
         if self._workers:

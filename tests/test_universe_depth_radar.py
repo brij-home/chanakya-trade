@@ -277,10 +277,12 @@ def test_fno_stock_futures_tbt_slot_allocation_and_cached_depth(monkeypatch):
     from market.order_book import get_depth_book, analyze_symbol_order_book
 
     tbt = FyersTbtManager()
+    tbt.reset_for_testing()
     tbt.refresh_grid("EQUITY_NFO")
     # Query Depth Radar for STOCKS to dynamically subscribe top F&O stocks to TBT scout pool
-    from market.universe_depth_radar import get_universe_depth_radar
+    from market.universe_depth_radar import get_universe_depth_radar, clear_radar_cache
 
+    clear_radar_cache()
     get_universe_depth_radar(segment="STOCKS", limit=15, allow_rest_fallback=False)
     desired = tbt.compute_desired_subscriptions()
 

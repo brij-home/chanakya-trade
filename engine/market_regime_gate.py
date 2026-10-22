@@ -290,6 +290,14 @@ def get_cached_regime() -> Optional[RegimeSnapshot]:
         return _cached_result
 
 
+def clear_cached_regime() -> None:
+    """Clear cached market regime snapshot for hermetic test isolation."""
+    global _cached_result, _cached_at
+    with _cache_lock:
+        _cached_result = None
+        _cached_at = 0.0
+
+
 def build_spread_recommendation(
     underlying: str,
     spot: float,

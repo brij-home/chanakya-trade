@@ -90,6 +90,12 @@ _RADAR_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _RADAR_CACHE_TTL = 10.0  # 10.0s in-memory coalescing cache window (zero REST during UI polling)
 
 
+def clear_radar_cache() -> None:
+    """Hermetically purge the in-memory Universe Depth Radar cache for test isolation."""
+    with _RADAR_CACHE_LOCK:
+        _RADAR_CACHE.clear()
+
+
 def _get_active_commodity_symbols() -> list[str]:
     """Retrieve active near-month contracts for core MCX commodities."""
     try:

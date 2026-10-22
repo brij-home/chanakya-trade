@@ -16,19 +16,12 @@ from market.fyers_tbt_manager import FyersTbtManager, MAX_TBT_SYMBOLS
 @pytest.fixture
 def tbt_mgr():
     mgr = FyersTbtManager()
+    mgr.reset_for_testing()
     with mgr._slots_lock:
-        mgr._in_flight.clear()
         mgr._core_grid = ["NSE:NIFTY26OCTFUT", "NSE:BANKNIFTY26OCTFUT", "NSE:MIDCPNIFTY26OCTFUT"]
-        mgr._todays_expiry.clear()
-        mgr._scout.clear()
-        mgr._sector_scouts.clear()
-        mgr._last_sector_scouts_refresh = 0.0
-        mgr._evicted_cooldowns.clear()
         mgr._current_session = "EQUITY_NFO"
-        mgr._slot_allocated_at.clear()
-        mgr._workers.clear()
-        mgr._subscribed.clear()
-    return mgr
+    yield mgr
+    mgr.reset_for_testing()
 
 
 def test_sector_leaders_resolution_and_caching(tbt_mgr):
