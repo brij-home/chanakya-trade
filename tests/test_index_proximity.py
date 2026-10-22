@@ -80,17 +80,18 @@ def test_camarilla_h4_proximity_call():
     prev_day_low = 24850.0
     prev_close = 25050.0
     # Range = 150. H4 = 25050 + 150 * 1.1 / 2 = 25132.5
-    # Let spot = 25115.0 -> distance to H4 is 17.5 pts (0.07%), well within 0.35%
-    spot = 25115.0
-    day_high = 25120.0
-    day_low = 25060.0
-    vwap = 25090.0
+    # Let spot = 25077.5 -> distance to H4 is 55.0 pts (0.218%), within (0.15%, 0.35%] staging envelope
+    spot = 25077.5
+    day_high = 25085.0
+    day_low = 25020.0
+    vwap = 25050.0
 
     chain = [
-        MockContract(25100.0, "CE", 125.0, volume=30000, oi=18000, pchange=6.5),
-        MockContract(25150.0, "CE", 95.0, volume=22000, oi=14000, pchange=5.0),
+        MockContract(25050.0, "CE", 125.0, volume=30000, oi=18000, pchange=6.5),
+        MockContract(25100.0, "CE", 95.0, volume=22000, oi=14000, pchange=5.0),
+        MockContract(25250.0, "CE", 30.0, volume=35000, oi=35000, pchange=2.0),
     ]
-    ohlcv = _make_dummy_5m_ohlcv(bars=12, base_price=25080.0, trend="UP")
+    ohlcv = _make_dummy_5m_ohlcv(bars=12, base_price=25040.0, trend="UP")
     ref_t = datetime(2026, 10, 19, 9, 45, tzinfo=IST)
 
     alerts = detect_index_call_setup(
@@ -136,8 +137,9 @@ def test_day_high_proximity_call():
     vwap = 25060.0
 
     chain = [
+        MockContract(25050.0, "CE", 145.0, volume=28000, oi=12000, pchange=5.5),
         MockContract(25100.0, "CE", 115.0, volume=28000, oi=16000, pchange=4.5),
-        MockContract(25150.0, "CE", 85.0, volume=20000, oi=12000, pchange=3.0),
+        MockContract(25250.0, "CE", 40.0, volume=35000, oi=35000, pchange=2.0),
     ]
     ohlcv = _make_dummy_5m_ohlcv(bars=12, base_price=25050.0, trend="UP")
     ref_t = datetime(2026, 10, 19, 10, 5, tzinfo=IST)
