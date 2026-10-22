@@ -243,7 +243,27 @@ def detect_index_put_setup(
     # ── Upside Velocity & Positive ROC Acceleration Veto Gate ───
     # When price velocity is actively accelerating upwards on 5m bars (d²P/dt² > 0 and 3-bar ROC positive),
     # buying naked puts fights institutional buying thrust / short covering.
-    if roc_metric.is_accelerating_up and roc_metric.roc_3bar >= 0.10:
+    # Exception: Do not veto if the current 5m bar is an institutional distribution shooting star / supply rejection (close < open and close in bottom 40% of bar),
+    # which is the quintessential footprint of DISTRIBUTION_TOP.
+    has_distribution_star = False
+    if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+        try:
+            col_c = "close" if "close" in active_ohlcv.columns else "Close"
+            col_o = "open" if "open" in active_ohlcv.columns else "Open"
+            col_h = "high" if "high" in active_ohlcv.columns else "High"
+            col_l = "low" if "low" in active_ohlcv.columns else "Low"
+            last_bar = active_ohlcv.iloc[-1]
+            lb_c = float(last_bar[col_c])
+            lb_o = float(last_bar[col_o])
+            lb_h = float(last_bar[col_h])
+            lb_l = float(last_bar[col_l])
+            lb_rng = max(0.1, lb_h - lb_l)
+            if lb_c < lb_o and (lb_c - lb_l) / lb_rng <= 0.40:
+                has_distribution_star = True
+        except Exception as e_star:
+            logger.debug(f"[IndexPutSetup] Distribution star check bypassed: {e_star}")
+
+    if roc_metric.is_accelerating_up and roc_metric.roc_3bar >= 0.10 and not has_distribution_star:
         logger.info(
             f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Upside ROC acceleration active "
             f"({roc_metric.summary}). Prohibiting put setups fighting upward momentum."
@@ -769,7 +789,7 @@ def detect_index_put_setup(
         or (
             _cam_l4_ref > 0
             and spot
-            and 0.15 < (_cam_l4_ref - spot) / max(1.0, spot) * 100.0 <= 0.35
+            and 0.15 < (spot - _cam_l4_ref) / max(1.0, spot) * 100.0 <= 0.35
         )
     )
     if prev_day_low and prev_day_low > 0:

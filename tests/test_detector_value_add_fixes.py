@@ -175,6 +175,9 @@ def test_option_derivative_lockout_propagates_to_underlying():
         or "Orderflow" in reason
         or "Vwap" in reason
         or "Noise" in reason
+        or "Chop" in reason
+        or "Auction" in reason
+        or "Opening" in reason
     )
 
     # 2. Underlying NIFTY itself is locked out

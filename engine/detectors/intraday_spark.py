@@ -326,6 +326,11 @@ def detect_intraday_mover_sparks(
                 t3_price = max(
                     tp.target_3, round(max(ltp + 5.5 * risk_pts, t2_price + 2.0 * risk_pts), 2)
                 )
+                if seg != "INDEX":
+                    max_circuit_t = round(ltp * 1.18, 2)
+                    t1_price = min(t1_price, max_circuit_t)
+                    t2_price = min(t2_price, max_circuit_t)
+                    t3_price = min(t3_price, max_circuit_t)
                 rr_str = f"1:{round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
                 tp_dict["invalidation_stop"] = sl_price
@@ -342,6 +347,11 @@ def detect_intraday_mover_sparks(
                 t1_price = round(ltp + 2.0 * risk_pts, 2)
                 t2_price = round(ltp + 3.5 * risk_pts, 2)
                 t3_price = round(ltp + 5.5 * risk_pts, 2)
+                if seg != "INDEX":
+                    max_circuit_t = round(ltp * 1.18, 2)
+                    t1_price = min(t1_price, max_circuit_t)
+                    t2_price = min(t2_price, max_circuit_t)
+                    t3_price = min(t3_price, max_circuit_t)
                 rr_str = f"1:{round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)}"
                 tp_dict = None
 
@@ -472,6 +482,11 @@ def detect_intraday_mover_sparks(
                     tp.target_3,
                     round(max(0.05, min(ltp - 5.5 * risk_pts, t2_price - 2.0 * risk_pts)), 2),
                 )
+                if seg != "INDEX":
+                    min_circuit_t = round(ltp * 0.82, 2)
+                    t1_price = max(t1_price, min_circuit_t)
+                    t2_price = max(t2_price, min_circuit_t)
+                    t3_price = max(t3_price, min_circuit_t)
                 rr_str = f"1:{round(abs(ltp - t1_price) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
                 tp_dict["invalidation_stop"] = sl_price
@@ -488,6 +503,11 @@ def detect_intraday_mover_sparks(
                 t1_price = round(max(0.05, ltp - 2.0 * risk_pts), 2)
                 t2_price = round(max(0.05, ltp - 3.5 * risk_pts), 2)
                 t3_price = round(max(0.05, ltp - 5.5 * risk_pts), 2)
+                if seg != "INDEX":
+                    min_circuit_t = round(ltp * 0.82, 2)
+                    t1_price = max(t1_price, min_circuit_t)
+                    t2_price = max(t2_price, min_circuit_t)
+                    t3_price = max(t3_price, min_circuit_t)
                 rr_str = f"1:{round(abs(ltp - t1_price) / max(0.01, risk_pts), 1)}"
                 tp_dict = None
 

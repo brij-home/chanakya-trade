@@ -252,7 +252,31 @@ def detect_index_call_setup(
     # ── Downside Velocity & Negative ROC Acceleration Veto Gate ───
     # When price velocity is actively accelerating downwards on 5m bars (d²P/dt² < 0 and 3-bar ROC negative),
     # buying naked calls is an institutional trap catching a falling knife.
-    if roc_metric.is_accelerating_down and roc_metric.roc_3bar <= -0.10:
+    # Exception: Do not veto if the current 5m bar is an institutional absorption / demand hammer (close > open and close in top 60% of bar),
+    # which is the quintessential footprint of ACCUMULATION_BOTTOM / CAPITULATION_REVERSAL.
+    has_absorption_hammer = False
+    if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+        try:
+            col_c = "close" if "close" in active_ohlcv.columns else "Close"
+            col_o = "open" if "open" in active_ohlcv.columns else "Open"
+            col_h = "high" if "high" in active_ohlcv.columns else "High"
+            col_l = "low" if "low" in active_ohlcv.columns else "Low"
+            last_bar = active_ohlcv.iloc[-1]
+            lb_c = float(last_bar[col_c])
+            lb_o = float(last_bar[col_o])
+            lb_h = float(last_bar[col_h])
+            lb_l = float(last_bar[col_l])
+            lb_rng = max(0.1, lb_h - lb_l)
+            if lb_c > lb_o and (lb_c - lb_l) / lb_rng >= 0.60:
+                has_absorption_hammer = True
+        except Exception as e_hammer:
+            logger.debug(f"[IndexCallSetup] Absorption hammer check bypassed: {e_hammer}")
+
+    if (
+        roc_metric.is_accelerating_down
+        and roc_metric.roc_3bar <= -0.10
+        and not has_absorption_hammer
+    ):
         logger.info(
             f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Downside ROC acceleration active "
             f"({roc_metric.summary}). Prohibiting call setups fighting downward momentum."
@@ -822,30 +846,14 @@ def detect_index_call_setup(
 
     # ── Severe Intraday Rejection from Day High Guard ─────────────
     # If spot has retreated >= 0.35% from Day High and is trading BELOW session VWAP,
-    # the market is in intraday distribution/markdown. Suppress all CE setups (preventing bull traps),
-    # UNLESS spot is actively testing key session support / demand levels or printing a V-reversal.
-    _is_at_support = bool(
-        (day_low and day_low > 0 and (spot - day_low) / max(1.0, spot) * 100.0 <= 0.45)
-        or (prev_day_low and prev_day_low > 0 and abs(spot - prev_day_low) / spot * 100.0 <= 0.45)
-        or (
-            prev_week_low and prev_week_low > 0 and abs(spot - prev_week_low) / spot * 100.0 <= 0.45
-        )
-        or _is_v_reversal_escape
-    )
-    if (
-        not _is_at_support
-        and day_high
+    # the market is in intraday distribution/markdown. Enforce structural reversal signal requirement downstream.
+    _is_severe_dh_rejection = bool(
+        day_high
         and day_high > 0
         and effective_vwap > 0
         and spot < effective_vwap
         and ((day_high - spot) / day_high * 100.0) >= 0.35
-    ):
-        logger.info(
-            f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Severe Rejection from Day High "
-            f"(-{((day_high - spot) / day_high * 100.0):.2f}% from high ₹{day_high:,.1f}) below VWAP ₹{effective_vwap:,.1f}. "
-            f"Bearish distribution trap active."
-        )
-        return []
+    )
 
     # ── VWAP Overextension & Climax Filter ───────────────────────
     # Default: Extended > 0.65% above VWAP = climax exhaustion, skip.
@@ -1962,6 +1970,28 @@ def detect_index_call_setup(
 
     if not signals:
         return []
+
+    # Severe Rejection from Day High: If market dumped >= 0.35% from Day High and trades below VWAP,
+    # require a verified structural reversal setup; suppress trend-following or pure OI setups.
+    if _is_severe_dh_rejection:
+        _REVERSAL_CALL_SIGNALS = {
+            "INTRADAY_CAPITULATION_REVERSAL",
+            "DAY_LOW_DEMAND_BOUNCE",
+            "FAILED_DAY_LOW_BREAKDOWN",
+            "PDL_DEMAND_REJECTION",
+            "PWL_DEMAND_REJECTION",
+            "SMT_BULLISH_DIVERGENCE",
+            "DOUBLE_BOTTOM_BREAKOUT",
+            "ACCUMULATION_BOTTOM",
+            "V_BOTTOM",
+        }
+        if not any(s in _REVERSAL_CALL_SIGNALS for s in signals):
+            logger.info(
+                f"[IndexCallSetup] Suppressed CE setup on {clean_sym} ({', '.join(signals)}): "
+                f"Severe Rejection from Day High (-{((day_high - spot) / day_high * 100.0):.2f}% from high ₹{day_high:,.1f}) "
+                f"below VWAP ₹{effective_vwap:,.1f} without structural price action reversal."
+            )
+            return []
 
     # ── 5-Minute Candle Rejection / Topping Tail Filter ───────────
     breakout_signals = {

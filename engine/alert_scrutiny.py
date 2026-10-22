@@ -222,7 +222,16 @@ class AlertScrutinyAuditor:
             "INDEX_PUT_SETUP",
             "INDEX_CALL_SETUP",
         ):
-            is_option_premium_levels = True
+            if (
+                atype == "OPTIONS_MOMENTUM"
+                and not is_index_sym
+                and ltp >= 500.0
+                and not getattr(alert, "contract_symbol", None)
+                and not getattr(alert, "strike", None)
+            ):
+                is_option_premium_levels = False
+            else:
+                is_option_premium_levels = True
         elif atype in ("GAMMA_BLAST",) and getattr(alert, "option_type", None):
             is_option_premium_levels = True
         elif atype in ("SQUEEZE_BREAKOUT", "SQUEEZE_BREAKDOWN") and getattr(

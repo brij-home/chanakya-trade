@@ -1159,14 +1159,6 @@ class AutoAlertEngine:
                         alert.actionable_plan["runner_target"] = f"₹{opt_t3:,.2f}"
                     alert.actionable_plan["no_chase_boundary"] = f"₹{opt_no_chase:,.2f}"
 
-                    # Update top-level alert fields for all downstream consumers
-                    alert.ltp = opt_entry
-                    alert.trigger_level = opt_entry
-                    if opt_sl > 0:
-                        alert.stop_loss = opt_sl
-                    if opt_t1 > 0:
-                        alert.target_level = opt_t1
-                    alert.no_chase_boundary = opt_no_chase
                     alert.option_premium = opt_entry
         except Exception as e_fno:
             logger.debug(f"[AutoAlertEngine] F&O contract enrichment non-fatal exception: {e_fno}")
@@ -4429,7 +4421,7 @@ class AutoAlertEngine:
                     logger.warning(
                         f"[AutoAlertEngine] Tier-2 AI Scrutiny VETOED active alert {alert.alert_id} for {alert.symbol}: {veto_reason}"
                     )
-                    self.disqualify_alert_by_id(
+                    self.invalidate_alert_by_id(
                         alert.alert_id,
                         reason=f"Tier-2 Scrutiny Veto: {veto_reason}",
                     )

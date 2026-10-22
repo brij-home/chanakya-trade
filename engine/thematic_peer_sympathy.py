@@ -270,9 +270,9 @@ class ThematicPeerSympathyEngine:
                         }
                     )
 
-            # Anti-Shotgunning: Pick top 1 strongest peer by absolute momentum
+            # Anti-Shotgunning: Pick top 2 strongest peers by absolute momentum
             qualified_candidates.sort(key=lambda c: abs(c["chg_pct"]), reverse=True)
-            top_peers = qualified_candidates[:1]
+            top_peers = qualified_candidates[:2]
 
             for cand in top_peers:
                 peer = cand["peer"]
@@ -506,22 +506,12 @@ class ThematicPeerSympathyEngine:
                 )
 
                 # Enforce Scale Separation Invariant (Invariant 14):
-                # When F&O option is resolved, denominate execution prices in Option Premium Points
-                # while preserving spot anchor levels in underlying_spot and underlying_sl.
+                # When F&O option is resolved, preserve spot anchor levels in top-level fields
+                # while populating option_premium and actionable_plan with contract details.
                 opt_entry = (
                     resolved_opt.entry_premium
                     if (resolved_opt and resolved_opt.entry_premium > 0)
-                    else ltp
-                )
-                opt_sl = (
-                    resolved_opt.sl_premium
-                    if (resolved_opt and resolved_opt.sl_premium > 0)
-                    else sl_price
-                )
-                opt_t1 = (
-                    resolved_opt.t1_premium
-                    if (resolved_opt and resolved_opt.t1_premium > 0)
-                    else t1_price
+                    else None
                 )
 
                 peer_alert = AutoAlert(
@@ -534,10 +524,10 @@ class ThematicPeerSympathyEngine:
                     direction=act.direction,
                     headline=headline,
                     summary=summary,
-                    ltp=opt_entry,
-                    trigger_level=opt_entry,
-                    target_level=opt_t1,
-                    stop_loss=opt_sl,
+                    ltp=ltp,
+                    trigger_level=ltp,
+                    target_level=t1_price,
+                    stop_loss=sl_price,
                     confidence=dyn_conf,
                     strike=resolved_opt.strike if resolved_opt else None,
                     option_type=resolved_opt.option_type if resolved_opt else None,

@@ -130,8 +130,8 @@ def test_day_high_proximity_call():
     prev_day_low = 24950.0
     prev_close = 25150.0
     # Range = 300. H4 = 25150 + 300 * 1.1 / 2 = 25315
-    day_high = 25120.0
-    spot = 25095.0  # 25 pts below Day High = 0.10%, within 0.35%
+    day_high = 25150.0
+    spot = 25095.0  # 55 pts below Day High = 0.22%, within (0.15%, 0.35%] staging envelope
     day_low = 25020.0
     vwap = 25060.0
 
@@ -175,17 +175,17 @@ def test_camarilla_l4_proximity_put():
     prev_day_low = 25100.0
     prev_close = 25000.0
     # Range = 150. L4 = 25000 - 150 * 1.1 / 2 = 24917.5
-    # Let spot = 24935.0 -> distance to L4 is 17.5 pts (0.07%), well within 0.35%
-    spot = 24935.0
-    day_high = 25030.0
-    day_low = 24925.0
-    vwap = 24980.0
+    # Let spot = 24972.5 -> distance to L4 is 55.0 pts (0.22%), within (0.15%, 0.35%] staging envelope
+    spot = 24972.5
+    day_high = 25050.0
+    day_low = 24910.0
+    vwap = 24990.0
 
     chain = [
         MockContract(24950.0, "PE", 120.0, volume=32000, oi=20000, pchange=7.0),
         MockContract(24900.0, "PE", 90.0, volume=24000, oi=15000, pchange=5.5),
     ]
-    ohlcv = _make_dummy_5m_ohlcv(bars=12, base_price=24990.0, trend="DOWN")
+    ohlcv = _make_dummy_5m_ohlcv(bars=12, base_price=25000.0, trend="DOWN")
     ref_t = datetime(2026, 10, 19, 9, 45, tzinfo=IST)
 
     alerts = detect_index_put_setup(
@@ -226,13 +226,13 @@ def test_day_low_proximity_put():
     prev_close = 25100.0
     # Range = 400. L4 = 25100 - 400 * 1.1 / 2 = 24880
     day_low = 25000.0
-    spot = 25025.0  # 25 pts above Day Low = 0.10%, within 0.35%
+    spot = 25055.0  # 55 pts above Day Low = 0.22%, within (0.15%, 0.35%] staging envelope
     day_high = 25150.0
     vwap = 25080.0
 
     chain = [
-        MockContract(25000.0, "PE", 110.0, volume=28000, oi=17000, pchange=4.0),
-        MockContract(24950.0, "PE", 80.0, volume=21000, oi=13000, pchange=3.0),
+        MockContract(25050.0, "PE", 110.0, volume=28000, oi=17000, pchange=4.0),
+        MockContract(25000.0, "PE", 80.0, volume=21000, oi=13000, pchange=3.0),
     ]
     ohlcv = _make_dummy_5m_ohlcv(bars=12, base_price=25120.0, trend="DOWN")
     ref_t = datetime(2026, 10, 19, 10, 10, tzinfo=IST)

@@ -1008,6 +1008,16 @@ class AutoAlert:
                     and (self.contract_symbol.endswith("CE") or self.contract_symbol.endswith("PE"))
                 )
             )
+        plan_dict = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
+        is_opt_action = bool(
+            plan_dict.get("instrument_type") == "OPTION"
+            or plan_dict.get("action") in ("BUY_CE", "BUY_PE", "BUY_CALL", "BUY_PUT")
+            or str(plan_dict.get("raw_contract", "")).upper().endswith(("CE", "PE"))
+            or (
+                "PE" in str(plan_dict.get("contract", "")).upper()
+                or "CE" in str(plan_dict.get("contract", "")).upper()
+            )
+        )
         is_long = is_opt or str(self.direction).upper() in ("BULLISH", "LONG", "BUY")
         is_short = not is_opt and str(self.direction).upper() in ("BEARISH", "SHORT", "SELL")
 
@@ -1168,8 +1178,11 @@ class AutoAlert:
 
             # Targets are option premium targets if the alert itself is an option premium level
             # or if the targets specifically came from option premium targets (t1_premium, t2_premium)
+            # or if actionable_plan defines an option contract ticket
             has_opt_target_premiums = bool(
-                is_opt or (opt_plan_dict.get("t1_premium") and opt_plan_dict.get("t2_premium"))
+                is_opt
+                or (opt_plan_dict.get("t1_premium") and opt_plan_dict.get("t2_premium"))
+                or (is_opt_action and (raw_t1 or raw_t2) and (t1_f and t1_f < (ltp * 0.5)))
             )
             if is_short and not has_opt_target_premiums:
                 # Bearish underlying spot / futures trade: targets extend strictly DOWNWARD
