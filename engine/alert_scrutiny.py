@@ -568,14 +568,50 @@ class AlertScrutinyAuditor:
                         or metrics_d.get("choch")
                         or metrics_d.get("mss")
                         or metrics_d.get("v_bottom")
+                        or metrics_d.get("v_top")
                         or any(
-                            sig in (metrics_d.get("signals") or [])
-                            for sig in (
-                                "DAY_HIGH_SUPPLY_REJECTION",
-                                "SUPPLY_REJECTION",
-                                "DAY_LOW_ABSORPTION",
-                                "ABSORPTION",
+                            any(
+                                kw in str(sig).upper()
+                                for kw in (
+                                    "REVERSAL",
+                                    "ABSORPTION",
+                                    "SUPPLY_REJECTION",
+                                    "DEMAND_BOUNCE",
+                                    "CAPITULATION",
+                                    "V_BOTTOM",
+                                    "V_TOP",
+                                    "BEAR_TRAP",
+                                    "BULL_TRAP",
+                                )
+                            )
+                            for sig in (metrics_d.get("signals") or [])
+                        )
+                        or any(
+                            kw in str(getattr(alert, "headline", "")).upper()
+                            for kw in (
                                 "REVERSAL",
+                                "ABSORPTION",
+                                "SUPPLY REJECTION",
+                                "DEMAND BOUNCE",
+                                "CAPITULATION",
+                                "V-BOTTOM",
+                                "V-TOP",
+                                "BEAR TRAP",
+                                "BULL TRAP",
+                            )
+                        )
+                        or any(
+                            kw in str(getattr(alert, "summary", "")).upper()
+                            for kw in (
+                                "REVERSAL",
+                                "ABSORPTION",
+                                "SUPPLY REJECTION",
+                                "DEMAND BOUNCE",
+                                "CAPITULATION",
+                                "V-BOTTOM",
+                                "V-TOP",
+                                "BEAR TRAP",
+                                "BULL TRAP",
                             )
                         )
                     )

@@ -219,6 +219,35 @@ def evaluate_institutional_quality_gate(
                 target2 = None
 
     # ── 2. Check 1: Headroom & Structural R:R Floor (R:R >= 1:2.0 Floor) ───────
+    # If alert has underlying spot/stop/target metrics (e.g. from an enriched option setup),
+    # evaluate underlying structural R:R first to enforce institutional headroom integrity.
+    metrics_d = getattr(alert, "metrics", {}) or {}
+    if isinstance(metrics_d, dict):
+        u_spot = float(metrics_d.get("underlying_spot") or 0.0)
+        u_sl = float(metrics_d.get("underlying_sl") or 0.0)
+        u_t1 = float(metrics_d.get("underlying_target") or 0.0)
+        u_t2_raw = metrics_d.get("underlying_target_2")
+        if u_spot > 0 and u_sl > 0 and (u_t1 > 0 or u_t2_raw):
+            u_stop_dist = abs(u_spot - u_sl)
+            if u_stop_dist > 0:
+                u_t1_dist = abs(u_t1 - u_spot) if u_t1 > 0 else 0.0
+                u_t2_dist = abs(float(u_t2_raw) - u_spot) if u_t2_raw else (u_t1_dist * 2.0)
+                u_rr_t2 = round(u_t2_dist / u_stop_dist, 2)
+                if u_rr_t2 < 1.8:
+                    verdict_metrics["rr_t1"] = round(u_t1_dist / u_stop_dist, 2)
+                    verdict_metrics["rr_t2"] = u_rr_t2
+                    return VetoVerdict(
+                        is_vetoed=True,
+                        veto_reason=f"Poor Structural R:R: Target 2 provides only {u_rr_t2:.1f}:1 R:R (< 1.8:1 floor) against Stop risk {u_stop_dist:,.1f} pts.",
+                        execution_mandate="VETOED",
+                        conviction_tier="REJECTED",
+                        metrics=verdict_metrics,
+                        coaching_notes=[
+                            "Overhead resistance is too close relative to required stop distance.",
+                            "Skip setup or restructure as defined-risk credit spread.",
+                        ],
+                    )
+
     if entry and stop and target1 and entry > 0 and stop > 0 and target1 > 0:
         stop_dist = abs(entry - stop)
         t1_dist = abs(target1 - entry)

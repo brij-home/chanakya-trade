@@ -822,9 +822,19 @@ def detect_index_call_setup(
 
     # ── Severe Intraday Rejection from Day High Guard ─────────────
     # If spot has retreated >= 0.35% from Day High and is trading BELOW session VWAP,
-    # the market is in intraday distribution/markdown. Suppress all CE setups (preventing bull traps).
+    # the market is in intraday distribution/markdown. Suppress all CE setups (preventing bull traps),
+    # UNLESS spot is actively testing key session support / demand levels or printing a V-reversal.
+    _is_at_support = bool(
+        (day_low and day_low > 0 and (spot - day_low) / max(1.0, spot) * 100.0 <= 0.45)
+        or (prev_day_low and prev_day_low > 0 and abs(spot - prev_day_low) / spot * 100.0 <= 0.45)
+        or (
+            prev_week_low and prev_week_low > 0 and abs(spot - prev_week_low) / spot * 100.0 <= 0.45
+        )
+        or _is_v_reversal_escape
+    )
     if (
-        day_high
+        not _is_at_support
+        and day_high
         and day_high > 0
         and effective_vwap > 0
         and spot < effective_vwap

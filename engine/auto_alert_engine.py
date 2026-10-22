@@ -1048,6 +1048,17 @@ class AutoAlertEngine:
                     alert.metrics["underlying_sl"] = underlying_sl
                 if underlying_target:
                     alert.metrics["underlying_target"] = underlying_target
+                if isinstance(alert.actionable_plan, dict) and "target_2" in alert.actionable_plan:
+                    try:
+                        import re
+
+                        _m = re.findall(
+                            r"[\d.]+", str(alert.actionable_plan["target_2"]).replace(",", "")
+                        )
+                        if _m:
+                            alert.metrics["underlying_target_2"] = float(_m[0])
+                    except Exception as e_t2:
+                        logger.debug(f"[AutoAlertEngine] Error parsing underlying_target_2: {e_t2}")
 
                 if not isinstance(alert.actionable_plan, dict):
                     alert.actionable_plan = {}
@@ -3322,27 +3333,32 @@ class AutoAlertEngine:
                             )
                         return True
 
-                    active_diff_detector = next(
-                        (
-                            a
-                            for a in self._alerts
-                            if a.symbol.replace("NSE:", "")
-                            .replace("BSE:", "")
-                            .replace("MCX:", "")
-                            .replace("NFO:", "")
-                            .strip()
-                            .upper()
-                            == clean_target
-                            and a.direction == alert.direction
-                            and a.alert_type != alert.alert_type
-                            and a.is_active
-                            and not a.is_invalidated
-                            and _is_recent_unbanked_trade(a)
-                            and a.alert_id != alert.alert_id
-                            and _is_same_session(a, alert_dt_date)
-                        ),
-                        None,
-                    )
+                    active_diff_detector = None
+                    if (
+                        clean_target not in _INDEX_SYMS_SET
+                        and alert.alert_type != "AFTERNOON_THRUST"
+                    ):
+                        active_diff_detector = next(
+                            (
+                                a
+                                for a in self._alerts
+                                if a.symbol.replace("NSE:", "")
+                                .replace("BSE:", "")
+                                .replace("MCX:", "")
+                                .replace("NFO:", "")
+                                .strip()
+                                .upper()
+                                == clean_target
+                                and a.direction == alert.direction
+                                and a.alert_type != alert.alert_type
+                                and a.is_active
+                                and not a.is_invalidated
+                                and _is_recent_unbanked_trade(a)
+                                and a.alert_id != alert.alert_id
+                                and _is_same_session(a, alert_dt_date)
+                            ),
+                            None,
+                        )
                     if active_diff_detector:
                         CONFLUENCE_RADARS = {
                             "PRECURSOR_RADAR",
@@ -3632,7 +3648,7 @@ class AutoAlertEngine:
                     from engine.pipeline.coherence_gate import coherence_gate
 
                     is_timing_allowed, timing_reason = coherence_gate.validate_session_entry_window(
-                        alert, ref_dt=datetime.now(IST)
+                        alert
                     )
                     if not is_timing_allowed:
                         logger.info(f"[AutoAlertEngine] 🛑 {timing_reason}")

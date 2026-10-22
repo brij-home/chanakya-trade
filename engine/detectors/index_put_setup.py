@@ -798,9 +798,22 @@ def detect_index_put_setup(
 
     # ── Severe Intraday Bounce from Day Low Guard ─────────────
     # If spot has surged >= 0.35% off Day Low and is trading ABOVE session VWAP,
-    # the market is in intraday accumulation/markup. Suppress all PE setups (preventing bear traps).
+    # the market is in intraday accumulation/markup. Suppress all PE setups (preventing bear traps),
+    # UNLESS spot is actively testing key session resistance / supply levels or printing a top distribution.
+    _is_at_resistance = bool(
+        (day_high and day_high > 0 and (day_high - spot) / max(1.0, spot) * 100.0 <= 0.45)
+        or (
+            prev_day_high and prev_day_high > 0 and abs(spot - prev_day_high) / spot * 100.0 <= 0.45
+        )
+        or (
+            prev_week_high
+            and prev_week_high > 0
+            and abs(spot - prev_week_high) / spot * 100.0 <= 0.45
+        )
+    )
     if (
-        day_low
+        not _is_at_resistance
+        and day_low
         and day_low > 0
         and effective_vwap > 0
         and spot > effective_vwap

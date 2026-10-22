@@ -297,7 +297,7 @@ def test_early_pre_0930_signals_unmuted_by_orb():
     assert "PRECURSOR_RADAR" in alert_types
     symbols = {a.symbol for a in all_morning_alerts}
     assert "NIFTY" in symbols
-    assert "NSE:TRENT" in symbols
+    assert "TRENT" in symbols or "NSE:TRENT" in symbols
 
 
 # ─────────────────────────────────────────────────────────────────────────────

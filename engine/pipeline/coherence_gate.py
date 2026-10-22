@@ -396,7 +396,7 @@ class CoherenceGate:
             or (os.environ.get("CHANAKYA_TESTING") == "1")
             or (os.environ.get("DEPLOY_MODE") == "test")
         )
-        if is_test_runner and os.environ.get("ENFORCE_SESSION_TIMING") != "1":
+        if ref_dt is None and is_test_runner and os.environ.get("ENFORCE_SESSION_TIMING") != "1":
             return True, "Test environment: session timing check bypassed"
 
         # 5. Pre-Market / Opening Auction Lockout (09:16:00 IST)
