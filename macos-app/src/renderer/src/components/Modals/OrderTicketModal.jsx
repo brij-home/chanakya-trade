@@ -95,9 +95,16 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
       setProduct(initialData.product || (isFO ? 'NRML' : 'MIS'))
 
       const p = Number(initialData.price ?? 0)
-      const rawNoChase = Number(initialData.no_chase_boundary || initialData.noChase || 0)
+      let rawNoChase = Number(initialData.no_chase_boundary || initialData.noChase || 0)
       const rawRetest = Number(initialData.optimal_entry_limit || initialData.retest_entry || initialData.trigger_level || 0)
       const rawZone = initialData.optimal_entry_range || initialData.entry_range || null
+
+      // Defensive Invariant: If this is an options derivative (e.g. ₹2.82) but rawNoChase is denominated in underlying spot price (e.g. ₹180.34, i.e. > p * 1.35),
+      // sanitize rawNoChase to the option premium execution ceiling (+5% tolerance) to prevent metric unit mismatch in Anti-FOMO guards.
+      const isOptionContract = sym.includes(' CE') || sym.includes(' PE') || cleanSym.endsWith('CE') || cleanSym.endsWith('PE')
+      if (isOptionContract && p > 0 && rawNoChase > p * 1.35) {
+        rawNoChase = act === 'BUY' ? Math.round(p * 1.05 * 100) / 100 : Math.round(p * 0.95 * 100) / 100
+      }
 
       setNoChaseLimit(rawNoChase > 0 ? rawNoChase : null)
       setOptimalEntryZone(rawZone)
@@ -609,7 +616,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                   <div className="flex items-center justify-between">
                     <span className="text-green text-[10px] uppercase font-ui font-semibold">Target</span>
                     {(initialData.target2 || initialData.targetMoonshot) && (
-                      <div className="flex items-center gap-1 text-[9px] font-mono">
+                      <div className="flex items-center gap-1 text-[11px] font-mono">
                         {initialData.target && (
                           <button
                             type="button"
@@ -666,7 +673,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                     />
                     <span>🛡️ Auto-Ratchet Breakeven at T1 (+2R)</span>
                   </label>
-                  <span className="text-[9px] text-emerald-400/80 hidden sm:inline">
+                  <span className="text-[11px] text-emerald-400/80 hidden sm:inline">
                     {autoRatchetBreakeven ? 'SL moves to Entry upon T1 fill' : 'Manual SL management'}
                   </span>
                 </div>
@@ -778,7 +785,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                       </div>
                     </div>
                   </div>
-                  <span className="text-[9px] uppercase px-1.5 py-0.5 rounded font-black font-mono bg-sky-500/20 text-sky-300 border border-sky-500/40">
+                  <span className="text-[11px] uppercase px-1.5 py-0.5 rounded font-black font-mono bg-sky-500/20 text-sky-300 border border-sky-500/40">
                     SOR Active
                   </span>
                 </div>
@@ -793,12 +800,12 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                     className="flex items-center gap-1.5 text-[11px] font-mono font-bold text-cyan-400 hover:text-cyan-300 transition-colors cursor-pointer"
                   >
                     <span>{showDomLadder ? '▼ Hide' : '▶ Show'} L2/L3 DOM Depth Ladder</span>
-                    <span className="text-[9px] px-1.5 py-0.2 bg-cyan-950/70 border border-cyan-800/50 rounded text-cyan-300 font-bold">
+                    <span className="text-[11px] px-1.5 py-0.2 bg-cyan-950/70 border border-cyan-800/50 rounded text-cyan-300 font-bold">
                       Order Book & OBI
                     </span>
                   </button>
                   {showDomLadder && (
-                    <span className="text-[9px] text-muted font-mono">
+                    <span className="text-[11px] text-muted font-mono">
                       Click any depth level to set limit price
                     </span>
                   )}
@@ -960,7 +967,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                       <span className="flex items-center gap-1 font-bold">
                         <span>🛡️</span> Broker-Side GTT OCO Bracket:
                       </span>
-                      <span className="bg-emerald-500/20 px-1.5 py-0.5 rounded text-[9px] font-bold">
+                      <span className="bg-emerald-500/20 px-1.5 py-0.5 rounded text-[11px] font-bold">
                         AUTO-ARM ON FILL (SL: ₹{stopLoss}{Number(target) > 0 ? ` | TGT: ₹${target}` : ''}{autoRatchetBreakeven ? ' | 🛡️ BE @ T1' : ''})
                       </span>
                     </div>

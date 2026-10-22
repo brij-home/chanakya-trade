@@ -560,6 +560,23 @@ class WebSocketManager:
     def _on_close(self, *args, **kwargs) -> None:
         self._connected = False
         logger.info("WebSocket: disconnected")
+        if getattr(self, "_running", False) and getattr(self, "_access_token", ""):
+            logger.info(
+                "[WebSocket] Connection lost while running; scheduling proactive reconnect in 3.0s..."
+            )
+
+            def _delayed_reconnect():
+                time.sleep(3.0)
+                if getattr(self, "_running", False) and not getattr(self, "_connected", False):
+                    try:
+                        logger.info("[WebSocket] Executing proactive reconnect...")
+                        self._connect()
+                    except Exception as e_recon:
+                        logger.warning(f"[WebSocket] Proactive reconnect failed: {e_recon}")
+
+            threading.Thread(
+                target=_delayed_reconnect, daemon=True, name="WsWatchdogReconnect"
+            ).start()
 
     def _on_error(self, *args, **kwargs) -> None:
         if args:

@@ -202,18 +202,18 @@ function ToastItem({ toast }) {
               {symbol}
             </span>
             {contractDetails && (
-              <span className={`text-[9px] font-mono font-bold px-1 py-0.2 rounded border flex-shrink-0 ${
+              <span className={`text-[11px] font-mono font-bold px-1 py-0.2 rounded border flex-shrink-0 ${
                 isPut ? 'bg-rose-500/15 text-rose-400 border-rose-500/30' : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
               }`}>
                 {contractDetails}
               </span>
             )}
-            <span className={`text-[8.5px] font-black uppercase px-1 py-0.5 rounded leading-none flex-shrink-0 ${
+            <span className={`text-[10px] font-black uppercase px-1 py-0.5 rounded leading-none flex-shrink-0 ${
               isBearish ? 'bg-rose-500/20 text-rose-300' : 'bg-emerald-500/20 text-emerald-300'
             }`}>
               {actionTag}
             </span>
-            <span className={`text-[8px] font-bold px-1 py-0.2 rounded border uppercase tracking-wider flex-shrink-0 ${stageStyle.bg} ${stageStyle.text} ${stageStyle.border}`}>
+            <span className={`text-[10px] font-bold px-1 py-0.2 rounded border uppercase tracking-wider flex-shrink-0 ${stageStyle.bg} ${stageStyle.text} ${stageStyle.border}`}>
               {stageStyle.label}
             </span>
           </div>
@@ -258,7 +258,7 @@ function ToastItem({ toast }) {
                 toast.action.onClick?.()
                 dismissToast(toast.id)
               }}
-              className="mt-0.5 text-[9px] font-bold hover:underline cursor-pointer"
+              className="mt-0.5 text-[11px] font-bold hover:underline cursor-pointer"
               style={{ color: cfg.borderColor }}
             >
               {toast.action.label} →
@@ -272,7 +272,7 @@ function ToastItem({ toast }) {
         {isAlertToast && !isInvalidated && rawStage !== 'RUNNER_EXIT' && (
           <button
             onClick={handleTrade}
-            className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 transition-colors flex items-center gap-0.5 cursor-pointer"
+            className="px-1.5 py-0.5 rounded text-[11px] font-bold bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 transition-colors flex items-center gap-0.5 cursor-pointer"
             title="Open Order Ticket"
           >
             ⚡ Ticket
@@ -281,7 +281,7 @@ function ToastItem({ toast }) {
         {isAlertToast && (isInvalidated || rawStage === 'RUNNER_EXIT') && (
           <button
             onClick={handleViewDetails}
-            className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-surface hover:bg-elevated text-text border border-border/70 transition-colors flex items-center gap-0.5 cursor-pointer"
+            className="px-1.5 py-0.5 rounded text-[11px] font-bold bg-surface hover:bg-elevated text-text border border-border/70 transition-colors flex items-center gap-0.5 cursor-pointer"
             title="View Details"
           >
             🔍 Details

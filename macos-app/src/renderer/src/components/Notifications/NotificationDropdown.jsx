@@ -328,7 +328,7 @@ export default function NotificationDropdown({ isOpen, onClose, onOpenOrderTicke
                 <div className="flex items-center gap-1.5 flex-wrap mb-1 pl-1">
                   {/* Stage pill */}
                   <span
-                    className={`text-[9px] font-black px-1.5 py-0.5 rounded-md border whitespace-nowrap ${stageCfg.bg} ${stageCfg.text} ${stageCfg.border}`}
+                    className={`text-[11px] font-black px-1.5 py-0.5 rounded-md border whitespace-nowrap ${stageCfg.bg} ${stageCfg.text} ${stageCfg.border}`}
                   >
                     {stageCfg.label}
                   </span>
@@ -341,7 +341,7 @@ export default function NotificationDropdown({ isOpen, onClose, onOpenOrderTicke
                   {/* Option Type */}
                   {item.option_type && (
                     <span
-                      className={`text-[9px] px-1.5 py-0.2 rounded font-black font-mono border ${
+                      className={`text-[11px] px-1.5 py-0.2 rounded font-black font-mono border ${
                         item.option_type === 'CE'
                           ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 border-emerald-500/30'
                           : 'bg-rose-500/20 text-rose-600 dark:text-rose-300 border-rose-500/30'
@@ -362,7 +362,7 @@ export default function NotificationDropdown({ isOpen, onClose, onOpenOrderTicke
 
                   {/* Test badge */}
                   {item.is_test && (
-                    <span className="text-[8px] font-black px-1 py-px rounded bg-purple-500/20 text-purple-600 dark:text-purple-300 border border-purple-500/30">
+                    <span className="text-[10px] font-black px-1 py-px rounded bg-purple-500/20 text-purple-600 dark:text-purple-300 border border-purple-500/30">
                       TEST
                     </span>
                   )}

@@ -772,8 +772,14 @@ def detect_gamma_blast(
             else:
                 oi_desc = f"Institutional Call turnover surge ({volume:,} contracts traded). "
 
+            vwap_diff_ce = spot - effective_vwap
+            vwap_text_ce = (
+                f"holding VWAP (+{vwap_diff_ce:.1f} pts)"
+                if vwap_diff_ce >= 0
+                else f"below VWAP ({vwap_diff_ce:.1f} pts)"
+            )
             summary = (
-                f"{oi_desc}Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} holding VWAP. "
+                f"{oi_desc}Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} {vwap_text_ce}. "
                 f"{'Explosive short-covering underway!' if is_ignited else 'Early-warning coiling before gamma surge!'}"
             )
 
@@ -1175,8 +1181,8 @@ def detect_gamma_blast(
         is_high_turnover = (
             vol_oi_ratio >= (0.80 if is_opening_drive else 1.4) or volume >= min_turnover_vol
         )
-        # Relaxed VWAP gate for PE (1.002 → 1.008)
-        _pe_vwap_multiplier = 1.008 if is_index else 1.004
+        # Strict VWAP boundary for index PE (1.000 for index, 1.002 for single-stock) to prevent CE/PE overlap
+        _pe_vwap_multiplier = 1.000 if is_index else 1.002
         spot_below_vwap = spot <= (effective_vwap * _pe_vwap_multiplier)
         # PDH sweep bypass: if spot swept the day_high and wicked back, lift the VWAP gate
         if _pdh_sweep_active and not spot_below_vwap:
@@ -1437,8 +1443,14 @@ def detect_gamma_blast(
             else:
                 oi_desc = f"Institutional Put turnover surge ({volume:,} contracts traded). "
 
+            vwap_diff_pe = spot - effective_vwap
+            vwap_text_pe = (
+                f"below VWAP ({vwap_diff_pe:.1f} pts)"
+                if vwap_diff_pe <= 0
+                else f"above VWAP (+{vwap_diff_pe:.1f} pts)"
+            )
             summary = (
-                f"{oi_desc}Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} below VWAP. "
+                f"{oi_desc}Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} {vwap_text_pe}. "
                 f"{'Aggressive long put / short spot momentum!' if is_ignited else 'Early-warning coiling before put gamma surge!'}"
             )
 

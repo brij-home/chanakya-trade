@@ -35,6 +35,7 @@ from engine.detectors.gamma_unpin_squeezer import (
     detect_0dte_gamma_unpin,
     GammaUnpinSqueezerDetector,
 )
+from engine.detectors.trend_day_continuation import detect_trend_day_pullback
 
 from engine.detection_context import (
     BaseDetector,
@@ -52,6 +53,7 @@ __all__ = [
     "FunctionalDetectorAdapter",
     "build_detection_context",
     "detector_registry",
+    "detect_trend_day_pullback",
     "detect_gamma_blast",
     "detect_index_call_setup",
     "detect_index_put_setup",

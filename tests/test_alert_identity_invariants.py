@@ -131,6 +131,8 @@ def test_all_detectors_use_canonical_identity():
         "%Y%m%d_%H%M",
         "uuid.uuid4().hex[:6]",
         "uuid.uuid4().hex[:8]",
+        'symbol=f"{exchange}:',
+        "symbol=f'{exchange}:",
     ]
 
     violations = []
@@ -143,6 +145,25 @@ def test_all_detectors_use_canonical_identity():
     assert not violations, "Banned alert identity patterns detected in detectors:\n" + "\n".join(
         violations
     )
+
+
+def test_auto_alert_post_init_canonicalizes_symbol():
+    """Verify AutoAlert.__post_init__ automatically normalizes symbols with exchange prefixes."""
+    alert = AutoAlert(
+        alert_id="aa-test-prefix-01",
+        alert_type="PREDATOR_SWEEP",
+        stage="IGNITED",
+        symbol="NSE:LT",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="LT Predator Sweep",
+        summary="Testing prefix cleanup",
+        ltp=3600.0,
+        trigger_level=3600.0,
+        target_level=3700.0,
+        stop_loss=3550.0,
+    )
+    assert alert.symbol == "LT"
 
 
 def test_auto_alert_market_status_resolution():

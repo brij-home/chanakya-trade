@@ -177,7 +177,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
           : radarSegment === 'ALERTS'
           ? 'ALERTS'
           : 'ALL'
-      const res = await fetch(`${getBaseUrl(port)}/api/market/depth-radar?segment=${backendSeg}&limit=80`, {
+      const res = await fetch(`${getBaseUrl(port)}/api/market/depth-radar?segment=${backendSeg}&limit=80&allow_rest=false`, {
         signal: AbortSignal.timeout(9000),
       })
       if (res.ok) {
@@ -820,19 +820,19 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
 
           <div className="grid grid-cols-4 gap-1.5 my-1.5">
             <div className="text-center p-0.5 rounded bg-surface border border-rose/30">
-              <span className="text-[8px] font-mono text-rose block font-bold">P0</span>
+              <span className="text-[10px] font-mono text-rose block font-bold">P0</span>
               <span className="text-xs font-mono font-black text-rose">{counts.P0 || 0}</span>
             </div>
             <div className="text-center p-0.5 rounded bg-surface border border-gold/30">
-              <span className="text-[8px] font-mono text-gold block font-bold">P1</span>
+              <span className="text-[10px] font-mono text-gold block font-bold">P1</span>
               <span className="text-xs font-mono font-black text-gold">{counts.P1 || 0}</span>
             </div>
             <div className="text-center p-0.5 rounded bg-surface border border-sapphire/30">
-              <span className="text-[8px] font-mono text-sapphire block font-bold">P2</span>
+              <span className="text-[10px] font-mono text-sapphire block font-bold">P2</span>
               <span className="text-xs font-mono font-black text-sapphire">{counts.P2 || 0}</span>
             </div>
             <div className="text-center p-0.5 rounded bg-surface border border-border">
-              <span className="text-[8px] font-mono text-muted block font-bold">P3</span>
+              <span className="text-[10px] font-mono text-muted block font-bold">P3</span>
               <span className="text-xs font-mono font-black text-muted">{counts.P3 || 0}</span>
             </div>
           </div>
@@ -1387,7 +1387,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                   <div>
                     <div className="font-bold text-gold text-xs uppercase tracking-wide flex items-center gap-2">
                       <span>Versova L3 TBT Standby Mode (EOD)</span>
-                      <span className="px-1.5 py-0.2 rounded text-[9px] bg-gold/20 text-gold border border-gold/30">
+                      <span className="px-1.5 py-0.2 rounded text-[11px] bg-gold/20 text-gold border border-gold/30">
                         NSE CLOSED 15:30 IST
                       </span>
                     </div>
@@ -1599,6 +1599,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                             ? '#a855f7'
                             : slot.role === 'TODAYS_EXPIRY'
                             ? 'var(--color-gold)'
+                            : slot.role === 'SECTOR_LEADER_SCOUT'
+                            ? '#38bdf8'
                             : 'var(--color-emerald)'
                         const roleBg =
                           slot.role === 'IN_FLIGHT_GUARDIAN'
@@ -1607,6 +1609,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                             ? 'rgba(168, 85, 247, 0.12)'
                             : slot.role === 'TODAYS_EXPIRY'
                             ? 'rgba(245, 166, 35, 0.15)'
+                            : slot.role === 'SECTOR_LEADER_SCOUT'
+                            ? 'rgba(56, 189, 248, 0.12)'
                             : 'rgba(0, 214, 143, 0.12)'
 
                         const durationStr =
@@ -1644,7 +1648,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                                   color: roleColor,
                                 }}
                               >
-                                {slot.role.replace('_', ' ')}
+                                {slot.role === 'SECTOR_LEADER_SCOUT' ? 'SECTOR LEADER' : slot.role.replace(/_/g, ' ')}
                               </span>
                             </td>
                             <td className="px-2 text-muted">{durationStr}</td>
@@ -1657,7 +1661,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                               >
                                 <span className="h-1.5 w-1.5 rounded-full inline-block" style={{ background: isStale ? 'var(--color-rose)' : 'var(--color-emerald)' }} />
                                 {freshStr}
-                                {isStale && <span className="text-[9px] uppercase px-1 rounded bg-rose/15 text-rose">STALE</span>}
+                                {isStale && <span className="text-[11px] uppercase px-1 rounded bg-rose/15 text-rose">STALE</span>}
                               </span>
                             </td>
                             <td className="px-2 text-right font-bold text-text">
@@ -2001,16 +2005,16 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                                   </span>
                                   {item.has_resting_wall && (
                                     <span
-                                      className="text-[9px] px-1 py-px rounded font-bold uppercase bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                                      className="text-[11px] px-1 py-px rounded font-bold uppercase bg-amber-500/20 text-amber-300 border border-amber-500/40"
                                       title={`Resting Wall: ${item.wall_ratio || 1.0}x average depth`}
                                     >
                                       🛡️ WALL
                                     </span>
                                   )}
                                 </div>
-                                <div className="text-[9px] text-muted flex items-center gap-1 mt-0.5">
+                                <div className="text-[11px] text-muted flex items-center gap-1 mt-0.5">
                                   <span
-                                    className={`px-1 py-px rounded border text-[8px] font-bold ${
+                                    className={`px-1 py-px rounded border text-[10px] font-bold ${
                                       item.segment?.includes('COMMODITY')
                                         ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
                                         : item.segment?.includes('CURRENCY')
@@ -2033,12 +2037,12 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                                       : item.segment || 'EQUITY'}
                                   </span>
                                   {item.is_market_open === false && (
-                                    <span className="text-[8px] px-1 py-px rounded font-bold uppercase bg-muted/20 text-muted border border-muted/30">
+                                    <span className="text-[10px] px-1 py-px rounded font-bold uppercase bg-muted/20 text-muted border border-muted/30">
                                       EOD
                                     </span>
                                   )}
                                   {item.is_market_open === true && item.segment?.includes('COMMODITY') && (
-                                    <span className="text-[8px] px-1 py-px rounded font-bold uppercase bg-emerald/20 text-emerald border border-emerald/40 animate-pulse">
+                                    <span className="text-[10px] px-1 py-px rounded font-bold uppercase bg-emerald/20 text-emerald border border-emerald/40 animate-pulse">
                                       ● LIVE
                                     </span>
                                   )}
@@ -2070,7 +2074,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                               {/* Capital Depth Notional (Bid vs Ask Cr) */}
                               <td className="px-3 text-center">
                                 <div className="w-32 mx-auto space-y-1">
-                                  <div className="flex justify-between text-[9px] text-muted font-bold">
+                                  <div className="flex justify-between text-[11px] text-muted font-bold">
                                     <span className="text-emerald">₹{bidCr}Cr</span>
                                     <span className="text-rose">₹{askCr}Cr</span>
                                   </div>
@@ -2226,7 +2230,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                         <h4 className="text-xs font-bold font-mono text-text">
                           {selectedRadarSymbol || 'Select Symbol'}
                         </h4>
-                        <span className="text-[9px] font-mono text-muted uppercase">
+                        <span className="text-[11px] font-mono text-muted uppercase">
                           Real-Time 5-Level Depth Ladder
                         </span>
                       </div>
@@ -2548,7 +2552,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                 >
                   {intel.badge || 'SENTINEL INTEL'}
                 </span>
-                <span className="text-[9px] font-mono px-2 py-0.5 rounded border border-slate-700 text-slate-300 bg-slate-900/90 font-bold">
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded border border-slate-700 text-slate-300 bg-slate-900/90 font-bold">
                   {intel.tag || 'ORDER FLOW'}
                 </span>
               </div>
@@ -2569,7 +2573,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                       : 'border-slate-700 text-slate-200'
                   }`}
                 >
-                  <span className="block text-[9px] uppercase tracking-wider text-slate-400 font-bold mb-1 font-mono">
+                  <span className="block text-[11px] uppercase tracking-wider text-slate-400 font-bold mb-1 font-mono">
                     🎯 Trading Decision Blueprint:
                   </span>
                   <span className="text-slate-100 font-semibold">{intel.decision}</span>

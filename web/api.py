@@ -1287,6 +1287,29 @@ async def get_error_logs(limit: int = 50):
     )
 
 
+@app.get("/api/diagnostics/metrics", tags=["Observability", "Operations"])
+async def get_recent_metrics(
+    journey_id: Optional[str] = None,
+    failed_only: bool = False,
+    limit: int = 50,
+):
+    """
+    Retrieve recent structured SLO metric measurements for deep diagnostic inspection.
+    Enables instant RCA of journey availability, latency spikes, and failure provenance.
+    """
+    from engine.observability import get_registry
+
+    obs = get_registry()
+    with obs._lock:
+        events = list(obs._metrics)
+    if journey_id:
+        events = [e for e in events if e.journey_id == journey_id]
+    if failed_only:
+        events = [e for e in events if not e.success]
+    sliced = events[-limit:]
+    return JSONResponse([e.to_dict() for e in sliced])
+
+
 @app.get("/api/diagnostics/errors/history", tags=["Observability", "Operations"])
 async def get_historical_error_logs(
     limit: int = 100,

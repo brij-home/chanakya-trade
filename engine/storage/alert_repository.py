@@ -496,15 +496,18 @@ class AlertRepository:
                         surviving.append(a)
                         continue
 
-                # 4b. Prior-session intraday trades: cannot carry over across overnight gaps
-                is_intraday = (
-                    getattr(a, "time_horizon", "") or ""
-                ).upper() == "INTRADAY" or a.alert_type in (
+                # 4b. Prior-session intraday / scalping trades: cannot carry over across overnight gaps
+                is_intraday = (getattr(a, "time_horizon", "") or "").upper() in (
+                    "INTRADAY",
+                    "SCALP",
+                    "INTRADAY_SCALP_ONLY",
+                ) or a.alert_type in (
                     "GAMMA_BLAST",
                     "OPTIONS_MOMENTUM",
                     "OPENING_DRIVE_IGNITION",
                     "AFTERNOON_THRUST",
                     "MICRO_SCALP",
+                    "INDEX_MICRO_SCALP",
                 )
                 if not a.is_archived and is_intraday:
                     a.stage = "COMPLETED"
@@ -590,7 +593,7 @@ class AlertRepository:
                     or (a.pnl_pct is not None and a.pnl_pct > 0.0)
                 )
 
-                if a.time_horizon in ("INTRADAY", "ROLLING_24H"):
+                if a.time_horizon in ("INTRADAY", "SCALP", "INTRADAY_SCALP_ONLY", "ROLLING_24H"):
                     exch = (a.exchange or "").upper()
                     seg = (getattr(a, "segment", "") or "").upper()
                     is_crypto = (

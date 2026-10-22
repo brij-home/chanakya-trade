@@ -1368,6 +1368,25 @@ def calculate_option_execution_plan(
         # Re-apply disciplined floor if valid
         if sl_prem < disciplined_sl_floor:
             sl_prem = min(disciplined_sl_floor, max_allowed_sl)
+
+        # Institutional Index Option Minimum Volatility Floor:
+        # Prevents sub-ATR noise traps on volatile index options
+        if is_index_contract and option_ltp >= 80.0:
+            if "SENSEX" in clean_contract or "BANKEX" in clean_contract:
+                idx_opt_floor = 45.0
+            elif "BANKNIFTY" in clean_contract:
+                idx_opt_floor = 35.0
+            elif "FINNIFTY" in clean_contract or "MIDCPNIFTY" in clean_contract:
+                idx_opt_floor = 20.0
+            else:
+                idx_opt_floor = 15.0
+
+            effective_sl_floor = max(
+                round(option_ltp - idx_opt_floor, 2), round(option_ltp * 0.72, 2)
+            )
+            if sl_prem > effective_sl_floor:
+                sl_prem = effective_sl_floor
+
         if sl_prem >= option_ltp:
             sl_prem = round(max(0.05, option_ltp * (0.85 if is_index_contract else 0.78)), 2)
     else:

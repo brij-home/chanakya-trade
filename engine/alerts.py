@@ -816,7 +816,9 @@ class AlertManager:
         try:
             from engine.alert_preferences import alert_preferences, classify_alert_segment
 
-            target_seg = getattr(alert, "segment", None) or classify_alert_segment(alert)
+            target_seg = classify_alert_segment(alert)
+            if hasattr(alert, "segment"):
+                alert.segment = target_seg
             tg_chat_id = alert_preferences.get_telegram_chat_id(target_seg)
             fno_index_chat = alert_preferences.get_telegram_chat_id("FNO_INDEX")
             if tg_chat_id and fno_index_chat and str(tg_chat_id) == str(fno_index_chat):

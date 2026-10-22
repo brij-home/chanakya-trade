@@ -149,7 +149,15 @@ def evaluate_institutional_quality_gate(
     act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
     is_opt_sell = is_opt and any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
 
-    now_dt = ref_dt or datetime.now(IST)
+    if ref_dt is None:
+        try:
+            import engine.auto_alert_engine as aae
+
+            now_dt = aae.datetime.now(IST)
+        except Exception:
+            now_dt = datetime.now(IST)
+    else:
+        now_dt = ref_dt
     if now_dt.tzinfo is None:
         now_dt = now_dt.replace(tzinfo=IST)
 

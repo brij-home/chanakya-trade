@@ -75,6 +75,11 @@ class TradeOutcomeSummary:
     verdict_note: str = ""
     telegram_dispatched: bool = False
     dispatched_channels: list[str] = field(default_factory=list)
+    alert_type: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.alert_type and self.strategy:
+            self.alert_type = self.strategy
 
 
 @dataclass
@@ -1872,27 +1877,38 @@ class EODReportGenerator:
         Synthesize institutional CIO Executive Debrief using Fast-LLM / Cascading provider.
         Wrapped in defensive 8.0s timeout with zero-blackout fallback.
         """
+        top_engine_str = ""
+        if top_detectors:
+            t = top_detectors[0]
+            top_engine_str = f"Top engine: {t['detector']} ({t['wins']}W, {t['win_rate']:.1f}% WR)."
+
+        leak_str = ""
+        if stopped_setups:
+            leak_syms = ", ".join(s.symbol for s in stopped_setups[:3])
+            leak_str = f"Losses: {len(stopped_setups)} stopped setups ({leak_syms})."
+
+        fii_net = float(mkt.get("fii_net_cr", 0.0) or 0.0)
+        macro_bias = (
+            "defensive institutional distribution"
+            if fii_net < -500.0
+            else ("institutional accumulation" if fii_net > 500.0 else "rotational regime")
+        )
+        deterministic_fallback = (
+            f"🏛️ <b>Macro Context:</b> NIFTY {mkt.get('nifty_change_pct', 0.0):+.2f}% under {macro_bias} "
+            f"(FII: ₹{fii_net:+,.0f} Cr, DII: ₹{float(mkt.get('dii_net_cr', 0.0) or 0.0):+,.0f} Cr, VIX {float(mkt.get('vix_ltp', 0.0) or 0.0):.1f}).\n"
+            f"🎯 <b>Strategy Performance:</b> {win_count} Wins vs {loss_count} Losses ({win_rate:.1f}% Win Rate, Net {total_realized_r:+.2f}R). {top_engine_str} {leak_str}\n"
+            f"⚡ <b>Tomorrow Blueprint:</b> Focus on relative strength leaders and decoupled sector momentum for {tomorrow_day_name} ({tomorrow_expiry_index or 'Regular'} weekly settlement)."
+        )
+
         if os.environ.get("CHANAKYA_TESTING") == "1":
-            return None
+            return deterministic_fallback
 
         try:
             from agent.core import get_fast_provider
 
             provider = get_fast_provider()
             if not provider:
-                return None
-
-            top_engine_str = ""
-            if top_detectors:
-                t = top_detectors[0]
-                top_engine_str = (
-                    f"Top engine: {t['detector']} ({t['wins']}W, {t['win_rate']:.1f}% WR)."
-                )
-
-            leak_str = ""
-            if stopped_setups:
-                leak_syms = ", ".join(s.symbol for s in stopped_setups[:3])
-                leak_str = f"Losses: {len(stopped_setups)} stopped setups ({leak_syms})."
+                return deterministic_fallback
 
             sys_prompt = (
                 "You are the Chief Investment Officer & Quant Risk Head at ChanakyaTrade. "
@@ -1931,9 +1947,8 @@ class EODReportGenerator:
                     return response.strip()
         except Exception as e:
             logger.debug(f"[EODReportGenerator] AI CIO synthesis bypassed: {e}")
-            return None
 
-        return None
+        return deterministic_fallback
 
     def generate(self, target_date: Optional[str] = None) -> EODReport:
         """
@@ -2114,6 +2129,9 @@ class EODReportGenerator:
                 or "prior to trigger" in lower_inv
                 or "never entered" in lower_inv
                 or "anchor breached before trigger" in lower_inv
+                or "pre-trade veto" in lower_inv
+                or "scrutiny veto" in lower_inv
+                or "tier-2 scrutiny" in lower_inv
                 or "gap_over_sl" in lower_inv
                 or "pre-open indicative" in lower_inv
                 or "gapped below stop loss" in lower_inv
@@ -2401,12 +2419,16 @@ class EODReportGenerator:
                 journal_entries.append(summary)
 
             # 5. Velocity / Stagnation Time-Stop Exit (Early capital defense scratch)
-            elif is_inv and (
-                "velocity time-stop" in lower_inv
+            elif (
+                target_status in ("STAGNATION_SCRATCH", "TIME_STOP_EXIT")
+                or stage in ("STAGNATION_EXIT", "TIME_STOP_EXIT")
+                or "velocity stagnation" in lower_inv
+                or "stagnation scratch" in lower_inv
+                or "velocity time-stop" in lower_inv
                 or "time-stop expired" in lower_inv
                 or "scratched early" in lower_inv
-                or target_status == "TIME_STOP_EXIT"
-                or stage == "TIME_STOP_EXIT"
+                or "velocity stagnation" in str(a.get("archive_reason", "")).lower()
+                or "stagnation scratch" in str(a.get("archive_reason", "")).lower()
             ):
                 outcome = "VELOCITY_TIME_STOP"
                 scratch_count += 1

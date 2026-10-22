@@ -45,7 +45,7 @@ export default function OICard({ data }) {
           <div className="flex items-center gap-2 mb-0.5">
             <p className="text-muted text-[10px] uppercase tracking-widest font-ui">Open Interest Profile</p>
             {dataSource === 'ESTIMATED_MODEL' && (
-              <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber/10 text-amber border border-amber/20 font-ui">
+              <span className="text-[11px] px-1.5 py-0.2 rounded bg-amber/10 text-amber border border-amber/20 font-ui">
                 Est. Model
               </span>
             )}
@@ -67,7 +67,7 @@ export default function OICard({ data }) {
               <div className="flex items-center gap-1.5 mt-0.5">
                 <span className="text-text text-sm font-semibold">{Number(pcr).toFixed(2)}</span>
                 {pcrStatus && (
-                  <span className={`text-[9px] px-1.5 py-0.5 rounded border font-ui ${pcrStatus.cls}`}>
+                  <span className={`text-[11px] px-1.5 py-0.5 rounded border font-ui ${pcrStatus.cls}`}>
                     {pcrStatus.text}
                   </span>
                 )}
@@ -157,7 +157,7 @@ export default function OICard({ data }) {
                     }`}
                   >
                     {Number(row.strike).toLocaleString('en-IN')}
-                    {atm && <span className="text-[9px] block leading-none mt-0.5">ATM</span>}
+                    {atm && <span className="text-[11px] block leading-none mt-0.5">ATM</span>}
                   </div>
 
                   {/* Put Bar (Left to Right) */}

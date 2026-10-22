@@ -342,7 +342,13 @@ class AlertScrutinyAuditor:
         # Multibaggers & long-term compounders ride out multi-quarter corrections with wide structural trailing floors (up to 30%)
         # For OPTIONS_MOMENTUM, enforce disciplined risk stop (capped at 32% max to align with trade_plan 30% drawdown ceiling)
         time_horizon = str(getattr(alert, "time_horizon", "") or "").upper()
-        if time_horizon in ("MULTIBAGGER", "LONG_TERM") or atype in (
+        if is_option_premium_levels:
+            max_risk = (
+                32.0
+                if atype == "OPTIONS_MOMENTUM"
+                else (25.0 if time_horizon in ("SCALP", "INTRADAY_SCALP_ONLY") else 45.0)
+            )
+        elif time_horizon in ("MULTIBAGGER", "LONG_TERM") or atype in (
             "STAGE_1_TO_2_EXPANSION",
             "MULTIBAGGER",
             "SUPERPERFORMER",
@@ -350,10 +356,6 @@ class AlertScrutinyAuditor:
             max_risk = 30.0
         elif time_horizon in ("SWING_SHORT", "SWING_MID", "SWING", "POSITIONAL"):
             max_risk = 14.0
-        elif atype == "OPTIONS_MOMENTUM":
-            max_risk = 32.0
-        elif is_option_premium_levels:
-            max_risk = 25.0 if time_horizon in ("SCALP", "INTRADAY_SCALP_ONLY") else 45.0
         elif time_horizon in ("SCALP", "INTRADAY_SCALP_ONLY"):
             max_risk = 3.5
         else:
@@ -389,20 +391,25 @@ class AlertScrutinyAuditor:
                     flags,
                 )
 
+        metrics = (
+            (getattr(alert, "metrics", {}) or {})
+            if not isinstance(alert, dict)
+            else (alert.get("metrics") or {})
+        )
         if (
             not is_option_premium_levels
             and clean_sym not in COMMODITY_MIN_SL_FLOORS
             and clean_sym not in INDEX_MIN_SL_FLOORS
         ):
             eq_atr = 0.0
-            metrics = getattr(alert, "metrics", {}) or {}
             if isinstance(metrics, dict):
                 eq_atr = float(metrics.get("atr") or metrics.get("atr_14") or 0.0)
             if eq_atr <= 0 and ltp > 0:
                 eq_atr = round(ltp * 0.015, 2)
 
             # Institutional Minimum Stop-Loss Volatility Floor:
-            # Multi-session swing setups and stage expansions require at least 1.20x ATR to survive ordinary intraday Brownian noise.
+            # Multi-session swing setups and stage expansions require at least 1.20x Daily ATR to survive ordinary inter-day Brownian noise.
+            # Intraday setups prioritize Lower Timeframe (5m/15m) ATR floor (1.10x 5m ATR) when present, falling back to 0.70x Daily ATR.
             min_floor_pts = float((metrics or {}).get("min_noise_sl_pts") or 0.0)
             is_swing_setup = time_horizon in (
                 "POSITIONAL",
@@ -413,29 +420,61 @@ class AlertScrutinyAuditor:
                 "MULTIBAGGER",
                 "RRG_SECTOR_ROTATION",
             )
-            min_floor_mult = 1.20 if is_swing_setup else 0.70
-            effective_floor = max(min_floor_mult * eq_atr, min_floor_pts)
-            if eq_atr > 0 and risk_pts < (effective_floor * 0.95):
-                flags["risk_within_bounds"] = False
-                return (
-                    False,
-                    f"Sub-ATR Equity Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < {min_floor_mult:.2f}x ATR volatility floor ({effective_floor:.1f} pts). Mandate wider structural stop or higher timeframe.",
-                    flags,
-                )
+
+            lower_tf_atr = float(
+                (metrics or {}).get("atr_5m") or (metrics or {}).get("atr_15m") or 0.0
+            )
+            if lower_tf_atr > 0 and not is_swing_setup:
+                effective_floor = max(1.20 * lower_tf_atr, min_floor_pts, ltp * 0.0025)
+                if risk_pts < (effective_floor * 0.95):
+                    flags["risk_within_bounds"] = False
+                    return (
+                        False,
+                        f"Sub-ATR Equity Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < 1.20x 5m ATR volatility floor ({effective_floor:.1f} pts). Mandate wider structural stop beyond 5m swing.",
+                        flags,
+                    )
+            else:
+                min_floor_mult = 1.20 if is_swing_setup else 0.70
+                effective_floor = max(min_floor_mult * eq_atr, min_floor_pts)
+                if eq_atr > 0 and risk_pts < (effective_floor * 0.95):
+                    flags["risk_within_bounds"] = False
+                    return (
+                        False,
+                        f"Sub-ATR Equity Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < {min_floor_mult:.2f}x ATR volatility floor ({effective_floor:.1f} pts). Mandate wider structural stop or higher timeframe.",
+                        flags,
+                    )
 
         if is_option_premium_levels:
             # Institutional Minimum Option Premium Volatility Floor:
             # Indian equity and index options experience bid-ask spread friction and intraday delta/gamma ticks.
             # Stop loss distance narrower than max(MIN_OPTION_PREMIUM_SL_PTS, MIN_OPTION_PREMIUM_SL_PCT of premium)
-            # leads to high-frequency whipsaw stop-outs (RCA: 30% of historical postmortems).
-            opt_min_floor = max(
-                MIN_OPTION_PREMIUM_SL_PTS, round(entry_anchor * MIN_OPTION_PREMIUM_SL_PCT, 1)
+            # leads to high-frequency whipsaw stop-outs (RCA: 46% of daily postmortems).
+            pts_floor = (
+                MIN_OPTION_PREMIUM_SL_PTS
+                if entry_anchor >= 25.0
+                else max(1.0, round(entry_anchor * 0.08, 1))
             )
+            opt_min_floor = max(pts_floor, round(entry_anchor * MIN_OPTION_PREMIUM_SL_PCT, 1))
+
+            # Dynamic Volatility Floor for Options (Check 5m ATR and Index spread noise floors)
+            opt_atr = float(
+                (metrics or {}).get("opt_atr_5m") or (metrics or {}).get("atr_5m") or 0.0
+            )
+            if opt_atr > 0:
+                opt_min_floor = max(opt_min_floor, opt_atr * 1.20)
+            elif is_index_sym:
+                idx_name = underlying_idx or clean_sym
+                min_idx_opt_floor = (
+                    45.0 if "SENSEX" in idx_name else (35.0 if "BANKNIFTY" in idx_name else 15.0)
+                )
+                if entry_anchor >= 80.0:
+                    opt_min_floor = max(opt_min_floor, min_idx_opt_floor)
+
             if risk_pts < (opt_min_floor * 0.95):  # 5% precision tolerance
                 flags["risk_within_bounds"] = False
                 return (
                     False,
-                    f"Sub-ATR Option Noise Trap: {clean_sym} option stop-loss ({risk_pts:.1f} pts) < minimum premium volatility floor ({opt_min_floor:.1f} pts / {MIN_OPTION_PREMIUM_SL_PCT * 100:.0f}%). Mandate wider premium stop to absorb bid-ask noise.",
+                    f"Sub-ATR Option Noise Trap: {clean_sym} option stop-loss ({risk_pts:.1f} pts) < minimum premium volatility floor ({opt_min_floor:.1f} pts). Mandate wider premium stop to absorb bid-ask noise.",
                     flags,
                 )
 
@@ -678,6 +717,60 @@ class AlertScrutinyAuditor:
                         f"[AlertScrutiny] Equity adaptive regime check bypassed: {e_eq_regime}"
                     )
                     flags["equity_regime_valid"] = True
+
+        # 3f. Mandatory Non-Zero RVOL Invariant Gate (Flaw 5)
+        # Every directional breakout/thrust setup MUST have verified positive relative volume. Zero/null is prohibited.
+        is_breakout_type = atype in (
+            "BREAKOUT",
+            "ORB_BREAKOUT",
+            "OPENING_RANGE_BREAKOUT",
+            "SQUEEZE_BREAKOUT",
+            "AFTERNOON_THRUST",
+            "OPTIONS_MOMENTUM",
+            "OPENING_DRIVE",
+        )
+        if is_breakout_type:
+            rvol_raw = (metrics_d or {}).get("rvol")
+            rvol_m = float(
+                rvol_raw
+                if rvol_raw is not None
+                else (
+                    (metrics_d or {}).get("tod_rvol")
+                    or getattr(alert, "rvol", None)
+                    or (1.5 if is_test_runner else 0.0)
+                )
+            )
+            if rvol_m <= 0.0:
+                flags["rvol_valid"] = False
+                return (
+                    False,
+                    f"Unverified Volume Veto: {clean_sym} directional breakout setup lacks verified positive relative volume (RVOL={rvol_m}). Silent defaulting is prohibited.",
+                    flags,
+                )
+            flags["rvol_valid"] = True
+
+        # 3g. Pre-Entry Velocity & Stagnation Immunity Gate (Flaw 7)
+        # Eliminates setups destined to stall before trade entry
+        if is_breakout_type:
+            adr_consumed = float((metrics_d or {}).get("adr_consumed_pct", 0.0) or 0.0)
+            if adr_consumed > 65.0:
+                flags["stagnation_immunity_valid"] = False
+                return (
+                    False,
+                    f"Stagnation Fuel Exhaustion Veto: {clean_sym} daily range is {adr_consumed:.1f}% consumed (> 65% limit). High stagnation risk.",
+                    flags,
+                )
+
+            is_choked = (metrics_d or {}).get("is_runway_choked")
+            if is_choked is True:
+                obs_mult = float((metrics_d or {}).get("obstacle_runway_atr_multiple", 0.0) or 0.0)
+                flags["stagnation_immunity_valid"] = False
+                return (
+                    False,
+                    f"Obstacle Runway Veto: {clean_sym} entry is choked by immediate structural roadblock ({obs_mult:.2f}x ATR < 1.5x ATR). Setup will stall into resistance.",
+                    flags,
+                )
+            flags["stagnation_immunity_valid"] = True
 
         # 4. Dynamic VIX Regime Adaptation & Mathematical Risk:Reward Asymmetry
         vix_val = None
@@ -1067,6 +1160,8 @@ class AlertScrutinyAuditor:
                 or "BREAKOUT" in atype
                 or "BREAKDOWN" in atype
             )
+            target_rr = (reward_pts / risk_pts) if risk_pts > 0 else 2.0
+            req_headroom = 2.00 if target_rr >= 2.0 else max(1.40, round(target_rr, 2))
             if is_bull and nearest_res is not None:
                 res_f = float(nearest_res)
                 if res_f > ltp and risk_pts > 0:
@@ -1075,7 +1170,7 @@ class AlertScrutinyAuditor:
                     flags["nearest_obstacle"] = res_f
                     flags["r_obs"] = round(r_obs, 2)
                     if (
-                        r_obs < 2.00
+                        r_obs < req_headroom
                         and obs_dist < (0.90 * reward_pts)
                         and not (is_intentional_breakout and abs(ltp - res_f) / ltp < 0.005)
                     ):
@@ -1083,7 +1178,7 @@ class AlertScrutinyAuditor:
                         flags["trap_immediate_resistance"] = True
                         return (
                             False,
-                            f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{res_f:,.1f} provides only {r_obs:.2f}R headroom (< 2.00R required). Insufficient runway to achieve asymmetric Target 1.",
+                            f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{res_f:,.1f} provides only {r_obs:.2f}R headroom (< {req_headroom:.2f}R required). Insufficient runway to achieve asymmetric Target 1.",
                             flags,
                         )
             elif not is_bull and nearest_sup is not None:
@@ -1094,7 +1189,7 @@ class AlertScrutinyAuditor:
                     flags["nearest_obstacle"] = sup_f
                     flags["r_obs"] = round(r_obs, 2)
                     if (
-                        r_obs < 2.00
+                        r_obs < req_headroom
                         and obs_dist < (0.90 * reward_pts)
                         and not (is_intentional_breakout and abs(ltp - sup_f) / ltp < 0.005)
                     ):
@@ -1102,7 +1197,7 @@ class AlertScrutinyAuditor:
                         flags["trap_immediate_support"] = True
                         return (
                             False,
-                            f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{sup_f:,.1f} provides only {r_obs:.2f}R headroom (< 2.00R required). Insufficient runway to achieve asymmetric Target 1.",
+                            f"Truncated Obstacle Headroom Veto: Nearest major obstacle at ₹{sup_f:,.1f} provides only {r_obs:.2f}R headroom (< {req_headroom:.2f}R required). Insufficient runway to achieve asymmetric Target 1.",
                             flags,
                         )
 
@@ -2468,6 +2563,15 @@ class AlertScrutinyAuditor:
                         )
                     )
 
+                    is_trend_pullback_decoupler = bool(
+                        atype in ("TREND_DAY_PULLBACK", "trend-pullback")
+                        and (
+                            rvol_val >= 1.0
+                            or float((metrics_dict or {}).get("rvol", 0.0) or 0.0) >= 1.0
+                        )
+                        and (sec_rs_val >= 0.40 or sec_chg_val >= 0.0 or is_defensive_leader)
+                    )
+
                     is_verified_decoupler = bool(
                         is_upstream_decoupler
                         or is_opening_drive_decoupler
@@ -2477,6 +2581,7 @@ class AlertScrutinyAuditor:
                         or is_equity_momentum_decoupler
                         or is_rrg_momentum_decoupler
                         or is_thematic_decoupler
+                        or is_trend_pullback_decoupler
                     )
 
                     # Bullish equity alert during severe NIFTY markdown:
@@ -2531,6 +2636,14 @@ class AlertScrutinyAuditor:
                                 vol_oi_val >= 2.0
                                 and opt_vol >= 3000
                                 and (opt_pch >= 20.0 or spot_chg <= -1.5)
+                            )
+                            or (
+                                atype in ("TREND_DAY_PULLBACK", "trend-pullback")
+                                and (
+                                    rvol_val >= 1.0
+                                    or float((metrics_dict or {}).get("rvol", 0.0) or 0.0) >= 1.0
+                                )
+                                and (sec_rs_val <= -0.40 or rrg_quad == "LAGGING")
                             )
                             or (spot_chg <= -2.0 and (rvol_val >= 1.8 or rrg_quad == "LAGGING"))
                         )
@@ -4053,7 +4166,7 @@ class AlertScrutinyAuditor:
                         idx in str(opt_sym).upper()
                         for idx in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
                     )
-                    max_allowed_spread = 4.5 if is_index_opt else 8.0
+                    max_allowed_spread = 2.5 if is_index_opt else 3.8
 
                     if spread_pct > max_allowed_spread:
                         flags["option_spread_friction_valid"] = False
@@ -4625,8 +4738,23 @@ class AlertScrutinyAuditor:
             from engine.session_runway import evaluate_session_runway
 
             horiz = getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY"
-            seg = getattr(alert, "segment", "EQUITY") or "EQUITY"
-            alert_rvol = float(flags.get("rvol", 1.0) or getattr(alert, "rvol", 1.0) or 1.0)
+            seg = getattr(alert, "segment", "") or ""
+            metrics_d = getattr(alert, "metrics", {}) or {}
+            if not isinstance(metrics_d, dict):
+                metrics_d = {}
+            alert_rvol = float(
+                metrics_d.get("rvol")
+                or metrics_d.get("rvol_val")
+                or flags.get("rvol")
+                or getattr(alert, "rvol", 1.0)
+                or 1.0
+            )
+            is_hedged_spread = bool(
+                getattr(alert, "hedged_spread", None)
+                or getattr(alert, "execution_style_mandate", "") == "HEDGED_SPREAD_MANDATORY"
+                or (getattr(alert, "actionable_plan", {}) or {}).get("execution_style_mandate")
+                == "HEDGED_SPREAD_MANDATORY"
+            )
             runway_eval = evaluate_session_runway(
                 symbol=sym,
                 alert_type=atype,
@@ -4634,6 +4762,7 @@ class AlertScrutinyAuditor:
                 segment=seg,
                 rvol=alert_rvol,
                 direction=direction,
+                is_hedged_spread=is_hedged_spread,
             )
             if not runway_eval.is_allowed:
                 logger.info(

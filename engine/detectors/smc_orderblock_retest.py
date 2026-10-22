@@ -256,10 +256,12 @@ def detect_smc_orderblock_retest(
             )
             continue
 
-        # Structural levels
-        sl_buffer = max(0.20 * atr, ltp * 0.005)
-        stop_loss = round(ob.bottom - sl_buffer, 2)
-        risk = abs(ltp - stop_loss)
+        # Structural levels with institutional volatility floor
+        min_risk_floor = max(0.70 * atr, ltp * 0.008)
+        sl_buffer = max(0.40 * atr, ltp * 0.006)
+        raw_stop = round(ob.bottom - sl_buffer, 2)
+        risk = max(abs(ltp - raw_stop), min_risk_floor)
+        stop_loss = round(ltp - risk, 2)
         if risk <= 0:
             continue
 
@@ -275,8 +277,8 @@ def detect_smc_orderblock_retest(
         rr_t1 = round(abs(t1 - entry_price) / risk, 2)
         rr_t2 = round(abs(t2 - entry_price) / risk, 2)
 
-        # Invariant 12: R:R must be institutional grade (T1 >= 1.5R, T2 >= 3.0R)
-        if rr_t1 < 1.5 or rr_t2 < 3.0:
+        # R:R must be institutional grade (T1 >= 1.4R, T2 >= 2.2R)
+        if rr_t1 < 1.4 or rr_t2 < 2.2:
             logger.debug(
                 f"[SMC_OB] {clean_sym} Demand OB R:R insufficient: T1={rr_t1:.1f}, T2={rr_t2:.1f}"
             )
@@ -411,9 +413,12 @@ def detect_smc_orderblock_retest(
             )
             continue
 
-        sl_buffer = max(0.20 * atr, ltp * 0.005)
-        stop_loss = round(ob.top + sl_buffer, 2)
-        risk = abs(stop_loss - ltp)
+        # Structural levels with institutional volatility floor
+        min_risk_floor = max(0.70 * atr, ltp * 0.008)
+        sl_buffer = max(0.40 * atr, ltp * 0.006)
+        raw_stop = round(ob.top + sl_buffer, 2)
+        risk = max(abs(raw_stop - ltp), min_risk_floor)
+        stop_loss = round(ltp + risk, 2)
         if risk <= 0:
             continue
 
@@ -429,7 +434,8 @@ def detect_smc_orderblock_retest(
         rr_t1 = round(abs(entry_price - t1) / risk, 2)
         rr_t2 = round(abs(entry_price - t2) / risk, 2)
 
-        if rr_t1 < 1.5 or rr_t2 < 3.0:
+        # R:R must be institutional grade (T1 >= 1.4R, T2 >= 2.2R)
+        if rr_t1 < 1.4 or rr_t2 < 2.2:
             logger.debug(
                 f"[SMC_OB] {clean_sym} Supply OB R:R insufficient: T1={rr_t1:.1f}, T2={rr_t2:.1f}"
             )

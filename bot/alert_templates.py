@@ -1281,6 +1281,17 @@ def _resolve_monotonic_display_targets(
         if filtered:
             candidates = filtered
 
+        # Scale Separation Invariant: For options buying (< 1000 premium), filter out leaked spot targets
+        is_opt = (
+            "OPTION" in str(ap.get("instrument_type", "")).upper()
+            or any(k in str(ap.get("contract", "")).upper() for k in ("CE", "PE"))
+            or (alert and getattr(alert, "option_type", None))
+        )
+        if is_opt and entry_val < 1000:
+            scale_filtered = [c for c in candidates if c < max(500.0, entry_val * 6.0)]
+            if scale_filtered:
+                candidates = scale_filtered
+
     # Monotonic sort: ascending for longs / option buyers, descending for shorts
     candidates.sort(reverse=is_short)
 
@@ -2951,7 +2962,14 @@ def render_precursor_alert(data: dict[str, Any], in_market: bool = True) -> str:
         header_line = f"{dir_icon} <b>{env_tag} NEW CALL · PRECURSOR RADAR [{seg}]</b>"
         off_note = ""
 
-    cmp_label = "Opt CMP" if seg == "FNO" else "Spot CMP"
+    is_opt = bool(
+        data.get("option_type") in ("CE", "PE")
+        or (
+            data.get("contract")
+            and any(k in str(data.get("contract")).upper() for k in (" CE", " PE", "CE", "PE"))
+        )
+    )
+    cmp_label = "Opt CMP" if is_opt else "Spot CMP"
     sig_ref = build_signal_ref(symbol=sym)
 
     lot_sz = data.get("lot_size") or (data.get("actionable_plan") or {}).get("lot_size")
@@ -3414,83 +3432,9 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
             f"{cost_str}{profit_str}{rr_tag} [~70% Margin Relief · Zero Theta Bleed]"
         )
 
-    # ── Futures Preferred execution line ──────────────────────────────────────
-    # Always rendered from actionable_plan["futures_plan"] when present.
+    # ── Futures Preferred execution line (PURGED: Zero Futures Invariant) ────
+    # User mandate: strictly naked options or hedged spreads only; no futures signals in UI or Telegram.
     fut_line = ""
-    raw_fut_sym = (
-        fut_plan.get("contract_symbol")
-        or data.get("futures_contract_symbol")
-        or metrics.get("futures_contract_symbol")
-        or metrics.get("futures_contract")
-    )
-    # INVARIANT: Intraday Index calls NEVER recommend Futures. Options (Naked or Hedged) only!
-    is_intraday_or_index = bool(
-        data.get("timeframe") in ("INTRADAY", "1m", "3m", "5m", "15m")
-        or act_plan.get("timeframe") in ("INTRADAY", "1m", "3m", "5m", "15m")
-        or data.get("time_horizon") == "INTRADAY"
-        or (data.get("alert_type") or "").startswith("INDEX_")
-    )
-
-    if raw_fut_sym and not is_intraday_or_index:
-        fut_sym = format_contract_display(raw_fut_sym)
-        fut_lot = fut_plan.get("lot_size") or lot_sz
-        fut_lot_tag = f" (Lot: {fut_lot})" if fut_lot else ""
-        fut_entry = (
-            fut_plan.get("entry_price") or data.get("futures_entry") or metrics.get("futures_entry")
-        )
-        fut_sl = fut_plan.get("stop_loss")
-        fut_t1 = fut_plan.get("target_1")
-        fut_parts = []
-        if fut_entry:
-            try:
-                fut_parts.append(f"@ ₹{float(fut_entry):,.1f}")
-            except (ValueError, TypeError):
-                fut_parts.append(f"@ {fut_entry}")
-        if fut_sl:
-            try:
-                fut_parts.append(f"SL: ₹{float(fut_sl):,.1f}")
-            except (ValueError, TypeError) as e_suppressed:
-                logger.debug(
-                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
-                )
-        if fut_t1:
-            try:
-                fut_parts.append(f"T1: ₹{float(fut_t1):,.1f}")
-            except (ValueError, TypeError) as e_suppressed:
-                logger.debug(
-                    f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
-                )
-        fut_exec_str = " | ".join(fut_parts)
-        if fut_exec_str:
-            fut_exec_str = " " + fut_exec_str
-        fut_exp_tag = (
-            f" [Exp: {exp_date_str}]"
-            if (exp_date_str and not re.search(r"\d{2}-[A-Z]{3}", fut_sym))
-            else ""
-        )
-        fut_hedge_obj = (
-            fut_plan.get("futures_hedge")
-            or act_plan.get("futures_hedge")
-            or data.get("futures_hedge")
-            or metrics.get("futures_hedge")
-        )
-        if fut_hedge_obj:
-            if isinstance(fut_hedge_obj, dict):
-                hedge_desc = fut_hedge_obj.get("description") or fut_hedge_obj.get("strategy") or ""
-            else:
-                hedge_desc = str(fut_hedge_obj)
-            fut_hedge_note = (
-                f"\n• <b>Overnight Gap Risk:</b> <i>{hedge_desc}</i>" if hedge_desc else ""
-            )
-        else:
-            fut_hedge_alt = fut_plan.get("hedge_option") or fut_plan.get("hedge_contract")
-            fut_hedge_note = f" (Hedged via {fut_hedge_alt})" if fut_hedge_alt else ""
-
-        fut_line = (
-            f"\n• <b>Futures Preferred:</b> <code>{fut_sym}</code>{fut_lot_tag}"
-            f"{fut_exec_str}{fut_exp_tag} [Delta 1.0 · Zero Theta Decay]"
-            f"{fut_hedge_note}"
-        )
 
     # ── Multi-directional message body ────────────────────────────────────────
     if is_neutral:
@@ -3662,16 +3606,20 @@ def render_milestone_alert(
     color_icon = "🔴" if is_pe else "🟢"
 
     comps = parse_contract_components(contract=d.contract or "", underlying=d.symbol)
-    is_fno = bool(
+    is_option = bool(
         comps["is_option"]
-        or comps["is_futures"]
-        or (d.contract and any(k in d.contract.upper() for k in ("CE", "PE", "FUT", "OPTION")))
-        or (d.symbol and any(k in d.symbol.upper() for k in ("CE", "PE", "FUT", "OPTION")))
-        or (d.segment and d.segment.upper() == "FNO")
+        or (d.contract and any(k in d.contract.upper() for k in (" CE", " PE", "CE", "PE")))
         or "OPTION" in (d.alert_type or "").upper()
         or "GAMMA" in (d.alert_type or "").upper()
     )
-    cmp_label = "Opt CMP" if is_fno else "Spot CMP"
+    is_futures = bool(comps["is_futures"] or (d.contract and "FUT" in d.contract.upper()))
+    is_fno = bool(
+        is_option
+        or is_futures
+        or (d.segment and d.segment.upper() in ("FNO", "NFO"))
+        or (d.symbol and any(k in d.symbol.upper() for k in ("CE", "PE", "FUT")))
+    )
+    cmp_label = "Opt CMP" if is_option else "Spot CMP"
 
     is_crypto = bool(
         getattr(d, "segment", "") == "CRYPTO"
@@ -5113,6 +5061,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             or getattr(alert, "alert_type", "") == "CURRENCY_BREAKOUT"
         ):
             tg_header = f"💱 <b>{env_tag} NEW CALL · CURRENCY BREAKOUT</b>"
+        elif getattr(alert, "alert_type", "") == "PRE_INFLECTION_DRYUP":
+            tg_header = f"🤫 <b>{env_tag} NEW CALL · PRE-INFLECTION DRY-UP (ANTI-FOMO)</b>"
         elif getattr(alert, "stage", "") == "EARLY_WARNING" or getattr(alert, "alert_type", "") in (
             "PATTERN_COILING",
             "CIRCUIT_WARNING",
@@ -5145,7 +5095,15 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             # FIX: alert_type-specific header takes STRICT PRIORITY over generic PUT/CE labels.
             # Prevents OPENING_DRIVE_IGNITION CE from being labelled "OPTIONS PUT SURGE".
             alert_type_val = getattr(alert, "alert_type", "")
-            if alert_type_val in ("OPENING_DRIVE", "OPENING_DRIVE_IGNITION"):
+            th_val = (getattr(alert, "time_horizon", "") or "").upper()
+            if alert_type_val in ("INDEX_MICRO_SCALP", "MICRO_SCALP") or th_val in (
+                "SCALP",
+                "INTRADAY_SCALP_ONLY",
+            ):
+                opt_tag = (
+                    f"INDEX MICRO-SCALP ({'PUT' if is_put else 'CALL'}) [FAST SCALP ⚡ 15–45m]"
+                )
+            elif alert_type_val in ("OPENING_DRIVE", "OPENING_DRIVE_IGNITION"):
                 opt_tag = "OPENING DRIVE BREAKDOWN" if is_put else "OPENING DRIVE IGNITION"
             elif alert_type_val == "AFTERNOON_THRUST":
                 opt_tag = "AFTERNOON FLUSH" if is_put else "AFTERNOON THRUST"
@@ -5155,6 +5113,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 opt_tag = "OPTIONS PUT SURGE" if is_put else "OPTIONS BREAKOUT"
             elif alert_type_val in ("INDEX_PUT_SETUP", "INDEX_CALL_SETUP"):
                 opt_tag = "INDEX PUT SETUP" if is_put else "INDEX CALL SETUP"
+            elif th_val == "SWING_SHORT":
+                opt_tag = f"OPTIONS {'PUT' if is_put else 'CALL'} SURGE [SHORT SWING ⚡ 2–5D]"
+            elif th_val == "SWING_MID":
+                opt_tag = f"OPTIONS {'PUT' if is_put else 'CALL'} SURGE [MID SWING 📈 1–4W]"
             else:
                 # Generic options alert: label strictly by CE/PE, never assume PUT for CE
                 opt_tag = "OPTIONS PUT SURGE" if is_put else "OPTIONS BREAKOUT"
@@ -5175,7 +5137,38 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             "MULTIBAGGER",
             "STAGE_1_TO_2_EXPANSION",
         ):
-            tg_header = f"🚀 <b>{env_tag} NEW CALL · MULTIBAGGER ALPHA</b>"
+            tg_header = f"🚀 <b>{env_tag} NEW CALL · MULTIBAGGER ALPHA (6–24M)</b>"
+        elif (getattr(alert, "time_horizon", "") or "").upper() == "POSITIONAL":
+            ignited_suffix = (
+                " · BREAKOUT IGNITED" if getattr(alert, "stage", "") == "IGNITED" else ""
+            )
+            tg_header = f"🏛️ <b>{env_tag} NEW CALL · POSITIONAL BREAKOUT (1–6M){ignited_suffix}</b>"
+        elif (getattr(alert, "time_horizon", "") or "").upper() == "SWING_SHORT":
+            ignited_suffix = (
+                " · BREAKOUT IGNITED" if getattr(alert, "stage", "") == "IGNITED" else ""
+            )
+            tg_header = f"⚡ <b>{env_tag} NEW CALL · SHORT SWING (2–5 SESSIONS){ignited_suffix}</b>"
+        elif (getattr(alert, "time_horizon", "") or "").upper() == "SWING_MID":
+            ignited_suffix = (
+                " · BREAKOUT IGNITED" if getattr(alert, "stage", "") == "IGNITED" else ""
+            )
+            tg_header = f"📈 <b>{env_tag} NEW CALL · MID SWING (1–4 WEEKS){ignited_suffix}</b>"
+        elif (getattr(alert, "time_horizon", "") or "").upper() in (
+            "SCALP",
+            "INTRADAY_SCALP_ONLY",
+        ):
+            ignited_suffix = (
+                " · BREAKOUT IGNITED" if getattr(alert, "stage", "") == "IGNITED" else ""
+            )
+            tg_header = f"⚡ <b>{env_tag} NEW CALL · MICRO-SCALP (15–45m){ignited_suffix}</b>"
+        elif getattr(alert, "stage", "") == "IGNITED":
+            is_bear = (
+                (getattr(alert, "direction", "") or "").upper() in ("BEARISH", "SHORT", "SELL")
+                or "BREAKDOWN" in str(getattr(alert, "alert_type", "")).upper()
+                or "SHORT" in str(getattr(alert, "headline", "")).upper()
+            )
+            icon = "🔴" if is_bear else "🟢"
+            tg_header = f"{icon} <b>{env_tag} NEW CALL · BREAKOUT IGNITED</b>"
         elif getattr(alert, "alert_type", "") == "EXECUTION_READY":
             is_bear = (
                 (getattr(alert, "direction", "") or "").upper() in ("BEARISH", "SHORT", "SELL")
@@ -5293,19 +5286,64 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
         # Spot-leakage defense: if entry or SL is in underlying spot units, rescue from option_plan
         opt_p = actionable_plan.get("option_plan") or {}
-        if isinstance(opt_p, dict):
-            try:
-                m_e_val = float(re.findall(r"[\d,]+(?:\.\d+)?", str(entry))[0].replace(",", ""))
-            except Exception:
-                m_e_val = 0.0
-            spot_val = float(getattr(alert, "underlying_spot", 0) or getattr(alert, "ltp", 0) or 0)
-            if spot_val > 0 and m_e_val > (spot_val * 0.4):
-                prem_entry = opt_p.get("entry_premium") or getattr(alert, "option_premium", None)
-                if prem_entry and float(prem_entry) > 0:
-                    entry = f"₹{float(prem_entry):,.2f}"
-                sl_prem = opt_p.get("sl_premium") or opt_p.get("stop_loss")
-                if sl_prem and float(sl_prem) > 0:
-                    sl = f"₹{float(sl_prem):,.1f}"
+        spot_val = float(
+            getattr(alert, "underlying_spot", 0)
+            or (actionable_plan.get("option_plan") or {}).get("spot")
+            or 0
+        )
+        if spot_val <= 0 and getattr(alert, "ltp", 0) > 0 and getattr(alert, "strike", 0):
+            if abs(alert.ltp - alert.strike) / alert.strike < 0.25:
+                spot_val = float(alert.ltp)
+
+        try:
+            m_e_val = float(re.findall(r"[\d,]+(?:\.\d+)?", str(entry))[0].replace(",", ""))
+        except Exception:
+            m_e_val = 0.0
+
+        is_entry_spot = bool(spot_val > 0 and m_e_val > (spot_val * 0.35))
+        if is_entry_spot:
+            prem_entry = (
+                opt_p.get("entry_premium") if isinstance(opt_p, dict) else None
+            ) or getattr(alert, "option_premium", None)
+            sl_prem = (
+                (opt_p.get("sl_premium") or opt_p.get("stop_loss"))
+                if isinstance(opt_p, dict)
+                else None
+            )
+            # If option_plan is missing or lacks premiums, dynamically resolve via option_resolver
+            if (not prem_entry or float(prem_entry) <= 0) and spot_val > 0:
+                try:
+                    from engine.option_resolver import resolve_option_contract
+                    from engine.alert_identity import canonical_alert_symbol
+
+                    clean_s = canonical_alert_symbol(getattr(alert, "symbol", ""))
+                    dyn_sl = None
+                    try:
+                        m_s_raw = re.findall(r"[\d,]+(?:\.\d+)?", str(sl))
+                        if m_s_raw:
+                            dyn_sl = float(m_s_raw[0].replace(",", ""))
+                    except Exception:
+                        dyn_sl = None
+                    res = resolve_option_contract(
+                        symbol=clean_s,
+                        spot=spot_val,
+                        direction=getattr(alert, "direction", "BULLISH"),
+                        underlying_sl=dyn_sl,
+                        strike_tier="ATM",
+                    )
+                    if res and getattr(res, "entry_premium", 0) > 0:
+                        prem_entry = res.entry_premium
+                        sl_prem = res.sl_premium
+                        if isinstance(opt_p, dict):
+                            opt_p.update(res.as_dict())
+                except Exception as e_dyn:
+                    logger.debug(f"[bot.alert_templates] Dynamic option rescue non-fatal: {e_dyn}")
+
+            if prem_entry and float(prem_entry) > 0:
+                p_e = float(prem_entry)
+                entry = f"₹{p_e:,.2f}"
+            if sl_prem and float(sl_prem) > 0:
+                sl = f"₹{float(sl_prem):,.2f}"
 
         # Resolve numerical entry value for monotonicity and R:R
         entry_val = None
@@ -5372,7 +5410,20 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             except (ValueError, TypeError):
                 ev_str = ""
 
-        opt_cmp = getattr(alert, "option_premium", None) or getattr(alert, "ltp", None)
+        opt_cmp = getattr(alert, "option_premium", None)
+        if opt_cmp is None and isinstance(opt_p, dict):
+            opt_cmp = opt_p.get("entry_premium")
+        # Validate Scale Separation Invariant: opt_cmp MUST NOT be the spot price
+        if opt_cmp is not None and spot_val > 0 and opt_cmp >= (spot_val * 0.35):
+            opt_cmp = None
+        if opt_cmp is None:
+            cand_ltp = getattr(alert, "ltp", None)
+            if (
+                cand_ltp is not None
+                and (spot_val <= 0 or cand_ltp < (spot_val * 0.35))
+                and (entry_val is None or cand_ltp < max(500.0, entry_val * 4.0))
+            ):
+                opt_cmp = cand_ltp
 
         opt_cmp_match = (
             entry_val is not None and opt_cmp is not None and abs(opt_cmp - entry_val) <= 0.25
@@ -5465,6 +5516,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 if m_sl_val:
                     sl_num = float(m_sl_val.group(1).replace(",", ""))
                     pts_risk = abs(entry_val - sl_num)
+                    if is_option_plan and act.upper().startswith("BUY"):
+                        pts_risk = min(entry_val, pts_risk)
                     if pts_risk > 0:
                         max_loss = pts_risk * int(lot_sz)
             except Exception as e_suppressed:
@@ -6576,7 +6629,24 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         except Exception as e:
             logger.debug(f"[bot.alert_templates] Failed to set alert.signal_ref: {e}")
     if is_options_alert:
-        opt_cmp = getattr(alert, "option_premium", None) or getattr(alert, "ltp", None)
+        opt_cmp = getattr(alert, "option_premium", None)
+        if opt_cmp is None and isinstance(actionable_plan.get("option_plan"), dict):
+            opt_cmp = actionable_plan["option_plan"].get("entry_premium")
+        spot_ref = float(getattr(alert, "underlying_spot", 0) or 0)
+        if opt_cmp is not None and spot_ref > 0 and opt_cmp >= (spot_ref * 0.35):
+            opt_cmp = None
+        if opt_cmp is None:
+            cand_ltp = getattr(alert, "ltp", None)
+            if cand_ltp is not None and (spot_ref <= 0 or cand_ltp < (spot_ref * 0.35)):
+                opt_cmp = cand_ltp
+
+        # Sanitize clean_hl for options alerts: strip underlying spot SL and R:R from headline
+        if clean_hl:
+            clean_hl = re.sub(r"\|\s*SL\s*₹?[\d,.]+", "", clean_hl)
+            clean_hl = re.sub(r"\|\s*R:R\s*[\d.:]+", "", clean_hl)
+            clean_hl = re.sub(r"\bat\s+(₹[\d,.]+(?:–|-|—)₹[\d,.]+)", r"(Spot: \1)", clean_hl)
+            clean_hl = re.sub(r"\s+", " ", clean_hl).strip(" |·-")
+
         # Check if clean_hl already mentions entry or CMP price to avoid confusing duplicates
         hl_price = None
         try:
@@ -6759,12 +6829,15 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     horizon_val = getattr(alert, "time_horizon", None) or "INTRADAY"
     setup_style_val = getattr(alert, "setup_style", None) or "MOMENTUM_BREAKOUT"
     horizon_icons = {
+        "SCALP": "⚡ SCALP (15–45m)",
+        "INTRADAY_SCALP_ONLY": "⚡ SCALP (15–45m)",
         "INTRADAY": "⏱️ INTRADAY",
         "SWING_SHORT": "⚡ 2-5D SHORT SWING",
         "SWING_MID": "📈 1-4W MID SWING",
         "POSITIONAL": "🏛️ LONG POSITIONAL",
         "LONG_TERM": "🏛️ LONG POSITIONAL",
         "MULTIBAGGER": "🚀 MULTIBAGGER",
+        "ROLLING_24H": "🪙 24H ROLLING",
     }
     horizon_display = horizon_icons.get(horizon_val, f"⏱️ {horizon_val}")
     eta_val = getattr(alert, "eta_label", None)
@@ -6774,7 +6847,9 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         else:
             th_u = str(horizon_val).upper()
             ex_u = str(getattr(alert, "exchange", "") or "NSE").upper()
-            if th_u == "INTRADAY":
+            if th_u in ("SCALP", "INTRADAY_SCALP_ONLY"):
+                eta_val = "15–45m Scalp"
+            elif th_u == "INTRADAY":
                 eta_val = "Today 23:15 IST" if ex_u == "MCX" else "Today by 15:15 IST"
             elif th_u == "SWING_SHORT":
                 eta_val = "2–5 Sessions"
@@ -6784,6 +6859,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 eta_val = "1–6 Months"
             elif th_u == "MULTIBAGGER":
                 eta_val = "6–24 Months"
+            elif th_u == "ROLLING_24H":
+                eta_val = "24h Rolling"
             else:
                 eta_val = "Today 15:15 IST"
 

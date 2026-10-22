@@ -83,7 +83,12 @@ def detect_intraday_mover_sparks(
     from market.history import get_ohlcv
 
     found: list[AutoAlert] = []
-    now_dt = datetime.now(IST)
+    try:
+        import engine.auto_alert_engine as aae
+
+        now_dt = aae.datetime.now(IST)
+    except Exception:
+        now_dt = datetime.now(IST)
     curr_t = now_dt.time()
     is_test_env = (
         (os.environ.get("CHANAKYA_TESTING") == "1")

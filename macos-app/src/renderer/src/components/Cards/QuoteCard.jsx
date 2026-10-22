@@ -49,7 +49,7 @@ export default function QuoteCard({ data }) {
           ['Volume', vol(data.volume)],
         ].map(([label, val]) => (
           <div key={label} className="bg-panel/40 p-1.5 rounded border border-border/30">
-            <p className="text-muted text-[9px] uppercase tracking-wider font-ui">{label}</p>
+            <p className="text-muted text-[11px] uppercase tracking-wider font-ui">{label}</p>
             <p className="text-text font-semibold mt-0.5">{val}</p>
           </div>
         ))}

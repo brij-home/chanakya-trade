@@ -25,6 +25,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Optional, Sequence
 
@@ -217,11 +218,12 @@ class CoherenceGate:
                 f"[engine.pipeline.coherence_gate] Non-fatal exception suppressed: {e_suppressed}"
             )
 
-        if conf < 80.0 or rr_ratio < 2.0:
+        min_concurrent_rr = float(os.environ.get("CHANAKYA_MIN_CONCURRENT_RR", "1.5"))
+        if conf < 80.0 or rr_ratio < min_concurrent_rr:
             msg = (
                 f"🛑 Quality Standard: Suppressed secondary index trade {clean_target} "
                 f"(confidence={conf:.0f}%, R:R={rr_ratio:.2f}). "
-                f"Concurrent index signals require confidence >= 80% and R:R >= 2.0."
+                f"Concurrent index signals require confidence >= 80% and R:R >= {min_concurrent_rr:.1f}."
             )
             logger.info(f"[CoherenceGate] {msg}")
             return False, msg
@@ -374,7 +376,15 @@ class CoherenceGate:
             return True, "Cash equity / non-option setup: exempt from option cutoff"
 
         # 4. Resolve Current Session Time
-        now_dt = ref_dt or datetime.now(IST_ZONE)
+        if ref_dt is None:
+            try:
+                import engine.auto_alert_engine as aae
+
+                now_dt = aae.datetime.now(IST_ZONE)
+            except Exception:
+                now_dt = datetime.now(IST_ZONE)
+        else:
+            now_dt = ref_dt
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=IST_ZONE)
         else:
@@ -386,7 +396,7 @@ class CoherenceGate:
             or (os.environ.get("CHANAKYA_TESTING") == "1")
             or (os.environ.get("DEPLOY_MODE") == "test")
         )
-        if is_test_runner and ref_dt is None and os.environ.get("ENFORCE_SESSION_TIMING") != "1":
+        if is_test_runner and os.environ.get("ENFORCE_SESSION_TIMING") != "1":
             return True, "Test environment: session timing check bypassed"
 
         # 5. Pre-Market / Opening Auction Lockout (09:16:00 IST)

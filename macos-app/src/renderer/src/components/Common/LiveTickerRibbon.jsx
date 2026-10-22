@@ -187,11 +187,11 @@ export default function LiveTickerRibbon({
                     </span>
                   </div>
                   <div className="flex items-center gap-1 mt-0.5">
-                    <span className="text-[8px] font-mono px-1 rounded uppercase font-semibold text-muted" style={{ background: 'var(--color-panel)' }}>
+                    <span className="text-[10px] font-mono px-1 rounded uppercase font-semibold text-muted" style={{ background: 'var(--color-panel)' }}>
                       {t.category === 'COMMODITY' ? 'MCX' : t.category}
                     </span>
                     {t.unit && t.unit !== '₹' && (
-                      <span className="text-[8px] font-mono text-muted">
+                      <span className="text-[10px] font-mono text-muted">
                         {t.unit}
                       </span>
                     )}
@@ -204,7 +204,7 @@ export default function LiveTickerRibbon({
                     {formatPrice(t.ltp, t.unit)}
                   </span>
                   <div
-                    className="flex items-center gap-0.5 px-1 py-0.2 rounded text-[9px] font-mono font-bold tabular-nums mt-0.5"
+                    className="flex items-center gap-0.5 px-1 py-0.2 rounded text-[11px] font-mono font-bold tabular-nums mt-0.5"
                     style={{
                       background: badgeBg,
                       border: `1px solid ${badgeBorder}`,

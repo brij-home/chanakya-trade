@@ -35,7 +35,7 @@ export default function ProxyDisclosure({
   if (variant === 'badge') {
     return (
       <span
-        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold
+        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono font-bold
           bg-violet-500/15 border border-violet-500/30 text-violet-400 ${className}`}
         title={buildTooltipText({ sourceTicker, sourceVenue, targetInstrument, conversionFormula, fxPair, fxRate })}
         aria-label={`Research proxy: sourced from ${sourceVenue ?? 'external exchange'}, not your tradable ${targetInstrument ?? 'instrument'}`}
@@ -69,13 +69,13 @@ export default function ProxyDisclosure({
             due to contract differences, expiry basis, and settlement methodology.
           </div>
           {conversionFormula && (
-            <div className="opacity-60 font-mono text-[9px]">
+            <div className="opacity-60 font-mono text-[11px]">
               Conversion: {conversionFormula}
               {fxPair && fxRate ? ` using ${fxPair} @ ${fxRate.toFixed(4)}` : ''}
               {fxAsOf ? ` (FX as of ${formatFxAsOf(fxAsOf)})` : ''}
             </div>
           )}
-          <div className="font-bold text-amber-400 text-[9px]">
+          <div className="font-bold text-amber-400 text-[11px]">
             ⚠ Do not use this price for order placement on {targetInstrument?.split(':')[0] ?? 'MCX'}.
           </div>
         </div>

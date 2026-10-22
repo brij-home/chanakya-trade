@@ -551,11 +551,11 @@ def get_universe_depth_radar(
 
     from concurrent.futures import ThreadPoolExecutor
 
-    # Bounded cold-miss budget for REST depth warming per radar sweep:
-    # Allows progressive in-memory cache warming for symbols not in TBT
-    # while strictly honoring Fyers Prime API limits.
-    warm_cap = min(40, len(candidates))
-    rest_warm_budget = [warm_cap] if allow_rest_fallback else [0]
+    # Broad multi-symbol universe sweeps strictly run on streaming ticks and TBT cache (zero REST depth calls).
+    # REST depth fallback is permitted exclusively for targeted single-scrip lookups (len(candidates) <= 1)
+    # to protect Fyers API from multi-symbol /depth bursts.
+    effective_allow_rest = bool(allow_rest_fallback and len(candidates) <= 1)
+    rest_warm_budget = [1] if effective_allow_rest else [0]
     rest_budget_lock = threading.Lock()
 
     def _process_candidate(cand: tuple[str, str], idx: int = 0) -> Optional[dict[str, Any]]:
@@ -564,10 +564,9 @@ def get_universe_depth_radar(
             # 1. Fast in-memory check (TBT stream, TBT cache, or broker depth cache)
             snap = analyze_symbol_order_book(sym, allow_rest_fallback=False)
 
-            # 2. If depth is absent in RAM (not in TBT, and cold miss in broker cache),
-            # check if cold-miss cache-warming budget is available for this candidate
+            # 2. If depth is absent in RAM and single-scrip REST fallback is explicitly permitted
             if (
-                allow_rest_fallback
+                effective_allow_rest
                 and not snap.bids
                 and not snap.asks
                 and snap.total_bid_qty == 0

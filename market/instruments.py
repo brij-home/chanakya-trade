@@ -709,3 +709,44 @@ def get_fno_lot_size(symbol: str) -> int:
     }
     canonical = alias_map.get(clean, clean)
     return STANDARD_LOT_SIZES.get(canonical, STANDARD_LOT_SIZES.get(clean, 1))
+
+
+@lru_cache(maxsize=2048)
+def is_derivative_eligible(symbol: str) -> bool:
+    """
+    Return True if the instrument is an approved derivative underlying (F&O equity, index, MCX commodity, or currency).
+    Queries the centralized STANDARD_LOT_SIZES and COMMODITY_SYMBOLS exchange masters (SSOT).
+    Cash-only equities without derivative contracts return False.
+    """
+    clean = (
+        (symbol or "")
+        .upper()
+        .replace("MCX:", "")
+        .replace("CDS:", "")
+        .replace("NFO:", "")
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .strip()
+    )
+    if not clean:
+        return False
+
+    if clean in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
+        return True
+    if clean in COMMODITY_SYMBOLS or (symbol or "").upper().startswith("MCX:"):
+        return True
+
+    alias_map = {
+        "NIFTY 50": "NIFTY",
+        "NIFTY50": "NIFTY",
+        "NSEI": "NIFTY",
+        "^NSEI": "NIFTY",
+        "CNX NIFTY": "NIFTY",
+        "NIFTY BANK": "BANKNIFTY",
+        "NSEBANK": "BANKNIFTY",
+        "^NSEBANK": "BANKNIFTY",
+        "NIFTY FINANCIAL SERVICES": "FINNIFTY",
+        "NIFTY MID SELECT": "MIDCPNIFTY",
+    }
+    canonical = alias_map.get(clean, clean)
+    return canonical in STANDARD_LOT_SIZES or clean in STANDARD_LOT_SIZES

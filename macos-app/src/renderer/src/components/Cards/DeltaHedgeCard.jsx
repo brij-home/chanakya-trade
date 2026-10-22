@@ -337,7 +337,7 @@ export default function DeltaHedgeCard({ data, onOpenOrderTicket }) {
               <div className="flex items-center gap-2">
                 <span className="text-base">{activeRecipe.icon}</span>
                 <h4 className="text-xs font-bold font-mono text-text">{activeRecipe.title}</h4>
-                <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber/10 text-amber border border-amber/30">
+                <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-amber/10 text-amber border border-amber/30">
                   {activeRecipe.badge}
                 </span>
               </div>
@@ -351,17 +351,17 @@ export default function DeltaHedgeCard({ data, onOpenOrderTicket }) {
 
           <div className="grid grid-cols-3 gap-2 text-xs font-mono">
             <div className="bg-panel p-2 rounded-lg border border-border/50">
-              <span className="text-[9px] text-muted uppercase block">Action</span>
+              <span className="text-[11px] text-muted uppercase block">Action</span>
               <span className={`font-bold ${activeRecipe.action === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {activeRecipe.action} {activeRecipe.lots} Lot{activeRecipe.lots > 1 ? 's' : ''}
               </span>
             </div>
             <div className="bg-panel p-2 rounded-lg border border-border/50 col-span-1 truncate">
-              <span className="text-[9px] text-muted uppercase block">Instrument</span>
+              <span className="text-[11px] text-muted uppercase block">Instrument</span>
               <span className="font-bold text-text truncate block">{activeRecipe.instrument}</span>
             </div>
             <div className="bg-panel p-2 rounded-lg border border-border/50">
-              <span className="text-[9px] text-muted uppercase block">Delta Impact</span>
+              <span className="text-[11px] text-muted uppercase block">Delta Impact</span>
               <span className="font-bold text-emerald-400">{activeRecipe.deltaImpact}</span>
             </div>
           </div>

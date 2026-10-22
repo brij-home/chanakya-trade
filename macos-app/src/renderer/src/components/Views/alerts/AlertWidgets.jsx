@@ -35,7 +35,7 @@ export function RRMiniBar({ sl, entry, t1, t2, t3, currentPrice, isUpward = true
 export function MilestoneDots({ targetStatus, stage, isSLHit = false, isExpired = false, isInvalidated = false, isTimeStop = false }) {
   if (isSLHit || stage === 'SL_HIT') {
     return (
-      <span className="flex items-center gap-0.5 font-mono text-[9px] text-rose-400 font-bold" title="Stop-Loss Hit">
+      <span className="flex items-center gap-0.5 font-mono text-[11px] text-rose-400 font-bold" title="Stop-Loss Hit">
         <span>🛑</span>
       </span>
     )
@@ -43,7 +43,7 @@ export function MilestoneDots({ targetStatus, stage, isSLHit = false, isExpired 
 
   if (isTimeStop || stage === 'TIME_STOP_EXIT') {
     return (
-      <span className="flex items-center gap-0.5 font-mono text-[9px] text-amber-400 font-bold" title="Velocity Time-Stop Exit">
+      <span className="flex items-center gap-0.5 font-mono text-[11px] text-amber-400 font-bold" title="Velocity Time-Stop Exit">
         <span>⏱️</span>
       </span>
     )
@@ -51,7 +51,7 @@ export function MilestoneDots({ targetStatus, stage, isSLHit = false, isExpired 
 
   if (isExpired || stage === 'EXPIRED' || stage === 'SESSION_CLOSE_EXIT' || stage === 'SUPERSEDED') {
     return (
-      <span className="flex items-center gap-0.5 font-mono text-[9px] text-zinc-400 font-bold" title="Expired / Session Closed">
+      <span className="flex items-center gap-0.5 font-mono text-[11px] text-zinc-400 font-bold" title="Expired / Session Closed">
         <span>🌙</span>
       </span>
     )
@@ -59,7 +59,7 @@ export function MilestoneDots({ targetStatus, stage, isSLHit = false, isExpired 
 
   if (isInvalidated || stage === 'INVALIDATED') {
     return (
-      <span className="flex items-center gap-0.5 font-mono text-[9px] text-amber-400 font-bold" title="Thesis Invalidated">
+      <span className="flex items-center gap-0.5 font-mono text-[11px] text-amber-400 font-bold" title="Thesis Invalidated">
         <span>⚠️</span>
       </span>
     )
@@ -70,7 +70,7 @@ export function MilestoneDots({ targetStatus, stage, isSLHit = false, isExpired 
   const t3Hit = stage === 'TARGET_ACHIEVED' || targetStatus === 'TARGET_ACHIEVED' || stage === 'COMPLETED'
 
   return (
-    <span className="flex items-center gap-1 font-mono text-[9px]" title="Target Milestones: T1 → T2 → T3">
+    <span className="flex items-center gap-1 font-mono text-[11px]" title="Target Milestones: T1 → T2 → T3">
       <span className={`transition-all ${t1Hit ? 'text-emerald-400 font-black scale-110 drop-shadow-[0_0_4px_rgba(16,185,129,0.8)]' : 'text-zinc-600'}`}>
         ●
       </span>

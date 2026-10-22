@@ -379,12 +379,12 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
                     </div>
                     <div className="text-center min-w-0 px-0.5">
                       <span
-                        className="text-[9px] font-extrabold uppercase tracking-wider block truncate"
+                        className="text-[11px] font-extrabold uppercase tracking-wider block truncate"
                         style={{ color: isDone || isActive ? 'var(--color-gold)' : 'var(--color-muted)' }}
                       >
                         {stage.label}
                       </span>
-                      <span className="text-[8px] truncate block" style={{ color: 'var(--color-muted)' }}>
+                      <span className="text-[10px] truncate block" style={{ color: 'var(--color-muted)' }}>
                         {isDone ? stage.sub : '...'}
                       </span>
                     </div>
@@ -642,13 +642,13 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
                           <span className="text-2xl">{PERSONA_ICONS[pid] || '🧠'}</span>
                           <div>
                             <div className="font-black text-xs" style={{ color: 'var(--color-text)' }}>{pName}</div>
-                            <div className="text-[9px] mt-0.5 font-mono" style={{ color: 'var(--color-muted)' }}>
+                            <div className="text-[11px] mt-0.5 font-mono" style={{ color: 'var(--color-muted)' }}>
                               {sig.confidence}% confidence
                             </div>
                           </div>
                         </div>
                         <span
-                          className="text-[9px] px-2 py-0.5 rounded-md font-black"
+                          className="text-[11px] px-2 py-0.5 rounded-md font-black"
                           style={{ background: verdictColor.bg, color: verdictColor.text, border: `1px solid ${verdictColor.border}` }}
                         >
                           {sig.verdict}
@@ -671,7 +671,7 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
                         </p>
                       )}
 
-                      <div className="text-[8px] mt-2 text-center" style={{ color: 'var(--color-muted)' }}>
+                      <div className="text-[10px] mt-2 text-center" style={{ color: 'var(--color-muted)' }}>
                         Hover to see full analysis ↻
                       </div>
                     </div>
@@ -681,7 +681,7 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
                       className="persona-card-back p-3.5 overflow-y-auto flex flex-col gap-2"
                       style={{ background: 'var(--color-panel)', border: `1px solid ${verdictColor.border}` }}
                     >
-                      <div className="text-[9px] font-black uppercase tracking-widest mb-1" style={{ color: verdictColor.text }}>
+                      <div className="text-[11px] font-black uppercase tracking-widest mb-1" style={{ color: verdictColor.text }}>
                         {PERSONA_ICONS[pid] || '🧠'} {pName} — Signals
                       </div>
                       <div className="space-y-1">
@@ -695,7 +695,7 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
                       {sig.key_metrics && typeof sig.key_metrics === 'object' && Object.keys(sig.key_metrics).length > 0 && (
                         <div className="flex flex-wrap gap-1 pt-1">
                           {Object.entries(sig.key_metrics).slice(0, 4).map(([k, v]) => (
-                            <span key={k} className="px-1.5 py-0.5 rounded text-[8px] font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-muted)' }}>
+                            <span key={k} className="px-1.5 py-0.5 rounded text-[10px] font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-muted)' }}>
                               {k}: <strong style={{ color: 'var(--color-text)' }}>{String(v)}</strong>
                             </span>
                           ))}

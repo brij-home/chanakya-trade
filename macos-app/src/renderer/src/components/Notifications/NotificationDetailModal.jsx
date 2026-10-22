@@ -21,7 +21,7 @@ function RRMiniBar({ sl, entry, t1, t2, t3 }) {
         {t2W > 0 && <div style={{ width: `${t2W}%` }} className="bg-cyan-500" title={`Target 2: ₹${t2}`} />}
         {t3W > 0 && <div style={{ width: `${t3W}%` }} className="bg-purple-500" title={`Target 3: ₹${t3}`} />}
       </div>
-      <div className="flex items-center justify-between text-[9px] font-mono text-muted">
+      <div className="flex items-center justify-between text-[11px] font-mono text-muted">
         <span className="text-rose-400 font-bold">SL (Risk)</span>
         <span className="text-amber-400 font-bold">Entry</span>
         <span className="text-emerald-400 font-bold">T1 (2R)</span>
@@ -123,7 +123,7 @@ export default function NotificationDetailModal({ onOpenOrderTicket }) {
                   {selected.contract_symbol || selected.symbol}
                 </span>
                 <span
-                  className={`text-[9px] font-black px-2 py-0.5 rounded-full border ${
+                  className={`text-[11px] font-black px-2 py-0.5 rounded-full border ${
                     isBull
                       ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
                       : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
@@ -132,7 +132,7 @@ export default function NotificationDetailModal({ onOpenOrderTicket }) {
                   {selected.direction}
                 </span>
                 {selected.is_test && (
-                  <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                  <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
                     TEST
                   </span>
                 )}

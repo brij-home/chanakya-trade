@@ -901,7 +901,7 @@ export default function TerminalView({
                               {c.name}
                             </span>
                           </div>
-                          <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-amber/10 border border-amber/30 text-amber">
+                          <span className="text-[11px] px-1.5 py-0.2 rounded font-mono font-bold bg-amber/10 border border-amber/30 text-amber">
                             {c.badge}
                           </span>
                         </div>
@@ -946,7 +946,7 @@ export default function TerminalView({
                             <span className="text-xs font-semibold text-text truncate">
                               {p.name}
                             </span>
-                            <span className="text-[9px] text-muted font-mono px-1 py-0.2 rounded bg-surface border border-border/50">
+                            <span className="text-[11px] text-muted font-mono px-1 py-0.2 rounded bg-surface border border-border/50">
                               {p.style}
                             </span>
                           </div>
@@ -1048,7 +1048,7 @@ export default function TerminalView({
                         <div className="flex items-center gap-1.5">
                           <span className="text-xs font-bold text-text block">{item.symbol}</span>
                           {item.cat && (
-                            <span className="text-[9px] px-1 rounded bg-surface border border-border/60 text-muted font-mono">
+                            <span className="text-[11px] px-1 rounded bg-surface border border-border/60 text-muted font-mono">
                               {item.cat}
                             </span>
                           )}
@@ -1267,7 +1267,7 @@ export default function TerminalView({
             {/* Row 3: Actionable Institutional Key Levels HUD (4-Tile Grid) */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-border/40 text-xs font-mono">
               <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
-                <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">UNMITIGATED OB</span>
+                <span className="text-[11px] text-muted block uppercase tracking-wider font-bold">UNMITIGATED OB</span>
                 <span className="font-bold text-emerald-400 text-[11px] truncate block tabular-nums">
                   {(data?.order_block?.bottom && data?.order_block?.top)
                     ? `₹${data.order_block.bottom} – ₹${data.order_block.top}`
@@ -1275,19 +1275,19 @@ export default function TerminalView({
                         ? `₹${setupRaw.order_block.bottom} – ₹${setupRaw.order_block.top}`
                         : '—')}
                 </span>
-                <span className="text-[9px] text-muted block">Demand Rebound Zone</span>
+                <span className="text-[11px] text-muted block">Demand Rebound Zone</span>
               </div>
               <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
-                <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">POC (Max Volume)</span>
+                <span className="text-[11px] text-muted block uppercase tracking-wider font-bold">POC (Max Volume)</span>
                 <span className="font-bold text-amber text-[11px] truncate block tabular-nums">
                   {(data?.volume_profile?.poc || setupRaw?.volume_profile?.poc)
                     ? `₹${data?.volume_profile?.poc || setupRaw?.volume_profile?.poc}`
                     : '—'}
                 </span>
-                <span className="text-[9px] text-muted block">Volume Acceptance</span>
+                <span className="text-[11px] text-muted block">Volume Acceptance</span>
               </div>
               <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
-                <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">VALUE AREA (70%)</span>
+                <span className="text-[11px] text-muted block uppercase tracking-wider font-bold">VALUE AREA (70%)</span>
                 <span className="font-bold text-blue-400 text-[11px] truncate block tabular-nums">
                   {(data?.volume_profile?.val && data?.volume_profile?.vah)
                     ? `₹${data.volume_profile.val} – ₹${data.volume_profile.vah}`
@@ -1295,14 +1295,14 @@ export default function TerminalView({
                         ? `₹${setupRaw.volume_profile.val} – ₹${setupRaw.volume_profile.vah}`
                         : '—')}
                 </span>
-                <span className="text-[9px] text-muted block">VAH / VAL Balance</span>
+                <span className="text-[11px] text-muted block">VAH / VAL Balance</span>
               </div>
               <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
-                <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">14D ATR VOLATILITY</span>
+                <span className="text-[11px] text-muted block uppercase tracking-wider font-bold">14D ATR VOLATILITY</span>
                 <span className="font-bold text-purple-400 text-[11px] truncate block tabular-nums">
                   {data?.atr != null && data.atr > 0 ? `₹${Number(data.atr).toFixed(2)}` : '—'}
                 </span>
-                <span className="text-[9px] text-muted block">Risk Range Per Bar</span>
+                <span className="text-[11px] text-muted block">Risk Range Per Bar</span>
               </div>
             </div>
 
@@ -1311,12 +1311,12 @@ export default function TerminalView({
               <div className="flex flex-wrap items-center gap-3">
                 {/* Put-Call Ratio (PCR) with Sentiment Tag */}
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[9px] uppercase font-bold text-muted">PCR:</span>
+                  <span className="text-[11px] uppercase font-bold text-muted">PCR:</span>
                   <span className="font-bold text-emerald-400 tabular-nums">
                     {data?.pcr != null ? Number(data.pcr).toFixed(2) : '—'}
                   </span>
                   {data?.pcr != null && (
-                    <span className="text-[9px] text-muted">
+                    <span className="text-[11px] text-muted">
                       {Number(data.pcr) >= 1.05 ? '(Bullish Put Writing)' : Number(data.pcr) <= 0.85 ? '(Call Resistance)' : '(Balanced)'}
                     </span>
                   )}
@@ -1324,21 +1324,21 @@ export default function TerminalView({
 
                 {/* Expiry Max Pain Pin */}
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[9px] uppercase font-bold text-muted">Max Pain:</span>
+                  <span className="text-[11px] uppercase font-bold text-muted">Max Pain:</span>
                   <span className="font-bold text-amber tabular-nums">
                     {data?.max_pain ? `₹${data.max_pain}` : '—'}
                   </span>
-                  {data?.max_pain && <span className="text-[9px] text-muted">Expiry Pin</span>}
+                  {data?.max_pain && <span className="text-[11px] text-muted">Expiry Pin</span>}
                 </div>
 
                 {/* Intraday VWAP Benchmark */}
                 <div className="flex items-center gap-1.5 hidden md:flex">
-                  <span className="text-[9px] uppercase font-bold text-muted">VWAP:</span>
+                  <span className="text-[11px] uppercase font-bold text-muted">VWAP:</span>
                   <span className="font-bold text-cyan-400 tabular-nums">
                     {data?.vwap != null ? `₹${Number(data.vwap).toFixed(1)}` : '—'}
                   </span>
                   {data?.vwap != null && curLtp != null && (
-                    <span className={`text-[9px] font-bold tabular-nums ${curLtp >= data.vwap ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    <span className={`text-[11px] font-bold tabular-nums ${curLtp >= data.vwap ? 'text-emerald-400' : 'text-rose-400'}`}>
                       {curLtp >= data.vwap ? `Above (+${(((curLtp - data.vwap) / data.vwap) * 100).toFixed(1)}%)` : `Below (${(((curLtp - data.vwap) / data.vwap) * 100).toFixed(1)}%)`}
                     </span>
                   )}
@@ -1719,18 +1719,18 @@ export default function TerminalView({
               {/* Header */}
               <div className="flex items-center justify-between">
                 <div>
-                  <span className="text-[9px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>⚡ SMART ORDER STAGING GATE</span>
+                  <span className="text-[11px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>⚡ SMART ORDER STAGING GATE</span>
                   <span className="text-xs font-bold font-mono" style={{ color: 'var(--color-text)' }}>{setup.symbol}</span>
                 </div>
                 <div className="flex flex-col items-end gap-1">
-                  <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold border ${
+                  <span className={`px-2 py-0.5 rounded-full text-[11px] font-bold border ${
                     setup?.action?.includes('SHORT')
                       ? 'border-rose-500/40 text-rose-400'
                       : 'border-emerald-500/40 text-emerald-400'
                   }`} style={{ background: setup?.action?.includes('SHORT') ? 'rgba(255,79,123,0.12)' : 'rgba(0,214,143,0.12)' }}>
                     ● {setup?.status || 'READY'}
                   </span>
-                  <span className={`text-[9px] font-bold px-2 py-0.5 rounded font-mono ${
+                  <span className={`text-[11px] font-bold px-2 py-0.5 rounded font-mono ${
                     setup.action.includes('SHORT') ? 'text-rose-400' : 'text-emerald-400'
                   }`} style={{ background: 'var(--color-elevated)' }}>
                     {setup.action}
@@ -1756,7 +1756,7 @@ export default function TerminalView({
                     <div className="flex justify-between items-center py-1.5 px-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
                       <div>
                         <span className="text-[10px] text-emerald-400 font-bold block">TARGET 2 (3.5R)</span>
-                        <span className="text-[9px] text-muted">{isShortOrder ? '−' : '+'}{setup.target_2 ? 'Full target' : 'Trailing'}</span>
+                        <span className="text-[11px] text-muted">{isShortOrder ? '−' : '+'}{setup.target_2 ? 'Full target' : 'Trailing'}</span>
                       </div>
                       <span className="font-extrabold text-xs text-emerald-400 tabular-nums">
                         {setup.target_2 != null ? `₹${Number(setup.target_2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
@@ -1766,7 +1766,7 @@ export default function TerminalView({
                       <div>
                         <span className="text-[10px] text-emerald-400 font-bold block">TARGET 1 (2R)</span>
                         {setup.reward_pct != null && setup.reward_pct !== '—' && (
-                          <span className="text-[9px] text-emerald-400/80">
+                          <span className="text-[11px] text-emerald-400/80">
                             {isShortOrder ? '−' : '+'}{setup.reward_pct}% ({isShortOrder ? '−' : '+'}{setup.reward_points}pts)
                           </span>
                         )}
@@ -1785,7 +1785,7 @@ export default function TerminalView({
                       <div>
                         <span className="text-[10px] text-rose-400 font-bold block">STOP LOSS</span>
                         {setup.risk_pct != null && setup.risk_pct !== '—' && (
-                          <span className="text-[9px] text-rose-400/80">
+                          <span className="text-[11px] text-rose-400/80">
                             {isShortOrder ? '+' : '−'}{setup.risk_pct}% ({isShortOrder ? '+' : '−'}{setup.risk_points}pts)
                           </span>
                         )}
@@ -1819,7 +1819,7 @@ export default function TerminalView({
                       return (
                         <div className="bg-surface/80 rounded-xl p-2.5 border border-border/60 space-y-2 mt-1.5">
                           <div className="flex items-center justify-between">
-                            <span className="text-[9px] font-bold uppercase tracking-wider text-muted flex items-center gap-1">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-muted flex items-center gap-1">
                               <span>⚡</span> QUANT POSITION SIZER
                             </span>
                             <span className="text-[10px] font-mono font-bold text-amber">
@@ -1834,7 +1834,7 @@ export default function TerminalView({
                                 key={bVal}
                                 type="button"
                                 onClick={() => setRiskBudget(bVal)}
-                                className={`flex-1 py-0.5 rounded text-[9px] font-mono font-bold transition-all cursor-pointer ${
+                                className={`flex-1 py-0.5 rounded text-[11px] font-mono font-bold transition-all cursor-pointer ${
                                   riskBudget === bVal
                                     ? 'bg-amber text-black shadow-xs font-extrabold'
                                     : 'text-muted hover:text-text'
@@ -1846,17 +1846,17 @@ export default function TerminalView({
                           </div>
 
                           {/* Sizing Telemetry Grid */}
-                          <div className="grid grid-cols-3 gap-1 text-[9px] font-mono text-center">
+                          <div className="grid grid-cols-3 gap-1 text-[11px] font-mono text-center">
                             <div className="bg-elevated/50 p-1 rounded border border-border/40">
-                              <span className="text-muted block text-[8px]">CAPPED RISK</span>
+                              <span className="text-muted block text-[10px]">CAPPED RISK</span>
                               <span className="text-rose-400 font-bold">₹{actualRiskAmt.toLocaleString('en-IN')}</span>
                             </div>
                             <div className="bg-elevated/50 p-1 rounded border border-border/40">
-                              <span className="text-muted block text-[8px]">T1 PROFIT (2R)</span>
+                              <span className="text-muted block text-[10px]">T1 PROFIT (2R)</span>
                               <span className="text-emerald-400 font-bold">+₹{profitT1Amt.toLocaleString('en-IN')}</span>
                             </div>
                             <div className="bg-elevated/50 p-1 rounded border border-border/40">
-                              <span className="text-muted block text-[8px]">T2 PROFIT (3.5R)</span>
+                              <span className="text-muted block text-[10px]">T2 PROFIT (3.5R)</span>
                               <span className="text-emerald-400 font-bold">+₹{profitT2Amt.toLocaleString('en-IN')}</span>
                             </div>
                           </div>
@@ -1927,8 +1927,8 @@ export default function TerminalView({
           ) : (
             <div className="rounded-2xl p-4 space-y-3" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
               <div className="flex items-center justify-between">
-                <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--color-muted)' }}>⚡ ORDER STAGING GATE</span>
-                <span className="text-[9px] font-mono px-2 py-0.5 rounded-full border border-amber/30 bg-amber/10 text-amber font-bold">
+                <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color: 'var(--color-muted)' }}>⚡ ORDER STAGING GATE</span>
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded-full border border-amber/30 bg-amber/10 text-amber font-bold">
                   ● AWAITING SETUP
                 </span>
               </div>
@@ -1983,9 +1983,9 @@ export default function TerminalView({
           {/* THESIS BOX — only render if backend provided a real thesis */}
           {setup && setup.thesis && (
             <div className="rounded-2xl p-3 space-y-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}>
-              <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--color-muted)' }}>💡 SETUP THESIS</span>
+              <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color: 'var(--color-muted)' }}>💡 SETUP THESIS</span>
               <p className="text-[11px] leading-relaxed font-ui" style={{ color: 'var(--color-text)' }}>{setup.thesis}</p>
-              <div className="px-2 py-1.5 rounded-lg text-[9px] flex items-start gap-1.5" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
+              <div className="px-2 py-1.5 rounded-lg text-[11px] flex items-start gap-1.5" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
                 <span>🛡️</span>
                 <span><strong style={{ color: 'var(--color-text)' }}>Trail Rule:</strong> Move SL to BE at T1. Trail remainder with 3× ATR Chandelier.</span>
               </div>
@@ -2013,7 +2013,7 @@ export default function TerminalView({
               <div className="p-3.5 space-y-3 border-t border-border/50 animate-fade-slide">
                 {/* RISK METER ARC WIDGET */}
                 <div className="flex flex-col items-center">
-                  <span className="text-[9px] font-bold uppercase tracking-widest block mb-2" style={{ color: 'var(--color-muted)' }}>⚡ PORTFOLIO HEAT METER</span>
+                  <span className="text-[11px] font-bold uppercase tracking-widest block mb-2" style={{ color: 'var(--color-muted)' }}>⚡ PORTFOLIO HEAT METER</span>
                   {(() => {
                     const heatPct = data?.portfolio_heat != null ? Number(data.portfolio_heat) : null
                     const arcLen = 157
@@ -2051,7 +2051,7 @@ export default function TerminalView({
                       </svg>
                     )
                   })()}
-                  <div className="flex items-center gap-2 text-[9px] font-mono mt-1">
+                  <div className="flex items-center gap-2 text-[11px] font-mono mt-1">
                     <span style={{ color: 'var(--color-emerald)' }}>● SAFE {'<'}40%</span>
                     <span style={{ color: 'var(--color-gold)' }}>● MOD 40–70%</span>
                     <span style={{ color: 'var(--color-rose)' }}>● HIGH {'>'}70%</span>
@@ -2088,14 +2088,14 @@ export default function TerminalView({
                   ]
                   return (
                     <div className="space-y-1.5 pt-2 border-t border-border/40">
-                      <span className="text-[9px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>🛡️ ATR TRAIL &amp; SCALE LEVELS</span>
+                      <span className="text-[11px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>🛡️ ATR TRAIL &amp; SCALE LEVELS</span>
                       {levels.map(({ label, price, note, color }) => (
                         <div key={label} className="flex items-center justify-between text-[10px] px-2 py-1 rounded-lg" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border-subtle)' }}>
                           <div>
                             <span className="block font-bold font-mono" style={{ color }}>{fmtPrice(price)}</span>
-                            <span className="text-[9px]" style={{ color: 'var(--color-muted)' }}>{note}</span>
+                            <span className="text-[11px]" style={{ color: 'var(--color-muted)' }}>{note}</span>
                           </div>
-                          <span className="text-[9px] text-right" style={{ color: 'var(--color-muted)' }}>{label}</span>
+                          <span className="text-[11px] text-right" style={{ color: 'var(--color-muted)' }}>{label}</span>
                         </div>
                       ))}
                     </div>
@@ -2118,7 +2118,7 @@ export default function TerminalView({
                 <span>🌊</span> INSTITUTIONAL FLOWS
               </span>
               <span
-                className={`text-[9px] font-bold px-2 py-0.5 rounded-full border font-mono ${
+                className={`text-[11px] font-bold px-2 py-0.5 rounded-full border font-mono ${
                   flows?.regime === 'DII_ABSORPTION'
                     ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
                     : flows?.regime === 'TWIN_BUYING'
@@ -2161,7 +2161,7 @@ export default function TerminalView({
                   <span>FII Net</span>
                   {fiiStreak != null && (
                     <span
-                      className={`text-[9px] px-1 rounded ${
+                      className={`text-[11px] px-1 rounded ${
                         fiiVal >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'
                       }`}
                     >
@@ -2179,7 +2179,7 @@ export default function TerminalView({
                   <span>DII Net</span>
                   {diiStreak != null && (
                     <span
-                      className={`text-[9px] px-1 rounded ${
+                      className={`text-[11px] px-1 rounded ${
                         diiVal >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'
                       }`}
                     >
@@ -2208,7 +2208,7 @@ export default function TerminalView({
                     style={{ width: `${Math.min(100, (absorptionPct / 200) * 100)}%` }}
                   />
                 </div>
-                <div className="text-[9px] text-muted font-sans">
+                <div className="text-[11px] text-muted font-sans">
                   {absorptionPct >= 100
                     ? '🛡️ Domestic institutions absorbed all foreign outflows'
                     : '⚠️ Foreign selling exceeding domestic absorption'}
@@ -2338,7 +2338,7 @@ export default function TerminalView({
               <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-2.5 space-y-1.5">
                 <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block flex items-center justify-between">
                   <span>🟢 LEADING</span>
-                  <span className="text-[9px] text-muted">RS &gt; 100, Mom &gt; 100</span>
+                  <span className="text-[11px] text-muted">RS &gt; 100, Mom &gt; 100</span>
                 </span>
                 <div className="space-y-1">
                   {(() => {
@@ -2374,7 +2374,7 @@ export default function TerminalView({
               <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-xl p-2.5 space-y-1.5">
                 <span className="text-[10px] font-bold text-cyan-400 uppercase tracking-wider block flex items-center justify-between">
                   <span>🔵 IMPROVING</span>
-                  <span className="text-[9px] text-muted">Mom &gt; 100</span>
+                  <span className="text-[11px] text-muted">Mom &gt; 100</span>
                 </span>
                 <div className="space-y-1">
                   {(() => {
@@ -2410,7 +2410,7 @@ export default function TerminalView({
               <div className="bg-amber/10 border border-amber/30 rounded-xl p-2.5 space-y-1.5">
                 <span className="text-[10px] font-bold text-amber uppercase tracking-wider block flex items-center justify-between">
                   <span>🟡 WEAKENING</span>
-                  <span className="text-[9px] text-muted">Mom &lt; 100</span>
+                  <span className="text-[11px] text-muted">Mom &lt; 100</span>
                 </span>
                 <div className="space-y-1">
                   {(() => {
@@ -2446,7 +2446,7 @@ export default function TerminalView({
               <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-2.5 space-y-1.5">
                 <span className="text-[10px] font-bold text-rose-400 uppercase tracking-wider block flex items-center justify-between">
                   <span>🔴 LAGGING</span>
-                  <span className="text-[9px] text-muted">RS &lt; 100, Mom &lt; 100</span>
+                  <span className="text-[11px] text-muted">RS &lt; 100, Mom &lt; 100</span>
                 </span>
                 <div className="space-y-1">
                   {(() => {
@@ -2511,7 +2511,7 @@ export default function TerminalView({
                         <span className="font-bold text-text group-hover:text-amber transition-colors">
                           {cleanName || 'SECTOR'}
                         </span>
-                        <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${badgeColor}`}>
+                        <span className={`text-[11px] font-bold px-1.5 py-0.2 rounded border ${badgeColor}`}>
                           {quad}
                         </span>
                       </div>

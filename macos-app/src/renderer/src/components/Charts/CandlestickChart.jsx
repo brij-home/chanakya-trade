@@ -155,9 +155,9 @@ function CandlestickChartComponent({
       const volStr = vol >= 1e7 ? `${(vol / 1e7).toFixed(2)}Cr` : vol >= 1e5 ? `${(vol / 1e5).toFixed(2)}L` : vol >= 1e3 ? `${(vol / 1e3).toFixed(1)}k` : vol.toString()
       const rvolStr = bar.rvol ? ` (${bar.rvol}x)` : ''
       const instTag = bar.is_inst_buy
-        ? '<span class="ml-2 px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/40 text-[9px] font-bold">🟢 Inst Buy</span>'
+        ? '<span class="ml-2 px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/40 text-[11px] font-bold">🟢 Inst Buy</span>'
         : bar.is_inst_sell
-        ? '<span class="ml-2 px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/40 text-[9px] font-bold">🔴 Inst Sell</span>'
+        ? '<span class="ml-2 px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/40 text-[11px] font-bold">🔴 Inst Sell</span>'
         : ''
 
       ohlcTextRef.current.innerHTML = `
@@ -887,7 +887,7 @@ function CandlestickChartComponent({
         {/* Left: Symbol & Live OHLC stats container */}
         <div className="flex items-center gap-2 overflow-x-auto">
           <span className="text-amber font-bold tracking-wide text-sm">{symbol}</span>
-          <span className="px-1.5 py-0.5 rounded bg-surface border border-border text-[9px] font-mono text-muted tracking-tight" title="Indian Standard Time (UTC+05:30)">
+          <span className="px-1.5 py-0.5 rounded bg-surface border border-border text-[11px] font-mono text-muted tracking-tight" title="Indian Standard Time (UTC+05:30)">
             {exchange} • IST (UTC+5:30)
           </span>
           <div ref={ohlcTextRef} className="flex items-center gap-1.5 text-[11px]" />
@@ -1100,7 +1100,7 @@ function CandlestickChartComponent({
             {/* Crisp High-Contrast Floating Chip Tag */}
             <div className="flex items-center gap-1.5 overflow-hidden ml-1">
               <span
-                className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-bold tracking-wider shadow-2xs border ${
+                className={`px-1.5 py-0.2 rounded text-[11px] font-mono font-bold tracking-wider shadow-2xs border ${
                   z.type === 'DEMAND'
                     ? 'bg-emerald-500/15 dark:bg-emerald-950/85 text-emerald-700 dark:text-emerald-300 border-emerald-500/40 backdrop-blur-xs'
                     : 'bg-rose-500/15 dark:bg-rose-950/85 text-rose-700 dark:text-rose-300 border-rose-500/40 backdrop-blur-xs'
@@ -1109,7 +1109,7 @@ function CandlestickChartComponent({
                 {z.tag}
               </span>
               <span
-                className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-semibold shadow-2xs border backdrop-blur-xs ${
+                className={`px-1.5 py-0.2 rounded text-[11px] font-mono font-semibold shadow-2xs border backdrop-blur-xs ${
                   z.type === 'DEMAND'
                     ? 'bg-surface/85 text-text border-emerald-500/30'
                     : 'bg-surface/85 text-text border-rose-500/30'
@@ -1140,7 +1140,7 @@ function CandlestickChartComponent({
               <span className="text-amber">● %K</span>
               <span className="text-cyan-500 dark:text-cyan-400">● %D</span>
             </div>
-            <span className="text-muted text-[9px]">Overbought: 80 | Oversold: 20</span>
+            <span className="text-muted text-[11px]">Overbought: 80 | Oversold: 20</span>
           </div>
           <div ref={stochContainerRef} className="w-full h-[100px]" />
         </div>

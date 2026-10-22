@@ -60,7 +60,7 @@ def test_zero_futures_for_intraday_asymmetric_alert():
 
     rendered = render_asymmetric_alert(asym_intraday)
 
-    # 1. Futures Preferred line must be strictly suppressed for Intraday
+    # 1. Futures Preferred line must be strictly suppressed
     assert "Futures Preferred:" not in rendered
     assert "Delta 1.0 · Zero Theta Decay" not in rendered
 
@@ -71,6 +71,100 @@ def test_zero_futures_for_intraday_asymmetric_alert():
     # 3. F&O Alternative Option must be rendered
     assert "F&O Alternative:" in rendered
     assert "NIFTY 24900 CE" in rendered
+
+
+def test_zero_futures_for_swing_and_stock_asymmetric_alert():
+    """Verify that positional/swing single-stock alerts never recommend Futures, strictly options or hedges."""
+    asym_swing_stock = {
+        "symbol": "LT",
+        "score": 90,
+        "verdict": "MAX_CONVICTION",
+        "ltp": 3628.1,
+        "stop_loss": 3588.86,
+        "target_1": 3864.9,
+        "timeframe": "SWING",
+        "segment": "FNO_STOCK",
+        "direction": "BULLISH",
+        "actionable_plan": {
+            "timeframe": "SWING",
+            "entry_range": "₹3,607.0 – ₹3,687.75",
+            "stop_loss": 3588.86,
+            "target_1": 3864.9,
+            "lot_size": 175,
+            "futures_plan": {
+                "contract_symbol": "LT26OCTFUT",
+                "entry_price": 3635.0,
+                "stop_loss": 3588.86,
+                "target_1": 3864.9,
+                "lot_size": 175,
+            },
+            "option_plan": {
+                "contract_symbol": "LT 3650 CE",
+                "entry_premium": 68.5,
+                "sl_premium": 42.0,
+                "t1_premium": 130.0,
+                "lot_size": 175,
+            },
+            "hedge_plan": {
+                "strategy": "BULL_CALL_SPREAD",
+                "strategy_title": "Bull Call Spread",
+                "buy_leg": "BUY LT 3650 CE @ ₹68.5",
+                "sell_leg": "SELL LT 3750 CE @ ₹28.0",
+                "net_debit_per_share": 40.5,
+                "max_loss": 7087.5,
+                "max_profit": 10412.5,
+                "risk_reward": "1:1.47",
+            },
+        },
+    }
+
+    rendered = render_asymmetric_alert(asym_swing_stock)
+
+    # 1. Zero Futures Invariant: Futures Preferred line must NOT exist
+    assert "Futures Preferred:" not in rendered
+    assert "LT26OCTFUT" not in rendered
+    assert "Delta 1.0 · Zero Theta Decay" not in rendered
+
+    # 2. Hedged Spread line must be rendered
+    assert "Hedged Spread (Preferred):" in rendered
+    assert "Bull Call Spread" in rendered
+
+    # 3. F&O Alternative Option must be rendered
+    assert "F&O Alternative:" in rendered
+    assert "LT 3650 CE" in rendered
+
+
+def test_alert_preferences_vetoes_all_futures_signals():
+    """Verify that alert_preferences suppresses any directional future signal across stock and index."""
+    from engine.alert_preferences import alert_preferences
+
+    # Stock future alert intent
+    stock_fut_alert = {
+        "symbol": "LT",
+        "segment": "FNO_STOCK",
+        "contract_symbol": "LT26OCTFUT",
+        "derivative_type": "FUT",
+        "action": "BUY_FUTURES",
+        "confidence": 90,
+        "stage": "IGNITED",
+    }
+    allowed, reason = alert_preferences.explain_alert_allowed(stock_fut_alert, "telegram")
+    assert allowed is False
+    assert "Futures signals prohibited" in reason
+
+    # Index future alert intent
+    index_fut_alert = {
+        "symbol": "NIFTY",
+        "segment": "FNO_INDEX",
+        "contract_symbol": "NIFTY26OCTFUT",
+        "derivative_type": "FUT",
+        "action": "BUY_FUT",
+        "confidence": 95,
+        "stage": "IGNITED",
+    }
+    allowed_idx, reason_idx = alert_preferences.explain_alert_allowed(index_fut_alert, "telegram")
+    assert allowed_idx is False
+    assert "Futures signals prohibited" in reason_idx
 
 
 def test_stage_primed_generates_broker_sl_limit_preorder():

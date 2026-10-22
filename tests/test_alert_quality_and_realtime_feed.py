@@ -133,6 +133,8 @@ def test_orb_stabilization_requires_institutional_volume_0930_to_0945(tmp_path, 
     )
     monkeypatch.setattr("engine.auto_alert_engine.datetime", mock_dt_cls)
     monkeypatch.setattr("engine.session_runway.datetime", mock_dt_cls)
+    monkeypatch.setattr("engine.detectors.intraday_spark.datetime", mock_dt_cls)
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda *args, **kwargs: True)
     monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
 

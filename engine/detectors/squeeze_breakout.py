@@ -454,9 +454,9 @@ def detect_squeeze_breakout(
                     sl = round(ltp - 1.25 * atr20, 1)
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 risk_pts = max(abs_risk_floor, round(ltp - sl, 1))
-                # Institutional invariant: Guarantee target provides at least 1:2.0 R:R
-                if (target - ltp) < 2.0 * risk_pts:
-                    target = round(ltp + 2.0 * risk_pts, 1)
+                # Guarantee target provides at least 1:1.5 R:R
+                if (target - ltp) < 1.5 * risk_pts:
+                    target = round(ltp + 1.5 * risk_pts, 1)
                 if target_2 <= target:
                     target_2 = round(target + 1.5 * risk_pts, 1)
                 real_rr = round((target - ltp) / risk_pts, 1)
@@ -613,9 +613,9 @@ def detect_squeeze_breakout(
                     sl = round(ltp + 1.25 * atr20, 1)
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 risk_pts = max(abs_risk_floor, round(sl - ltp, 1))
-                # Institutional invariant: Guarantee target provides at least 1:2.0 R:R
-                if (ltp - target) < 2.0 * risk_pts:
-                    target = round(ltp - 2.0 * risk_pts, 1)
+                # Guarantee target provides at least 1:1.5 R:R
+                if (ltp - target) < 1.5 * risk_pts:
+                    target = round(ltp - 1.5 * risk_pts, 1)
                 if target_2 >= target:
                     target_2 = round(target - 1.5 * risk_pts, 1)
                 real_rr = round((ltp - target) / risk_pts, 1)
@@ -761,9 +761,9 @@ def detect_squeeze_breakout(
                     sl = round(ltp - 1.25 * atr20, 1)
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 risk_pts = max(abs_risk_floor, round(ltp - sl, 1))
-                # Institutional invariant: Guarantee target provides at least 1:2.0 R:R
-                if (target - ltp) < 2.0 * risk_pts:
-                    target = round(ltp + 2.0 * risk_pts, 1)
+                # Guarantee target provides at least 1:1.5 R:R
+                if (target - ltp) < 1.5 * risk_pts:
+                    target = round(ltp + 1.5 * risk_pts, 1)
                 if target_2 <= target:
                     target_2 = round(target + 1.5 * risk_pts, 1)
                 real_rr = round((target - ltp) / risk_pts, 1)
@@ -922,9 +922,9 @@ def detect_squeeze_breakout(
                     sl = round(ltp + 1.25 * atr20, 1)
                 abs_risk_floor = resolve_price_tier(ltp).abs_min_risk_pts
                 risk_pts = max(abs_risk_floor, round(sl - ltp, 1))
-                # Institutional invariant: Guarantee target provides at least 1:2.0 R:R
-                if (ltp - target) < 2.0 * risk_pts:
-                    target = round(ltp - 2.0 * risk_pts, 1)
+                # Guarantee target provides at least 1:1.5 R:R
+                if (ltp - target) < 1.5 * risk_pts:
+                    target = round(ltp - 1.5 * risk_pts, 1)
                 if target_2 >= target:
                     target_2 = round(target - 1.5 * risk_pts, 1)
                 real_rr = round((ltp - target) / risk_pts, 1)

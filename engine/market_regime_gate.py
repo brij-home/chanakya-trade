@@ -39,6 +39,7 @@ class RegimeSnapshot:
     evaluated_at: float
     is_locomotive_polarized: bool = False
     locomotive_detail: str = ""
+    locomotive_direction: str = ""  # "BULLISH" | "BEARISH" | ""
 
 
 def _fetch_vix() -> Optional[float]:
@@ -109,19 +110,23 @@ def _fetch_ad_ratio() -> Optional[float]:
     return None
 
 
-def _fetch_locomotive_polarization(ad_ratio: Optional[float]) -> tuple[bool, str]:
+def _fetch_locomotive_polarization(ad_ratio: Optional[float]) -> tuple[bool, str, str]:
     """
-    Checks if top 3 NIFTY heavyweights (HDFCBANK, RELIANCE, ICICIBANK) are artificially
-    holding up the index while broader market breadth is collapsing (A/D < 0.85).
+    Checks if top 3 NIFTY heavyweights (HDFCBANK, RELIANCE, ICICIBANK) are divergent from
+    broader market breadth:
+      1. Bullish Locomotive Trap: Heavyweights held green (avg > +0.10%) while A/D < 0.85
+         (artificially masking broad market liquidation). Direction: "BULLISH"
+      2. Bearish Reverse Locomotive Trap: Heavyweights dumped red (avg < -0.25%) while A/D > 1.25
+         (artificially dragging index while broad market accumulates). Direction: "BEARISH"
     """
-    if ad_ratio is None or ad_ratio >= 0.85:
-        return False, ""
+    if ad_ratio is None or (0.85 <= ad_ratio <= 1.25):
+        return False, "", ""
     try:
         from market.quotes import get_quote
 
         quotes = get_quote(["NSE:HDFCBANK", "NSE:RELIANCE", "NSE:ICICIBANK"])
         if not quotes:
-            return False, ""
+            return False, "", ""
         changes = []
         for sym in ("NSE:HDFCBANK", "NSE:RELIANCE", "NSE:ICICIBANK"):
             q = quotes.get(sym)
@@ -130,15 +135,21 @@ def _fetch_locomotive_polarization(ad_ratio: Optional[float]) -> tuple[bool, str
                 changes.append(chg)
         if len(changes) >= 2:
             avg_chg = sum(changes) / len(changes)
-            if avg_chg > 0.10:
+            if ad_ratio < 0.85 and avg_chg > 0.10:
                 detail = (
-                    f"Locomotive Trap: Heavyweights (HDFC/RELIANCE/ICICI) avg {avg_chg:+.2f}%% "
+                    f"Locomotive Trap: Heavyweights (HDFC/RELIANCE/ICICI) avg {avg_chg:+.2f}% "
                     f"masking broad market liquidation (A/D {ad_ratio:.2f})."
                 )
-                return True, detail
+                return True, detail, "BULLISH"
+            elif ad_ratio > 1.25 and avg_chg < -0.25:
+                detail = (
+                    f"Reverse Locomotive Trap: Heavyweights (HDFC/RELIANCE/ICICI) avg {avg_chg:+.2f}% "
+                    f"dragging benchmark while broad market accumulates (A/D {ad_ratio:.2f})."
+                )
+                return True, detail, "BEARISH"
     except Exception as exc:
         logger.debug("[MarketRegimeGate] Locomotive check error: %s", exc)
-    return False, ""
+    return False, "", ""
 
 
 def evaluate_market_regime(force_refresh: bool = False) -> RegimeSnapshot:
@@ -200,7 +211,7 @@ def evaluate_market_regime(force_refresh: bool = False) -> RegimeSnapshot:
         ad_condition = False
 
     is_edgeless = vix_condition and ad_condition and data_quality != "UNAVAILABLE"
-    is_loco, loco_detail = _fetch_locomotive_polarization(ad_ratio)
+    is_loco, loco_detail, loco_dir = _fetch_locomotive_polarization(ad_ratio)
 
     vix_str = "VIX %.1f" % vix if vix_available else "VIX UNAVAILABLE"
     ad_str = "A/D %.2f" % ad_ratio if ad_available else "A/D UNAVAILABLE"
@@ -214,12 +225,20 @@ def evaluate_market_regime(force_refresh: bool = False) -> RegimeSnapshot:
             % (vix_str, _VIX_EDGELESS_THRESHOLD, ad_str, _AD_LOW, _AD_HIGH)
         )
     elif is_loco:
-        banner = "LOCOMOTIVE POLARIZATION DETECTED — NAKED CALLS VETOED"
-        reason = (
-            "%s Top heavyweights artificially holding benchmark while broad market liquidates. "
-            "Naked index calls suppressed. Mandate defined-risk hedges or short setups."
-            % loco_detail
-        )
+        if loco_dir == "BEARISH":
+            banner = "REVERSE LOCOMOTIVE POLARIZATION — NAKED PUTS VETOED"
+            reason = (
+                "%s Top heavyweights artificially dragging benchmark while broad market advances. "
+                "Naked index puts suppressed. Squeeze risk is elevated; mandate defined-risk hedges or individual longs."
+                % loco_detail
+            )
+        else:
+            banner = "LOCOMOTIVE POLARIZATION DETECTED — NAKED CALLS VETOED"
+            reason = (
+                "%s Top heavyweights artificially holding benchmark while broad market liquidates. "
+                "Naked index calls suppressed. Mandate defined-risk hedges or short setups."
+                % loco_detail
+            )
     elif prefer_spreads:
         banner = "LOW VIX - USE DEFINED-RISK SPREADS (%s)" % vix_str
         reason = (
@@ -251,6 +270,7 @@ def evaluate_market_regime(force_refresh: bool = False) -> RegimeSnapshot:
         evaluated_at=now,
         is_locomotive_polarized=is_loco,
         locomotive_detail=loco_detail,
+        locomotive_direction=loco_dir,
     )
 
     with _cache_lock:

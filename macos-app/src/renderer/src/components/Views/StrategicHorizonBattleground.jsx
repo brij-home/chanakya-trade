@@ -77,7 +77,7 @@ export default function StrategicHorizonBattleground() {
                 Strategic Horizon &amp; Battleground Map
               </span>
               <span
-                className="text-[9px] font-mono px-1.5 py-0.5 rounded font-bold uppercase tracking-wider"
+                className="text-[11px] font-mono px-1.5 py-0.5 rounded font-bold uppercase tracking-wider"
                 style={{ background: biasBg, color: biasColor, border: `1px solid ${biasColor}40` }}
               >
                 {bias} • {conviction}% CONVICTION
@@ -115,7 +115,7 @@ export default function StrategicHorizonBattleground() {
             title="Refresh strategic horizon"
           >
             <span className={loading ? 'animate-spin' : ''}>🔄</span>
-            {lastRefreshed && <span className="font-mono text-[9px] hidden sm:inline">{lastRefreshed}</span>}
+            {lastRefreshed && <span className="font-mono text-[11px] hidden sm:inline">{lastRefreshed}</span>}
           </button>
         </div>
       </div>
@@ -141,7 +141,7 @@ export default function StrategicHorizonBattleground() {
               <div className="flex items-center justify-between text-[10px] text-muted font-mono font-medium">
                 <span>SPOT / VWAP</span>
                 <span
-                  className="font-bold text-[9px] px-1 rounded"
+                  className="font-bold text-[11px] px-1 rounded"
                   style={{
                     background: isAboveVwap ? 'rgba(0, 214, 143, 0.15)' : 'rgba(255, 79, 123, 0.15)',
                     color: isAboveVwap ? 'var(--color-emerald)' : 'var(--color-rose)'
@@ -179,7 +179,7 @@ export default function StrategicHorizonBattleground() {
               >
                 {regime.replace(/_/g, ' ')}
               </div>
-              <div className="text-[9.5px] text-muted truncate">
+              <div className="text-[11px] text-muted truncate">
                 Day Range: ₹{data?.day_low ? Number(data.day_low).toFixed(0) : '—'} – ₹{data?.day_high ? Number(data.day_high).toFixed(0) : '—'}
               </div>
             </div>
@@ -188,7 +188,7 @@ export default function StrategicHorizonBattleground() {
             <div className="p-2 rounded-lg bg-surface/70 border border-border/60 space-y-0.5">
               <div className="flex items-center justify-between text-[10px] text-muted font-mono font-medium">
                 <span>OPTIONS WALLS</span>
-                <span className="font-bold text-[9px] text-indigo-400">
+                <span className="font-bold text-[11px] text-indigo-400">
                   PCR: {options?.pcr ?? '—'}
                 </span>
               </div>
@@ -201,7 +201,7 @@ export default function StrategicHorizonBattleground() {
                   PW: {options?.put_wall ? Number(options.put_wall).toFixed(0) : '—'}
                 </span>
               </div>
-              <div className="text-[9px] text-muted font-mono truncate">
+              <div className="text-[11px] text-muted font-mono truncate">
                 {options?.total_contracts ?? 0} strike contracts evaluated
               </div>
             </div>
@@ -210,14 +210,14 @@ export default function StrategicHorizonBattleground() {
             <div className="p-2 rounded-lg bg-surface/70 border border-border/60 space-y-0.5">
               <div className="flex items-center justify-between text-[10px] text-muted font-mono font-medium">
                 <span>BREADTH ALIGNMENT</span>
-                <span className="font-bold text-[9px] text-sky-400">
+                <span className="font-bold text-[11px] text-sky-400">
                   A/D: {data?.market_breadth?.ad_ratio ?? '—'}x
                 </span>
               </div>
               <div className="text-xs font-mono font-bold text-text truncate">
                 {data?.market_breadth?.verdict || 'HARMONIOUS'}
               </div>
-              <div className="text-[9px] text-muted font-mono flex justify-between">
+              <div className="text-[11px] text-muted font-mono flex justify-between">
                 <span style={{ color: 'var(--color-emerald)' }}>▲ {data?.market_breadth?.advances ?? 0}</span>
                 <span style={{ color: 'var(--color-rose)' }}>▼ {data?.market_breadth?.declines ?? 0}</span>
               </div>
@@ -241,7 +241,7 @@ export default function StrategicHorizonBattleground() {
                       SMT INTER-MARKET DIVERGENCE: {smt.divergence_type?.replace(/_/g, ' ')}
                     </span>
                     {smt.is_trap && (
-                      <span className="text-[9px] font-mono px-1 rounded bg-rose-500/20 text-rose-400 font-bold border border-rose-500/40">
+                      <span className="text-[11px] font-mono px-1 rounded bg-rose-500/20 text-rose-400 font-bold border border-rose-500/40">
                         INSTITUTIONAL TRAP
                       </span>
                     )}
@@ -269,35 +269,35 @@ export default function StrategicHorizonBattleground() {
           <div className="p-2.5 rounded-lg bg-surface/70 border border-border/60 space-y-1.5">
             <div className="text-[10px] font-mono font-bold uppercase tracking-wider text-muted flex items-center justify-between">
               <span>🗺️ Key Institutional Battleground Levels</span>
-              <span className="text-[9px] text-text font-normal font-sans">
+              <span className="text-[11px] text-text font-normal font-sans">
                 {data?.battleground_zone || 'Active Session Corridor'}
               </span>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center font-mono">
               <div className="p-1.5 rounded bg-panel border border-border/50">
-                <div className="text-[9px] text-muted uppercase">Invalidation Boundary</div>
+                <div className="text-[11px] text-muted uppercase">Invalidation Boundary</div>
                 <div className="text-xs font-bold" style={{ color: 'var(--color-rose)' }}>
                   ₹{data?.invalidation_level ? Number(data.invalidation_level).toLocaleString('en-IN', { maximumFractionDigits: 1 }) : '—'}
                 </div>
               </div>
 
               <div className="p-1.5 rounded bg-panel border border-border/50">
-                <div className="text-[9px] text-muted uppercase">Immediate Resistance</div>
+                <div className="text-[11px] text-muted uppercase">Immediate Resistance</div>
                 <div className="text-xs font-bold text-amber-400">
                   ₹{data?.immediate_resistance ? Number(data.immediate_resistance).toLocaleString('en-IN', { maximumFractionDigits: 1 }) : '—'}
                 </div>
               </div>
 
               <div className="p-1.5 rounded bg-panel border border-border/50">
-                <div className="text-[9px] text-muted uppercase">Pivot Equilibrium</div>
+                <div className="text-[11px] text-muted uppercase">Pivot Equilibrium</div>
                 <div className="text-xs font-bold text-sky-400">
                   ₹{data?.pivot_equilibrium ? Number(data.pivot_equilibrium).toLocaleString('en-IN', { maximumFractionDigits: 1 }) : '—'}
                 </div>
               </div>
 
               <div className="p-1.5 rounded bg-panel border border-border/50">
-                <div className="text-[9px] text-muted uppercase">Immediate Support</div>
+                <div className="text-[11px] text-muted uppercase">Immediate Support</div>
                 <div className="text-xs font-bold" style={{ color: 'var(--color-emerald)' }}>
                   ₹{data?.immediate_support ? Number(data.immediate_support).toLocaleString('en-IN', { maximumFractionDigits: 1 }) : '—'}
                 </div>

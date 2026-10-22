@@ -180,7 +180,7 @@ def test_tbt_15_slot_priority_governor():
         mgr._scout.clear()
 
     # 1. Normal state: 6 core + 3 expiry = 9 symbols
-    desired = mgr.compute_desired_subscriptions()
+    desired = mgr.compute_desired_subscriptions(fill_sector_leaders=False)
     assert len(desired) == 9
     assert len(desired) <= MAX_TBT_SYMBOLS
 
@@ -190,7 +190,7 @@ def test_tbt_15_slot_priority_governor():
     mgr.register_in_flight("NSE:NIFTY26OCT25000CE")
     mgr.register_in_flight("NSE:BANKNIFTY26OCT52000PE")
 
-    desired = mgr.compute_desired_subscriptions()
+    desired = mgr.compute_desired_subscriptions(fill_sector_leaders=False)
     assert len(desired) == 13  # 4 in-flight + 6 core + 3 expiry
     assert desired[0] == "NSE:INFY-EQ"  # In-flight placed first
 
@@ -369,7 +369,7 @@ def test_tbt_zero_duplication_on_nifty_expiry_week(monkeypatch):
         mgr._in_flight.clear()
         mgr._scout.clear()
 
-    desired = mgr.compute_desired_subscriptions()
+    desired = mgr.compute_desired_subscriptions(fill_sector_leaders=False)
     assert len(desired) == 7
     assert len(desired) == len(set(desired))  # Strictly unique
     # 8 remaining slots available for Scouts

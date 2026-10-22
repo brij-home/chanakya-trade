@@ -179,6 +179,7 @@ def _load_recent_events_from_disk(limit: int = 250) -> None:
                             "websocket",
                             "fyerswebsocket",
                             "fyersdatasocket",
+                            "fyerstbtsocket",
                             "httpcore",
                             "starlette",
                         )
@@ -188,8 +189,11 @@ def _load_recent_events_from_disk(limit: int = 250) -> None:
                         or "RATE LIMIT" in rsn.upper()
                         or "TOO MANY REQUESTS" in rsn.upper()
                     )
-                    if is_ext and not is_rate_lim:
-                        prio = "P3" if sev != "ERROR" else "P2"
+                    if is_ext:
+                        if is_rate_lim:
+                            prio = "P2"
+                        else:
+                            prio = "P3" if sev != "ERROR" else "P2"
                     elif ev_type == EVENT_LLM_FAILOVER or any(
                         k in rsn.upper()
                         for k in (
@@ -710,13 +714,14 @@ class TelemetryLogHandler(logging.Handler):
                     "starlette",
                     "fyerswebsocket",
                     "fyersdatasocket",
+                    "fyerstbtsocket",
                 )
             )
             is_rate_limit = (
                 "429" in msg or "RATE LIMIT" in msg.upper() or "TOO MANY REQUESTS" in msg.upper()
             )
 
-            if is_external_noise and not is_rate_limit:
+            if is_external_noise:
                 # Scraper ticker misses or routine socket drops are operational diagnostics
                 # Fyers broker socket invalid_symbols feedback is P3 informational audit
                 if any(
@@ -725,6 +730,10 @@ class TelemetryLogHandler(logging.Handler):
                 ):
                     severity = "INFO"
                     priority = "P3"
+                elif is_rate_limit:
+                    # External socket/scraper rate throttle with active backoff is P2 Warning (degraded rate gate)
+                    severity = "WARNING"
+                    priority = "P2"
                 else:
                     severity = "INFO" if record.levelno < logging.ERROR else "WARNING"
                     priority = "P3" if record.levelno < logging.ERROR else "P2"

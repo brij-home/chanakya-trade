@@ -217,7 +217,7 @@ export default function DepthLadderWidget({
     if (provenance.includes('LIVE')) {
       return (
         <span
-          className="text-[8px] font-black font-mono px-1.5 py-0.5 rounded border border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
+          className="text-[10px] font-black font-mono px-1.5 py-0.5 rounded border border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
           title="Direct Level-2 broker depth feed streaming"
         >
           🟢 LIVE L2
@@ -227,7 +227,7 @@ export default function DepthLadderWidget({
     if (provenance.includes('FEED') || provenance.includes('L1')) {
       return (
         <span
-          className="text-[8px] font-black font-mono px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/20 text-amber-300"
+          className="text-[10px] font-black font-mono px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/20 text-amber-300"
           title="Exchange L1 broadcast depth"
         >
           🟡 L1 FEED
@@ -236,7 +236,7 @@ export default function DepthLadderWidget({
     }
     return (
       <span
-        className="text-[8px] font-black font-mono px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-400"
+        className="text-[10px] font-black font-mono px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-400"
         title="Offline / disconnected simulator mode"
       >
         🧪 SIM DEPTH
@@ -258,7 +258,7 @@ export default function DepthLadderWidget({
           {provenanceBadge}
           {iceberg && (
             <span
-              className="text-[8px] font-black px-1 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
+              className="text-[10px] font-black px-1 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
               title={`Hidden iceberg detected absorbing on ${iceberg.side} side at ₹${iceberg.price}`}
             >
               🧊 ICEBERG {iceberg.side}
@@ -294,7 +294,7 @@ export default function DepthLadderWidget({
             <span className="font-bold text-indigo-300">
               {greeks.option_type || 'OPT'} ₹{greeks.strike}
             </span>
-            <span className="text-[9px] text-muted">
+            <span className="text-[11px] text-muted">
               (Spot: ₹{Number(greeks.spot || 0).toLocaleString('en-IN')})
             </span>
           </div>
@@ -320,7 +320,7 @@ export default function DepthLadderWidget({
 
       {/* OBI Imbalance Gauge */}
       <div className="mb-2.5 bg-elevated/60 border border-border/40 rounded-lg p-1.5">
-        <div className="flex items-center justify-between text-[9px] mb-1 font-semibold">
+        <div className="flex items-center justify-between text-[11px] mb-1 font-semibold">
           <span className="text-rose-400">Ask Pressure (Distribution)</span>
           <span
             className={`font-black ${
@@ -345,7 +345,7 @@ export default function DepthLadderWidget({
       </div>
 
       {/* DOM Table Headers */}
-      <div className="grid grid-cols-11 gap-1 text-[9px] font-bold text-muted pb-1 mb-1 border-b border-border/40 uppercase tracking-wider text-center">
+      <div className="grid grid-cols-11 gap-1 text-[11px] font-bold text-muted pb-1 mb-1 border-b border-border/40 uppercase tracking-wider text-center">
         <div className="col-span-1 text-left pl-1">Ord</div>
         <div className="col-span-3 text-right">Bid Qty</div>
         <div className="col-span-3 text-center text-text font-black">Price (L2)</div>
@@ -381,7 +381,7 @@ export default function DepthLadderWidget({
                 }`}
                 title={`Click to set limit price to ₹${p.toFixed(2)}`}
               >
-                <div className="col-span-1 text-muted text-left pl-1 text-[9px]">-</div>
+                <div className="col-span-1 text-muted text-left pl-1 text-[11px]">-</div>
                 <div className="col-span-3 text-muted text-right text-[10px]">-</div>
 
                 {/* Price Cell */}
@@ -389,7 +389,7 @@ export default function DepthLadderWidget({
                   ₹{p.toFixed(2)}
                   {noChaseBoundary && p >= noChaseBoundary && (
                     <span
-                      className="ml-1 text-[8px] px-1 py-px rounded bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                      className="ml-1 text-[10px] px-1 py-px rounded bg-amber-500/20 text-amber-300 border border-amber-500/30"
                       title="No Chase Ceiling"
                     >
                       🛑 NO CHASE
@@ -397,7 +397,7 @@ export default function DepthLadderWidget({
                   )}
                   {target && Math.abs(p - target) < 1.0 && (
                     <span
-                      className="ml-1 text-[8px] px-1 py-px rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                      className="ml-1 text-[10px] px-1 py-px rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                       title="Target 1 Anchor"
                     >
                       🎯 T1
@@ -415,7 +415,7 @@ export default function DepthLadderWidget({
                     <span>{q.toLocaleString('en-IN')}</span>
                     {isWall && (
                       <span
-                        className="text-[7px] font-black px-1 py-px rounded bg-amber-500/25 text-amber-300 border border-amber-500/50 uppercase"
+                        className="text-[10px] font-black px-1 py-px rounded bg-amber-500/25 text-amber-300 border border-amber-500/50 uppercase"
                         title={`🏰 BEARISH SUPPLY CEILING (${wallRatio}x avg ask depth): Heavy institutional limit selling blocks upside. Do not chase breakout into wall; take profit or look for exhaustion rejection with SL above ₹${p.toFixed(2)}.`}
                       >
                         🏰 {wallRatio}x
@@ -424,13 +424,13 @@ export default function DepthLadderWidget({
                   </div>
                 </div>
 
-                <div className="col-span-1 text-right pr-1 text-muted text-[9px]">{o}</div>
+                <div className="col-span-1 text-right pr-1 text-muted text-[11px]">{o}</div>
               </div>
             )
           })}
 
           {/* Spread Indicator Divider */}
-          <div className="py-1 px-2 my-0.5 rounded bg-zinc-800/80 border border-border/60 flex items-center justify-between text-[9px] font-bold text-muted">
+          <div className="py-1 px-2 my-0.5 rounded bg-zinc-800/80 border border-border/60 flex items-center justify-between text-[11px] font-bold text-muted">
             <span className="text-emerald-400">BEST BID</span>
             <span className="text-text font-black tracking-wider">
               SPREAD: ₹{spread.toFixed(2)}
@@ -457,7 +457,7 @@ export default function DepthLadderWidget({
                 }`}
                 title={`Click to set limit price to ₹${p.toFixed(2)}`}
               >
-                <div className="col-span-1 text-left pl-1 text-muted text-[9px]">{o}</div>
+                <div className="col-span-1 text-left pl-1 text-muted text-[11px]">{o}</div>
 
                 {/* Bid Qty with Visual Volume Bar */}
                 <div className="col-span-3 relative flex items-center justify-end">
@@ -468,7 +468,7 @@ export default function DepthLadderWidget({
                   <div className="relative z-10 pr-1.5 flex items-center gap-1 font-semibold text-emerald-200">
                     {isWall && (
                       <span
-                        className="text-[7px] font-black px-1 py-px rounded bg-amber-500/25 text-amber-300 border border-amber-500/50 uppercase"
+                        className="text-[10px] font-black px-1 py-px rounded bg-amber-500/25 text-amber-300 border border-amber-500/50 uppercase"
                         title={`🛡️ BULLISH DEMAND FLOOR (${wallRatio}x avg bid depth): Institutional accumulation absorbing selling pressure. Dips into ₹${p.toFixed(2)} are high-probability bounce zones. Anchor SL below this floor.`}
                       >
                         🛡️ {wallRatio}x
@@ -483,7 +483,7 @@ export default function DepthLadderWidget({
                   ₹{p.toFixed(2)}
                   {stopLoss && Math.abs(p - stopLoss) < 1.0 && (
                     <span
-                      className="ml-1 text-[8px] px-1 py-px rounded bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                      className="ml-1 text-[10px] px-1 py-px rounded bg-rose-500/20 text-rose-300 border border-rose-500/30"
                       title="Stop-Loss Invalidation Anchor"
                     >
                       🛡️ SL
@@ -492,7 +492,7 @@ export default function DepthLadderWidget({
                 </div>
 
                 <div className="col-span-3 text-muted text-left text-[10px]">-</div>
-                <div className="col-span-1 text-muted text-right pr-1 text-[9px]">-</div>
+                <div className="col-span-1 text-muted text-right pr-1 text-[11px]">-</div>
               </div>
             )
           })}
@@ -500,7 +500,7 @@ export default function DepthLadderWidget({
       )}
 
       {/* Footer / Instructions */}
-      <div className="pt-2 mt-2 border-t border-border/40 flex items-center justify-between text-[9px] text-muted">
+      <div className="pt-2 mt-2 border-t border-border/40 flex items-center justify-between text-[11px] text-muted">
         <span>💡 Click any price rung to populate order ticket limit</span>
         <button
           type="button"

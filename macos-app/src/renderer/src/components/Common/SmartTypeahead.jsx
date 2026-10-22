@@ -227,49 +227,49 @@ export default function SmartTypeahead({
                     )}
 
                     {isStock && item.lotSize && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-slate-100 dark:bg-slate-800 border border-slate-300/80 dark:border-slate-700/80 text-slate-600 dark:text-slate-400 hidden sm:inline-block">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-mono font-semibold bg-slate-100 dark:bg-slate-800 border border-slate-300/80 dark:border-slate-700/80 text-slate-600 dark:text-slate-400 hidden sm:inline-block">
                         Lot {item.lotSize}
                       </span>
                     )}
 
                     {isStock && stockType === 'index' && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-emerald-500 text-black shadow-xs">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-emerald-500 text-black shadow-xs">
                         INDEX
                       </span>
                     )}
 
                     {isStock && stockType === 'etf' && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-sky-500 text-black shadow-xs">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-sky-500 text-black shadow-xs">
                         ETF
                       </span>
                     )}
 
                     {isStock && stockType === 'commodity' && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-amber-500 text-black shadow-xs">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-amber-500 text-black shadow-xs">
                         MCX
                       </span>
                     )}
 
                     {isStock && stockType === 'currency' && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-violet-500 text-white shadow-xs">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-violet-500 text-white shadow-xs">
                         FOREX
                       </span>
                     )}
 
                     {isCouncil && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-blue-600 text-white shadow-xs">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-blue-600 text-white shadow-xs">
                         COUNCIL
                       </span>
                     )}
 
                     {isPersona && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-purple-600 text-white shadow-xs">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-purple-600 text-white shadow-xs">
                         PERSONA
                       </span>
                     )}
 
                     {isRecent && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-amber text-black shadow-xs">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-amber text-black shadow-xs">
                         RECENT
                       </span>
                     )}

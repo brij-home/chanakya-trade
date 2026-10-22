@@ -62,7 +62,7 @@ function StrategyBlock({ strat, isTop }) {
           { label: 'R:R', value: strat.rr_ratio != null ? `${Number(strat.rr_ratio).toFixed(1)}x` : '—' },
         ].map(m => (
           <div key={m.label} className="bg-panel border border-border rounded p-1.5">
-            <p className="text-muted text-[9px] uppercase tracking-wider">{m.label}</p>
+            <p className="text-muted text-[11px] uppercase tracking-wider">{m.label}</p>
             <p className={`font-semibold mt-0.5 ${m.green ? 'text-green' : m.red ? 'text-red' : 'text-text'}`}>{m.value}</p>
           </div>
         ))}

@@ -467,4 +467,15 @@ def run_eod_alert_postmortems(
     except Exception as exc:
         logger.warning("[AlertPostMortem] Recalibration error: %s", exc)
 
+    # 4. Autonomous Market Mover Learning: Ingest pre-blast fingerprints from today's top runners
+    try:
+        learned_movers = pattern_learning_engine.scan_and_learn_from_market_movers()
+        report["learned_movers_count"] = len(learned_movers)
+        if learned_movers:
+            logger.info(
+                f"[AlertPostMortem] Ingested {len(learned_movers)} new explosive mover fingerprints into pattern memory."
+            )
+    except Exception as exc:
+        logger.warning(f"[AlertPostMortem] Mover learning error: {exc}")
+
     return report

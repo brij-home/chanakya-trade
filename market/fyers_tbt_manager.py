@@ -625,6 +625,7 @@ class TbtSocketWorker:
             to_remove = self.subscribed - desired_set
             to_add = desired_set - self.subscribed
 
+            to_remove_tbt: set[str] = set()
             if to_remove:
                 self.subscribed.difference_update(to_remove)
                 to_remove_tbt = {s for s in to_remove if is_tbt_eligible_symbol(s)}
@@ -643,6 +644,7 @@ class TbtSocketWorker:
                     except Exception as e:
                         logger.debug(f"[TbtWorker-{self.worker_id}] Unsubscribe failed: {e}")
 
+            to_add_tbt: set[str] = set()
             if to_add:
                 self.subscribed.update(to_add)
                 to_add_tbt = {s for s in to_add if is_tbt_eligible_symbol(s)}
@@ -661,7 +663,7 @@ class TbtSocketWorker:
                     except Exception as e:
                         logger.debug(f"[TbtWorker-{self.worker_id}] Subscribe failed: {e}")
 
-            if hasattr(self.ws, "switchChannel"):
+            if hasattr(self.ws, "switchChannel") and bool(to_add_tbt or self.subscribed):
                 try:
                     self.ws.switchChannel(set(["1"]), set())
                 except Exception as e:
@@ -926,6 +928,11 @@ class FyersTbtManager:
         self._last_atm_strikes: dict[str, int] = {}
         self._slots_lock = threading.RLock()
 
+        # Opportunistic Sector Leaders Baseline (Preemptible Elastic Slots)
+        self._sector_scouts: list[str] = []
+        self._last_sector_scouts_refresh: float = 0.0
+        self._sector_scouts_ttl: float = 900.0  # 15 minutes anti-thrashing cadence
+
         # Autonomous Session Handover & Drift Sentinel
         self._stop_event = threading.Event()
         self._guardian_thread: Optional[threading.Thread] = None
@@ -1078,6 +1085,16 @@ class FyersTbtManager:
 
                 # 2b. Autonomous Scout & Dead-Symbol Sanitation Sentinel (Every cycle)
                 self.cleanse_stale_scouts(ttl_sec=120.0)
+
+                # 2c. Opportunistic Sector Scout Capacity Refill
+                if self._current_session in ("EQUITY_NFO", "OFF_MARKET"):
+                    with self._slots_lock:
+                        free_cap = MAX_TBT_SYMBOLS - len(self._subscribed)
+                        expired_ttl = (
+                            time.time() - self._last_sector_scouts_refresh
+                        ) >= self._sector_scouts_ttl
+                    if free_cap > 0 or expired_ttl:
+                        self.sync_subscriptions()
 
                 # 3. In-flight position cleanup
                 if self._in_flight:
@@ -1932,7 +1949,102 @@ class FyersTbtManager:
                 )
                 self.sync_subscriptions()
 
-    def compute_desired_subscriptions(self) -> list[str]:
+    def _get_cached_sector_scouts(self, force_refresh: bool = False) -> list[str]:
+        """
+        Opportunistic Sector Momentum Leaders & Heavyweights (Preemptible Elastic Slots).
+        Returns up to 12 tradable F&O Stock Futures representing:
+          1. Leaders from RRG LEADING & IMPROVING sectors (via analysis.sector_rotation).
+          2. Top NIFTY 50 beta heavyweights (RELIANCE, HDFCBANK, ICICIBANK, INFY, TCS, LT, SBIN).
+        Refreshes on a 15-minute anti-thrashing cadence (or force_refresh).
+        """
+        now = time.time()
+        if (
+            not force_refresh
+            and self._sector_scouts
+            and (now - self._last_sector_scouts_refresh) < self._sector_scouts_ttl
+        ):
+            return [s for s in self._sector_scouts if s not in self._evicted_cooldowns]
+
+        # Only populate equity sector leaders during EQUITY_NFO / OFF_MARKET / daytime
+        if self._current_session == "COMMODITY_CDS":
+            return []
+
+        sector_key_map = {
+            "BANK": "banking",
+            "IT": "it",
+            "AUTO": "auto",
+            "PHARMA": "pharma",
+            "FMCG": "fmcg",
+            "METAL": "metals",
+            "REALTY": "infra",
+            "ENERGY": "energy",
+            "INFRA": "infra",
+            "PSU_BANK": "banking",
+        }
+        # Core Index Mega-Cap Pillars: RELIANCE (~9.5% NIFTY weight) + Top Banking/IT leaders
+        # These 5 titans move >40% of the entire index and must be monitored first in spare capacity
+        core_market_pillars = [
+            "RELIANCE",
+            "HDFCBANK",
+            "ICICIBANK",
+            "INFY",
+            "TCS",
+        ]
+        secondary_heavies = [
+            "LT",
+            "SBIN",
+            "BHARTIARTL",
+            "MARUTI",
+            "TATASTEEL",
+        ]
+
+        candidates: list[str] = list(core_market_pillars)
+
+        # 1. RRG Leading & Improving sector constituents
+        try:
+            from analysis.sector_rotation import get_sector_rrg_matrix
+            from analysis.universe import SECTOR_TAXONOMY
+
+            rrg = get_sector_rrg_matrix(use_cache=True)
+            leading_sectors = [pt.sector for pt in rrg if getattr(pt, "quadrant", "") == "LEADING"]
+            improving_sectors = [
+                pt.sector for pt in rrg if getattr(pt, "quadrant", "") == "IMPROVING"
+            ]
+
+            for sec in leading_sectors + improving_sectors:
+                tax_key = sector_key_map.get(sec)
+                if tax_key and tax_key in SECTOR_TAXONOMY:
+                    symbols = SECTOR_TAXONOMY[tax_key].get("symbols", [])
+                    for stk in symbols[:2]:
+                        if stk not in candidates:
+                            candidates.append(stk)
+        except Exception as e_suppressed:
+            logger.debug(f"[TbtManager] Sector RRG resolution fallback: {e_suppressed}")
+
+        # 2. Secondary benchmark heavies
+        for h in secondary_heavies:
+            if h not in candidates:
+                candidates.append(h)
+
+        # 3. Resolve to tradable stock futures
+        resolved: list[str] = []
+        for sym in candidates:
+            try:
+                fut = resolve_stock_future(sym)
+                if fut and is_tbt_eligible_symbol(fut) and fut not in resolved:
+                    resolved.append(fut)
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[TbtManager] Failed resolving stock future for {sym}: {e_suppressed}"
+                )
+
+        self._sector_scouts = resolved
+        self._last_sector_scouts_refresh = now
+        return [s for s in self._sector_scouts if s not in self._evicted_cooldowns]
+
+    def compute_desired_subscriptions(
+        self, fill_sector_leaders: Optional[bool] = None
+    ) -> list[str]:
         """
         Build exact prioritized list of up to MAX_TBT_SYMBOLS (15) symbols.
         Order of priority:
@@ -1940,6 +2052,7 @@ class FyersTbtManager:
           2. CORE_GRID (Benchmark Futures & Revolving ATM Options, elastic)
           3. TODAYS_EXPIRY (0DTE priority candidates when active)
           4. SCOUT (Elastic: fills all remaining unallocated slots up to 15)
+          5. SECTOR_LEADERS (Opportunistic baseline: fills remaining spare slots with sector heavies)
         """
         now = time.time()
         with self._slots_lock:
@@ -1979,6 +2092,24 @@ class FyersTbtManager:
                     reverse=True,
                 )
                 for s, _ in sorted_scout:
+                    if len(desired) >= MAX_TBT_SYMBOLS:
+                        break
+                    if s and s not in desired and s not in self._evicted_cooldowns:
+                        desired.append(s)
+
+            # 5. Opportunistic Sector Momentum Leaders (Elastic preemption baseline)
+            # Fills any remaining empty slots up to MAX_TBT_SYMBOLS (15) with market-leading sector heavies.
+            # These are 100% PREEMPTIBLE: any in-flight order, core grid update, or JIT alert scout
+            # will immediately claim slots ahead of these background sector scouts.
+            remaining_for_sector = MAX_TBT_SYMBOLS - len(desired)
+            fill_sector = (
+                getattr(self, "_opportunistic_sector_leaders_enabled", True)
+                if fill_sector_leaders is None
+                else fill_sector_leaders
+            )
+            if remaining_for_sector > 0 and fill_sector:
+                sector_candidates = self._get_cached_sector_scouts()
+                for s in sector_candidates:
                     if len(desired) >= MAX_TBT_SYMBOLS:
                         break
                     if s and s not in desired and s not in self._evicted_cooldowns:
@@ -2285,6 +2416,29 @@ class FyersTbtManager:
                 self._slot_allocated_at.pop(k, None)
                 cleansed += 1
 
+            # Condition 3: Dead sector scout fast-eviction
+            # If an active sector scout has received zero packets for >= 45s, cool it down for 5m
+            # and rotate in another sector leader
+            for sym in list(self._sector_scouts):
+                if (
+                    sym in self._subscribed
+                    and sym not in self._in_flight
+                    and sym not in self._core_grid
+                    and sym not in self._scout
+                ):
+                    alloc_t = self._slot_allocated_at.get(sym, now)
+                    if (now - alloc_t) >= 45.0:
+                        depth_data = self._depth_cache.get(sym, {})
+                        if not depth_data.get("timestamp"):
+                            logger.warning(
+                                f"[TbtManager] Evicting unresponsive sector scout {sym}: zero packets received after {now - alloc_t:.0f}s"
+                            )
+                            self._evicted_cooldowns[sym] = now + 300.0
+                            if sym in self._sector_scouts:
+                                self._sector_scouts.remove(sym)
+                            self._slot_allocated_at.pop(sym, None)
+                            cleansed += 1
+
             # Also scrub any invalid/BSE/MCX from core and todays_expiry if any slipped in
             self._core_grid = [s for s in self._core_grid if resolve_tradable_tbt_symbol(s)]
             self._todays_expiry = [s for s in self._todays_expiry if resolve_tradable_tbt_symbol(s)]
@@ -2292,7 +2446,7 @@ class FyersTbtManager:
             if cleansed > 0:
                 self.sync_subscriptions()
                 logger.info(
-                    f"[TbtManager] Cleaned up {cleansed} stale/dead scout slots: {stale_keys}"
+                    f"[TbtManager] Cleaned up {cleansed} stale/dead scout slots (Scout keys: {stale_keys})"
                 )
         return cleansed
 
@@ -2372,6 +2526,7 @@ class FyersTbtManager:
         """
         cleansed = self.cleanse_stale_scouts(ttl_sec=30.0)
         revolved = self.revolve_atm_strikes(force=True)
+        self._get_cached_sector_scouts(force_refresh=True)
         self.refresh_grid(session=session)
         logger.info(
             f"[TbtManager] Operator grid rebalance completed (cleansed={cleansed}, revolved={revolved}). "
@@ -2411,6 +2566,8 @@ class FyersTbtManager:
                     role = "TODAYS_EXPIRY"
                 elif sym in self._scout:
                     role = "DYNAMIC_SCOUT"
+                elif sym in getattr(self, "_sector_scouts", []):
+                    role = "SECTOR_LEADER_SCOUT"
                 else:
                     role = "DYNAMIC_SCOUT"
 
@@ -2511,6 +2668,7 @@ class FyersTbtManager:
                 "core_grid": list(self._core_grid),
                 "todays_expiry": list(self._todays_expiry),
                 "scout": list(self._scout.keys()),
+                "sector_scouts": list(getattr(self, "_sector_scouts", [])),
                 "subscribed": subscribed_list,
                 "slots": slots,
                 "cooldowns": {s: round(exp - now, 1) for s, exp in self._evicted_cooldowns.items()},

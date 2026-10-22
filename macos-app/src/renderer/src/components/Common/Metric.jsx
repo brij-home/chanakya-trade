@@ -92,7 +92,7 @@ export default function Metric({
           <div
             className={`inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-bold border ${currentTheme.badge}`}
           >
-            <span className="mr-0.5 text-[9px]" aria-hidden="true">
+            <span className="mr-0.5 text-[11px]" aria-hidden="true">
               {resolvedStatus === 'positive' ? '▲' : resolvedStatus === 'negative' ? '▼' : ''}
             </span>
             <span>

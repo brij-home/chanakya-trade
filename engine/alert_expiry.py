@@ -328,6 +328,21 @@ def is_alert_option_premium_level(alert: Any) -> bool:
             return True
         return False
 
+    # If the alert's LTP has explicitly been mapped to option premium space, it IS option premium levels
+    opt_prem = _g("option_premium", None)
+    ltp = float(_g("ltp", 0.0) or 0.0)
+    deriv = str(_g("derivative_type", "") or "").upper()
+    spot_val = _g("underlying_spot", None)
+
+    if opt_prem is not None and float(opt_prem) > 0 and ltp > 0:
+        prem = float(opt_prem)
+        if abs(ltp - prem) <= max(1.0, prem * 0.15):
+            return True
+
+    if deriv == "OPT" and spot_val is not None and float(spot_val) > 0 and ltp > 0:
+        if ltp < float(spot_val) * 0.35:
+            return True
+
     # Underlying stock/index setups are anchored to spot even if an option recommendation is attached
     if atype in (
         "BREAKOUT",

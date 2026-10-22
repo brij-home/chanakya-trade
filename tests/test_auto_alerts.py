@@ -2128,8 +2128,14 @@ def test_scan_intraday_breakdown_spark(tmp_path, monkeypatch):
     assert dixon_spark.direction == "BEARISH"
     assert dixon_spark.alert_type == "INTRADAY_BREAKDOWN_SPARK"
     assert dixon_spark.stage == "IGNITED"
-    assert dixon_spark.actionable_plan["action"] == "SELL_SHORT_OR_BUY_PUT"
-    assert dixon_spark.stop_loss > dixon_spark.ltp  # Stop-loss above entry for shorts
+    assert dixon_spark.actionable_plan["action"] in ("SELL_SHORT_OR_BUY_PUT", "BUY_PUT")
+    if dixon_spark.option_premium:
+        assert dixon_spark.stop_loss < dixon_spark.ltp  # Put premium SL is below entry premium
+        spot_sl = dixon_spark.metrics.get("underlying_sl") or 0.0
+        spot_price = dixon_spark.metrics.get("underlying_spot") or 0.0
+        assert spot_sl > spot_price  # Spot SL is above spot price for shorts
+    else:
+        assert dixon_spark.stop_loss > dixon_spark.ltp  # Stop-loss above entry for cash shorts
 
 
 def test_scan_options_momentum_monthly_put_surge(tmp_path, monkeypatch):
@@ -2773,11 +2779,13 @@ def test_early_warning_session_expiry():
 
 def test_alert_ignition_refreshes_timestamp_and_premium(tmp_path, monkeypatch):
     """Verify that when an EARLY_WARNING is upgraded to IGNITED, timestamp, premium, and signal_ref are refreshed."""
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
     ist = ZoneInfo("Asia/Kolkata")
-    now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+    now_dt = datetime.now(ist)
+    now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    earlier_str = (now_dt - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S IST")
 
     data_file = tmp_path / "auto_alerts.json"
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
@@ -2803,7 +2811,7 @@ def test_alert_ignition_refreshes_timestamp_and_premium(tmp_path, monkeypatch):
         option_type="CE",
         contract_symbol="HDFCBANK680CE",
         option_premium=24.70,
-        created_at="2026-09-11 10:00:00 IST",
+        created_at=earlier_str,
         signal_ref="#SIG_HDFCBANK_680CE_11SEP_1000",
     )
     engine.record_alert(early_alert)
@@ -3961,7 +3969,12 @@ def test_scan_gamma_blasts_anti_storm_pacing_and_indices_only(tmp_path, monkeypa
     # Mock market data calls
     monkeypatch.setattr(
         "market.quotes.get_quote",
-        lambda sym: {"last_price": 1000.0, "vwap": 995.0, "high": 1010.0, "low": 990.0},
+        lambda sym, *args, **kwargs: {
+            "last_price": 1000.0,
+            "vwap": 995.0,
+            "high": 1010.0,
+            "low": 990.0,
+        },
     )
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 1000.0)
     monkeypatch.setattr(
@@ -4382,7 +4395,14 @@ def test_scan_opening_drives_anti_storm_pacing(tmp_path, monkeypatch):
     monkeypatch.setattr("engine.auto_alert_engine.detect_opening_drive", mock_detect)
     monkeypatch.setattr(
         "market.history.get_ohlcv",
-        lambda *a, **k: pd.DataFrame({"close": [100.0, 101.0, 102.0], "volume": [100, 200, 300]}),
+        lambda *a, **k: pd.DataFrame(
+            {
+                "high": [101.0, 102.0, 103.0],
+                "low": [99.0, 100.0, 101.0],
+                "close": [100.0, 101.0, 102.0],
+                "volume": [100, 200, 300],
+            }
+        ),
     )
     monkeypatch.setattr(
         "market.quotes.get_ltp", lambda sym, *a, **k: 25000.0 if "NIFTY" in str(sym) else 2000.0

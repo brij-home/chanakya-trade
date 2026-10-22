@@ -61,7 +61,7 @@ const SECTIONS = [
 function Kbd({ children }) {
   return (
     <kbd
-      className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono font-bold"
+      className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-bold"
       style={{
         background: 'var(--color-elevated)',
         border: '1px solid var(--color-border)',
@@ -156,7 +156,7 @@ export default function HotkeyPanel({ open, onClose }) {
                   <div className="flex items-center gap-1 flex-shrink-0">
                     {ks.map((k, i) => (
                       <span key={i} className="flex items-center gap-1">
-                        {i > 0 && <span className="text-[9px]" style={{ color: 'var(--color-muted)' }}>+</span>}
+                        {i > 0 && <span className="text-[11px]" style={{ color: 'var(--color-muted)' }}>+</span>}
                         <Kbd>{k}</Kbd>
                       </span>
                     ))}

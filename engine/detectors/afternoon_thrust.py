@@ -115,8 +115,8 @@ def detect_afternoon_thrust(
 
     curr_t = now_dt.time()
     if not ignore_time_gate:
-        # Afternoon thrust active from 13:00 IST to 15:15 IST
-        if curr_t < dtime(13, 0) or curr_t > dtime(15, 15):
+        # Afternoon thrust active from 13:15 IST (post midday-lull) to 15:15 IST
+        if curr_t < dtime(13, 15) or curr_t > dtime(15, 15):
             return None
 
     col_o = "open" if "open" in df_5m.columns else "Open"
@@ -433,7 +433,8 @@ def detect_afternoon_thrust(
         "session_low": session_low,
         "midday_high": midday_high,
         "midday_low": midday_low,
-        "no_chase_boundary": resolved_no_chase,
+        "no_chase_boundary": opt_no_chase if has_opt else resolved_no_chase,
+        "spot_no_chase_boundary": resolved_no_chase,
         "target_1": opt_t1 if has_opt else t1_price,
         "target_2": opt_t2 if has_opt else t2_price,
         "target_3": opt_runner if has_opt else t3_price,
@@ -473,7 +474,8 @@ def detect_afternoon_thrust(
         trigger_level=opt_ltp if has_opt else ltp,
         target_level=opt_t1 if has_opt else t1_price,
         stop_loss=opt_sl if has_opt else sl_price,
-        no_chase_boundary=resolved_no_chase,
+        no_chase_boundary=opt_no_chase if has_opt else resolved_no_chase,
+        spot_no_chase_boundary=resolved_no_chase if has_opt else None,
         strike=opt_strike if has_opt else None,
         option_type=opt_type if has_opt else None,
         contract_symbol=opt_contract_sym if has_opt else None,

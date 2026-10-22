@@ -539,4 +539,22 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     expect(multi.compactBadge).toContain('MULTI')
     expect(multi.etaFull).toBe('6–24 Months')
   })
+
+  it('switches to Table density mode and renders institutional AlertTableView', async () => {
+    render(<AlertsView />)
+
+    await waitFor(() => {
+      expect(screen.getByText('NIFTY')).toBeTruthy()
+    })
+
+    const tableModeBtn = screen.getByText('▦ Table')
+    expect(tableModeBtn).toBeTruthy()
+
+    fireEvent.click(tableModeBtn)
+
+    // Table headers should now be rendered across active sections
+    expect(screen.getAllByText(/Symbol & Contract/i).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/LTP & Return/i).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/Execution CTAs/i).length).toBeGreaterThanOrEqual(1)
+  })
 })

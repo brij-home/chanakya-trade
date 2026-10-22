@@ -39,6 +39,7 @@ import {
   TelegramPreflightModal,
   AlertCompactRow,
   AlertTriageCard,
+  AlertTableView,
   TradeExecutionMatrix,
   PredatoryPipelineDrawer,
   isTestOrSimAlert,
@@ -316,31 +317,31 @@ const AutoAlertCard = memo(function AutoAlertCard({
           <div className="min-w-0">
             <div className="flex items-center gap-1 flex-wrap">
               <span className="text-sm font-black tracking-wide text-text leading-none">{alert.symbol}</span>
-              <span className={`text-[8px] px-1.5 py-px rounded font-black tracking-wider uppercase border ${provenance.cls}`}>
+              <span className={`text-[10px] px-1.5 py-px rounded font-black tracking-wider uppercase border ${provenance.cls}`}>
                 {provenance.label}
               </span>
               {isDerivative && strikeNum && !isFuture && (
-                <span className="text-[9px] font-black text-gold font-mono leading-none">₹{Number(strikeNum).toLocaleString('en-IN')}</span>
+                <span className="text-[11px] font-black text-gold font-mono leading-none">₹{Number(strikeNum).toLocaleString('en-IN')}</span>
               )}
               {isDerivative && optType && !isFuture && (
-                <span className={`text-[8px] px-1 py-px rounded font-black uppercase ${
+                <span className={`text-[10px] px-1 py-px rounded font-black uppercase ${
                   optType === 'CE' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
                 }`}>{optType}</span>
               )}
               {isDerivative && moneyness && !isFuture && (
-                <span className={`text-[8px] px-1 py-px rounded font-black ${
+                <span className={`text-[10px] px-1 py-px rounded font-black ${
                   moneyness === 'ITM' ? 'text-emerald-300 bg-emerald-500/15' : moneyness === 'ATM' ? 'text-gold bg-gold/15' : 'text-zinc-400 bg-zinc-500/15'
                 }`}>{moneyness}</span>
               )}
             </div>
             {/* Expiry + direction sub-line */}
             <div className="flex items-center gap-1 mt-0.5 flex-wrap">
-              <span className={`text-[8px] font-bold ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
+              <span className={`text-[10px] font-bold ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {isBull ? '▲' : '▼'} {alert.direction}
               </span>
               {isDerivative && expiryInfo?.fullDisplay && (
                 <span
-                  className={`text-[8px] font-mono px-1.5 py-px rounded font-bold whitespace-nowrap border ${
+                  className={`text-[10px] font-mono px-1.5 py-px rounded font-bold whitespace-nowrap border ${
                     expiryInfo.isWeekly
                       ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
                       : 'bg-blue-500/15 text-blue-300 border-blue-500/30'
@@ -356,13 +357,13 @@ const AutoAlertCard = memo(function AutoAlertCard({
                 <div className="flex items-center gap-1">
                   <span
                     title={horizonInfo.tooltip}
-                    className={`text-[8px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap border cursor-help ${horizonInfo.badgeClasses}`}
+                    className={`text-[10px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap border cursor-help ${horizonInfo.badgeClasses}`}
                   >
                     {horizonInfo.icon} {horizonInfo.label}
                   </span>
                   <span
                     title={`Target ETA: ${horizonInfo.etaFull}`}
-                    className={`text-[8px] px-1.5 py-px rounded font-bold uppercase whitespace-nowrap border ${horizonInfo.etaClasses}`}
+                    className={`text-[10px] px-1.5 py-px rounded font-bold uppercase whitespace-nowrap border ${horizonInfo.etaClasses}`}
                   >
                     🎯 ETA: {horizonInfo.etaFull}
                   </span>
@@ -371,30 +372,30 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
               {/* Order Flow & Broker Depth Feed Status */}
               {isTest ? (
-                <span className="text-[7px] px-1 py-px rounded font-black bg-purple-500/20 text-purple-300 border border-purple-500/30 whitespace-nowrap" title="Simulated test environment">
+                <span className="text-[10px] px-1 py-px rounded font-black bg-purple-500/20 text-purple-300 border border-purple-500/30 whitespace-nowrap" title="Simulated test environment">
                   🧪 SIM DEPTH
                 </span>
               ) : alert.order_flow_signals?.live_broker_connected === false || alert.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' ? (
-                <span className="text-[7px] px-1 py-px rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap" title="No active broker WebSocket connection. Using tick-level fallback.">
+                <span className="text-[10px] px-1 py-px rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap" title="No active broker WebSocket connection. Using tick-level fallback.">
                   ⚠️ SYNTHETIC L1
                 </span>
               ) : (alert.order_flow_signals?.live_broker_connected || alert.order_flow_signals?.broker_depth_status === 'LIVE_L2') ? (
-                <span className="text-[7px] px-1 py-px rounded font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 whitespace-nowrap" title="Live Broker Level 2 depth active">
+                <span className="text-[10px] px-1 py-px rounded font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 whitespace-nowrap" title="Live Broker Level 2 depth active">
                   🟢 LIVE L2
                 </span>
               ) : null}
 
               {/* Telegram Delivery Status */}
               {alert.telegram_dispatched ? (
-                <span className="text-[7px] px-1 py-px rounded font-black bg-sky-500/20 text-sky-300 border border-sky-500/35 whitespace-nowrap flex items-center gap-0.5" title="Dispatched to Telegram channel">
+                <span className="text-[10px] px-1 py-px rounded font-black bg-sky-500/20 text-sky-300 border border-sky-500/35 whitespace-nowrap flex items-center gap-0.5" title="Dispatched to Telegram channel">
                   <span>📱</span><span>TG SENT</span>
                 </span>
               ) : alert.telegram_suppression_reason ? (
-                <span className="text-[7px] px-1 py-px rounded font-medium bg-amber-500/10 text-amber-300/90 border border-amber-500/25 whitespace-nowrap flex items-center gap-0.5 cursor-help" title={`Telegram push held: ${alert.telegram_suppression_reason}`}>
+                <span className="text-[10px] px-1 py-px rounded font-medium bg-amber-500/10 text-amber-300/90 border border-amber-500/25 whitespace-nowrap flex items-center gap-0.5 cursor-help" title={`Telegram push held: ${alert.telegram_suppression_reason}`}>
                   <span>📱</span><span>TG HELD</span>
                 </span>
               ) : isTest ? (
-                <span className="text-[7px] px-1 py-px rounded font-medium bg-panel text-muted border border-border/40 whitespace-nowrap" title="Terminal only (Simulation / Test mode)">
+                <span className="text-[10px] px-1 py-px rounded font-medium bg-panel text-muted border border-border/40 whitespace-nowrap" title="Terminal only (Simulation / Test mode)">
                   TERMINAL
                 </span>
               ) : null}
@@ -407,11 +408,11 @@ const AutoAlertCard = memo(function AutoAlertCard({
           {/* Status pill — compact, single word */}
           <div className="flex-shrink-0">
             {isTest ? (
-              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-purple-500/20 text-purple-300 border border-purple-500/40 whitespace-nowrap">
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-black uppercase bg-purple-500/20 text-purple-300 border border-purple-500/40 whitespace-nowrap">
                 🧪 TEST
               </span>
             ) : (
-              <span className={`text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase whitespace-nowrap border ${stagePill.cls}`}>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black uppercase whitespace-nowrap border ${stagePill.cls}`}>
                 {stagePill.label}
               </span>
             )}
@@ -425,22 +426,22 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
           {/* 3 key metric chips — always visible, no wrap */}
           <div className="flex items-center gap-1 flex-shrink-0">
-            <span className="text-[9px] font-mono font-bold text-gold whitespace-nowrap">
+            <span className="text-[11px] font-mono font-bold text-gold whitespace-nowrap">
               {alert.confidence || 85}% conf
             </span>
             {alert.metrics?.vol_oi_ratio !== undefined && (
-              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-gold/10 text-gold border border-gold/25 whitespace-nowrap">
+              <span className="text-[11px] font-mono font-bold px-1 py-px rounded bg-gold/10 text-gold border border-gold/25 whitespace-nowrap">
                 {alert.metrics.vol_oi_ratio}x OI
               </span>
             )}
             {alert.metrics?.expected_rr && (
-              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 whitespace-nowrap">
+              <span className="text-[11px] font-mono font-bold px-1 py-px rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 whitespace-nowrap">
                 {alert.metrics.expected_rr}:1 R
               </span>
             )}
             {alert.metrics?.scrutiny && (
               <span
-                className={`text-[9px] font-mono font-bold px-1 py-px rounded whitespace-nowrap ${
+                className={`text-[11px] font-mono font-bold px-1 py-px rounded whitespace-nowrap ${
                   alert.metrics.scrutiny.status === 'APPROVED'
                     ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/35'
                     : alert.metrics.scrutiny.status === 'QUANT_VERIFIED'
@@ -454,27 +455,27 @@ const AutoAlertCard = memo(function AutoAlertCard({
               </span>
             )}
             {(alert.entry_range || alert.optimal_entry_range) && (
-              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-amber-500/10 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-300/60 dark:border-amber-500/30 whitespace-nowrap" title="Optimal Trade Entry (OTE) Pullback Range">
+              <span className="text-[11px] font-mono font-bold px-1 py-px rounded bg-amber-500/10 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-300/60 dark:border-amber-500/30 whitespace-nowrap" title="Optimal Trade Entry (OTE) Pullback Range">
                 🎯 OTE {alert.entry_range || alert.optimal_entry_range}
               </span>
             )}
-            {alert.no_chase_boundary && (
-              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-rose-500/10 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap" title="No-Chase Maximum Entry Limit">
-                🛑 NoChase ₹{Number(alert.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
+            {(executionLevels?.no_chase_boundary || alert.no_chase_boundary) && (
+              <span className="text-[11px] font-mono font-bold px-1 py-px rounded bg-rose-500/10 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap" title={executionLevels?.spot_no_chase_boundary ? `No-Chase Option Limit: ₹${Number(executionLevels.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })} (Spot Max: ₹${Number(executionLevels.spot_no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })})` : "No-Chase Maximum Entry Limit"}>
+                🛑 NoChase ₹{Number(executionLevels?.no_chase_boundary || alert.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
               </span>
             )}
             {alert.is_apex_confluence && (
-              <span className="text-[9px] font-mono font-black px-1.5 py-px rounded bg-purple-500/20 text-purple-300 border border-purple-500/40 whitespace-nowrap shadow-sm" title="Multi-detector institutional apex confluence confirmed">
+              <span className="text-[11px] font-mono font-black px-1.5 py-px rounded bg-purple-500/20 text-purple-300 border border-purple-500/40 whitespace-nowrap shadow-sm" title="Multi-detector institutional apex confluence confirmed">
                 💎 APEX
               </span>
             )}
             {alert.execution_friction_badge && (
-              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-amber-500/15 text-amber-300 border border-amber-500/35 whitespace-nowrap" title={`Microstructure L2 Friction: ${alert.execution_friction_badge}${alert.estimated_slippage_bps ? ` (${alert.estimated_slippage_bps} bps slippage)` : ''}`}>
+              <span className="text-[11px] font-mono font-bold px-1 py-px rounded bg-amber-500/15 text-amber-300 border border-amber-500/35 whitespace-nowrap" title={`Microstructure L2 Friction: ${alert.execution_friction_badge}${alert.estimated_slippage_bps ? ` (${alert.estimated_slippage_bps} bps slippage)` : ''}`}>
                 {alert.execution_friction_badge}
               </span>
             )}
             {alert.theta_scratch_recommended && (
-              <span className="text-[9px] font-mono font-black px-1.5 py-px rounded bg-rose-500/25 text-rose-300 border border-rose-500/50 whitespace-nowrap animate-pulse" title={`0DTE Theta Stagnation Bailout: ${alert.stagnation_bailout_reason || 'Bailout recommended'}`}>
+              <span className="text-[11px] font-mono font-black px-1.5 py-px rounded bg-rose-500/25 text-rose-300 border border-rose-500/50 whitespace-nowrap animate-pulse" title={`0DTE Theta Stagnation Bailout: ${alert.stagnation_bailout_reason || 'Bailout recommended'}`}>
                 🛑 THETA SCRATCH
               </span>
             )}
@@ -494,11 +495,11 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   {liveContract?.ltp && !isTerminal ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
                 </span>
                 {liveReturn && (
-                  <span className={`text-[9px] font-bold leading-none ${liveReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  <span className={`text-[11px] font-bold leading-none ${liveReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
                     {liveReturn.isProfitable ? '+' : ''}{liveReturn.pct}%
                   </span>
                 )}
-                <span className={`text-[8px] font-mono text-muted leading-none ${liveSpot?.flash === 'up' && !isTerminal ? 'text-emerald-300' : liveSpot?.flash === 'down' && !isTerminal ? 'text-rose-300' : ''}`}>
+                <span className={`text-[10px] font-mono text-muted leading-none ${liveSpot?.flash === 'up' && !isTerminal ? 'text-emerald-300' : liveSpot?.flash === 'down' && !isTerminal ? 'text-rose-300' : ''}`}>
                   Spot ₹{Number(spotNum || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
                 </span>
               </>
@@ -511,7 +512,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   {liveSpot?.ltp && !isTerminal ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
                 </span>
                 {liveReturn && (
-                  <span className={`text-[9px] font-bold leading-none ${liveReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  <span className={`text-[11px] font-bold leading-none ${liveReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
                     {liveReturn.isProfitable ? '+' : ''}{liveReturn.pct}%
                   </span>
                 )}
@@ -609,19 +610,19 @@ const AutoAlertCard = memo(function AutoAlertCard({
       {(alert.trailing_rationale || alert.summary) && (
         <div className="flex items-start gap-2 px-1 text-[10px] text-zinc-400 leading-relaxed">
           <span
-            className="text-[8px] px-1 py-px rounded font-black uppercase flex-shrink-0 mt-0.5"
+            className="text-[10px] px-1 py-px rounded font-black uppercase flex-shrink-0 mt-0.5"
             style={{ background: style.bg, color: style.color, border: `1px solid ${style.border}` }}
           >{style.label}</span>
           <p className={`${showDetails ? '' : 'line-clamp-2'} flex-1 min-w-0`}>
             {alert.trailing_rationale || alert.summary}
           </p>
           {alert.metrics?.oi_change_pct !== undefined && (
-            <span className={`flex-shrink-0 text-[9px] font-mono font-bold px-1 py-px rounded ${
+            <span className={`flex-shrink-0 text-[11px] font-mono font-bold px-1 py-px rounded ${
               alert.metrics.oi_change_pct < 0 ? 'bg-rose-500/15 text-rose-300' : 'bg-emerald-500/15 text-emerald-300'
             }`}>ΔOI {alert.metrics.oi_change_pct}%</span>
           )}
           {alert.trailing_stop && (
-            <span className="flex-shrink-0 text-[9px] font-mono font-bold px-1 py-px rounded bg-cyan-500/15 text-cyan-300">
+            <span className="flex-shrink-0 text-[11px] font-mono font-bold px-1 py-px rounded bg-cyan-500/15 text-cyan-300">
               Trail ₹{Number(alert.trailing_stop).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
             </span>
           )}
@@ -631,10 +632,10 @@ const AutoAlertCard = memo(function AutoAlertCard({
       {/* Multi-Strike Flow Consolidation Bar */}
       {Boolean((alert.metrics?.related_strikes || alert.related_strikes)?.length) && (
         <div className="flex items-center gap-1.5 flex-wrap px-2 py-1 rounded-lg bg-surface/70 border border-gold/25 text-[10px] animate-slide-up-fade">
-          <span className="font-bold text-gold flex items-center gap-1 uppercase tracking-wider text-[9px]">
+          <span className="font-bold text-gold flex items-center gap-1 uppercase tracking-wider text-[11px]">
             <span>🌊 Flow ({((alert.metrics?.related_strikes || alert.related_strikes) || []).length + 1}):</span>
           </span>
-          <span className="px-1.5 py-0.5 rounded bg-gold/25 text-gold border border-gold/40 font-mono font-bold text-[9px] shadow-sm">
+          <span className="px-1.5 py-0.5 rounded bg-gold/25 text-gold border border-gold/40 font-mono font-bold text-[11px] shadow-sm">
             {alert.contract_symbol || `${alert.strike} ${alert.option_type}`} (Active)
           </span>
           {(alert.metrics?.related_strikes || alert.related_strikes || []).map((stk, sIdx) => (
@@ -653,7 +654,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   })
                 }
               }}
-              className="px-1.5 py-0.5 rounded bg-elevated hover:bg-gold/20 text-zinc-300 hover:text-gold border border-border/60 hover:border-gold/50 font-mono text-[9px] transition-all cursor-pointer"
+              className="px-1.5 py-0.5 rounded bg-elevated hover:bg-gold/20 text-zinc-300 hover:text-gold border border-border/60 hover:border-gold/50 font-mono text-[11px] transition-all cursor-pointer"
               title={`1-Click execute ${stk} via order ticket`}
             >
               {stk} ↗
@@ -672,7 +673,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
                 Next Expiry Opportunity: {nextExpiryOpp.recommendedContract}
               </span>
             </div>
-            <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500/15 dark:bg-amber-500/20 text-amber-800 dark:text-amber-200 border border-amber-500/30 dark:border-amber-500/40 font-bold uppercase">
+            <span className="text-[11px] font-mono px-1.5 py-0.2 rounded bg-amber-500/15 dark:bg-amber-500/20 text-amber-800 dark:text-amber-200 border border-amber-500/30 dark:border-amber-500/40 font-bold uppercase">
               {nextExpiryOpp.tag}
             </span>
           </div>
@@ -730,7 +731,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
                     Retrospective Post-Mortem & Attribution
                   </span>
                 </div>
-                <span className="text-[9px] font-black font-mono px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 uppercase">
+                <span className="text-[11px] font-black font-mono px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 uppercase">
                   Cause: {postMortem.primary_failure_reason ? postMortem.primary_failure_reason.replace(/_/g, ' ') : 'STRUCTURAL STOP HIT'}
                 </span>
               </div>
@@ -770,26 +771,26 @@ const AutoAlertCard = memo(function AutoAlertCard({
               )}
 
               {/* Metrics Snapshot Bar */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[9px] font-mono pt-1">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[11px] font-mono pt-1">
                 <div className="p-1 rounded bg-surface/80 border border-border/40">
-                  <span className="text-muted block text-[8px] uppercase">Realized R</span>
+                  <span className="text-muted block text-[10px] uppercase">Realized R</span>
                   <span className="font-bold text-rose-400">{postMortem.realized_r !== undefined ? `${postMortem.realized_r}R` : '-1.0R'}</span>
                 </div>
                 <div className="p-1 rounded bg-surface/80 border border-border/40">
-                  <span className="text-muted block text-[8px] uppercase">Stop Distance</span>
+                  <span className="text-muted block text-[10px] uppercase">Stop Distance</span>
                   <span className="font-bold text-amber-300">
                     {postMortem.loss_pts ? `${postMortem.loss_pts} pts ` : ''}
                     ({postMortem.loss_pct || 0}%)
                   </span>
                 </div>
                 <div className="p-1 rounded bg-surface/80 border border-border/40">
-                  <span className="text-muted block text-[8px] uppercase">Min 1.2x ATR Floor</span>
+                  <span className="text-muted block text-[10px] uppercase">Min 1.2x ATR Floor</span>
                   <span className="font-bold text-cyan-300">
                     {postMortem.metrics_snapshot?.min_noise_sl_pts ? `${postMortem.metrics_snapshot.min_noise_sl_pts} pts` : 'Calculated'}
                   </span>
                 </div>
                 <div className="p-1 rounded bg-surface/80 border border-border/40">
-                  <span className="text-muted block text-[8px] uppercase">Intraday VWAP</span>
+                  <span className="text-muted block text-[10px] uppercase">Intraday VWAP</span>
                   <span className="font-bold text-zinc-300">
                     {postMortem.metrics_snapshot?.intraday_vwap ? `₹${postMortem.metrics_snapshot.intraday_vwap.toLocaleString('en-IN', { maximumFractionDigits: 1 })}` : 'N/A'}
                   </span>
@@ -806,32 +807,32 @@ const AutoAlertCard = memo(function AutoAlertCard({
                         <span>🔬</span> Exit Microstructure Snapshot (L2/L3 Order Book):
                       </span>
                       {exitMicro.has_resting_wall && (
-                        <span className="text-[8px] font-black font-mono px-1.5 py-0.5 rounded bg-amber-500/25 text-amber-300 border border-amber-500/40 uppercase">
+                        <span className="text-[10px] font-black font-mono px-1.5 py-0.5 rounded bg-amber-500/25 text-amber-300 border border-amber-500/40 uppercase">
                           🏰 {exitMicro.wall_side} WALL ({exitMicro.wall_ratio}x)
                         </span>
                       )}
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[9px] font-mono pt-0.5">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[11px] font-mono pt-0.5">
                       <div className="p-1 rounded bg-panel/80 border border-border/40">
-                        <span className="text-muted block text-[8px] uppercase">Spread</span>
+                        <span className="text-muted block text-[10px] uppercase">Spread</span>
                         <span className={`font-bold ${exitMicro.spread_bps > 45 ? 'text-rose-400' : 'text-zinc-200'}`}>
                           {exitMicro.spread_bps != null ? `${Number(exitMicro.spread_bps).toFixed(1)} bps` : '—'}
                         </span>
                       </div>
                       <div className="p-1 rounded bg-panel/80 border border-border/40">
-                        <span className="text-muted block text-[8px] uppercase">Exit OBI (50L)</span>
+                        <span className="text-muted block text-[10px] uppercase">Exit OBI (50L)</span>
                         <span className={`font-bold ${exitMicro.obi_50 < -0.3 ? 'text-rose-400' : exitMicro.obi_50 > 0.3 ? 'text-emerald-400' : 'text-zinc-200'}`}>
                           {exitMicro.obi_50 != null ? `${exitMicro.obi_50 > 0 ? '+' : ''}${Number(exitMicro.obi_50).toFixed(2)}` : '—'}
                         </span>
                       </div>
                       <div className="p-1 rounded bg-panel/80 border border-border/40">
-                        <span className="text-muted block text-[8px] uppercase">Best Bid / Ask</span>
+                        <span className="text-muted block text-[10px] uppercase">Best Bid / Ask</span>
                         <span className="font-bold text-zinc-200">
                           ₹{exitMicro.best_bid || '—'} / ₹{exitMicro.best_ask || '—'}
                         </span>
                       </div>
                       <div className="p-1 rounded bg-panel/80 border border-border/40">
-                        <span className="text-muted block text-[8px] uppercase">Resting Wall</span>
+                        <span className="text-muted block text-[10px] uppercase">Resting Wall</span>
                         <span className={`font-bold ${exitMicro.has_resting_wall ? 'text-amber-300' : 'text-zinc-400'}`}>
                           {exitMicro.has_resting_wall ? `${exitMicro.wall_qty} @ ₹${exitMicro.wall_price}` : 'None'}
                         </span>
@@ -911,7 +912,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
             currentPrice={currentPrice}
             stopLoss={executionLevels?.sl || alert.stop_loss}
             target={executionLevels?.t1 || alert.target_level}
-            noChaseBoundary={alert.no_chase_boundary}
+            noChaseBoundary={executionLevels?.no_chase_boundary || alert.no_chase_boundary}
             onPriceSelect={(selectedPrice) => {
               if (onOpenTicket) {
                 onOpenTicket({
@@ -961,7 +962,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
                     exchange: alert.exchange || 'NFO',
                     price: alert.actionable_plan.runner_strike.ltp || 0,
                   })}
-                  className="btn btn-xs text-[9px] px-2 py-0.5 font-black bg-purple-500/25 hover:bg-purple-500/35 text-purple-100 border border-purple-400/50 rounded transition-all"
+                  className="btn btn-xs text-[11px] px-2 py-0.5 font-black bg-purple-500/25 hover:bg-purple-500/35 text-purple-100 border border-purple-400/50 rounded transition-all"
                   title="1-Click Trade: Open pre-populated Order Ticket for Runner Strike"
                 >
                   ⚡ Trade Runner
@@ -1006,7 +1007,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   </span>
                 </div>
                 {alert.actionable_plan.trade_plan.asymmetry_verdict && (
-                  <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 uppercase">
+                  <span className="text-[11px] font-mono font-bold px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 uppercase">
                     {alert.actionable_plan.trade_plan.asymmetry_verdict}
                   </span>
                 )}
@@ -1047,12 +1048,12 @@ const AutoAlertCard = memo(function AutoAlertCard({
                 </span>
                 <div className="flex items-center gap-2 flex-wrap">
                   {alert.metrics.similarity_score ? (
-                    <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-gold/20 text-gold border border-gold/40 font-bold">
+                    <span className="text-[11px] font-mono px-1.5 py-0.2 rounded bg-gold/20 text-gold border border-gold/40 font-bold">
                       {alert.metrics.similarity_score}% Archetype Match {alert.metrics.closest_archetype ? `· ${alert.metrics.closest_archetype}` : ''}
                     </span>
                   ) : null}
                   {alert.metrics.expected_rr ? (
-                    <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
+                    <span className="text-[11px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
                       Expected R:R {alert.metrics.expected_rr}:1
                     </span>
                   ) : null}
@@ -1080,13 +1081,13 @@ const AutoAlertCard = memo(function AutoAlertCard({
             >
               {alert.metrics.vol_oi_ratio !== undefined && (
                 <div>
-                  <span className="text-[8px] text-muted uppercase block">Vol / OI Ratio</span>
+                  <span className="text-[10px] text-muted uppercase block">Vol / OI Ratio</span>
                   <span className="font-bold text-gold">{alert.metrics.vol_oi_ratio}x</span>
                 </div>
               )}
               {alert.metrics.oi_change_pct !== undefined && (
                 <div>
-                  <span className="text-[8px] text-muted uppercase block">Δ OI Unwinding</span>
+                  <span className="text-[10px] text-muted uppercase block">Δ OI Unwinding</span>
                   <span className={`font-bold ${alert.metrics.oi_change_pct < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
                     {alert.metrics.oi_change_pct}%
                   </span>
@@ -1094,37 +1095,37 @@ const AutoAlertCard = memo(function AutoAlertCard({
               )}
               {alert.metrics.dist_to_pivot_pct !== undefined && (
                 <div>
-                  <span className="text-[8px] text-muted uppercase block">Pivot Distance</span>
+                  <span className="text-[10px] text-muted uppercase block">Pivot Distance</span>
                   <span className="font-bold text-emerald-400">{alert.metrics.dist_to_pivot_pct}%</span>
                 </div>
               )}
               {alert.metrics.dist_to_uc_pct !== undefined && (
                 <div>
-                  <span className="text-[8px] text-muted uppercase block">To Circuit Ceiling</span>
+                  <span className="text-[10px] text-muted uppercase block">To Circuit Ceiling</span>
                   <span className="font-bold text-rose-400">{alert.metrics.dist_to_uc_pct}%</span>
                 </div>
               )}
               {alert.metrics.rvol !== undefined && (
                 <div>
-                  <span className="text-[8px] text-muted uppercase block">RVOL 20D</span>
+                  <span className="text-[10px] text-muted uppercase block">RVOL 20D</span>
                   <span className="font-bold text-cyan-400">{alert.metrics.rvol}x</span>
                 </div>
               )}
               {alert.metrics.spot !== undefined && (
                 <div>
-                  <span className="text-[8px] text-muted uppercase block">Underlying Spot</span>
+                  <span className="text-[10px] text-muted uppercase block">Underlying Spot</span>
                   <span className="font-bold">₹{alert.metrics.spot}</span>
                 </div>
               )}
               {alert.target_level > 0 && (
                 <div>
-                  <span className="text-[8px] text-muted uppercase block">Target</span>
+                  <span className="text-[10px] text-muted uppercase block">Target</span>
                   <span className="font-bold text-emerald-400">₹{alert.target_level}</span>
                 </div>
               )}
               {alert.stop_loss > 0 && (
                 <div>
-                  <span className="text-[8px] text-muted uppercase block">Stop Loss</span>
+                  <span className="text-[10px] text-muted uppercase block">Stop Loss</span>
                   <span className="font-bold text-rose-400">₹{alert.stop_loss}</span>
                 </div>
               )}
@@ -1140,7 +1141,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
                 </span>
                 <button
                   onClick={() => setShowHistory((v) => !v)}
-                  className="text-[9px] text-gold hover:underline font-mono font-bold"
+                  className="text-[11px] text-gold hover:underline font-mono font-bold"
                 >
                   {showHistory ? 'Hide Attempts ▲' : `Show ${historyAttempts.length} Older Attempt${historyAttempts.length > 1 ? 's' : ''} ▼`}
                 </button>
@@ -1159,12 +1160,12 @@ const AutoAlertCard = memo(function AutoAlertCard({
                           <span className="font-semibold text-text">
                             Attempt #{historyAttempts.length - idx}: {hist.headline || hist.alert_type}
                           </span>
-                          <p className="text-[9px] text-muted font-mono">
+                          <p className="text-[11px] text-muted font-mono">
                             {hist.invalidated_at || hist.created_at || 'Previous'} · Trigger: ₹{hist.trigger_level} · SL: ₹{hist.stop_loss}
                           </p>
                         </div>
                       </div>
-                      <span className="text-[8px] font-mono px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 font-bold">
+                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 font-bold">
                         {hist.is_invalidated ? 'INVALIDATED' : hist.stage}
                       </span>
                     </div>
@@ -1177,7 +1178,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
       )}
 
       {/* Footer Timestamp Strip */}
-      <div className="flex items-center justify-between text-[9px] font-mono text-muted/70 pt-1.5 border-t border-border/20 flex-wrap gap-1.5">
+      <div className="flex items-center justify-between text-[11px] font-mono text-muted/70 pt-1.5 border-t border-border/20 flex-wrap gap-1.5">
         <div className="flex items-center gap-2 flex-wrap">
           <span>🕒 Triggered: {alert.timestamp || alert.created_at || 'Live'}</span>
           {alert.invalidated_at && (
@@ -1187,7 +1188,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
             <span className="text-amber-400/80 font-semibold">📁 Archived: {alert.archived_at}</span>
           )}
         </div>
-        <span className="text-[8px] uppercase tracking-wider text-muted/50">
+        <span className="text-[10px] uppercase tracking-wider text-muted/50">
           ID: {alert.alert_id?.slice(-8) || alert.symbol}
         </span>
       </div>
@@ -1261,7 +1262,7 @@ function InstitutionalTradeInspector({
                 10L
               </button>
             </div>
-            <span className="text-[9px] font-mono text-muted hidden sm:inline">
+            <span className="text-[11px] font-mono text-muted hidden sm:inline">
               Margin ~₹{marginEst.toLocaleString('en-IN')}
             </span>
           </div>
@@ -1342,27 +1343,27 @@ const ManualAlertCard = memo(function ManualAlertCard({ alert, onRemove, onAnaly
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs font-black">{alert.symbol}</span>
               <span
-                className={`text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider border ${provenance.cls}`}
+                className={`text-[11px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider border ${provenance.cls}`}
               >
                 {provenance.label}
               </span>
               <span
-                className="text-[9px] px-1.5 py-0.5 rounded font-bold"
+                className="text-[11px] px-1.5 py-0.5 rounded font-bold"
                 style={{ background: `${style.color}18`, color: style.color }}
               >
                 {alert.alert_type}
               </span>
               {isDisqualified && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-slate-500/20 text-slate-300 border border-slate-500/40">
+                <span className="text-[11px] px-1.5 py-0.5 rounded font-bold bg-slate-500/20 text-slate-300 border border-slate-500/40">
                   🚫 CANCELLED
                 </span>
               )}
               {isInvalidated && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                <span className="text-[11px] px-1.5 py-0.5 rounded font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
                   ❌ INVALIDATED
                 </span>
               )}
-              <span className="text-[9px] font-mono" style={{ color: 'var(--color-muted)' }}>
+              <span className="text-[11px] font-mono" style={{ color: 'var(--color-muted)' }}>
                 {alert.exchange}
               </span>
             </div>
@@ -1397,7 +1398,7 @@ const ManualAlertCard = memo(function ManualAlertCard({ alert, onRemove, onAnaly
                 >
                   ₹{Number(liveSpot.ltp).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}
                 </span>
-                <span className="text-[8px] font-black text-emerald-400 bg-emerald-500/10 px-1 py-0.2 rounded animate-pulse">
+                <span className="text-[10px] font-black text-emerald-400 bg-emerald-500/10 px-1 py-0.2 rounded animate-pulse">
                   🟢 LIVE
                 </span>
                 {alert.threshold && (
@@ -2489,7 +2490,8 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     const isPureOpt = alt.alert_type === 'OPTIONS_MOMENTUM' ||
       alt.alert_type === 'OPTION_WRITE' ||
       (alt.alert_type === 'GAMMA_BLAST' && (alt.option_type || alt.contract_symbol)) ||
-      (alt.contract_symbol && (alt.contract_symbol.endsWith('CE') || alt.contract_symbol.endsWith('PE')) && alt.exchange === 'NFO')
+      (alt.contract_symbol && (alt.contract_symbol.endsWith('CE') || alt.contract_symbol.endsWith('PE'))) ||
+      Boolean(actPlan.instrument_type === 'OPTION' || optPlan?.contract_symbol || (alt.option_type && alt.strike))
 
     const wantOption = Boolean(alt._tradeOptionAlternative || (isPureOpt && (alt.contract_symbol || optPlan?.contract_symbol)))
 
@@ -2519,7 +2521,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       targetSL = null
       targetTP = null
     } else if (wantOption) {
-      targetExchange = 'NFO'
+      targetExchange = (alt.exchange === 'BSE' || alt.exchange === 'BFO') ? 'BFO' : 'NFO'
       if (optPlan?.contract_symbol) targetSym = optPlan.contract_symbol
       else if (actPlan.option_contract) targetSym = actPlan.option_contract
       else if (alt.contract_symbol) targetSym = alt.contract_symbol
@@ -2650,6 +2652,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const expiredCount = autoAlerts.filter((a) => a.is_expired || a.stage === 'EXPIRED').length
   const tgSentCount = useMemo(() => autoAlerts.filter((a) => a.telegram_dispatched).length, [autoAlerts])
   const tgHeldCount = useMemo(() => autoAlerts.filter((a) => a.telegram_suppression_reason && !a.telegram_dispatched).length, [autoAlerts])
+  const preInflectionCount = useMemo(() => autoAlerts.filter((a) => a.alert_type === 'PRE_INFLECTION_DRYUP').length, [autoAlerts])
 
   // Invalidation count for banner:
   // 1. Must not already be archived (archived setups belong in history tab, not active radar)
@@ -2709,7 +2712,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         a.contract_symbol?.toUpperCase().includes(':FUT') ||
         a.symbol?.toUpperCase().endsWith('FUT') ||
         a.alert_id?.toLowerCase().includes('-fut-') ||
-        a.alert_id?.toLowerCase().endsWith('-fut')
+        a.alert_id?.toLowerCase().endsWith('-fut') ||
+        a.actionable_plan?.preferred_vehicle === 'FUTURES' ||
+        a.actionable_plan?.action?.toUpperCase().includes('FUT')
       )
       if (isFut) return false
 
@@ -3016,6 +3021,21 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
   const renderAlertList = (items) => {
     if (!items || items.length === 0) return null
+
+    if (densityMode === 'table') {
+      return (
+        <AlertTableView
+          items={items}
+          onTrade={handleOpenTicket}
+          onSendTelegram={handleOpenTelegramModal}
+          onDismiss={handleDismissAlert}
+          onAnalyze={handleAnalyze}
+          selectedAlertId={activeSelectedAlert?.alert_id || activeSelectedAlert?.id || activeSelectedAlert?.symbol}
+          onSelectAlert={(a) => setSelectedAlertId(a.alert_id || a.id || a.symbol)}
+        />
+      )
+    }
+
     return (
       <div className={densityMode === 'compact' ? 'space-y-1.5' : densityMode === 'split' ? 'space-y-2' : 'space-y-3'}>
         {items.map(({ alert: alt, history }) => {
@@ -3198,7 +3218,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
             <div>
               <div className="font-bold flex items-center gap-2">
                 <span>NO ACTIVE BROKER CONNECTION — Level-2 Order Book Streaming Offline</span>
-                <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold bg-amber-500/15 dark:bg-amber-500/20 text-amber-800 dark:text-amber-300 border border-amber-500/30 dark:border-amber-500/40">
+                <span className="text-[11px] px-1.5 py-0.5 rounded font-mono font-bold bg-amber-500/15 dark:bg-amber-500/20 text-amber-800 dark:text-amber-300 border border-amber-500/30 dark:border-amber-500/40">
                   SYNTHETIC L1 ACTIVE
                 </span>
               </div>
@@ -3496,7 +3516,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                     isAllSegmentsSelected ? 'bg-black/20 font-bold' : 'bg-elevated'
                   }`}>{totalSegmentCount}</span>
                   {groupedAutoAlerts.length !== totalSegmentCount && (
-                    <span className={`text-[9px] font-mono opacity-70 hidden sm:inline ${
+                    <span className={`text-[11px] font-mono opacity-70 hidden sm:inline ${
                       isAllSegmentsSelected ? 'text-black/80 dark:text-black/70 font-semibold' : 'text-muted'
                     }`} title={`${totalSegmentCount} total setups deduplicated into ${groupedAutoAlerts.length} symbol cards`}>
                       ({groupedAutoAlerts.length} cards)
@@ -3603,6 +3623,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   <option value="TURTLE_SOUP_SWEEP">🐢 Turtle Soup Sweep</option>
                   <option value="TURTLE_SOUP_PLUS_ONE_LONG">🐢 Turtle Soup Bullish Inversion</option>
                   <option value="TURTLE_SOUP_SHORT">🐢 Turtle Soup Bearish Upthrust</option>
+                  <option value="PRE_INFLECTION_DRYUP">🤫 Pre-Inflection Dry-Up ({preInflectionCount})</option>
                   <option value="PRECURSOR_RADAR">⚡ Precursor Radar</option>
                   <option value="ASYMMETRIC_OPPORTUNITY">🎯 Asymmetric R:R</option>
                   <option value="CIRCUIT_WARNING">🔒 Circuit Warning</option>
@@ -3719,6 +3740,16 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   >◫ Split</button>
                   <button
                     onClick={() => {
+                      setDensityMode('table')
+                      try { localStorage.setItem('chanakya_alerts_density_mode', 'table') } catch (_) {}
+                    }}
+                    className={`px-2 py-0.5 rounded text-xs font-bold transition-all ${
+                      densityMode === 'table' ? 'bg-gold/20 text-gold shadow-sm' : 'text-muted hover:text-text'
+                    }`}
+                    title="Institutional High-Density Quant Table (Sortable columns, monospace figures, 1-click execution)"
+                  >▦ Table</button>
+                  <button
+                    onClick={() => {
                       setDensityMode('expanded')
                       try { localStorage.setItem('chanakya_alerts_density_mode', 'expanded') } catch (_) {}
                     }}
@@ -3813,7 +3844,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                           </h2>
                         </div>
                         <span className="text-[10px] font-mono text-muted">
-                          {selectedSegment === 'FNO_INDEX' ? 'Filtered to Index Derivatives Only' : 'Gamma Blasts · Index Options · 0DTE Scalps · Futures'}
+                          {selectedSegment === 'FNO_INDEX' ? 'Filtered to Index Derivatives Only' : 'Gamma Blasts · Index Options · 0DTE Scalps · Hedged Spreads'}
                         </span>
                       </div>
                       {groupedFnoIndexAlerts.length === 0 ? (
@@ -3826,18 +3857,18 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                     </div>
                   )}
 
-                  {/* 2. Stock Derivatives (Single-Stock Options & Futures) */}
+                  {/* 2. Stock Derivatives (Single-Stock Options & Hedged Spreads) */}
                   {(selectedSegment === 'ALL' ? groupedFnoStockAlerts.length > 0 : (selectedSegment === 'FNO_STOCK' || selectedSegment === 'FNO')) && (
                     <div className="space-y-3">
                       <div className="flex items-center justify-between pb-2 border-b border-purple-500/40">
                         <div className="flex items-center gap-2">
                           <span className="text-base">🎯</span>
                           <h2 className="text-xs font-black uppercase tracking-wider text-purple-300">
-                            Institutional Stock Derivatives (Single-Stock Options & Futures) ({groupedFnoStockAlerts.length})
+                            Institutional Stock Derivatives (Single-Stock Options & Hedged Spreads) ({groupedFnoStockAlerts.length})
                           </h2>
                         </div>
                         <span className="text-[10px] font-mono text-muted">
-                          {selectedSegment === 'FNO_STOCK' ? 'Filtered to Stock Derivatives Only' : 'High RVOL Momentum · Single-Stock Options · Stock Futures'}
+                          {selectedSegment === 'FNO_STOCK' ? 'Filtered to Stock Derivatives Only' : 'High RVOL Momentum · Single-Stock Options · Hedged Spreads'}
                         </span>
                       </div>
                       {groupedFnoStockAlerts.length === 0 ? (
@@ -3970,7 +4001,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                         </h2>
                       </div>
                       <span className="text-[10px] font-mono text-muted">
-                        {selectedSegment === 'FNO_INDEX' ? 'Filtered to Index Derivatives Only' : 'Gamma Blasts · Index Options · 0DTE Scalps · Futures'}
+                        {selectedSegment === 'FNO_INDEX' ? 'Filtered to Index Derivatives Only' : 'Gamma Blasts · Index Options · 0DTE Scalps · Hedged Spreads'}
                       </span>
                     </div>
                     {groupedFnoIndexAlerts.length === 0 ? (
@@ -3983,18 +4014,18 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   </div>
                 )}
 
-                {/* 2. Stock Derivatives (Single-Stock Options & Futures) */}
+                {/* 2. Stock Derivatives (Single-Stock Options & Hedged Spreads) */}
                 {(selectedSegment === 'ALL' ? groupedFnoStockAlerts.length > 0 : (selectedSegment === 'FNO_STOCK' || selectedSegment === 'FNO')) && (
                   <div className="space-y-3">
                     <div className="flex items-center justify-between pb-2 border-b border-purple-500/40">
                       <div className="flex items-center gap-2">
                         <span className="text-base">🎯</span>
                         <h2 className="text-xs font-black uppercase tracking-wider text-purple-300">
-                          Institutional Stock Derivatives (Single-Stock Options & Futures) ({groupedFnoStockAlerts.length})
+                          Institutional Stock Derivatives (Single-Stock Options & Hedged Spreads) ({groupedFnoStockAlerts.length})
                         </h2>
                       </div>
                       <span className="text-[10px] font-mono text-muted">
-                        {selectedSegment === 'FNO_STOCK' ? 'Filtered to Stock Derivatives Only' : 'High RVOL Momentum · Single-Stock Options · Stock Futures'}
+                        {selectedSegment === 'FNO_STOCK' ? 'Filtered to Stock Derivatives Only' : 'High RVOL Momentum · Single-Stock Options · Hedged Spreads'}
                       </span>
                     </div>
                     {groupedFnoStockAlerts.length === 0 ? (

@@ -204,6 +204,7 @@ class AutoAlert:
     anchored_levels: dict[str, float] = field(default_factory=dict)
     order_flow_signals: dict[str, Any] = field(default_factory=dict)
     no_chase_boundary: Optional[float] = None
+    spot_no_chase_boundary: Optional[float] = None
     telegram_dispatched: bool = False
     dispatched_channels: list[str] = field(default_factory=list)
     telegram_suppression_reason: Optional[str] = None
@@ -266,7 +267,29 @@ class AutoAlert:
             self.audit_trail = self.audit_trail[-50:]
         return evt
 
+    def sync_segment(self) -> str:
+        """Reclassifies and synchronizes self.segment with classify_alert_segment(self)."""
+        try:
+            from engine.alert_preferences import classify_alert_segment
+
+            canonical_seg = classify_alert_segment(self)
+            self.segment = canonical_seg
+            if isinstance(self.actionable_plan, dict):
+                self.actionable_plan["segment"] = canonical_seg
+                if canonical_seg in ("FNO_INDEX", "FNO_STOCK"):
+                    cur_inst = self.actionable_plan.get("instrument_type")
+                    if not cur_inst or cur_inst == "EQUITY":
+                        self.actionable_plan["instrument_type"] = "OPTION"
+            return canonical_seg
+        except Exception:
+            return self.segment or "EQUITY"
+
     def __post_init__(self) -> None:
+        if self.symbol:
+            from engine.alert_identity import canonical_alert_symbol
+
+            self.symbol = canonical_alert_symbol(self.symbol)
+
         if (not self.strike or not self.option_type) and (self.headline or self.contract_symbol):
             text_to_search = f"{self.headline or ''} {self.contract_symbol or ''}"
             m_opt = re.search(r"\b(\d{3,6}(?:\.\d+)?)\s*(CE|PE)\b", text_to_search, re.IGNORECASE)
@@ -308,7 +331,9 @@ class AutoAlert:
             elif self.stop_loss is not None and self.stop_loss > 0:
                 self.initial_stop_loss = float(self.stop_loss)
 
-        if self.initial_entry_premium is None:
+        if self.initial_entry_premium is None or (
+            self.option_premium and self.initial_entry_premium > self.option_premium * 3.5
+        ):
             if (
                 self.actionable_plan
                 and isinstance(self.actionable_plan.get("option_plan"), dict)
@@ -324,7 +349,11 @@ class AutoAlert:
                     )
             elif self.option_premium is not None and self.option_premium > 0:
                 self.initial_entry_premium = float(self.option_premium)
-            elif (self.strike or self.option_type) and self.trigger_level > 0:
+            elif (
+                (self.strike or self.option_type)
+                and self.trigger_level > 0
+                and self.trigger_level < 1500.0
+            ):
                 self.initial_entry_premium = float(self.trigger_level)
 
         # Derive Dual-Horizon Invalidation coordinates (Tactical 1m close vs Structural Spot)
@@ -352,7 +381,12 @@ class AutoAlert:
                 except (ValueError, TypeError):
                     self.tactical_sl = float(self.stop_loss)
             elif is_opt_setup:
-                self.tactical_sl = float(self.stop_loss)
+                # Scale guard: only adopt stop_loss as tactical option SL if it is in option premium scale (< 1500 pts)
+                # If stop_loss is in spot scale (>= 1500 pts), it belongs in structural_spot_sl!
+                if self.stop_loss < 1500.0:
+                    self.tactical_sl = float(self.stop_loss)
+                elif self.structural_spot_sl is None:
+                    self.structural_spot_sl = float(self.stop_loss)
 
         if self.structural_spot_sl is None:
             spot_anchor = (
@@ -379,12 +413,74 @@ class AutoAlert:
             opt_entry_ref = float(
                 self.initial_entry_premium
                 or self.option_premium
-                or (float(self.stop_loss) * 1.33 if (self.stop_loss and self.tactical_sl) else 0.0)
+                or (
+                    float(self.stop_loss) * 1.33
+                    if (self.stop_loss and self.tactical_sl and self.stop_loss < 1500.0)
+                    else 0.0
+                )
                 or 0.0
             )
-            if opt_entry_ref > 0:
+            if 0 < opt_entry_ref < 3500.0:
                 # Maximum 32% drawdown catastrophe floor on premium
                 self.disaster_stop_floor = round(opt_entry_ref * 0.68, 2)
+
+        # Scale guard for option derivative alerts: ensure no_chase_boundary is denominated in option premium units.
+        # If no_chase_boundary was populated with underlying cash equity spot (e.g. ₹180 vs option premium ₹2.8),
+        # preserve spot boundary in spot_no_chase_boundary and normalize no_chase_boundary to option premium ceiling.
+        if is_opt_setup:
+            opt_ref = float(
+                self.option_premium
+                or (
+                    self.initial_entry_premium
+                    if (self.initial_entry_premium and self.initial_entry_premium < 1500.0)
+                    else 0.0
+                )
+                or (
+                    self.trigger_level
+                    if (self.trigger_level and self.trigger_level < 1500.0)
+                    else 0.0
+                )
+                or 0.0
+            )
+            if self.spot_no_chase_boundary is None:
+                spot_nc = (self.metrics or {}).get("spot_no_chase_boundary") or (
+                    self.actionable_plan or {}
+                ).get("spot_no_chase_boundary")
+                if spot_nc:
+                    try:
+                        self.spot_no_chase_boundary = float(
+                            str(spot_nc).replace("₹", "").replace(",", "").strip()
+                        )
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                        )
+
+            if self.no_chase_boundary is not None and self.no_chase_boundary > 0:
+                if opt_ref > 0 and self.no_chase_boundary > (opt_ref * 1.35):
+                    if self.spot_no_chase_boundary is None:
+                        self.spot_no_chase_boundary = float(self.no_chase_boundary)
+                    plan_opt_nc = None
+                    if isinstance(self.actionable_plan, dict):
+                        plan_opt_nc = (self.actionable_plan.get("option_plan") or {}).get(
+                            "no_chase_boundary"
+                        )
+                    adopted = False
+                    if plan_opt_nc:
+                        try:
+                            clean_opt_nc = float(
+                                str(plan_opt_nc).replace("₹", "").replace(",", "").strip()
+                            )
+                            if 0 < clean_opt_nc <= (opt_ref * 1.35):
+                                self.no_chase_boundary = clean_opt_nc
+                                adopted = True
+                        except (ValueError, TypeError) as e_suppressed:
+                            logger.debug(
+                                f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+                    if not adopted:
+                        # For option derivative setups, traders buy contracts (CE or PE); ceiling is entry premium + 5%
+                        self.no_chase_boundary = round(opt_ref * 1.05, 2)
 
         if not self.created_at:
             self.created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
@@ -435,12 +531,14 @@ class AutoAlert:
                 )
             except Exception as e_suppressed:
                 logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
-        if not self.segment:
-            try:
-                from engine.alert_preferences import classify_alert_segment
+        try:
+            from engine.alert_preferences import classify_alert_segment
 
-                self.segment = classify_alert_segment(self)
-            except Exception:
+            canonical_seg = classify_alert_segment(self)
+            if not self.segment or self.segment == "EQUITY" or canonical_seg != "EQUITY":
+                self.segment = canonical_seg
+        except Exception:
+            if not self.segment:
                 self.segment = "EQUITY"
         if self.lot_size is None:
             if self.metrics and "lot_size" in self.metrics and self.metrics["lot_size"]:
@@ -547,7 +645,7 @@ class AutoAlert:
         # Auto-infer horizon if not explicitly specified
         if not self.time_horizon:
             atype = (self.alert_type or "").upper()
-            if atype == "MULTIBAGGER":
+            if atype in ("MULTIBAGGER",):
                 self.time_horizon = "MULTIBAGGER"
             elif atype == "STAGE_1_TO_2_EXPANSION":
                 text = f"{self.headline or ''} {self.summary or ''} {self.alert_id or ''}".upper()
@@ -560,8 +658,18 @@ class AutoAlert:
                 "SQUEEZE_BREAKDOWN",
                 "VCP_PIVOT_BREAKOUT",
                 "RRG_SECTOR_ROTATION",
+                "PATTERN_COILING",
             ):
                 self.time_horizon = "SWING_MID"
+            elif atype in (
+                "SWING_INFLECTION",
+                "PRE_INFLECTION_DRYUP",
+                "SMC_OB_RETEST",
+                "SMC_SPRING_SWEEP",
+                "CIRCUIT_WARNING",
+                "PRECURSOR_RADAR",
+            ):
+                self.time_horizon = "SWING_SHORT"
             elif atype == "ASYMMETRIC_OPPORTUNITY":
                 setup_action = str((self.actionable_plan or {}).get("action", "")).upper()
                 if "POCKET_PIVOT" in setup_action:
@@ -570,24 +678,38 @@ class AutoAlert:
                     self.time_horizon = "INTRADAY"
                 else:
                     self.time_horizon = "SWING_SHORT"
-            elif atype in ("CIRCUIT_WARNING", "PATTERN_COILING", "PRECURSOR_RADAR"):
-                self.time_horizon = "SWING_SHORT"
             elif (
                 "CRYPTO" in atype
                 or (self.exchange or "").upper() in ("CRYPTO", "BINANCE", "DERIBIT")
                 or (getattr(self, "segment", "") or "").upper() == "CRYPTO"
             ):
                 self.time_horizon = "ROLLING_24H"
-            elif atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST") and (
-                "SCALP" in (self.headline or "").upper()
+            elif atype in (
+                "INDEX_MICRO_SCALP",
+                "INTRADAY_SCALP_ONLY",
+                "FAST_SCALP",
+                "MICRO_SCALP",
+            ) or (
+                "SCALP" in atype
+                or "SCALP" in (self.headline or "").upper()
                 or "SCALP" in (self.summary or "").upper()
-                or "0DTE" in (self.headline or "").upper()
             ):
                 self.time_horizon = "SCALP"
-            elif atype in ("INTRADAY_SCALP_ONLY", "FAST_SCALP"):
+            elif atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST") and (
+                "0DTE" in (self.headline or "").upper()
+            ):
                 self.time_horizon = "SCALP"
             elif atype in (
                 "GAMMA_BLAST",
+                "OPTIONS_MOMENTUM",
+                "INDEX_CALL_SETUP",
+                "INDEX_PUT_SETUP",
+                "OPENING_DRIVE",
+                "OPENING_DRIVE_IGNITION",
+                "AFTERNOON_THRUST",
+                "TURTLE_SOUP",
+                "TURTLE_SOUP_SWEEP",
+                "TREND_DAY_CONTINUATION",
                 "INTRADAY_SPARK",
                 "INTRADAY_BREAKDOWN_SPARK",
                 "INDEX_CONTAGION",
@@ -1044,42 +1166,35 @@ class AutoAlert:
                         f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
                     )
 
-            # Check if the trade plan itself is buying an option (even if direction is BEARISH)
-            is_buying_option = bool(
-                is_opt
-                or plan_dict.get("instrument_type") == "OPTION"
-                or str(plan_dict.get("action", "")).startswith("BUY")
-                or (
-                    getattr(self, "derivative_type", "") == "OPT"
-                    and str((self.actionable_plan or {}).get("action", "")).startswith("BUY")
-                )
+            # Targets are option premium targets if the alert itself is an option premium level
+            # or if the targets specifically came from option premium targets (t1_premium, t2_premium)
+            has_opt_target_premiums = bool(
+                is_opt or (opt_plan_dict.get("t1_premium") and opt_plan_dict.get("t2_premium"))
             )
-            if t1_f and t2_f:
-                if is_buying_option or is_long:
-                    if t2_f <= t1_f:
-                        return (
-                            False,
-                            f"Inverted Target Hierarchy: Target 2 (₹{t2_f:,.2f}) <= Target 1 (₹{t1_f:,.2f})",
-                        )
-                elif is_short:
-                    if t2_f >= t1_f:
-                        return (
-                            False,
-                            f"Inverted Bearish Target Hierarchy: Target 2 (₹{t2_f:,.2f}) >= Target 1 (₹{t1_f:,.2f})",
-                        )
-            if t2_f and t3_f:
-                if is_buying_option or is_long:
-                    if t3_f <= t2_f:
-                        return (
-                            False,
-                            f"Inverted Target Hierarchy: Target 3 (₹{t3_f:,.2f}) <= Target 2 (₹{t2_f:,.2f})",
-                        )
-                elif is_short:
-                    if t3_f >= t2_f:
-                        return (
-                            False,
-                            f"Inverted Bearish Target Hierarchy: Target 3 (₹{t3_f:,.2f}) >= Target 2 (₹{t2_f:,.2f})",
-                        )
+            if is_short and not has_opt_target_premiums:
+                # Bearish underlying spot / futures trade: targets extend strictly DOWNWARD
+                if t1_f and t2_f and t2_f >= t1_f:
+                    return (
+                        False,
+                        f"Inverted Bearish Target Hierarchy: Target 2 (₹{t2_f:,.2f}) >= Target 1 (₹{t1_f:,.2f})",
+                    )
+                if t2_f and t3_f and t3_f >= t2_f:
+                    return (
+                        False,
+                        f"Inverted Bearish Target Hierarchy: Target 3 (₹{t3_f:,.2f}) >= Target 2 (₹{t2_f:,.2f})",
+                    )
+            else:
+                # Bullish trade or option premium buying (where premiums expand upward): targets extend strictly UPWARD
+                if t1_f and t2_f and t2_f <= t1_f:
+                    return (
+                        False,
+                        f"Inverted Target Hierarchy: Target 2 (₹{t2_f:,.2f}) <= Target 1 (₹{t1_f:,.2f})",
+                    )
+                if t2_f and t3_f and t3_f <= t2_f:
+                    return (
+                        False,
+                        f"Inverted Target Hierarchy: Target 3 (₹{t3_f:,.2f}) <= Target 2 (₹{t2_f:,.2f})",
+                    )
 
             # Zero / Micro Risk Guard:
             entry_ref = float(self.trigger_level or getattr(self, "entry_price", 0.0) or ltp)

@@ -134,7 +134,7 @@ export default function Tooltip({
             <div className="flex items-center justify-between gap-1.5 border-b border-slate-700/70 pb-2 mb-2">
               <div className="flex items-center gap-1.5 min-w-0">
                 {displayCategory && (
-                  <span className="text-[8.5px] uppercase font-mono font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/25 shrink-0">
+                  <span className="text-[10px] uppercase font-mono font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/25 shrink-0">
                     {displayCategory}
                   </span>
                 )}
@@ -145,7 +145,7 @@ export default function Tooltip({
                 )}
               </div>
               {metricKey && (
-                <span className="text-[8.5px] bg-emerald-500/15 text-emerald-300 px-1.5 py-0.5 rounded font-mono font-bold shrink-0 border border-emerald-500/30">
+                <span className="text-[10px] bg-emerald-500/15 text-emerald-300 px-1.5 py-0.5 rounded font-mono font-bold shrink-0 border border-emerald-500/30">
                   Inspect ↗
                 </span>
               )}
@@ -162,7 +162,7 @@ export default function Tooltip({
           {/* Actionable Decision Guidance ("🎯 How It Helps You Decide") */}
           {displayGuide && (
             <div className="mt-2 p-2.5 rounded-lg bg-emerald-950/60 border border-emerald-500/30 text-[10.5px] text-emerald-300 font-ui leading-tight">
-              <div className="flex items-center gap-1 font-bold text-[9px] uppercase tracking-wider text-emerald-400 mb-1">
+              <div className="flex items-center gap-1 font-bold text-[11px] uppercase tracking-wider text-emerald-400 mb-1">
                 <span>🎯</span>
                 <span>How It Helps You Decide:</span>
               </div>
@@ -175,14 +175,14 @@ export default function Tooltip({
           {/* Key Thresholds Preview (if available) */}
           {displayThresholds && displayThresholds.length > 0 && (
             <div className="mt-2 space-y-1">
-              <span className="text-[8.5px] uppercase font-bold text-slate-400 font-mono tracking-wider block">
+              <span className="text-[10px] uppercase font-bold text-slate-400 font-mono tracking-wider block">
                 Rule of Thumb:
               </span>
               <div className="flex flex-wrap gap-1">
                 {displayThresholds.slice(0, 3).map((t, idx) => (
                   <span
                     key={idx}
-                    className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${
+                    className={`text-[11px] font-mono px-1.5 py-0.5 rounded border ${
                       t.color === 'green'
                         ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
                         : t.color === 'red'
@@ -199,14 +199,14 @@ export default function Tooltip({
 
           {/* Formula preview */}
           {displayFormula && (
-            <div className="mt-2 p-2 rounded bg-slate-950 border border-slate-800 text-[9.5px] font-mono text-amber-400 overflow-x-auto whitespace-pre">
+            <div className="mt-2 p-2 rounded bg-slate-950 border border-slate-800 text-[11px] font-mono text-amber-400 overflow-x-auto whitespace-pre">
               {displayFormula}
             </div>
           )}
 
           {/* Bottom Hint */}
           {metricKey && (
-            <div className="mt-2 pt-1.5 border-t border-slate-700/60 flex items-center justify-between text-[9.5px] text-slate-400 font-ui">
+            <div className="mt-2 pt-1.5 border-t border-slate-700/60 flex items-center justify-between text-[11px] text-slate-400 font-ui">
               <span>💡 Click to inspect model & variables</span>
               <span className="text-emerald-400 font-bold">➔</span>
             </div>
@@ -278,10 +278,10 @@ export function HelpHint({
 }) {
   const openInspector = useInspectorStore((s) => s.openInspector)
   const sizeClasses = {
-    xs: 'w-3 h-3 text-[8px]',
-    sm: 'w-3.5 h-3.5 text-[9px]',
+    xs: 'w-3 h-3 text-[10px]',
+    sm: 'w-3.5 h-3.5 text-[11px]',
     md: 'w-4 h-4 text-[10px]',
-  }[size] || 'w-3.5 h-3.5 text-[9px]'
+  }[size] || 'w-3.5 h-3.5 text-[11px]'
 
   return (
     <Tooltip

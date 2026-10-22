@@ -842,7 +842,7 @@ function BrokerRouting() {
 
   const names = { zerodha: 'Zerodha', fyers: 'Fyers', groww: 'Groww', angel_one: 'Angel One', upstox: 'Upstox' }
   return (
-    <span className="text-[9px] text-muted font-ui flex-shrink-0 ml-2">
+    <span className="text-[11px] text-muted font-ui flex-shrink-0 ml-2">
       {dataB && <><span className="text-blue">Data</span>: {names[dataB[0]] ?? dataB[0]}</>}
       {dataB && execB && ' · '}
       {execB && <><span className="text-amber">Exec</span>: {names[execB[0]] ?? execB[0]}</>}

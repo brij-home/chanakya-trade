@@ -132,7 +132,18 @@ def get_ohlcv(
 
     # Normalize interval alias
     kite_interval = INTERVAL_MAP.get(interval, interval)
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
+    clean_sym = (
+        symbol.upper()
+        .replace(".NS", "")
+        .replace(".BO", "")
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("MCX:", "")
+        .replace("CDS:", "")
+        .replace("NFO:", "")
+        .replace("BFO:", "")
+        .strip()
+    )
     effective_to = as_of or to_date
     cutoff_key = effective_to.strftime("%Y%m%d%H%M%S") if effective_to else "latest"
     cache_key = f"{clean_sym}_{exchange.upper()}_{kite_interval}_{days}_{cutoff_key}_{int(include_live_candle)}"

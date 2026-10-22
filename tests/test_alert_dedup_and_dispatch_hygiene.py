@@ -130,6 +130,9 @@ def test_in_session_secondary_reentry_15m_reset_buffer(clean_engine):
         created_at=exit_time_recent,
         strike=55500.0,
         option_type="PE",
+        ltp=100.0,
+        stop_loss=60.0,
+        target_level=180.0,
     )
     clean_engine._alerts.append(alert_prior)
 
@@ -143,6 +146,9 @@ def test_in_session_secondary_reentry_15m_reset_buffer(clean_engine):
         created_at=exit_time_recent,
         strike=55500.0,
         option_type="PE",
+        ltp=100.0,
+        stop_loss=60.0,
+        target_level=180.0,
     )
 
     with patch.dict(os.environ, {"CHANAKYA_TESTING": "0"}):

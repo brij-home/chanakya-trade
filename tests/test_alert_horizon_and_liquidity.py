@@ -130,6 +130,43 @@ def test_unignited_early_warning_time_stop():
     assert "60-minute momentum window" in reason
 
 
+def test_velocity_stagnation_time_stop_intraday_option():
+    """Verify that an active intraday option setup stagnating for >= 45m without reaching +0.5R
+    triggers Velocity Stagnation Time-Stop to prevent afternoon theta decay."""
+    simulated_now = datetime(2026, 10, 21, 13, 30, tzinfo=IST)
+    created_time = simulated_now - timedelta(minutes=50)
+
+    alert = AutoAlert(
+        alert_id="test-stagnation-005",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        contract_symbol="NIFTY26OCT24500CE",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Nifty Call Option",
+        summary="Call momentum",
+        ltp=100.0,
+        trigger_level=100.0,
+        option_premium=100.0,
+        stop_loss=75.0,
+        target_level=150.0,
+        time_horizon="INTRADAY",
+        created_at=created_time.strftime("%Y-%m-%d %H:%M:%S IST"),
+    )
+    alert._force_test_expiry = True
+
+    with patch("engine.alert_evaluator.datetime") as mock_dt:
+        mock_dt.now.return_value = simulated_now
+        mock_dt.strptime.side_effect = datetime.strptime
+        reason = evaluate_alert_invalidation(alert, current_ltp=99.0)
+
+    assert reason is not None
+    assert "Velocity Stagnation Time-Stop" in reason
+    assert "50m without reaching +0.5R expansion" in reason
+    assert "prevent theta decay" in reason
+
+
 def test_options_liquidity_audit():
     """Verify audit_option_liquidity detects optimal vs wide spreads and flags slippage risks."""
     # 1. Optimal tight spread: LTP 120, Bid 119.80, Ask 120.20 (Spread = 0.33%)

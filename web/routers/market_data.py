@@ -1508,7 +1508,7 @@ async def get_depth_radar_endpoint(
     segment: Optional[str] = "ALL",
     query: Optional[str] = None,
     limit: int = 60,
-    allow_rest: bool = True,
+    allow_rest: bool = False,
 ):
     """
     Returns real-time L2 Market Depth Radar across curated market universe.

@@ -50,7 +50,7 @@ export default function AuditCard({ data }) {
           { label: 'Hold', value: d.hold_assessment },
         ].map(({ label, value }) => (
           <div key={label} className="bg-panel border border-border rounded-lg p-2 text-center">
-            <p className="text-muted text-[9px] uppercase tracking-wider font-ui">{label}</p>
+            <p className="text-muted text-[11px] uppercase tracking-wider font-ui">{label}</p>
             <p className={`text-[12px] font-ui font-semibold mt-0.5 ${qualityColor(value)}`}>{value ?? '—'}</p>
           </div>
         ))}
@@ -62,7 +62,7 @@ export default function AuditCard({ data }) {
           <p className="text-muted text-[10px] uppercase tracking-wider font-ui mb-2">Analyst Grades</p>
           <table className="w-full text-[11px]">
             <thead>
-              <tr className="text-muted text-[9px] font-ui border-b border-border">
+              <tr className="text-muted text-[11px] font-ui border-b border-border">
                 <th className="pb-1 text-left pr-3">Analyst</th>
                 <th className="pb-1 text-left pr-3">Grade</th>
                 <th className="pb-1 text-right">Accuracy</th>
@@ -88,13 +88,13 @@ export default function AuditCard({ data }) {
         <div className="flex gap-3 text-[11px]">
           {d.most_accurate && (
             <div className="flex-1 bg-green/5 border border-green/20 rounded-lg px-3 py-2">
-              <p className="text-muted text-[9px] uppercase font-ui">Most Accurate</p>
+              <p className="text-muted text-[11px] uppercase font-ui">Most Accurate</p>
               <p className="text-green font-ui font-semibold mt-0.5">{d.most_accurate}</p>
             </div>
           )}
           {d.most_wrong && (
             <div className="flex-1 bg-red/5 border border-red/20 rounded-lg px-3 py-2">
-              <p className="text-muted text-[9px] uppercase font-ui">Most Wrong</p>
+              <p className="text-muted text-[11px] uppercase font-ui">Most Wrong</p>
               <p className="text-red font-ui font-semibold mt-0.5">{d.most_wrong}</p>
             </div>
           )}

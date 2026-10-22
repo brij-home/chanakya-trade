@@ -72,7 +72,7 @@ function Section({ title, items, color, onSelect }) {
 
               {item.spikes_count > 1 && (
                 <span
-                  className="text-[9px] font-ui px-1 py-0.2 rounded bg-amber/10 text-amber border border-amber/20"
+                  className="text-[11px] font-ui px-1 py-0.2 rounded bg-amber/10 text-amber border border-amber/20"
                   title={`${item.spikes_count} active strike spikes for ${underlyingSymbol}`}
                 >
                   {item.spikes_count}⚡

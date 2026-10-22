@@ -966,26 +966,72 @@ class PatternLearningEngine:
             except Exception:
                 atr = None
 
+        # Check alert timeframe & metrics
+        th = (getattr(alert, "time_horizon", "") or "").upper()
+        metrics = getattr(alert, "metrics", {}) or {}
+        is_swing = th in (
+            "SWING",
+            "SWING_SHORT",
+            "SWING_MID",
+            "LONG_TERM",
+            "POSITIONAL",
+            "MULTIBAGGER",
+        ) or getattr(alert, "setup_style", "") in ("SWING", "POSITIONAL")
+
+        atr_5m = float(metrics.get("atr_5m") or metrics.get("atr_15m") or 0.0)
+
         if is_opt:
-            # Option noise floor: scale underlying ATR by Delta (~0.50), bounded by 8% to 25% of premium
-            if atr and atr > 0:
-                opt_atr_equiv = round(0.50 * 1.2 * atr, 1)
-                min_noise_sl_pts = max(
-                    round(entry_price * 0.08, 1), min(round(entry_price * 0.25, 1), opt_atr_equiv)
+            # Option noise floor:
+            # Indices: check institutional index floors (15 pts Nifty, 35 pts BankNifty, 45 pts Sensex)
+            # Stocks: 10% - 15% of option premium or 1.10x option 5m ATR
+            opt_atr_5m = float(metrics.get("opt_atr_5m") or atr_5m or 0.0)
+            is_index_sym = any(
+                idx in clean_sym
+                for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+            )
+
+            if is_index_sym:
+                min_idx_floor = (
+                    45.0
+                    if ("SENSEX" in clean_sym or "BANKEX" in clean_sym)
+                    else (35.0 if "BANKNIFTY" in clean_sym else 15.0)
                 )
+                if entry_price >= 80.0:
+                    min_noise_sl_pts = min_idx_floor
+                else:
+                    min_noise_sl_pts = max(3.0, round(entry_price * 0.12, 1))
             else:
-                min_noise_sl_pts = round(entry_price * 0.12, 1)
+                base_pct = round(entry_price * 0.12, 1)
+                min_noise_sl_pts = (
+                    max(base_pct, round(1.10 * opt_atr_5m, 1))
+                    if opt_atr_5m > 0
+                    else max(1.5, base_pct)
+                )
         else:
-            base_min_noise = round(1.2 * atr, 1) if atr else round(entry_price * 0.012, 1)
+            # Equities, Commodities, Crypto, Spot:
             try:
-                from engine.alert_scrutiny import COMMODITY_MIN_SL_FLOORS
+                from engine.alert_scrutiny import COMMODITY_MIN_SL_FLOORS, INDEX_MIN_SL_FLOORS
 
                 if clean_sym in COMMODITY_MIN_SL_FLOORS:
-                    min_noise_sl_pts = max(base_min_noise, COMMODITY_MIN_SL_FLOORS[clean_sym])
+                    min_noise_sl_pts = COMMODITY_MIN_SL_FLOORS[clean_sym]
+                elif clean_sym in INDEX_MIN_SL_FLOORS and not is_opt:
+                    min_noise_sl_pts = INDEX_MIN_SL_FLOORS[clean_sym]
                 else:
-                    min_noise_sl_pts = base_min_noise
+                    if is_swing:
+                        # Swing setups need 1.2x Daily ATR
+                        min_noise_sl_pts = (
+                            round(1.20 * atr, 1) if atr else round(entry_price * 0.020, 1)
+                        )
+                    else:
+                        # Intraday setups: 1.20x 5m ATR, or if only daily ATR available, 0.25x Daily ATR (~1.2x 5m range)
+                        if atr_5m > 0:
+                            min_noise_sl_pts = round(1.20 * atr_5m, 1)
+                        elif atr:
+                            min_noise_sl_pts = round(max(0.25 * atr, entry_price * 0.007), 1)
+                        else:
+                            min_noise_sl_pts = round(entry_price * 0.008, 1)
             except Exception:
-                min_noise_sl_pts = base_min_noise
+                min_noise_sl_pts = round(entry_price * 0.008, 1)
 
         actual_sl_pts = round(abs(entry_price - stop_loss), 2) if stop_loss > 0 else 0.0
         metrics_snapshot["stop_distance_pts"] = actual_sl_pts

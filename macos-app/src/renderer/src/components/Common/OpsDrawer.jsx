@@ -387,7 +387,7 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
                     >
                       <div className="flex items-center justify-between">
                         <span
-                          className="px-1.5 py-0.2 rounded font-bold text-[9px]"
+                          className="px-1.5 py-0.2 rounded font-bold text-[11px]"
                           style={{
                             background: isP0 ? 'rgba(255, 79, 123, 0.2)' : isP1 ? 'rgba(245, 166, 35, 0.2)' : 'rgba(77, 155, 255, 0.15)',
                             color: pColor,
@@ -421,7 +421,7 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
                             {isExp ? 'Hide Traceback ▲' : 'Show Traceback ▼'}
                           </button>
                           {isExp && (
-                            <pre className="mt-1.5 p-2 rounded bg-black/40 text-[9px] text-muted overflow-x-auto max-h-40 no-scrollbar">
+                            <pre className="mt-1.5 p-2 rounded bg-black/40 text-[11px] text-muted overflow-x-auto max-h-40 no-scrollbar">
                               {inc.details.traceback}
                             </pre>
                           )}

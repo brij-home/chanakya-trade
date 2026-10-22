@@ -225,31 +225,31 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
                         </span>
 
                         {isStock && item.sector && (
-                          <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-surface border border-border/60 text-muted">
+                          <span className="text-[11px] px-1.5 py-0.2 rounded font-mono font-bold bg-surface border border-border/60 text-muted">
                             {item.sector}
                           </span>
                         )}
 
                         {isStock && stockType === 'index' && (
-                          <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-emerald-500/15 border border-emerald-500/30 text-emerald-400">
+                          <span className="text-[11px] px-1.5 py-0.2 rounded font-mono font-bold bg-emerald-500/15 border border-emerald-500/30 text-emerald-400">
                             INDEX
                           </span>
                         )}
 
                         {isStock && stockType === 'etf' && (
-                          <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-sky-500/15 border border-sky-500/30 text-sky-400">
+                          <span className="text-[11px] px-1.5 py-0.2 rounded font-mono font-bold bg-sky-500/15 border border-sky-500/30 text-sky-400">
                             ETF
                           </span>
                         )}
 
                         {isStock && stockType === 'commodity' && (
-                          <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-amber-500/15 border border-amber-500/30 text-amber">
+                          <span className="text-[11px] px-1.5 py-0.2 rounded font-mono font-bold bg-amber-500/15 border border-amber-500/30 text-amber">
                             MCX
                           </span>
                         )}
 
                         {isStock && stockType === 'currency' && (
-                          <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-violet-500/15 border border-violet-500/30 text-violet-400">
+                          <span className="text-[11px] px-1.5 py-0.2 rounded font-mono font-bold bg-violet-500/15 border border-violet-500/30 text-violet-400">
                             FOREX
                           </span>
                         )}
@@ -261,7 +261,7 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
                     </div>
                   </div>
 
-                  <code className="text-[9px] text-amber bg-panel px-1.5 py-0.5 rounded font-mono border border-border/50 flex-shrink-0 ml-2 hidden sm:inline-block">
+                  <code className="text-[11px] text-amber bg-panel px-1.5 py-0.5 rounded font-mono border border-border/50 flex-shrink-0 ml-2 hidden sm:inline-block">
                     {item.command || item.text || (item.symbol ? `analyze ${item.symbol}` : '')}
                   </code>
                 </button>

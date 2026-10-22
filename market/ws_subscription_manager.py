@@ -739,6 +739,7 @@ class WsSubscriptionManager:
         with self._lock:
             changed = False
             for s in invalid_symbols:
+                _WS_SYMBOL_BLACKLIST.add(s)
                 if s in self._dynamic_symbols:
                     del self._dynamic_symbols[s]
                     changed = True
@@ -748,7 +749,7 @@ class WsSubscriptionManager:
             if changed:
                 self._save_to_disk()
                 logger.info(
-                    f"[WsSubManager] Purged {len(invalid_symbols)} invalid symbols from subscription registry: {invalid_symbols}"
+                    f"[WsSubManager] Purged {len(invalid_symbols)} invalid symbols from subscription registry and blacklisted: {invalid_symbols}"
                 )
 
     def get_all_desired_subscriptions(self) -> list[str]:

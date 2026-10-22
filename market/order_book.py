@@ -965,6 +965,22 @@ def analyze_symbol_order_book(
                 )
             if ltp > 0:
                 is_stream = getattr(q, "source", "") == "STREAM"
+                bid_p = float(getattr(q, "bid", 0.0) or 0.0)
+                ask_p = float(getattr(q, "ask", 0.0) or 0.0)
+                if bid_p > 0 and ask_p > 0:
+                    vol = int(getattr(q, "volume", 0) or 0)
+                    qty_proxy = max(1, int(vol * 0.05)) if vol > 0 else 50
+                    raw_l1 = {
+                        "buy": [{"price": bid_p, "quantity": qty_proxy, "orders": 1}],
+                        "sell": [{"price": ask_p, "quantity": qty_proxy, "orders": 1}],
+                    }
+                    return compute_order_book_metrics(
+                        clean_sym,
+                        raw_l1,
+                        ltp,
+                        live_broker_connected=is_stream,
+                        provenance="LIVE_STREAM_L1" if is_stream else "CACHED_L1",
+                    )
                 return OrderBookSnapshot(
                     symbol=clean_sym,
                     ltp=ltp,

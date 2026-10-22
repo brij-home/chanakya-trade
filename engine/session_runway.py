@@ -97,6 +97,7 @@ def evaluate_session_runway(
     direction: str = "BULLISH",
     now_dt: Optional[datetime] = None,
     fii_net_cr: Optional[float] = None,
+    is_hedged_spread: bool = False,
 ) -> RunwayEvaluation:
     """
     Evaluates whether an alert setup has viable market runway and dynamic regime alignment.
@@ -247,10 +248,23 @@ def evaluate_session_runway(
             )
 
     # 5. Midday Compression Lull (11:00 - 13:15 IST)
-    # Lunchtime chop: require institutional momentum RVOL >= 1.8x for single-stock equity options.
-    # Exemption: Benchmark index setups (FNO_INDEX) with structural alignment or defined-risk spreads allowed when rvol >= 1.0.
+    # Lunchtime chop: require institutional momentum (TOD-RVOL >= 1.30x) for single-stock equity breakouts.
+    # Exemptions:
+    #   a) Benchmark index setups (FNO_INDEX) with structural alignment
+    #   b) Defined-risk vertical spreads (is_hedged_spread=True) which neutralize midday theta decay
+    #   c) Trend Day Pullback, SMC Orderblock, & Liquidity Sweep setups where volume dry-up is healthy & expected
     if phase == "MIDDAY_COMPRESSION":
-        min_rvol_mc = 1.0 if is_fno_index else 1.8
+        is_pullback_setup = alert_type.upper() in (
+            "TREND_DAY_PULLBACK",
+            "SMC_ORDERBLOCK_RETEST",
+            "TURTLE_SOUP_RETEST",
+            "PULLBACK_RETEST",
+            "VWAP_BOUNCE",
+            "TREND_PULLBACK_BOUNCE",
+            "SMC_SPRING_SWEEP",
+            "PREDATOR_SWEEP",
+        )
+        min_rvol_mc = 1.0 if (is_fno_index or is_pullback_setup or is_hedged_spread) else 1.30
         if rvol < min_rvol_mc and not is_swing:
             return RunwayEvaluation(
                 is_allowed=False,
@@ -260,15 +274,25 @@ def evaluate_session_runway(
                 elevated_rvol_required=min_rvol_mc,
             )
 
-    # 6. Hard Runway Gate (After 14:00 IST):
-    # Intraday equities and stock options initiated after 14:00 have < 75m before mandatory 15:15 cutoff.
-    # 93 trades were liquidated on 16-Oct because of late entries!
-    if (is_equity_intraday or is_fno_stock_intraday) and now_dt.time() >= dtime(14, 0):
+    # 6. Hard Runway Gate:
+    # a) Intraday Cash Equities initiated after 14:00 have < 75m before mandatory 15:15 broker square-off.
+    if is_equity_intraday and now_dt.time() >= dtime(14, 0):
         return RunwayEvaluation(
             is_allowed=False,
             phase=phase,
             runway_minutes=runway_mins,
-            veto_reason=f"Session Runway Exhaustion: New intraday entries silenced after 14:00 IST (remaining {runway_mins}m < 75m minimum runway).",
+            veto_reason=f"Session Runway Exhaustion: New intraday cash equity entries silenced after 14:00 IST (remaining {runway_mins}m < 75m minimum runway).",
+        )
+
+    # b) F&O Stock Options & High-Velocity Afternoon Thrusts:
+    # Options momentum moves have fast 15-30m execution horizons. They are permitted
+    # until 14:45 IST before 0DTE theta collapse or mandatory 15:15 square-off.
+    if is_fno_stock_intraday and now_dt.time() >= dtime(14, 45):
+        return RunwayEvaluation(
+            is_allowed=False,
+            phase=phase,
+            runway_minutes=runway_mins,
+            veto_reason=f"Session Runway Exhaustion: New F&O stock option entries silenced after 14:45 IST ({runway_mins}m remaining).",
         )
 
     # 7. Index Options Late Entry Gate:

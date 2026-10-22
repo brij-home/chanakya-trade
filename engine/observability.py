@@ -148,6 +148,7 @@ CRITICAL_JOURNEY_SLOS: dict[str, SLOTarget] = {
         p95_latency_ms=1000.0,
         p99_latency_ms=2500.0,
         availability_pct=98.0,
+        error_budget_pct=2.0,
     ),
     "options_chain": SLOTarget(
         journey_id="options_chain",
@@ -155,6 +156,7 @@ CRITICAL_JOURNEY_SLOS: dict[str, SLOTarget] = {
         p95_latency_ms=6000.0,
         p99_latency_ms=10000.0,
         availability_pct=98.0,
+        error_budget_pct=2.0,
     ),
     "multi_agent_analyze": SLOTarget(
         journey_id="multi_agent_analyze",
@@ -162,6 +164,7 @@ CRITICAL_JOURNEY_SLOS: dict[str, SLOTarget] = {
         p95_latency_ms=18000.0,
         p99_latency_ms=30000.0,
         availability_pct=95.0,
+        error_budget_pct=5.0,
     ),
     "paper_order_submit": SLOTarget(
         journey_id="paper_order_submit",
@@ -169,6 +172,7 @@ CRITICAL_JOURNEY_SLOS: dict[str, SLOTarget] = {
         p95_latency_ms=300.0,
         p99_latency_ms=800.0,
         availability_pct=99.9,
+        error_budget_pct=0.1,
     ),
     "backtest_run": SLOTarget(
         journey_id="backtest_run",
@@ -176,6 +180,7 @@ CRITICAL_JOURNEY_SLOS: dict[str, SLOTarget] = {
         p95_latency_ms=30000.0,
         p99_latency_ms=120000.0,
         availability_pct=98.0,
+        error_budget_pct=2.0,
     ),
 }
 

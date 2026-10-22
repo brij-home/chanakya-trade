@@ -130,6 +130,7 @@ def resolve_option_contract(
     india_vix: Optional[float] = None,
     prefer_spread: Optional[bool] = None,
     strike_tier: str = "ATM",  # "ATM" | "HIGH_GAMMA_ASYMMETRY" | "DEEP_ITM"
+    roc_velocity: Optional[float] = None,
 ) -> Optional[ResolvedOptionPlan]:
     """
     Resolves real option contract and premium levels for an index or F&O stock.
@@ -177,8 +178,9 @@ def resolve_option_contract(
         except Exception:
             vix_val = 14.5
 
-    # VIX Regime Classification
-    is_elevated_vix = (vix_val >= 19.0) or (prefer_spread is True)
+    # VIX Regime Classification: Mandate Defined-Risk Spreads when VIX >= 16.0 or momentum velocity is slow (< 0.20%)
+    is_slow_momentum = roc_velocity is not None and abs(float(roc_velocity)) < 0.20
+    is_elevated_vix = (vix_val >= 16.0) or (prefer_spread is True) or is_slow_momentum
     if is_elevated_vix:
         vix_regime = "ELEVATED_VOL_SPREAD"
         strategy_type = "BULL_CALL_SPREAD" if is_bull else "BEAR_PUT_SPREAD"
@@ -215,7 +217,7 @@ def resolve_option_contract(
                 c
                 for c in contracts
                 if getattr(c, "option_type", "").upper() == opt_type
-                and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                and float(getattr(c, "last_price", 0.0) or 0.0) >= (1.0 if is_idx else 0.50)
                 and (abs(float(getattr(c, "strike", 0.0)) - spot) / max(1.0, spot)) <= 0.025
             ]
             # Liquidity & Bid-Ask Spread Guard:

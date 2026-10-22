@@ -154,6 +154,7 @@ class UnifiedFyersRateGate:
         self._last_warn_time: float = 0.0
         self._last_dispatch_ts: float = 0.0
         self._last_depth_dispatch_ts: float = 0.0
+        self._last_hist_dispatch_ts: float = 0.0
         self._caller_counts: dict[str, int] = {}
         self._load_daily_quota()
 
@@ -262,16 +263,28 @@ class UnifiedFyersRateGate:
         self, now: float, category: Optional[FyersCallCategory] = None
     ) -> float:
         """Calculate minimum sleep needed to satisfy 1-sec, 60-sec caps, and leaky bucket inter-request spacing."""
-        # 1. Leaky bucket inter-request spacing to eliminate sub-second multi-thread spikes
-        min_interval = 1.0 / max(self._max_per_sec, 1.0)
+        # 1. Orders bypass leaky bucket inter-request spacing for immediate execution
+        if category == FyersCallCategory.ORDER:
+            min_interval = 0.02
+        else:
+            min_interval = 1.0 / max(self._max_per_sec, 1.0)
+
         time_since_last = now - self._last_dispatch_ts
         sleep_sec = max(0.0, min_interval - time_since_last)
 
         # 1b. Dedicated rate pacing for DEPTH_CHAIN calls to eliminate Fyers /depth burst throttling (-360/429)
         if category == FyersCallCategory.DEPTH_CHAIN:
-            depth_spacing = 0.28  # Max ~3.5 depth requests/sec
+            depth_spacing = (
+                0.38  # Max ~2.6 depth requests/sec (strictly protects Fyers /depth limit)
+            )
             time_since_depth = now - self._last_depth_dispatch_ts
             sleep_sec = max(sleep_sec, depth_spacing - time_since_depth)
+
+        # 1c. Dedicated rate pacing for HISTORICAL calls to pace multi-bar history fetches
+        if category == FyersCallCategory.HISTORICAL:
+            hist_spacing = 0.30  # Max ~3.3 historical requests/sec
+            time_since_hist = now - getattr(self, "_last_hist_dispatch_ts", 0.0)
+            sleep_sec = max(sleep_sec, hist_spacing - time_since_hist)
 
         # 2. Check 1-second rolling window
         sec_cutoff = now - 1.0
@@ -285,6 +298,12 @@ class UnifiedFyersRateGate:
         if len(self._sliding_window) >= self._max_per_min:
             oldest_in_min = self._sliding_window[0][0]
             sleep_sec = max(sleep_sec, 60.0 - (now - oldest_in_min) + 0.02)
+
+        # Apply slight micro-jitter (2-6ms) when sleep is needed to desynchronize thread releases
+        if sleep_sec > 0.0:
+            import random
+
+            sleep_sec += random.uniform(0.002, 0.006)
 
         return sleep_sec
 
@@ -359,6 +378,8 @@ class UnifiedFyersRateGate:
                 self._last_dispatch_ts = now
                 if category == FyersCallCategory.DEPTH_CHAIN:
                     self._last_depth_dispatch_ts = now
+                elif category == FyersCallCategory.HISTORICAL:
+                    self._last_hist_dispatch_ts = now
                 self._total_requests[category] += 1
                 self._daily_requests += 1
                 self._daily_by_category[category] += 1
@@ -390,6 +411,8 @@ class UnifiedFyersRateGate:
                         self._last_dispatch_ts = now
                         if category == FyersCallCategory.DEPTH_CHAIN:
                             self._last_depth_dispatch_ts = now
+                        elif category == FyersCallCategory.HISTORICAL:
+                            self._last_hist_dispatch_ts = now
                         self._total_requests[category] += 1
                         self._daily_requests += 1
                         self._daily_by_category[category] += 1

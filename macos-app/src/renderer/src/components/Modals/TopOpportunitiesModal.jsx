@@ -338,13 +338,13 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <span className="font-extrabold text-sm font-mono" style={{ color: 'var(--color-text)' }}>{symbol}</span>
-                                <span className="text-[9px] px-1.5 py-0.5 rounded font-bold uppercase"
+                                <span className="text-[11px] px-1.5 py-0.5 rounded font-bold uppercase"
                                   style={{ background: `rgba(${isReady ? '0,214,143' : isStalk ? '245,166,35' : '255,79,123'},0.15)`, color: accentColor, border: `1px solid ${borderColor}` }}>
                                   {signal}
                                 </span>
-                                <span className="text-[9px] font-mono" style={{ color: 'var(--color-muted)' }}>#{idx + 1}</span>
+                                <span className="text-[11px] font-mono" style={{ color: 'var(--color-muted)' }}>#{idx + 1}</span>
                               </div>
-                              {sector && <span className="text-[9px] block mt-0.5" style={{ color: 'var(--color-muted)' }}>{sector}</span>}
+                              {sector && <span className="text-[11px] block mt-0.5" style={{ color: 'var(--color-muted)' }}>{sector}</span>}
                             </div>
 
                             {/* Conviction arc — empty ring when score unavailable */}
@@ -374,31 +374,31 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                                 {livePrice ? `₹${Number(livePrice).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}` : (entry ? `₹${Number(entry).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}` : '—')}
                               </span>
                               {livePrice ? (
-                                <span className="text-[8px] font-bold px-1 py-0.2 rounded" style={{ background: 'rgba(0,214,143,0.15)', color: 'var(--color-emerald)' }}>
+                                <span className="text-[10px] font-bold px-1 py-0.2 rounded" style={{ background: 'rgba(0,214,143,0.15)', color: 'var(--color-emerald)' }}>
                                   LIVE
                                 </span>
                               ) : (
-                                <span className="text-[8px] px-1 py-0.2 rounded" style={{ color: 'var(--color-muted)' }}>
+                                <span className="text-[10px] px-1 py-0.2 rounded" style={{ color: 'var(--color-muted)' }}>
                                   EOD
                                 </span>
                               )}
                             </div>
                             {distPct != null && (
-                              <span className="text-[9px] font-bold tabular-nums" style={{ color: isStopBreached ? 'var(--color-rose)' : Math.abs(distPct) <= 1 ? 'var(--color-emerald)' : distPct > 0 ? 'var(--color-gold)' : 'var(--color-rose)' }}>
+                              <span className="text-[11px] font-bold tabular-nums" style={{ color: isStopBreached ? 'var(--color-rose)' : Math.abs(distPct) <= 1 ? 'var(--color-emerald)' : distPct > 0 ? 'var(--color-gold)' : 'var(--color-rose)' }}>
                                 {isStopBreached ? '⚠️ STOP HIT' : distPct > 0 ? `+${distPct.toFixed(1)}% entry` : `${distPct.toFixed(1)}% entry`}
                               </span>
                             )}
                           </div>
 
                           {/* Price levels */}
-                          <div className="grid grid-cols-3 gap-1 text-[9px] font-mono tabular-nums">
+                          <div className="grid grid-cols-3 gap-1 text-[11px] font-mono tabular-nums">
                             {[
                               { label: 'ENTRY', value: entry ? `₹${Number(entry).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—', color: 'var(--color-text)' },
                               { label: 'SL', value: sl ? `₹${Number(sl).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—', color: 'var(--color-rose)' },
                               { label: 'T1', value: t1 ? `₹${Number(t1).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—', color: 'var(--color-emerald)' },
                             ].map(({ label, value, color }) => (
                               <div key={label} className="text-center px-1 py-1 rounded" style={{ background: 'var(--color-elevated)' }}>
-                                <span className="block text-[8px]" style={{ color: 'var(--color-muted)' }}>{label}</span>
+                                <span className="block text-[10px]" style={{ color: 'var(--color-muted)' }}>{label}</span>
                                 <span className="font-bold tabular-nums" style={{ color }}>{value}</span>
                               </div>
                             ))}
@@ -410,7 +410,7 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                               {rr != null ? `R:R 1:${rr}` : <span style={{ color: 'var(--color-muted)' }}>R:R —</span>}
                             </span>
                             {action && (
-                              <span className="text-[9px] font-bold px-2 py-0.5 rounded"
+                              <span className="text-[11px] font-bold px-2 py-0.5 rounded"
                                 style={{ background: 'var(--color-elevated)', color: accentColor }}>
                                 {action}
                               </span>
@@ -437,7 +437,7 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                                 }
                                 onClose()
                               }}
-                              className="flex-1 py-1.5 rounded-xl text-[9px] font-bold cursor-pointer transition-all hover:brightness-110"
+                              className="flex-1 py-1.5 rounded-xl text-[11px] font-bold cursor-pointer transition-all hover:brightness-110"
                               style={{ background: `rgba(${isReady ? '0,214,143' : '245,166,35'},0.12)`, border: `1px solid ${borderColor}`, color: accentColor }}
                             >
                               ⚡ Order
@@ -448,7 +448,7 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                                 sendDraft(`analyze ${symbol}${exch !== 'NSE' ? ' ' + exch : ''}`)
                                 onClose()
                               }}
-                              className="flex-1 py-1.5 rounded-xl text-[9px] font-bold cursor-pointer transition-all hover:brightness-110"
+                              className="flex-1 py-1.5 rounded-xl text-[11px] font-bold cursor-pointer transition-all hover:brightness-110"
                               style={{ background: 'rgba(77,155,255,0.10)', border: '1px solid rgba(77,155,255,0.25)', color: 'var(--color-sapphire)' }}
                             >
                               ⚔️ Debate

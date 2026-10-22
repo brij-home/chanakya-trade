@@ -191,7 +191,7 @@ def get_options_chain(
     Returns:
         List of OptionsContract sorted by strike then type (CE/PE).
     """
-    from market.instruments import COMMODITY_SYMBOLS
+    from market.instruments import COMMODITY_SYMBOLS, is_derivative_eligible
 
     clean_sym = (
         underlying.upper()
@@ -204,6 +204,10 @@ def get_options_chain(
     )
     is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
     is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+
+    # Fast-exit for non-derivative cash equities (prevents 80s web scraper timeouts & SLO corruption)
+    if not is_derivative_eligible(clean_sym):
+        return []
 
     # ── Fast-path in-memory chain cache check ──
     # If the default/nearest chain is already cached and valid, return it instantly with zero REST calls
@@ -424,7 +428,12 @@ def get_options_chain(
                 from engine.observability import get_registry
                 from market.calendar import is_market_open
 
-                is_live = is_market_open("NSE")
+                venue = (
+                    "MCX"
+                    if is_commodity
+                    else ("BSE" if clean_sym in ("SENSEX", "BANKEX") else "NSE")
+                )
+                is_live = is_market_open(venue)
                 is_success = bool(chain_result) or not is_live
 
                 get_registry().record_metric(
@@ -569,6 +578,11 @@ def get_expiries(underlying: str, allow_chain_fallback: bool = False) -> list[st
         .upper()
         .strip()
     )
+    from market.instruments import is_derivative_eligible
+
+    if not is_derivative_eligible(clean_u):
+        return []
+
     now = time.time()
     if clean_u in _EXPIRIES_CACHE:
         cached_at, cached_exp = _EXPIRIES_CACHE[clean_u]
@@ -634,12 +648,26 @@ def get_options_snapshot(
     from datetime import datetime, timezone
     from brokers.session import get_data_broker, get_data_broker_key
     from market.calendar import is_market_open
+    from market.instruments import is_derivative_eligible
 
     clean_u = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()
     is_bse = clean_u in ("SENSEX", "BANKEX")
     market_open = is_market_open("BSE" if is_bse else "NSE")
     now_utc = datetime.now(timezone.utc).isoformat()
     now_ist = datetime.now().strftime("%I:%M:%S %p IST")
+
+    if not is_derivative_eligible(clean_u):
+        source_info = {
+            "provider": "none",
+            "source": "NOT_DERIVATIVE_ELIGIBLE",
+            "data_state": "UNAVAILABLE",
+            "is_realtime": False,
+            "is_market_open": market_open,
+            "as_of": now_utc,
+            "as_of_display": now_ist,
+            "source_label": f"{clean_u} is not an approved F&O derivative underlying",
+        }
+        return [], None, [], source_info
 
     cache_key = f"{clean_u}:{expiry or 'nearest'}"
     now_ts = time.time()

@@ -5,17 +5,31 @@ import UnavailableState from '../Common/UnavailableState'
 
 const money = (value) => `₹${Number(value || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
 
-function Metric({ label, value, tone }) {
+function Metric({ label, value, tone, pct }) {
   return (
     <div
       className="rounded-xl p-3"
       style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}
     >
-      <div className="text-[9px] uppercase font-bold tracking-wider" style={{ color: 'var(--color-muted)' }}>
+      <div className="text-[11px] uppercase font-bold tracking-wider" style={{ color: 'var(--color-muted)' }}>
         {label}
       </div>
-      <div className="text-sm mt-1 font-mono font-black" style={{ color: tone || 'var(--color-text)' }}>
-        {value}
+      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+        <div className="text-sm font-mono font-black" style={{ color: tone || 'var(--color-text)' }}>
+          {value}
+        </div>
+        {pct != null && (
+          <span
+            className={`text-[11px] font-bold font-mono px-1.5 py-0.5 rounded-full border ${
+              Number(pct) >= 0
+                ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+            }`}
+            title={`Return: ${Number(pct) >= 0 ? '+' : ''}${Number(pct).toFixed(2)}%`}
+          >
+            {Number(pct) >= 0 ? '+' : ''}{Number(pct).toFixed(2)}%
+          </span>
+        )}
       </div>
     </div>
   )
@@ -227,7 +241,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
       >
         <span>{label}</span>
         <span
-          className={`text-[8px] font-mono transition-all ${
+          className={`text-[10px] font-mono transition-all ${
             isSorted
               ? 'opacity-100 text-amber-600 dark:text-amber-400 font-bold'
               : 'opacity-30 group-hover:opacity-100 group-hover:text-amber-500'
@@ -292,7 +306,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
           </button>
           <div className="flex items-center gap-1.5">
             {lastUpdated && !loading && (
-              <span className="text-[9px] font-mono tabular-nums" style={{ color: 'var(--color-muted)' }}
+              <span className="text-[11px] font-mono tabular-nums" style={{ color: 'var(--color-muted)' }}
                 title={`Last updated: ${lastUpdated.toLocaleTimeString('en-IN')}`}
               >
                 ⏱ {lastUpdated.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
@@ -333,7 +347,12 @@ export default function PortfolioView({ onOpenOrderTicket }) {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
             <Metric label="Account balance" value={money(portfolio?.funds?.total_balance)} />
             <Metric label="Invested value" value={money(totalValue)} />
-            <Metric label="Open P&L" value={`${totalPnl >= 0 ? '+' : ''}${money(totalPnl)}`} tone={pnlTone} />
+            <Metric
+              label="Open P&L"
+              value={`${totalPnl >= 0 ? '+' : ''}${money(totalPnl)}`}
+              tone={pnlTone}
+              pct={totalValue > 0 ? (totalPnl / totalValue) * 100 : null}
+            />
             <Metric label="Available cash" value={money(portfolio?.funds?.available_cash)} tone="var(--color-cyan)" />
           </div>
 
@@ -350,7 +369,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                   <h3 className="text-xs font-black uppercase tracking-wider text-text flex items-center gap-2">
                     <span>Portfolio Greek Risk Surface</span>
                     {greeks?.delta_posture && (
-                      <span className={`text-[9px] px-2 py-0.5 rounded font-black font-mono border ${
+                      <span className={`text-[11px] px-2 py-0.5 rounded font-black font-mono border ${
                         greeks.delta_posture === 'EXTREME_LONG' || greeks.delta_posture === 'EXTREME_SHORT'
                           ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
                           : greeks.delta_posture === 'BULLISH'
@@ -363,7 +382,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                       </span>
                     )}
                     {greeks?.theta_status && (
-                      <span className={`text-[9px] px-2 py-0.5 rounded font-black font-mono border ${
+                      <span className={`text-[11px] px-2 py-0.5 rounded font-black font-mono border ${
                         greeks.theta_status === 'HAZARDOUS_THETA_CLIFF'
                           ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
                           : greeks.theta_status === 'HEALTHY_INCOME'
@@ -383,7 +402,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
               {/* Quick Net Exposure Stats */}
               <div className="flex items-center gap-3 text-xs font-mono">
                 <div>
-                  <span className="text-[9px] uppercase text-muted block">Net Delta Eq</span>
+                  <span className="text-[11px] uppercase text-muted block">Net Delta Eq</span>
                   <span className={`font-black ${
                     (greeks?.net_delta_nifty_eq || 0) > 0 ? 'text-sky-400' : (greeks?.net_delta_nifty_eq || 0) < 0 ? 'text-amber-400' : 'text-text'
                   }`}>
@@ -392,7 +411,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                   </span>
                 </div>
                 <div className="border-l border-border/50 pl-3">
-                  <span className="text-[9px] uppercase text-muted block">Daily Theta</span>
+                  <span className="text-[11px] uppercase text-muted block">Daily Theta</span>
                   <span className={`font-black ${
                     (greeks?.net_theta_daily_inr || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
                   }`}>
@@ -401,13 +420,13 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                   </span>
                 </div>
                 <div className="border-l border-border/50 pl-3">
-                  <span className="text-[9px] uppercase text-muted block">Net Gamma</span>
+                  <span className="text-[11px] uppercase text-muted block">Net Gamma</span>
                   <span className="font-black text-text">
                     {(greeks?.net_gamma || 0).toFixed(4)}
                   </span>
                 </div>
                 <div className="border-l border-border/50 pl-3">
-                  <span className="text-[9px] uppercase text-muted block">Net Vega</span>
+                  <span className="text-[11px] uppercase text-muted block">Net Vega</span>
                   <span className={`font-black ${
                     (greeks?.net_vega_inr || 0) >= 0 ? 'text-cyan-400' : 'text-purple-400'
                   }`}>
@@ -442,7 +461,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
 
             {/* 4-Scenario Shock Stress Testing Matrix */}
             <div>
-              <div className="text-[9px] font-bold uppercase tracking-wider text-muted mb-1.5">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-muted mb-1.5">
                 Market Shock Scenarios (Gamma &amp; Vega-Calibrated P&amp;L Impact)
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
@@ -463,7 +482,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                       style={{ background: 'var(--color-surface)', border: '1px solid var(--color-border-subtle)' }}
                       title={sc.desc}
                     >
-                      <div className="text-[8px] font-bold uppercase tracking-wider text-muted truncate">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-muted truncate">
                         {sc.label}
                       </div>
                       <div className="text-xs font-black mt-1" style={{ color: tone }}>
@@ -526,9 +545,9 @@ export default function PortfolioView({ onOpenOrderTicket }) {
 
               {/* Table Header */}
               <div
-                className="grid px-4 py-2 text-[9px] font-bold uppercase tracking-wider border-b"
+                className="grid px-4 py-2 text-[11px] font-bold uppercase tracking-wider border-b"
                 style={{
-                  gridTemplateColumns: '1.4fr 0.6fr 0.8fr 0.8fr 0.9fr 1.5fr',
+                  gridTemplateColumns: '1.4fr 0.6fr 0.8fr 0.8fr 1.1fr 1.5fr',
                   color: 'var(--color-muted)',
                   borderColor: 'var(--color-border)',
                 }}
@@ -537,8 +556,8 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                 {renderColHeader('qty', 'Qty')}
                 {renderColHeader('avg_price', 'Average')}
                 {renderColHeader('ltp', 'LTP')}
-                {renderColHeader('pnl', 'P&L')}
-                <span className="text-right">Risk & Lifecycle Controls</span>
+                {renderColHeader('pnl', 'P&L / Return')}
+                <span className="text-right">Risk &amp; Lifecycle Controls</span>
               </div>
 
               {/* Table Rows */}
@@ -552,16 +571,16 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                     key={`${row.broker || 'broker'}-${row.symbol}-${index}`}
                     className="grid items-center px-4 py-3 border-b gap-2 hover:bg-amber-500/[0.04] dark:hover:bg-white/[0.03] transition-all"
                     style={{
-                      gridTemplateColumns: '1.4fr 0.6fr 0.8fr 0.8fr 0.9fr 1.5fr',
+                      gridTemplateColumns: '1.4fr 0.6fr 0.8fr 0.8fr 1.1fr 1.5fr',
                       borderColor: 'var(--color-border-subtle)',
                     }}
                   >
                     <div>
                       <div className="text-xs font-bold text-text group-hover:text-gold transition-colors">{row.symbol}</div>
-                      <div className="text-[9px] flex items-center gap-1.5 flex-wrap" style={{ color: 'var(--color-muted)' }}>
+                      <div className="text-[11px] flex items-center gap-1.5 flex-wrap" style={{ color: 'var(--color-muted)' }}>
                         <span>{row.broker || '—'} {row.product ? `· ${row.product}` : ''}</span>
                         {greek && (
-                          <span className="font-mono text-[8px] font-bold text-sky-400 bg-sky-500/10 px-1 py-px rounded border border-sky-500/20" title={`Delta: ${greek.delta}, Gamma: ${greek.gamma}, Vega: ₹${greek.vega_inr}`}>
+                          <span className="font-mono text-[10px] font-bold text-sky-400 bg-sky-500/10 px-1 py-px rounded border border-sky-500/20" title={`Delta: ${greek.delta} — Directional exposure per ₹1 spot move\nGamma: ${greek.gamma} — Rate of delta acceleration\nVega: ₹${greek.vega_inr} — IV sensitivity\nTheta: ${money(greek.theta_daily_inr)}/day — Daily time decay cost`}>
                             Δ {greek.delta >= 0 ? '+' : ''}{Number(greek.delta).toFixed(2)} · Θ {money(greek.theta_daily_inr)}/d
                           </span>
                         )}
@@ -570,10 +589,31 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                     <span className="text-xs font-mono tabular-nums text-text">{row.qty}</span>
                     <span className="text-xs font-mono tabular-nums text-muted">{money(row.avg_price)}</span>
                     <span className="text-xs font-mono tabular-nums font-bold text-text">{money(row.ltp)}</span>
-                    <span className="text-xs font-mono tabular-nums font-bold" style={{ color: tone }}>
-                      {pnl >= 0 ? '+' : ''}
-                      {money(pnl)}
-                    </span>
+                    {/* P&L + Return % Pill */}
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-xs font-mono tabular-nums font-bold" style={{ color: tone }}>
+                        {pnl >= 0 ? '+' : ''}
+                        {money(pnl)}
+                      </span>
+                      {row.avg_price > 0 && row.qty && (
+                        (() => {
+                          const invested = Number(row.avg_price) * Math.abs(Number(row.qty))
+                          const retPct = invested > 0 ? (pnl / invested) * 100 : null
+                          return retPct != null ? (
+                            <span
+                              className={`text-[11px] font-bold font-mono px-1.5 py-0.5 rounded-full border tabular-nums ${
+                                retPct >= 0
+                                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                                  : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+                              }`}
+                              title={`Return on invested capital: ${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%`}
+                            >
+                              {retPct >= 0 ? '+' : ''}{retPct.toFixed(1)}%
+                            </span>
+                          ) : null
+                        })()
+                      )}
+                    </div>
                     <div className="flex items-center justify-end gap-1.5 flex-wrap">
                       <button
                         onClick={() => handleAuditLifecycle(row)}
@@ -667,7 +707,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                     {/* Score & Health Header */}
                     <div className="grid grid-cols-3 gap-2">
                       <div className="p-2.5 rounded-xl bg-surface border border-border/50">
-                        <span className="text-[9px] uppercase text-muted block font-bold">Health Status</span>
+                        <span className="text-[11px] uppercase text-muted block font-bold">Health Status</span>
                         <span className={`text-xs font-black mt-0.5 block ${
                           selectedLifecycle.data.health_status === 'HEALTHY_ACCELERATING'
                             ? 'text-emerald-400'
@@ -681,7 +721,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                         </span>
                       </div>
                       <div className="p-2.5 rounded-xl bg-surface border border-border/50">
-                        <span className="text-[9px] uppercase text-muted block font-bold">Payoff Multiple</span>
+                        <span className="text-[11px] uppercase text-muted block font-bold">Payoff Multiple</span>
                         <span className={`text-xs font-black mt-0.5 block ${
                           Number(selectedLifecycle.data.current_r_multiple || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
                         }`}>
@@ -690,7 +730,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                         </span>
                       </div>
                       <div className="p-2.5 rounded-xl bg-surface border border-border/50">
-                        <span className="text-[9px] uppercase text-muted block font-bold">Health Score</span>
+                        <span className="text-[11px] uppercase text-muted block font-bold">Health Score</span>
                         <span className="text-xs font-black mt-0.5 text-gold block">
                           {selectedLifecycle.data.health_score} / 100
                         </span>
@@ -708,7 +748,7 @@ export default function PortfolioView({ onOpenOrderTicket }) {
                             ₹{Number(selectedLifecycle.data.trailing_stops.recommended_active_stop).toFixed(2)}
                           </span>
                         </div>
-                        <div className="grid grid-cols-3 gap-2 pt-1 text-[9px] text-muted border-t border-amber-500/20">
+                        <div className="grid grid-cols-3 gap-2 pt-1 text-[11px] text-muted border-t border-amber-500/20">
                           <div>Structure: ₹{Number(selectedLifecycle.data.trailing_stops.structure_stop).toFixed(2)}</div>
                           <div>Chandelier: ₹{Number(selectedLifecycle.data.trailing_stops.chandelier_stop).toFixed(2)}</div>
                           <div>20-EMA: ₹{Number(selectedLifecycle.data.trailing_stops.ema20_stop).toFixed(2)}</div>

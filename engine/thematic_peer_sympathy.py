@@ -63,7 +63,7 @@ class SectorLeaderActivation:
     alert_type: str
     confidence: int
     activated_at: float = field(default_factory=time.time)
-    expiry_ttl: float = 5400.0  # 90 minutes sympathy window
+    expiry_ttl: float = 2700.0  # 45 minutes sympathy cascade window
 
 
 class ThematicPeerSympathyEngine:
@@ -226,29 +226,31 @@ class ThematicPeerSympathyEngine:
                 # Sympathy Validation Rules: Strict VWAP alignment, proven momentum & institutional volume confirmation
                 # Eliminates thin sympathy follower traps where dead stocks get dragged along without institutional orderflow
                 # (RCA: -14.6R loss on sympathy followers due to STRUCTURAL_ORDERFLOW_FAILURE).
-                is_volume_confirmed = dyn_rvol >= MIN_SYMPATHY_FOLLOWER_RVOL or avg_vol <= 0
+                is_volume_confirmed = (dyn_rvol >= MIN_SYMPATHY_FOLLOWER_RVOL) or (
+                    vol >= 500000 and avg_vol <= 0
+                )
 
                 is_qualified = False
                 if is_volume_confirmed:
                     if is_bull:
-                        # Bullish sympathy: Spot strictly at/above VWAP, green on day or Open==Low
+                        # Bullish sympathy: Spot strictly at/above VWAP, strong momentum (>= +0.75%) or Open==Low expansion (>= +0.40%)
                         is_vwap_holding = vwap_val > 0 and ltp >= vwap_val
-                        is_positive_slope = chg_pct >= 0.40 or (
+                        is_positive_slope = chg_pct >= 0.75 or (
                             spot_open > 0
                             and spot_low > 0
                             and (abs(spot_open - spot_low) / spot_open <= 0.0025)
-                            and chg_pct > 0.10
+                            and chg_pct >= 0.40
                         )
                         if is_vwap_holding and is_positive_slope:
                             is_qualified = True
                     else:
-                        # Bearish sympathy: Spot strictly at/below VWAP, red on day or Open==High
+                        # Bearish sympathy: Spot strictly at/below VWAP, strong liquidation (<= -0.75%) or Open==High cascade (<= -0.40%)
                         is_vwap_holding = vwap_val > 0 and ltp <= vwap_val
-                        is_negative_slope = chg_pct <= -0.40 or (
+                        is_negative_slope = chg_pct <= -0.75 or (
                             spot_open > 0
                             and spot_high > 0
                             and (abs(spot_open - spot_high) / spot_open <= 0.0025)
-                            and chg_pct < -0.10
+                            and chg_pct <= -0.40
                         )
                         if is_vwap_holding and is_negative_slope:
                             is_qualified = True
@@ -268,9 +270,9 @@ class ThematicPeerSympathyEngine:
                         }
                     )
 
-            # Anti-Shotgunning: Pick top 2 strongest peers by absolute momentum
+            # Anti-Shotgunning: Pick top 1 strongest peer by absolute momentum
             qualified_candidates.sort(key=lambda c: abs(c["chg_pct"]), reverse=True)
-            top_peers = qualified_candidates[:2]
+            top_peers = qualified_candidates[:1]
 
             for cand in top_peers:
                 peer = cand["peer"]
@@ -394,19 +396,19 @@ class ThematicPeerSympathyEngine:
                 resolved_opt = None
                 opt_sym = ""
                 opt_strike = 0.0
-                opt_prem = 0.0
                 if has_fno:
                     try:
                         resolved_opt = resolve_option_contract(
-                            underlying=peer,
-                            direction=act.direction,
+                            symbol=peer,
                             spot=ltp,
-                            ref_time=now_dt,
+                            direction=act.direction,
+                            underlying_sl=sl_price,
+                            underlying_target=t1_price,
+                            prefer_options=True,
                         )
                         if resolved_opt:
                             opt_sym = resolved_opt.contract_symbol
                             opt_strike = resolved_opt.strike
-                            opt_prem = resolved_opt.premium
                     except Exception as e_res:
                         logger.debug(
                             f"[ThematicPeerSympathy] Option resolution for {peer}: {e_res}"
@@ -431,6 +433,7 @@ class ThematicPeerSympathyEngine:
                     if resolved_opt
                     else action_verb,
                     "instrument_type": "OPTION" if resolved_opt else "EQUITY",
+                    "segment": "FNO_STOCK" if resolved_opt else "EQUITY",
                     "entry_type": "LIMIT_ON_PULLBACK",
                     "optimal_entry_limit": ltp,
                     "stop_loss": f"₹{sl_price:,.1f}",
@@ -454,8 +457,13 @@ class ThematicPeerSympathyEngine:
                 if resolved_opt:
                     plan["contract"] = opt_sym
                     plan["strike"] = opt_strike
-                    plan["option_type"] = "CE" if is_bull else "PE"
-                    plan["recommended_entry"] = f"₹{opt_prem:,.2f}"
+                    plan["option_type"] = resolved_opt.option_type
+                    plan["recommended_entry"] = f"₹{resolved_opt.entry_premium:,.2f}"
+                    plan["stop_loss"] = f"₹{resolved_opt.sl_premium:,.2f}"
+                    plan["target_1"] = f"₹{resolved_opt.t1_premium:,.2f}"
+                    plan["target_2"] = f"₹{resolved_opt.t2_premium:,.2f}"
+                    plan["target_3"] = f"₹{resolved_opt.t3_premium:,.2f}"
+                    plan["runner_target"] = f"₹{resolved_opt.t3_premium:,.2f}"
 
                 # Calculate genuine dynamic confidence based on leader conviction, volume, and momentum
                 base_conf = 74
@@ -497,23 +505,46 @@ class ThematicPeerSympathyEngine:
                     peer, "THEMATIC_SYMPATHY_IGNITION", variant=f"{act.direction.lower()[:4]}"
                 )
 
+                # Enforce Scale Separation Invariant (Invariant 14):
+                # When F&O option is resolved, denominate execution prices in Option Premium Points
+                # while preserving spot anchor levels in underlying_spot and underlying_sl.
+                opt_entry = (
+                    resolved_opt.entry_premium
+                    if (resolved_opt and resolved_opt.entry_premium > 0)
+                    else ltp
+                )
+                opt_sl = (
+                    resolved_opt.sl_premium
+                    if (resolved_opt and resolved_opt.sl_premium > 0)
+                    else sl_price
+                )
+                opt_t1 = (
+                    resolved_opt.t1_premium
+                    if (resolved_opt and resolved_opt.t1_premium > 0)
+                    else t1_price
+                )
+
                 peer_alert = AutoAlert(
                     alert_id=alert_id,
                     alert_type="THEMATIC_SYMPATHY_IGNITION",
                     stage="IGNITED",
                     symbol=peer,
-                    exchange="NFO" if has_fno else "NSE",
+                    exchange="NFO" if (has_fno and resolved_opt) else "NSE",
+                    segment="FNO_STOCK" if resolved_opt else "EQUITY",
                     direction=act.direction,
                     headline=headline,
                     summary=summary,
-                    ltp=ltp,
-                    trigger_level=ltp,
-                    target_level=t1_price,
-                    stop_loss=sl_price,
+                    ltp=opt_entry,
+                    trigger_level=opt_entry,
+                    target_level=opt_t1,
+                    stop_loss=opt_sl,
                     confidence=dyn_conf,
-                    strike=opt_strike if resolved_opt else None,
-                    option_type=("CE" if is_bull else "PE") if resolved_opt else None,
-                    option_premium=opt_prem if resolved_opt else None,
+                    strike=resolved_opt.strike if resolved_opt else None,
+                    option_type=resolved_opt.option_type if resolved_opt else None,
+                    option_premium=opt_entry if resolved_opt else None,
+                    contract_symbol=resolved_opt.contract_symbol if resolved_opt else None,
+                    expiry_date=resolved_opt.expiry if resolved_opt else None,
+                    underlying_spot=ltp,
                     actionable_plan=plan,
                     metrics=metrics_dict,
                     time_horizon="INTRADAY",

@@ -28,7 +28,7 @@ export default function DataStateBadge({
     return (
       <span
         role="status"
-        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${cfg.classes} ${className}`}
+        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono font-bold border ${cfg.classes} ${className}`}
         title={[cfg.label, sourceName, asOf].filter(Boolean).join(' | ')}
         aria-label={`Data status: ${cfg.label}`}
       >
@@ -51,7 +51,7 @@ export default function DataStateBadge({
       )}
       {tradable === false && (
         <span
-          className="ml-0.5 px-1 py-px rounded bg-amber-500/20 border border-amber-500/40 text-amber-400 text-[8px] font-bold"
+          className="ml-0.5 px-1 py-px rounded bg-amber-500/20 border border-amber-500/40 text-amber-400 text-[10px] font-bold"
           title="This value is a proxy and is NOT your tradable instrument price"
         >
           NON-TRADABLE

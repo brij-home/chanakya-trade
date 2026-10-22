@@ -525,6 +525,8 @@ def _to_fyers_symbol(instrument: str) -> str:
 
     # BSE Equity
     if exch_upper == "BSE":
+        if not any(sym_upper.endswith(sfx) for sfx in ("-A", "-B", "-X", "-XT", "-T", "-Z", "-EQ")):
+            return f"BSE:{sym_upper}-A"
         return f"BSE:{sym_upper}"
 
     return f"NSE:{sym_upper}-EQ"
@@ -1033,6 +1035,7 @@ class FyersAPI(BrokerAPI):
     def get_profile(self) -> UserProfile:
         if self._profile:
             return self._profile
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
         data = fyers.get_profile()
         payload = data.get("data", {})
@@ -1045,6 +1048,7 @@ class FyersAPI(BrokerAPI):
         return self._profile
 
     def get_funds(self) -> Funds:
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
         data = fyers.funds()
         payload = data.get("fund_limit", [])
@@ -1067,6 +1071,7 @@ class FyersAPI(BrokerAPI):
     # ── Portfolio ─────────────────────────────────────────────
 
     def get_holdings(self) -> list[Holding]:
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
         fyers = self._get_fyers()
         data = fyers.holdings()
         holdings = []
@@ -1094,6 +1099,7 @@ class FyersAPI(BrokerAPI):
         return holdings
 
     def get_positions(self) -> list[Position]:
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
         data = fyers.positions()
         positions = []
@@ -2506,6 +2512,7 @@ class FyersAPI(BrokerAPI):
 
     def get_gtt_orders(self) -> list[dict]:
         """Fetch active server-side GTT orders."""
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
         try:
             data = fyers.gtt_orderbook()
@@ -2515,6 +2522,7 @@ class FyersAPI(BrokerAPI):
 
     def cancel_gtt_order(self, order_id: str) -> bool:
         """Cancel an active GTT order."""
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
         try:
             data = fyers.cancel_gtt_order({"id": str(order_id)})
@@ -2526,6 +2534,7 @@ class FyersAPI(BrokerAPI):
         """Standardized BrokerAPI implementation for Fyers server-side GTT/OCO."""
         from brokers.base import GTTResponse
 
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
         fyers_sym = _to_fyers_symbol(req.symbol)
         side = 1 if str(req.transaction_type).upper() == "BUY" else -1
@@ -2619,6 +2628,7 @@ class FyersAPI(BrokerAPI):
                     if now - ts < 120.0:
                         return val
 
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
         fyers = self._get_fyers()
         if not fyers:
             return {"status": "error", "error": "Broker session not authenticated", "s": "error"}
@@ -2644,6 +2654,7 @@ class FyersAPI(BrokerAPI):
                     if now - ts < 120.0:
                         return val
 
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
         fyers = self._get_fyers()
         if not fyers:
             return {"status": "error", "error": "Broker session not authenticated", "s": "error"}

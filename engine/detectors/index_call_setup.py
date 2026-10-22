@@ -2243,13 +2243,13 @@ def detect_index_call_setup(
     }.get(clean_sym, 35.0)
 
     min_intraday_opt_risk = {
-        "NIFTY": 10.5,
-        "BANKNIFTY": 28.0,
-        "FINNIFTY": 12.5,
-        "MIDCPNIFTY": 8.0,
-        "SENSEX": 38.0,
-        "BANKEX": 38.0,
-    }.get(clean_sym, 10.0)
+        "NIFTY": 15.0,
+        "BANKNIFTY": 35.0,
+        "FINNIFTY": 20.0,
+        "MIDCPNIFTY": 12.0,
+        "SENSEX": 45.0,
+        "BANKEX": 45.0,
+    }.get(clean_sym, 15.0)
 
     if opt_ltp > 0:
         calc_risk = max(1.0, opt_ltp - sl_premium)
@@ -2263,9 +2263,13 @@ def detect_index_call_setup(
             rr_str = "1:2.0"
             net_rr_str = "1:2.0"
         else:
-            # Enforce minimum stop-loss distance floor (10.5 pts for Nifty, 28 pts BankNifty, etc.)
-            # Bounded by 35% of premium to avoid over-risking on cheap OTM contracts
-            effective_min_risk = min(opt_ltp * 0.35, min_intraday_opt_risk)
+            # Enforce minimum stop-loss distance floor (15 pts Nifty, 35 pts BankNifty, 45 pts Sensex)
+            # Bounded by 35% of premium to avoid over-risking on cheap OTM contracts (< 80)
+            effective_min_risk = (
+                min(opt_ltp * 0.35, min_intraday_opt_risk)
+                if opt_ltp < 80.0
+                else min_intraday_opt_risk
+            )
             if calc_risk < effective_min_risk:
                 calc_risk = effective_min_risk
                 sl_premium = round(max(0.5, opt_ltp - calc_risk), 1)

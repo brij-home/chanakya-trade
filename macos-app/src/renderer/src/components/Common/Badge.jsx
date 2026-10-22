@@ -30,7 +30,7 @@ export default function Badge({
   }
 
   const sizeStyles = {
-    xs: 'text-[9px] px-1.5 py-0.5 rounded font-mono font-bold uppercase tracking-wider',
+    xs: 'text-[11px] px-1.5 py-0.5 rounded font-mono font-bold uppercase tracking-wider',
     sm: 'text-[10px] px-2 py-0.5 rounded-full font-mono font-bold uppercase tracking-wider',
     md: 'text-xs px-2.5 py-1 rounded-md font-semibold',
   }

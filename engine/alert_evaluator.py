@@ -59,7 +59,8 @@ def evaluate_alert_invalidation(
         th = (getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY").upper()
 
         # 0a. Hard Intraday Cutoff (15:15 IST NSE/BSE/NFO, 23:15 IST MCX; Crypto is 24x7 rolling)
-        if th == "INTRADAY" and not getattr(alert, "expiry_date", None):
+        # Enforce unconditionally on all INTRADAY setups (equity & derivatives) to eliminate zombie in-flight positions.
+        if th == "INTRADAY":
             exch = (getattr(alert, "exchange", "NSE") or "NSE").upper()
             cutoff_reached = False
             if exch in ("CRYPTO", "BINANCE", "DERIBIT"):
@@ -199,6 +200,64 @@ def evaluate_alert_invalidation(
             mins = int(ttl_sec / 60)
             dur_str = f"{days}-day" if days >= 1 else f"{mins}-minute"
             return f"Time-Stop expired: Setup did not trigger within {dur_str} momentum window."
+
+    # 0c. Velocity Stagnation Time-Stop for Intraday Option Campaigns
+    # If an intraday option setup has been active for >= 45m without reaching +0.5R (+12%),
+    # and momentum/volume has dried up with LTP at or below entry, exit at scratch before theta collapse.
+    if (
+        not is_test_runner
+        and is_option
+        and created_dt
+        and (getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY").upper() == "INTRADAY"
+        and (
+            getattr(alert, "has_triggered", False)
+            or getattr(alert, "stage", "") in ("IGNITED", "TRIGGERED", "OPEN", "ACTIVE", "TRAILING")
+        )
+    ):
+        now_ist = datetime.now(IST)
+        elapsed_sec = (now_ist - created_dt).total_seconds()
+        has_hit_any_target = bool(
+            any(
+                m in (getattr(alert, "achieved_milestones", []) or [])
+                for m in (
+                    "T0_5_ACHIEVED",
+                    "T1_ACHIEVED",
+                    "T2_ACHIEVED",
+                    "TARGET_ACHIEVED",
+                    "BREAKEVEN_LOCKED",
+                )
+            )
+            or getattr(alert, "target_status", "")
+            in (
+                "T0_5_ACHIEVED",
+                "T1_ACHIEVED",
+                "T2_ACHIEVED",
+                "TARGET_ACHIEVED",
+                "BREAKEVEN_LOCKED",
+            )
+        )
+        if elapsed_sec >= 2700 and not has_hit_any_target:
+            ref_entry = float(
+                getattr(alert, "initial_entry_premium", None)
+                or getattr(alert, "entry_price", None)
+                or getattr(alert, "option_premium", None)
+                or getattr(alert, "trigger_level", None)
+                or 0.0
+            )
+            if ref_entry > 0 and current_ltp <= (ref_entry * 1.02):
+                peak_high = float(session_high or current_ltp)
+                max_gain_pct = (
+                    ((peak_high - ref_entry) / ref_entry) * 100.0 if ref_entry > 0 else 0.0
+                )
+                if max_gain_pct < 12.0:
+                    rvol = float((getattr(alert, "metrics", {}) or {}).get("rvol", 1.0) or 1.0)
+                    is_afternoon_decay = now_ist.hour >= 13 or elapsed_sec >= 3600 or rvol < 0.90
+                    if is_afternoon_decay:
+                        mins_stalled = int(elapsed_sec / 60)
+                        return (
+                            f"Velocity Stagnation Time-Stop: Option momentum stalled for {mins_stalled}m "
+                            f"without reaching +0.5R expansion. Exited at scratch level ₹{current_ltp:.1f} to prevent theta decay."
+                        )
 
     # 1. Stop-Loss Invalidation
     if alert.stop_loss and alert.stop_loss > 0:
@@ -747,11 +806,9 @@ def evaluate_alert_invalidation(
             )
             if not underlying_price or underlying_price <= 0:
                 try:
-                    from market.quotes import get_ltp
+                    from market.quotes import get_ltp, normalize_instrument
 
-                    underlying_price = get_ltp(
-                        f"NSE:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
-                    )
+                    underlying_price = get_ltp(normalize_instrument(alert.symbol))
                 except Exception:
                     underlying_price = None
         else:
@@ -2794,16 +2851,14 @@ def evaluate_alert_in_flight_decay(
         )
         if not spot_price or spot_price <= 0:
             try:
-                from market.quotes import get_ltp
+                from market.quotes import get_ltp, normalize_instrument
                 from market.indices import INDEX_INSTRUMENTS
 
                 raw_sym = str(getattr(alert, "symbol", "")).upper()
                 clean_sym = (
                     raw_sym.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
                 )
-                lookup = INDEX_INSTRUMENTS.get(
-                    clean_sym, f"NSE:{raw_sym}" if ":" not in raw_sym else raw_sym
-                )
+                lookup = INDEX_INSTRUMENTS.get(clean_sym, normalize_instrument(raw_sym))
                 spot_price = get_ltp(lookup)
             except Exception as e_suppressed:
                 logger.debug(
@@ -2823,16 +2878,14 @@ def evaluate_alert_in_flight_decay(
                 )
         if not effective_vwap or effective_vwap <= 0:
             try:
-                from market.quotes import get_quote
+                from market.quotes import get_quote, normalize_instrument
                 from market.indices import INDEX_INSTRUMENTS
 
                 raw_sym = str(getattr(alert, "symbol", "")).upper()
                 clean_sym = (
                     raw_sym.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
                 )
-                lookup = INDEX_INSTRUMENTS.get(
-                    clean_sym, f"NSE:{raw_sym}" if ":" not in raw_sym else raw_sym
-                )
+                lookup = INDEX_INSTRUMENTS.get(clean_sym, normalize_instrument(raw_sym))
                 q_res = get_quote([lookup])
                 if q_res and getattr(q_res.get(lookup), "vwap", 0):
                     effective_vwap = float(q_res[lookup].vwap)

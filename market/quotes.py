@@ -105,15 +105,19 @@ def _compute_raw_vwap(clean_sym: str, exchange: str = "NSE") -> Optional[float]:
         if len(df) < 1:
             return None
 
-        col_h = "high" if "high" in df.columns else "High"
-        col_l = "low" if "low" in df.columns else "Low"
-        col_c = "close" if "close" in df.columns else "Close"
-        col_v = "volume" if "volume" in df.columns else "Volume"
+        col_c = "close" if "close" in df.columns else ("Close" if "Close" in df.columns else None)
+        if col_c is None:
+            return None
+        col_h = "high" if "high" in df.columns else ("High" if "High" in df.columns else col_c)
+        col_l = "low" if "low" in df.columns else ("Low" if "Low" in df.columns else col_c)
+        col_v = (
+            "volume" if "volume" in df.columns else ("Volume" if "Volume" in df.columns else None)
+        )
 
         h = df[col_h].astype(float)
         lo = df[col_l].astype(float)
         c = df[col_c].astype(float)
-        v = df[col_v].astype(float)
+        v = df[col_v].astype(float) if col_v else (c * 0.0)
 
         typical = (h + lo + c) / 3.0
         total_vol = v.sum()
@@ -239,6 +243,18 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                             float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0)
                             or None
                         )
+                        ws_bid = (
+                            float(
+                                getattr(tick, "bid", 0.0) or getattr(tick, "bid_price", 0.0) or 0.0
+                            )
+                            or None
+                        )
+                        ws_ask = (
+                            float(
+                                getattr(tick, "ask", 0.0) or getattr(tick, "ask_price", 0.0) or 0.0
+                            )
+                            or None
+                        )
                         result[inst] = _enrich_quote(
                             Quote(
                                 symbol=clean,
@@ -248,6 +264,8 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                                 low=getattr(tick, "low", None),
                                 close=getattr(tick, "close", None),
                                 volume=int(getattr(tick, "volume", 0) or 0),
+                                bid=ws_bid,
+                                ask=ws_ask,
                                 change=float(getattr(tick, "change", 0.0) or 0.0),
                                 change_pct=float(getattr(tick, "change_pct", 0.0) or 0.0),
                                 vwap=ws_vwap,
@@ -294,6 +312,18 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                             float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0)
                             or None
                         )
+                        ws_bid = (
+                            float(
+                                getattr(tick, "bid", 0.0) or getattr(tick, "bid_price", 0.0) or 0.0
+                            )
+                            or None
+                        )
+                        ws_ask = (
+                            float(
+                                getattr(tick, "ask", 0.0) or getattr(tick, "ask_price", 0.0) or 0.0
+                            )
+                            or None
+                        )
                         result[inst] = _enrich_quote(
                             Quote(
                                 symbol=clean,
@@ -303,6 +333,8 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                                 low=getattr(tick, "low", None),
                                 close=getattr(tick, "close", None),
                                 volume=int(getattr(tick, "volume", 0) or 0),
+                                bid=ws_bid,
+                                ask=ws_ask,
                                 change=float(getattr(tick, "change", 0.0) or 0.0),
                                 change_pct=float(getattr(tick, "change_pct", 0.0) or 0.0),
                                 vwap=ws_vwap,
@@ -345,6 +377,8 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                 ws_vwap = (
                     float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0) or None
                 )
+                ws_bid = float(getattr(tick, "bid", 0.0) or 0.0) or None
+                ws_ask = float(getattr(tick, "ask", 0.0) or 0.0) or None
                 result[inst] = _enrich_quote(
                     Quote(
                         symbol=tick.symbol.split(":")[-1].split("-")[0]
@@ -356,6 +390,8 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                         low=tick.low,
                         close=tick.close,
                         volume=tick.volume,
+                        bid=ws_bid,
+                        ask=ws_ask,
                         change=tick.change,
                         change_pct=tick.change_pct,
                         vwap=ws_vwap,
@@ -601,13 +637,17 @@ def _yf_fallback_quotes(
 
 
 def normalize_instrument(inst: str) -> str:
-    """Intelligently prefix EXCHANGE: if omitted."""
+    """Intelligently prefix EXCHANGE: if omitted or canonicalize mis-prefixed venue."""
     s = inst.strip()
+    clean = s.split(":")[-1].upper().strip()
+    # Crypto symbols always resolve to CRYPTO venue (e.g. accidental NSE:SOLUSDT -> CRYPTO:SOLUSDT)
+    if clean in _CRYPTO_SYMBOLS or s.upper().startswith(
+        ("CRYPTO:", "BINANCE:", "BYBIT:", "COINBASE:")
+    ):
+        return f"CRYPTO:{clean}"
     if ":" in s:
         return s
     upper = s.upper()
-    if upper in _CRYPTO_SYMBOLS:
-        return f"CRYPTO:{upper}"
     if upper in _MCX_SYMBOLS:
         return f"MCX:{upper}"
     if upper in _CDS_SYMBOLS:
@@ -920,6 +960,7 @@ def get_quote(
     # quote is expected off-market state rather than a live journey availability breach.
     is_success = bool(result) or not is_live_venue
 
+    missing_symbols = [inst for inst in canonical_instruments if inst not in result]
     get_registry().record_metric(
         "quote_fetch",
         latency_ms=(time.monotonic() - started) * 1000,
@@ -931,6 +972,7 @@ def get_quote(
             "requested": len(canonical_instruments),
             "resolved": len(result),
             "off_market": not is_live_venue,
+            "missing": missing_symbols[:5] if missing_symbols else [],
         },
     )
     return final_result

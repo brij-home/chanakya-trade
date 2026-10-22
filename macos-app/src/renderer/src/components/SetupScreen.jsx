@@ -88,7 +88,7 @@ export default function SetupScreen({ phase, data }) {
 
       {/* Version footer */}
       <div
-        className="absolute bottom-4 left-0 right-0 text-center text-[9px]"
+        className="absolute bottom-4 left-0 right-0 text-center text-xs"
         style={{ color: 'var(--color-subtle)', WebkitAppRegion: 'no-drag' }}
       >
         ChanakyaTrade v0.2.0 · NSE · BSE · NFO · MCX

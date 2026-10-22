@@ -771,3 +771,59 @@ def test_telegram_index_reversal_bypass_allowed():
     )
     passed_bull, reason_bull = engine._eval_telegram_apex_gate(bull_alert, in_market=True)
     assert passed_bull, f"Expected reversal bypass to grant dispatch, but got: {reason_bull}"
+
+
+def test_fii_selling_and_index_vwap_bearish_regime_suppresses_longs():
+    """On days like 2026-10-21 where NIFTY is down -0.34%, BANKNIFTY is down -0.92%,
+    NIFTY is below session VWAP, and FIIs are net sellers (-₹1,148 Cr),
+    counter-trend bullish equity breakouts must be suppressed on Telegram unless
+    there is genuine sector decoupling and high RVOL.
+    """
+    engine = AutoAlertEngine()
+    engine._hourly_telegram_dispatches = {"INDEX": [], "STOCKS": []}
+
+    # 1. Routine Bullish Breakout in Metal sector without Decoupling
+    alert_fail = _make_dummy_alert(
+        "stk-tata-steel",
+        "TATASTEEL",
+        direction="BULLISH",
+        segment="FNO_STOCK",
+        opt_type="CE",
+        confidence=86,
+    )
+    alert_fail.metrics = {
+        "nifty_change_pct": -0.34,
+        "nifty_below_vwap": True,
+        "banknifty_change_pct": -0.92,
+        "fii_net": -1148.5,
+        "sector_id": "metal",
+        "sector_change_pct": -0.50,
+        "sector_rs": -0.16,
+        "rvol": 1.4,
+    }
+    passed, reason = engine._eval_telegram_apex_gate(alert_fail, in_market=True)
+    assert not passed
+    assert "Institutional selling regime" in reason
+    assert "FII -1,148 Cr" in reason
+
+    # 2. Defensive decoupler (e.g. Pharma or FMCG with positive RS) still passes
+    alert_pass = _make_dummy_alert(
+        "stk-sunpharma",
+        "SUNPHARMA",
+        direction="BULLISH",
+        segment="FNO_STOCK",
+        opt_type="CE",
+        confidence=90,
+    )
+    alert_pass.metrics = {
+        "nifty_change_pct": -0.34,
+        "nifty_below_vwap": True,
+        "banknifty_change_pct": -0.92,
+        "fii_net": -1148.5,
+        "sector_id": "pharma",
+        "sector_change_pct": 0.40,
+        "sector_rs": 0.74,
+        "rvol": 2.6,
+    }
+    passed_p, reason_p = engine._eval_telegram_apex_gate(alert_pass, in_market=True)
+    assert passed_p, f"Expected decoupled defensive leader to pass, but got: {reason_p}"

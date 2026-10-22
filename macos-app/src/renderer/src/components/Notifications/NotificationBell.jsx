@@ -65,7 +65,7 @@ export default function NotificationBell({ onOpenOrderTicket }) {
         {/* Unread badge */}
         {unreadCount > 0 && (
           <span
-            className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full text-[9px] font-black font-mono text-white flex items-center justify-center shadow-md animate-pulse"
+            className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full text-[11px] font-black font-mono text-white flex items-center justify-center shadow-md animate-pulse"
             style={{
               background: 'var(--color-rose)',
               boxShadow: '0 0 8px rgba(255, 79, 123, 0.6)',

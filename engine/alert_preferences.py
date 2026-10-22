@@ -240,6 +240,29 @@ def classify_alert_segment(alert: Any) -> str:
         .upper()
     )
 
+    # Inspect actionable_plan if present for nested options contract details
+    plan = (
+        alert.get("actionable_plan")
+        if isinstance(alert, dict)
+        else getattr(alert, "actionable_plan", None)
+    ) or {}
+    if isinstance(plan, dict):
+        if not contract:
+            contract = str(
+                plan.get("contract") or plan.get("contract_symbol") or plan.get("instrument") or ""
+            ).upper()
+        if not op_type:
+            op_type = str(plan.get("option_type") or "").upper()
+        if strike is None:
+            strike = plan.get("strike")
+        if not expiry:
+            expiry = plan.get("expiry_date") or plan.get("expiry")
+        plan_action = str(plan.get("action") or "").upper()
+        plan_inst = str(plan.get("instrument_type") or "").upper()
+    else:
+        plan_action = ""
+        plan_inst = ""
+
     # 0.5. Crypto (24x7)
     if (
         exch in ("CRYPTO", "BINANCE", "COINBASE")
@@ -299,11 +322,15 @@ def classify_alert_segment(alert: Any) -> str:
         or "FUT" in sym.upper()
         or deriv_type == "FUT"
         or alt_type in ("FUTURES", "STOCK_FUTURES")
+        or plan_inst in ("FUT", "FUTURE", "FUTURES")
     )
     is_option = bool(
         op_type in ("CE", "PE")
         or (strike is not None and float(strike or 0) > 0)
         or (expiry and contract and contract != clean_sym)
+        or any(contract.endswith(sfx) for sfx in ("CE", "PE"))
+        or plan_action in ("BUY_CALL", "BUY_PUT", "SELL_CALL", "SELL_PUT")
+        or plan_inst in ("OPTION", "OPTIONS")
     )
     is_deriv_alt = bool(alt_type in ("GAMMA_BLAST", "OPTIONS_MOMENTUM"))
     has_deriv_contract = bool(
@@ -316,6 +343,7 @@ def classify_alert_segment(alert: Any) -> str:
         or is_deriv_alt
         or has_deriv_contract
         or (exch == "NFO" and (has_deriv_contract or is_fut or is_option))
+        or seg in ("FNO_STOCK", "STOCK_FNO", "FNO_STOCKS")
     )
 
     if is_stock_fno:
@@ -835,54 +863,76 @@ class AlertPreferencesManager:
                 else:
                     return False, f"Segment '{seg}' is disabled for {channel}"
 
-            # Strict Directional Index Futures Gate:
-            # Directional futures signals on indices are prohibited unless explicitly flagged as a hedge.
-            # Index options (CE/PE/momentum/gamma) and hedging index signals are permitted.
-            if seg == "FNO_INDEX":
-                if isinstance(alert, dict):
-                    contract_val = str(
-                        alert.get("contract_symbol") or alert.get("contract") or ""
-                    ).upper()
-                    deriv_val = str(alert.get("derivative_type") or "").upper()
-                    act_val = str(alert.get("action") or "").upper()
-                    alt_val = str(alert.get("alert_type") or "").upper()
-                    is_hedge_flag = bool(
-                        alert.get("is_hedge")
-                        or alert.get("purpose") == "HEDGE"
-                        or (alert.get("actionable_plan") or {}).get("is_hedge")
-                        or (alert.get("metrics") or {}).get("is_hedge")
-                    )
-                else:
-                    contract_val = str(
-                        getattr(alert, "contract_symbol", "")
-                        or getattr(alert, "contract", "")
-                        or ""
-                    ).upper()
-                    deriv_val = str(getattr(alert, "derivative_type", "") or "").upper()
-                    act_val = str(getattr(alert, "action", "") or "").upper()
-                    alt_val = str(getattr(alert, "alert_type", "") or "").upper()
-                    is_hedge_flag = bool(
-                        getattr(alert, "is_hedge", False)
-                        or getattr(alert, "purpose", "") == "HEDGE"
-                        or (getattr(alert, "actionable_plan", {}) or {}).get("is_hedge")
-                        or (getattr(alert, "metrics", {}) or {}).get("is_hedge")
-                    )
-
-                is_index_future = bool(
-                    "FUT" in contract_val
-                    or deriv_val == "FUT"
-                    or alt_val in ("INDEX_FUTURES", "FUTURES")
-                    or act_val in ("BUY_FUTURES", "SELL_SHORT_FUTURES")
+            # Strict Zero-Futures Invariant Gate:
+            # Prohibit any directional futures signals across all segments (index, stocks, commodities).
+            # User mandate: strictly naked options or hedged spreads only; no futures signals in UI or Telegram.
+            contract_val = (
+                str(alert.get("contract_symbol") or alert.get("contract") or "").upper()
+                if isinstance(alert, dict)
+                else str(
+                    getattr(alert, "contract_symbol", "") or getattr(alert, "contract", "") or ""
+                ).upper()
+            )
+            deriv_val = (
+                str(alert.get("derivative_type") or "").upper()
+                if isinstance(alert, dict)
+                else str(getattr(alert, "derivative_type", "") or "").upper()
+            )
+            act_val = (
+                str(alert.get("action") or "").upper()
+                if isinstance(alert, dict)
+                else str(getattr(alert, "action", "") or "").upper()
+            )
+            alt_val = (
+                str(alert.get("alert_type") or "").upper()
+                if isinstance(alert, dict)
+                else str(getattr(alert, "alert_type", "") or "").upper()
+            )
+            pref_veh = (
+                str(
+                    (alert.get("actionable_plan") or {}).get("preferred_vehicle")
+                    or alert.get("preferred_vehicle")
+                    or ""
+                ).upper()
+                if isinstance(alert, dict)
+                else str(
+                    (getattr(alert, "actionable_plan", {}) or {}).get("preferred_vehicle")
+                    or getattr(alert, "preferred_vehicle", "")
+                    or ""
+                ).upper()
+            )
+            is_hedge_flag = bool(
+                (
+                    alert.get("is_hedge")
+                    or alert.get("purpose") == "HEDGE"
+                    or (alert.get("actionable_plan") or {}).get("is_hedge")
+                    or (alert.get("metrics") or {}).get("is_hedge")
                 )
-                if is_index_future and not is_hedge_flag:
-                    logger.info(
-                        f"[AlertPreferences] Suppressed directional index futures for {contract_val or deriv_val}: "
-                        f"Only index options and index hedging permitted."
-                    )
-                    return (
-                        False,
-                        "Directional index futures prohibited; only index options or hedges allowed",
-                    )
+                if isinstance(alert, dict)
+                else (
+                    getattr(alert, "is_hedge", False)
+                    or getattr(alert, "purpose", "") == "HEDGE"
+                    or (getattr(alert, "actionable_plan", {}) or {}).get("is_hedge")
+                    or (getattr(alert, "metrics", {}) or {}).get("is_hedge")
+                )
+            )
+
+            is_future_signal = bool(
+                "FUT" in contract_val
+                or deriv_val == "FUT"
+                or pref_veh == "FUTURES"
+                or alt_val in ("INDEX_FUTURES", "FUTURES", "STOCK_FUTURES")
+                or act_val in ("BUY_FUTURES", "SELL_SHORT_FUTURES", "BUY FUT", "SHORT FUT")
+            )
+            if is_future_signal and not is_hedge_flag:
+                logger.info(
+                    f"[AlertPreferences] Suppressed futures signal for {contract_val or deriv_val or alt_val}: "
+                    f"User mandate enforces naked options or hedged spreads only."
+                )
+                return (
+                    False,
+                    "Futures signals prohibited; user mandate enforces naked options or hedging only",
+                )
 
             # Extract confidence and stage
             if isinstance(alert, dict):
@@ -950,6 +1000,7 @@ class AlertPreferencesManager:
                 else:
                     alt_type = str(getattr(alert, "alert_type", "") or "").upper()
                 _early_warn_whitelisted_types = (
+                    "PRE_INFLECTION_DRYUP",
                     "PRECURSOR_RADAR",
                     "ASYMMETRIC_OPPORTUNITY",
                     "OPTIONS_MOMENTUM",
@@ -986,6 +1037,7 @@ class AlertPreferencesManager:
 
             effective_min_conf = ch_pref.min_confidence
             _quant_models_80 = (
+                "PRE_INFLECTION_DRYUP",
                 "STAGE_1_TO_2_EXPANSION",
                 "RRG_SECTOR_ROTATION",
                 "SMC_SPRING_SWEEP",
@@ -999,6 +1051,7 @@ class AlertPreferencesManager:
                 "CURRENCY_BREAKOUT",
             )
             _calibrated_bar_types = (
+                "PRE_INFLECTION_DRYUP",
                 "PRECURSOR_RADAR",
                 "ASYMMETRIC_OPPORTUNITY",
                 "CRYPTO_SQUEEZE",
