@@ -37,9 +37,9 @@ def test_jit_tbt_scout_promotion_and_ttl():
     promoted = mgr.promote_jit_scout(sym, duration_sec=0.5, reason="TEST_PRE_INFLECTION")
     assert promoted is True
 
-    # Check slot allocation (Fyers symbol normalization maps NSE:TATAMOTORS to NSE:TATAMOTORS-EQ)
+    # Check slot allocation (Fyers symbol normalization maps NSE:TATAMOTORS to NSE:TMPV26OCTFUT)
     slots = mgr.get_slot_allocation()
-    assert any("TATAMOTORS" in s for s in slots["scout"])
+    assert any(("TATAMOTORS" in s or "TMPV" in s) for s in slots["scout"])
 
     # Module helper function promotion
     helper_promoted = promote_jit_tbt_scout("NSE:WIPRO", duration_sec=0.5, reason="HELPER_TEST")
@@ -50,7 +50,7 @@ def test_jit_tbt_scout_promotion_and_ttl():
     time.sleep(0.6)
     mgr.cleanse_stale_scouts(ttl_sec=0.5)
     cleansed_slots = mgr.get_slot_allocation()
-    assert not any("TATAMOTORS" in s for s in cleansed_slots["scout"])
+    assert not any(("TATAMOTORS" in s or "TMPV" in s) for s in cleansed_slots["scout"])
     assert not any("WIPRO" in s for s in cleansed_slots["scout"])
 
 

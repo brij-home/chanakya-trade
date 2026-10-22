@@ -125,8 +125,8 @@ def test_auto_alert_engine_enriches_with_live_l2_depth():
     """Verify record_alert enriches incoming alert with real-time BisectDepthBook depth."""
     engine = AutoAlertEngine()
 
-    # Pre-populate L2 book in memory for NIFTY26OCT25000CE
-    book = get_depth_book("NIFTY26OCT25000CE")
+    # Pre-populate L2 book in memory for UNIQUE_L2_TEST_CE
+    book = get_depth_book("UNIQUE_L2_TEST_CE")
     book.batch_update(
         bids=[{"price": 148.0, "quantity": 1200}, {"price": 147.5, "quantity": 1800}],
         asks=[{"price": 152.0, "quantity": 1500}, {"price": 152.5, "quantity": 2200}],
@@ -137,7 +137,7 @@ def test_auto_alert_engine_enriches_with_live_l2_depth():
         alert_type="OPTIONS_MOMENTUM",
         stage="IGNITED",
         symbol="NIFTY",
-        contract_symbol="NIFTY26OCT25000CE",
+        contract_symbol="UNIQUE_L2_TEST_CE",
         exchange="NFO",
         direction="BULLISH",
         headline="NIFTY 25000 CE Live Book",

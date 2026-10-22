@@ -2130,9 +2130,15 @@ def test_scan_intraday_breakdown_spark(tmp_path, monkeypatch):
     assert dixon_spark.stage == "IGNITED"
     assert dixon_spark.actionable_plan["action"] in ("SELL_SHORT_OR_BUY_PUT", "BUY_PUT")
     if dixon_spark.option_premium:
-        assert dixon_spark.stop_loss < dixon_spark.ltp  # Put premium SL is below entry premium
-        spot_sl = dixon_spark.metrics.get("underlying_sl") or 0.0
-        spot_price = dixon_spark.metrics.get("underlying_spot") or 0.0
+        opt_sl = float(
+            str(dixon_spark.actionable_plan["stop_loss"]).replace("₹", "").replace(",", "")
+        )
+        opt_entry = float(
+            str(dixon_spark.actionable_plan["recommended_entry"]).replace("₹", "").replace(",", "")
+        )
+        assert opt_sl < opt_entry  # Put premium SL is below entry premium
+        spot_sl = dixon_spark.metrics.get("underlying_sl") or dixon_spark.stop_loss
+        spot_price = dixon_spark.metrics.get("underlying_spot") or dixon_spark.ltp
         assert spot_sl > spot_price  # Spot SL is above spot price for shorts
     else:
         assert dixon_spark.stop_loss > dixon_spark.ltp  # Stop-loss above entry for cash shorts

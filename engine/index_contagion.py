@@ -174,10 +174,13 @@ class IndexContagionEngine:
         idx_q = (
             quotes_map.get(idx_sym)
             or quotes_map.get(clean_idx)
+            or quotes_map.get(f"NSE:{clean_idx}")
+            or quotes_map.get(f"BSE:{clean_idx}")
             or (quotes_map.get("BSE:SENSEX-INDEX") if clean_idx == "SENSEX" else None)
             or (quotes_map.get("NSE:MIDCPNIFTY") if clean_idx == "MIDCPNIFTY" else None)
             or (quotes_map.get("NSE:FINNIFTY-INDEX") if clean_idx == "FINNIFTY" else None)
             or (quotes_map.get("NSE:NIFTY FIN SERVICE") if clean_idx == "FINNIFTY" else None)
+            or (quotes_map.get("NSE:FINNIFTY") if clean_idx == "FINNIFTY" else None)
         )
         idx_ltp = float(getattr(idx_q, "last_price", 0.0) or getattr(idx_q, "ltp", 0.0) or 0.0)
         if idx_ltp <= 0:

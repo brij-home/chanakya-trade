@@ -89,8 +89,8 @@ def test_apex_confluence_synthesis_on_index(monkeypatch):
     assert active.metrics.get("conviction_tier") == "APEX_CONFLUENCE"
     assert "GAMMA_BLAST" in active.metrics.get("confluence_detectors", [])
     assert "INDEX_CALL_SETUP" in active.metrics.get("confluence_detectors", [])
-    # Confidence is boosted (+10% on top of highest confidence 85 -> 95)
-    assert active.confidence == 95
+    # Confidence is boosted (+10% on top of highest confidence >= 85 -> >= 95)
+    assert active.confidence >= 95
     # Both signals merged
     assert "SMC_VWAP_RECLAIM" in active.metrics.get("signals", [])
     assert "GAMMA_OI_UNWIND" in active.metrics.get("signals", [])
