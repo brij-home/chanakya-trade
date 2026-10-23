@@ -968,6 +968,7 @@ class FyersTbtManager:
             self._subscribed.clear()
             self._channel_symbols = {"1": set(), "2": set(), "3": set()}
             self._current_session = "AUTO"
+            self._workers.clear()
         with self._depth_lock:
             self._depth_cache.clear()
         self._connected = False
