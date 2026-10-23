@@ -49,6 +49,8 @@ _SETUP_ICONS = {
     "VWAP_BREAKDOWN": "📉",
     "CPR_SUPPLY_REJECTION": "🔴",
     "CAMARILLA_L4_BREAKDOWN": "📉",
+    "CAMARILLA_L4_PROXIMITY": "⚡",
+    "DAY_LOW_PROXIMITY": "⚡",
     "SUPPLY_ZONE_SWEEP": "⚡",
     "BEARISH_OB_CONFLUENCE": "🎯",
     "DOUBLE_TOP_BREAKDOWN": "🔴",
@@ -238,6 +240,36 @@ def detect_index_put_setup(
 
         roc_metric = calculate_roc_momentum(None, symbol=clean_sym)
 
+    # ── Upside Velocity & Positive ROC Acceleration Veto Gate ───
+    # When price velocity is actively accelerating upwards on 5m bars (d²P/dt² > 0 and 3-bar ROC positive),
+    # buying naked puts fights institutional buying thrust / short covering.
+    # Exception: Do not veto if the current 5m bar is an institutional distribution shooting star / supply rejection (close < open and close in bottom 40% of bar),
+    # which is the quintessential footprint of DISTRIBUTION_TOP.
+    has_distribution_star = False
+    if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+        try:
+            col_c = "close" if "close" in active_ohlcv.columns else "Close"
+            col_o = "open" if "open" in active_ohlcv.columns else "Open"
+            col_h = "high" if "high" in active_ohlcv.columns else "High"
+            col_l = "low" if "low" in active_ohlcv.columns else "Low"
+            last_bar = active_ohlcv.iloc[-1]
+            lb_c = float(last_bar[col_c])
+            lb_o = float(last_bar[col_o])
+            lb_h = float(last_bar[col_h])
+            lb_l = float(last_bar[col_l])
+            lb_rng = max(0.1, lb_h - lb_l)
+            if lb_c < lb_o and (lb_c - lb_l) / lb_rng <= 0.40:
+                has_distribution_star = True
+        except Exception as e_star:
+            logger.debug(f"[IndexPutSetup] Distribution star check bypassed: {e_star}")
+
+    if roc_metric.is_accelerating_up and roc_metric.roc_3bar >= 0.10 and not has_distribution_star:
+        logger.info(
+            f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Upside ROC acceleration active "
+            f"({roc_metric.summary}). Prohibiting put setups fighting upward momentum."
+        )
+        return []
+
     is_bse = clean_sym in ("SENSEX", "BANKEX")
     opt_exchange = "BFO" if is_bse else "NFO"
     effective_vwap = vwap if (vwap and vwap > 0) else spot
@@ -393,8 +425,14 @@ def detect_index_put_setup(
         default=None,
     )
     atm_ce_oi_chg = int(getattr(atm_ce, "oi_change", 0) or 0) if atm_ce else 0
-    is_call_writing_ceiling = (atm_ce_oi_chg > 500) or (
-        ce_oi_change_sum > 2000 and ce_oi_change_sum > pe_oi_change_sum
+    atm_ce_pchange = float(getattr(atm_ce, "pchange", 0.0) or 0.0) if atm_ce else 0.0
+    # Institutional Call Writing Ceiling Invariant:
+    # True Call Writing requires writers driving premium decay (CE price stagnant or decaying).
+    # If CE premium is surging (pchange > 2.0%), buyers are bidding up calls (Long Call Buildup / rally),
+    # which is NOT a call writing ceiling!
+    is_ce_decaying = atm_ce_pchange <= 2.0
+    is_call_writing_ceiling = is_ce_decaying and (
+        (atm_ce_oi_chg > 500) or (ce_oi_change_sum > 2000 and ce_oi_change_sum > pe_oi_change_sum)
     )
     chain_pcr = (
         round(pe_oi_total / max(1, ce_oi_total), 2)
@@ -402,16 +440,16 @@ def detect_index_put_setup(
         else None
     )
 
-    # Veto only when: PCR > 1.45 AND writers are actively adding new puts (floor building)
+    # Veto when: PCR > 1.45 AND writers are NOT unwinding (put floor cushion building/holding)
     # NOT when writers are unwinding (breakdown acceleration)
-    _pcr_writers_adding = pe_oi_change_sum > 0
-    if chain_pcr is not None and chain_pcr > 1.45 and _pcr_writers_adding:
+    _pcr_writers_unwinding = pe_oi_change_sum < 0
+    if chain_pcr is not None and chain_pcr > 1.45 and not _pcr_writers_unwinding:
         logger.info(
             f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Active Put Writing Cushion "
-            f"(PCR: {chain_pcr:.2f} > 1.45, OI adding {pe_oi_change_sum:+,}). Floor-building writers resist breakdown."
+            f"(PCR: {chain_pcr:.2f} > 1.45, OI change {pe_oi_change_sum:+,}). Floor-building writers resist breakdown."
         )
         return []
-    elif chain_pcr is not None and chain_pcr > 1.45 and not _pcr_writers_adding:
+    elif chain_pcr is not None and chain_pcr > 1.45 and _pcr_writers_unwinding:
         logger.debug(
             f"[IndexPutSetup] PCR={chain_pcr:.2f} > 1.45 but pe_oi_change={pe_oi_change_sum:+,} (unwinding) "
             f"→ NOT a floor, this is a breakdown signal. Allowing PE setup to proceed."
@@ -514,10 +552,16 @@ def detect_index_put_setup(
                     return []
                 if atr > 0 and day_high > 0:
                     down_move = day_high - spot
-                    if down_move >= (1.10 * atr) and not is_explosive_momentum:
+                    if down_move >= (1.15 * atr):
+                        logger.info(
+                            f"[IndexPutSetup] Absolute Terminal ADR Downward Exhaustion: Spot ₹{spot:,.1f} dropped -{down_move:.1f} pts "
+                            f"(>= 1.15x ATR {atr:.1f}) off day high ₹{day_high:,.1f}. Downside statistically exhausted; suppressing put setup."
+                        )
+                        return []
+                    elif down_move >= (1.10 * atr) and not is_long_unwinding_flush:
                         logger.info(
                             f"[IndexPutSetup] Terminal ADR Downward Exhaustion: Spot ₹{spot:,.1f} dropped -{down_move:.1f} pts "
-                            f"(>= 1.1x ATR {atr:.1f}) off day high ₹{day_high:,.1f}. Suppressing breakdown put."
+                            f"(>= 1.1x ATR {atr:.1f}) off day high ₹{day_high:,.1f} without active long unwinding flush. Suppressing breakdown put."
                         )
                         return []
                     elif down_move >= (0.85 * atr) and not is_breakdown_momentum:
@@ -729,29 +773,78 @@ def detect_index_put_setup(
     # If spot is right above Previous Day Low or Day Low, buying PE collides directly
     # into underneath demand support UNLESS breaking down with true momentum.
     # If spot has just pierced PDL by < 0.15% without momentum, it's a high-probability Bear Trap sweep.
+    # PROXIMITY WATCH EXCEPTION: Do not suppress when spot is within 0.35% of PDL, Day Low, or Cam L4 for pre-breakdown watch.
+    _cam_l4_ref = 0.0
+    if prev_day_high and prev_day_low and prev_day_high > prev_day_low > 0:
+        _ref_c = (
+            prev_close if (prev_close and prev_close > 0) else (prev_day_high + prev_day_low) / 2.0
+        )
+        _cam_l4_ref = _ref_c - ((prev_day_high - prev_day_low) * 0.55)
+
+    # Staging envelope: 0.15% to 0.35% above support level.
+    # When spot has already collided into <= 0.15% without breakdown momentum, headroom is exhausted.
+    _is_proximity_watch_pe = (
+        (day_low and spot and 0.15 < (spot - day_low) / max(1.0, spot) * 100.0 <= 0.35)
+        or (prev_day_low and spot and 0.15 < (spot - prev_day_low) / max(1.0, spot) * 100.0 <= 0.35)
+        or (
+            _cam_l4_ref > 0
+            and spot
+            and 0.15 < (spot - _cam_l4_ref) / max(1.0, spot) * 100.0 <= 0.35
+        )
+    )
     if prev_day_low and prev_day_low > 0:
         if spot > prev_day_low:
             pdl_headroom_pct = (spot - prev_day_low) / spot * 100.0
-            if pdl_headroom_pct < 0.25 and not is_breakdown_momentum:
-                logger.debug(
+            if pdl_headroom_pct < 0.25 and not is_breakdown_momentum and not _is_proximity_watch_pe:
+                logger.info(
                     f"[IndexPutSetup] Suppressed PE: Spot ₹{spot:,.1f} is within {pdl_headroom_pct:.2f}% of PDL ₹{prev_day_low:,.1f} (Opposing Demand Collision)"
                 )
                 return []
         else:
             pdl_break_pct = (prev_day_low - spot) / prev_day_low * 100.0
             if pdl_break_pct < 0.15 and not is_breakdown_momentum:
-                logger.debug(
+                logger.info(
                     f"[IndexPutSetup] Suppressed PE: Spot ₹{spot:,.1f} shallow pierce of PDL ₹{prev_day_low:,.1f} ({pdl_break_pct:.2f}%) without breakdown momentum (Bear Trap Risk)"
                 )
                 return []
 
     if day_low and spot > day_low and day_high and ((day_high - day_low) / max(1.0, spot)) >= 0.003:
         dl_headroom_pct = (spot - day_low) / spot * 100.0
-        if dl_headroom_pct < 0.15 and not is_breakdown_momentum:
-            logger.debug(
-                f"[IndexPutSetup] Suppressed PE: Spot ₹{spot:,.1f} is within {dl_headroom_pct:.2f}% of Day Low ₹{day_low:,.1f} (Headroom Truncated)"
+        if dl_headroom_pct < 0.15 and not is_breakdown_momentum and not _is_proximity_watch_pe:
+            logger.info(
+                f"[IndexPutSetup] Suppressed PE: Spot ₹{spot:,.1f} is within {dl_headroom_pct:.2f}% of Day Low ₹{day_low:,.1f} (Headroom Truncated / Overhead Demand Collision)"
             )
             return []
+
+    # ── Severe Intraday Bounce from Day Low Guard ─────────────
+    # If spot has surged >= 0.35% off Day Low and is trading ABOVE session VWAP,
+    # the market is in intraday accumulation/markup. Suppress all PE setups (preventing bear traps),
+    # UNLESS spot is actively testing key session resistance / supply levels or printing a top distribution.
+    _is_at_resistance = bool(
+        (day_high and day_high > 0 and (day_high - spot) / max(1.0, spot) * 100.0 <= 0.45)
+        or (
+            prev_day_high and prev_day_high > 0 and abs(spot - prev_day_high) / spot * 100.0 <= 0.45
+        )
+        or (
+            prev_week_high
+            and prev_week_high > 0
+            and abs(spot - prev_week_high) / spot * 100.0 <= 0.45
+        )
+    )
+    if (
+        not _is_at_resistance
+        and day_low
+        and day_low > 0
+        and effective_vwap > 0
+        and spot > effective_vwap
+        and ((spot - day_low) / day_low * 100.0) >= 0.35
+    ):
+        logger.info(
+            f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Severe Bounce from Day Low "
+            f"(+{((spot - day_low) / day_low * 100.0):.2f}% from low ₹{day_low:,.1f}) above VWAP ₹{effective_vwap:,.1f}. "
+            f"Bullish markup trap active."
+        )
+        return []
 
     # ── VWAP Overextension & Capitulation Filter ─────────────────
     # Default: Extended > 0.65% below VWAP = FOMO exhaustion trap, skip.
@@ -901,6 +994,40 @@ def detect_index_put_setup(
                     "breakdown_pct": round((cam_l4 - spot) / cam_l4 * 100.0, 3),
                     "is_narrow_cpr": is_narrow_cpr,
                 }
+        elif spot > cam_l4 and (spot - cam_l4) / cam_l4 * 100.0 <= 0.35 and not is_5m_bull_trend:
+            # Camarilla L4 Proximity Surveillance (STAGE_PRIMED Pre-Breakdown Alert)
+            # Spot approaching within 0.35% above L4; enables trader staging 2-3 mins ahead of breakdown.
+            if effective_vwap <= 0 or spot <= effective_vwap * 1.002:
+                has_valid_l4_prox = True
+                if (
+                    active_ohlcv is not None
+                    and hasattr(active_ohlcv, "iloc")
+                    and len(active_ohlcv) >= 1
+                ):
+                    try:
+                        col_h = "high" if "high" in active_ohlcv.columns else "High"
+                        col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                        col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                        col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                        last_b = active_ohlcv.iloc[-1]
+                        b_h = float(last_b[col_h])
+                        b_l = float(last_b[col_l])
+                        b_c = float(last_b[col_c])
+                        b_o = float(last_b[col_o])
+                        b_rng = max(0.1, b_h - b_l)
+                        l_wick_pct = (min(b_c, b_o) - b_l) / b_rng * 100.0
+                        if l_wick_pct >= 40.0 and b_c > b_o:
+                            has_valid_l4_prox = False
+                    except Exception:
+                        has_valid_l4_prox = True
+
+                if has_valid_l4_prox:
+                    signals.append("CAMARILLA_L4_PROXIMITY")
+                    signal_tags["camarilla_l4_proximity"] = {
+                        "cam_l4": round(cam_l4, 1),
+                        "proximity_pct": round((spot - cam_l4) / cam_l4 * 100.0, 3),
+                        "is_narrow_cpr": is_narrow_cpr,
+                    }
 
         # CPR Supply Rejection Check: Spot tested CPR Bottom from below and is rejecting with supply
         cpr_bottom_prox = abs(spot - cpr_bottom) / max(1.0, cpr_bottom) * 100.0
@@ -941,29 +1068,92 @@ def detect_index_put_setup(
                     "is_narrow_cpr": is_narrow_cpr,
                 }
 
+    # 0. SMT Bearish Divergence & Locomotive Polarization Supply Rejection (Judas Swing / Top Reversal)
+    # If spot is near/at Day High (within 0.35%) and sibling index non-confirms or locomotive polarization is active
+    if day_high and day_high > 0:
+        dh_prox = abs(day_high - spot) / max(1.0, day_high) * 100.0
+        if dh_prox <= 0.35:
+            try:
+                from engine.smt_divergence import evaluate_smt_divergence
+
+                smt_dh = evaluate_smt_divergence(
+                    clean_sym,
+                    "BULLISH",
+                    spot,
+                    primary_day_high=day_high,
+                    primary_day_low=day_low,
+                    primary_vwap=effective_vwap,
+                )
+                if (
+                    smt_dh
+                    and smt_dh.is_trap
+                    and smt_dh.divergence_type == "BEARISH_DIVERGENCE_BULL_TRAP"
+                ):
+                    signals.append("SMT_BEARISH_DIVERGENCE")
+                    signal_tags["smt_bearish_divergence"] = {
+                        "sibling_index": smt_dh.sibling_symbol,
+                        "rationale": smt_dh.rationale,
+                        "day_high": day_high,
+                        "spot": spot,
+                    }
+            except Exception as e_smt_dh:
+                logger.debug(f"[IndexPutSetup] SMT DH check skipped: {e_smt_dh}")
+
+            # Check Locomotive Polarization top reversal
+            try:
+                from engine.market_regime_gate import evaluate_market_regime
+
+                _mrg = evaluate_market_regime()
+                if (
+                    _mrg
+                    and getattr(_mrg, "is_locomotive_polarized", False)
+                    and getattr(_mrg, "ad_ratio", 1.0) <= 0.45
+                ):
+                    signals.append("LOCOMOTIVE_POLARIZATION_DISTRIBUTION")
+                    signal_tags["locomotive_polarization_distribution"] = {
+                        "locomotive_detail": getattr(_mrg, "locomotive_detail", ""),
+                        "ad_ratio": getattr(_mrg, "ad_ratio", 1.0),
+                        "day_high": day_high,
+                        "spot": spot,
+                    }
+            except Exception as e_loco_dh:
+                logger.debug(f"[IndexPutSetup] Loco DH check skipped: {e_loco_dh}")
+
     # 1. PDH Supply Rejection
-    # Spot came within 0.25% of prev_day_high and is now pulling back
+    # Spot tested prev_day_high and is currently in an active rejection pullback (within 0.45% of PDH)
     if prev_day_high and prev_day_high > 0:
         pdh_proximity_pct = ((day_high or spot) - prev_day_high) / prev_day_high * 100
         spot_retreat_from_high = (
             ((day_high or spot) - spot) / max(1.0, spot) * 100 if day_high else 0.0
         )
-        if -0.1 <= pdh_proximity_pct <= 0.5 and spot_retreat_from_high >= 0.1:
+        spot_dist_from_pdh = abs(spot - prev_day_high) / prev_day_high * 100.0
+        if (
+            -0.1 <= pdh_proximity_pct <= 0.5
+            and 0.10 <= spot_retreat_from_high <= 0.45
+            and spot_dist_from_pdh <= 0.45
+        ):
             signals.append("PDH_SUPPLY_REJECTION")
             signal_tags["pdh_supply_rejection"] = {
                 "prev_day_high": prev_day_high,
                 "day_high": day_high,
                 "pdh_proximity_pct": round(pdh_proximity_pct, 3),
                 "retreat_pct": round(spot_retreat_from_high, 3),
+                "spot_dist_pct": round(spot_dist_from_pdh, 3),
             }
 
     # 2. PWH Supply Rejection (Previous Week High)
+    # Spot tested prev_week_high and is currently in an active rejection pullback (within 0.45% of PWH)
     if prev_week_high and prev_week_high > 0 and "PDH_SUPPLY_REJECTION" not in signals:
         pwh_proximity_pct = ((day_high or spot) - prev_week_high) / prev_week_high * 100
         spot_retreat_from_high = (
             ((day_high or spot) - spot) / max(1.0, spot) * 100 if day_high else 0.0
         )
-        if -0.15 <= pwh_proximity_pct <= 0.4 and spot_retreat_from_high >= 0.12:
+        spot_dist_from_pwh = abs(spot - prev_week_high) / prev_week_high * 100.0
+        if (
+            -0.15 <= pwh_proximity_pct <= 0.4
+            and 0.12 <= spot_retreat_from_high <= 0.45
+            and spot_dist_from_pwh <= 0.45
+        ):
             signals.append("PDH_SUPPLY_REJECTION")  # reuse the same type; tagged differently
             signal_tags["pdh_supply_rejection"] = {
                 "level_type": "PWH",
@@ -971,6 +1161,7 @@ def detect_index_put_setup(
                 "day_high": day_high,
                 "pwh_proximity_pct": round(pwh_proximity_pct, 3),
                 "retreat_pct": round(spot_retreat_from_high, 3),
+                "spot_dist_pct": round(spot_dist_from_pwh, 3),
             }
 
     # 2b. Day High Supply Rejection (Intraday Bull Trap / Ceiling Rejection)
@@ -1379,8 +1570,8 @@ def detect_index_put_setup(
     # When spot is testing or breaking down through session low with VWAP weakness and PE momentum
     if day_low and day_low > 0 and "DAY_LOW_BREAKDOWN" not in signals and not is_opening_buffer:
         dl_dist_pct = (day_low - spot) / day_low * 100.0
-        # Within 0.15% above day low, or broke down below day low up to 0.50%
-        if -0.15 <= dl_dist_pct <= 0.50 and (
+        # Spot crossing or trading at/below Day Low (Breakdown)
+        if -0.02 <= dl_dist_pct <= 0.50 and (
             spot <= (effective_vwap * 1.002) if effective_vwap > 0 else True
         ):
             # Wyckoff Spring / Lower Wick Absorption Guard:
@@ -1407,7 +1598,27 @@ def detect_index_put_setup(
                         f"[engine.detectors.index_put_setup] Non-fatal exception suppressed: {e_suppressed}"
                     )
 
-            if not has_absorption_wick and (
+            # SMT Inter-Index Non-Confirmation Sentinel:
+            smt_res = None
+            try:
+                from engine.smt_divergence import evaluate_smt_divergence
+
+                smt_res = evaluate_smt_divergence(
+                    clean_sym,
+                    "BEARISH",
+                    spot,
+                    primary_day_high=day_high,
+                    primary_day_low=day_low,
+                    primary_vwap=effective_vwap,
+                )
+            except Exception as e_smt:
+                logger.debug(f"[IndexPutSetup] SMT check bypassed: {e_smt}")
+
+            if smt_res and smt_res.is_trap:
+                logger.info(
+                    f"[IndexPutSetup] Suppressed DAY_LOW_BREAKDOWN on {clean_sym}: {smt_res.rationale}"
+                )
+            elif not has_absorption_wick and (
                 is_breakdown_momentum
                 or (active_ohlcv is not None and len(active_ohlcv) >= 3 and cand_pe_pchange >= -2.0)
             ):
@@ -1418,6 +1629,25 @@ def detect_index_put_setup(
                     "dl_dist_pct": round(dl_dist_pct, 3),
                     "pe_pchange": cand_pe_pchange,
                     "vol_oi": cand_pe_vol_oi,
+                    "smt_divergence": smt_res.divergence_type if smt_res else None,
+                }
+        elif (
+            -0.35 <= dl_dist_pct < -0.05
+            and not is_5m_bull_trend
+            and (spot <= (effective_vwap * 1.002) if effective_vwap > 0 else True)
+        ):
+            # Day Low Proximity Surveillance (STAGE_PRIMED)
+            if (
+                "DAY_LOW_PROXIMITY" not in signals
+                and "DAY_LOW_BREAKDOWN" not in signals
+                and "CAMARILLA_L4_PROXIMITY" not in signals
+                and "CAMARILLA_L4_BREAKDOWN" not in signals
+            ):
+                signals.append("DAY_LOW_PROXIMITY")
+                signal_tags["day_low_proximity"] = {
+                    "day_low": round(day_low, 1),
+                    "spot": spot,
+                    "proximity_pct": round(abs(dl_dist_pct), 3),
                 }
 
     # 8. Institutional Expansion Breakdown (Parabolic Momentum Flush)
@@ -1825,6 +2055,9 @@ def detect_index_put_setup(
         "DOUBLE_TOP_BREAKDOWN": 8,
         "TREND_PULLBACK_REJECTION": 10,
         "DAY_LOW_BREAKDOWN": 12,
+        "DAY_LOW_PROXIMITY": 16,
+        "CAMARILLA_L4_BREAKDOWN": 16,
+        "CAMARILLA_L4_PROXIMITY": 18,
         "INSTITUTIONAL_EXPANSION_BREAKDOWN": 16,
         "LONG_UNWINDING_FLUSH": 16,
         "CALL_WRITING_CEILING": 8,
@@ -1845,6 +2078,13 @@ def detect_index_put_setup(
         confidence += 3
     prem_vel = calculate_premium_velocity(contract_sym, opt_ltp)
     signal_tags["premium_velocity"] = round(prem_vel, 2)
+    # Violent Option Premium Bleed Veto:
+    if prem_vel <= -10.0:
+        logger.info(
+            f"[IndexPutSetup] Suppressed PE setup on {clean_sym}: Option premium bleeding rapidly "
+            f"(premium velocity {prem_vel:.1f} pts/min <= -10.0). Prohibiting put entry during short covering."
+        )
+        return []
     if prem_vel >= 25.0:
         confidence += 5
     elif prem_vel >= 10.0:
@@ -1852,7 +2092,9 @@ def detect_index_put_setup(
     # Narrow CPR Breakdown Confluence Boost
     if is_narrow_cpr and (
         "DAY_LOW_BREAKDOWN" in signals
+        or "DAY_LOW_PROXIMITY" in signals
         or "CAMARILLA_L4_BREAKDOWN" in signals
+        or "CAMARILLA_L4_PROXIMITY" in signals
         or is_institutional_thrust
     ):
         confidence += 6
@@ -1860,11 +2102,20 @@ def detect_index_put_setup(
     confidence = min(98, confidence)
 
     # Single-signal unconfirmed guard: if only 1 signal and without explosive momentum, cap at 72%
-    if len(signals) == 1 and not is_explosive_momentum:
+    # (Exempt PRIMED proximity surveillance setups which require >= 85 confidence for advance heads-up dispatch)
+    if (
+        len(signals) == 1
+        and not is_explosive_momentum
+        and "CAMARILLA_L4_PROXIMITY" not in signals
+        and "DAY_LOW_PROXIMITY" not in signals
+    ):
         confidence = min(72, confidence)
 
-    # Determine stage: IGNITED if premium is already expanding strongly, else EARLY_WARNING
-    if is_institutional_thrust:
+    # Determine stage:
+    if any(s in signals for s in ("CAMARILLA_L4_PROXIMITY", "DAY_LOW_PROXIMITY")):
+        stage = "PRIMED"
+        confidence = max(85, confidence)
+    elif is_institutional_thrust:
         stage = "IGNITED"
     else:
         stage = "IGNITED" if (pchange >= 8.0 or vol_oi_ratio >= 1.5) else "EARLY_WARNING"
@@ -1920,13 +2171,13 @@ def detect_index_put_setup(
     }.get(clean_sym, 35.0)
 
     min_intraday_opt_risk = {
-        "NIFTY": 10.5,
-        "BANKNIFTY": 28.0,
-        "FINNIFTY": 12.5,
-        "MIDCPNIFTY": 8.0,
-        "SENSEX": 38.0,
-        "BANKEX": 38.0,
-    }.get(clean_sym, 10.0)
+        "NIFTY": 15.0,
+        "BANKNIFTY": 35.0,
+        "FINNIFTY": 20.0,
+        "MIDCPNIFTY": 12.0,
+        "SENSEX": 45.0,
+        "BANKEX": 45.0,
+    }.get(clean_sym, 15.0)
 
     if opt_ltp > 0:
         calc_risk = max(1.0, opt_ltp - sl_premium)
@@ -1940,9 +2191,13 @@ def detect_index_put_setup(
             rr_str = "1:2.0"
             net_rr_str = "1:2.0"
         else:
-            # Enforce minimum stop-loss distance floor (10.5 pts for Nifty, 28 pts BankNifty, etc.)
-            # Bounded by 35% of premium to avoid over-risking on cheap OTM contracts
-            effective_min_risk = min(opt_ltp * 0.35, min_intraday_opt_risk)
+            # Enforce minimum stop-loss distance floor (15 pts Nifty, 35 pts BankNifty, 45 pts Sensex)
+            # Bounded by 35% of premium to avoid over-risking on cheap OTM contracts (< 80)
+            effective_min_risk = (
+                min(opt_ltp * 0.35, min_intraday_opt_risk)
+                if opt_ltp < 80.0
+                else min_intraday_opt_risk
+            )
             if calc_risk < effective_min_risk:
                 calc_risk = effective_min_risk
                 sl_premium = round(max(0.5, opt_ltp - calc_risk), 1)
@@ -2000,7 +2255,25 @@ def detect_index_put_setup(
     icon = _SETUP_ICONS.get(primary_signal, "🔴")
     signal_label = primary_signal.replace("_", " ")
 
-    if "INSTITUTIONAL_EXPANSION_BREAKDOWN" in signals:
+    if "CAMARILLA_L4_PROXIMITY" in signals and stage == "PRIMED":
+        l4_info = signal_tags.get("camarilla_l4_proximity", {})
+        headline = (
+            f"⚡ [PRIMED PROXIMITY] CAMARILLA L4 BREAKDOWN WATCH: {clean_sym} {int(strike)} PE"
+        )
+        summary = (
+            f"Pre-Breakdown Proximity Watch: Spot (₹{spot:,.1f}) approaching Camarilla L4 (₹{l4_info.get('cam_l4', 0):,.1f}, "
+            f"{l4_info.get('proximity_pct', 0.2):.2f}% above). Stage contract now in broker watchlist to capture immediate momentum on breakdown. "
+            f"Entry Trigger: Spot ₹{l4_info.get('cam_l4', 0):,.1f} (Est. Prem ₹{opt_ltp:,.1f}) | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "DAY_LOW_PROXIMITY" in signals and stage == "PRIMED":
+        dl_info = signal_tags.get("day_low_proximity", {})
+        headline = f"⚡ [PRIMED PROXIMITY] DAY LOW BREAKDOWN WATCH: {clean_sym} {int(strike)} PE"
+        summary = (
+            f"Pre-Breakdown Proximity Watch: Spot (₹{spot:,.1f}) approaching Session Low (₹{dl_info.get('day_low', 0):,.1f}, "
+            f"{dl_info.get('proximity_pct', 0.2):.2f}% above). Stage contract now in broker watchlist to capture immediate momentum on breakdown. "
+            f"Entry Trigger: Spot ₹{dl_info.get('day_low', 0):,.1f} (Est. Prem ₹{opt_ltp:,.1f}) | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "INSTITUTIONAL_EXPANSION_BREAKDOWN" in signals:
         ieb = signal_tags.get("institutional_expansion_breakdown", {})
         headline = f"📉 INSTITUTIONAL EXPANSION BREAKDOWN: {clean_sym} {int(strike)} PE"
         summary = (
@@ -2515,6 +2788,11 @@ def detect_index_put_setup(
         )
     )
 
+    primed_sl_limit_trigger = round(opt_ltp * 1.025, 1) if opt_ltp > 0 else 0.0
+    primed_sl_limit_price = (
+        round(primed_sl_limit_trigger * 1.015, 1) if primed_sl_limit_trigger > 0 else 0.0
+    )
+
     if any(
         s in signals
         for s in (
@@ -2532,6 +2810,24 @@ def detect_index_put_setup(
         exec_notes_str = (
             f"Supply Rejection Execution: Enter on limit or rejection in OTE zone ({entry_range_str}). "
             f"Invalidation stop anchored at ₹{sl_premium:,.1f}."
+        )
+    elif "CAMARILLA_L4_PROXIMITY" in signals:
+        l4_lvl = signal_tags.get("camarilla_l4_proximity", {}).get("cam_l4", spot)
+        exec_trigger_str = f"BUY_PE_ON_CAMARILLA_L4_BREACH_₹{l4_lvl:,.1f}"
+        conf_rule_str = "BREACH_OR_1M_CLOSE_BELOW_L4"
+        exec_notes_str = (
+            f"⚡ Pre-Breakdown Proximity: Stage contract in broker terminal now. "
+            f"Place pending BUY SL-LIMIT (Trigger: ₹{primed_sl_limit_trigger:,.1f}, Limit: ₹{primed_sl_limit_price:,.1f}) "
+            f"or execute when spot crosses below Camarilla L4 (₹{l4_lvl:,.1f}). Invalidation stop anchored at ₹{sl_premium:,.1f}."
+        )
+    elif "DAY_LOW_PROXIMITY" in signals:
+        dl_lvl = signal_tags.get("day_low_proximity", {}).get("day_low", spot)
+        exec_trigger_str = f"BUY_PE_ON_DAY_LOW_BREACH_₹{dl_lvl:,.1f}"
+        conf_rule_str = "BREACH_OR_1M_CLOSE_BELOW_DAY_LOW"
+        exec_notes_str = (
+            f"⚡ Pre-Breakdown Proximity: Stage contract in broker terminal now. "
+            f"Place pending BUY SL-LIMIT (Trigger: ₹{primed_sl_limit_trigger:,.1f}, Limit: ₹{primed_sl_limit_price:,.1f}) "
+            f"or execute when spot crosses below Session Low (₹{dl_lvl:,.1f}). Invalidation stop anchored at ₹{sl_premium:,.1f}."
         )
     elif is_breakdown_type:
         exec_trigger_str = f"ABOVE_₹{opt_ltp:,.1f}_ON_1M_CLOSE" if opt_ltp else "ON_BREAKDOWN_CLOSE"
@@ -2677,8 +2973,15 @@ def detect_index_put_setup(
             )
             if hedge_plan
             else ("DEEP_ITM_OR_SPREAD" if is_high_iv_risk else "NAKED_OPTION"),
+            "broker_order_type": "BUY SL-LIMIT" if stage == "PRIMED" else "LIMIT_OR_MARKET",
+            "sl_limit_trigger": f"₹{primed_sl_limit_trigger:,.1f}"
+            if (stage == "PRIMED" and primed_sl_limit_trigger > 0)
+            else None,
+            "sl_limit_price": f"₹{primed_sl_limit_price:,.1f}"
+            if (stage == "PRIMED" and primed_sl_limit_price > 0)
+            else None,
             "iv_crush_defense": (
-                f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65), Bear Put Vertical Spreads, or Futures."
+                f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65) or Bear Put Vertical Spreads (Zero Futures Intraday Rule)."
                 if is_high_iv_risk
                 else None
             ),

@@ -192,7 +192,7 @@ export default function BrokerPanel({ onClose }) {
                   }`} />
                   <span className={`text-[13px] font-semibold font-ui ${broker.color}`}>{broker.name}</span>
                   {status.authenticated && status.role && status.role !== 'both' && (
-                    <span className={`text-[9px] font-ui font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
+                    <span className={`text-[11px] font-ui font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
                       status.role === 'data'
                         ? 'bg-blue/15 text-blue'
                         : 'bg-amber/15 text-amber'

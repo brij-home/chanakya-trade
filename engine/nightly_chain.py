@@ -151,6 +151,25 @@ def run_nightly_post_market_chain(
     except Exception as exc:
         logger.error("[NightlyChain] Stage 3 (drift check) failed: %s", exc)
 
+    # ── Stage 3b: Historical Parquet Warehouse EOD & Intraday Ingestion ──
+    try:
+        from engine.historical_warehouse import historical_warehouse
+        from brokers.session import get_data_broker
+
+        broker = get_data_broker()
+        if broker and not getattr(broker, "_is_mock", False):
+            sync_targets = ["NIFTY", "BANKNIFTY"]
+            synced_stats = historical_warehouse.sync_universe(
+                sync_targets, interval="5minute", days=3, max_workers=2
+            )
+            result["stage3b_warehouse_sync"] = synced_stats
+            logger.info(
+                "[NightlyChain] Stage 3b complete — synced %d symbols to parquet warehouse",
+                len(synced_stats),
+            )
+    except Exception as exc:
+        logger.debug("[NightlyChain] Stage 3b (warehouse sync) non-fatal exception: %s", exc)
+
     result["status"] = "COMPLETED"
 
     # ── Stage 4: Telegram summary (best-effort) ────────────────────────────

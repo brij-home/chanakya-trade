@@ -17,6 +17,7 @@ NO_FRONTEND=0
 API_PORT=8765
 VITE_PORT=5173
 SKIP_PREFLIGHT=0
+DETACHED=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -32,12 +33,24 @@ while [[ $# -gt 0 ]]; do
       SKIP_PREFLIGHT=1
       shift
       ;;
+    --detached)
+      DETACHED=1
+      shift
+      ;;
     *)
       echo "Unknown option: $1"
       exit 1
       ;;
   esac
 done
+
+if [[ ${DETACHED} -eq 1 ]]; then
+    EXTRA_FLAGS=""
+    if [[ ${NO_FRONTEND} -eq 1 ]]; then
+        EXTRA_FLAGS="--no-frontend"
+    fi
+    exec "${SCRIPT_DIR}/service.sh" restart ${EXTRA_FLAGS} --port "${API_PORT}" --vite-port "${VITE_PORT}"
+fi
 
 echo ""
 echo -e "\033[1;36m==================================================================\033[0m"

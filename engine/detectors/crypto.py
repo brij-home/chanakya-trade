@@ -454,7 +454,21 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                 else float(df["volume"].mean())
             )
             cur_vol = float(df["volume"].iloc[-1])
-            rvol = round(cur_vol / max(v20, 1.0), 2)
+            bar_elapsed_sec = 900.0
+            if hasattr(df.index, "dtype") and len(df) >= 1:
+                try:
+                    last_ts = df.index[-1]
+                    if hasattr(last_ts, "timestamp"):
+                        import time
+
+                        now_ts = time.time()
+                        diff_sec = now_ts - last_ts.timestamp()
+                        if 0 < diff_sec < 900.0:
+                            bar_elapsed_sec = max(60.0, diff_sec)
+                except Exception:
+                    bar_elapsed_sec = 900.0
+            cur_vol_proj = cur_vol * (900.0 / bar_elapsed_sec)
+            rvol = round(cur_vol_proj / max(v20, 1.0), 2)
             ema20 = float(df["close"].ewm(span=20, adjust=False).mean().iloc[-1])
 
             # Institutional Order Flow & CVD Divergence Check
@@ -979,7 +993,21 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
             if vols is not None and len(vols) >= 20:
                 avg_v = float(vols.iloc[-21:-1].mean())
                 cur_v = float(last_bar.get("volume", 0.0) or 0.0)
-                rvol = round(cur_v / max(1.0, avg_v), 2) if avg_v > 0 else 1.0
+                bar_elapsed_sec = 900.0
+                if hasattr(df.index, "dtype") and len(df) >= 1:
+                    try:
+                        last_ts = df.index[-1]
+                        if hasattr(last_ts, "timestamp"):
+                            import time
+
+                            now_ts = time.time()
+                            diff_sec = now_ts - last_ts.timestamp()
+                            if 0 < diff_sec < 900.0:
+                                bar_elapsed_sec = max(60.0, diff_sec)
+                    except Exception:
+                        bar_elapsed_sec = 900.0
+                cur_v_proj = cur_v * (900.0 / bar_elapsed_sec)
+                rvol = round(cur_v_proj / max(1.0, avg_v), 2) if avg_v > 0 else 1.0
 
             ema20 = float(df["close"].ewm(span=20, adjust=False).mean().iloc[-1])
             is_breakout_long = (

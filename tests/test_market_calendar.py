@@ -334,3 +334,64 @@ def test_get_trading_days_elapsed():
     assert (
         get_trading_days_elapsed(date(2026, 9, 15), date(2026, 9, 11)) == 0
     )  # start > target -> 0
+
+
+def test_sebi_single_weekly_expiry_mandate():
+    """
+    Verify that under SEBI Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136:
+    - NSE: Only NIFTY 50 has weekly options (Thursday).
+    - BSE: Only SENSEX has weekly options (Friday).
+    - BANKEX, BANKNIFTY, MIDCPNIFTY, FINNIFTY, and Equities offer strictly monthly contracts.
+    """
+    from market.calendar import (
+        get_nearest_weekly_expiry,
+        get_nearest_monthly_expiry,
+        get_active_derivative_expiry,
+    )
+    from engine.alert_expiry import classify_expiry_type
+
+    # Reference date: Monday 2026-09-07
+    ref_d = date(2026, 9, 7)
+
+    # NIFTY resolves to upcoming Thursday (2026-09-10)
+    nifty_exp = get_nearest_weekly_expiry("NIFTY", ref_date=ref_d)
+    assert nifty_exp.weekday() == 3  # Thursday
+    assert (nifty_exp - ref_d).days <= 7
+    assert classify_expiry_type(str(nifty_exp), symbol="NIFTY") == "WEEKLY"
+
+    # SENSEX resolves to upcoming Friday (2026-09-11)
+    sensex_exp = get_nearest_weekly_expiry("SENSEX", ref_date=ref_d)
+    assert sensex_exp.weekday() == 4  # Friday
+    assert (sensex_exp - ref_d).days <= 7
+    assert classify_expiry_type(str(sensex_exp), symbol="SENSEX") == "WEEKLY"
+
+    # BANKEX (BSE) must NOT resolve to this week's Friday! It must resolve to monthly expiry (last Friday of September 2026)
+    bankex_exp = get_nearest_weekly_expiry("BANKEX", ref_date=ref_d)
+    monthly_bankex = get_nearest_monthly_expiry("BANKEX", ref_date=ref_d)
+    assert bankex_exp == monthly_bankex
+    assert bankex_exp.day > 20  # Last Friday of the month
+    assert classify_expiry_type(str(bankex_exp), symbol="BANKEX") == "MONTHLY"
+
+    # BANKNIFTY (NSE) must resolve to monthly expiry (last Thursday of September 2026)
+    banknifty_exp = get_nearest_weekly_expiry("BANKNIFTY", ref_date=ref_d)
+    monthly_bn = get_nearest_monthly_expiry("BANKNIFTY", ref_date=ref_d)
+    assert banknifty_exp == monthly_bn
+    assert banknifty_exp.day > 20
+    assert classify_expiry_type(str(banknifty_exp), symbol="BANKNIFTY") == "MONTHLY"
+
+    # MIDCPNIFTY must resolve to monthly expiry
+    midcp_exp = get_nearest_weekly_expiry("MIDCPNIFTY", ref_date=ref_d)
+    monthly_midcp = get_nearest_monthly_expiry("MIDCPNIFTY", ref_date=ref_d)
+    assert midcp_exp == monthly_midcp
+    assert classify_expiry_type(str(midcp_exp), symbol="MIDCPNIFTY") == "MONTHLY"
+
+    # FINNIFTY must resolve to monthly expiry
+    fin_exp = get_nearest_weekly_expiry("FINNIFTY", ref_date=ref_d)
+    monthly_fin = get_nearest_monthly_expiry("FINNIFTY", ref_date=ref_d)
+    assert fin_exp == monthly_fin
+    assert classify_expiry_type(str(fin_exp), symbol="FINNIFTY") == "MONTHLY"
+
+    # Single stock equity option (RELIANCE) must resolve to monthly expiry
+    rel_exp = get_active_derivative_expiry("RELIANCE", is_future=False, ref_date=ref_d)
+    assert rel_exp == get_nearest_monthly_expiry("RELIANCE", ref_date=ref_d)
+    assert classify_expiry_type(str(rel_exp), symbol="RELIANCE") == "MONTHLY"

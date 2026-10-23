@@ -261,7 +261,7 @@ export default function RRGCard({ data }) {
           </span>
 
           {/* Center Benchmark Crosshair Badge */}
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 px-2 py-0.5 rounded-full bg-elevated/90 border border-border/80 text-[9px] font-mono text-muted shadow-xs z-10">
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 px-2 py-0.5 rounded-full bg-elevated/90 border border-border/80 text-[11px] font-mono text-muted shadow-xs z-10">
             NIFTY 50 (100, 100)
           </div>
 
@@ -324,7 +324,7 @@ export default function RRGCard({ data }) {
                 }`}>
                   <span className="text-xs">{qCfg.icon}</span>
                   <span className="text-[10px] font-bold font-mono">{sec.sector}</span>
-                  <span className={`text-[9px] font-mono ${isHovered ? 'text-black' : qCfg.text}`}>
+                  <span className={`text-[11px] font-mono ${isHovered ? 'text-black' : qCfg.text}`}>
                     {Number(sec.rs_ratio).toFixed(0)}
                   </span>
                 </div>

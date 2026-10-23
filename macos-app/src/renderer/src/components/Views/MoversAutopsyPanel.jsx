@@ -704,7 +704,7 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
                           <span className={`px-2 py-0.5 text-[10px] font-black rounded border ${badgeColor}`}>
                             {setupTitle}
                           </span>
-                          <span className={`px-1.5 py-0.5 text-[9px] font-black rounded ${
+                          <span className={`px-1.5 py-0.5 text-[11px] font-black rounded ${
                             isShort ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' :
                             isCondor ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' :
                             'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'

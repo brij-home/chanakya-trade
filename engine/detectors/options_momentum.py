@@ -266,21 +266,23 @@ def detect_options_momentum_breakouts(
                     )
                     from market.options import get_expiries
 
-                    available_exps = get_expiries(clean_sym)
-                    exp_res = resolve_recommended_derivative_expiry(
-                        symbol=clean_sym,
-                        instrument_type="OPTION",
-                        available_expiries=available_exps,
-                        ref_dt=now_dt,
-                    )
-                    if exp_res.get("is_next_month_routed"):
-                        next_exp_str = exp_res.get("recommended_expiry")
-                        next_chain = get_options_chain(clean_sym, expiry=next_exp_str)
-                        if next_chain and any(
-                            float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in next_chain
-                        ):
-                            chain = next_chain
-                            is_next_month_routed = True
+                    # Zero-API calendar gate: only query expiries during actual physical expiry week
+                    if is_monthly_physical_expiry_week(ref_dt=now_dt):
+                        available_exps = get_expiries(clean_sym)
+                        exp_res = resolve_recommended_derivative_expiry(
+                            symbol=clean_sym,
+                            instrument_type="OPTION",
+                            available_expiries=available_exps,
+                            ref_dt=now_dt,
+                        )
+                        if exp_res.get("is_next_month_routed"):
+                            next_exp_str = exp_res.get("recommended_expiry")
+                            next_chain = get_options_chain(clean_sym, expiry=next_exp_str)
+                            if next_chain and any(
+                                float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in next_chain
+                            ):
+                                chain = next_chain
+                                is_next_month_routed = True
                 except Exception as e_exp:
                     logger.debug(
                         f"[OptionsBreakout] Next-month rollover check failed for {clean_sym}: {e_exp}"
@@ -1423,6 +1425,32 @@ def detect_options_momentum_breakouts(
             return None
 
     if active_targets:
+        # Institutional Top-N Prioritization:
+        # Retain all index targets, and prioritize top 8 highest-momentum single-stocks
+        # using in-RAM quote metrics (opening drive, day high/low proximity, abs % change).
+        # This prevents fan-out across 40+ stocks, dropping REST API hits by 80%.
+        if not is_test_env and len(active_targets) > 10:
+            idx_targets = [t for t in active_targets if t.get("is_idx")]
+            stock_targets = [t for t in active_targets if not t.get("is_idx")]
+
+            def _pre_rank(t):
+                score = 0.0
+                if t.get("is_bear_drive") or t.get("is_bull_drive"):
+                    score += 20.0
+                score += abs(t.get("spot_change_pct", 0.0)) * 3.0
+                s = t.get("spot", 0.0)
+                if s > 0:
+                    hi = t.get("spot_high", 0.0)
+                    lo = t.get("spot_low", 0.0)
+                    if hi > 0 and abs(s - hi) / hi <= 0.003:
+                        score += 15.0  # At or breaking Day High
+                    elif lo > 0 and abs(s - lo) / lo <= 0.003:
+                        score += 15.0  # At or breaking Day Low
+                return score
+
+            stock_targets.sort(key=_pre_rank, reverse=True)
+            active_targets = idx_targets + stock_targets[:8]
+
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(
@@ -1454,17 +1482,25 @@ def detect_options_momentum_breakouts(
             ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
         )
         _opt_pacing_limit = int(os.environ.get("OPTIONS_MOMENTUM_STOCK_PACING", "0"))
+        is_apex = bool(
+            (alert.metrics or {}).get("is_apex_confluence")
+            or getattr(alert, "confidence", 0) >= 90
+            or ((alert.metrics or {}).get("conviction_tier") == "APEX_CONFLUENCE")
+        )
+        effective_limit = (
+            (_opt_pacing_limit + 1) if (is_apex and _opt_pacing_limit > 0) else _opt_pacing_limit
+        )
         if (
-            _opt_pacing_limit > 0
+            effective_limit > 0
             and is_stock
-            and (recent_options_count + len(found)) >= _opt_pacing_limit
+            and (recent_options_count + len(found)) >= effective_limit
         ):
             if (
                 alert.confidence < 88
                 and alert.metrics.get("decoupler_status") != "VERIFIED_DECOUPLER"
             ):
                 logger.debug(
-                    f"[OptionsBreakout] Paced options alert {alert.symbol}: Rolling 5m limit reached (score {q_score:.1f}, conf {alert.confidence})"
+                    f"[OptionsBreakout] Paced options alert {alert.symbol}: Rolling 5m limit reached (score {q_score:.1f}, conf {alert.confidence}, limit {effective_limit})"
                 )
                 continue
 

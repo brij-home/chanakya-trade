@@ -227,6 +227,7 @@ class MarketMatrix:
         self._latest_ticks: dict[str, dict[str, Any]] = {}
         self.candle_weaver = LiveCandleWeaver(max_bars=500)
         self._registered_aliases: dict[str, str] = {}
+        self._jit_scout_cooldown: dict[str, float] = {}
 
     def _get_or_create_buffer_locked(self, sym: str) -> RollingTickBuffer:
         if sym not in self._buffers:
@@ -282,6 +283,20 @@ class MarketMatrix:
         # Feed to candle weaver
         self.candle_weaver.on_tick(symbol=clean, ltp=ltp, day_volume=volume, tick_ts=ts)
 
+        # Step 1: Automatic JIT TBT Promotion when approaching native ATP/VWAP inflection zone
+        if atp > 0 and abs(ltp - atp) / atp <= 0.0025:
+            now_t = time.time()
+            if (now_t - self._jit_scout_cooldown.get(clean, 0.0)) >= 60.0:
+                self._jit_scout_cooldown[clean] = now_t
+                try:
+                    from market.fyers_tbt_manager import promote_jit_tbt_scout
+
+                    promote_jit_tbt_scout(
+                        raw_symbol or clean, duration_sec=60.0, reason="ATP_TEST_PROXIMITY"
+                    )
+                except Exception as e_suppressed:
+                    logger.debug(f"[MarketMatrix] JIT TBT promotion pass: {e_suppressed}")
+
     def get_quant_stats(self, symbol: str) -> dict[str, Any]:
         """
         Return instantaneous quant statistics in O(1).
@@ -291,12 +306,23 @@ class MarketMatrix:
             buf = self._buffers.get(clean)
             latest = self._latest_ticks.get(clean, {})
 
+        atp_val = float(latest.get("atp", 0.0) or 0.0)
+        ltp_val = float(latest.get("ltp", 0.0) or 0.0)
+
         if not buf:
             return {
                 "symbol": clean,
                 "count": 0,
-                "last_price": latest.get("ltp", 0.0),
-                "vwap": latest.get("atp", 0.0),
+                "last_price": ltp_val,
+                "vwap": atp_val,
+                "atp": atp_val,
+                "session_vwap": atp_val,
+                "atp_distance_pct": round(((ltp_val - atp_val) / atp_val) * 100.0, 3)
+                if atp_val > 0
+                else 0.0,
+                "atp_posture": "ABOVE_ATP"
+                if ltp_val >= atp_val > 0
+                else ("BELOW_ATP" if atp_val > 0 else "UNKNOWN"),
                 "mean": 0.0,
                 "std": 0.0,
                 "min": 0.0,
@@ -306,10 +332,37 @@ class MarketMatrix:
 
         stats = buf.get_snapshot()
         stats["symbol"] = clean
+        stats["atp"] = atp_val
+        stats["session_vwap"] = atp_val if atp_val > 0 else stats.get("vwap", 0.0)
+        stats["atp_distance_pct"] = (
+            round(((stats["last_price"] - atp_val) / atp_val) * 100.0, 3) if atp_val > 0 else 0.0
+        )
+        stats["atp_posture"] = (
+            "ABOVE_ATP"
+            if stats["last_price"] >= atp_val > 0
+            else ("BELOW_ATP" if atp_val > 0 else "UNKNOWN")
+        )
+
         # If exchange provides explicit ATP, incorporate when tick buffer volume is nascent
-        if latest.get("atp") and latest["atp"] > 0 and (stats["vwap"] == 0 or stats["count"] < 10):
-            stats["vwap"] = latest["atp"]
+        if atp_val > 0 and (stats["vwap"] == 0 or stats["count"] < 10):
+            stats["vwap"] = atp_val
         return stats
+
+    def get_atp(self, symbol: str) -> Optional[float]:
+        """Returns instantaneous exchange-computed session Average Traded Price (ATP) or None."""
+        clean = canonical_alert_symbol(symbol)
+        with self._lock:
+            latest = self._latest_ticks.get(clean)
+            if latest and latest.get("atp", 0.0) > 0:
+                return float(latest["atp"])
+        return None
+
+    def get_session_vwap(self, symbol: str) -> Optional[float]:
+        """Returns best available session VWAP (native exchange ATP prioritized over rolling buffer)."""
+        atp = self.get_atp(symbol)
+        if atp is not None and atp > 0:
+            return atp
+        return self.get_vwap(symbol)
 
     def get_vwap(self, symbol: str) -> Optional[float]:
         """

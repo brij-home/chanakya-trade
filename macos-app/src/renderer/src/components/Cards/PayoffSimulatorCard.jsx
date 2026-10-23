@@ -743,7 +743,7 @@ function PayoffSVG({ expiryData = [], targetData = [], spotPrice, breakevens = [
           className="absolute -translate-x-1/2 bg-elevated/95 border border-border/80 backdrop-blur-md px-3 py-1.5 rounded-xl shadow-xl font-mono text-[11px] pointer-events-none z-30 flex items-center gap-3 animate-in fade-in"
         >
           <div>
-            <span className="text-muted block text-[9px]">UNDERLYING SPOT</span>
+            <span className="text-muted block text-[11px]">UNDERLYING SPOT</span>
             <span className="font-bold text-text">
               ₹{hoveredPoint.spot.toLocaleString('en-IN')}{' '}
               <span className={`text-[10px] ${hoveredPoint.pctDiff >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
@@ -753,13 +753,13 @@ function PayoffSVG({ expiryData = [], targetData = [], spotPrice, breakevens = [
             </span>
           </div>
           <div className="border-l border-border/50 pl-2.5">
-            <span className="text-muted block text-[9px]">EXPIRY P&L</span>
+            <span className="text-muted block text-[11px]">EXPIRY P&L</span>
             <span className={`font-bold ${hoveredPoint.expPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
               {hoveredPoint.expPnl >= 0 ? '+' : ''}₹{Math.round(hoveredPoint.expPnl).toLocaleString('en-IN')}
             </span>
           </div>
           <div className="border-l border-border/50 pl-2.5">
-            <span className="text-muted block text-[9px]">T+TARGET P&L</span>
+            <span className="text-muted block text-[11px]">T+TARGET P&L</span>
             <span className={`font-bold ${hoveredPoint.tgtPnl >= 0 ? 'text-cyan-400' : 'text-rose-400'}`}>
               {hoveredPoint.tgtPnl >= 0 ? '+' : ''}₹{Math.round(hoveredPoint.tgtPnl).toLocaleString('en-IN')}
             </span>

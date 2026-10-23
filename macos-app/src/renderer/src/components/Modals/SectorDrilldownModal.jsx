@@ -335,7 +335,7 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                   📡 Relative Rotation Graph — JdK RS-Ratio × RS-Momentum
                 </div>
                 <div
-                  className="text-[9px] px-2 py-0.5 rounded font-bold"
+                  className="text-[11px] px-2 py-0.5 rounded font-bold"
                   style={{ background: `rgba(${rrg.quadrant === 'LEADING' ? '0,214,143' : rrg.quadrant === 'IMPROVING' ? '77,155,255' : rrg.quadrant === 'WEAKENING' ? '245,166,35' : '255,79,123'},0.15)`, color: `${rrg.quadrant === 'LEADING' ? 'var(--color-emerald)' : rrg.quadrant === 'IMPROVING' ? 'var(--color-sapphire)' : rrg.quadrant === 'WEAKENING' ? 'var(--color-gold)' : 'var(--color-rose)'}` }}
                 >
                   {quadCfg.icon} {quadCfg.label}
@@ -425,11 +425,11 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                     >
                       <span className="text-sm">{icon}</span>
                       <div>
-                        <span className="text-[9px] font-extrabold uppercase block" style={{ color }}>{q}</span>
-                        <span className="text-[8px]" style={{ color: 'var(--color-muted)' }}>{desc}</span>
+                        <span className="text-[11px] font-extrabold uppercase block" style={{ color }}>{q}</span>
+                        <span className="text-[10px]" style={{ color: 'var(--color-muted)' }}>{desc}</span>
                       </div>
                       {rrg.quadrant === q && (
-                        <span className="ml-auto text-[8px] font-bold" style={{ color }}>← NOW</span>
+                        <span className="ml-auto text-[10px] font-bold" style={{ color }}>← NOW</span>
                       )}
                     </div>
                   ))}
@@ -484,11 +484,11 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                             ₹{Number(displayLtp || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                           </span>
                           {livePrice ? (
-                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-green/15 text-green border border-green/30 font-bold font-mono">
+                            <span className="text-[11px] px-1.5 py-0.2 rounded bg-green/15 text-green border border-green/30 font-bold font-mono">
                               LIVE
                             </span>
                           ) : (
-                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-elevated text-muted border border-border/60 font-mono">
+                            <span className="text-[11px] px-1.5 py-0.2 rounded bg-elevated text-muted border border-border/60 font-mono">
                               EOD
                             </span>
                           )}
@@ -532,21 +532,21 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                   {/* Contributing Factors Key Value Tags */}
                   <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
                     <div className="bg-elevated/70 border border-border/40 px-2.5 py-1.5 rounded-lg flex flex-col justify-center">
-                      <span className="text-[9px] text-muted uppercase font-ui">Weinstein Stage</span>
+                      <span className="text-[11px] text-muted uppercase font-ui">Weinstein Stage</span>
                       <span className="font-bold text-text text-[11px] truncate">💎 {cf.stage || opp.weinstein_stage}</span>
                     </div>
                     <div className="bg-elevated/70 border border-border/40 px-2.5 py-1.5 rounded-lg flex flex-col justify-center">
-                      <span className="text-[9px] text-muted uppercase font-ui">Minervini Trend</span>
+                      <span className="text-[11px] text-muted uppercase font-ui">Minervini Trend</span>
                       <span className="font-bold text-text text-[11px]">📊 {cf.trend_template || `${opp.trend_template_passed}/8 Passed`}</span>
                     </div>
                     <div className="bg-elevated/70 border border-border/40 px-2.5 py-1.5 rounded-lg flex flex-col justify-center">
-                      <span className="text-[9px] text-muted uppercase font-ui">Relative Volume</span>
+                      <span className="text-[11px] text-muted uppercase font-ui">Relative Volume</span>
                       <span className={`font-bold text-[11px] ${Number(opp.rvol_20d) >= 1.5 ? 'text-green' : 'text-amber'}`}>
                         ⚡ {cf.rvol || `${Number(opp.rvol_20d || 1.0).toFixed(1)}x RVOL`}
                       </span>
                     </div>
                     <div className="bg-elevated/70 border border-border/40 px-2.5 py-1.5 rounded-lg flex flex-col justify-center">
-                      <span className="text-[9px] text-muted uppercase font-ui">Forensic Safety</span>
+                      <span className="text-[11px] text-muted uppercase font-ui">Forensic Safety</span>
                       <span className="font-bold text-text text-[11px]">🛡️ {cf.forensic_grade ?? (opp.forensic_quality ? `Grade ${opp.forensic_quality}` : '—')}</span>
                     </div>
                   </div>

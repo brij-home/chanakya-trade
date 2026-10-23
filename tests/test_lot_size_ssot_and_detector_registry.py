@@ -80,8 +80,32 @@ def test_get_fno_lot_size_helper():
     assert get_fno_lot_size("NON_FNO_STOCK_XYZ") == 1
 
 
+def test_is_derivative_eligible_and_options_fast_exit():
+    """Verify is_derivative_eligible correctly identifies F&O contracts and protects against non-F&O web scrapes."""
+    from market.instruments import is_derivative_eligible
+    from market.options import get_options_chain
+
+    # F&O equities & indices & commodities
+    assert is_derivative_eligible("NIFTY") is True
+    assert is_derivative_eligible("NSE:BANKNIFTY") is True
+    assert is_derivative_eligible("RELIANCE") is True
+    assert is_derivative_eligible("NSE:TCS") is True
+    assert is_derivative_eligible("MCX:CRUDEOIL") is True
+    assert is_derivative_eligible("GOLD") is True
+    assert is_derivative_eligible("SENSEX") is True
+
+    # Cash-only equities
+    assert is_derivative_eligible("NON_FNO_STOCK_XYZ") is False
+    assert is_derivative_eligible("ZOMATO") is False
+    assert is_derivative_eligible("") is False
+
+    # Fast-exit verification: non-derivative stock returns [] instantly without calling broker or NSE scraper
+    assert get_options_chain("NON_FNO_STOCK_XYZ") == []
+
+
 def test_canonical_instrument_cash_vs_derivative_distinction():
     """Verify cash equity maintains 1-share lot size while derivatives resolve contract size."""
+
     # Cash equity
     eq = resolve_canonical_instrument("RELIANCE")
     assert eq.lot_size == 1

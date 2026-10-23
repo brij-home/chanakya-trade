@@ -3,6 +3,47 @@ import { createChart, ColorType, CandlestickSeries, HistogramSeries, LineSeries 
 import { useAPI } from '../../hooks/useAPI'
 import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 
+// Timezone formatters for Indian Exchange Sessions (Asia/Kolkata)
+const formatCrosshairTime = (time) => {
+  if (typeof time === 'number') {
+    const d = new Date(time * 1000)
+    return d.toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+  }
+  if (typeof time === 'object' && time !== null) {
+    return `${time.year}-${String(time.month).padStart(2, '0')}-${String(time.day).padStart(2, '0')}`
+  }
+  return String(time)
+}
+
+const formatAxisTickMark = (time, tickMarkType) => {
+  if (typeof time === 'number') {
+    const d = new Date(time * 1000)
+    // TickMarkType >= 3 indicates intraday time tick mark
+    if (tickMarkType >= 3) {
+      return d.toLocaleTimeString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      })
+    }
+    // Day of month / date boundary tick
+    return d.toLocaleDateString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      day: '2-digit',
+      month: 'short',
+    })
+  }
+  return null
+}
+
 function CandlestickChartComponent({
   symbol = 'NIFTY',
   exchange = 'NSE',
@@ -114,9 +155,9 @@ function CandlestickChartComponent({
       const volStr = vol >= 1e7 ? `${(vol / 1e7).toFixed(2)}Cr` : vol >= 1e5 ? `${(vol / 1e5).toFixed(2)}L` : vol >= 1e3 ? `${(vol / 1e3).toFixed(1)}k` : vol.toString()
       const rvolStr = bar.rvol ? ` (${bar.rvol}x)` : ''
       const instTag = bar.is_inst_buy
-        ? '<span class="ml-2 px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/40 text-[9px] font-bold">🟢 Inst Buy</span>'
+        ? '<span class="ml-2 px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/40 text-[11px] font-bold">🟢 Inst Buy</span>'
         : bar.is_inst_sell
-        ? '<span class="ml-2 px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/40 text-[9px] font-bold">🔴 Inst Sell</span>'
+        ? '<span class="ml-2 px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/40 text-[11px] font-bold">🔴 Inst Sell</span>'
         : ''
 
       ohlcTextRef.current.innerHTML = `
@@ -139,12 +180,13 @@ function CandlestickChartComponent({
 
     const fetchCandles = async () => {
       try {
-        let days = 250
-        if (interval === '5m') days = 15
-        else if (interval === '15m') days = 30
-        else if (interval === '1h' || interval === '60m') days = 90
-        else if (interval === 'day' || interval === '1D') days = 365
-        else if (interval === 'week' || interval === '1W' || interval === '1wk') days = 1200
+        let days = 365
+        if (interval === '1m' || interval === 'minute') days = 7
+        else if (interval === '5m') days = 30
+        else if (interval === '15m') days = 60
+        else if (interval === '1h' || interval === '60m') days = 180
+        else if (interval === 'day' || interval === '1D') days = 730
+        else if (interval === 'week' || interval === '1W' || interval === '1wk') days = 1825
         else if (interval === 'month' || interval === '1M' || interval === '1mo') days = 3650
 
         const apiInterval = interval === '1D' ? 'day' : interval === '1W' ? 'week' : interval === '1M' ? 'month' : interval
@@ -180,6 +222,10 @@ function CandlestickChartComponent({
   // Real-time live tick synchronization: Update latest candle when effectiveLivePrice updates
   useEffect(() => {
     if (!effectiveLivePrice || !candleSeriesRef.current || !lastCandleRef.current) return
+    const isMarketOpen = chartData?.is_market_open !== false
+    // Never synthesize or forge live candles when market is closed or on holiday
+    if (!isMarketOpen) return
+
     const priceNum = Number(effectiveLivePrice)
     if (isNaN(priceNum) || priceNum <= 0) return
 
@@ -260,7 +306,7 @@ function CandlestickChartComponent({
         } catch (e) {}
       }
     }
-  }, [effectiveLivePrice, interval])
+  }, [effectiveLivePrice, interval, chartData?.is_market_open])
 
   // 2. Recalculate Order Block pixel zones when chart scrolls/scales
   const recalculateOBZones = useCallback(() => {
@@ -385,10 +431,15 @@ function CandlestickChartComponent({
         borderColor: isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)',
         scaleMargins: { top: 0.08, bottom: 0.18 },
       },
+      localization: {
+        dateFormat: 'yyyy-MM-dd',
+        timeFormatter: formatCrosshairTime,
+      },
       timeScale: {
         borderColor: isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)',
         timeVisible: interval !== 'day' && interval !== '1D',
         secondsVisible: false,
+        tickMarkFormatter: formatAxisTickMark,
       },
     })
 
@@ -579,10 +630,15 @@ function CandlestickChartComponent({
         borderColor: isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)',
         scaleMargins: { top: 0.1, bottom: 0.1 },
       },
+      localization: {
+        dateFormat: 'yyyy-MM-dd',
+        timeFormatter: formatCrosshairTime,
+      },
       timeScale: {
         borderColor: isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)',
         timeVisible: interval !== 'day' && interval !== '1D',
         secondsVisible: false,
+        tickMarkFormatter: formatAxisTickMark,
       },
     })
 
@@ -829,8 +885,11 @@ function CandlestickChartComponent({
       {/* Chart Top Bar Controls */}
       <div className="flex flex-wrap items-center justify-between px-3.5 py-2 border-b border-border/60 bg-surface/50 text-xs font-mono gap-2">
         {/* Left: Symbol & Live OHLC stats container */}
-        <div className="flex items-center gap-3 overflow-x-auto">
+        <div className="flex items-center gap-2 overflow-x-auto">
           <span className="text-amber font-bold tracking-wide text-sm">{symbol}</span>
+          <span className="px-1.5 py-0.5 rounded bg-surface border border-border text-[11px] font-mono text-muted tracking-tight" title="Indian Standard Time (UTC+05:30)">
+            {exchange} • IST (UTC+5:30)
+          </span>
           <div ref={ohlcTextRef} className="flex items-center gap-1.5 text-[11px]" />
         </div>
 
@@ -1041,7 +1100,7 @@ function CandlestickChartComponent({
             {/* Crisp High-Contrast Floating Chip Tag */}
             <div className="flex items-center gap-1.5 overflow-hidden ml-1">
               <span
-                className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-bold tracking-wider shadow-2xs border ${
+                className={`px-1.5 py-0.2 rounded text-[11px] font-mono font-bold tracking-wider shadow-2xs border ${
                   z.type === 'DEMAND'
                     ? 'bg-emerald-500/15 dark:bg-emerald-950/85 text-emerald-700 dark:text-emerald-300 border-emerald-500/40 backdrop-blur-xs'
                     : 'bg-rose-500/15 dark:bg-rose-950/85 text-rose-700 dark:text-rose-300 border-rose-500/40 backdrop-blur-xs'
@@ -1050,7 +1109,7 @@ function CandlestickChartComponent({
                 {z.tag}
               </span>
               <span
-                className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-semibold shadow-2xs border backdrop-blur-xs ${
+                className={`px-1.5 py-0.2 rounded text-[11px] font-mono font-semibold shadow-2xs border backdrop-blur-xs ${
                   z.type === 'DEMAND'
                     ? 'bg-surface/85 text-text border-emerald-500/30'
                     : 'bg-surface/85 text-text border-rose-500/30'
@@ -1081,7 +1140,7 @@ function CandlestickChartComponent({
               <span className="text-amber">● %K</span>
               <span className="text-cyan-500 dark:text-cyan-400">● %D</span>
             </div>
-            <span className="text-muted text-[9px]">Overbought: 80 | Oversold: 20</span>
+            <span className="text-muted text-[11px]">Overbought: 80 | Oversold: 20</span>
           </div>
           <div ref={stochContainerRef} className="w-full h-[100px]" />
         </div>

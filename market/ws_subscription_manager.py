@@ -5,7 +5,7 @@ Persistent WebSocket Subscription Manager with LRU Capacity Management.
 
 Fyers API Hard Constraints & Architecture:
   - WebSocket Data Socket supports up to 5,000 symbols concurrent real-time stream.
-  - REST API rate limit is strictly 10 requests / sec, 200 requests / min.
+  - REST API rate limit is 10 requests / sec, 500 requests / min on Prime (500k req/day).
   - Subscription manager maintains up to 5,000 active symbols with LRU eviction for dynamic additions.
   - Permanently maintains core benchmarks, commodities, and top F&O equities.
   - Persists subscription state to disk so service restarts restore all feeds instantly with zero REST calls.
@@ -18,7 +18,9 @@ import logging
 import os
 import threading
 import time
+from calendar import monthrange
 from collections import OrderedDict
+from datetime import date, datetime, timedelta, time as dtime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,10 +33,9 @@ CORE_BASE_SYMBOLS: list[str] = [
     # Benchmark & Sectoral Indices
     "NSE:NIFTY50-INDEX",
     "NSE:NIFTYBANK-INDEX",
-    "NSE:FINNIFTY-INDEX",
     "NSE:MIDCPNIFTY-INDEX",
+    "NSE:FINNIFTY-INDEX",
     "BSE:SENSEX-INDEX",
-    "BSE:BANKEX-INDEX",
     "NSE:INDIAVIX-INDEX",
     "NSE:NIFTYIT-INDEX",
     "NSE:NIFTYAUTO-INDEX",
@@ -115,6 +116,153 @@ import re
 _VALID_OPTION_RE = re.compile(
     r"^[A-Za-z0-9_&]+?(\d{2})([A-Za-z]{3}|[1-9ONDond]\d{2}|\d{4})(\d+)(CE|PE)$"
 )
+
+WEEKLY_OPT_RE = re.compile(r"^([A-Za-z0-9_&]+?)(\d{2})([1-9ONDond])(\d{2})(\d+)(CE|PE)$")
+MONTHLY_OPT_RE = re.compile(r"^([A-Za-z0-9_&]+?)(\d{2})([A-Za-z]{3})(\d+)(CE|PE)$")
+FUT_RE = re.compile(r"^([A-Za-z0-9_&]+?)(\d{2})([A-Za-z]{3})FUT$")
+
+WEEKLY_MONTH_MAP: dict[str, int] = {
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
+    "6": 6,
+    "7": 7,
+    "8": 8,
+    "9": 9,
+    "O": 10,
+    "N": 11,
+    "D": 12,
+}
+MONTH_NAME_MAP: dict[str, int] = {
+    "JAN": 1,
+    "FEB": 2,
+    "MAR": 3,
+    "APR": 4,
+    "MAY": 5,
+    "JUN": 6,
+    "JUL": 7,
+    "AUG": 8,
+    "SEP": 9,
+    "OCT": 10,
+    "NOV": 11,
+    "DEC": 12,
+}
+
+
+def _calc_monthly_expiry_date(exch: str, underlying: str, yr: int, mo: int) -> date:
+    """Calculate the precise monthly expiry date for NSE, BSE, MCX, or CDS."""
+    _, num_days = monthrange(yr, mo)
+    exch_up = (exch or "NSE").upper()
+    if exch_up == "BSE":
+        d = date(yr, mo, num_days)
+        while d.weekday() != 4:  # Last Friday
+            d -= timedelta(days=1)
+    elif exch_up == "MCX":
+        if "CRUDE" in underlying.upper():
+            exp_day = min(19, num_days)
+            d = date(yr, mo, exp_day)
+        else:
+            d = date(yr, mo, num_days)
+    else:
+        d = date(yr, mo, num_days)
+        while d.weekday() != 3:  # Last Thursday
+            d -= timedelta(days=1)
+    try:
+        from market.calendar import get_adjusted_expiry_date
+
+        return get_adjusted_expiry_date(d, exch_up if exch_up in ("BSE", "MCX") else "NFO")
+    except Exception:
+        return d
+
+
+def parse_contract_expiry(symbol: str) -> Optional[date]:
+    """
+    Parse the official expiry date from any Indian market derivative contract symbol
+    (Fyers / NSE / BSE / MCX / CDS options and futures).
+    Returns None if the symbol is a cash equity, index, or non-derivative.
+    """
+    if not symbol or not isinstance(symbol, str):
+        return None
+    s = symbol.strip()
+    exch = "NSE"
+    if ":" in s:
+        parts = s.split(":", 1)
+        exch = parts[0].upper().strip()
+        clean = parts[1].strip()
+    else:
+        clean = s
+
+    # 1. Weekly Option (e.g., NIFTY26O1922900CE)
+    m_w = WEEKLY_OPT_RE.match(clean)
+    if m_w:
+        _, yy, mo_code, dd, _, _ = m_w.groups()
+        yr = 2000 + int(yy)
+        mo = WEEKLY_MONTH_MAP.get(mo_code.upper())
+        day = int(dd)
+        if mo:
+            try:
+                return date(yr, mo, day)
+            except ValueError:
+                return None
+
+    # 2. Monthly Option (e.g., NIFTY26OCT23000CE)
+    m_m = MONTHLY_OPT_RE.match(clean)
+    if m_m:
+        underlying, yy, mo_str, _, _ = m_m.groups()
+        yr = 2000 + int(yy)
+        mo = MONTH_NAME_MAP.get(mo_str.upper())
+        if mo:
+            return _calc_monthly_expiry_date(exch, underlying, yr, mo)
+
+    # 3. Monthly Future (e.g., NIFTY26OCTFUT)
+    m_f = FUT_RE.match(clean)
+    if m_f:
+        underlying, yy, mo_str = m_f.groups()
+        yr = 2000 + int(yy)
+        mo = MONTH_NAME_MAP.get(mo_str.upper())
+        if mo:
+            return _calc_monthly_expiry_date(exch, underlying, yr, mo)
+
+    return None
+
+
+def is_contract_expired(symbol: str, ref_dt: Optional[datetime] = None) -> bool:
+    """
+    Determine if a derivative contract is expired relative to current IST market time.
+    Equities, benchmark indices, and cash symbols return False (never expire).
+    """
+    exp_date = parse_contract_expiry(symbol)
+    if exp_date is None:
+        return False
+
+    from config.constants import IST_ZONE as IST
+
+    now = ref_dt or datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+    else:
+        now = now.astimezone(IST)
+
+    today = now.date()
+    if today > exp_date:
+        return True
+    if today < exp_date:
+        return False
+
+    # Today is expiry date: verify session close cutoff
+    current_time = now.time()
+    exch = symbol.split(":", 1)[0].upper() if ":" in symbol else "NSE"
+    if exch == "MCX":
+        close_cutoff = dtime(23, 30)
+    elif exch in ("CDS", "CURRENCY"):
+        close_cutoff = dtime(17, 0)
+    else:
+        close_cutoff = dtime(15, 30)
+
+    return current_time >= close_cutoff
+
 
 # Known blacklisted/delisted symbols that Fyers socket rejects with -300
 _WS_SYMBOL_BLACKLIST = {
@@ -237,25 +385,26 @@ def get_active_index_options_grid(num_strikes_per_side: int = 8) -> list[str]:
     return grid
 
 
-def get_active_commodity_grid() -> list[str]:
+def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
     """
     Generate active MCX Commodity and Currency CDS futures and near ATM options.
     """
     from datetime import datetime, timedelta
 
-    now = datetime.now()
-    c_dt = now if now.day <= 18 else now + timedelta(days=20)
+    now = ref_time or datetime.now()
+    # Crude Oil options expire ~2 business days before futures; roll on day 15 to guarantee active front-month options.
+    c_dt = now if now.day <= 15 else now + timedelta(days=20)
     c_suffix = c_dt.strftime("%y%b").upper()
 
     from brokers.fyers import _resolve_commodity_contract, _resolve_currency_contract
 
     comm_symbols = [
-        _resolve_commodity_contract("CRUDEOIL"),
-        _resolve_commodity_contract("NATURALGAS"),
-        _resolve_commodity_contract("GOLD"),
-        _resolve_commodity_contract("SILVER"),
-        _resolve_commodity_contract("COPPER"),
-        _resolve_commodity_contract("ZINC"),
+        _resolve_commodity_contract("CRUDEOIL", ref_time=now),
+        _resolve_commodity_contract("NATURALGAS", ref_time=now),
+        _resolve_commodity_contract("GOLD", ref_time=now),
+        _resolve_commodity_contract("SILVER", ref_time=now),
+        _resolve_commodity_contract("COPPER", ref_time=now),
+        _resolve_commodity_contract("ZINC", ref_time=now),
         _resolve_currency_contract("USDINR"),
         _resolve_currency_contract("EURINR"),
     ]
@@ -296,6 +445,7 @@ class WsSubscriptionManager:
         self._core_symbols: set[str] = set(CORE_BASE_SYMBOLS)
         # Dynamic subscriptions tracked in OrderedDict for LRU eviction: symbol -> timestamp
         self._dynamic_symbols: OrderedDict[str, float] = OrderedDict()
+        self._anchored_spots: dict[str, float] = {}
         self._load_from_disk()
 
     def seed_active_derivatives(self, ws_client: Optional[Any] = None) -> list[str]:
@@ -334,7 +484,7 @@ class WsSubscriptionManager:
         return to_add
 
     def _load_from_disk(self) -> None:
-        """Load persisted subscriptions from previous run."""
+        """Load persisted subscriptions from previous run and auto-cleanse expired contracts."""
         path = _get_cache_path()
         if not path.exists():
             return
@@ -342,27 +492,221 @@ class WsSubscriptionManager:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             loaded_dynamic = data.get("dynamic", [])
-            import time
-
+            loaded_core = data.get("core", [])
             now = time.time()
             sanitized_needed = False
+
             with self._lock:
                 for sym in loaded_dynamic:
-                    if not is_valid_ws_symbol(sym):
+                    if not is_valid_ws_symbol(sym) or is_contract_expired(sym):
                         sanitized_needed = True
                         continue
                     if sym not in self._core_symbols:
                         self._dynamic_symbols[sym] = now
+
+                # Also cleanse expired from loaded core (preserve CORE_BASE_SYMBOLS)
+                for sym in loaded_core:
+                    if sym not in CORE_BASE_SYMBOLS:
+                        if is_contract_expired(sym) or not is_valid_ws_symbol(sym):
+                            sanitized_needed = True
+                            self._core_symbols.discard(sym)
+                        else:
+                            self._core_symbols.add(sym)
+
             if sanitized_needed:
                 self._save_to_disk()
             logger.info(
-                f"[WsSubManager] Restored {len(self._dynamic_symbols)} dynamic subscriptions from disk (sanitized={sanitized_needed})"
+                f"[WsSubManager] Restored {len(self._dynamic_symbols)} dynamic and {len(self._core_symbols)} core subscriptions from disk (sanitized={sanitized_needed})"
             )
         except Exception as exc:
             logger.warning(
                 f"[WsSubManager] Failed loading disk subscriptions from {path}: {exc}",
                 exc_info=True,
             )
+
+    def cleanse_expired_derivatives(self, ws_client: Optional[Any] = None) -> list[str]:
+        """
+        Scan all registered subscriptions (core derivatives and dynamic symbols),
+        identify and unregister expired options and futures contracts.
+        Permanent baseline equities and indices are strictly preserved.
+        Purges expired ticks from memory and syncs state to disk.
+        """
+        purged: list[str] = []
+        with self._lock:
+            # Scan core derivatives (preserve CORE_BASE_SYMBOLS)
+            for sym in list(self._core_symbols):
+                if sym not in CORE_BASE_SYMBOLS and is_contract_expired(sym):
+                    self._core_symbols.discard(sym)
+                    purged.append(sym)
+
+            # Scan dynamic symbols
+            for sym in list(self._dynamic_symbols.keys()):
+                if is_contract_expired(sym):
+                    del self._dynamic_symbols[sym]
+                    purged.append(sym)
+
+            if purged:
+                self._save_to_disk()
+
+        if purged:
+            logger.info(
+                f"[WsSubManager] Cleanse purged {len(purged)} expired derivative contracts from registry"
+            )
+            # Unsubscribe from WebSocket
+            client = ws_client
+            if client is None:
+                try:
+                    from market.websocket import ws_manager
+
+                    if ws_manager.connected:
+                        client = ws_manager
+                except Exception:
+                    client = None
+
+            if client and hasattr(client, "unsubscribe"):
+                try:
+                    client.unsubscribe(purged)
+                except Exception as exc:
+                    logger.warning(f"[WsSubManager] Failed to unsubscribe purged contracts: {exc}")
+
+            # Purge from live tick cache in RAM
+            try:
+                from market.websocket import ws_manager
+
+                ws_manager.purge_symbols(purged)
+            except Exception as e_purge:
+                logger.debug(f"[WsSubManager] Tick cache purge error: {e_purge}")
+
+        return purged
+
+    def cleanse_closed_session_derivatives(self, ws_client: Optional[Any] = None) -> list[str]:
+        """
+        At 15:30 IST market close, evict closed daytime NSE & BSE derivative contracts (CE/PE/FUT)
+        from both core derivatives and dynamic subscriptions to liberate WebSocket slots and memory
+        for evening commodity and currency trading.
+        Permanent baseline equities, indices, and active MCX commodities are strictly preserved.
+        """
+        try:
+            from market.calendar import is_market_open
+            import os
+
+            if is_market_open("NSE") and not os.environ.get("CHANAKYA_TESTING"):
+                return []
+        except Exception as e_mkt_open:
+            logger.debug(
+                f"[market.ws_subscription_manager] is_market_open suppressed: {e_mkt_open}"
+            )
+
+        def _is_closed_daytime_deriv(s: str) -> bool:
+            return (s.startswith("NSE:") or s.startswith("BSE:")) and (
+                s.endswith("CE") or s.endswith("PE") or s.endswith("FUT")
+            )
+
+        purged: list[str] = []
+        with self._lock:
+            # 1. Cleanse daytime NSE/BSE options and futures from dynamic subscriptions
+            for sym in list(self._dynamic_symbols.keys()):
+                if _is_closed_daytime_deriv(sym):
+                    del self._dynamic_symbols[sym]
+                    purged.append(sym)
+
+            # 2. Cleanse daytime NSE/BSE options and futures from core subscriptions
+            # (CORE_BASE_SYMBOLS like cash equities and benchmark indices are strictly preserved)
+            for sym in list(self._core_symbols):
+                if sym not in CORE_BASE_SYMBOLS and _is_closed_daytime_deriv(sym):
+                    self._core_symbols.discard(sym)
+                    purged.append(sym)
+
+            if purged:
+                self._save_to_disk()
+
+        if purged:
+            logger.info(
+                f"[WsSubManager] Session cleanse purged {len(purged)} closed daytime NSE/BSE derivative contracts from live socket"
+            )
+            client = ws_client
+            if client is None:
+                try:
+                    from market.websocket import ws_manager
+
+                    if ws_manager.connected:
+                        client = ws_manager
+                except Exception as e_ws_lookup:
+                    logger.debug(f"[WsSubManager] ws_manager lookup error: {e_ws_lookup}")
+                    client = None
+
+            if client and hasattr(client, "unsubscribe"):
+                try:
+                    client.unsubscribe(purged)
+                except Exception as exc:
+                    logger.warning(
+                        f"[WsSubManager] Failed to unsubscribe closed daytime options/futures: {exc}"
+                    )
+
+            # Purge from live tick cache in RAM
+            try:
+                from market.websocket import ws_manager
+
+                ws_manager.purge_symbols(purged)
+            except Exception as e_purge:
+                logger.debug(f"[WsSubManager] Tick cache purge error: {e_purge}")
+
+        return purged
+
+    def revolve_active_derivatives(
+        self, ws_client: Optional[Any] = None, drift_pct_threshold: float = 1.0
+    ) -> dict[str, Any]:
+        """
+        Active spot drift revolver for index options grid.
+        Monitors underlying spots (NIFTY, BANKNIFTY, SENSEX, FINNIFTY, MIDCPNIFTY).
+        If spot drifts >= drift_pct_threshold (default 1.0%), or upon initial anchor,
+        regenerates ATM strike options grid, subscribes new strikes, and prunes stale expired items.
+        """
+        # Step 1: Always cleanse any expired contracts first
+        cleansed = self.cleanse_expired_derivatives(ws_client=ws_client)
+
+        revolved: list[str] = []
+        underlying_spots: dict[str, float] = {}
+        drift_detected = False
+
+        from market.quotes import get_ltp
+
+        indices = {
+            "NIFTY": "NSE:NIFTY50-INDEX",
+            "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+            "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+            "SENSEX": "BSE:SENSEX-INDEX",
+            "FINNIFTY": "NSE:FINNIFTY-INDEX",
+        }
+
+        for idx_name, sym in indices.items():
+            curr_ltp = get_ltp(sym) or get_ltp(idx_name)
+            if not curr_ltp or curr_ltp <= 0:
+                continue
+            underlying_spots[idx_name] = curr_ltp
+            anchored = self._anchored_spots.get(idx_name)
+            if anchored is None:
+                self._anchored_spots[idx_name] = curr_ltp
+                drift_detected = True
+                revolved.append(idx_name)
+            else:
+                pct_drift = abs(curr_ltp - anchored) / anchored * 100.0
+                if pct_drift >= drift_pct_threshold:
+                    self._anchored_spots[idx_name] = curr_ltp
+                    drift_detected = True
+                    revolved.append(idx_name)
+
+        if drift_detected or not self._anchored_spots:
+            self.seed_active_derivatives(ws_client=ws_client)
+
+        return {
+            "cleansed_count": len(cleansed),
+            "cleansed_symbols": cleansed,
+            "drift_detected": drift_detected,
+            "revolved_indices": revolved,
+            "anchored_spots": dict(self._anchored_spots),
+            "total_subscribed": len(self.get_all_desired_subscriptions()),
+        }
 
     def _save_to_disk(self) -> None:
         """Save active subscription list to disk."""
@@ -395,6 +739,7 @@ class WsSubscriptionManager:
         with self._lock:
             changed = False
             for s in invalid_symbols:
+                _WS_SYMBOL_BLACKLIST.add(s)
                 if s in self._dynamic_symbols:
                     del self._dynamic_symbols[s]
                     changed = True
@@ -404,7 +749,7 @@ class WsSubscriptionManager:
             if changed:
                 self._save_to_disk()
                 logger.info(
-                    f"[WsSubManager] Purged {len(invalid_symbols)} invalid symbols from subscription registry: {invalid_symbols}"
+                    f"[WsSubManager] Purged {len(invalid_symbols)} invalid symbols from subscription registry and blacklisted: {invalid_symbols}"
                 )
 
     def get_all_desired_subscriptions(self) -> list[str]:
@@ -515,6 +860,7 @@ class WsSubscriptionManager:
                 "dynamic_count": dynamic_count,
                 "utilization_pct": util_pct,
                 "recent_symbols": recent_dynamic,
+                "anchored_spots": dict(self._anchored_spots),
             }
 
 

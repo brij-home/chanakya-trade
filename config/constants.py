@@ -117,3 +117,18 @@ def get_broker_callback_url(broker_key: str) -> str:
     return DEFAULT_BROKER_CALLBACK_URLS.get(
         k, f"http://localhost:{DEFAULT_SIDECAR_PORT}/{k}/callback"
     )
+
+
+# ── Microstructure Risk & Volatility Floors ─────────────────────────────────
+
+#: Minimum option premium stop loss points (tick noise buffer)
+MIN_OPTION_PREMIUM_SL_PTS: float = 3.0
+
+#: Minimum option premium stop loss percentage (10% floor)
+MIN_OPTION_PREMIUM_SL_PCT: float = 0.10
+
+#: Maximum adverse excursion drawdown percentage for statistical arbitrage / pair trading
+DEFAULT_PAIR_MAX_ADVERSE_PCT: float = 5.0
+
+#: Minimum relative volume for thematic sympathy follower qualification
+MIN_SYMPATHY_FOLLOWER_RVOL: float = 0.80

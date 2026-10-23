@@ -279,6 +279,11 @@ def test_early_pre_0930_signals_unmuted_by_orb():
         patch.object(engine, "scan_incubation_triggers", return_value=[]),
         patch.object(engine, "scan_smc_orderblock_retests", return_value=[]),
         patch.object(engine, "scan_swing_inflections", return_value=[]),
+        patch.object(engine, "scan_predator_liquidity_sweeps", return_value=[]),
+        patch.object(engine, "scan_turtle_soup_sweeps", return_value=[]),
+        patch.object(engine, "scan_defined_risk_neutral", return_value=[]),
+        patch.object(engine, "scan_pairs_arbitrage", return_value=[]),
+        patch.object(engine, "scan_order_book_thrusts", return_value=[]),
     ]
     with ExitStack() as stack:
         for p in mocked_scanners:
@@ -292,7 +297,7 @@ def test_early_pre_0930_signals_unmuted_by_orb():
     assert "PRECURSOR_RADAR" in alert_types
     symbols = {a.symbol for a in all_morning_alerts}
     assert "NIFTY" in symbols
-    assert "NSE:TRENT" in symbols
+    assert "TRENT" in symbols or "NSE:TRENT" in symbols
 
 
 # ─────────────────────────────────────────────────────────────────────────────

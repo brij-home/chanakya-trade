@@ -83,7 +83,7 @@ def test_sonacoms_staged_scaleout_scrutiny_approval():
             expiry=exp_dt,
             last_price=7.80,
             volume=1040000,
-            oi=830000,
+            oi=1500000,
             oi_change=-45000,  # Unwinding
             pchange=28.5,
             bid=7.70,

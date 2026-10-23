@@ -239,7 +239,7 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
         <div className={`inline-flex items-center gap-1.5 ${align === 'right' ? 'justify-end' : 'justify-start'}`}>
           <span>{label}</span>
           <span
-            className={`text-[9px] font-mono transition-all ${
+            className={`text-[11px] font-mono transition-all ${
               isSorted
                 ? 'text-amber-600 dark:text-amber-400 font-bold opacity-100'
                 : 'opacity-30 group-hover:opacity-100 group-hover:text-amber-500'
@@ -264,7 +264,7 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
                 <h1 className="text-xs sm:text-sm font-bold font-mono tracking-wide text-text">
                   Quantitative Backtest Studio
                 </h1>
-                <span className="text-[9px] font-mono font-bold bg-amber/15 text-amber border border-amber/30 px-1.5 py-0.2 rounded-full">
+                <span className="text-[11px] font-mono font-bold bg-amber/15 text-amber border border-amber/30 px-1.5 py-0.2 rounded-full">
                   Vectorized Execution Engine
                 </span>
               </div>
@@ -416,36 +416,36 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-xs font-mono">
         {/* Net Return */}
         <div className="bg-panel border border-border/80 rounded-xl p-2 sm:p-2.5 shadow-xs space-y-0.5">
-          <span className="text-[9px] uppercase font-bold text-muted font-ui block">Net Return</span>
+          <span className="text-[11px] uppercase font-bold text-muted font-ui block">Net Return</span>
           <div className="flex items-baseline gap-1.5">
             <span className={`text-base sm:text-lg font-black font-mono tabular-nums ${isPos ? 'text-green' : 'text-red'}`}>
               {isPos ? '+' : ''}{totalReturn.toFixed(2)}%
             </span>
           </div>
-          <span className="text-[9.5px] text-muted font-mono block truncate">
+          <span className="text-[11px] text-muted font-mono block truncate">
             PnL: <strong className={isPos ? 'text-green' : 'text-red'}>{formatINR(netPnL)}</strong>
           </span>
         </div>
 
         {/* CAGR */}
         <div className="bg-panel border border-border/80 rounded-xl p-2 sm:p-2.5 shadow-xs space-y-0.5">
-          <span className="text-[9px] uppercase font-bold text-muted font-ui block">CAGR</span>
+          <span className="text-[11px] uppercase font-bold text-muted font-ui block">CAGR</span>
           <span className="text-base sm:text-lg font-black font-mono text-text tabular-nums block">
             +{cagr.toFixed(2)}%
           </span>
-          <span className="text-[9.5px] text-muted font-ui block">Annualized Rate</span>
+          <span className="text-[11px] text-muted font-ui block">Annualized Rate</span>
         </div>
 
         {/* Sharpe Ratio */}
         <div className="bg-panel border border-border/80 rounded-xl p-2 sm:p-2.5 shadow-xs space-y-0.5">
           <div className="flex items-center justify-between">
-            <span className="text-[9px] uppercase font-bold text-muted font-ui block">Sharpe Ratio</span>
+            <span className="text-[11px] uppercase font-bold text-muted font-ui block">Sharpe Ratio</span>
             <HelpHint metricKey="sharpe_ratio" size="xs" />
           </div>
           <span className="text-base sm:text-lg font-black font-mono text-amber tabular-nums block">
             {sharpe.toFixed(2)}
           </span>
-          <span className="text-[9.5px] text-muted font-ui block">
+          <span className="text-[11px] text-muted font-ui block">
             {sharpe >= 1.5 ? 'Institutional Grade' : 'Standard Alpha'}
           </span>
         </div>
@@ -453,21 +453,21 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
         {/* Max Drawdown */}
         <div className="bg-panel border border-border/80 rounded-xl p-2 sm:p-2.5 shadow-xs space-y-0.5">
           <div className="flex items-center justify-between">
-            <span className="text-[9px] uppercase font-bold text-muted font-ui block">Max Drawdown</span>
+            <span className="text-[11px] uppercase font-bold text-muted font-ui block">Max Drawdown</span>
             <HelpHint metricKey="max_drawdown" size="xs" />
           </div>
           <span className="text-base sm:text-lg font-black font-mono text-red tabular-nums block">
             {maxDd.toFixed(2)}%
           </span>
-          <span className="text-[9.5px] text-muted font-ui block">Peak-to-Trough</span>
+          <span className="text-[11px] text-muted font-ui block">Peak-to-Trough</span>
         </div>
 
         {/* Win Rate (Disambiguated: Trade vs Period & OOS Robustness) */}
         <div className="bg-panel border border-border/80 rounded-xl p-2 sm:p-2.5 shadow-xs space-y-0.5">
           <div className="flex items-center justify-between">
-            <span className="text-[9px] uppercase font-bold text-muted font-ui block">Win Rate</span>
+            <span className="text-[11px] uppercase font-bold text-muted font-ui block">Win Rate</span>
             {r.oos_robustness != null && (
-              <span className={`text-[8.5px] font-mono font-bold px-1 rounded ${
+              <span className={`text-[10px] font-mono font-bold px-1 rounded ${
                 Number(r.oos_robustness) >= 0.7 ? 'text-emerald-400 bg-emerald-500/10' : 'text-amber-400 bg-amber-500/10'
               }`} title="Out-of-Sample Walk-Forward Robustness Score">
                 OOS {Number(r.oos_robustness).toFixed(2)}
@@ -477,10 +477,10 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
           <span className="text-base sm:text-lg font-black font-mono text-green tabular-nums block">
             {winRate.toFixed(1)}%
           </span>
-          <span className="text-[9.5px] text-muted font-mono block">
+          <span className="text-[11px] text-muted font-mono block">
             {Math.round(totalTrades * winRate / 100)}W / {totalTrades - Math.round(totalTrades * winRate / 100)}L
             {r.positive_period_pct != null && (
-              <span className="text-[9px] text-muted/80 ml-1">({Number(r.positive_period_pct).toFixed(0)}% Days)</span>
+              <span className="text-[11px] text-muted/80 ml-1">({Number(r.positive_period_pct).toFixed(0)}% Days)</span>
             )}
           </span>
         </div>
@@ -488,13 +488,13 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
         {/* Profit Factor */}
         <div className="bg-panel border border-border/80 rounded-xl p-2 sm:p-2.5 shadow-xs space-y-0.5">
           <div className="flex items-center justify-between">
-            <span className="text-[9px] uppercase font-bold text-muted font-ui block">Profit Factor</span>
+            <span className="text-[11px] uppercase font-bold text-muted font-ui block">Profit Factor</span>
             <HelpHint metricKey="profit_factor" size="xs" />
           </div>
           <span className="text-base sm:text-lg font-black font-mono text-cyan-400 tabular-nums block">
             {profitFactor.toFixed(2)}×
           </span>
-          <span className="text-[9.5px] text-muted font-ui block">Gross Win / Gross Loss</span>
+          <span className="text-[11px] text-muted font-ui block">Gross Win / Gross Loss</span>
         </div>
       </div>
 
@@ -504,7 +504,7 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
         <div className="lg:col-span-8 bg-panel border border-border/80 rounded-xl p-3 shadow-xs space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-2">
             <div>
-              <span className="text-[9px] uppercase font-bold text-muted tracking-wider block">
+              <span className="text-[11px] uppercase font-bold text-muted tracking-wider block">
                 Equity Progression vs Benchmark
               </span>
               <h2 className="text-xs font-bold text-text">
@@ -533,7 +533,7 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
         <div className="lg:col-span-4 bg-panel border border-border/80 rounded-xl p-3 shadow-xs space-y-2.5 flex flex-col justify-between">
           <div className="space-y-2">
             <div className="border-b border-border/50 pb-1.5">
-              <span className="text-[9px] uppercase font-bold text-muted tracking-wider block">Strategy Architecture</span>
+              <span className="text-[11px] uppercase font-bold text-muted tracking-wider block">Strategy Architecture</span>
               <h3 className="text-xs font-extrabold text-amber mt-0.5">
                 {STRATEGY_PRESETS.find(s => s.id === strategy)?.name}
               </h3>
@@ -562,15 +562,34 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
             </div>
           </div>
 
-          <div className="pt-2 border-t border-border/50">
+          <div className="pt-2 border-t border-border/50 flex flex-col sm:flex-row gap-2">
             <button
               onClick={() => {
                 const exch = getSymbolExchange(symbol)
                 sendDraft(`analyze ${symbol}${exch !== 'NSE' ? ' ' + exch : ''}`)
               }}
-              className="w-full py-1.5 rounded-lg bg-elevated hover:bg-elevated/80 border border-border text-text font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              className="flex-1 py-1.5 rounded-lg bg-elevated hover:bg-elevated/80 border border-border text-text font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5"
             >
-              <span>🔍</span> Open Deep AI Copilot Analysis
+              <span>🔍</span> Deep AI Copilot Analysis
+            </button>
+            <button
+              onClick={() => {
+                const exch = getSymbolExchange(symbol)
+                if (onOpenOrderTicket) {
+                  onOpenOrderTicket({
+                    symbol: symbol,
+                    exchange: exch,
+                    price: null,
+                    action: 'BUY',
+                    quantity: 1,
+                  })
+                } else {
+                  sendDraft(`trade BUY 1 ${symbol} (${strategy.toUpperCase()})`)
+                }
+              }}
+              className="py-1.5 px-3 rounded-lg bg-amber text-black font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5 hover:brightness-110 shadow-xs"
+            >
+              <span>⚡</span> Stage Live Order
             </button>
           </div>
         </div>
@@ -580,7 +599,7 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
       <div className="bg-panel border border-border/80 rounded-xl p-2.5 sm:p-3 shadow-xs space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-2">
           <div>
-            <span className="text-[9px] uppercase font-bold text-muted tracking-wider block">Execution Ledger</span>
+            <span className="text-[11px] uppercase font-bold text-muted tracking-wider block">Execution Ledger</span>
             <h3 className="text-xs font-bold text-text">
               Simulated Trade History ({filteredTrades.length} Trades)
             </h3>
@@ -645,7 +664,7 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
 
         {/* Table */}
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs font-mono">
+          <table className="w-full text-left text-xs font-mono tabular-nums">
             <thead>
               <tr className="text-[10px] uppercase text-muted border-b border-border/50">
                 <th className="py-1.5 px-2.5">#</th>
@@ -664,24 +683,24 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
                 const tradeIsWin = t.pnl > 0
                 return (
                   <tr key={idx} className="hover:bg-elevated/40 transition-colors">
-                    <td className="py-1.5 px-2.5 text-muted">{(tradePage - 1) * pageSize + idx + 1}</td>
+                    <td className="py-1.5 px-2.5 text-muted tabular-nums">{(tradePage - 1) * pageSize + idx + 1}</td>
                     <td className="py-1.5 px-2.5 text-text font-ui">{t.date}</td>
                     <td className="py-1.5 px-2.5">
-                      <span className={`px-1.5 py-0.2 rounded text-[9.5px] font-extrabold ${
+                      <span className={`px-1.5 py-0.5 rounded text-[10.5px] font-extrabold ${
                         t.type === 'LONG' ? 'bg-green/15 text-green border border-green/30' : 'bg-red/15 text-red border border-red/30'
                       }`}>
                         {t.type}
                       </span>
                     </td>
-                    <td className="py-1.5 px-2.5 text-text">₹{Number(t.entry).toFixed(2)}</td>
-                    <td className="py-1.5 px-2.5 text-text">₹{Number(t.exit).toFixed(2)}</td>
-                    <td className={`py-1.5 px-2.5 font-bold ${tradeIsWin ? 'text-green' : 'text-red'}`}>
+                    <td className="py-1.5 px-2.5 text-text tabular-nums">₹{Number(t.entry).toFixed(2)}</td>
+                    <td className="py-1.5 px-2.5 text-text tabular-nums">₹{Number(t.exit).toFixed(2)}</td>
+                    <td className={`py-1.5 px-2.5 font-bold tabular-nums ${tradeIsWin ? 'text-green' : 'text-red'}`}>
                       {tradeIsWin ? '+' : ''}{formatINR(t.pnl)}
                     </td>
-                    <td className={`py-1.5 px-2.5 font-bold ${tradeIsWin ? 'text-green' : 'text-red'}`}>
+                    <td className={`py-1.5 px-2.5 font-bold tabular-nums ${tradeIsWin ? 'text-green' : 'text-red'}`}>
                       {tradeIsWin ? '+' : ''}{t.pct.toFixed(2)}%
                     </td>
-                    <td className="py-1.5 px-2.5 font-bold text-amber">
+                    <td className="py-1.5 px-2.5 font-bold text-amber tabular-nums">
                       {t.r >= 0 ? `+${t.r.toFixed(1)}R` : `${t.r.toFixed(1)}R`}
                     </td>
                     <td className="py-1.5 px-2.5 text-muted text-[10.5px] font-ui">{t.reason}</td>

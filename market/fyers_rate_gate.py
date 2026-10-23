@@ -4,12 +4,16 @@ market/fyers_rate_gate.py
 Unified prioritized sliding-window rate gate and budget governor for Fyers API v3.
 
 Fyers API Hard Constraints:
-  - Maximum 10 requests / second
-  - Maximum 200 requests / minute (3 strikes in 1 day = account blocked for the entire day)
-
-ChanakyaTrade Safe Operating Parameters:
-  - Hard cap: 8.0 req/sec (20% safety margin)
-  - Hard cap: 160.0 req/min (20% safety margin)
+  - Fyers Prime Plan:
+      * 10 requests / second (Safe operating cap: 8.0 - 9.0 req/s)
+      * 500 requests / minute (Safe operating cap: 400.0 - 450.0 req/min)
+      * 500,000 requests / day (Safe operating cap: 480,000 req/day)
+      * Up to 1,000 symbols per quotes request (clamped to 300 to avoid HTTP 414 URI Length)
+      * Up to 5,000 symbols on real-time Data WebSocket
+  - Fyers Standard Plan:
+      * 5 requests / second (Safe operating cap: 4.0 req/s)
+      * 50 requests / minute (Safe operating cap: 40.0 req/min)
+      * 5,000 requests / day (Safe operating cap: 4,500 req/day)
 
 Priority Tiers (Lower value = Higher priority):
   - Tier 0: ORDER           (Execution, cancel, modify; never starved by queries)
@@ -52,7 +56,7 @@ _QUOTA_FILE = _get_quota_file()
 FYERS_PLAN_PRESETS: dict[str, dict[str, Any]] = {
     "PRIME": {
         "max_per_sec": 8.0,  # Official limit: 10 req/s (20% institutional cushion to prevent micro-burst trips)
-        "max_per_min": 360.0,  # Official limit: 500 req/min (140 req/min headroom)
+        "max_per_min": 360.0,  # Official limit: 500 req/min (140 req/min headroom to prevent rolling window trips)
         "max_per_day": 480_000.0,  # Official limit: 500,000 req/day (20k emergency buffer)
         "order_emergency_cap": 498_000.0,
         "quotes_chunk_size": 1000,  # Official limit: 1,000 symbols/request
@@ -101,9 +105,25 @@ class UnifiedFyersRateGate:
         self._plan = selected_plan
         preset = FYERS_PLAN_PRESETS[selected_plan]
 
-        self._max_per_sec = float(max_per_sec if max_per_sec is not None else preset["max_per_sec"])
-        self._max_per_min = float(max_per_min if max_per_min is not None else preset["max_per_min"])
-        self._max_per_day = float(max_per_day if max_per_day is not None else preset["max_per_day"])
+        env_sec = os.environ.get("FYERS_MAX_PER_SEC")
+        env_min = os.environ.get("FYERS_MAX_PER_MIN")
+        env_day = os.environ.get("FYERS_MAX_PER_DAY")
+
+        self._max_per_sec = float(
+            max_per_sec
+            if max_per_sec is not None
+            else (float(env_sec) if env_sec else preset["max_per_sec"])
+        )
+        self._max_per_min = float(
+            max_per_min
+            if max_per_min is not None
+            else (float(env_min) if env_min else preset["max_per_min"])
+        )
+        self._max_per_day = float(
+            max_per_day
+            if max_per_day is not None
+            else (float(env_day) if env_day else preset["max_per_day"])
+        )
         self._order_emergency_cap = float(preset["order_emergency_cap"])
         self._quotes_chunk_size = int(preset["quotes_chunk_size"])
         self._data_socket_symbols = int(preset["data_socket_symbols"])
@@ -133,6 +153,9 @@ class UnifiedFyersRateGate:
         self._daily_by_category: dict[FyersCallCategory, int] = {c: 0 for c in FyersCallCategory}
         self._last_warn_time: float = 0.0
         self._last_dispatch_ts: float = 0.0
+        self._last_depth_dispatch_ts: float = 0.0
+        self._last_hist_dispatch_ts: float = 0.0
+        self._caller_counts: dict[str, int] = {}
         self._load_daily_quota()
 
     @property
@@ -236,12 +259,32 @@ class UnifiedFyersRateGate:
         while self._sliding_window and self._sliding_window[0][0] < cutoff:
             self._sliding_window.popleft()
 
-    def _calculate_sleep_needed(self, now: float) -> float:
+    def _calculate_sleep_needed(
+        self, now: float, category: Optional[FyersCallCategory] = None
+    ) -> float:
         """Calculate minimum sleep needed to satisfy 1-sec, 60-sec caps, and leaky bucket inter-request spacing."""
-        # 1. Leaky bucket inter-request spacing to eliminate sub-second multi-thread spikes
-        min_interval = 1.0 / max(self._max_per_sec, 1.0)
+        # 1. Orders bypass leaky bucket inter-request spacing for immediate execution
+        if category == FyersCallCategory.ORDER:
+            min_interval = 0.02
+        else:
+            min_interval = 1.0 / max(self._max_per_sec, 1.0)
+
         time_since_last = now - self._last_dispatch_ts
         sleep_sec = max(0.0, min_interval - time_since_last)
+
+        # 1b. Dedicated rate pacing for DEPTH_CHAIN calls to eliminate Fyers /depth burst throttling (-360/429)
+        if category == FyersCallCategory.DEPTH_CHAIN:
+            depth_spacing = (
+                0.38  # Max ~2.6 depth requests/sec (strictly protects Fyers /depth limit)
+            )
+            time_since_depth = now - self._last_depth_dispatch_ts
+            sleep_sec = max(sleep_sec, depth_spacing - time_since_depth)
+
+        # 1c. Dedicated rate pacing for HISTORICAL calls to pace multi-bar history fetches
+        if category == FyersCallCategory.HISTORICAL:
+            hist_spacing = 0.30  # Max ~3.3 historical requests/sec
+            time_since_hist = now - getattr(self, "_last_hist_dispatch_ts", 0.0)
+            sleep_sec = max(sleep_sec, hist_spacing - time_since_hist)
 
         # 2. Check 1-second rolling window
         sec_cutoff = now - 1.0
@@ -256,6 +299,12 @@ class UnifiedFyersRateGate:
             oldest_in_min = self._sliding_window[0][0]
             sleep_sec = max(sleep_sec, 60.0 - (now - oldest_in_min) + 0.02)
 
+        # Apply slight micro-jitter (2-6ms) when sleep is needed to desynchronize thread releases
+        if sleep_sec > 0.0:
+            import random
+
+            sleep_sec += random.uniform(0.002, 0.006)
+
         return sleep_sec
 
     def acquire(
@@ -269,6 +318,22 @@ class UnifiedFyersRateGate:
         Higher priority categories jump ahead in the wait queue.
         Returns True if acquired, False if timed out or rejected due to daily quota.
         """
+        # Track caller attribution for institutional rate observability
+        import traceback
+
+        try:
+            frames = traceback.extract_stack(limit=12)[:-1]
+            relevant = [
+                f"{Path(fr.filename).name}:{fr.lineno} ({fr.name})"
+                for fr in frames
+                if "fyers_rate_gate" not in fr.filename and "threading" not in fr.filename
+            ]
+            if relevant:
+                c_key = " <- ".join(reversed(relevant[-3:]))
+                with self._lock:
+                    self._caller_counts[c_key] = self._caller_counts.get(c_key, 0) + 1
+        except Exception as e_suppressed:
+            logger.debug(f"[market.fyers_rate_gate] Caller tracking error: {e_suppressed}")
         event = threading.Event()
         start_wait = time.time()
         tie_breaker = next(self._counter)
@@ -306,11 +371,15 @@ class UnifiedFyersRateGate:
             # If no one is waiting and there is immediate capacity, grant immediately
             now = time.time()
             self._purge_stale_timestamps(now)
-            sleep_needed = self._calculate_sleep_needed(now)
+            sleep_needed = self._calculate_sleep_needed(now, category=category)
 
             if not self._waiters and sleep_needed <= 0.0:
                 self._sliding_window.append((now, category))
                 self._last_dispatch_ts = now
+                if category == FyersCallCategory.DEPTH_CHAIN:
+                    self._last_depth_dispatch_ts = now
+                elif category == FyersCallCategory.HISTORICAL:
+                    self._last_hist_dispatch_ts = now
                 self._total_requests[category] += 1
                 self._daily_requests += 1
                 self._daily_by_category[category] += 1
@@ -333,12 +402,17 @@ class UnifiedFyersRateGate:
 
                 # Check if we are at the top of the priority queue
                 if self._waiters and self._waiters[0][1] == tie_breaker:
-                    sleep_needed = self._calculate_sleep_needed(now)
+                    waiter_cat = self._waiters[0][2]
+                    sleep_needed = self._calculate_sleep_needed(now, category=waiter_cat)
                     if sleep_needed <= 0.0:
                         # Success: pop ourselves and record consumption
                         heapq.heappop(self._waiters)
                         self._sliding_window.append((now, category))
                         self._last_dispatch_ts = now
+                        if category == FyersCallCategory.DEPTH_CHAIN:
+                            self._last_depth_dispatch_ts = now
+                        elif category == FyersCallCategory.HISTORICAL:
+                            self._last_hist_dispatch_ts = now
                         self._total_requests[category] += 1
                         self._daily_requests += 1
                         self._daily_by_category[category] += 1
@@ -431,6 +505,9 @@ class UnifiedFyersRateGate:
                 "waiters_by_tier": waiting_by_tier,
                 "requests_last_min_by_tier": by_category_last_min,
                 "total_requests_by_tier": by_category_total,
+                "top_callers": dict(
+                    sorted(self._caller_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+                ),
                 "uptime_seconds": round(now - self._started_at, 1),
                 "status": "EXHAUSTED"
                 if is_daily_exhausted

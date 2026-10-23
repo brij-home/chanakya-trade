@@ -160,6 +160,13 @@ export const AUTO_TYPE_STYLE = {
     bg: 'rgba(245, 158, 11, 0.08)',
     border: 'rgba(245, 158, 11, 0.20)',
   },
+  PRE_INFLECTION_DRYUP: {
+    icon: '🤫',
+    label: 'PRE-INFLECTION DRY-UP',
+    color: '#06b6d4',
+    bg: 'rgba(6, 182, 212, 0.08)',
+    border: 'rgba(6, 182, 212, 0.20)',
+  },
   OPTIONS_MOMENTUM: {
     icon: '🚀',
     label: 'OPTIONS MOMENTUM',
@@ -664,7 +671,7 @@ export function computeNextExpiryOpportunity(alert, expiryInfo) {
     alert.alert_type === 'FUTURES'
   )
 
-  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM'
+  const isSpotSetup = alert.alert_type === 'PRE_INFLECTION_DRYUP' || alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM'
 
   const isDerivative = !isSpotSetup && Boolean(
     isFuture ||
@@ -793,12 +800,15 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
 
   let t2 = null
   const act = String(tradePlan.action || alert?.actionable_plan?.action || '').toUpperCase()
-  const isOptionSell = isDerivative && (
-    act === 'SELL' ||
+  let isOptionSell = isDerivative && (
     act === 'WRITE' ||
-    act === 'SHORT' ||
+    alert.alert_type === 'OPTION_WRITE' ||
+    (act === 'SELL' && !act.includes('BUY') && !(optType && act.includes(optType))) ||
     (sl && entry && t1 && sl > entry && t1 < entry)
   )
+  if (isDerivative && sl && entry && t1 && sl < entry && t1 > entry) {
+    isOptionSell = false
+  }
   const isUpwardPayoff = isDerivative ? !isOptionSell : isBull
   if (isDerivative) {
     if (optPlan?.t2_premium) {
@@ -857,6 +867,57 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   const t3_pct = entry && t3 && entry > 0 ? ((t3_pts / entry) * 100).toFixed(1) : null
   const t3_rr = t3_pts !== null && sl_pts && sl_pts > 0 ? (t3_pts / sl_pts).toFixed(1) : null
 
+  // Resolve No-Chase Boundary with Institutional Scale Harmonization:
+  // If this is a derivative/option setup, no_chase_boundary MUST be in option premium space.
+  // If the raw boundary is in spot space (e.g. > entry * 1.35 or near spotNum), preserve as spot_no_chase_boundary
+  // and re-derive the option premium execution ceiling.
+  let rawNoChase = null
+  if (optPlan?.no_chase_boundary != null) {
+    rawNoChase = Number(String(optPlan.no_chase_boundary).replace(/[^0-9.-]/g, ''))
+  } else if (tradePlan.no_chase_boundary != null) {
+    rawNoChase = Number(String(tradePlan.no_chase_boundary).replace(/[^0-9.-]/g, ''))
+  } else if (alert.no_chase_boundary != null) {
+    rawNoChase = Number(String(alert.no_chase_boundary).replace(/[^0-9.-]/g, ''))
+  }
+  if (rawNoChase !== null && (isNaN(rawNoChase) || rawNoChase <= 0)) {
+    rawNoChase = null
+  }
+
+  let spot_no_chase_boundary = alert.metrics?.spot_no_chase_boundary || alert.actionable_plan?.spot_no_chase_boundary || null
+  if (typeof spot_no_chase_boundary === 'string') {
+    spot_no_chase_boundary = Number(spot_no_chase_boundary.replace(/[^0-9.-]/g, ''))
+  }
+  if (spot_no_chase_boundary !== null && (isNaN(spot_no_chase_boundary) || spot_no_chase_boundary <= 0)) {
+    spot_no_chase_boundary = null
+  }
+
+  let no_chase_boundary = null
+  if (isDerivative) {
+    const isSpotDenominated = Boolean(
+      rawNoChase && entry && (
+        rawNoChase > entry * 1.35 ||
+        (spotNum && Math.abs(rawNoChase - spotNum) / spotNum < 0.25)
+      )
+    )
+
+    if (isSpotDenominated) {
+      if (!spot_no_chase_boundary) {
+        spot_no_chase_boundary = rawNoChase
+      }
+      if (optPlan?.no_chase_boundary && Number(optPlan.no_chase_boundary) <= entry * 1.35) {
+        no_chase_boundary = Number(optPlan.no_chase_boundary)
+      } else if (entry) {
+        no_chase_boundary = isUpwardPayoff ? Math.round(entry * 1.05 * 10) / 10 : Math.round(entry * 0.95 * 10) / 10
+      }
+    } else if (rawNoChase && rawNoChase > 0) {
+      no_chase_boundary = rawNoChase
+    } else if (entry) {
+      no_chase_boundary = isUpwardPayoff ? Math.round(entry * 1.05 * 10) / 10 : Math.round(entry * 0.95 * 10) / 10
+    }
+  } else {
+    no_chase_boundary = (rawNoChase && rawNoChase > 0) ? rawNoChase : (entry ? (isBull ? entry * 1.02 : entry * 0.98) : null)
+  }
+
   return {
     entry,
     sl,
@@ -880,7 +941,8 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     net_risk_reward: plan.net_risk_reward || alert.metrics?.net_risk_reward || optPlan?.net_option_rr || null,
     max_loss: plan.max_loss_capped ?? plan.max_loss_rupees ?? plan.max_loss_per_lot ?? alert.metrics?.max_loss_rupees ?? optPlan?.max_loss_per_lot ?? null,
     friction_pts: plan.friction_pts || alert.metrics?.friction_pts || optPlan?.friction_pts || null,
-    no_chase_boundary: alert.no_chase_boundary || tradePlan.no_chase_boundary || null,
+    no_chase_boundary,
+    spot_no_chase_boundary,
     entry_range: alert.entry_range || alert.optimal_entry_range || tradePlan.optimal_entry_range || null,
     anchored_levels: alert.anchored_levels || tradePlan.anchored_levels || null,
     time_horizon: alert.time_horizon || null,
@@ -1277,21 +1339,61 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   const strikeNum = rawStrike ? Number(String(rawStrike).replace(/[^0-9.-]/g, '')) : null
   const isFuture = Boolean(rawContract?.toUpperCase().includes('FUT') || alert.symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
 
-  const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE')) && alert.exchange === 'NFO')
-  const isSpotSetup = !isFuture && !isPureOption && (alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'TURTLE_SOUP_PLUS_ONE_LONG' || alert.alert_type === 'TURTLE_SOUP_SWEEP' || alert.alert_type === 'IRON_CONDOR_PINNING' || alert.alert_type === 'CRYPTO_SQUEEZE' || alert.alert_type === 'CRYPTO_MOMENTUM')
-  const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || rawContract)))
+  const hasOptionContract = Boolean(
+    (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE'))) ||
+    ((optType === 'CE' || optType === 'PE') && (strikeNum || alert.option_premium || optPlan?.entry_premium)) ||
+    plan.instrument_type === 'OPTION' ||
+    (optPlan && optPlan.entry_premium > 0)
+  )
+
+  const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' ||
+    alert.alert_type === 'OPTION_WRITE' ||
+    (alert.alert_type === 'GAMMA_BLAST' && optType) ||
+    hasOptionContract
+
+  const isSpotSetup = !isFuture && !hasOptionContract && (
+    alert.alert_type === 'PRE_INFLECTION_DRYUP' ||
+    alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' ||
+    alert.alert_type === 'SQUEEZE_BREAKOUT' ||
+    alert.alert_type === 'SQUEEZE_BREAKDOWN' ||
+    alert.alert_type === 'PATTERN_COILING' ||
+    alert.alert_type === 'MOMENTUM_ACCELERATION' ||
+    alert.alert_type === 'POCKET_PIVOT' ||
+    alert.alert_type === 'PRECURSOR_RADAR' ||
+    alert.alert_type === 'SMC_SWEEP' ||
+    alert.alert_type === 'CIRCUIT_WARNING' ||
+    alert.alert_type === 'COMMODITY_MOMENTUM' ||
+    alert.alert_type === 'TURTLE_SOUP_SHORT' ||
+    alert.alert_type === 'TURTLE_SOUP_PLUS_ONE_LONG' ||
+    alert.alert_type === 'TURTLE_SOUP_SWEEP' ||
+    alert.alert_type === 'IRON_CONDOR_PINNING' ||
+    alert.alert_type === 'CRYPTO_SQUEEZE' ||
+    alert.alert_type === 'CRYPTO_MOMENTUM'
+  )
+
+  const isDerivative = !isSpotSetup && Boolean(
+    isFuture ||
+    isPureOption ||
+    hasOptionContract ||
+    alert.exchange === 'NFO' ||
+    alert.exchange === 'BFO' ||
+    ((alert.segment === 'FNO_INDEX' || alert.segment === 'FNO_STOCK' || alert.segment === 'FNO') && (optType || strikeNum || rawContract))
+  )
 
   const isBull = alert.direction === 'BULLISH'
   const isBear = alert.direction === 'BEARISH'
   const isNeutral = alert.direction === 'NEUTRAL' || alert.alert_type === 'IRON_CONDOR_PINNING'
 
   const act = String(tradePlan.action || plan.action || '').toUpperCase()
-  const isOptionSell = isDerivative && (
-    act === 'SELL' ||
+  let isOptionSell = isDerivative && (
     act === 'WRITE' ||
-    act === 'SHORT' ||
-    alert.alert_type === 'OPTION_WRITE'
+    alert.alert_type === 'OPTION_WRITE' ||
+    (act === 'SELL' && !act.includes('BUY') && !(optType && act.includes(optType))) ||
+    (alert.stop_loss && alert.option_premium && alert.target_level && alert.stop_loss > alert.option_premium && alert.target_level < alert.option_premium)
   )
+  if (isDerivative && alert.stop_loss && alert.option_premium && alert.target_level && alert.stop_loss < alert.option_premium && alert.target_level > alert.option_premium) {
+    isOptionSell = false
+  }
 
   // 1. Resolve Execution Levels
   const levels = computeExecutionLevels(
@@ -1759,6 +1861,7 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     isBear,
     isNeutral,
     isOptionSell,
+    isUpwardPayoff: levels?.isUpwardPayoff ?? (isDerivative ? !isOptionSell : isBull),
     cleanSym,
     cleanContract,
     rawContract,
@@ -1768,6 +1871,8 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     isCrypto,
     currSym: isCrypto ? '$' : '₹',
     levels,
+    noChaseNum: levels?.no_chase_boundary ?? null,
+    spotNoChaseNum: levels?.spot_no_chase_boundary ?? null,
     entryNum,
     slNum,
     t1Num,

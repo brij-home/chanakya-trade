@@ -102,7 +102,7 @@ export default function Sidebar() {
         >
           <span>📊</span>
           <span>Terminal</span>
-          <span className="ml-auto text-[9px] text-subtle font-mono">^1</span>
+          <span className="ml-auto text-[11px] text-subtle font-mono">^1</span>
         </button>
 
         <button
@@ -116,7 +116,7 @@ export default function Sidebar() {
         >
           <span>⚔️</span>
           <span>Debate Arena</span>
-          <span className="ml-auto text-[9px] text-subtle font-mono">^2</span>
+          <span className="ml-auto text-[11px] text-subtle font-mono">^2</span>
         </button>
 
         <button
@@ -130,7 +130,7 @@ export default function Sidebar() {
         >
           <span>⚡</span>
           <span>Options &amp; GEX</span>
-          <span className="ml-auto text-[9px] text-subtle font-mono">^3</span>
+          <span className="ml-auto text-[11px] text-subtle font-mono">^3</span>
         </button>
       </div>
 
@@ -160,7 +160,7 @@ export default function Sidebar() {
             <path d="M12 5v14M5 12h14" />
           </svg>
           <span>New Session</span>
-          <span className="ml-auto text-[9px] text-subtle font-mono">^N</span>
+          <span className="ml-auto text-[11px] text-subtle font-mono">^N</span>
         </button>
 
         {/* Quick Filter Search for Sessions */}
@@ -236,7 +236,7 @@ export default function Sidebar() {
         <div className="flex items-center justify-between mb-1.5 px-1">
           <p className="text-[10px] uppercase font-ui tracking-wider text-muted font-semibold">Institutional Tools</p>
           {activeSymbol && (
-            <span className="text-[9px] font-mono text-amber bg-amber/10 border border-amber/30 px-1 rounded font-bold" title="Active Stock Context">
+            <span className="text-[11px] font-mono text-amber bg-amber/10 border border-amber/30 px-1 rounded font-bold" title="Active Stock Context">
               {activeSymbol}
             </span>
           )}
@@ -327,7 +327,7 @@ export default function Sidebar() {
                   <span className="w-1.5 h-1.5 rounded-full bg-green flex-shrink-0" />
                   <span className="text-[11px] text-text font-ui">{name}</span>
                   {roleLabel && (
-                    <span className={`text-[8px] font-ui font-bold uppercase tracking-wider px-1 py-0.5 rounded flex-shrink-0 ${
+                    <span className={`text-[10px] font-ui font-bold uppercase tracking-wider px-1 py-0.5 rounded flex-shrink-0 ${
                       status.role === 'data' ? 'bg-blue/10 text-blue' : 'bg-amber/10 text-amber'
                     }`}>{roleLabel}</span>
                   )}

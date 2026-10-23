@@ -214,3 +214,32 @@ def print_iv_smile(underlying: str, expiry: Optional[str] = None) -> None:
         )
         skew = classify_skew(otm_put, atm_iv, otm_call)
         console.print(f"  Skew: [bold]{skew}[/bold]")
+
+
+# ── Institutional Hagan's SABR (2002) Volatility Surface Re-exports ───
+from analysis.vol_surface import (
+    sabr_implied_volatility,
+    calibrate_sabr,
+    interpolate_sabr_smile,
+    detect_strike_mispricings,
+    analyze_volatility_surface,
+    SABRParameters,
+    StrikeMispricing,
+    SABRCalibrationResult,
+)
+
+__all__ = [
+    "classify_skew",
+    "classify_term_structure",
+    "compute_iv_smile",
+    "compute_iv_term_structure",
+    "print_iv_smile",
+    "sabr_implied_volatility",
+    "calibrate_sabr",
+    "interpolate_sabr_smile",
+    "detect_strike_mispricings",
+    "analyze_volatility_surface",
+    "SABRParameters",
+    "StrikeMispricing",
+    "SABRCalibrationResult",
+]

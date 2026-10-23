@@ -530,9 +530,11 @@ def test_render_asymmetric_alert_displays_futures_and_rollover_badge():
     }
 
     rendered = render_asymmetric_alert(sample_alert, in_market=True)
-    assert "Futures Preferred:" in rendered
-    assert "RELIANCE 26-OCT FUT" in rendered or "RELIANCE26OCTFUT" in rendered
-    assert "Delta 1.0 · Zero Theta Decay" in rendered
+    # Zero-Futures Invariant: Futures Preferred is strictly purged
+    assert "Futures Preferred:" not in rendered
+    assert "RELIANCE 26-OCT FUT" not in rendered
+    assert "Delta 1.0 · Zero Theta Decay" not in rendered
+    assert "RELIANCE 3000 CE" in rendered or "RELIANCE26OCT3000CE" in rendered
 
     assert "NEXT-MONTH ROLLOVER" in rendered
     assert "SEBI Physical Margin Safe" in rendered
@@ -623,6 +625,6 @@ def test_render_asymmetric_alert_displays_hedged_spread_and_futures_collar():
     assert "Bull Call Spread" in rendered
     assert "Net Debit:" in rendered
     assert "70% Margin Relief · Zero Theta Bleed" in rendered
-    assert "Overnight Gap Risk:" in rendered
-    assert "Futures Preferred:" in rendered
+    assert "Futures Preferred:" not in rendered
+    assert "Overnight Gap Risk:" not in rendered
     assert "F&O Alternative:" in rendered

@@ -284,11 +284,9 @@ def test_asymmetric_setup_alert_readable_futures_and_no_spot_clash():
     assert "SL:</b> <code>₹22,661.61</code>" in msg
     assert "T1 (+2R):</b> <code>₹24,057.49</code>" in msg
 
-    # 2. Futures Preferred line must show clean symbol with expiry, lot size, and execution levels
-    assert (
-        "Futures Preferred:</b> <code>NIFTY 26-OCT FUT</code> (Lot: 65) @ ₹23,157.8 | SL: ₹22,661.6 | T1: ₹24,057.5 [Delta 1.0 · Zero Theta Decay]"
-        in msg
-    )
+    # 2. Zero-Futures Invariant: Futures Preferred line must be purged
+    assert "Futures Preferred:" not in msg
+    assert "Delta 1.0 · Zero Theta Decay" not in msg
 
     # 3. F&O Alternative option line must show clean option, lot size, and execution levels
     assert (
@@ -2464,8 +2462,9 @@ def test_asymmetric_and_fno_alerts_display_all_expiry_contract_details():
         in rendered_asym
     )
 
-    # Invariant 4: Futures Preferred line
-    assert "Futures Preferred:</b> <code>NIFTY 26-OCT FUT</code>" in rendered_asym
+    # Invariant 4: Zero-Futures Invariant Gate (Futures line must be purged)
+    assert "Futures Preferred:" not in rendered_asym
+    assert "Delta 1.0 · Zero Theta Decay" not in rendered_asym
 
     # 2. F&O Gamma Blast Alert with Hedged Spread
     fno_dict = {

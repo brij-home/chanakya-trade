@@ -89,15 +89,15 @@ export default function ThematicBasketsCard({ data }) {
 
               <div className="grid grid-cols-3 gap-1 text-center text-[10px] font-mono pt-1 border-t border-border/30">
                 <div className="bg-elevated/40 p-1 rounded">
-                  <span className="text-muted block text-[9px]">X (Quality)</span>
+                  <span className="text-muted block text-[11px]">X (Quality)</span>
                   <span className="font-bold text-blue">{c.x_quality_score}/35</span>
                 </div>
                 <div className="bg-elevated/40 p-1 rounded">
-                  <span className="text-muted block text-[9px]">Y (Growth)</span>
+                  <span className="text-muted block text-[11px]">Y (Growth)</span>
                   <span className="font-bold text-green">{c.y_growth_score}/35</span>
                 </div>
                 <div className="bg-elevated/40 p-1 rounded">
-                  <span className="text-muted block text-[9px]">Z (Timing)</span>
+                  <span className="text-muted block text-[11px]">Z (Timing)</span>
                   <span className="font-bold text-amber">{c.z_timing_score}/30</span>
                 </div>
               </div>

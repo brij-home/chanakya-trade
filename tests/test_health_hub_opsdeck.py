@@ -154,3 +154,71 @@ def test_fundamental_snapshot_and_scheduler_sync():
     assert res["status"] == "SUCCESS"
     assert "fundamentals_saved" in res
     assert "forensics_saved" in res
+
+
+def test_telemetry_handler_external_scraper_downgrade():
+    """Verify external library logs (yfinance, websocket) are not elevated to P1 critical incidents."""
+    import logging
+    from engine.telemetry import TelemetryLogHandler, get_prioritized_incidents, clear_telemetry
+
+    clear_telemetry()
+    handler = TelemetryLogHandler()
+
+    # 1. Benign yfinance scraper message should be P2, not P1
+    rec_yf = logging.LogRecord(
+        name="yfinance.scrapers",
+        level=logging.ERROR,
+        pathname="yfinance/history.py",
+        lineno=372,
+        msg="$NIFTY_FIN_SERVICE.NS: possibly delisted; no price data found",
+        args=(),
+        exc_info=None,
+    )
+    handler.emit(rec_yf)
+
+    # 2. Routine websocket client closure should be P2, not P1
+    rec_ws = logging.LogRecord(
+        name="websocket",
+        level=logging.ERROR,
+        pathname="websocket/client.py",
+        lineno=100,
+        msg="Connection to remote host was lost. - goodbye",
+        args=(),
+        exc_info=None,
+    )
+    handler.emit(rec_ws)
+
+    # Verify neither was recorded as P1
+    p1_incs = get_prioritized_incidents(priority="P1")
+    assert len(p1_incs) == 0
+
+    # Verify both are accessible as operational diagnostics (P2)
+    p2_incs = get_prioritized_incidents(priority="P2")
+    assert len(p2_incs) == 2
+
+    clear_telemetry()
+
+
+def test_observability_off_market_slo_protection():
+    """Verify off-market queries do not flag false live SLO breaches."""
+    from engine.observability import ObservabilityRegistry
+
+    obs = ObservabilityRegistry()
+    obs.clear_metrics()
+
+    # Record 50 off-market unfulfilled option chain measurements
+    for _ in range(50):
+        obs.record_metric(
+            journey_id="options_chain",
+            latency_ms=12000.0,
+            success=False,
+            metadata={"symbol": "NIFTY", "off_market": True},
+        )
+
+    report = obs.get_slo_report(journey_id="options_chain")
+    journey = report["journeys"]["options_chain"]
+    assert journey["slo_breach"] is False
+    assert journey["status"] == "OK"
+    assert report["overall_status"] == "OK"
+
+    obs.clear_metrics()

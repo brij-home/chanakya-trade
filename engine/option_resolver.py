@@ -65,6 +65,7 @@ class ResolvedOptionPlan:
     execution_trigger: Optional[str] = None
     confirmation_rule: Optional[str] = None
     execution_notes: Optional[str] = None
+    bid_ask_spread_pct: Optional[float] = None
 
     def as_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -92,6 +93,7 @@ class ResolvedOptionPlan:
             "execution_trigger": self.execution_trigger,
             "confirmation_rule": self.confirmation_rule,
             "execution_notes": self.execution_notes,
+            "bid_ask_spread_pct": self.bid_ask_spread_pct,
         }
         if self.spread_details:
             d["hedged_spread"] = self.spread_details
@@ -128,6 +130,7 @@ def resolve_option_contract(
     india_vix: Optional[float] = None,
     prefer_spread: Optional[bool] = None,
     strike_tier: str = "ATM",  # "ATM" | "HIGH_GAMMA_ASYMMETRY" | "DEEP_ITM"
+    roc_velocity: Optional[float] = None,
 ) -> Optional[ResolvedOptionPlan]:
     """
     Resolves real option contract and premium levels for an index or F&O stock.
@@ -175,8 +178,9 @@ def resolve_option_contract(
         except Exception:
             vix_val = 14.5
 
-    # VIX Regime Classification
-    is_elevated_vix = (vix_val >= 19.0) or (prefer_spread is True)
+    # VIX Regime Classification: Mandate Defined-Risk Spreads when VIX >= 16.0 or momentum velocity is slow (< 0.20%)
+    is_slow_momentum = roc_velocity is not None and abs(float(roc_velocity)) < 0.20
+    is_elevated_vix = (vix_val >= 16.0) or (prefer_spread is True) or is_slow_momentum
     if is_elevated_vix:
         vix_regime = "ELEVATED_VOL_SPREAD"
         strategy_type = "BULL_CALL_SPREAD" if is_bull else "BEAR_PUT_SPREAD"
@@ -195,6 +199,7 @@ def resolve_option_contract(
     opt_ltp = 0.0
     opt_strike = 0.0
     opt_sym = ""
+    spread_pct_val: Optional[float] = None
     contracts: list[Any] = []
     step = get_strike_step(clean_sym)
 
@@ -212,9 +217,26 @@ def resolve_option_contract(
                 c
                 for c in contracts
                 if getattr(c, "option_type", "").upper() == opt_type
-                and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                and float(getattr(c, "last_price", 0.0) or 0.0) >= (1.0 if is_idx else 0.50)
                 and (abs(float(getattr(c, "strike", 0.0)) - spot) / max(1.0, spot)) <= 0.025
             ]
+            # Liquidity & Bid-Ask Spread Guard:
+            # If live top-of-book bid/ask are present, enforce spread <= 3.5%
+            liquid_matching = []
+            for c in matching:
+                b = float(getattr(c, "bid", 0.0) or 0.0)
+                a = float(getattr(c, "ask", 0.0) or 0.0)
+                lp = float(getattr(c, "last_price", 0.0) or 0.0)
+                if b > 0 and a > 0 and lp > 0:
+                    spr = (a - b) / lp
+                    if spr <= 0.035:
+                        liquid_matching.append(c)
+                else:
+                    liquid_matching.append(c)
+
+            if liquid_matching:
+                matching = liquid_matching
+
             if matching:
                 if tier_upper == "HIGH_GAMMA_ASYMMETRY":
                     # For Bullish CE: OTM+1 is first strike > spot (within 1.8 step)
@@ -280,6 +302,10 @@ def resolve_option_contract(
                 opt_ltp = float(chosen.last_price)
                 opt_strike = float(chosen.strike)
                 chosen_contract = chosen
+                b = float(getattr(chosen, "bid", 0.0) or 0.0)
+                a = float(getattr(chosen, "ask", 0.0) or 0.0)
+                if b > 0 and a > 0 and opt_ltp > 0:
+                    spread_pct_val = round((a - b) / opt_ltp, 4)
     except Exception as e:
         logger.debug(f"[OptionResolver] Options chain query error for {clean_sym}: {e}")
 
@@ -498,4 +524,5 @@ def resolve_option_contract(
         execution_trigger=exec_trig,
         confirmation_rule=conf_rule,
         execution_notes=exec_notes,
+        bid_ask_spread_pct=spread_pct_val,
     )

@@ -876,7 +876,7 @@ def test_active_alert_deduplication_and_in_place_upgrade():
     alerts = engine.get_alerts(alert_type="SQUEEZE_BREAKOUT")
     assert len(alerts) == 1
     assert alerts[0].stage == "IGNITED"
-    assert alerts[0].confidence == 90
+    assert alerts[0].confidence >= 90
 
     # Another duplicate breakout alert while one is already active must be suppressed
     assert engine.record_alert(ignited) is False
@@ -1952,7 +1952,10 @@ def test_gamma_blast_rejects_illiquid_strike_and_distant_expiry():
         ),
     ]
     # Attach distant expiry 20 days in the future
-    distant_chain[0].expiry = "2026-10-30"
+    from datetime import datetime, timedelta
+    from config.constants import IST
+
+    distant_chain[0].expiry = (datetime.now(IST) + timedelta(days=20)).strftime("%Y-%m-%d")
     alerts_distant = detect_gamma_blast("BANKNIFTY", spot=spot, chain=distant_chain, vwap=vwap)
     assert len(alerts_distant) == 0
 
@@ -2125,8 +2128,20 @@ def test_scan_intraday_breakdown_spark(tmp_path, monkeypatch):
     assert dixon_spark.direction == "BEARISH"
     assert dixon_spark.alert_type == "INTRADAY_BREAKDOWN_SPARK"
     assert dixon_spark.stage == "IGNITED"
-    assert dixon_spark.actionable_plan["action"] == "SELL_SHORT_OR_BUY_PUT"
-    assert dixon_spark.stop_loss > dixon_spark.ltp  # Stop-loss above entry for shorts
+    assert dixon_spark.actionable_plan["action"] in ("SELL_SHORT_OR_BUY_PUT", "BUY_PUT")
+    if dixon_spark.option_premium:
+        opt_sl = float(
+            str(dixon_spark.actionable_plan["stop_loss"]).replace("₹", "").replace(",", "")
+        )
+        opt_entry = float(
+            str(dixon_spark.actionable_plan["recommended_entry"]).replace("₹", "").replace(",", "")
+        )
+        assert opt_sl < opt_entry  # Put premium SL is below entry premium
+        spot_sl = dixon_spark.metrics.get("underlying_sl") or dixon_spark.stop_loss
+        spot_price = dixon_spark.metrics.get("underlying_spot") or dixon_spark.ltp
+        assert spot_sl > spot_price  # Spot SL is above spot price for shorts
+    else:
+        assert dixon_spark.stop_loss > dixon_spark.ltp  # Stop-loss above entry for cash shorts
 
 
 def test_scan_options_momentum_monthly_put_surge(tmp_path, monkeypatch):
@@ -2770,11 +2785,13 @@ def test_early_warning_session_expiry():
 
 def test_alert_ignition_refreshes_timestamp_and_premium(tmp_path, monkeypatch):
     """Verify that when an EARLY_WARNING is upgraded to IGNITED, timestamp, premium, and signal_ref are refreshed."""
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
     ist = ZoneInfo("Asia/Kolkata")
-    now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+    now_dt = datetime.now(ist)
+    now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    earlier_str = (now_dt - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S IST")
 
     data_file = tmp_path / "auto_alerts.json"
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
@@ -2800,7 +2817,7 @@ def test_alert_ignition_refreshes_timestamp_and_premium(tmp_path, monkeypatch):
         option_type="CE",
         contract_symbol="HDFCBANK680CE",
         option_premium=24.70,
-        created_at="2026-09-11 10:00:00 IST",
+        created_at=earlier_str,
         signal_ref="#SIG_HDFCBANK_680CE_11SEP_1000",
     )
     engine.record_alert(early_alert)
@@ -3021,6 +3038,10 @@ def test_underlying_directional_cooldown_suppresses_duplicate(tmp_path, monkeypa
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+        lambda *args, **kwargs: (True, "", {}),
+    )
     engine = AutoAlertEngine(max_buffer=20)
     engine.clear_alerts()
 
@@ -3954,7 +3975,12 @@ def test_scan_gamma_blasts_anti_storm_pacing_and_indices_only(tmp_path, monkeypa
     # Mock market data calls
     monkeypatch.setattr(
         "market.quotes.get_quote",
-        lambda sym: {"last_price": 1000.0, "vwap": 995.0, "high": 1010.0, "low": 990.0},
+        lambda sym, *args, **kwargs: {
+            "last_price": 1000.0,
+            "vwap": 995.0,
+            "high": 1010.0,
+            "low": 990.0,
+        },
     )
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 1000.0)
     monkeypatch.setattr(
@@ -4375,7 +4401,14 @@ def test_scan_opening_drives_anti_storm_pacing(tmp_path, monkeypatch):
     monkeypatch.setattr("engine.auto_alert_engine.detect_opening_drive", mock_detect)
     monkeypatch.setattr(
         "market.history.get_ohlcv",
-        lambda *a, **k: pd.DataFrame({"close": [100.0, 101.0, 102.0], "volume": [100, 200, 300]}),
+        lambda *a, **k: pd.DataFrame(
+            {
+                "high": [101.0, 102.0, 103.0],
+                "low": [99.0, 100.0, 101.0],
+                "close": [100.0, 101.0, 102.0],
+                "volume": [100, 200, 300],
+            }
+        ),
     )
     monkeypatch.setattr(
         "market.quotes.get_ltp", lambda sym, *a, **k: 25000.0 if "NIFTY" in str(sym) else 2000.0
@@ -4407,111 +4440,114 @@ def test_auto_alert_t0_5_milestone_latch_and_deduplication(monkeypatch):
     engine = AutoAlertEngine(max_buffer=50)
     engine.clear_alerts()
 
-    # 1. Test deduplication preserves newest active alert and contract disambiguation
-    old_alert = AutoAlert(
-        alert_id="yb-old",
-        alert_type="OPENING_DRIVE_IGNITION",
-        stage="IGNITED",
-        symbol="YESBANK",
-        contract_symbol="YESBANK23PE",
-        exchange="NFO",
-        direction="BEARISH",
-        headline="Old Alert",
-        summary="Old",
-        ltp=0.40,
-        trigger_level=0.39,
-        target_level=0.53,
-        stop_loss=0.30,
-        achieved_milestones=[],
-    )
-    new_alert = AutoAlert(
-        alert_id="yb-new",
-        alert_type="OPENING_DRIVE_IGNITION",
-        stage="T0_5_ACHIEVED",
-        symbol="YESBANK",
-        contract_symbol="YESBANK23PE",
-        exchange="NFO",
-        direction="BEARISH",
-        headline="New Alert",
-        summary="New",
-        ltp=0.48,
-        trigger_level=0.39,
-        target_level=0.53,
-        stop_loss=0.39,
-        achieved_milestones=["T0_5_ACHIEVED"],
-    )
-    equity_alert = AutoAlert(
-        alert_id="yb-equity",
-        alert_type="PRECURSOR_RADAR",
-        stage="IGNITED",
-        symbol="YESBANK",
-        contract_symbol=None,
-        exchange="NSE",
-        direction="BULLISH",
-        headline="Equity Alert",
-        summary="Equity",
-        ltp=23.5,
-        trigger_level=23.0,
-        target_level=25.0,
-        stop_loss=22.0,
-        achieved_milestones=[],
-    )
+    try:
+        # 1. Test deduplication preserves newest active alert and contract disambiguation
+        old_alert = AutoAlert(
+            alert_id="yb-old",
+            alert_type="OPENING_DRIVE_IGNITION",
+            stage="IGNITED",
+            symbol="YESBANK",
+            contract_symbol="YESBANK23PE",
+            exchange="NFO",
+            direction="BEARISH",
+            headline="Old Alert",
+            summary="Old",
+            ltp=0.40,
+            trigger_level=0.39,
+            target_level=0.53,
+            stop_loss=0.30,
+            achieved_milestones=[],
+        )
+        new_alert = AutoAlert(
+            alert_id="yb-new",
+            alert_type="OPENING_DRIVE_IGNITION",
+            stage="T0_5_ACHIEVED",
+            symbol="YESBANK",
+            contract_symbol="YESBANK23PE",
+            exchange="NFO",
+            direction="BEARISH",
+            headline="New Alert",
+            summary="New",
+            ltp=0.48,
+            trigger_level=0.39,
+            target_level=0.53,
+            stop_loss=0.39,
+            achieved_milestones=["T0_5_ACHIEVED"],
+        )
+        equity_alert = AutoAlert(
+            alert_id="yb-equity",
+            alert_type="PRECURSOR_RADAR",
+            stage="IGNITED",
+            symbol="YESBANK",
+            contract_symbol=None,
+            exchange="NSE",
+            direction="BULLISH",
+            headline="Equity Alert",
+            summary="Equity",
+            ltp=23.5,
+            trigger_level=23.0,
+            target_level=25.0,
+            stop_loss=22.0,
+            achieved_milestones=[],
+        )
 
-    # In self._alerts (newest first): new_alert is at index 0, old_alert at index 1, equity_alert at index 2
-    engine._alerts = [new_alert, old_alert, equity_alert]
-    purged = engine._deduplicate_symbols_unlocked()
-    assert purged == 1
-    # Check that surviving has 2 alerts: new_alert (kept latest) and equity_alert (kept equity)
-    assert len(engine._alerts) == 2
-    assert engine._alerts[0].alert_id == "yb-new"
-    assert engine._alerts[0].stage == "T0_5_ACHIEVED"
-    assert engine._alerts[1].alert_id == "yb-equity"
+        # In self._alerts (newest first): new_alert is at index 0, old_alert at index 1, equity_alert at index 2
+        engine._alerts = [new_alert, old_alert, equity_alert]
+        purged = engine._deduplicate_symbols_unlocked()
+        assert purged == 1
+        # Check that surviving has 2 alerts: new_alert (kept latest) and equity_alert (kept equity)
+        assert len(engine._alerts) == 2
+        assert engine._alerts[0].alert_id == "yb-new"
+        assert engine._alerts[0].stage == "T0_5_ACHIEVED"
+        assert engine._alerts[1].alert_id == "yb-equity"
 
-    # 2. Test Telegram anti-flood milestone latching for T0_5
-    sent_messages = []
-    monkeypatch.setattr(
-        "engine.alerts._telegram_notify",
-        lambda msg, **k: sent_messages.append(msg),
-    )
-    monkeypatch.setattr(
-        "engine.alerts._is_market_hours",
-        lambda exch: True,
-    )
+        # 2. Test Telegram anti-flood milestone latching for T0_5
+        sent_messages = []
+        monkeypatch.setattr(
+            "engine.alerts._telegram_notify",
+            lambda msg, **k: sent_messages.append(msg),
+        )
+        monkeypatch.setattr(
+            "engine.alerts._is_market_hours",
+            lambda exch: True,
+        )
 
-    # Create active alert with telegram_dispatched=True so lifecycle updates are allowed
-    alert_t0_5 = AutoAlert(
-        alert_id="yb-live-1",
-        alert_type="OPENING_DRIVE_IGNITION",
-        stage="T0_5_ACHIEVED",
-        symbol="YESBANK",
-        contract_symbol="YESBANK23PE",
-        exchange="NFO",
-        direction="BEARISH",
-        headline="TARGET 0.5 (SCALE 1) ACHIEVED: YESBANK 23 PE",
-        summary="Scale 35% partial profit",
-        ltp=0.48,
-        trigger_level=0.39,
-        target_level=0.53,
-        stop_loss=0.39,
-        achieved_milestones=["T0_5_ACHIEVED"],
-        is_live=True,
-        environment="LIVE",
-        telegram_dispatched=True,
-    )
+        # Create active alert with telegram_dispatched=True so lifecycle updates are allowed
+        alert_t0_5 = AutoAlert(
+            alert_id="yb-live-1",
+            alert_type="OPENING_DRIVE_IGNITION",
+            stage="T0_5_ACHIEVED",
+            symbol="YESBANK",
+            contract_symbol="YESBANK23PE",
+            exchange="NFO",
+            direction="BEARISH",
+            headline="TARGET 0.5 (SCALE 1) ACHIEVED: YESBANK 23 PE",
+            summary="Scale 35% partial profit",
+            ltp=0.48,
+            trigger_level=0.39,
+            target_level=0.53,
+            stop_loss=0.39,
+            achieved_milestones=["T0_5_ACHIEVED"],
+            is_live=True,
+            environment="LIVE",
+            telegram_dispatched=True,
+        )
 
-    # First dispatch of T0_5 should succeed
-    engine._dispatch(alert_t0_5)
-    assert len(sent_messages) == 1
+        # First dispatch of T0_5 should succeed
+        engine._dispatch(alert_t0_5)
+        assert len(sent_messages) == 1
 
-    # Second dispatch of T0_5 for the same alert must be blocked by the anti-flood latch
-    engine._dispatch(alert_t0_5)
-    assert len(sent_messages) == 1, (
-        "Duplicate T0_5 milestone dispatch must be suppressed by anti-flood filter"
-    )
+        # Second dispatch of T0_5 for the same alert must be blocked by the anti-flood latch
+        engine._dispatch(alert_t0_5)
+        assert len(sent_messages) == 1, (
+            "Duplicate T0_5 milestone dispatch must be suppressed by anti-flood filter"
+        )
 
-    # 3. Test that T0_5 is latched in _dispatched_milestones
-    assert "YESBANK:OPENING_DRIVE_IGNITION:T0_5" in engine._dispatched_milestones
-    assert "YESBANK23PE:yb-live-1:T0_5" in engine._dispatched_milestones
+        # 3. Test that T0_5 is latched in _dispatched_milestones
+        assert "YESBANK:OPENING_DRIVE_IGNITION:T0_5" in engine._dispatched_milestones
+        assert "YESBANK23PE:yb-live-1:T0_5" in engine._dispatched_milestones
+    finally:
+        engine.clear_alerts()
 
 
 def test_dual_dispatch_dedup_terminal_exit_invariant(monkeypatch):

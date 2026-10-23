@@ -170,7 +170,7 @@ export default function WelcomeStep({ onNext }) {
             <span className="text-xl leading-none flex-shrink-0">{c.icon}</span>
             <div>
               <div className="text-xs font-bold" style={{ color: 'var(--color-text)' }}>{c.label}</div>
-              <div className="text-[9px]" style={{ color: 'var(--color-subtle)' }}>{c.sub}</div>
+              <div className="text-[11px]" style={{ color: 'var(--color-subtle)' }}>{c.sub}</div>
             </div>
           </div>
         ))}

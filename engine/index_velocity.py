@@ -507,3 +507,11 @@ def calculate_premium_velocity(
         smoothed_vel = round(0.6 * inst_vel + 0.4 * prev_vel, 2)
         _PREMIUM_VELOCITY_CACHE[clean_sym] = (ts, ltp, smoothed_vel)
         return smoothed_vel
+
+
+def clear_velocity_cache() -> None:
+    """Hermetically clear real-time index velocity and option premium velocity caches for test isolation."""
+    with _velocity_cache_lock:
+        _velocity_cache.clear()
+    with _premium_velocity_lock:
+        _PREMIUM_VELOCITY_CACHE.clear()

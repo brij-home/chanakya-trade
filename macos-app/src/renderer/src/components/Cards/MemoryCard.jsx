@@ -38,7 +38,7 @@ export default function MemoryCard({ data }) {
           { label: 'Avg Conf', value: `${Number(stats.avg_confidence ?? 0).toFixed(0)}%` },
         ].map(({ label, value, color }) => (
           <div key={label} className="bg-panel border border-border rounded-lg p-2 text-center">
-            <p className="text-muted text-[9px] uppercase tracking-wider font-ui">{label}</p>
+            <p className="text-muted text-[11px] uppercase tracking-wider font-ui">{label}</p>
             <p className={`text-[13px] font-mono font-semibold mt-0.5 ${color ?? 'text-text'}`}>{value}</p>
           </div>
         ))}
@@ -48,7 +48,7 @@ export default function MemoryCard({ data }) {
         <div className="overflow-x-auto">
           <table className="w-full text-[11px]">
             <thead>
-              <tr className="text-muted text-[9px] uppercase tracking-wider font-ui border-b border-border">
+              <tr className="text-muted text-[11px] uppercase tracking-wider font-ui border-b border-border">
                 <th className="pb-1 text-left pr-3">Date</th>
                 <th className="pb-1 text-left pr-3">Symbol</th>
                 <th className="pb-1 text-left pr-3">Verdict</th>

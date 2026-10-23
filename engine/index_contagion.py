@@ -155,6 +155,11 @@ class IndexContagionEngine:
         elif clean_idx == "MIDCPNIFTY":
             idx_sym = "NSE:NIFTY MID SELECT"
             symbols_to_fetch = [idx_sym, "NSE:MIDCPNIFTY"] + [f"NSE:{s}" for s in weights.keys()]
+        elif clean_idx == "FINNIFTY":
+            idx_sym = "NSE:NIFTY FIN SERVICE"
+            symbols_to_fetch = [idx_sym, "NSE:FINNIFTY-INDEX", "NSE:FINNIFTY"] + [
+                f"NSE:{s}" for s in weights.keys()
+            ]
         else:
             idx_sym = f"NSE:{clean_idx}"
             symbols_to_fetch = [idx_sym] + [f"NSE:{s}" for s in weights.keys()]
@@ -169,8 +174,13 @@ class IndexContagionEngine:
         idx_q = (
             quotes_map.get(idx_sym)
             or quotes_map.get(clean_idx)
+            or quotes_map.get(f"NSE:{clean_idx}")
+            or quotes_map.get(f"BSE:{clean_idx}")
             or (quotes_map.get("BSE:SENSEX-INDEX") if clean_idx == "SENSEX" else None)
             or (quotes_map.get("NSE:MIDCPNIFTY") if clean_idx == "MIDCPNIFTY" else None)
+            or (quotes_map.get("NSE:FINNIFTY-INDEX") if clean_idx == "FINNIFTY" else None)
+            or (quotes_map.get("NSE:NIFTY FIN SERVICE") if clean_idx == "FINNIFTY" else None)
+            or (quotes_map.get("NSE:FINNIFTY") if clean_idx == "FINNIFTY" else None)
         )
         idx_ltp = float(getattr(idx_q, "last_price", 0.0) or getattr(idx_q, "ltp", 0.0) or 0.0)
         if idx_ltp <= 0:
@@ -179,6 +189,8 @@ class IndexContagionEngine:
                 idx_ltp = get_ltp("BSE:SENSEX-INDEX")
             elif idx_ltp <= 0 and clean_idx == "MIDCPNIFTY":
                 idx_ltp = get_ltp("NSE:MIDCPNIFTY")
+            elif idx_ltp <= 0 and clean_idx == "FINNIFTY":
+                idx_ltp = get_ltp("NSE:NIFTY FIN SERVICE") or get_ltp("NSE:FINNIFTY-INDEX")
         if idx_ltp <= 0:
             return None
 
@@ -629,6 +641,11 @@ class IndexContagionEngine:
                 "change_pct": round(change_pct, 2),
                 "option_contract": opt_contract_sym,
                 "option_premium": opt_ltp,
+                "spot": spot,
+                "underlying_ltp": spot,
+                "underlying_symbol": index_name,
+                "day_high": day_high,
+                "day_low": day_low,
             },
             actionable_plan={
                 "action": f"WAIT_CONFIRMATION ({asym_verdict})"

@@ -27,6 +27,7 @@ import argparse
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -92,19 +93,25 @@ def run_command(
             bufsize=1,
         )
 
-        if proc.stdout:
-            for line in iter(proc.stdout.readline, ""):
-                lines.append(line)
-                stripped = line.rstrip()
-                if stream and stripped:
-                    print(f"   {stripped}", flush=True)
-            proc.stdout.close()
+        def _reader() -> None:
+            if proc.stdout:
+                for line in iter(proc.stdout.readline, ""):
+                    lines.append(line)
+                    stripped = line.rstrip()
+                    if stream and stripped:
+                        print(f"   {stripped}", flush=True)
+                proc.stdout.close()
 
-        try:
-            returncode = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
+        reader_thread = threading.Thread(target=_reader, daemon=True)
+        reader_thread.start()
+        reader_thread.join(timeout=timeout)
+
+        if reader_thread.is_alive():
             proc.kill()
-            proc.wait(timeout=5)
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
             duration = time.perf_counter() - start
             print(f"  ❌ TIMEOUT ({duration:.2f}s exceeded {timeout}s limit): {title}", flush=True)
             return (
@@ -112,6 +119,12 @@ def run_command(
                 duration,
                 "".join(lines) + f"\n[ERROR] Command timed out after {timeout} seconds.",
             )
+
+        try:
+            returncode = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            returncode = 1
 
     except Exception as exc:
         duration = time.perf_counter() - start

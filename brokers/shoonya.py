@@ -449,6 +449,79 @@ class ShoonyaAPI(BrokerAPI):
             )
         return quotes
 
+    def get_market_depth(self, symbol: str) -> dict[str, Any]:
+        """
+        Level 2 Market Depth (5-level Order Book) from Shoonya GetQuotes API.
+        Bridges into central BisectDepthBook in market.order_book.
+        """
+        if not symbol:
+            return {
+                "symbol": "",
+                "bids": [],
+                "asks": [],
+                "spread": 0.0,
+                "total_buy_qty": 0,
+                "total_sell_qty": 0,
+                "status": "UNAVAILABLE",
+            }
+
+        clean_sym = symbol.replace(".NS", "").strip()
+        try:
+            resolved = self._resolve_instrument(clean_sym)
+            result = self._post("GetQuotes", {"exch": resolved["exch"], "token": resolved["token"]})
+            bids = []
+            asks = []
+            tot_b = 0
+            tot_s = 0
+
+            for i in range(1, 6):
+                bp = _num(result.get(f"bp{i}"))
+                bq = _int(result.get(f"bq{i}"))
+                bno = _int(result.get(f"bno{i}")) or 1
+                if bp > 0 and bq > 0:
+                    bids.append({"level": i, "price": bp, "quantity": bq, "orders": bno})
+                    tot_b += bq
+
+                sp = _num(result.get(f"sp{i}"))
+                sq = _int(result.get(f"sq{i}"))
+                sno = _int(result.get(f"sno{i}")) or 1
+                if sp > 0 and sq > 0:
+                    asks.append({"level": i, "price": sp, "quantity": sq, "orders": sno})
+                    tot_s += sq
+
+            spread = round(asks[0]["price"] - bids[0]["price"], 2) if (bids and asks) else 0.0
+
+            # Bridge into in-memory BisectDepthBook
+            try:
+                from market.order_book import get_depth_book
+
+                get_depth_book(symbol).batch_update(bids, asks)
+                get_depth_book(clean_sym.split(":")[-1]).batch_update(bids, asks)
+            except Exception as e_bridge:
+                log.debug(f"[Shoonya] BisectDepthBook bridge error: {e_bridge}")
+
+            return {
+                "symbol": symbol,
+                "bids": bids,
+                "asks": asks,
+                "spread": spread,
+                "total_buy_qty": tot_b,
+                "total_sell_qty": tot_s,
+                "status": "LIVE_L2",
+            }
+        except Exception as e:
+            log.warning(f"[Shoonya] get_market_depth failed for {symbol}: {e}")
+            return {
+                "symbol": symbol,
+                "bids": [],
+                "asks": [],
+                "spread": 0.0,
+                "total_buy_qty": 0,
+                "total_sell_qty": 0,
+                "status": "UNAVAILABLE",
+                "message": str(e),
+            }
+
     def get_historical_data(
         self,
         symbol: str,

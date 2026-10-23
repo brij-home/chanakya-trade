@@ -52,10 +52,8 @@ except Exception:
     DEFAULT_SYMBOLS = [
         "NSE:NIFTY50-INDEX",
         "NSE:NIFTYBANK-INDEX",
-        "NSE:FINNIFTY-INDEX",
         "NSE:MIDCPNIFTY-INDEX",
         "BSE:SENSEX-INDEX",
-        "BSE:BANKEX-INDEX",
         "NSE:INDIAVIX-INDEX",
         "MCX:CRUDEOIL",
         "MCX:NATURALGAS",
@@ -66,14 +64,31 @@ except Exception:
 # Map our instrument format to Fyers WebSocket format
 _SYMBOL_MAP = {
     "NSE:NIFTY 50": "NSE:NIFTY50-INDEX",
+    "NSE:NIFTY": "NSE:NIFTY50-INDEX",
+    "NSE:NIFTY-INDEX": "NSE:NIFTY50-INDEX",
+    "NIFTY": "NSE:NIFTY50-INDEX",
+    "NIFTY 50": "NSE:NIFTY50-INDEX",
+    "NIFTY50": "NSE:NIFTY50-INDEX",
     "NSE:NIFTY BANK": "NSE:NIFTYBANK-INDEX",
+    "NSE:BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    "NSE:BANKNIFTY-INDEX": "NSE:NIFTYBANK-INDEX",
+    "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    "NIFTY BANK": "NSE:NIFTYBANK-INDEX",
     "NSE:INDIA VIX": "NSE:INDIAVIX-INDEX",
+    "NSE:INDIAVIX": "NSE:INDIAVIX-INDEX",
+    "INDIA VIX": "NSE:INDIAVIX-INDEX",
+    "VIX": "NSE:INDIAVIX-INDEX",
     "BSE:SENSEX": "BSE:SENSEX-INDEX",
+    "SENSEX": "BSE:SENSEX-INDEX",
     "NSE:NIFTY FIN SERVICE": "NSE:FINNIFTY-INDEX",
+    "NSE:FINNIFTY": "NSE:FINNIFTY-INDEX",
+    "FINNIFTY": "NSE:FINNIFTY-INDEX",
     "NSE:NIFTY MIDCAP 100": "NSE:NIFTYMIDCAP100-INDEX",
     "NSE:MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+    "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
     "NSE:NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
     "BSE:BANKEX": "BSE:BANKEX-INDEX",
+    "BANKEX": "BSE:BANKEX-INDEX",
     "NSE:NIFTY IT": "NSE:NIFTYIT-INDEX",
     "NSE:NIFTY PHARMA": "NSE:NIFTYPHARMA-INDEX",
     "NSE:NIFTY AUTO": "NSE:NIFTYAUTO-INDEX",
@@ -95,40 +110,69 @@ _INDEX_PREFIXES = (
 
 def _to_ws_symbol(instrument: str) -> str:
     """Convert any instrument format (Equity, Index, MCX, Currency, Options) to Fyers WebSocket format."""
+    s = str(instrument).strip()
+    if not s:
+        return ""
+
+    # Direct map lookup
+    if s in _SYMBOL_MAP:
+        return _SYMBOL_MAP[s]
+    if s.upper() in _SYMBOL_MAP:
+        return _SYMBOL_MAP[s.upper()]
+
     try:
         from brokers.fyers import _to_fyers_symbol
 
-        return _to_fyers_symbol(instrument)
+        res = _to_fyers_symbol(s)
+        if res:
+            return res
     except Exception as e_suppressed:
         logger.debug(f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}")
 
-    # Direct map lookup
-    if instrument in _SYMBOL_MAP:
-        return _SYMBOL_MAP[instrument]
-
-    # Try uppercase version
-    if instrument.upper() in _SYMBOL_MAP:
-        return _SYMBOL_MAP[instrument.upper()]
-
-    if ":" in instrument:
-        exch, sym = instrument.split(":", 1)
+    if ":" in s:
+        exch, sym = s.split(":", 1)
+        exch_upper = exch.upper().strip()
         sym_upper = sym.upper().strip()
-        # Already in Fyers format (has -EQ, -INDEX, etc.)
-        if sym_upper.endswith(("-EQ", "-INDEX", "-BE", "-SM", "-BZ", "-GB")):
-            return f"{exch.upper()}:{sym_upper}"
+
+        # Fix known malformed index formats
+        if sym_upper == "NIFTY-INDEX":
+            return "NSE:NIFTY50-INDEX"
+        if sym_upper == "BANKNIFTY-INDEX":
+            return "NSE:NIFTYBANK-INDEX"
+
+        # Already in Fyers format (has -EQ, -INDEX, FUT, options, etc.)
+        if sym_upper.endswith(
+            ("-EQ", "-INDEX", "-BE", "-SM", "-BZ", "-GB", "FUT", "CE", "PE")
+        ) or exch_upper in ("MCX", "CDS"):
+            return f"{exch_upper}:{sym_upper}"
 
         # Check full map with constructed key
-        map_key = f"{exch.upper()}:{sym_upper}"
+        map_key = f"{exch_upper}:{sym_upper}"
         if map_key in _SYMBOL_MAP:
             return _SYMBOL_MAP[map_key]
 
         # Check if it's an index by explicit prefixes
         clean = sym_upper.replace(" ", "")
-        if clean.startswith(_INDEX_PREFIXES) or clean in ("VIX", "INDIAVIX"):
-            return f"{exch}:{clean}-INDEX"
+        if clean in ("NIFTY", "NIFTY50"):
+            return "NSE:NIFTY50-INDEX"
+        if clean in ("BANKNIFTY", "NIFTYBANK"):
+            return "NSE:NIFTYBANK-INDEX"
+        if clean in ("FINNIFTY",):
+            return "NSE:FINNIFTY-INDEX"
+        if clean in ("MIDCPNIFTY", "NIFTYMIDSELECT"):
+            return "NSE:MIDCPNIFTY-INDEX"
+        if clean in ("SENSEX",):
+            return "BSE:SENSEX-INDEX"
+        if clean in ("BANKEX",):
+            return "BSE:BANKEX-INDEX"
+        if clean in ("VIX", "INDIAVIX"):
+            return "NSE:INDIAVIX-INDEX"
 
-        return f"{exch}:{sym}-EQ"
-    return f"NSE:{instrument}-EQ"
+        if clean.startswith(_INDEX_PREFIXES):
+            return f"{exch_upper}:{clean}-INDEX"
+
+        return f"{exch_upper}:{sym}-EQ"
+    return f"NSE:{s}-EQ"
 
 
 from market.ws_subscription_manager import is_valid_ws_symbol
@@ -151,6 +195,19 @@ class Tick:
     bid: float = 0.0
     ask: float = 0.0
     atp: float = 0.0
+
+    def is_stale(self, max_age_seconds: float = 60.0) -> bool:
+        """Return True if tick age exceeds max_age_seconds or timestamp is zero."""
+        if self.timestamp <= 0:
+            return True
+        return (time.time() - self.timestamp) > max_age_seconds
+
+    @property
+    def age_seconds(self) -> float:
+        """Return tick age in seconds."""
+        if self.timestamp <= 0:
+            return float("inf")
+        return max(0.0, time.time() - self.timestamp)
 
 
 class WebSocketManager:
@@ -203,6 +260,25 @@ class WebSocketManager:
                 get_market_matrix().on_tick(tick)
             except Exception as e_mm:
                 logger.debug(f"[WebSocket] MarketMatrix ingestion error: {e_mm}")
+
+            # Ingest into Columnar Parquet Tick Warehouse
+            try:
+                from engine.tick_warehouse import get_tick_warehouse
+
+                ts_ms = (
+                    int(tick.timestamp * 1000) if tick.timestamp and tick.timestamp > 0 else None
+                )
+                get_tick_warehouse().record_tick(
+                    symbol=tick.symbol,
+                    ltp=tick.ltp,
+                    bid=getattr(tick, "bid", 0.0) or 0.0,
+                    ask=getattr(tick, "ask", 0.0) or 0.0,
+                    volume=int(getattr(tick, "volume", 0) or 0),
+                    flag="WS_TICK",
+                    timestamp_ms=ts_ms,
+                )
+            except Exception as e_wh:
+                logger.debug(f"[WebSocket] TickWarehouse ingestion error: {e_wh}")
 
             with self._lock:
                 callbacks = list(self._callbacks)
@@ -372,19 +448,65 @@ class WebSocketManager:
         except Exception as e_suppressed:
             logger.debug(f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}")
 
-    def get_tick(self, instrument: str) -> Optional[Tick]:
+    def get_tick(self, instrument: str, max_age_seconds: Optional[float] = None) -> Optional[Tick]:
         """
         Get the latest cached tick for a symbol (instant, no API call).
-        Returns None if no tick received yet.
+        Returns None if no tick received yet, or if max_age_seconds is specified and the tick is older.
         """
         ws_sym = _to_ws_symbol(instrument)
         with self._lock:
-            return self._ticks.get(ws_sym)
+            tick = self._ticks.get(ws_sym)
 
-    def get_ltp(self, instrument: str) -> Optional[float]:
-        """Get cached LTP for a symbol. Returns None if not available."""
-        tick = self.get_tick(instrument)
-        return tick.ltp if tick else None
+        if tick is not None and max_age_seconds is not None:
+            if tick.is_stale(max_age_seconds):
+                return None
+        return tick
+
+    def get_ltp(self, instrument: str, max_age_seconds: Optional[float] = None) -> Optional[float]:
+        """Get cached LTP for a symbol. Returns None if not available or stale."""
+        tick = self.get_tick(instrument, max_age_seconds=max_age_seconds)
+        return tick.ltp if tick and tick.ltp > 0 else None
+
+    def purge_symbols(self, symbols: list[str]) -> int:
+        """Remove specified symbols and their canonical aliases from tick cache."""
+        ws_syms: set[str] = set()
+        for s in symbols:
+            ws_syms.add(s)
+            ws_syms.add(_to_ws_symbol(s))
+            if ":" in s:
+                clean = s.split(":", 1)[1]
+                ws_syms.add(clean)
+                if "-" in clean:
+                    ws_syms.add(clean.split("-")[0])
+
+        count = 0
+        with self._lock:
+            for k in list(self._ticks.keys()):
+                if k in ws_syms:
+                    del self._ticks[k]
+                    count += 1
+        return count
+
+    def cleanse_stale_ticks(self, max_age_seconds: float = 86400.0) -> int:
+        """
+        Purge cached ticks older than max_age_seconds (default 24h) to avoid memory bloat
+        from inactive symbols or past calendar sessions.
+        Returns count of purged tick entries.
+        """
+        now = time.time()
+        purged = 0
+        with self._lock:
+            keys_to_delete = [
+                k for k, t in self._ticks.items() if (now - t.timestamp) > max_age_seconds
+            ]
+            for k in keys_to_delete:
+                del self._ticks[k]
+                purged += 1
+        if purged > 0:
+            logger.info(
+                f"[WebSocket] Cleanse purged {purged} stale cached ticks older than {max_age_seconds}s"
+            )
+        return purged
 
     def on_tick(self, callback: Callable[[Tick], None]) -> None:
         """Register a callback that fires on every tick. Used by alerts."""
@@ -438,11 +560,42 @@ class WebSocketManager:
     def _on_close(self, *args, **kwargs) -> None:
         self._connected = False
         logger.info("WebSocket: disconnected")
+        if getattr(self, "_running", False) and getattr(self, "_access_token", ""):
+            logger.info(
+                "[WebSocket] Connection lost while running; scheduling proactive reconnect in 3.0s..."
+            )
+
+            def _delayed_reconnect():
+                time.sleep(3.0)
+                if getattr(self, "_running", False) and not getattr(self, "_connected", False):
+                    try:
+                        logger.info("[WebSocket] Executing proactive reconnect...")
+                        self._connect()
+                    except Exception as e_recon:
+                        logger.warning(f"[WebSocket] Proactive reconnect failed: {e_recon}")
+
+            threading.Thread(
+                target=_delayed_reconnect, daemon=True, name="WsWatchdogReconnect"
+            ).start()
 
     def _on_error(self, *args, **kwargs) -> None:
         if args:
             err = args[0]
             logger.debug(f"WebSocket error: {err}")
+            try:
+                from engine.telemetry import record_event
+
+                record_event(
+                    event_type="WEBSOCKET_ERROR",
+                    component="fyers_websocket",
+                    reason=f"Fyers WebSocket error: {str(err)[:120]}",
+                    severity="WARNING",
+                    priority="P2",
+                    details={"error": str(err)},
+                )
+            except Exception as e:
+                logger.debug(f"[market.websocket] record_event suppressed: {e}")
+
             # Purge invalid_symbols reported by Fyers broker SDK
             if isinstance(err, dict):
                 invalid_syms = err.get("invalid_symbols")
@@ -532,26 +685,98 @@ class WebSocketManager:
                             logger.debug(
                                 f"[market.websocket] Non-fatal exception suppressed: {e_suppressed}"
                             )
+                        try:
+                            from engine.telemetry import record_event
+
+                            record_event(
+                                event_type="WEBSOCKET_INFO",
+                                component="fyers_websocket",
+                                reason=f"Fyers purged invalid symbols: {invalid_syms}",
+                                severity="INFO",
+                                priority="P3",
+                                details={"invalid_symbols": invalid_syms, "response": data},
+                            )
+                        except Exception as e:
+                            logger.debug(f"[market.websocket] record_event suppressed: {e}")
                     continue
 
                 symbol = data.get("symbol", data.get("n", ""))
                 if not symbol:
                     continue
 
+                # Zero-LTP overwrite poisoning guard:
+                # Never overwrite a valid historical/live traded price with 0.0 from depth-only packets
+                raw_ltp = float(data.get("ltp", data.get("lp", 0)) or 0.0)
+                raw_open = float(data.get("open_price", data.get("open", 0)) or 0.0)
+                raw_high = float(data.get("high_price", data.get("high", 0)) or 0.0)
+                raw_low = float(data.get("low_price", data.get("low", 0)) or 0.0)
+                raw_close = float(data.get("prev_close_price", data.get("close", 0)) or 0.0)
+                raw_vol = int(data.get("vol_traded_today", data.get("volume", 0)) or 0)
+                raw_ch = float(data.get("ch", 0) or 0.0)
+                raw_chp = float(data.get("chp", 0) or 0.0)
+                raw_ts = float(data.get("exch_feed_time", time.time()) or time.time())
+                raw_bid = float(data.get("bid", 0) or 0.0)
+                raw_ask = float(data.get("ask", 0) or 0.0)
+                raw_atp = float(data.get("atp", data.get("avg_traded_price", 0.0)) or 0.0)
+
+                with self._lock:
+                    existing_tick = self._ticks.get(symbol)
+
+                final_ltp = (
+                    raw_ltp if raw_ltp > 0 else (existing_tick.ltp if existing_tick else 0.0)
+                )
+                final_open = (
+                    raw_open if raw_open > 0 else (existing_tick.open if existing_tick else 0.0)
+                )
+                final_high = (
+                    raw_high if raw_high > 0 else (existing_tick.high if existing_tick else 0.0)
+                )
+                final_low = (
+                    raw_low if raw_low > 0 else (existing_tick.low if existing_tick else 0.0)
+                )
+                final_close = (
+                    raw_close if raw_close > 0 else (existing_tick.close if existing_tick else 0.0)
+                )
+                final_vol = (
+                    raw_vol if raw_vol > 0 else (existing_tick.volume if existing_tick else 0)
+                )
+                final_atp = (
+                    raw_atp if raw_atp > 0 else (existing_tick.atp if existing_tick else 0.0)
+                )
+                final_bid = (
+                    raw_bid if raw_bid > 0 else (existing_tick.bid if existing_tick else 0.0)
+                )
+                final_ask = (
+                    raw_ask if raw_ask > 0 else (existing_tick.ask if existing_tick else 0.0)
+                )
+                final_ch = (
+                    raw_ch if raw_ch != 0.0 else (existing_tick.change if existing_tick else 0.0)
+                )
+                final_chp = (
+                    raw_chp
+                    if raw_chp != 0.0
+                    else (existing_tick.change_pct if existing_tick else 0.0)
+                )
+                final_ts = (
+                    raw_ts
+                    if raw_ts > 0
+                    else (existing_tick.timestamp if existing_tick else time.time())
+                )
+
                 tick = Tick(
                     symbol=symbol,
-                    ltp=float(data.get("ltp", data.get("lp", 0))),
-                    open=float(data.get("open_price", data.get("open", 0))),
-                    high=float(data.get("high_price", data.get("high", 0))),
-                    low=float(data.get("low_price", data.get("low", 0))),
-                    close=float(data.get("prev_close_price", data.get("close", 0))),
-                    volume=int(data.get("vol_traded_today", data.get("volume", 0))),
-                    change=float(data.get("ch", 0)),
-                    change_pct=float(data.get("chp", 0)),
-                    timestamp=float(data.get("exch_feed_time", time.time())),
-                    bid=float(data.get("bid", 0)),
-                    ask=float(data.get("ask", 0)),
-                    atp=float(data.get("atp", data.get("avg_traded_price", 0.0)) or 0.0),
+                    ltp=final_ltp,
+                    open=final_open,
+                    high=final_high,
+                    low=final_low,
+                    close=final_close,
+                    volume=final_vol,
+                    change=final_ch,
+                    change_pct=final_chp,
+                    timestamp=final_ts,
+                    bid=final_bid,
+                    ask=final_ask,
+                    atp=final_atp,
                 )
 
                 with self._lock:

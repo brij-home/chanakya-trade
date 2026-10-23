@@ -352,7 +352,8 @@ def detect_opening_drive(
         "entry_type": "LIMIT_ON_PULLBACK",
         "optimal_entry_limit": bar_open,
         "retest_entry": bar_open,
-        "no_chase_boundary": f"₹{resolved_no_chase:,.1f}",
+        "no_chase_boundary": f"₹{opt_no_chase:,.1f}" if has_opt else f"₹{resolved_no_chase:,.1f}",
+        "spot_no_chase_boundary": f"₹{resolved_no_chase:,.1f}",
         "risk_reward": rr_str,
         "asymmetric_rr": f"1:{max(3.0, rr_ratio):.1f}",
         "underlying_symbol": clean_sym,
@@ -379,8 +380,32 @@ def detect_opening_drive(
             if has_opt
             else f"Enter {'LONG' if is_bull_drive else 'SHORT'} on pullback while holding {'above' if is_bull_drive else 'below'} ₹{bar_open:,.1f}."
         ),
-        "when_to_wait": f"DO NOT CHASE beyond ₹{resolved_no_chase:,.1f}. If price > ₹{resolved_no_chase:,.1f}, wait for pullback to ₹{bar_open:,.1f} or cancel.",
         "profit_rule": "Scale 50% at T1 (+2.0R to +3.0R), move SL to Cost/Breakeven, risk drops to ₹0.00 (Free-Roll). Hold 25% for T2, trail runner on 5m 20-EMA.",
+    }
+
+    # Bidirectional Tiered Gap-Retracement Blueprint (Anti-Chasing Sizing)
+    gap_dist = abs(bar_open - (prev_close or bar_open))
+    is_large_gap = bool(atr_5m > 0 and gap_dist >= (0.75 * atr_5m))
+    if is_bull_drive:
+        tier_a_entry = bar_high
+        tier_b_pullback = round(bar_open + 0.382 * max(0.1, bar_high - bar_open), 2)
+    else:
+        tier_a_entry = bar_low
+        tier_b_pullback = round(bar_open - 0.382 * max(0.1, bar_open - bar_low), 2)
+
+    act_plan["tiered_gap_execution"] = {
+        "is_large_gap": is_large_gap,
+        "gap_pts": round(gap_dist, 2),
+        "tier_a_pilot_pct": 30,
+        "tier_a_entry": f"₹{tier_a_entry:,.1f}",
+        "tier_b_core_pct": 70,
+        "tier_b_limit_pullback": f"₹{tier_b_pullback:,.1f}",
+        "execution_notes": (
+            f"Large Gap Drive ({gap_dist:,.1f} pts >= 0.75x ATR): Place 30% Pilot on candle break; "
+            f"place 70% Core Limit order on 38.2% Fib pullback near ₹{tier_b_pullback:,.1f}."
+            if is_large_gap
+            else "Standard Drive: Enter near CMP or retest."
+        ),
     }
 
     if has_opt:
@@ -405,7 +430,8 @@ def detect_opening_drive(
             act_plan["strategy_type"] = resolved_opt.strategy_type
 
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
-    alert_seg = "FNO_INDEX" if is_index else ("FNO_STOCK" if lot_sz > 1 else "EQUITY")
+    alert_seg = "FNO_INDEX" if is_index else ("FNO_STOCK" if has_opt or lot_sz > 1 else "EQUITY")
+    act_plan["segment"] = alert_seg
 
     metrics_dict: dict[str, Any] = {
         "setup": "OPENING_DRIVE",
@@ -416,7 +442,8 @@ def detect_opening_drive(
         "bar_high": bar_high,
         "bar_low": bar_low,
         "bar_close": bar_close,
-        "no_chase_boundary": resolved_no_chase,
+        "no_chase_boundary": opt_no_chase if has_opt else resolved_no_chase,
+        "spot_no_chase_boundary": resolved_no_chase,
         "target_1": opt_t1 if has_opt else t1_price,
         "target_2": opt_t2 if has_opt else t2_price,
         "target_3": opt_runner if has_opt else t3_price,
@@ -458,7 +485,8 @@ def detect_opening_drive(
         trigger_level=opt_ltp if has_opt else ltp,
         target_level=opt_t1 if has_opt else t1_price,
         stop_loss=opt_sl if has_opt else sl_price,
-        no_chase_boundary=resolved_no_chase,
+        no_chase_boundary=opt_no_chase if has_opt else resolved_no_chase,
+        spot_no_chase_boundary=resolved_no_chase if has_opt else None,
         strike=opt_strike if has_opt else None,
         option_type=opt_type if has_opt else None,
         contract_symbol=opt_contract_sym if has_opt else None,

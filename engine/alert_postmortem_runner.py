@@ -53,6 +53,11 @@ def generate_session_scorecard(
     best_trade = None
     best_trade_r = -999.0
     archetype_stats: dict[str, dict[str, Any]] = {}
+    microstructure_stats: dict[str, int] = {
+        "wall_traps": 0,
+        "obi_imbalances": 0,
+        "spread_friction": 0,
+    }
 
     for alert in today_alerts:
         sym = getattr(alert, "contract_symbol", None) or getattr(alert, "symbol", "") or "UNKNOWN"
@@ -123,6 +128,25 @@ def generate_session_scorecard(
             neg_r_sum += abs(min(0.0, r_val))
             stat["losses"] += 1
             stat["net_r"] = round(stat["net_r"] + r_val, 2)
+
+            # Microstructure root-cause tracking
+            pm = (getattr(alert, "metrics", {}) or {}).get("post_mortem") or {}
+            reason_code = str(pm.get("primary_failure_reason", "") or "").upper()
+            exit_micro = getattr(alert, "exit_microstructure", None) or (
+                getattr(alert, "metrics", {}) or {}
+            ).get("exit_microstructure")
+            if reason_code == "ORDER_BOOK_ABSORPTION_WALL_TRAP" or (
+                exit_micro and exit_micro.get("has_resting_wall")
+            ):
+                microstructure_stats["wall_traps"] += 1
+            elif reason_code == "HEAVY_OBI_LIQUIDITY_RUN_IMBALANCE" or (
+                exit_micro and abs(float(exit_micro.get("obi_50", 0.0) or 0.0)) >= 0.40
+            ):
+                microstructure_stats["obi_imbalances"] += 1
+            elif reason_code == "EXCESSIVE_SPREAD_FRICTION_DRAG" or (
+                exit_micro and float(exit_micro.get("spread_bps", 0.0) or 0.0) >= 35.0
+            ):
+                microstructure_stats["spread_friction"] += 1
         elif is_multi_session and not is_expired:
             active_swings += 1
             stat["net_r"] = round(stat["net_r"] + r_val, 2)
@@ -153,6 +177,7 @@ def generate_session_scorecard(
         "gross_loss_r": round(neg_r_sum, 2),
         "best_trade": best_trade,
         "archetype_breakdown": archetype_stats,
+        "microstructure_attribution": microstructure_stats,
     }
 
 
@@ -185,6 +210,18 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
         else "None"
     )
 
+    micro = scorecard.get("microstructure_attribution") or {}
+    micro_parts = []
+    if micro.get("wall_traps", 0) > 0:
+        micro_parts.append(f"{micro['wall_traps']} Wall Absorption")
+    if micro.get("obi_imbalances", 0) > 0:
+        micro_parts.append(f"{micro['obi_imbalances']} OBI Skew")
+    if micro.get("spread_friction", 0) > 0:
+        micro_parts.append(f"{micro['spread_friction']} Spread Drag")
+    micro_str = (
+        f"🔬 <b>Microstructure Root Causes:</b> {', '.join(micro_parts)}\n" if micro_parts else ""
+    )
+
     return (
         f"🏁 <b>[EOD QUANTITATIVE SESSION SCORECARD]</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -197,9 +234,8 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
         f"{r_icon} <b>Net Realized PnL:</b> <b>{r_sign}{net_r:.1f}R</b>\n\n"
         f"🏆 <b>Best Setup:</b> {best_str}\n\n"
         f"📋 <b>Strategy Attribution:</b>\n"
-        f"{bd_str}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🧠 <i>Factor weights recalibrated in Pattern Learning Engine.</i>"
+        f"{bd_str}\n" + (f"\n{micro_str}" if micro_str else "") + "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🧠 <i>Factor weights recalibrated in Pattern Learning Engine.</i>"
     )
 
 
@@ -430,5 +466,16 @@ def run_eod_alert_postmortems(
         logger.info("[AlertPostMortem] Recalibrated factor weights: %s", updated_weights)
     except Exception as exc:
         logger.warning("[AlertPostMortem] Recalibration error: %s", exc)
+
+    # 4. Autonomous Market Mover Learning: Ingest pre-blast fingerprints from today's top runners
+    try:
+        learned_movers = pattern_learning_engine.scan_and_learn_from_market_movers()
+        report["learned_movers_count"] = len(learned_movers)
+        if learned_movers:
+            logger.info(
+                f"[AlertPostMortem] Ingested {len(learned_movers)} new explosive mover fingerprints into pattern memory."
+            )
+    except Exception as exc:
+        logger.warning(f"[AlertPostMortem] Mover learning error: {exc}")
 
     return report

@@ -206,3 +206,26 @@ def test_quotes_chunking_url_length_safe(monkeypatch):
     assert len(chunks_sent) == 3
     for chunk in chunks_sent:
         assert len(chunk) <= 300
+
+
+def test_dynamic_url_budget_quote_chunking():
+    """Verify chunk_symbols_for_quotes dynamically packs symbols respecting both symbol count and URL byte budget."""
+    from market.quote_dispatcher import chunk_symbols_for_quotes
+
+    # Case 1: Empty list
+    assert chunk_symbols_for_quotes([]) == []
+
+    # Case 2: Short symbols capped by max_symbols
+    short_symbols = [f"SYM{i}" for i in range(100)]
+    chunks_short = chunk_symbols_for_quotes(short_symbols, max_symbols=25, max_chars=10000)
+    assert len(chunks_short) == 4
+    for c in chunks_short:
+        assert len(c) == 25
+
+    # Case 3: Long symbols capped by max_chars budget (guarantees immunity against HTTP 414)
+    long_symbols = [f"NSE:LONGINSTRUMENTNAME{i:03d}26OCTFUT" for i in range(50)]
+    chunks_budget = chunk_symbols_for_quotes(long_symbols, max_symbols=100, max_chars=500)
+    assert len(chunks_budget) >= 3
+    for c in chunks_budget:
+        query_str = ",".join(c)
+        assert len(query_str) <= 500

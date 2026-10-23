@@ -741,6 +741,7 @@ def generate_execution_ticket(
     is_fno: bool = False,
     order_type: str = "LIMIT",
     conviction_tier: Optional[str] = None,
+    execution_friction_badge: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Builds a capital-calibrated, ready-to-execute institutional order ticket.
@@ -774,6 +775,17 @@ def generate_execution_ticket(
 
     side = "BUY" if direction.upper() in ("BULLISH", "BUY", "LONG") else "SELL"
 
+    # Strict Limit Mandate: wide bid-ask spread or option orders mandate LIMIT orders
+    final_order_type = order_type
+    ticket_notes = res.notes
+    if execution_friction_badge and (
+        "STRICT LIMIT" in execution_friction_badge.upper()
+        or "WIDE SPREAD" in execution_friction_badge.upper()
+    ):
+        final_order_type = "LIMIT"
+        f_note = "Strict LIMIT order enforced due to wide bid-ask spread"
+        ticket_notes = f"{ticket_notes} | {f_note}" if ticket_notes else f_note
+
     # Generate Smart Order Router (SOR) execution plan
     from engine.smart_order_router import build_smart_execution_plan
 
@@ -788,7 +800,7 @@ def generate_execution_ticket(
     return {
         "symbol": clean_sym,
         "side": side,
-        "order_type": order_type,
+        "order_type": final_order_type,
         "limit_price": round(entry_price, 2),
         "shares": res.shares,
         "lots": res.lots,
@@ -803,8 +815,9 @@ def generate_execution_ticket(
         "sizing_model": res.sizing_model,
         "auto_submit_ready": True,
         "smart_routing": sor_plan.to_dict(),
-        "notes": res.notes,
+        "notes": ticket_notes,
         "conviction_tier": conviction_tier,
+        "execution_friction_badge": execution_friction_badge,
     }
 
 

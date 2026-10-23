@@ -79,9 +79,14 @@ Always remind users that markets involve risk and past performance doesn't guara
 ## Indian Market Context
 - Market hours: 9:15 AM – 3:30 PM IST (pre-open: 9:00–9:15)
 - Settlement: T+1 for equity delivery (CNC); same-day for F&O (NRML/MIS)
-- Lot sizes: NIFTY=75, BANKNIFTY=15, varies by stock
+- Canonical lot sizes: NIFTY=65, BANKNIFTY=30, SENSEX=20 (Always resolve from market.instruments)
 - STT, GST, brokerage apply on every trade — factor into P&L estimates
-- Weekly expiry: every Thursday | Monthly: last Thursday of month
+- SEBI Single-Weekly Index Mandate (Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136):
+  * ONLY 1 benchmark index per exchange offers weekly options:
+    - NSE: NIFTY 50 (Weekly expiry every Thursday).
+    - BSE: SENSEX (Weekly expiry every Friday).
+  * BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX, and all single-stock equities offer STRICTLY MONTHLY options (last Thursday of month).
+  * NEVER refer to, simulate, or recommend weekly or 0DTE options for BANKNIFTY. Monday–Wednesday have ZERO weekly index expiries.
 - India VIX: <12 (low), 12–15 (normal), 15–20 (elevated), >20 (danger)
 
 ## How to Respond

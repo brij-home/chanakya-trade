@@ -131,13 +131,15 @@ def classify_market_regime(
     if vix_val is None or vix_val <= 0:
         vix_val = 13.5  # Neutral institutional baseline
 
-    # 2. Check Expiry Session (Post 13:15 IST on active index expiry days)
-    weekday = (
-        now_ist.weekday()
-    )  # 0=Mon (Midcap), 1=Tue (Finnifty), 2=Wed (BankNifty), 3=Thu (Nifty), 4=Fri (Sensex)
-    is_expiry_day = weekday in (0, 1, 2, 3, 4)
+    # 2. Check Expiry Session (Post 13:15 IST on active index weekly expiry days: Nifty Thu, Sensex Fri)
+    from market.calendar import is_expiry_day
+
+    cur_d = now_ist.date()
+    is_active_expiry = is_expiry_day("NIFTY", ref_date=cur_d) or is_expiry_day(
+        "SENSEX", ref_date=cur_d, exchange="BSE"
+    )
     now_t = now_ist.time()
-    is_afternoon_expiry = is_expiry_day and now_t >= dtime(13, 15) and now_t <= dtime(15, 30)
+    is_afternoon_expiry = is_active_expiry and now_t >= dtime(13, 15) and now_t <= dtime(15, 30)
 
     # 3. Check ORB Trapping (Opening 30-min range containment between 10:30 and 14:00 IST)
     is_orb_trapped = False
@@ -179,6 +181,45 @@ def classify_market_regime(
             guidance="Expiry day gamma expansion active. Fast-paced options unwinding setups prioritized.",
             active_detectors=["GAMMA_BLAST", "OPTIONS_MOMENTUM", "INTRADAY_SPARK"],
             suppressed_detectors=["MULTIBAGGER", "DEFINED_RISK_NEUTRAL"],
+        )
+
+    # Regime 2b: Institutional Distribution (Bearish Trend Day)
+    nifty_dir_chg = 0.0
+    if not is_test_env:
+        try:
+            from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+
+            with _quote_cache_lock:
+                for k in ("NSE:NIFTY 50", "NSE:NIFTY", "NIFTY", "NIFTY 50"):
+                    if k in _QUOTE_CACHE:
+                        _, nq = _QUOTE_CACHE[k]
+                        nifty_dir_chg = float(getattr(nq, "change_pct", 0.0) or 0.0)
+                        break
+        except Exception as e_suppressed:
+            logger.debug(f"[analysis.regime_governor] Benchmark quote error: {e_suppressed}")
+
+    if (nifty_dir_chg <= -0.40 or macro_score <= -30.0) and not is_orb_trapped:
+        return MarketRegimeClassification(
+            regime="INSTITUTIONAL_DISTRIBUTION",
+            vix=vix_val,
+            is_orb_trapped=False,
+            is_expiry_session=is_afternoon_expiry,
+            min_scrutiny_score=75,
+            dominant_bias="BEARISH_EXPANSION",
+            guidance="Dalal Street in institutional distribution (Nifty down >= 0.40% or macro headwinds). Actively prioritize Put setups, breakdown sparks, and defensive decouplers.",
+            active_detectors=[
+                "INDEX_PUT_SETUP",
+                "INTRADAY_SPARK",
+                "SMC_OB_RETEST",
+                "TURTLE_SOUP_SWEEP",
+                "GAMMA_BLAST",
+            ],
+            suppressed_detectors=[
+                "INDEX_CALL_SETUP",
+                "OPENING_DRIVE",
+                "AFTERNOON_THRUST",
+                "THEMATIC_SYMPATHY",
+            ],
         )
 
     # Regime 2: Balanced Chop / Midday Consolidation
@@ -257,20 +298,86 @@ def is_detector_eligible_for_regime(
     regime: MarketRegimeClassification,
     rvol: float = 1.0,
     has_structural_sweep: bool = False,
+    direction: str = "BULLISH",
+    sector_rs_leading: bool = False,
+    sector_rs_lagging: bool = False,
 ) -> tuple[bool, str]:
     """
     Evaluates if a specific detector is eligible to fire under the current market regime.
+    Bidirectionally calibrated:
+      - In Bearish Institutional Distribution: Put setups prioritized; Bullish setups allowed
+        at calibrated 1.60x RVOL if in a Leading/Improving Relative Strength sector (e.g. IT, FMCG, Pharma).
+      - In Bullish Trend Expansion: Call setups prioritized; Bearish short setups allowed
+        at calibrated 1.60x RVOL if in a Lagging Relative Strength sector with structural breakdown.
+      - In Balanced Chop: Breakouts require >= 2.0x RVOL or verified SMC structural sweep.
+      - In Macro Shock: Naked directional breakouts prohibited; defined-risk spreads mandated.
     Returns: (is_eligible, reason_if_suppressed)
     """
     atype = alert_type.upper()
+    dir_up = str(direction or "BULLISH").upper()
+    is_bull = dir_up in ("BULLISH", "LONG", "BUY")
+    is_bear = dir_up in ("BEARISH", "SHORT", "SELL")
 
-    # In Macro Shock, suppress naked directional breakouts
+    # In Macro Shock, suppress naked directional breakouts in both directions
     if regime.regime == "MACRO_SHOCK":
-        if atype in ("SQUEEZE_BREAKOUT", "OPTIONS_MOMENTUM", "INTRADAY_SPARK", "INDEX_MICRO_SCALP"):
+        if atype in (
+            "SQUEEZE_BREAKOUT",
+            "SQUEEZE_BREAKDOWN",
+            "OPTIONS_MOMENTUM",
+            "INTRADAY_SPARK",
+            "INDEX_MICRO_SCALP",
+        ):
             return (
                 False,
                 "Suppressed by Regime Governor: MACRO_SHOCK regime prohibits naked breakouts. Use defined-risk spreads.",
             )
+
+    # In Institutional Distribution (Bearish Benchmark State)
+    if regime.regime == "INSTITUTIONAL_DISTRIBUTION":
+        if is_bull:
+            if atype == "INDEX_CALL_SETUP":
+                if rvol < 2.5:
+                    return (
+                        False,
+                        f"Suppressed by Regime Governor: INSTITUTIONAL_DISTRIBUTION active (Benchmark down >= 0.40%). "
+                        f"Index Call continuation requires extreme institutional decoupling (RVOL >= 2.50x, got {rvol:.2f}x). "
+                        f"Terminal dynamically pivots to Index Put setups & breakdown sparks.",
+                    )
+            elif atype in ("OPENING_DRIVE", "AFTERNOON_THRUST", "SQUEEZE_BREAKOUT"):
+                rvol_floor = 1.60 if sector_rs_leading else 2.50
+                if rvol < rvol_floor:
+                    tag = (
+                        "Leading/Defensive Sector Decoupler"
+                        if sector_rs_leading
+                        else "Cyclical/Broad Market"
+                    )
+                    return (
+                        False,
+                        f"Suppressed by Regime Governor: INSTITUTIONAL_DISTRIBUTION active ({tag}). "
+                        f"Bullish setup requires RVOL >= {rvol_floor:.2f}x (got {rvol:.2f}x) to confirm decoupling from benchmark selling.",
+                    )
+
+    # In Bullish Trend Expansion (Bullish Benchmark State)
+    if regime.regime == "TREND_EXPANSION":
+        if is_bear:
+            if atype == "INDEX_PUT_SETUP":
+                if not has_structural_sweep and rvol < 2.5:
+                    return (
+                        False,
+                        f"Suppressed by Regime Governor: TREND_EXPANSION active (Benchmark trending up). "
+                        f"Counter-trend Index Put requires verified SMC structural sweep or extreme RVOL >= 2.50x (got {rvol:.2f}x).",
+                    )
+            elif atype in ("SQUEEZE_BREAKDOWN", "INTRADAY_BREAKDOWN_SPARK"):
+                rvol_floor = 1.60 if sector_rs_lagging else 2.20
+                if not has_structural_sweep and rvol < rvol_floor:
+                    tag = (
+                        "Lagging Relative Strength Sector" if sector_rs_lagging else "General Stock"
+                    )
+                    return (
+                        False,
+                        f"Suppressed by Regime Governor: TREND_EXPANSION active ({tag}). "
+                        f"Short breakdown requires RVOL >= {rvol_floor:.2f}x (got {rvol:.2f}x) or verified SMC sweep to avoid bear traps.",
+                    )
 
     # In Balanced Chop, suppress directional breakouts unless confirmed by heavy volume or SMC sweep
     if regime.regime == "BALANCED_CHOP":
@@ -282,6 +389,7 @@ def is_detector_eligible_for_regime(
             )
         if atype in (
             "SQUEEZE_BREAKOUT",
+            "SQUEEZE_BREAKDOWN",
             "ORB_BREAKOUT",
             "OPENING_RANGE_BREAKOUT",
             "OPTIONS_MOMENTUM",

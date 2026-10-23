@@ -77,7 +77,7 @@ export default function BacktestCard({ data }) {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         {metrics.map(([label, val, cls]) => (
           <div key={label} className="bg-panel/60 border border-border/40 rounded-lg p-2">
-            <p className="text-muted text-[9px] uppercase tracking-wider font-ui">{label}</p>
+            <p className="text-muted text-[11px] uppercase tracking-wider font-ui">{label}</p>
             <p className={`text-xs mt-0.5 ${cls}`}>{val}</p>
           </div>
         ))}

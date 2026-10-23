@@ -120,20 +120,21 @@ def test_orb_stabilization_requires_institutional_volume_0930_to_0945(tmp_path, 
 
     # Simulate 09:36 IST (where MAZDOCK originally gave a false breakdown)
     mock_0936 = datetime(2026, 9, 16, 9, 36, 0, tzinfo=IST)
-    monkeypatch.setattr(
-        "engine.auto_alert_engine.datetime",
-        type(
-            "MockDT",
-            (),
-            {
-                "now": staticmethod(lambda tz=None: mock_0936),
-                "fromtimestamp": datetime.fromtimestamp,
-                "strptime": datetime.strptime,
-                "date": datetime.date,
-                "time": datetime.time,
-            },
-        ),
+    mock_dt_cls = type(
+        "MockDT",
+        (),
+        {
+            "now": staticmethod(lambda tz=None: mock_0936),
+            "fromtimestamp": datetime.fromtimestamp,
+            "strptime": datetime.strptime,
+            "date": datetime.date,
+            "time": datetime.time,
+        },
     )
+    monkeypatch.setattr("engine.auto_alert_engine.datetime", mock_dt_cls)
+    monkeypatch.setattr("engine.session_runway.datetime", mock_dt_cls)
+    monkeypatch.setattr("engine.detectors.intraday_spark.datetime", mock_dt_cls)
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda *args, **kwargs: True)
     monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
 

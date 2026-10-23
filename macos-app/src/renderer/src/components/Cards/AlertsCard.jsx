@@ -74,7 +74,7 @@ export default function AlertsCard({ data }) {
                       ₹{Number(rawPrice).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
                     </span>
                   )}
-                  <span className={`text-[9px] px-1.5 py-0.2 rounded font-black uppercase tracking-wider ${isTest ? 'bg-purple-500/20 text-purple-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
+                  <span className={`text-[11px] px-1.5 py-0.2 rounded font-black uppercase tracking-wider ${isTest ? 'bg-purple-500/20 text-purple-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
                     {isTest ? '🧪 TEST' : '🟢 LIVE'}
                   </span>
                   {(() => {
@@ -82,29 +82,29 @@ export default function AlertsCard({ data }) {
                     return (
                       <span
                         title={hz.tooltip}
-                        className={`text-[8px] px-1 py-0.2 rounded font-mono font-bold border ${hz.badgeClasses}`}
+                        className={`text-[10px] px-1 py-0.2 rounded font-mono font-bold border ${hz.badgeClasses}`}
                       >
                         {hz.compactBadge}
                       </span>
                     )
                   })()}
                   {a.order_flow_signals?.live_broker_connected === false || a.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' ? (
-                    <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40" title="No active broker WebSocket depth connection. Using tick-level fallback.">
+                    <span className="text-[10px] px-1 py-0.2 rounded font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40" title="No active broker WebSocket depth connection. Using tick-level fallback.">
                       ⚠️ SYNTHETIC L1
                     </span>
                   ) : (a.order_flow_signals?.live_broker_connected || a.order_flow_signals?.broker_depth_status === 'LIVE_L2') ? (
-                    <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" title="Live Broker Level 2 depth active">
+                    <span className="text-[10px] px-1 py-0.2 rounded font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" title="Live Broker Level 2 depth active">
                       🟢 LIVE L2
                     </span>
                   ) : null}
                   {a.no_chase_boundary && (
-                    <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-rose-500/10 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-300/60 dark:border-rose-500/30" title="No-Chase limit">
+                    <span className="text-[10px] px-1 py-0.2 rounded font-mono font-bold bg-rose-500/10 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-300/60 dark:border-rose-500/30" title="No-Chase limit">
                       NoChase ₹{Number(a.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
                     </span>
                   )}
                   {a.metrics?.tiger_mandate && (
                     <span
-                      className={`text-[8px] px-1 py-0.2 rounded font-mono font-bold border ${
+                      className={`text-[10px] px-1 py-0.2 rounded font-mono font-bold border ${
                         a.metrics.tiger_mandate.mandate === 'MOMENTUM_EXPANSION'
                           ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
                           : a.metrics.tiger_mandate.mandate === 'TURTLE_SOUP_RANGE_FADE'
@@ -118,7 +118,7 @@ export default function AlertsCard({ data }) {
                   )}
                   {(a.metrics?.cheetah_mandate || a.metrics?.predatory_pipeline?.cheetah?.mandate) && (
                     <span
-                      className={`text-[8px] px-1 py-0.2 rounded font-mono font-bold border ${
+                      className={`text-[10px] px-1 py-0.2 rounded font-mono font-bold border ${
                         (a.metrics?.cheetah_mandate || a.metrics?.predatory_pipeline?.cheetah?.mandate) === 'CHEETAH_POUNCE_MOMENTUM'
                           ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
                           : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
@@ -148,12 +148,12 @@ export default function AlertsCard({ data }) {
                     </span>
                   )}
                   {hasTrail && (
-                    <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-amber-500/20 text-amber-300">
+                    <span className="text-[11px] px-1.5 py-0.2 rounded font-mono font-bold bg-amber-500/20 text-amber-300">
                       📈 TRAIL: ₹{Number(a.trailing_stop).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
                     </span>
                   )}
                   {timeDisplay && (
-                    <span className="text-[9px] font-mono text-muted/70 ml-auto flex items-center gap-0.5" title={rawTime}>
+                    <span className="text-[11px] font-mono text-muted/70 ml-auto flex items-center gap-0.5" title={rawTime}>
                       🕒 {timeDisplay}
                     </span>
                   )}

@@ -88,7 +88,9 @@ class OrderFlowSnapshot:
         }
 
 
-def analyze_order_flow(symbol: str, timeframe: str = "5m") -> OrderFlowSnapshot:
+def analyze_order_flow(
+    symbol: str, timeframe: str = "5m", allow_rest_depth: bool = False
+) -> OrderFlowSnapshot:
     """
     Compute full order flow and Cumulative Volume Delta (CVD) analysis for any instrument.
     Leverages Fyers Level 2 5-deep market depth and intraday price-action delta.
@@ -100,7 +102,7 @@ def analyze_order_flow(symbol: str, timeframe: str = "5m") -> OrderFlowSnapshot:
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
 
     # 1. Fetch live LTP
-    ltp = float(get_ltp(f"NSE:{clean_sym}") or get_ltp(clean_sym) or 0.0)
+    ltp = float(get_ltp(symbol) or get_ltp(f"NSE:{clean_sym}") or get_ltp(clean_sym) or 0.0)
 
     market_state = "OFFLINE"
     total_buy = 0
@@ -138,8 +140,32 @@ def analyze_order_flow(symbol: str, timeframe: str = "5m") -> OrderFlowSnapshot:
     except Exception as e_mem:
         logger.debug(f"Failed querying in-memory depth book for {clean_sym}: {e_mem}")
 
-    # Fallback to REST broker depth if in-memory stream not populated
+    # 2b. Check streaming quote L1 cache (zero REST calls)
     if market_state != "LIVE":
+        try:
+            from market.quotes import get_quote
+
+            norm_q = symbol if ":" in symbol else f"NSE:{clean_sym}"
+            q_map = get_quote([norm_q], ws_only=True)
+            q = q_map.get(norm_q) or q_map.get(clean_sym)
+            if q and getattr(q, "bid", None) and getattr(q, "ask", None):
+                bid_p = float(q.bid)
+                ask_p = float(q.ask)
+                if bid_p > 0 and ask_p > 0:
+                    market_state = "LIVE"
+                    top_bids = [{"price": bid_p, "volume": 100.0, "orders": 1}]
+                    top_asks = [{"price": ask_p, "volume": 100.0, "orders": 1}]
+                    spread = max(0.0, ask_p - bid_p)
+                    spread_pct = (spread / bid_p) * 100.0
+                    micro_price = (bid_p + ask_p) / 2.0
+                    total_buy = 100
+                    total_sell = 100
+                    imbalance = 0.0
+        except Exception as e_q:
+            logger.debug(f"[analysis.order_flow] Quote fallback notice: {e_q}")
+
+    # Fallback to REST broker depth ONLY if explicitly requested
+    if market_state != "LIVE" and allow_rest_depth:
         broker = None
         try:
             broker = get_data_broker()

@@ -37,11 +37,11 @@ _CHAIN_CACHE_TTL_LIVE = (
 _CHAIN_CACHE_TTL_SCRAPER = 30.0  # 30s for scraper fallback
 _CHAIN_CACHE_TTL_EMPTY = 60.0  # 60s negative cache when options chain is empty or broker is tripped
 _EXPIRIES_CACHE: dict[str, tuple[float, list[str]]] = {}
-_EXPIRIES_CACHE_TTL = 300.0  # 5 minutes cache for expiry dates
+_EXPIRIES_CACHE_TTL = 43200.0  # 12 hours cache for expiry dates (immutable exchange schedules)
 
 
-def get_chain_cache_ttl(is_broker: bool = True, is_empty: bool = False) -> float:
-    """Returns dynamic cache TTL: 15s live broker / 30s scraper, 60s negative cache, 180s when closed."""
+def get_chain_cache_ttl(is_broker: bool = True, is_empty: bool = False, symbol: str = "") -> float:
+    """Returns dynamic cache TTL: 30s live index, 90s stock options, 60s negative cache, 180s when closed."""
     if is_empty:
         try:
             from market.fyers_circuit_breaker import get_fyers_circuit_breaker
@@ -56,6 +56,19 @@ def get_chain_cache_ttl(is_broker: bool = True, is_empty: bool = False) -> float
         from market.calendar import is_market_open
 
         if is_market_open("NFO") or is_market_open("NSE") or is_market_open("MCX"):
+            clean = (
+                symbol.upper().replace("NSE:", "").replace("BSE:", "").replace("-INDEX", "").strip()
+            )
+            is_index = clean in (
+                "NIFTY",
+                "BANKNIFTY",
+                "FINNIFTY",
+                "MIDCPNIFTY",
+                "SENSEX",
+                "BANKEX",
+            )
+            if not is_index and clean:
+                return 90.0 if is_broker else 120.0
             return _CHAIN_CACHE_TTL_LIVE if is_broker else _CHAIN_CACHE_TTL_SCRAPER
     except Exception as e_suppressed:
         logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
@@ -178,7 +191,7 @@ def get_options_chain(
     Returns:
         List of OptionsContract sorted by strike then type (CE/PE).
     """
-    from market.instruments import COMMODITY_SYMBOLS
+    from market.instruments import COMMODITY_SYMBOLS, is_derivative_eligible
 
     clean_sym = (
         underlying.upper()
@@ -192,40 +205,76 @@ def get_options_chain(
     is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
     is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
 
-    # Institutional Single-Stock Physical Expiry Rollover:
-    # Under SEBI regulations, single-stock options are physically settled. In the final 4 trading
-    # days before the last Thursday, near-month stock options are subject to 100% physical delivery
-    # margin surges and severe gamma/theta collapse.
-    # Therefore, when expiry is not specified for an F&O stock during monthly expiry week,
-    # always select the next-month monthly expiry contract and its live data.
-    if not is_commodity and not is_index and expiry is None:
-        try:
-            avail_exps = get_expiries(clean_sym)
-            if alert_expiry.is_monthly_physical_expiry_week(
-                symbol=clean_sym, available_expiries=avail_exps
-            ):
-                exp_res = alert_expiry.resolve_recommended_derivative_expiry(
-                    symbol=clean_sym,
-                    instrument_type="OPTION",
-                    available_expiries=avail_exps,
-                )
-                if exp_res.get("is_next_month_routed"):
-                    expiry = exp_res.get("recommended_expiry")
-                    logger.info(
-                        f"[Options] Single-stock {clean_sym} in physical expiry week: "
-                        f"routed to next-month contract {expiry} and its live data."
-                    )
-        except Exception as e_exp:
-            logger.debug(f"[Options] Physical expiry check error for {clean_sym}: {e_exp}")
+    # Fast-exit for non-derivative cash equities (prevents 80s web scraper timeouts & SLO corruption)
+    if not is_derivative_eligible(clean_sym):
+        return []
 
+    # ── Fast-path in-memory chain cache check ──
+    # If the default/nearest chain is already cached and valid, return it instantly with zero REST calls
     cache_key = f"{clean_sym}:{expiry or 'nearest'}"
     now = time.time()
     with _CHAIN_CACHE_LOCK:
         if cache_key in _CHAIN_CACHE:
             cached_at, cached_chain = _CHAIN_CACHE[cache_key]
-            ttl = get_chain_cache_ttl(is_broker=True, is_empty=not bool(cached_chain))
+            ttl = get_chain_cache_ttl(
+                is_broker=True, is_empty=not bool(cached_chain), symbol=clean_sym
+            )
             if (now - cached_at) < ttl:
+                try:
+                    from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+
+                    with _quote_cache_lock:
+                        for c in cached_chain:
+                            q_rec = _QUOTE_CACHE.get(c.symbol)
+                            if q_rec:
+                                q_obj = q_rec[1]
+                                lp = getattr(q_obj, "last_price", 0.0)
+                                if lp > 0:
+                                    c.ltp = lp
+                                v = getattr(q_obj, "volume", 0)
+                                if v > 0:
+                                    c.volume = v
+                except Exception as e_tick:
+                    logger.debug(f"[market.options] Quote overlay suppressed: {e_tick}")
                 return cached_chain
+
+    # Institutional Single-Stock Physical Expiry Rollover:
+    # Under SEBI regulations, single-stock options are physically settled. In the final 4 trading
+    # days before the last Thursday, near-month stock options are subject to 100% physical delivery
+    # margin surges and severe gamma/theta collapse.
+    # CRITICAL: Check pure calendar math first (zero API calls) before querying expiries.
+    if not is_commodity and not is_index and expiry is None:
+        try:
+            if alert_expiry.is_monthly_physical_expiry_week():
+                avail_exps = get_expiries(clean_sym)
+                if alert_expiry.is_monthly_physical_expiry_week(
+                    symbol=clean_sym, available_expiries=avail_exps
+                ):
+                    exp_res = alert_expiry.resolve_recommended_derivative_expiry(
+                        symbol=clean_sym,
+                        instrument_type="OPTION",
+                        available_expiries=avail_exps,
+                    )
+                    if exp_res.get("is_next_month_routed"):
+                        expiry = exp_res.get("recommended_expiry")
+                        cache_key = f"{clean_sym}:{expiry}"
+                        logger.info(
+                            f"[Options] Single-stock {clean_sym} in physical expiry week: "
+                            f"routed to next-month contract {expiry} and its live data."
+                        )
+                        # Re-check cache for the resolved next-month contract
+                        with _CHAIN_CACHE_LOCK:
+                            if cache_key in _CHAIN_CACHE:
+                                cached_at, cached_chain = _CHAIN_CACHE[cache_key]
+                                ttl = get_chain_cache_ttl(
+                                    is_broker=True,
+                                    is_empty=not bool(cached_chain),
+                                    symbol=clean_sym,
+                                )
+                                if (now - cached_at) < ttl:
+                                    return cached_chain
+        except Exception as e_exp:
+            logger.debug(f"[Options] Physical expiry check error for {clean_sym}: {e_exp}")
 
     # Single-Flight: Coalesce concurrent requests for the exact same underlying option chain
     is_leader = False
@@ -377,12 +426,25 @@ def get_options_chain(
             evt.set()
             try:
                 from engine.observability import get_registry
+                from market.calendar import is_market_open
+
+                venue = (
+                    "MCX"
+                    if is_commodity
+                    else ("BSE" if clean_sym in ("SENSEX", "BANKEX") else "NSE")
+                )
+                is_live = is_market_open(venue)
+                is_success = bool(chain_result) or not is_live
 
                 get_registry().record_metric(
                     journey_id="options_chain",
                     latency_ms=(time.time() - t0) * 1000.0,
-                    success=bool(chain_result),
-                    metadata={"symbol": clean_sym, "count": len(chain_result)},
+                    success=is_success,
+                    metadata={
+                        "symbol": clean_sym,
+                        "count": len(chain_result),
+                        "off_market": not is_live,
+                    },
                 )
             except Exception as e_suppressed:
                 logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
@@ -516,6 +578,11 @@ def get_expiries(underlying: str, allow_chain_fallback: bool = False) -> list[st
         .upper()
         .strip()
     )
+    from market.instruments import is_derivative_eligible
+
+    if not is_derivative_eligible(clean_u):
+        return []
+
     now = time.time()
     if clean_u in _EXPIRIES_CACHE:
         cached_at, cached_exp = _EXPIRIES_CACHE[clean_u]
@@ -581,12 +648,26 @@ def get_options_snapshot(
     from datetime import datetime, timezone
     from brokers.session import get_data_broker, get_data_broker_key
     from market.calendar import is_market_open
+    from market.instruments import is_derivative_eligible
 
     clean_u = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()
     is_bse = clean_u in ("SENSEX", "BANKEX")
     market_open = is_market_open("BSE" if is_bse else "NSE")
     now_utc = datetime.now(timezone.utc).isoformat()
     now_ist = datetime.now().strftime("%I:%M:%S %p IST")
+
+    if not is_derivative_eligible(clean_u):
+        source_info = {
+            "provider": "none",
+            "source": "NOT_DERIVATIVE_ELIGIBLE",
+            "data_state": "UNAVAILABLE",
+            "is_realtime": False,
+            "is_market_open": market_open,
+            "as_of": now_utc,
+            "as_of_display": now_ist,
+            "source_label": f"{clean_u} is not an approved F&O derivative underlying",
+        }
+        return [], None, [], source_info
 
     cache_key = f"{clean_u}:{expiry or 'nearest'}"
     now_ts = time.time()
@@ -1053,4 +1134,151 @@ def audit_option_liquidity(
         "volume": volume,
         "slippage_risk": risk,
         "execution_warning": warning,
+    }
+
+
+def compute_chain_gex(
+    chain: list[Any],
+    spot: float,
+    underlying: Optional[str] = None,
+    lot_size: Optional[int] = None,
+) -> dict[str, Any]:
+    """
+    Computes Institutional Dealer Gamma Exposure (GEX) across an options surface.
+
+    In quant market structure:
+      - Customers buy calls/puts; market makers/dealers take the opposing side.
+      - Call GEX = Gamma * Spot^2 * 0.01 * Call_OI * LotSize
+      - Put GEX = Gamma * Spot^2 * 0.01 * Put_OI * LotSize
+      - Net GEX = Total Call GEX - Total Put GEX
+
+    Regimes:
+      - POSITIVE_GAMMA_PIN (Net GEX >= 0):
+        Dealers hedge counter-trend (buy dips, sell rips), suppressing realized volatility
+        and creating range-bound chop / pinning toward Max Pain.
+      - NEGATIVE_GAMMA_ACCELERATION (Net GEX < 0):
+        Dealers hedge pro-trend (sell breakdowns, buy breakouts), fueling directional explosive
+        acceleration and gamma blast volatility expansion.
+
+    Gamma Flip Strike:
+      - The strike price where cumulative net GEX transitions between positive and negative.
+    """
+    import math
+    from collections import defaultdict
+    from datetime import datetime, timezone
+
+    if spot <= 0 or not chain:
+        return {
+            "net_gex": 0.0,
+            "call_gex": 0.0,
+            "put_gex": 0.0,
+            "gamma_regime": "NEUTRAL",
+            "gex_flip_strike": 0.0,
+            "is_acceleration_zone": False,
+            "contracts_analyzed": 0,
+        }
+
+    # Resolve lot size
+    resolved_lot = lot_size
+    if not resolved_lot or resolved_lot <= 0:
+        if underlying:
+            try:
+                from engine.position_sizer import get_lot_size
+
+                resolved_lot = get_lot_size(underlying) or 1
+            except Exception:
+                resolved_lot = 1
+        else:
+            resolved_lot = 1
+
+    strike_gex: dict[float, float] = defaultdict(float)
+    total_call_gex = 0.0
+    total_put_gex = 0.0
+    analyzed_count = 0
+    now = datetime.now(timezone.utc)
+
+    for c in chain:
+        if isinstance(c, dict):
+            strike = float(c.get("strike", 0.0) or 0.0)
+            opt_type = str(c.get("option_type", "") or "").upper()
+            oi = int(c.get("oi", 0) or c.get("open_interest", 0) or 0)
+            iv = float(c.get("iv", 0.0) or 0.0)
+            gamma_val = float(c.get("gamma", 0.0) or 0.0)
+            exp_str = str(c.get("expiry", "") or "")
+        else:
+            strike = float(getattr(c, "strike", 0.0) or 0.0)
+            opt_type = str(getattr(c, "option_type", "") or "").upper()
+            oi = int(getattr(c, "oi", 0) or getattr(c, "open_interest", 0) or 0)
+            iv = float(getattr(c, "iv", 0.0) or 0.0)
+            gamma_val = float(getattr(c, "gamma", 0.0) or 0.0)
+            exp_str = str(getattr(c, "expiry", "") or "")
+
+        if strike <= 0 or oi <= 0 or opt_type not in ("CE", "PE"):
+            continue
+
+        # If gamma is not provided, analytically compute Black-Scholes gamma
+        if gamma_val <= 0:
+            t_years = 4.0 / 365.25  # default near-term ~4 days
+            if exp_str:
+                for fmt in ("%Y-%m-%d", "%d%b%y", "%d%b%Y", "%d-%b-%Y"):
+                    try:
+                        exp_dt = datetime.strptime(exp_str.strip().upper(), fmt).replace(
+                            tzinfo=timezone.utc
+                        )
+                        t_days = max(0.25, (exp_dt - now).total_seconds() / 86400.0)
+                        t_years = t_days / 365.25
+                        break
+                    except Exception as e:
+                        logger.debug(f"[market.options] Exp parsing suppressed: {e}")
+
+            sigma = max(0.08, min(2.5, iv / 100.0)) if iv > 0 else 0.15
+            r = 0.065  # 6.5% standard RBI rate
+
+            try:
+                d1 = (math.log(spot / strike) + (r + 0.5 * sigma * sigma) * t_years) / (
+                    sigma * math.sqrt(t_years)
+                )
+                pdf_d1 = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+                gamma_val = pdf_d1 / (spot * sigma * math.sqrt(t_years))
+            except (ValueError, ZeroDivisionError, OverflowError):
+                gamma_val = 0.0
+
+        if gamma_val <= 0:
+            continue
+
+        # Notional Rupee Gamma Exposure
+        notional_gamma = gamma_val * (spot**2) * 0.01 * oi * resolved_lot
+
+        if opt_type == "CE":
+            total_call_gex += notional_gamma
+            strike_gex[strike] += notional_gamma
+        else:
+            total_put_gex += notional_gamma
+            strike_gex[strike] -= notional_gamma
+
+        analyzed_count += 1
+
+    net_gex = total_call_gex - total_put_gex
+    regime = "POSITIVE_GAMMA_PIN" if net_gex >= 0 else "NEGATIVE_GAMMA_ACCELERATION"
+
+    # Compute Gamma Flip Strike
+    sorted_strikes = sorted(strike_gex.keys())
+    cum_gex = 0.0
+    flip_strike = spot
+    for s in sorted_strikes:
+        cum_gex += strike_gex[s]
+        if cum_gex >= 0:
+            flip_strike = s
+            break
+
+    is_acceleration = net_gex < 0 or (net_gex >= 0 and spot < flip_strike)
+
+    return {
+        "net_gex": round(net_gex, 2),
+        "call_gex": round(total_call_gex, 2),
+        "put_gex": round(total_put_gex, 2),
+        "gamma_regime": regime,
+        "gex_flip_strike": round(flip_strike, 2),
+        "is_acceleration_zone": bool(is_acceleration),
+        "contracts_analyzed": analyzed_count,
     }

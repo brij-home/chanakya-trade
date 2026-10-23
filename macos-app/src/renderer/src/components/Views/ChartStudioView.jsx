@@ -281,7 +281,7 @@ function ChartStudioView({
               </span>
               <div className="grid grid-cols-2 gap-2 text-xs font-mono">
                 <div className="p-1.5 rounded bg-surface/80 border border-border/50">
-                  <span className="text-[9px] text-muted block uppercase">Unmitigated OB</span>
+                  <span className="text-[11px] text-muted block uppercase">Unmitigated OB</span>
                   <span className="font-bold text-emerald-400">
                     {setupData?.order_block?.bottom && setupData?.order_block?.top
                       ? `₹${setupData.order_block.bottom} – ₹${setupData.order_block.top}`
@@ -289,19 +289,19 @@ function ChartStudioView({
                   </span>
                 </div>
                 <div className="p-1.5 rounded bg-surface/80 border border-border/50">
-                  <span className="text-[9px] text-muted block uppercase">POC (Max Vol)</span>
+                  <span className="text-[11px] text-muted block uppercase">POC (Max Vol)</span>
                   <span className="font-bold text-amber">
                     {setupData?.volume_profile?.poc ? `₹${setupData.volume_profile.poc}` : '—'}
                   </span>
                 </div>
                 <div className="p-1.5 rounded bg-surface/80 border border-border/50">
-                  <span className="text-[9px] text-muted block uppercase">VAH (70% High)</span>
+                  <span className="text-[11px] text-muted block uppercase">VAH (70% High)</span>
                   <span className="font-bold text-blue-400">
                     {setupData?.volume_profile?.vah ? `₹${setupData.volume_profile.vah}` : '—'}
                   </span>
                 </div>
                 <div className="p-1.5 rounded bg-surface/80 border border-border/50">
-                  <span className="text-[9px] text-muted block uppercase">VAL (70% Low)</span>
+                  <span className="text-[11px] text-muted block uppercase">VAL (70% Low)</span>
                   <span className="font-bold text-purple-400">
                     {setupData?.volume_profile?.val ? `₹${setupData.volume_profile.val}` : '—'}
                   </span>

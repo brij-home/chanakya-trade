@@ -136,7 +136,7 @@ function FlowBox({ label, value, streak }) {
         {pos ? '+' : ''}₹{Math.abs(value).toFixed(0)} Cr
       </p>
       {streak !== undefined && streak !== 0 && (
-        <p className="text-muted text-[9px] font-ui mt-0.5">
+        <p className="text-muted text-[11px] font-ui mt-0.5">
           {Math.abs(streak)}d {streak >= 0 ? 'buying' : 'selling'}
         </p>
       )}

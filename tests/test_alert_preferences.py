@@ -196,7 +196,8 @@ def test_alert_preferences_manager(tmp_path):
     index_alert = {"symbol": "NIFTY", "option_type": "CE", "confidence": 85, "stage": "IGNITED"}
     stock_alert = {
         "symbol": "RELIANCE",
-        "contract_symbol": "RELIANCE26SEPFUT",
+        "contract_symbol": "RELIANCE26SEP3000CE",
+        "option_type": "CE",
         "confidence": 90,
         "stage": "IGNITED",
     }
@@ -256,6 +257,12 @@ def test_auto_alert_engine_dispatch_routing(monkeypatch, tmp_path):
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
 
     engine = AutoAlertEngine()
+    with engine._lock:
+        engine._alerts = [a for a in engine._alerts if a.symbol != "NIFTY"]
+        engine._dispatched_milestones.clear()
+        engine._dispatch_cooldowns.clear()
+        engine._daily_index_telegram.clear()
+        engine._hourly_telegram_dispatches["INDEX"].clear()
 
     # 1. Commodity alert -> Should be blocked from Telegram!
     comm_alert = AutoAlert(
@@ -305,20 +312,20 @@ def test_auto_alert_engine_dispatch_routing(monkeypatch, tmp_path):
 
     # 3. Index FNO alert -> Should be sent to Telegram!
     fno_alert = AutoAlert(
-        alert_id="live-fno-001",
+        alert_id="live-fno-dispatch-route-001",
         alert_type="GAMMA_BLAST",
         stage="IGNITED",
         symbol="NIFTY",
         exchange="NFO",
         direction="BULLISH",
-        headline="NIFTY 25000 CE GAMMA SURGE",
+        headline="NIFTY 25100 CE GAMMA SURGE",
         summary="Call OI unwinding",
         ltp=150.0,
         trigger_level=140.0,
         target_level=220.0,
         stop_loss=110.0,
         option_type="CE",
-        strike=25000.0,
+        strike=25100.0,
         confidence=92,
         is_live=True,
         environment="LIVE",
@@ -421,24 +428,35 @@ def test_fno_telegram_destination_routing(monkeypatch):
 
     monkeypatch.setattr("engine.alerts._telegram_notify", mock_tg_notify)
 
+    from engine.alert_preferences import alert_preferences, AlertPreferences
+
+    monkeypatch.setattr(alert_preferences, "_preferences", AlertPreferences())
+
     engine = AutoAlertEngine()
+    with engine._lock:
+        engine._alerts = [a for a in engine._alerts if a.symbol not in ("NIFTY", "RELIANCE")]
+        engine._dispatched_milestones.clear()
+        engine._dispatch_cooldowns.clear()
+        engine._daily_index_telegram.clear()
+        engine._hourly_telegram_dispatches["INDEX"].clear()
+        engine._hourly_telegram_dispatches["FNO_STOCK"].clear()
 
     # 1. F&O Index Alert (NIFTY) -> routes to Premium_Alpha_Vortex_FnO_Index
     fno_index_alert = AutoAlert(
-        alert_id="live-fno-index-routing-001",
+        alert_id="live-fno-index-dest-001",
         alert_type="GAMMA_BLAST",
         stage="IGNITED",
         symbol="NIFTY",
         exchange="NFO",
         direction="BULLISH",
-        headline="NIFTY 25000 CE GAMMA SURGE",
+        headline="NIFTY 25200 CE GAMMA SURGE",
         summary="Call OI unwinding",
         ltp=150.0,
         trigger_level=140.0,
         target_level=220.0,
         stop_loss=110.0,
         option_type="CE",
-        strike=25000.0,
+        strike=25200.0,
         confidence=92,
         is_live=True,
         environment="LIVE",
@@ -822,3 +840,78 @@ def test_fno_index_channel_whitelist_nifty_banknifty_midcp_sensex_only(monkeypat
         "🟢 [REAL/LIVE] NEW CALL · FINNIFTY 23500 CE", chat_id="-1004380788314"
     )
     assert p_fin == {}  # Suppressed!
+
+
+def test_stock_options_enrichment_routes_to_fno_stock_not_equity(monkeypatch):
+    """
+    RCA Regression Test:
+    Ensures that when a spot equity detector creates an alert for a stock like LT,
+    and it is subsequently enriched with an options contract (e.g. LT 3700 CE),
+    it routes strictly to the FNO_STOCK Telegram channel (-1004393392375)
+    and NEVER leaks into the Equity channel (-1003524867091).
+    """
+    from engine.alert_preferences import classify_alert_segment, alert_preferences
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    # 1. Alert created by a spot detector with initial segment='EQUITY' or unset
+    lt_alert = AutoAlert(
+        alert_id="aa-smc_ob_retest-LT-20261021",
+        alert_type="SMC_OB_RETEST",
+        stage="IGNITED",
+        symbol="LT",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="🔥 BREAKOUT IGNITED: LT 3700 CE (Lot: 175) crossed ₹3,654.5",
+        summary="LT breakout",
+        ltp=3689.9,
+        trigger_level=3654.5,
+        target_level=3864.9,
+        stop_loss=3588.54,
+        confidence=88,
+        is_live=True,
+        environment="LIVE",
+        segment="EQUITY",  # spot detector initialized as EQUITY
+        contract_symbol="NSE:LT26OCT3700CE",
+        strike=3700.0,
+        option_type="CE",
+        actionable_plan={
+            "action": "BUY_CALL",
+            "contract": "NSE:LT26OCT3700CE",
+            "strike": 3700.0,
+            "option_type": "CE",
+            "lot_size": 175,
+        },
+    )
+
+    # Invariant: classify_alert_segment MUST return FNO_STOCK despite segment='EQUITY'
+    assert classify_alert_segment(lt_alert) == "FNO_STOCK"
+
+    # Invariant: sync_segment() updates self.segment to FNO_STOCK
+    lt_alert.sync_segment()
+    assert lt_alert.segment == "FNO_STOCK"
+
+    # Invariant: Target chat ID for FNO_STOCK must be the F&O stock channel
+    target_chat = alert_preferences.get_telegram_chat_id(classify_alert_segment(lt_alert))
+    assert target_chat == "-1004393392375"
+    assert target_chat != "-1003524867091"  # NOT Equity channel
+
+    # 2. Test full AutoAlertEngine._dispatch routing with Telegram capture
+    engine = AutoAlertEngine()
+    sent_calls = []
+
+    def mock_tg_notify(msg, chat_id=None):
+        sent_calls.append((msg, chat_id))
+
+    monkeypatch.setattr("engine.alerts._telegram_notify", mock_tg_notify)
+    monkeypatch.setattr(engine, "_eval_telegram_apex_gate", lambda a, **kw: (True, "Passes Apex"))
+
+    # Reset segment back to EQUITY to verify engine forces canonical classification
+    lt_alert.segment = "EQUITY"
+    lt_alert.telegram_dispatched = False
+
+    engine._dispatch(lt_alert)
+
+    assert len(sent_calls) >= 1
+    # Must dispatch to FNO_STOCK channel (-1004393392375), NEVER Equity (-1003524867091)
+    assert sent_calls[0][1] == "-1004393392375"
+    assert lt_alert.segment == "FNO_STOCK"

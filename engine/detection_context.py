@@ -87,10 +87,106 @@ class DetectionContext:
         return None
 
     @property
+    def order_book_depth_imbalance(self) -> Optional[float]:
+        """Calculates top-5 order book depth imbalance ratio (OBI_5)."""
+        if "obi_5" in self.extra_metrics:
+            try:
+                return float(self.extra_metrics["obi_5"])
+            except (ValueError, TypeError) as e:
+                logger.debug(f"[DetectionContext] obi_5 cast suppressed: {e}")
+        if "order_book_imbalance" in self.extra_metrics:
+            try:
+                return float(self.extra_metrics["order_book_imbalance"])
+            except (ValueError, TypeError) as e:
+                logger.debug(f"[DetectionContext] order_book_imbalance cast suppressed: {e}")
+
+        depth_obj = (
+            self.extra_metrics.get("depth_50")
+            or self.extra_metrics.get("order_book")
+            or self.extra_metrics.get("depth")
+        )
+        if depth_obj:
+            try:
+                from market.order_book import BisectDepthBook
+
+                if isinstance(depth_obj, BisectDepthBook):
+                    return depth_obj.obi(5)
+                elif isinstance(depth_obj, dict):
+                    bids = depth_obj.get("buy") or depth_obj.get("bids") or []
+                    asks = depth_obj.get("sell") or depth_obj.get("asks") or []
+                    b_vol = sum(int(b.get("quantity") or b.get("qty") or 0) for b in bids[:5])
+                    a_vol = sum(int(a.get("quantity") or a.get("qty") or 0) for a in asks[:5])
+                    tot = b_vol + a_vol
+                    if tot > 0:
+                        return round((b_vol - a_vol) / tot, 4)
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detection_context] OBI calculation suppressed: {e_suppressed}"
+                )
+
+        # Check in-memory depth book
+        try:
+            from market.order_book import get_depth_book
+
+            db = get_depth_book(self.canonical_symbol)
+            if db.total_bid_qty > 0 or db.total_ask_qty > 0:
+                return db.obi(5)
+        except Exception as e:
+            logger.debug(f"[DetectionContext] get_depth_book lookup suppressed: {e}")
+        return None
+
+    def estimated_slippage_bps(
+        self, quantity: int = 1, direction: str = "BULLISH"
+    ) -> Optional[float]:
+        """Estimates execution slippage in basis points from L2 depth or bid-ask spread."""
+        depth_obj = self.extra_metrics.get("depth_50") or self.extra_metrics.get("order_book")
+        if depth_obj:
+            try:
+                from market.order_book import BisectDepthBook
+
+                book = depth_obj if isinstance(depth_obj, BisectDepthBook) else None
+                if not book and isinstance(depth_obj, dict):
+                    book = BisectDepthBook(max_depth=50)
+                    book.batch_update(depth_obj.get("buy", []), depth_obj.get("sell", []))
+                if book:
+                    side = "BUY" if str(direction).upper() in ("BULLISH", "BUY", "LONG") else "SELL"
+                    sweep = book.simulate_sweep(side, quantity=quantity)
+                    if sweep.get("slippage_bps") is not None:
+                        return float(sweep["slippage_bps"])
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.detection_context] Sweep slippage suppressed: {e_suppressed}"
+                )
+
+        spread = self.bid_ask_spread_pct
+        if spread is not None:
+            return round(spread * 100.0, 1)
+        return None
+
+    @property
+    def execution_friction_badge(self) -> Optional[str]:
+        """Flags institutional execution friction based on L2 depth and spread."""
+        spread = self.bid_ask_spread_pct
+        liq_status = self.extra_metrics.get("liquidity_status")
+        slippage = self.estimated_slippage_bps()
+
+        if (
+            (spread is not None and spread > 1.5)
+            or liq_status in ("WIDE_SPREAD_CAUTION", "ILLIQUID")
+            or (slippage is not None and slippage > 150.0)
+        ):
+            return "⚠️ WIDE SPREAD — USE STRICT LIMIT"
+        elif spread is not None and spread <= 0.5:
+            return "⚡ PRIME LIQUIDITY — TIGHT SPREAD"
+        elif spread is not None:
+            return "✓ LIQUID — NORMAL DEPTH"
+        return None
+
+    @property
     def liquidity_warning(self) -> Optional[str]:
         """Flags illiquid options or wide spreads to enforce limit orders."""
         spread = self.bid_ask_spread_pct
-        if spread is not None and spread > 3.0:
+        if spread is not None and spread > 1.5:
             return f"⚠️ WIDE BID-ASK SPREAD ({spread:.1f}%) — High slippage risk! Use strict limit orders."
         return None
 
@@ -158,6 +254,7 @@ class DetectionContext:
             direction=direction,
             alert_type=alert_type,
             is_fno=self.segment in ("NFO", "BFO", "F&O"),
+            execution_friction_badge=self.execution_friction_badge,
         )
 
 
@@ -340,6 +437,10 @@ def register_default_detectors() -> None:
     from engine.detectors.crypto import detect_single_crypto_symbol
     from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
     from engine.detectors.turtle_soup import detect_turtle_soup_sweep
+    from engine.detectors.liquidity_sweep import detect_predator_liquidity_sweep
+    from engine.detectors.afternoon_thrust import detect_afternoon_thrust
+    from engine.detectors.index_micro_scalp import detect_index_micro_scalp
+    from engine.detectors.smt_sweep import detect_smt_sweep
 
     def _circuit_adapter(ctx: DetectionContext):
         if ctx.ltp > 0 and ctx.prev_close and ctx.prev_close > 0:
@@ -540,7 +641,92 @@ def register_default_detectors() -> None:
             )
         return None
 
+    def _predator_sweep_adapter(ctx: DetectionContext):
+        df = ctx.candles_5m if ctx.candles_5m is not None else ctx.candles_15m
+        if df is None:
+            df = ctx.candles_daily
+        if df is not None and len(df) >= 10:
+            return detect_predator_liquidity_sweep(
+                symbol=ctx.symbol,
+                df=df,
+                ltp=ctx.ltp,
+                vwap=ctx.vwap,
+                exchange=ctx.exchange,
+                rvol=ctx.rvol or 1.0,
+                session_date=ctx.timestamp.date() if ctx.timestamp else None,
+            )
+        return None
+
+    def _afternoon_thrust_adapter(ctx: DetectionContext):
+        if ctx.candles_5m is not None and len(ctx.candles_5m) >= 3 and ctx.ltp > 0:
+            return detect_afternoon_thrust(
+                symbol=ctx.symbol,
+                df_5m=ctx.candles_5m,
+                ltp=ctx.ltp,
+                vwap=ctx.vwap,
+                rvol=ctx.rvol,
+                day_high=ctx.day_high,
+                day_low=ctx.day_low,
+                ref_time=ctx.timestamp,
+                prev_close=ctx.prev_close,
+            )
+        return None
+
+    def _index_micro_scalp_adapter(ctx: DetectionContext):
+        if ctx.segment == "FNO_INDEX" and ctx.option_chain and ctx.ltp > 0:
+            return detect_index_micro_scalp(
+                underlying=ctx.canonical_symbol,
+                spot=ctx.ltp,
+                chain=ctx.option_chain,
+                ohlcv_5m=ctx.candles_5m,
+                vwap=ctx.vwap,
+                day_high=ctx.day_high,
+                day_low=ctx.day_low,
+                ref_time=ctx.timestamp,
+            )
+        return None
+
+    def _smt_sweep_adapter(ctx: DetectionContext):
+        if ctx.segment == "FNO_INDEX" and ctx.option_chain and ctx.ltp > 0:
+            return detect_smt_sweep(
+                underlying=ctx.canonical_symbol,
+                spot=ctx.ltp,
+                chain=ctx.option_chain,
+                vwap=ctx.vwap,
+                day_high=ctx.day_high,
+                day_low=ctx.day_low,
+                prev_day_high=ctx.prev_day_high,
+                prev_day_low=ctx.prev_day_low,
+                ohlcv_5m=ctx.candles_5m,
+                ref_time=ctx.timestamp,
+            )
+        return None
+
     adapters = [
+        FunctionalDetectorAdapter(
+            "afternoon_thrust",
+            "Afternoon Thrust & Power Hour Breakout",
+            ("EQUITY", "FNO_STOCK", "FNO_INDEX"),
+            _afternoon_thrust_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "index_micro_scalp",
+            "Institutional Index Micro Scalp",
+            ("FNO_INDEX",),
+            _index_micro_scalp_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "smt_sweep",
+            "SMT Liquidity Sweep & Polarization Reversal",
+            ("FNO_INDEX",),
+            _smt_sweep_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "predator_liquidity_sweep",
+            "Predator Liquidity Sweep & Absorption",
+            ("EQUITY", "FNO_STOCK", "FNO_INDEX", "COMMODITY"),
+            _predator_sweep_adapter,
+        ),
         FunctionalDetectorAdapter(
             "turtle_soup_sweep",
             "Turtle Soup Liquidity Sweep Reversal",
@@ -644,8 +830,12 @@ def register_default_detectors() -> None:
 
     # Register class-based BaseDetector protocols
     from engine.detectors.order_flow import OrderFlowDivergenceDetector
+    from engine.detectors.order_book_thrust import OrderBookThrustDetector
+    from engine.detectors.gamma_unpin_squeezer import GammaUnpinSqueezerDetector
 
     detector_registry.register(OrderFlowDivergenceDetector())
+    detector_registry.register(OrderBookThrustDetector())
+    detector_registry.register(GammaUnpinSqueezerDetector())
 
 
 # Auto-populate default institutional detectors into registry

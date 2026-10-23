@@ -12,6 +12,7 @@ from engine.detectors.gamma_blast import detect_gamma_blast
 from engine.detectors.index_call_setup import detect_index_call_setup
 from engine.detectors.index_put_setup import detect_index_put_setup
 from engine.detectors.index_micro_scalp import detect_index_micro_scalp
+from engine.detectors.smt_sweep import detect_smt_sweep
 from engine.detectors.intraday_spark import detect_intraday_mover_sparks
 from engine.detectors.multibagger import detect_multibagger_breakouts, get_multibagger_universe
 from engine.detectors.opening_drive import detect_opening_drive
@@ -27,7 +28,14 @@ from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
 from engine.detectors.defined_risk_neutral import detect_defined_risk_neutral
 from engine.detectors.pairs_arbitrage import detect_pairs_arbitrage
 from engine.detectors.turtle_soup import detect_turtle_soup_sweep
+from engine.detectors.liquidity_sweep import detect_predator_liquidity_sweep
 from engine.detectors.swing_inflection import detect_swing_inflection_setups
+from engine.detectors.order_book_thrust import detect_order_book_thrust, OrderBookThrustDetector
+from engine.detectors.gamma_unpin_squeezer import (
+    detect_0dte_gamma_unpin,
+    GammaUnpinSqueezerDetector,
+)
+from engine.detectors.trend_day_continuation import detect_trend_day_pullback
 
 from engine.detection_context import (
     BaseDetector,
@@ -45,10 +53,12 @@ __all__ = [
     "FunctionalDetectorAdapter",
     "build_detection_context",
     "detector_registry",
+    "detect_trend_day_pullback",
     "detect_gamma_blast",
     "detect_index_call_setup",
     "detect_index_put_setup",
     "detect_index_micro_scalp",
+    "detect_smt_sweep",
     "detect_opening_drive",
     "detect_afternoon_thrust",
     "detect_preopen_bias",
@@ -71,5 +81,10 @@ __all__ = [
     "detect_defined_risk_neutral",
     "detect_pairs_arbitrage",
     "detect_turtle_soup_sweep",
+    "detect_predator_liquidity_sweep",
     "detect_swing_inflection_setups",
+    "detect_order_book_thrust",
+    "OrderBookThrustDetector",
+    "detect_0dte_gamma_unpin",
+    "GammaUnpinSqueezerDetector",
 ]

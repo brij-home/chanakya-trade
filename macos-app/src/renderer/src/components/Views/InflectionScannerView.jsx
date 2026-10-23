@@ -9,6 +9,7 @@ import Tooltip, { HelpHint } from '../UI/Tooltip'
 
 const ARCHETYPE_TABS = [
   { id: 'ALL', label: 'All Inflections', icon: '🌐' },
+  { id: 'PRE_INFLECTION_DRYUP', label: 'Dry-Up (Anti-FOMO)', icon: '🤫' },
   { id: 'VCP_PIVOT_BREAKOUT', label: 'VCP Pivots', icon: '🎯' },
   { id: 'TTM_SQUEEZE_EXPLOSION', label: 'TTM Squeeze', icon: '⚡' },
   { id: 'STAGE_1_TO_2_EXPANSION', label: 'Stage 1→2 Markup', icon: '🚀' },
@@ -22,6 +23,32 @@ const TIMING_TABS = [
   { id: 'COILING_IMMINENT', label: '⏳ Coiling (1–3d)' },
   { id: 'PULLBACK_RETEST', label: '🎯 Retest Zone' },
 ]
+
+/**
+ * Mathematically grounds candidate entry, stop-loss, targets and R:R.
+ * Replaces arbitrary multipliers with verified levels and ATR risk-based targets.
+ */
+function resolveCandidateRiskLevels(c) {
+  const af = c.anti_fomo || {}
+  const entry = Number(c.entry_price || af.fair_value_anchor || c.ltp || 0)
+  const stop = Number(c.stop_loss || af.invalidation_stop || (entry > 0 ? entry * 0.93 : 0))
+  const risk = Math.max(0.1, entry > stop ? entry - stop : entry * 0.07)
+  const t1 = Number(c.target_1 || (entry > 0 ? entry + 2 * risk : 0))
+  const t2 = Number(c.target_2 || (entry > 0 ? entry + 4 * risk : 0))
+  const target_moonshot = Number(c.target_moonshot || (entry > 0 ? entry + 8 * risk : 0))
+  const rr = c.risk_reward_ratio != null
+    ? Number(c.risk_reward_ratio)
+    : (risk > 0 && t1 > entry ? Number(((t1 - entry) / risk).toFixed(1)) : 2.0)
+
+  return {
+    entry_price: entry,
+    stop_loss: stop,
+    target_1: t1,
+    target_2: t2,
+    target_moonshot,
+    risk_reward_ratio: rr,
+  }
+}
 
 export default function InflectionScannerView({
   onOpenOrderTicket,
@@ -696,7 +723,7 @@ export default function InflectionScannerView({
         >
           <span>{label}</span>
           <span
-            className={`text-[9px] font-mono transition-all ${
+            className={`text-[11px] font-mono transition-all ${
               isSorted
                 ? 'opacity-100 text-amber-600 dark:text-amber-400 font-bold'
                 : 'opacity-30 group-hover:opacity-100 group-hover:text-amber-500'
@@ -844,7 +871,7 @@ export default function InflectionScannerView({
                               {c.symbol}
                             </span>
                             <span
-                              className={`text-[8.5px] font-bold px-1.5 py-0.2 rounded border uppercase font-mono ${
+                              className={`text-[10px] font-bold px-1.5 py-0.2 rounded border uppercase font-mono ${
                                 c.horizon === 'LONG_TERM'
                                   ? 'bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/30'
                                   : c.horizon === 'SHORT_TERM'
@@ -875,7 +902,7 @@ export default function InflectionScannerView({
                           >
                             {c.cycle_state.replace('_', ' ')}
                           </span>
-                          <span className="text-[9.5px] text-muted">
+                          <span className="text-[11px] text-muted">
                             {c.eta_label} ({c.days_in_incubation || 0}d inc)
                           </span>
                         </div>
@@ -902,11 +929,11 @@ export default function InflectionScannerView({
                           <span className="text-emerald-600 dark:text-emerald-400 font-bold" title="Target 1 (+2R)">
                             T1: ₹{c.target_1.toFixed(1)}
                           </span>
-                          <span className="text-muted text-[8px]">•</span>
+                          <span className="text-muted text-[10px]">•</span>
                           <span className="text-amber-600 dark:text-amber-400 font-bold" title="Target 2 (+3.5R)">
                             T2: ₹{c.target_2.toFixed(1)}
                           </span>
-                          <span className="text-muted text-[8px]">•</span>
+                          <span className="text-muted text-[10px]">•</span>
                           <span className="text-purple-600 dark:text-purple-400 font-bold flex items-center gap-0.5" title="Target Moonshot (+6.5R)">
                             <span>🚀</span>₹{c.target_moonshot.toFixed(1)}
                           </span>
@@ -932,13 +959,13 @@ export default function InflectionScannerView({
                             c.catalyst_badges.map((b, i) => (
                               <span
                                 key={i}
-                                className="text-[8.5px] px-1.5 py-0.5 rounded bg-surface border border-border text-muted font-mono"
+                                className="text-[10px] px-1.5 py-0.5 rounded bg-surface border border-border text-muted font-mono"
                               >
                                 {b}
                               </span>
                             ))
                           ) : (
-                            <span className="text-[9px] text-muted">Technical setup</span>
+                            <span className="text-[11px] text-muted">Technical setup</span>
                           )}
                         </div>
                       </td>
@@ -1175,7 +1202,7 @@ export default function InflectionScannerView({
         >
           <span>{label}</span>
           <span
-            className={`text-[9px] font-mono transition-all ${
+            className={`text-[11px] font-mono transition-all ${
               isSorted
                 ? 'opacity-100 text-emerald-600 dark:text-emerald-400 font-bold'
                 : 'opacity-0 group-hover:opacity-60 text-muted'
@@ -1486,6 +1513,7 @@ export default function InflectionScannerView({
                     const te = c.twin_engines || {}
                     const af = c.anti_fomo || {}
                     const is100x = (c.compounder_tier === '100X_CENTURY' || c.compounder_tier === '1000X_POTENTIAL')
+                    const levels = resolveCandidateRiskLevels(c)
                     return (
                       <tr
                         key={c.symbol}
@@ -1497,12 +1525,12 @@ export default function InflectionScannerView({
                           ltp: c.ltp,
                           inflection_score: c.century_score,
                           primary_archetype: 'STAGE_1_TO_2_EXPANSION',
-                          entry_price: af.fair_value_anchor || c.ltp,
-                          stop_loss: af.invalidation_stop,
-                          target_1: (af.fair_value_anchor || c.ltp) * 2.0,
-                          target_2: (af.fair_value_anchor || c.ltp) * 4.0,
-                          target_moonshot: (af.fair_value_anchor || c.ltp) * 10.0,
-                          risk_reward_ratio: 4.5,
+                          entry_price: levels.entry_price,
+                          stop_loss: levels.stop_loss,
+                          target_1: levels.target_1,
+                          target_2: levels.target_2,
+                          target_moonshot: levels.target_moonshot,
+                          risk_reward_ratio: levels.risk_reward_ratio,
                         })}
                       >
                         {/* Symbol / MCap */}
@@ -1514,7 +1542,7 @@ export default function InflectionScannerView({
                                 <span className="font-bold text-text text-xs group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors">
                                   {c.symbol}
                                 </span>
-                                <span className={`text-[8.5px] font-bold px-1.5 py-0.2 rounded border uppercase font-mono ${
+                                <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded border uppercase font-mono ${
                                   is100x
                                     ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
                                     : 'bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/30'
@@ -1547,7 +1575,7 @@ export default function InflectionScannerView({
                           <div className="font-black text-sm text-emerald-600 dark:text-emerald-400">
                             {te.total_projected_multiple}x
                           </div>
-                          <div className="text-[9px] text-muted font-mono">
+                          <div className="text-[11px] text-muted font-mono">
                             ➔ ₹{te.target_market_cap_cr ? (te.target_market_cap_cr / 1000).toFixed(1) + 'k' : '—'} Cr
                           </div>
                         </td>
@@ -1584,7 +1612,7 @@ export default function InflectionScannerView({
 
                         {/* Anti-FOMO State */}
                         <td className="py-2 px-2">
-                          <span className={`inline-block text-[9.5px] font-bold px-2 py-0.5 rounded font-mono ${
+                          <span className={`inline-block text-[10.5px] font-bold px-2 py-0.5 rounded font-mono ${
                             af.action_directive === 'ACCUMULATE_FAIR_VALUE'
                               ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
                               : af.action_directive === 'WAIT_FOR_PULLBACK'
@@ -1597,7 +1625,7 @@ export default function InflectionScannerView({
                               ? '🔴 Wait Pullback'
                               : '🟡 Stalk Pivot'}
                           </span>
-                          <div className="text-[9.5px] text-rose-500/90 mt-0.5">
+                          <div className="text-[11px] text-rose-500/90 mt-0.5">
                             Ceiling: ₹{af.no_chase_boundary}
                           </div>
                         </td>
@@ -1608,14 +1636,14 @@ export default function InflectionScannerView({
                             {(c.catalyst_badges || []).slice(0, 2).map((b, i) => (
                               <span
                                 key={i}
-                                className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-elevated border border-border text-text font-mono truncate max-w-[130px]"
+                                className="text-[11px] font-semibold px-1.5 py-0.5 rounded bg-elevated border border-border text-text font-mono truncate max-w-[130px]"
                                 title={b}
                               >
                                 {b}
                               </span>
                             ))}
                             {(c.catalyst_badges || []).length > 2 && (
-                              <span className="text-[9px] text-muted font-mono self-center">
+                              <span className="text-[11px] text-muted font-mono self-center">
                                 +{c.catalyst_badges.length - 2}
                               </span>
                             )}
@@ -1627,26 +1655,29 @@ export default function InflectionScannerView({
                           <div className="flex items-center justify-end gap-1.5">
                             <button
                               type="button"
-                              onClick={() => handleAddToIncubation({
-                                symbol: c.symbol,
-                                name: c.symbol,
-                                sector: 'Quality Microcap',
-                                horizon: 'LONG_TERM',
-                                cycle_state: 'STAGE_1_ACCUMULATION',
-                                eta_days: 15,
-                                eta_label: 'Stage 1 Base',
-                                entry_price: af.fair_value_anchor || c.ltp,
-                                ltp: c.ltp,
-                                stop_loss: af.invalidation_stop,
-                                target_1: (af.fair_value_anchor || c.ltp) * 2.0,
-                                target_2: (af.fair_value_anchor || c.ltp) * 4.0,
-                                target_moonshot: (af.fair_value_anchor || c.ltp) * 10.0,
-                                risk_reward_ratio: 4.5,
-                                inflection_score: c.century_score,
-                                primary_archetype: 'STAGE_1_TO_2_EXPANSION',
-                                catalyst_badges: c.catalyst_badges || [],
-                                catalyst_summary: c.summary,
-                              })}
+                              onClick={() => {
+                                const levels = resolveCandidateRiskLevels(c)
+                                handleAddToIncubation({
+                                  symbol: c.symbol,
+                                  name: c.symbol,
+                                  sector: 'Quality Microcap',
+                                  horizon: 'LONG_TERM',
+                                  cycle_state: 'STAGE_1_ACCUMULATION',
+                                  eta_days: 15,
+                                  eta_label: 'Stage 1 Base',
+                                  entry_price: levels.entry_price,
+                                  ltp: c.ltp,
+                                  stop_loss: levels.stop_loss,
+                                  target_1: levels.target_1,
+                                  target_2: levels.target_2,
+                                  target_moonshot: levels.target_moonshot,
+                                  risk_reward_ratio: levels.risk_reward_ratio,
+                                  inflection_score: c.century_score,
+                                  primary_archetype: 'STAGE_1_TO_2_EXPANSION',
+                                  catalyst_badges: c.catalyst_badges || [],
+                                  catalyst_summary: c.summary,
+                                })
+                              }}
                               className="p-1 px-1.5 rounded-lg border border-purple-500/40 bg-purple-500/10 text-[10px] font-bold text-purple-600 dark:text-purple-400 hover:bg-purple-500/20 transition-all cursor-pointer"
                               title="Retain in Incubation Pipeline"
                             >
@@ -1720,7 +1751,7 @@ export default function InflectionScannerView({
                           {te.total_projected_multiple}x
                         </span>
                       </div>
-                      <span className="text-[9px] text-muted font-mono uppercase">
+                      <span className="text-[11px] text-muted font-mono uppercase">
                         Projected 10Y Multiple
                       </span>
                     </div>
@@ -1729,13 +1760,13 @@ export default function InflectionScannerView({
                   {/* Twin Engines Breakdown */}
                   <div className="grid grid-cols-2 gap-2 text-xs font-mono p-2 rounded-lg bg-panel border border-border">
                     <div>
-                      <span className="text-[9.5px] text-muted font-ui block">ENGINE 1: PAT EXPANSION</span>
+                      <span className="text-[10.5px] text-muted font-ui block">ENGINE 1: PAT EXPANSION</span>
                       <span className="font-bold text-text">
                         {te.pat_expansion_multiple}x ({te.forecast_pat_cagr_pct}% CAGR)
                       </span>
                     </div>
                     <div>
-                      <span className="text-[9.5px] text-muted font-ui block">ENGINE 2: P/E RE-RATING</span>
+                      <span className="text-[10.5px] text-muted font-ui block">ENGINE 2: P/E RE-RATING</span>
                       <span className="font-bold text-amber-600 dark:text-amber-400">
                         {te.pe_expansion_multiple}x ({te.current_pe}x ➔ {te.projected_terminal_pe}x)
                       </span>
@@ -1747,7 +1778,7 @@ export default function InflectionScannerView({
                     {c.catalyst_badges?.map((b, i) => (
                       <span
                         key={i}
-                        className="text-[9px] font-semibold px-2 py-0.5 rounded bg-elevated border border-border text-text font-mono"
+                        className="text-[11px] font-semibold px-2 py-0.5 rounded bg-elevated border border-border text-text font-mono"
                       >
                         {b}
                       </span>
@@ -1761,7 +1792,7 @@ export default function InflectionScannerView({
                         <span>🛡️</span>
                         <span>Anti-FOMO Accumulation Blueprint</span>
                       </span>
-                      <span className={`text-[9.5px] font-bold px-2 py-0.5 rounded font-mono ${
+                      <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded font-mono ${
                         af.action_directive === 'ACCUMULATE_FAIR_VALUE'
                           ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400'
                           : af.action_directive === 'WAIT_FOR_PULLBACK'
@@ -1774,19 +1805,19 @@ export default function InflectionScannerView({
 
                     <div className="grid grid-cols-3 gap-2 text-xs font-mono">
                       <div>
-                        <span className="text-[9px] text-muted font-ui block">FAIR VALUE ZONE</span>
+                        <span className="text-[11px] text-muted font-ui block">FAIR VALUE ZONE</span>
                         <span className="font-bold text-text">
                           ₹{af.accumulate_low} – ₹{af.accumulate_high}
                         </span>
                       </div>
                       <div>
-                        <span className="text-[9px] text-rose-500 font-ui block">NO CHASE CEILING</span>
+                        <span className="text-[11px] text-rose-500 font-ui block">NO CHASE CEILING</span>
                         <span className="font-bold text-rose-600 dark:text-rose-400">
                           ₹{af.no_chase_boundary}
                         </span>
                       </div>
                       <div>
-                        <span className="text-[9px] text-cyan-600 dark:text-cyan-400 font-ui block">PULLBACK LIMIT</span>
+                        <span className="text-[11px] text-cyan-600 dark:text-cyan-400 font-ui block">PULLBACK LIMIT</span>
                         <span className="font-bold text-cyan-600 dark:text-cyan-400">
                           ₹{af.pullback_limit_entry}
                         </span>
@@ -1805,26 +1836,29 @@ export default function InflectionScannerView({
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => handleAddToIncubation({
-                          symbol: c.symbol,
-                          name: c.symbol,
-                          sector: 'Quality Microcap',
-                          horizon: 'LONG_TERM',
-                          cycle_state: 'STAGE_1_ACCUMULATION',
-                          eta_days: 15,
-                          eta_label: 'Stage 1 Base',
-                          entry_price: af.fair_value_anchor || c.ltp,
-                          ltp: c.ltp,
-                          stop_loss: af.invalidation_stop,
-                          target_1: (af.fair_value_anchor || c.ltp) * 2.0,
-                          target_2: (af.fair_value_anchor || c.ltp) * 4.0,
-                          target_moonshot: (af.fair_value_anchor || c.ltp) * 10.0,
-                          risk_reward_ratio: 4.5,
-                          inflection_score: c.century_score,
-                          primary_archetype: 'STAGE_1_TO_2_EXPANSION',
-                          catalyst_badges: c.catalyst_badges || [],
-                          catalyst_summary: c.summary,
-                        })}
+                        onClick={() => {
+                          const levels = resolveCandidateRiskLevels(c)
+                          handleAddToIncubation({
+                            symbol: c.symbol,
+                            name: c.symbol,
+                            sector: 'Quality Microcap',
+                            horizon: 'LONG_TERM',
+                            cycle_state: 'STAGE_1_ACCUMULATION',
+                            eta_days: 15,
+                            eta_label: 'Stage 1 Base',
+                            entry_price: levels.entry_price,
+                            ltp: c.ltp,
+                            stop_loss: levels.stop_loss,
+                            target_1: levels.target_1,
+                            target_2: levels.target_2,
+                            target_moonshot: levels.target_moonshot,
+                            risk_reward_ratio: levels.risk_reward_ratio,
+                            inflection_score: c.century_score,
+                            primary_archetype: 'STAGE_1_TO_2_EXPANSION',
+                            catalyst_badges: c.catalyst_badges || [],
+                            catalyst_summary: c.summary,
+                          })
+                        }}
                         className="px-2.5 py-1 rounded-lg border border-purple-500/40 bg-purple-500/15 text-xs font-semibold text-purple-600 dark:text-purple-400 hover:bg-purple-500/25 transition-all cursor-pointer flex items-center gap-1"
                         title="Retain in Incubation Pipeline"
                       >
@@ -1895,7 +1929,7 @@ export default function InflectionScannerView({
               <span>📌</span>
               <span>Incubation Pipeline</span>
               {incubatedCandidates.length > 0 && (
-                <span className="text-[9px] px-1.5 py-0.2 rounded-full font-mono bg-purple-500/20 text-purple-600 dark:text-purple-400 font-bold">
+                <span className="text-[11px] px-1.5 py-0.2 rounded-full font-mono bg-purple-500/20 text-purple-600 dark:text-purple-400 font-bold">
                   {incubatedCandidates.length}
                 </span>
               )}
@@ -2090,6 +2124,7 @@ export default function InflectionScannerView({
               title="Filter by quantitative inflection archetype"
             >
               <option value="ALL">All Inflections {scanResult && archetypeCounts.ALL ? `(${archetypeCounts.ALL})` : ''}</option>
+              <option value="PRE_INFLECTION_DRYUP">🤫 Pre-Inflection Dry-Up {scanResult && archetypeCounts.PRE_INFLECTION_DRYUP ? `(${archetypeCounts.PRE_INFLECTION_DRYUP})` : ''}</option>
               <option value="VCP_PIVOT_BREAKOUT">🎯 VCP Pivots {scanResult && archetypeCounts.VCP_PIVOT_BREAKOUT ? `(${archetypeCounts.VCP_PIVOT_BREAKOUT})` : ''}</option>
               <option value="TTM_SQUEEZE_EXPLOSION">⚡ TTM Squeeze Breakouts {scanResult && archetypeCounts.TTM_SQUEEZE_EXPLOSION ? `(${archetypeCounts.TTM_SQUEEZE_EXPLOSION})` : ''}</option>
               <option value="STAGE_1_TO_2_EXPANSION">🚀 Stage 1→2 Markup {scanResult && archetypeCounts.STAGE_1_TO_2_EXPANSION ? `(${archetypeCounts.STAGE_1_TO_2_EXPANSION})` : ''}</option>
@@ -2353,7 +2388,7 @@ export default function InflectionScannerView({
                               </span>
                               {c.horizon && (
                                 <span
-                                  className={`text-[8px] font-bold px-1.5 py-0.2 rounded border uppercase font-mono ${
+                                  className={`text-[10px] font-bold px-1.5 py-0.2 rounded border uppercase font-mono ${
                                     c.horizon === 'LONG_TERM'
                                       ? 'bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/30'
                                       : c.horizon === 'SHORT_TERM'
@@ -2367,7 +2402,7 @@ export default function InflectionScannerView({
                               )}
                               {c.eta_label && (
                                 <span
-                                  className="text-[8px] font-mono px-1 py-0.2 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20"
+                                  className="text-[10px] font-mono px-1 py-0.2 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20"
                                   title={`Cycle ETA: ${c.eta_label}`}
                                 >
                                   {c.eta_label}
@@ -2375,7 +2410,7 @@ export default function InflectionScannerView({
                               )}
                               {c.executive_verdict && (
                                 <span
-                                  className={`text-[8px] font-bold px-1.5 py-0.2 rounded uppercase font-mono ${
+                                  className={`text-[10px] font-bold px-1.5 py-0.2 rounded uppercase font-mono ${
                                     c.executive_verdict.includes('CIRCUIT')
                                       ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/30'
                                       : c.executive_verdict.includes('STRONG')
@@ -2388,7 +2423,7 @@ export default function InflectionScannerView({
                               )}
                               {c.cap_tier && (
                                 <span
-                                  className={`text-[8px] font-bold px-1 py-0.2 rounded border uppercase font-mono ${
+                                  className={`text-[10px] font-bold px-1 py-0.2 rounded border uppercase font-mono ${
                                     c.cap_tier === 'LARGE'
                                       ? 'bg-blue-500/15 text-blue-700 dark:text-blue-300 border-blue-500/30'
                                       : c.cap_tier === 'MID'
@@ -2404,7 +2439,7 @@ export default function InflectionScannerView({
                               )}
                               {c.circuit_state === 'UPPER_CIRCUIT_LOCKED' && (
                                 <span
-                                  className="text-[8px] font-bold px-1 py-0.2 rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/40 animate-pulse"
+                                  className="text-[10px] font-bold px-1 py-0.2 rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/40 animate-pulse"
                                   title="Upper Circuit Locked (No Sellers Available)"
                                 >
                                   🔒 UC LOCKED
@@ -2412,7 +2447,7 @@ export default function InflectionScannerView({
                               )}
                               {c.circuit_state === 'NEAR_UPPER_CIRCUIT' && (
                                 <span
-                                  className="text-[8px] font-bold px-1 py-0.2 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/40"
+                                  className="text-[10px] font-bold px-1 py-0.2 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/40"
                                   title="Within 1.5% of Upper Circuit Ceiling"
                                 >
                                   ⚠️ NEAR UC
@@ -2420,14 +2455,14 @@ export default function InflectionScannerView({
                               )}
                               {c.weekly_stage === 'STAGE_2_UPTREND' && (
                                 <span
-                                  className="text-[8px] font-bold px-1 py-0.2 rounded bg-yellow-500/15 text-yellow-800 dark:text-yellow-300 border border-yellow-500/30"
+                                  className="text-[10px] font-bold px-1 py-0.2 rounded bg-yellow-500/15 text-yellow-800 dark:text-yellow-300 border border-yellow-500/30"
                                   title="Aligned with Weekly 30-week EMA Stage 2 Uptrend"
                                 >
                                   👑 W-S2
                                 </span>
                               )}
                               {c.rrg_quadrant === 'LEADING' && (
-                                <span className="text-[9px] px-1 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30 font-bold">
+                                <span className="text-[11px] px-1 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30 font-bold">
                                   LEADING
                                 </span>
                               )}
@@ -2450,10 +2485,10 @@ export default function InflectionScannerView({
                             {c.inflection_score}
                           </div>
                           <div className="flex flex-col">
-                            <span className="text-[9px] font-mono text-muted" title="Technical / Sector / Quality Pillars">
+                            <span className="text-[11px] font-mono text-muted" title="Technical / Sector / Quality Pillars">
                               {c.technical_score != null ? c.technical_score : '—'}T • {c.sector_score != null ? c.sector_score : '—'}S • {c.quality_score != null ? c.quality_score : '—'}Q
                             </span>
-                            <span className="text-[8px] font-mono text-emerald-600 dark:text-emerald-400 font-bold">
+                            <span className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400 font-bold">
                               💾 0ms
                             </span>
                           </div>
@@ -2492,11 +2527,11 @@ export default function InflectionScannerView({
                             <div className="flex flex-col items-end gap-0.5">
                               <span>₹{displayLtp.toLocaleString('en-IN', { minimumFractionDigits: 1 })}</span>
                               {livePrice ? (
-                                <span className="text-[8px] font-mono text-emerald-500 flex items-center gap-0.5">
+                                <span className="text-[10px] font-mono text-emerald-500 flex items-center gap-0.5">
                                   <span className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse" />LIVE
                                 </span>
                               ) : (
-                                <span className="text-[8px] font-mono text-muted">EOD</span>
+                                <span className="text-[10px] font-mono text-muted">EOD</span>
                               )}
                             </div>
                           )
@@ -2526,7 +2561,7 @@ export default function InflectionScannerView({
                           >
                             {c.rvol_20d}x
                           </span>
-                          <span className="text-[9px] text-muted font-mono mt-0.5" title="20-Day Median Turnover">
+                          <span className="text-[11px] text-muted font-mono mt-0.5" title="20-Day Median Turnover">
                             ₹{c.turnover_20d_cr > 0 ? c.turnover_20d_cr.toFixed(2) : '0.00'} Cr
                           </span>
                         </div>
@@ -2566,11 +2601,11 @@ export default function InflectionScannerView({
                             <span className="text-emerald-600 dark:text-emerald-400 font-bold" title="Target 1 (+2R Scale 50% & SL to Breakeven)">
                               T1: ₹{c.target_1.toFixed(1)}
                             </span>
-                            <span className="text-muted text-[8px]">•</span>
+                            <span className="text-muted text-[10px]">•</span>
                             <span className="text-amber-600 dark:text-amber-400 font-bold" title="Target 2 (+3.5R Primary Positional Swing)">
                               T2: ₹{(c.target_2 || (c.entry_price + (3.5 * Math.max(0.5, c.entry_price - c.stop_loss)))).toFixed(1)}
                             </span>
-                            <span className="text-muted text-[8px]">•</span>
+                            <span className="text-muted text-[10px]">•</span>
                             <span className="text-purple-600 dark:text-purple-400 font-bold flex items-center gap-0.5" title="Moonshot Target (+6.5R Runner)">
                               <span>🚀</span>T3: ₹{(c.target_moonshot || (c.entry_price + (6.5 * Math.max(0.5, c.entry_price - c.stop_loss)))).toFixed(1)}
                             </span>
@@ -2668,7 +2703,7 @@ export default function InflectionScannerView({
                         </span>
                         {c.executive_verdict && (
                           <span
-                            className={`text-[8px] font-bold px-1.5 py-0.2 rounded uppercase font-mono ${
+                            className={`text-[10px] font-bold px-1.5 py-0.2 rounded uppercase font-mono ${
                               c.executive_verdict.includes('CIRCUIT')
                                 ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/30'
                                 : c.executive_verdict.includes('STRONG')
@@ -2698,7 +2733,7 @@ export default function InflectionScannerView({
                 <div className="flex flex-wrap items-center gap-1.5">
                   {c.horizon && (
                     <span
-                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase font-mono ${
+                      className={`text-[11px] font-bold px-1.5 py-0.5 rounded border uppercase font-mono ${
                         c.horizon === 'LONG_TERM'
                           ? 'bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/30'
                           : c.horizon === 'SHORT_TERM'
@@ -2712,7 +2747,7 @@ export default function InflectionScannerView({
                   )}
                   {c.eta_label && (
                     <span
-                      className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20"
+                      className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20"
                       title={`ETA: ${c.eta_label}`}
                     >
                       {c.eta_label}
@@ -2720,7 +2755,7 @@ export default function InflectionScannerView({
                   )}
                   {c.cap_tier && (
                     <span
-                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase font-mono ${
+                      className={`text-[11px] font-bold px-1.5 py-0.5 rounded border uppercase font-mono ${
                         c.cap_tier === 'LARGE'
                           ? 'bg-blue-500/15 text-blue-700 dark:text-blue-300 border-blue-500/30'
                           : c.cap_tier === 'MID'
@@ -2736,7 +2771,7 @@ export default function InflectionScannerView({
                   )}
                   {c.circuit_state === 'UPPER_CIRCUIT_LOCKED' && (
                     <span
-                      className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/40 animate-pulse"
+                      className="text-[11px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/40 animate-pulse"
                       title="Upper Circuit Locked"
                     >
                       🔒 UC LOCKED
@@ -2744,7 +2779,7 @@ export default function InflectionScannerView({
                   )}
                   {c.weekly_stage === 'STAGE_2_UPTREND' && (
                     <span
-                      className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-800 dark:text-yellow-300 border border-yellow-500/30"
+                      className="text-[11px] font-bold px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-800 dark:text-yellow-300 border border-yellow-500/30"
                       title="Aligned with Weekly 30-week EMA Stage 2 Uptrend"
                     >
                       👑 W-S2
@@ -2762,7 +2797,7 @@ export default function InflectionScannerView({
                     </span>
                   )}
                   {c.turnover_20d_cr > 0 && (
-                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-panel border border-border text-muted">
+                    <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-panel border border-border text-muted">
                       ₹{c.turnover_20d_cr.toFixed(1)} Cr/d
                     </span>
                   )}
@@ -2800,12 +2835,12 @@ export default function InflectionScannerView({
                       const entryDelta = c.entry_price > 0 ? ((displayLtp - c.entry_price) / c.entry_price * 100) : null
                       return (
                         <div className="flex flex-col items-center">
-                          <span className="text-[9.5px] text-muted block">
-                            LTP {livePrice ? <span className="text-emerald-500 text-[8px] ml-0.5">● LIVE</span> : <span className="text-muted text-[8px] ml-0.5">EOD</span>}
+                          <span className="text-[10.5px] text-muted block">
+                            LTP {livePrice ? <span className="text-emerald-500 text-[10px] ml-0.5">● LIVE</span> : <span className="text-muted text-[10px] ml-0.5">EOD</span>}
                           </span>
                           <span className="font-bold text-text">₹{displayLtp.toLocaleString('en-IN', { minimumFractionDigits: 1 })}</span>
                           {entryDelta != null && (
-                            <span className={`text-[8.5px] ${Math.abs(entryDelta) <= 1 ? 'text-emerald-600 dark:text-emerald-400 font-bold' : entryDelta > 3 ? 'text-amber-600 dark:text-amber-400' : 'text-muted'}`}>
+                            <span className={`text-[10px] ${Math.abs(entryDelta) <= 1 ? 'text-emerald-600 dark:text-emerald-400 font-bold' : entryDelta > 3 ? 'text-amber-600 dark:text-amber-400' : 'text-muted'}`}>
                               {entryDelta >= 0 ? '+' : ''}{entryDelta.toFixed(1)}% vs entry
                             </span>
                           )}
@@ -2813,11 +2848,11 @@ export default function InflectionScannerView({
                       )
                     })()}
                     <div>
-                      <span className="text-[9.5px] text-muted block">ENTRY</span>
+                      <span className="text-[10.5px] text-muted block">ENTRY</span>
                       <span className="font-bold text-text">₹{c.entry_price.toFixed(1)}</span>
                     </div>
                     <div>
-                      <span className="text-[9.5px] text-muted block">STOP LOSS</span>
+                      <span className="text-[10.5px] text-muted block">STOP LOSS</span>
                       <span className="font-bold text-rose-600 dark:text-rose-400">₹{c.stop_loss.toFixed(1)}</span>
                     </div>
                   </div>
@@ -2825,23 +2860,23 @@ export default function InflectionScannerView({
                   {/* Row 2: 3-Target Ladder + Payoff */}
                   <div className="grid grid-cols-4 gap-1 text-center">
                     <div className="p-1 rounded bg-surface/50 border border-emerald-500/20" title="Target 1: +2.0R Breakeven Scale-out">
-                      <span className="text-[9px] text-emerald-600 dark:text-emerald-400 font-semibold block">T1 (+2R)</span>
+                      <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold block">T1 (+2R)</span>
                       <span className="font-bold text-emerald-600 dark:text-emerald-400 text-xs">₹{c.target_1.toFixed(1)}</span>
                     </div>
                     <div className="p-1 rounded bg-surface/50 border border-amber-500/20" title="Target 2: +3.5R Positional Swing Target">
-                      <span className="text-[9px] text-amber-600 dark:text-amber-400 font-semibold block">T2 (+3.5R)</span>
+                      <span className="text-[11px] text-amber-600 dark:text-amber-400 font-semibold block">T2 (+3.5R)</span>
                       <span className="font-bold text-amber-600 dark:text-amber-400 text-xs">
                         ₹{(c.target_2 || (c.entry_price + (3.5 * Math.max(0.5, c.entry_price - c.stop_loss)))).toFixed(1)}
                       </span>
                     </div>
                     <div className="p-1 rounded bg-surface/50 border border-purple-500/20" title="Moonshot Target: +6.5R Multibagger Horizon">
-                      <span className="text-[9px] text-purple-600 dark:text-purple-400 font-semibold block">🚀 T3++</span>
+                      <span className="text-[11px] text-purple-600 dark:text-purple-400 font-semibold block">🚀 T3++</span>
                       <span className="font-bold text-purple-600 dark:text-purple-400 text-xs">
                         ₹{(c.target_moonshot || (c.entry_price + (6.5 * Math.max(0.5, c.entry_price - c.stop_loss)))).toFixed(1)}
                       </span>
                     </div>
                     <div className="p-1 rounded bg-surface/50 border border-border" title="Risk:Reward Multiple">
-                      <span className="text-[9px] text-muted block">PAYOFF</span>
+                      <span className="text-[11px] text-muted block">PAYOFF</span>
                       <span className="font-bold text-text text-xs">1:{c.risk_reward_ratio ?? '—'}</span>
                     </div>
                   </div>
@@ -2944,9 +2979,9 @@ export default function InflectionScannerView({
                       <>
                         <span className="font-mono font-bold text-text">LTP: ₹{displayLtp}</span>
                         {livePrice ? (
-                          <span className="ml-1 text-[9px] text-emerald-500 font-mono">● LIVE</span>
+                          <span className="ml-1 text-[11px] text-emerald-500 font-mono">● LIVE</span>
                         ) : (
-                          <span className="ml-1 text-[9px] text-muted font-mono">EOD</span>
+                          <span className="ml-1 text-[11px] text-muted font-mono">EOD</span>
                         )}
                       </>
                     )
@@ -3052,25 +3087,25 @@ export default function InflectionScannerView({
                     {/* 3-Pillar Confluence Scoreboard */}
                     <div className="grid grid-cols-4 gap-2 pt-1 border-t border-border/50 text-center font-mono">
                       <div className="p-2 rounded bg-panel/70 border border-border/70">
-                        <span className="text-[9px] text-muted uppercase block font-ui">⚡ Technical</span>
+                        <span className="text-[11px] text-muted uppercase block font-ui">⚡ Technical</span>
                         <span className="text-xs font-bold text-cyan-700 dark:text-cyan-400">
                           {activeCandidate?.technical_score != null ? `${activeCandidate.technical_score}/40` : '—'}
                         </span>
                       </div>
                       <div className="p-2 rounded bg-panel/70 border border-border/70">
-                        <span className="text-[9px] text-muted uppercase block font-ui">🔄 Sector</span>
+                        <span className="text-[11px] text-muted uppercase block font-ui">🔄 Sector</span>
                         <span className="text-xs font-bold text-amber-700 dark:text-amber-400">
                           {activeCandidate?.sector_score != null ? `${activeCandidate.sector_score}/30` : '—'}
                         </span>
                       </div>
                       <div className="p-2 rounded bg-panel/70 border border-border/70">
-                        <span className="text-[9px] text-muted uppercase block font-ui">🛡️ Forensic</span>
+                        <span className="text-[11px] text-muted uppercase block font-ui">🛡️ Forensic</span>
                         <span className="text-xs font-bold text-emerald-700 dark:text-emerald-400">
                           {activeCandidate?.quality_score != null ? `${activeCandidate.quality_score}/30` : '—'}
                         </span>
                       </div>
                       <div className="p-2 rounded bg-panel/70 border border-border/70">
-                        <span className="text-[9px] text-muted uppercase block font-ui">🎯 R:R</span>
+                        <span className="text-[11px] text-muted uppercase block font-ui">🎯 R:R</span>
                         <span className="text-xs font-bold text-text">
                           {activeCandidate?.risk_reward_ratio != null ? `1:${activeCandidate.risk_reward_ratio}` : '—'}
                         </span>
@@ -3214,11 +3249,11 @@ export default function InflectionScannerView({
                                     ₹{livePrice ? livePrice.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : activeCandidate?.ltp?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                                   </span>
                                   {livePrice ? (
-                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 font-bold">
+                                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 font-bold">
                                       LIVE
                                     </span>
                                   ) : (
-                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-elevated text-muted border border-border">
+                                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-elevated text-muted border border-border">
                                       EOD
                                     </span>
                                   )}

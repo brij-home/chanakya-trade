@@ -41,6 +41,7 @@ import json
 import logging
 import threading
 import time
+import datetime as dt
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -69,8 +70,12 @@ _FYERS_INDEX_MAP = {
     "NIFTY 50": "NSE:NIFTY50-INDEX",
     "NIFTY": "NSE:NIFTY50-INDEX",
     "NIFTY50": "NSE:NIFTY50-INDEX",
+    "NIFTY-INDEX": "NSE:NIFTY50-INDEX",
+    "NSE:NIFTY-INDEX": "NSE:NIFTY50-INDEX",
     "NIFTY BANK": "NSE:NIFTYBANK-INDEX",
     "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    "BANKNIFTY-INDEX": "NSE:NIFTYBANK-INDEX",
+    "NSE:BANKNIFTY-INDEX": "NSE:NIFTYBANK-INDEX",
     "INDIA VIX": "NSE:INDIAVIX-INDEX",
     "VIX": "NSE:INDIAVIX-INDEX",
     "SENSEX": "BSE:SENSEX-INDEX",
@@ -355,24 +360,24 @@ def _warn_circuit_breaker_open(op: str, target: str = "") -> None:
         logger.debug(f"[FyersAPI] Circuit breaker is OPEN. Suppressing {op} for {target}.")
 
 
-def _resolve_commodity_contract(symbol: str) -> str:
+def _resolve_commodity_contract(symbol: str, ref_time: dt.datetime | None = None) -> str:
     """
     Resolve generic commodity symbol (e.g. 'GOLD', 'CRUDEOIL', 'SILVER', 'NATURALGAS')
     to the active near-month Fyers MCX futures contract symbol.
     """
-    import datetime as dt
-
-    now = dt.datetime.now()
+    now = ref_time or dt.datetime.now()
     clean = symbol.upper().replace("MCX:", "").replace("-FUT", "").replace("_FUT", "").strip()
 
-    # CRUDEOIL: monthly, expires ~19th of each month
+    # CRUDEOIL: monthly, futures expire ~19th (tender period starts ~17th).
+    # 48h pre-tender auto-roll activates on day 17 to shift liquidity to the active front month.
     if clean in ("CRUDEOIL", "CRUDEOILM"):
-        target_dt = now if now.day <= 18 else now + dt.timedelta(days=20)
+        target_dt = now if now.day <= 16 else now + dt.timedelta(days=20)
         return f"MCX:{clean}{target_dt.strftime('%y%b').upper()}FUT"
 
-    # NATURALGAS: monthly, expires ~25th of each month
+    # NATURALGAS: monthly, expires ~25th (tender period starts ~23rd).
+    # 48h pre-tender auto-roll activates on day 23.
     if clean in ("NATURALGAS", "NATURALGASM"):
-        target_dt = now if now.day <= 24 else now + dt.timedelta(days=15)
+        target_dt = now if now.day <= 22 else now + dt.timedelta(days=15)
         return f"MCX:{clean}{target_dt.strftime('%y%b').upper()}FUT"
 
     # GOLD: active contract months: FEB(2), APR(4), JUN(6), AUG(8), OCT(10), DEC(12)
@@ -520,6 +525,8 @@ def _to_fyers_symbol(instrument: str) -> str:
 
     # BSE Equity
     if exch_upper == "BSE":
+        if not any(sym_upper.endswith(sfx) for sfx in ("-A", "-B", "-X", "-XT", "-T", "-Z", "-EQ")):
+            return f"BSE:{sym_upper}-A"
         return f"BSE:{sym_upper}"
 
     return f"NSE:{sym_upper}-EQ"
@@ -628,7 +635,8 @@ class FyersAPI(BrokerAPI):
         self._screener_cache_lock = threading.Lock()
         self._depth_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._depth_cache_lock = threading.Lock()
-        self._depth_cache_ttl: float = 5.0
+        self._depth_cache_ttl: float = 25.0
+        self._market_status_cache: tuple[float, dict[str, Any]] = (0.0, {})
         self.name: str = "fyers"
         self._load_token()
 
@@ -1027,6 +1035,7 @@ class FyersAPI(BrokerAPI):
     def get_profile(self) -> UserProfile:
         if self._profile:
             return self._profile
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
         data = fyers.get_profile()
         payload = data.get("data", {})
@@ -1039,6 +1048,7 @@ class FyersAPI(BrokerAPI):
         return self._profile
 
     def get_funds(self) -> Funds:
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
         data = fyers.funds()
         payload = data.get("fund_limit", [])
@@ -1061,6 +1071,7 @@ class FyersAPI(BrokerAPI):
     # ── Portfolio ─────────────────────────────────────────────
 
     def get_holdings(self) -> list[Holding]:
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
         fyers = self._get_fyers()
         data = fyers.holdings()
         holdings = []
@@ -1088,6 +1099,7 @@ class FyersAPI(BrokerAPI):
         return holdings
 
     def get_positions(self) -> list[Position]:
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
         data = fyers.positions()
         positions = []
@@ -1157,10 +1169,21 @@ class FyersAPI(BrokerAPI):
             _warn_circuit_breaker_open("get_quote")
             return {}
 
-        # Chunk in batches up to plan limit (clamped to 300 symbols/request to prevent HTTP 414 URI Too Long)
-        CHUNK_SIZE = min(getattr(_fyers_rate_limiter, "quotes_chunk_size", 1000), 300)
-        for i in range(0, len(unique_fyers_symbols), CHUNK_SIZE):
-            chunk = unique_fyers_symbols[i : i + CHUNK_SIZE]
+        # Chunk in batches up to plan limit (clamped to 300 symbols/request and URL byte budget to prevent HTTP 414 URI Too Long)
+        from market.quote_dispatcher import (
+            chunk_symbols_for_quotes,
+            SAFE_HTTP_MAX_CHUNK_SIZE,
+            SAFE_URL_MAX_CHARS,
+        )
+
+        max_symbols = min(
+            getattr(_fyers_rate_limiter, "quotes_chunk_size", 1000),
+            SAFE_HTTP_MAX_CHUNK_SIZE,
+        )
+        chunks = chunk_symbols_for_quotes(
+            unique_fyers_symbols, max_symbols=max_symbols, max_chars=SAFE_URL_MAX_CHARS
+        )
+        for chunk in chunks:
             try:
                 if not rate_gate_acquired:
                     _fyers_rate_limiter.acquire(category=category)
@@ -1460,17 +1483,25 @@ class FyersAPI(BrokerAPI):
 
     def get_market_status(self) -> dict[str, Any]:
         """Real-time market status for Indian exchanges (NSE, BSE, MCX, CDS)."""
+        now_ts = time.time()
+        if hasattr(self, "_market_status_cache"):
+            cached_ts, cached_res = self._market_status_cache
+            if (now_ts - cached_ts) < 30.0 and cached_res:
+                return cached_res
+
         fyers = self._get_fyers()
         if not fyers:
             return {"status": "UNAVAILABLE", "message": "Fyers broker session not authenticated"}
         try:
-            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
+            _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
             res = fyers.market_status()
             if isinstance(res, dict) and res.get("s") == "ok":
-                return {
+                status_res = {
                     "status": "ok",
                     "marketStatus": res.get("marketStatus", []),
                 }
+                self._market_status_cache = (now_ts, status_res)
+                return status_res
             return {"status": "error", "raw": res}
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -1651,8 +1682,7 @@ class FyersAPI(BrokerAPI):
                                 str(exp_val),
                             )
             res = sorted(set(dates))
-            if res:
-                self._expiries_dates_cache[fyers_sym] = (now_ts, res)
+            self._expiries_dates_cache[fyers_sym] = (now_ts, res)
             return res
         except Exception as exc:
             logger.warning(
@@ -2131,7 +2161,7 @@ class FyersAPI(BrokerAPI):
         if not fyers:
             return []
         try:
-            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
+            _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
             res = (
                 fyers.get_smartexit_triggers(filters or {})
                 if filters
@@ -2482,6 +2512,7 @@ class FyersAPI(BrokerAPI):
 
     def get_gtt_orders(self) -> list[dict]:
         """Fetch active server-side GTT orders."""
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
         try:
             data = fyers.gtt_orderbook()
@@ -2491,12 +2522,67 @@ class FyersAPI(BrokerAPI):
 
     def cancel_gtt_order(self, order_id: str) -> bool:
         """Cancel an active GTT order."""
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
         try:
             data = fyers.cancel_gtt_order({"id": str(order_id)})
             return data.get("s") == "ok"
         except Exception:
             return False
+
+    def place_gtt(self, req: Any) -> Any:
+        """Standardized BrokerAPI implementation for Fyers server-side GTT/OCO."""
+        from brokers.base import GTTResponse
+
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
+        fyers = self._get_fyers()
+        fyers_sym = _to_fyers_symbol(req.symbol)
+        side = 1 if str(req.transaction_type).upper() == "BUY" else -1
+        order_info: dict[str, Any] = {
+            "leg1": {
+                "price": float(req.leg1.price),
+                "triggerPrice": float(req.leg1.trigger_price),
+                "qty": int(req.leg1.quantity),
+            }
+        }
+        if str(req.trigger_type).upper() == "OCO" and req.leg2:
+            order_info["leg2"] = {
+                "price": float(req.leg2.price),
+                "triggerPrice": float(req.leg2.trigger_price),
+                "qty": int(req.leg2.quantity),
+            }
+
+        product = (
+            "CNC"
+            if str(req.product).upper() == "CNC"
+            else ("INTRADAY" if str(req.product).upper() == "MIS" else "MARGIN")
+        )
+        payload = {
+            "side": side,
+            "symbol": fyers_sym,
+            "productType": product,
+            "orderInfo": order_info,
+        }
+        try:
+            res = fyers.place_gtt_order(payload)
+            if isinstance(res, dict) and (res.get("s") == "ok" or "id" in res):
+                gtt_id = str(res.get("id") or res.get("order_id") or "FYERS-GTT")
+                return GTTResponse(gtt_id=gtt_id, status="ACTIVE", raw=res)
+            msg = res.get("message", "GTT placement failed") if isinstance(res, dict) else str(res)
+            return GTTResponse(
+                gtt_id="",
+                status="REJECTED",
+                message=msg,
+                raw=res if isinstance(res, dict) else None,
+            )
+        except Exception as e:
+            return GTTResponse(gtt_id="", status="REJECTED", message=str(e))
+
+    def get_gtts(self) -> list[dict[str, Any]]:
+        return self.get_gtt_orders()
+
+    def cancel_gtt(self, gtt_id: str) -> bool:
+        return self.cancel_gtt_order(gtt_id)
 
     def create_smart_trailing_order(
         self,
@@ -2542,6 +2628,7 @@ class FyersAPI(BrokerAPI):
                     if now - ts < 120.0:
                         return val
 
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
         fyers = self._get_fyers()
         if not fyers:
             return {"status": "error", "error": "Broker session not authenticated", "s": "error"}
@@ -2567,6 +2654,7 @@ class FyersAPI(BrokerAPI):
                     if now - ts < 120.0:
                         return val
 
+        _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
         fyers = self._get_fyers()
         if not fyers:
             return {"status": "error", "error": "Broker session not authenticated", "s": "error"}

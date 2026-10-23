@@ -183,7 +183,25 @@ def detect_defined_risk_neutral(
         else short_call.strike + net_credit_pts
     )
 
-    # Conviction scoring (72 - 92)
+    # Quantitative SABR Volatility Smile Check
+    sabr_skew = None
+    short_put_edge = None
+    short_call_edge = None
+    try:
+        from analysis.vol_surface import analyze_volatility_surface
+
+        surf = analyze_volatility_surface(symbol)
+        if surf:
+            sabr_skew = surf.skew_verdict
+            for m in surf.mispricings:
+                if m.strike == short_put.strike:
+                    short_put_edge = m.iv_edge_pts
+                elif m.strike == short_call.strike:
+                    short_call_edge = m.iv_edge_pts
+    except Exception as e_sabr:
+        logger.debug("SABR surface check non-fatal for %s: %s", symbol, e_sabr)
+
+    # Conviction scoring (72 - 95)
     conviction = 74
     if vix < 14.0:
         conviction += 6
@@ -191,7 +209,10 @@ def detect_defined_risk_neutral(
         conviction += 5
     if oi_walls_present:
         conviction += 5
-    conviction = min(92, conviction)
+    # Boost conviction if short strikes exhibit positive IV edge (overpriced premium)
+    if (short_put_edge and short_put_edge > 0.5) or (short_call_edge and short_call_edge > 0.5):
+        conviction += 3
+    conviction = min(95, conviction)
 
     now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     headline = (
@@ -200,7 +221,8 @@ def detect_defined_risk_neutral(
     )
     summary = (
         f"Range-bound consolidation regime (VIX {vix:.1f}"
-        f"{f', ADX {adx_val:.1f}' if adx_val is not None else ''}). "
+        f"{f', ADX {adx_val:.1f}' if adx_val is not None else ''}"
+        f"{f', SABR Skew: {sabr_skew}' if sabr_skew else ''}). "
         f"Hedged Iron Condor collects ₹{abs(spread.net_debit_or_credit):,.0f} net credit. "
         f"Safe corridor ₹{lower_be:,.1f} to ₹{upper_be:,.1f}. Capped max loss ₹{spread.max_loss:,.0f}."
     )
@@ -237,6 +259,9 @@ def detect_defined_risk_neutral(
             "breakeven_lower": round(lower_be, 2),
             "breakeven_upper": round(upper_be, 2),
             "margin_estimate": round(spread.capital_required, 2),
+            "sabr_skew": sabr_skew,
+            "short_put_iv_edge": short_put_edge,
+            "short_call_iv_edge": short_call_edge,
         },
         actionable_plan={
             "action": "EXECUTE_IRON_CONDOR",
@@ -247,12 +272,14 @@ def detect_defined_risk_neutral(
             "entry_range": f"Spot ₹{round(ltp * 0.995, 1):.1f} – ₹{round(ltp * 1.005, 1):.1f}",
             "profit_corridor": f"₹{short_put.strike:,.0f} to ₹{short_call.strike:,.0f}",
             "breakevens": f"₹{lower_be:,.1f} – ₹{upper_be:,.1f}",
+            "no_chase_boundary": f"₹{upper_be:,.1f}",
             "target": f"+50% Decay (Harvest ₹{t1_profit:,.0f})",
             "target_2": f"+80% Decay (Harvest ₹{t2_profit:,.0f})",
             "stop_loss": f"Exit if underlying crosses ₹{lower_be:.1f} or ₹{upper_be:.1f}",
             "risk_reward": f"1:{spread.risk_reward_ratio:.2f}",
             "profit_rule": "Scale 50% profits at 50% max theta decay; close all wings if underlying challenges short strikes.",
         },
+        no_chase_boundary=round(upper_be, 2),
         confidence=conviction,
         created_at=now_iso,
     )

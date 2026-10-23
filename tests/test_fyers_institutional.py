@@ -29,7 +29,7 @@ def test_multi_segment_symbol_resolution():
     # Equities
     assert _to_fyers_symbol("RELIANCE") == "NSE:RELIANCE-EQ"
     assert _to_fyers_symbol("NSE:TCS") == "NSE:TCS-EQ"
-    assert _to_fyers_symbol("BSE:INFY") == "BSE:INFY"
+    assert _to_fyers_symbol("BSE:INFY") == "BSE:INFY-A"
 
     # MCX Commodities
     assert _to_fyers_symbol("MCX:CRUDEOIL").startswith("MCX:CRUDEOIL")

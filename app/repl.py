@@ -800,6 +800,20 @@ def _handle_backtest_command(args: list[str]) -> None:
                 logger.debug(f"[app.repl] Non-fatal exception suppressed: {e_suppressed}")
             strategy_args = [a for a in strategy_args if a not in ("--trades", clean_args[idx + 1])]
 
+    # ── SMT Benchmark Mode ───────────────────────────────────
+    if strategy_name in ("smt-benchmark", "smt_benchmark") or "--smt-benchmark" in clean_args:
+        from engine.smt_benchmark import run_smt_benchmark
+
+        console.print(
+            f"\n[dim]Running institutional SMT Sweep Strategic Benchmark for {symbol} ({period})...[/dim]"
+        )
+        try:
+            bm_res = run_smt_benchmark(symbol=symbol, period=period)
+            bm_res.print_summary()
+        except Exception as e:
+            console.print(f"[red]SMT Benchmark failed:[/red] {e}")
+        return
+
     # ── Multi-strategy compare mode ──────────────────────────
     if wants_compare or (wants_html and len(clean_args) > 2):
         # All positional args after the symbol are strategy names

@@ -83,7 +83,12 @@ def detect_intraday_mover_sparks(
     from market.history import get_ohlcv
 
     found: list[AutoAlert] = []
-    now_dt = datetime.now(IST)
+    try:
+        import engine.auto_alert_engine as aae
+
+        now_dt = aae.datetime.now(IST)
+    except Exception:
+        now_dt = datetime.now(IST)
     curr_t = now_dt.time()
     is_test_env = (
         (os.environ.get("CHANAKYA_TESTING") == "1")
@@ -314,13 +319,18 @@ def detect_intraday_mover_sparks(
             if tp and tp.is_asymmetry_viable and tp.target_1 > ltp and tp.invalidation_stop < ltp:
                 risk_pts = max(min_risk, round(ltp - tp.invalidation_stop, 2))
                 sl_price = round(ltp - risk_pts, 2)
-                t1_price = max(tp.target_1, round(ltp + 1.5 * risk_pts, 2))
+                t1_price = max(tp.target_1, round(ltp + 2.0 * risk_pts, 2))
                 t2_price = max(
-                    tp.target_2, round(max(ltp + 2.5 * risk_pts, t1_price + 1.0 * risk_pts), 2)
+                    tp.target_2, round(max(ltp + 3.5 * risk_pts, t1_price + 1.5 * risk_pts), 2)
                 )
                 t3_price = max(
-                    tp.target_3, round(max(ltp + 4.0 * risk_pts, t2_price + 1.5 * risk_pts), 2)
+                    tp.target_3, round(max(ltp + 5.5 * risk_pts, t2_price + 2.0 * risk_pts), 2)
                 )
+                if seg != "INDEX":
+                    max_circuit_t = round(ltp * 1.18, 2)
+                    t1_price = min(t1_price, max_circuit_t)
+                    t2_price = min(t2_price, max_circuit_t)
+                    t3_price = min(t3_price, max_circuit_t)
                 rr_str = f"1:{round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
                 tp_dict["invalidation_stop"] = sl_price
@@ -336,7 +346,12 @@ def detect_intraday_mover_sparks(
                 sl_price = round(ltp - risk_pts, 2)
                 t1_price = round(ltp + 2.0 * risk_pts, 2)
                 t2_price = round(ltp + 3.5 * risk_pts, 2)
-                t3_price = round(ltp + 5.0 * risk_pts, 2)
+                t3_price = round(ltp + 5.5 * risk_pts, 2)
+                if seg != "INDEX":
+                    max_circuit_t = round(ltp * 1.18, 2)
+                    t1_price = min(t1_price, max_circuit_t)
+                    t2_price = min(t2_price, max_circuit_t)
+                    t3_price = min(t3_price, max_circuit_t)
                 rr_str = f"1:{round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)}"
                 tp_dict = None
 
@@ -458,15 +473,20 @@ def detect_intraday_mover_sparks(
             if tp and tp.is_asymmetry_viable and tp.target_1 < ltp and tp.invalidation_stop > ltp:
                 risk_pts = max(min_risk, round(tp.invalidation_stop - ltp, 2))
                 sl_price = round(ltp + risk_pts, 2)
-                t1_price = min(tp.target_1, round(max(0.05, ltp - 1.5 * risk_pts), 2))
+                t1_price = min(tp.target_1, round(max(0.05, ltp - 2.0 * risk_pts), 2))
                 t2_price = min(
                     tp.target_2,
-                    round(max(0.05, min(ltp - 2.5 * risk_pts, t1_price - 1.0 * risk_pts)), 2),
+                    round(max(0.05, min(ltp - 3.5 * risk_pts, t1_price - 1.5 * risk_pts)), 2),
                 )
                 t3_price = min(
                     tp.target_3,
-                    round(max(0.05, min(ltp - 4.0 * risk_pts, t2_price - 1.5 * risk_pts)), 2),
+                    round(max(0.05, min(ltp - 5.5 * risk_pts, t2_price - 2.0 * risk_pts)), 2),
                 )
+                if seg != "INDEX":
+                    min_circuit_t = round(ltp * 0.82, 2)
+                    t1_price = max(t1_price, min_circuit_t)
+                    t2_price = max(t2_price, min_circuit_t)
+                    t3_price = max(t3_price, min_circuit_t)
                 rr_str = f"1:{round(abs(ltp - t1_price) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
                 tp_dict["invalidation_stop"] = sl_price
@@ -482,7 +502,12 @@ def detect_intraday_mover_sparks(
                 sl_price = round(ltp + risk_pts, 2)
                 t1_price = round(max(0.05, ltp - 2.0 * risk_pts), 2)
                 t2_price = round(max(0.05, ltp - 3.5 * risk_pts), 2)
-                t3_price = round(max(0.05, ltp - 5.0 * risk_pts), 2)
+                t3_price = round(max(0.05, ltp - 5.5 * risk_pts), 2)
+                if seg != "INDEX":
+                    min_circuit_t = round(ltp * 0.82, 2)
+                    t1_price = max(t1_price, min_circuit_t)
+                    t2_price = max(t2_price, min_circuit_t)
+                    t3_price = max(t3_price, min_circuit_t)
                 rr_str = f"1:{round(abs(ltp - t1_price) / max(0.01, risk_pts), 1)}"
                 tp_dict = None
 

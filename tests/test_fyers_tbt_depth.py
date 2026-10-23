@@ -180,7 +180,7 @@ def test_tbt_15_slot_priority_governor():
         mgr._scout.clear()
 
     # 1. Normal state: 6 core + 3 expiry = 9 symbols
-    desired = mgr.compute_desired_subscriptions()
+    desired = mgr.compute_desired_subscriptions(fill_sector_leaders=False)
     assert len(desired) == 9
     assert len(desired) <= MAX_TBT_SYMBOLS
 
@@ -190,7 +190,7 @@ def test_tbt_15_slot_priority_governor():
     mgr.register_in_flight("NSE:NIFTY26OCT25000CE")
     mgr.register_in_flight("NSE:BANKNIFTY26OCT52000PE")
 
-    desired = mgr.compute_desired_subscriptions()
+    desired = mgr.compute_desired_subscriptions(fill_sector_leaders=False)
     assert len(desired) == 13  # 4 in-flight + 6 core + 3 expiry
     assert desired[0] == "NSE:INFY-EQ"  # In-flight placed first
 
@@ -272,11 +272,13 @@ def test_tbt_primary_focus_elastic_core():
     assert len(desired) >= 7
     assert len(desired) <= 15
 
-    # 2. Revert to balanced mode
+    # 2. Revert to balanced mode (Option A: pure 3 anchor futures, liberating 12 dynamic slots)
     mgr.set_primary_focus(None)
     status_balanced = mgr.get_active_slots_status()
     assert status_balanced["primary_focus"] is None
-    assert len(status_balanced["core_grid"]) == 5  # 3 futures + 2 NIFTY ATM options
+    assert (
+        len(status_balanced["core_grid"]) == 3
+    )  # 3 benchmark futures (NIFTY, BANKNIFTY, MIDCPNIFTY)
 
 
 def test_tbt_no_finnifty_blocking_and_dynamic_sampling():
@@ -312,6 +314,7 @@ def test_tbt_revolve_atm_strikes_on_drift(monkeypatch):
     from market.fyers_tbt_manager import FyersTbtManager
 
     mgr = FyersTbtManager()
+    mgr.set_primary_focus("NIFTY")
     mgr.refresh_grid(session="EQUITY_NFO")
 
     # Initial spot = 25000 (ATM = 25000)
@@ -350,12 +353,12 @@ def test_tbt_zero_duplication_on_nifty_expiry_week(monkeypatch):
         ),
     )
 
-    core, todays = get_default_core_grid("EQUITY_NFO")
+    core, todays = get_default_core_grid("EQUITY_NFO", primary_focus="NIFTY")
     # Verify zero duplication between core and todays_expiry
     overlap = set(core).intersection(set(todays))
     assert len(overlap) == 0
 
-    # On Thursday, NIFTY 0DTE has ATM + Wings in Core (7 symbols: 3 futures + 4 options)
+    # On Thursday with NIFTY in focus, NIFTY 0DTE has ATM + Wings in Core (7 symbols: 3 futures + 4 options)
     assert len(core) == 7
     # todays_expiry is 0 (no redundant duplication!)
     assert len(todays) == 0
@@ -366,7 +369,7 @@ def test_tbt_zero_duplication_on_nifty_expiry_week(monkeypatch):
         mgr._in_flight.clear()
         mgr._scout.clear()
 
-    desired = mgr.compute_desired_subscriptions()
+    desired = mgr.compute_desired_subscriptions(fill_sector_leaders=False)
     assert len(desired) == 7
     assert len(desired) == len(set(desired))  # Strictly unique
     # 8 remaining slots available for Scouts
@@ -393,9 +396,12 @@ def test_tbt_zero_duplication_on_nifty_expiry_week(monkeypatch):
     core_fri, todays_fri = get_default_core_grid("EQUITY_NFO")
     overlap_fri = set(core_fri).intersection(set(todays_fri))
     assert len(overlap_fri) == 0
-    assert len(core_fri) == 5
-    assert len(todays_fri) == 3
-    assert any("BSE:SENSEX" in s for s in todays_fri)
+    assert len(core_fri) == 3  # Option A: 3 benchmark futures
+    assert len(todays_fri) == 0  # 12 dynamic slots liberated for on-demand allocation
+
+    # When SENSEX is set as primary focus, it expands dynamically
+    core_sensex, _ = get_default_core_grid("EQUITY_NFO", primary_focus="SENSEX")
+    assert any("SENSEX" in s for s in core_sensex)
 
 
 def test_tbt_in_flight_deregistration_and_sync():
@@ -845,8 +851,8 @@ def test_tbt_monday_morning_expiry_and_sebi_compliance(monkeypatch):
     assert s_exp == date(2026, 10, 23)  # Friday weekly!
     assert get_nearest_weekly_expiry("SENSEX", ref_date=date(2026, 10, 19)) == date(2026, 10, 23)
 
-    # Check Core grid on Monday Oct 19
-    core, todays = get_default_core_grid("EQUITY_NFO")
+    # Check Core grid on Monday Oct 19 with NIFTY in focus
+    core, todays = get_default_core_grid("EQUITY_NFO", primary_focus="NIFTY")
     assert "NSE:NIFTY26OCTFUT" in core
     assert "NSE:BANKNIFTY26OCTFUT" in core
     assert "NSE:MIDCPNIFTY26OCTFUT" in core
@@ -868,7 +874,7 @@ def test_tbt_monday_morning_expiry_and_sebi_compliance(monkeypatch):
         ),
     )
 
-    core_26, _ = get_default_core_grid("EQUITY_NFO")
+    core_26, _ = get_default_core_grid("EQUITY_NFO", primary_focus="NIFTY")
     # Must remain in October near-month (NOT prematurely jumped to November!)
     assert "NSE:NIFTY26OCTFUT" in core_26
     assert any("NSE:NIFTY26OCT" in s for s in core_26)
@@ -942,3 +948,166 @@ def test_fyers_broker_depth_when_sdk_not_installed(monkeypatch):
     rest_res = broker.get_market_depth("NSE:UNCACHEDFUT")
     assert rest_res["status"] == "UNAVAILABLE"
     assert "fyers-apiv3" in rest_res["message"]
+
+
+def test_build_sentinel_decision_intel():
+    """Verify that build_sentinel_decision_intel translates raw L3 depth into actionable Bull/Bear/Neutral intelligence."""
+    from market.fyers_tbt_manager import build_sentinel_decision_intel
+
+    # 1. Fortress Bid Wall
+    bid_depth = {
+        "fortress_bid_wall_confirmed": True,
+        "strongest_bid_wall": {
+            "price": 25400.0,
+            "qty": 14250,
+            "book_share_pct": 22.5,
+            "multiple_of_avg": 4.1,
+            "duration": 25.0,
+        },
+        "ltp": 25410.0,
+        "obi_50": 0.28,
+    }
+    intel_bid = build_sentinel_decision_intel(bid_depth)
+    assert intel_bid["bias"] == "BULLISH"
+    assert "DEMAND FLOOR" in intel_bid["badge"]
+    assert "25,400" in intel_bid["headline"]
+    assert "FAVOR CALLS / LONGS" in intel_bid["decision"]
+    assert intel_bid["wall_price"] == 25400.0
+
+    # 2. Fortress Ask Wall
+    ask_depth = {
+        "fortress_ask_wall_confirmed": True,
+        "strongest_ask_wall": {
+            "price": 25500.0,
+            "qty": 18000,
+            "book_share_pct": 25.0,
+            "multiple_of_avg": 4.5,
+            "duration": 30.0,
+        },
+        "ltp": 25480.0,
+        "obi_50": -0.32,
+    }
+    intel_ask = build_sentinel_decision_intel(ask_depth)
+    assert intel_ask["bias"] == "BEARISH"
+    assert "SUPPLY CEILING" in intel_ask["badge"]
+    assert "25,500" in intel_ask["headline"]
+    assert "FAVOR PUTS / SHORTS" in intel_ask["decision"]
+    assert intel_ask["wall_price"] == 25500.0
+
+    # 3. Bid Spoof (Bull Trap / Rugpull Risk)
+    spoof_bid = {
+        "fleeing_bid_wall_detected": True,
+        "spoof_trap_warning": "BID_SPOOF_RUGPULL_RISK",
+        "recent_fleeing_event": {"price": 25350.0, "qty": 8500},
+        "ltp": 25355.0,
+    }
+    intel_sp_bid = build_sentinel_decision_intel(spoof_bid)
+    assert intel_sp_bid["bias"] == "CAUTION_BEAR"
+    assert "BULL TRAP" in intel_sp_bid["badge"]
+    assert "DO NOT CHASE LONGS" in intel_sp_bid["decision"]
+
+    # 4. Ask Spoof (Bear Trap / Short Squeeze)
+    spoof_ask = {
+        "fleeing_ask_wall_detected": True,
+        "spoof_trap_warning": "ASK_SPOOF_BEARTRAP_RISK",
+        "recent_fleeing_event": {"price": 25450.0, "qty": 12000},
+        "ltp": 25445.0,
+    }
+    intel_sp_ask = build_sentinel_decision_intel(spoof_ask)
+    assert intel_sp_ask["bias"] == "BULLISH"
+    assert "BEAR TRAP" in intel_sp_ask["badge"]
+    assert "FAVOR LONGS / CALLS" in intel_sp_ask["decision"]
+
+    # 5. Balanced Auction
+    balanced_depth = {
+        "ltp": 25400.0,
+        "obi_50": 0.04,
+        "density_score": 65.0,
+    }
+    intel_bal = build_sentinel_decision_intel(balanced_depth)
+    assert intel_bal["bias"] == "NEUTRAL"
+    assert "BALANCED AUCTION" in intel_bal["badge"]
+    assert "TRADE PRICE ACTION" in intel_bal["decision"]
+
+
+def test_tbt_single_stock_fno_focus_allocation(monkeypatch):
+    """Verify Fyers Prime L3 TBT manager dynamically allocates slots for single-stock F&O."""
+    from market.fyers_tbt_manager import FyersTbtManager, _tbt_symbol_priority
+
+    mgr = FyersTbtManager()
+
+    # Mock quotes so RELIANCE spot is available
+    monkeypatch.setattr(
+        "market.quotes.get_ltp",
+        lambda sym: 2800.0 if "RELIANCE" in sym else 25000.0,
+    )
+
+    # 1. Set primary focus to single-stock F&O: RELIANCE
+    mgr.set_primary_focus("RELIANCE")
+    assert mgr._primary_focus_index == "RELIANCE"
+
+    # Core grid must now contain RELIANCE Future and ATM options
+    core_grid = mgr._core_grid
+    assert any("RELIANCE" in s and "FUT" in s for s in core_grid)
+    assert any("RELIANCE" in s and "CE" in s for s in core_grid)
+    assert any("RELIANCE" in s and "PE" in s for s in core_grid)
+
+    # 2. Verify priority elevation for focused stock
+    p_rel_opt = _tbt_symbol_priority("NSE:RELIANCE26OCT2800CE", primary_focus="RELIANCE")
+    p_nifty_opt = _tbt_symbol_priority("NSE:NIFTY26OCT25000CE", primary_focus="RELIANCE")
+    p_rel_fut = _tbt_symbol_priority("NSE:RELIANCE26OCTFUT", primary_focus="RELIANCE")
+    p_nifty_fut = _tbt_symbol_priority("NSE:NIFTY26OCTFUT", primary_focus="RELIANCE")
+
+    assert p_rel_opt == 65
+    assert p_rel_opt > p_nifty_opt  # Focused stock option elevated above NIFTY option (60)
+    assert p_rel_fut == 50
+    assert p_rel_fut > p_nifty_fut  # Focused stock future elevated above NIFTY future (45)
+
+    # 3. Dynamic ATM revolving includes focused stock
+    revolved = mgr.revolve_atm_strikes(force=True)
+    assert revolved is True
+    assert "RELIANCE" in mgr._last_atm_strikes
+    assert mgr._last_atm_strikes["RELIANCE"] == 2800
+
+    # 4. Return to balanced mode
+    mgr.set_primary_focus(None)
+    assert mgr._primary_focus_index is None
+
+
+def test_tbt_scout_anti_thrashing_dwell_time():
+    """
+    Verify anti-thrashing minimum dwell time (MIN_SCOUT_DWELL_SECONDS = 10.0s).
+    Within the same priority tier, a scout that has satisfied minimum dwell time (>= 10s)
+    is evicted before a young scout (< 10s), preventing rapid churn/thrashing.
+    """
+    from market.fyers_tbt_manager import (
+        FyersTbtManager,
+        MAX_SCOUT_SLOTS,
+        MIN_SCOUT_DWELL_SECONDS,
+    )
+    import time
+
+    mgr = FyersTbtManager()
+    mgr._scout.clear()
+    assert MIN_SCOUT_DWELL_SECONDS == 10.0
+
+    now = time.time()
+    # Populate scout ring with MAX_SCOUT_SLOTS symbols
+    # Symbol "OLD_SCOUT" was promoted 25 seconds ago (has dwelled >= 10s)
+    mgr._scout["NSE:TCS-EQ"] = now - 25.0
+
+    # Other symbols were promoted 2 seconds ago (young, < 10s dwell time)
+    for i in range(MAX_SCOUT_SLOTS - 1):
+        mgr._scout[f"NSE:YOUNG{i}-EQ"] = now - 2.0
+
+    assert len(mgr._scout) == MAX_SCOUT_SLOTS
+
+    # Now subscribe a new cash equity "NSE:NEWCOMER-EQ", forcing 1 eviction
+    mgr.subscribe(["NSE:NEWCOMER-EQ"])
+
+    assert len(mgr._scout) == MAX_SCOUT_SLOTS
+    # "NSE:TCS-EQ" (dwelled 25s) should be evicted before any of the young scouts
+    assert "NSE:TCS-EQ" not in mgr._scout
+    # Young scouts are protected from eviction
+    assert "NSE:YOUNG0-EQ" in mgr._scout
+    assert "NSE:NEWCOMER-EQ" in mgr._scout

@@ -306,7 +306,7 @@ export default function IVSmileCard({ data, onOpenOrderTicket }) {
                 return (
                   <tr key={r.strike} className={`border-b border-border/40 hover:bg-surface/60 ${isAtm ? 'bg-amber/5' : ''}`}>
                     <td className={`py-1.5 font-bold ${isAtm ? 'text-amber' : 'text-text'}`}>
-                      {Number(r.strike).toLocaleString('en-IN')} {isAtm && <span className="text-[9px] text-amber ml-1">ATM</span>}
+                      {Number(r.strike).toLocaleString('en-IN')} {isAtm && <span className="text-[11px] text-amber ml-1">ATM</span>}
                     </td>
                     <td className="py-1.5 text-right pr-2 text-cyan-400">{fmtIV(ceIv)}</td>
                     <td className="py-1.5 text-right pr-2 text-amber">{fmtIV(peIv)}</td>
@@ -327,7 +327,7 @@ export default function IVSmileCard({ data, onOpenOrderTicket }) {
                             sendDraft(`analyze option strike ${r.strike} for ${symbol}`)
                           }
                         }}
-                        className="text-[9px] px-2 py-0.5 rounded bg-surface border border-border hover:border-amber hover:text-amber cursor-pointer transition-all"
+                        className="text-[11px] px-2 py-0.5 rounded bg-surface border border-border hover:border-amber hover:text-amber cursor-pointer transition-all"
                       >
                         Trade
                       </button>

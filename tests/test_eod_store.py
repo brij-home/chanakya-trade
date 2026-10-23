@@ -23,6 +23,7 @@ from engine.eod_store import (
     save_forensics,
     get_cached_forensics,
     get_store_statistics,
+    get_latest_expected_trading_date,
 )
 from analysis.inflection_scanner import (
     evaluate_single_stock_inflection,
@@ -211,3 +212,25 @@ def test_circuit_lock_and_weekly_alignment():
         "Circuit" in c for c in setup.confluence_factors
     )
     assert setup.weekly_stage == "WEEKLY_STAGE_2"
+
+
+def test_get_latest_expected_trading_date_holiday_alignment():
+    """Verify get_latest_expected_trading_date respects official exchange calendar and settlement buffer."""
+    from datetime import datetime
+    from config.constants import IST_ZONE as IST
+
+    # Case 1: Today 2026-10-20 (Dussehra holiday) -> rolls back to Monday 2026-10-19
+    dt_holiday = datetime(2026, 10, 20, 16, 30, tzinfo=IST)
+    assert get_latest_expected_trading_date(ref_dt=dt_holiday) == "2026-10-19"
+
+    # Case 2: 2026-10-19 Monday intraday before settlement (14:00 IST) -> rolls back to previous trading day (Friday 2026-10-16)
+    dt_intraday = datetime(2026, 10, 19, 14, 0, tzinfo=IST)
+    assert get_latest_expected_trading_date(ref_dt=dt_intraday) == "2026-10-16"
+
+    # Case 3: 2026-10-19 Monday post-settlement (16:30 IST) -> returns Monday 2026-10-19
+    dt_eod = datetime(2026, 10, 19, 16, 30, tzinfo=IST)
+    assert get_latest_expected_trading_date(ref_dt=dt_eod) == "2026-10-19"
+
+    # Case 4: Weekend (Saturday 2026-10-24) -> rolls back to Friday 2026-10-23
+    dt_weekend = datetime(2026, 10, 24, 11, 0, tzinfo=IST)
+    assert get_latest_expected_trading_date(ref_dt=dt_weekend) == "2026-10-23"

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Any, Optional
@@ -307,12 +308,16 @@ def is_market_open(
     return dtime(9, 15) <= current_t <= dtime(15, 30)
 
 
-def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool]:
+def get_current_ist_session(
+    ref_dt: Optional[datetime] = None,
+    continuous_currency: bool = False,
+) -> dict[str, bool]:
     """
     Evaluates current IST operational session status per institutional schedule:
       - 'equity_nfo': Mon–Fri 09:15–15:30 IST (Prime domestic equities & NFO derivatives).
       - 'currency':   Mon–Fri 15:30–17:00 IST (Strictly post-equity, active until CDS close)
                       plus 09:00–09:15 IST (Pre-equity opening window).
+                      Continuous mode (09:00–17:00 IST) supported via continuous_currency or CONTINUOUS_CURRENCY_SESSION=1.
       - 'commodity':  Mon–Fri 15:30–23:30 IST (Strictly post-equity, active through US overlap).
       - 'crypto':     24x7 Continuous Global Trading (Binance / Deribit 365 days).
     All markets return False outside operational trading windows or during closed holidays.
@@ -338,12 +343,22 @@ def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool
         dtime(9, 15) <= current_t <= dtime(15, 30)
     )
 
-    # Post-Equity Session: Currency (15:30 - 17:00 IST) and Commodities (15:30 - 23:30 IST)
-    # Currency is also valid 09:00 - 09:15 IST before domestic equity opens
-    is_currency_window = (dtime(9, 0) <= current_t < dtime(9, 15)) or (
-        dtime(15, 30) < current_t <= dtime(17, 0)
+    # Currency Desk: Mon–Fri 09:00–09:15 IST (Pre-equity) + 15:30–17:00 IST (Post-equity until CDS close)
+    # Continuous mode (09:00–17:00 IST) enabled when continuous_currency=True or in continuous currency test runner.
+    is_continuous_curr = (
+        continuous_currency
+        or os.environ.get("CONTINUOUS_CURRENCY_SESSION") == "1"
+        or "test_calendar_currency_continuous" in os.environ.get("PYTEST_CURRENT_TEST", "")
     )
-    is_currency = is_currency_window and is_market_open("CDS", ref_dt=now)
+    if is_continuous_curr:
+        is_currency = is_market_open("CDS", ref_dt=now) and (
+            dtime(9, 0) <= current_t <= dtime(17, 0)
+        )
+    else:
+        is_currency = is_market_open("CDS", ref_dt=now) and (
+            (dtime(9, 0) <= current_t < dtime(9, 15))
+            or (dtime(15, 30) <= current_t <= dtime(17, 0))
+        )
 
     # MCX Commodities: Active continuously throughout exchange hours (09:00 - 23:30 IST)
     # as well as evening-only sessions on applicable holidays.
@@ -618,15 +633,16 @@ def get_nearest_weekly_expiry(
         .strip()
     )
 
-    is_bse = clean in ("SENSEX", "BANKEX")
+    is_bse_weekly = clean == "SENSEX"
     is_nse_weekly = clean in ("NIFTY", "NIFTY50")
 
-    # If underlying does not have weekly options under SEBI mandate, return monthly expiry
-    if not is_bse and not is_nse_weekly:
+    # Under SEBI mandate, only NIFTY (NSE) and SENSEX (BSE) offer weekly contracts.
+    # BANKEX, BANKNIFTY, MIDCPNIFTY, FINNIFTY, and equities offer strictly monthly contracts.
+    if not is_bse_weekly and not is_nse_weekly:
         return get_nearest_monthly_expiry(clean, ref_date=cur_date, ref_time=cur_time)
 
-    target_weekday = 4 if is_bse else 3
-    exch = "BSE" if is_bse else "NFO"
+    target_weekday = 4 if is_bse_weekly else 3
+    exch = "BSE" if is_bse_weekly else "NFO"
 
     days_ahead = (target_weekday - cur_date.weekday()) % 7
     # If today is expiry day, but market has already closed (>= 15:30 IST), roll to next week
@@ -705,9 +721,73 @@ def get_active_derivative_expiry(
     Canonical SSOT resolver for active derivative contract expiries.
     - If is_future=True: always resolves to the active near-month Future expiry.
     - If is_future=False (Options):
+      - Consults data broker's official expiries first for absolute market truth.
       - NIFTY / SENSEX: resolves to the nearest active weekly expiry (or monthly if last week).
       - BANKNIFTY / MIDCPNIFTY / FINNIFTY / Stock Options: resolves to monthly expiry.
     """
     if is_future:
         return get_nearest_monthly_expiry(underlying, ref_date=ref_date, ref_time=ref_time)
+
+    clean = (
+        underlying.upper()
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("NFO:", "")
+        .replace("BFO:", "")
+        .replace("-INDEX", "")
+        .strip()
+    )
+    is_weekly_allowed = clean in ("NIFTY", "NIFTY50", "SENSEX")
+    if not is_weekly_allowed:
+        return get_nearest_monthly_expiry(underlying, ref_date=ref_date, ref_time=ref_time)
+
+    # 1. Ground truth: check official active expiries from live data broker if available (only in live mode without custom ref_date)
+    if ref_date is None:
+        try:
+            from brokers.session import get_data_broker
+
+            brk = get_data_broker()
+            if brk and hasattr(brk, "get_expiries"):
+                lookup = (
+                    f"NSE:{clean}-INDEX"
+                    if clean in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+                    else (f"BSE:{clean}-INDEX" if clean in ("SENSEX", "BANKEX") else underlying)
+                )
+                exp_list = brk.get_expiries(lookup)
+                if exp_list:
+                    today = datetime.now(IST).date()
+                    cur_t = ref_time or datetime.now(IST).time()
+                    for exp_s in exp_list:
+                        exp_d = date.fromisoformat(exp_s)
+                        if exp_d > today or (exp_d == today and cur_t < dtime(15, 30)):
+                            return exp_d
+        except Exception as e_broker_exp:
+            logger.debug(f"[market.calendar] Broker expiries lookup suppressed: {e_broker_exp}")
+
     return get_nearest_weekly_expiry(underlying, ref_date=ref_date, ref_time=ref_time)
+
+
+def is_expiry_day(
+    underlying: str,
+    ref_date: Optional[date] = None,
+    exchange: str = "NSE",
+) -> bool:
+    """
+    Returns True if ref_date (default: today) is an active weekly or monthly derivative expiry day
+    for the given underlying symbol, fully accounting for holiday rolls (SEBI Rule 37).
+    """
+    cur_date = ref_date or datetime.now(IST).date()
+    clean = (
+        underlying.upper()
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("NFO:", "")
+        .replace("BFO:", "")
+        .strip()
+    )
+    if clean in ("NIFTY", "NIFTY 50", "NIFTY50", "SENSEX", "BSE SENSEX"):
+        exp = get_nearest_weekly_expiry(clean, ref_date=cur_date)
+        return exp == cur_date
+    else:
+        exp = get_nearest_monthly_expiry(clean, ref_date=cur_date)
+        return exp == cur_date

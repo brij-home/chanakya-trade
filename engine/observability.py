@@ -145,16 +145,18 @@ CRITICAL_JOURNEY_SLOS: dict[str, SLOTarget] = {
     "quote_fetch": SLOTarget(
         journey_id="quote_fetch",
         description="Live quote retrieval for a single instrument",
-        p95_latency_ms=500.0,
-        p99_latency_ms=1500.0,
-        availability_pct=99.0,
+        p95_latency_ms=1000.0,
+        p99_latency_ms=2500.0,
+        availability_pct=98.0,
+        error_budget_pct=2.0,
     ),
     "options_chain": SLOTarget(
         journey_id="options_chain",
         description="Options chain fetch and validation",
-        p95_latency_ms=1500.0,
-        p99_latency_ms=3000.0,
+        p95_latency_ms=6000.0,
+        p99_latency_ms=10000.0,
         availability_pct=98.0,
+        error_budget_pct=2.0,
     ),
     "multi_agent_analyze": SLOTarget(
         journey_id="multi_agent_analyze",
@@ -162,6 +164,7 @@ CRITICAL_JOURNEY_SLOS: dict[str, SLOTarget] = {
         p95_latency_ms=18000.0,
         p99_latency_ms=30000.0,
         availability_pct=95.0,
+        error_budget_pct=5.0,
     ),
     "paper_order_submit": SLOTarget(
         journey_id="paper_order_submit",
@@ -169,6 +172,7 @@ CRITICAL_JOURNEY_SLOS: dict[str, SLOTarget] = {
         p95_latency_ms=300.0,
         p99_latency_ms=800.0,
         availability_pct=99.9,
+        error_budget_pct=0.1,
     ),
     "backtest_run": SLOTarget(
         journey_id="backtest_run",
@@ -176,6 +180,7 @@ CRITICAL_JOURNEY_SLOS: dict[str, SLOTarget] = {
         p95_latency_ms=30000.0,
         p99_latency_ms=120000.0,
         availability_pct=98.0,
+        error_budget_pct=2.0,
     ),
 }
 
@@ -366,16 +371,40 @@ class ObservabilityRegistry:
         except Exception as e_suppressed:
             logger.debug(f"[engine.observability] Non-fatal exception suppressed: {e_suppressed}")
 
-    def get_slo_report(self, journey_id: Optional[str] = None) -> dict[str, Any]:
+    def clear_metrics(self) -> None:
+        """Clear recorded journey metrics history."""
+        with self._lock:
+            self._metrics.clear()
+
+    def get_slo_report(
+        self,
+        journey_id: Optional[str] = None,
+        window_seconds: Optional[float] = 900.0,
+    ) -> dict[str, Any]:
         """
         Compute SLO compliance report for one or all journeys.
 
         Returns per-journey: availability, p95/p99 latency vs targets,
         error budget consumption, and SLO breach status.
+        Evaluates a rolling time window (default 900s = 15m) and excludes
+        off-market queries from triggering live SLO breaches.
         """
         try:
             with self._lock:
                 metrics = list(self._metrics)
+
+            now_ts = time.time()
+            if window_seconds is not None:
+                cutoff_ts = now_ts - window_seconds
+                filtered_metrics = []
+                for m in metrics:
+                    try:
+                        ts = datetime.fromisoformat(m.timestamp).timestamp()
+                        if ts >= cutoff_ts:
+                            filtered_metrics.append(m)
+                    except Exception:
+                        filtered_metrics.append(m)
+                metrics = filtered_metrics
 
             if journey_id:
                 metrics = [m for m in metrics if m.journey_id == journey_id]
@@ -396,6 +425,10 @@ class ObservabilityRegistry:
                 p95 = latencies[int(total * 0.95) - 1] if total >= 20 else None
                 p99 = latencies[int(total * 0.99) - 1] if total >= 100 else None
 
+                all_off_market = len(events) > 0 and all(
+                    bool(e.metadata.get("off_market", False)) for e in events
+                )
+
                 error_budget_consumed: Optional[float] = None
                 slo_breach = False
                 if slo:
@@ -408,9 +441,13 @@ class ObservabilityRegistry:
                         ),
                         1,
                     )
-                    slo_breach = availability_actual < slo.availability_pct or (
-                        p95 is not None and p95 > slo.p95_latency_ms
-                    )
+                    if not all_off_market:
+                        failures = total - successes
+                        availability_breached = availability_actual < slo.availability_pct and (
+                            failures >= 3 or total >= 100
+                        )
+                        latency_breached = bool(p95 is not None and p95 > slo.p95_latency_ms)
+                        slo_breach = availability_breached or latency_breached
 
                 reports[jid] = {
                     "journey_id": jid,

@@ -121,7 +121,7 @@ export default function GlobalMacroCard({ data }) {
                 🇮🇳 Modelled Overnight Sentiment
               </span>
               {/* P0-A: Removed hardcoded "~0.96 Corr" — this was an approximate model estimate */}
-              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-surface text-violet-400 border border-violet-500/30 font-bold">
+              <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-surface text-violet-400 border border-violet-500/30 font-bold">
                 MODEL
               </span>
             </div>
@@ -156,7 +156,7 @@ export default function GlobalMacroCard({ data }) {
           )}
 
           {/* P0-A: Explicit model disclosure */}
-          <div className="mt-2 text-[9px] text-muted/60 font-mono leading-relaxed">
+          <div className="mt-2 text-[11px] text-muted/60 font-mono leading-relaxed">
             ⚠ Not actual GIFT NIFTY data. Weighted proxy model using US futures.
             Do not use for order placement without verifying the live GIFT NIFTY quote.
           </div>
@@ -210,11 +210,11 @@ export default function GlobalMacroCard({ data }) {
                   className="bg-panel rounded-xl p-2.5 border border-border/70 hover:border-amber/40 transition-all flex flex-col justify-between"
                 >
                   <div>
-                    <div className="flex items-center justify-between text-[9px] font-mono text-muted gap-1">
+                    <div className="flex items-center justify-between text-[11px] font-mono text-muted gap-1">
                       <span className="truncate font-bold">{it.name}</span>
                       {isProxy && (
                         <span
-                          className="flex-shrink-0 px-1 rounded text-[8px] font-bold bg-violet-500/15 border border-violet-500/25 text-violet-400"
+                          className="flex-shrink-0 px-1 rounded text-[10px] font-bold bg-violet-500/15 border border-violet-500/25 text-violet-400"
                           title="Research proxy — not your tradable exchange price"
                         >
                           P
@@ -223,7 +223,7 @@ export default function GlobalMacroCard({ data }) {
                     </div>
                     <p className="text-xs font-mono font-black text-text mt-1">
                       {Number(it.ltp).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                      <span className="text-[9px] font-normal text-muted ml-0.5">{it.unit}</span>
+                      <span className="text-[11px] font-normal text-muted ml-0.5">{it.unit}</span>
                     </p>
                   </div>
 
@@ -231,7 +231,7 @@ export default function GlobalMacroCard({ data }) {
                     <span className={isPos ? 'text-emerald-400' : 'text-rose-400'}>
                       {isPos ? '+' : ''}{Number(it.change_pct).toFixed(2)}%
                     </span>
-                    <span className={`text-[9px] font-bold ${biasColor}`}>
+                    <span className={`text-[11px] font-bold ${biasColor}`}>
                       {it.impact_bias}
                     </span>
                   </div>
@@ -274,7 +274,7 @@ export default function GlobalMacroCard({ data }) {
                     <span className="font-bold text-xs font-mono text-text">
                       {sec.sector_name}
                     </span>
-                    <span className={`text-[9px] font-mono font-black px-2 py-0.5 rounded-full border ${tagStyle}`}>
+                    <span className={`text-[11px] font-mono font-black px-2 py-0.5 rounded-full border ${tagStyle}`}>
                       {isTailwind ? '🚀 TAILWIND' : isHeadwind ? '⚠️ HEADWIND' : '⚖️ NEUTRAL'}
                     </span>
                   </div>
@@ -285,12 +285,12 @@ export default function GlobalMacroCard({ data }) {
 
                   {sec.affected_symbols && sec.affected_symbols.length > 0 && (
                     <div className="flex flex-wrap items-center gap-1 pt-1">
-                      <span className="text-[9px] text-muted font-mono">Impacted:</span>
+                      <span className="text-[11px] text-muted font-mono">Impacted:</span>
                       {sec.affected_symbols.slice(0, 5).map((sym) => (
                         <button
                           key={sym}
                           onClick={() => sendDraft(`analyze ${sym}`)}
-                          className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-surface hover:bg-amber/20 hover:text-amber border border-border/60 text-muted transition-all cursor-pointer"
+                          className="text-[11px] font-mono font-bold px-1.5 py-0.5 rounded bg-surface hover:bg-amber/20 hover:text-amber border border-border/60 text-muted transition-all cursor-pointer"
                         >
                           {sym}
                         </button>

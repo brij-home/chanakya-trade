@@ -113,24 +113,24 @@ export default function MorningBriefCard({ data }) {
                   {/* Level Grid */}
                   <div className="grid grid-cols-4 gap-2 text-[10px] font-mono">
                     <div className="bg-elevated/60 p-1.5 rounded border border-border/40">
-                      <span className="text-muted block text-[9px]">CPR RANGE</span>
+                      <span className="text-muted block text-[11px]">CPR RANGE</span>
                       <span className="font-bold text-amber-300">₹{cpr.bottom} - ₹{cpr.top}</span>
-                      <span className="text-[8px] text-muted block">Width: {cpr.width_pct}%</span>
+                      <span className="text-[10px] text-muted block">Width: {cpr.width_pct}%</span>
                     </div>
                     <div className="bg-elevated/60 p-1.5 rounded border border-border/40">
-                      <span className="text-muted block text-[9px]">CAM H4 (LONG)</span>
+                      <span className="text-muted block text-[11px]">CAM H4 (LONG)</span>
                       <span className="font-bold text-emerald-400">₹{cam.h4}</span>
-                      <span className="text-[8px] text-muted block">H3: ₹{cam.h3}</span>
+                      <span className="text-[10px] text-muted block">H3: ₹{cam.h3}</span>
                     </div>
                     <div className="bg-elevated/60 p-1.5 rounded border border-border/40">
-                      <span className="text-muted block text-[9px]">CAM L4 (SHORT)</span>
+                      <span className="text-muted block text-[11px]">CAM L4 (SHORT)</span>
                       <span className="font-bold text-rose-400">₹{cam.l4}</span>
-                      <span className="text-[8px] text-muted block">L3: ₹{cam.l3}</span>
+                      <span className="text-[10px] text-muted block">L3: ₹{cam.l3}</span>
                     </div>
                     <div className="bg-elevated/60 p-1.5 rounded border border-border/40">
-                      <span className="text-muted block text-[9px]">PREV DAY RANGE</span>
+                      <span className="text-muted block text-[11px]">PREV DAY RANGE</span>
                       <span className="font-bold text-text">H: ₹{item.pdh}</span>
-                      <span className="text-[8px] text-muted block">L: ₹{item.pdl}</span>
+                      <span className="text-[10px] text-muted block">L: ₹{item.pdl}</span>
                     </div>
                   </div>
 

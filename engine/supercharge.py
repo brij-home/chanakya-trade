@@ -94,7 +94,7 @@ COUNCIL_ROSTER: list[StrategistSeat] = [
     ),
     StrategistSeat(
         name="Execution",
-        domain="broker rate limits (10/s, 200/min), slippage, liquidity",
+        domain="broker rate limits (10/s, 500/min Prime), slippage, liquidity",
         mandate="keep strategies realistically executable under Indian broker limits",
         owned_metrics=["trade_count"],
         has_veto=True,

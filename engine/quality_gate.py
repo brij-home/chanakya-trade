@@ -149,7 +149,15 @@ def evaluate_institutional_quality_gate(
     act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
     is_opt_sell = is_opt and any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
 
-    now_dt = ref_dt or datetime.now(IST)
+    if ref_dt is None:
+        try:
+            import engine.auto_alert_engine as aae
+
+            now_dt = aae.datetime.now(IST)
+        except Exception:
+            now_dt = datetime.now(IST)
+    else:
+        now_dt = ref_dt
     if now_dt.tzinfo is None:
         now_dt = now_dt.replace(tzinfo=IST)
 
@@ -211,6 +219,35 @@ def evaluate_institutional_quality_gate(
                 target2 = None
 
     # ── 2. Check 1: Headroom & Structural R:R Floor (R:R >= 1:2.0 Floor) ───────
+    # If alert has underlying spot/stop/target metrics (e.g. from an enriched option setup),
+    # evaluate underlying structural R:R first to enforce institutional headroom integrity.
+    metrics_d = getattr(alert, "metrics", {}) or {}
+    if isinstance(metrics_d, dict):
+        u_spot = float(metrics_d.get("underlying_spot") or 0.0)
+        u_sl = float(metrics_d.get("underlying_sl") or 0.0)
+        u_t1 = float(metrics_d.get("underlying_target") or 0.0)
+        u_t2_raw = metrics_d.get("underlying_target_2")
+        if u_spot > 0 and u_sl > 0 and (u_t1 > 0 or u_t2_raw):
+            u_stop_dist = abs(u_spot - u_sl)
+            if u_stop_dist > 0:
+                u_t1_dist = abs(u_t1 - u_spot) if u_t1 > 0 else 0.0
+                u_t2_dist = abs(float(u_t2_raw) - u_spot) if u_t2_raw else (u_t1_dist * 2.0)
+                u_rr_t2 = round(u_t2_dist / u_stop_dist, 2)
+                if u_rr_t2 < 1.8:
+                    verdict_metrics["rr_t1"] = round(u_t1_dist / u_stop_dist, 2)
+                    verdict_metrics["rr_t2"] = u_rr_t2
+                    return VetoVerdict(
+                        is_vetoed=True,
+                        veto_reason=f"Poor Structural R:R: Target 2 provides only {u_rr_t2:.1f}:1 R:R (< 1.8:1 floor) against Stop risk {u_stop_dist:,.1f} pts.",
+                        execution_mandate="VETOED",
+                        conviction_tier="REJECTED",
+                        metrics=verdict_metrics,
+                        coaching_notes=[
+                            "Overhead resistance is too close relative to required stop distance.",
+                            "Skip setup or restructure as defined-risk credit spread.",
+                        ],
+                    )
+
     if entry and stop and target1 and entry > 0 and stop > 0 and target1 > 0:
         stop_dist = abs(entry - stop)
         t1_dist = abs(target1 - entry)
@@ -288,7 +325,26 @@ def evaluate_institutional_quality_gate(
                 elif is_mcx_golden_hours_window(now_dt):
                     verdict_metrics["mcx_golden_hours"] = True
         else:
-            if is_eod_close_window(now_dt):
+            _SWING_TYPES = {
+                "DAILY",
+                "SWING",
+                "SWING_SHORT",
+                "SWING_MID",
+                "WEEKLY",
+                "POSITIONAL",
+                "LONG_TERM",
+                "MULTIBAGGER",
+            }
+            time_horizon = str(getattr(alert, "time_horizon", "") or "").upper()
+            setup_style = str(getattr(alert, "setup_style", "") or "").upper()
+            timeframe = str(getattr(alert, "timeframe", "") or "").upper()
+            is_swing_or_positional = (
+                time_horizon in _SWING_TYPES
+                or setup_style in _SWING_TYPES
+                or timeframe in _SWING_TYPES
+            )
+
+            if not is_swing_or_positional and is_eod_close_window(now_dt):
                 return VetoVerdict(
                     is_vetoed=True,
                     veto_reason="EOD Terminal Window (Post-15:00 IST): Intraday directional option buying prohibited due to pin-risk & MTM auction distortion.",
@@ -301,7 +357,7 @@ def evaluate_institutional_quality_gate(
                     ],
                 )
 
-            if is_lunchtime_theta_window(now_dt):
+            if not is_swing_or_positional and is_lunchtime_theta_window(now_dt):
                 # Lunchtime Theta Trap: Mandate defined-risk spread unless exceptional conviction (>=92)
                 if confidence < 92:
                     notes.append(

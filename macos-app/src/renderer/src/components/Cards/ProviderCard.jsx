@@ -22,7 +22,7 @@ export default function ProviderCard({ data }) {
 
       {/* Current provider */}
       <div className={`border rounded-xl px-4 py-3 ${meta.bg}`}>
-        <p className="text-muted text-[9px] uppercase tracking-wider font-ui mb-1">Active</p>
+        <p className="text-muted text-[11px] uppercase tracking-wider font-ui mb-1">Active</p>
         <p className={`text-[17px] font-ui font-semibold ${meta.color}`}>{meta.label}</p>
         {model && <p className="text-muted text-[11px] font-mono mt-0.5">{model}</p>}
       </div>
@@ -39,7 +39,7 @@ export default function ProviderCard({ data }) {
                 <div key={p} className={`flex items-center gap-2.5 px-3 py-2 rounded-lg border ${isActive ? 'border-green/30 bg-green/5' : 'border-border bg-panel'}`}>
                   <span style={{ width: 6, height: 6, borderRadius: '50%', background: isActive ? '#52e07a' : m.dot, display: 'inline-block', flexShrink: 0 }} />
                   <span className={`text-[12px] font-ui ${isActive ? 'text-green font-semibold' : m.color}`}>{m.label}</span>
-                  {isActive && <span className="ml-auto text-green text-[9px] font-ui uppercase tracking-wider">active</span>}
+                  {isActive && <span className="ml-auto text-green text-[11px] font-ui uppercase tracking-wider">active</span>}
                 </div>
               )
             })}

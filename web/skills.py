@@ -359,6 +359,7 @@ async def skill_history(req: HistoryRequest):
         from market.history import get_ohlcv
         import numpy as np
         from engine.provenance import create_provenance
+        from market.calendar import is_market_open, is_trading_holiday
 
         sym, exch = _normalize_symbol_and_exchange(req.symbol, req.exchange)
         df = await asyncio.to_thread(
@@ -421,8 +422,32 @@ async def skill_history(req: HistoryRequest):
         )
         vol_sma20 = df["volume"].rolling(20, min_periods=5).mean().fillna(df["volume"])
 
+        from zoneinfo import ZoneInfo
+        from datetime import timezone
+
+        ist_zone = ZoneInfo("Asia/Kolkata")
+
+        def _format_time(ts) -> int | str:
+            if not is_intraday:
+                return ts.strftime("%Y-%m-%d")
+            # If already timezone-aware, convert to UTC epoch seconds
+            if getattr(ts, "tzinfo", None) is not None:
+                return int(ts.astimezone(timezone.utc).timestamp())
+            # For Indian domestic exchanges (NSE, BSE, NFO, MCX, CDS):
+            if exch in ("NSE", "BSE", "NFO", "MCX", "CDS"):
+                # If hour is < 9 (e.g. 03:45), the bar timestamp was stored in raw UTC (03:45 UTC = 09:15 IST)
+                if ts.hour < 9:
+                    aware_utc = ts.replace(tzinfo=timezone.utc)
+                    return int(aware_utc.timestamp())
+                # Otherwise, it represents exchange local IST (e.g. 09:15 IST)
+                aware_ist = ts.replace(tzinfo=ist_zone)
+                return int(aware_ist.timestamp())
+            # For continuous 24x7 global crypto:
+            aware_utc = ts.replace(tzinfo=timezone.utc)
+            return int(aware_utc.timestamp())
+
         for i, (ts, row) in enumerate(df.iterrows()):
-            t_val = int(ts.timestamp()) if is_intraday else ts.strftime("%Y-%m-%d")
+            t_val = _format_time(ts)
             c_open = round(float(row["open"]), 2)
             c_high = round(float(row["high"]), 2)
             c_low = round(float(row["low"]), 2)
@@ -474,17 +499,17 @@ async def skill_history(req: HistoryRequest):
         if len(df) >= 20:
             s20 = df["close"].rolling(20).mean()
             for ts, val in s20.dropna().items():
-                t_val = int(ts.timestamp()) if is_intraday else ts.strftime("%Y-%m-%d")
+                t_val = _format_time(ts)
                 sma20.append({"time": t_val, "value": round(float(val), 2)})
         if len(df) >= 50:
             s50 = df["close"].rolling(50).mean()
             for ts, val in s50.dropna().items():
-                t_val = int(ts.timestamp()) if is_intraday else ts.strftime("%Y-%m-%d")
+                t_val = _format_time(ts)
                 sma50.append({"time": t_val, "value": round(float(val), 2)})
         if len(df) >= 200:
             s200 = df["close"].rolling(200).mean()
             for ts, val in s200.dropna().items():
-                t_val = int(ts.timestamp()) if is_intraday else ts.strftime("%Y-%m-%d")
+                t_val = _format_time(ts)
                 sma200.append({"time": t_val, "value": round(float(val), 2)})
 
         tf_map = {
@@ -598,7 +623,7 @@ async def skill_history(req: HistoryRequest):
 
             for ts in df.index:
                 if ts in k_series and ts in d_series:
-                    t_val = int(ts.timestamp()) if is_intraday else ts.strftime("%Y-%m-%d")
+                    t_val = _format_time(ts)
                     stoch_k.append({"time": t_val, "value": round(float(k_series[ts]), 2)})
                     stoch_d.append({"time": t_val, "value": round(float(d_series[ts]), 2)})
 
@@ -611,7 +636,7 @@ async def skill_history(req: HistoryRequest):
 
             for ts, m_val in macd_l.dropna().items():
                 if ts in signal_l and not np.isnan(signal_l[ts]):
-                    t_val = int(ts.timestamp()) if is_intraday else ts.strftime("%Y-%m-%d")
+                    t_val = _format_time(ts)
                     h_val = float(hist_l[ts])
                     macd_res["line"].append({"time": t_val, "value": round(float(m_val), 2)})
                     macd_res["signal"].append(
@@ -656,11 +681,7 @@ async def skill_history(req: HistoryRequest):
                         or (k_curr > k_prev_low + 4.0 and k_curr < 40)
                     )
                     if is_bull_div:
-                        t_val = (
-                            int(timestamps[i].timestamp())
-                            if is_intraday
-                            else timestamps[i].strftime("%Y-%m-%d")
-                        )
+                        t_val = _format_time(timestamps[i])
                         divergences.append(
                             {
                                 "time": t_val,
@@ -678,11 +699,7 @@ async def skill_history(req: HistoryRequest):
                         or (k_curr < k_prev_high - 4.0 and k_curr > 60)
                     )
                     if is_bear_div:
-                        t_val = (
-                            int(timestamps[i].timestamp())
-                            if is_intraday
-                            else timestamps[i].strftime("%Y-%m-%d")
-                        )
+                        t_val = _format_time(timestamps[i])
                         divergences.append(
                             {
                                 "time": t_val,
@@ -705,6 +722,10 @@ async def skill_history(req: HistoryRequest):
                 "symbol": req.symbol.upper(),
                 "exchange": req.exchange.upper(),
                 "interval": req.interval,
+                "is_market_open": bool(is_market_open(req.exchange.upper())),
+                "is_market_holiday": bool(
+                    is_trading_holiday(datetime.now().date(), exchange=req.exchange.upper())
+                ),
                 "candles": candles,
                 "volumes": volumes,
                 "sma20": sma20,

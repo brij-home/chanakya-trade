@@ -4,6 +4,7 @@ import { useChatStore } from '../../store/chatStore'
 import SkeletonCard from '../Loading/SkeletonCard'
 import DataStateBadge from '../Common/DataStateBadge'
 import UnavailableState from '../Common/UnavailableState'
+import StrategicHorizonBattleground from './StrategicHorizonBattleground'
 
 // ── P0-A: This view NEVER uses hardcoded numeric fallbacks for production data.
 // When data is unavailable (API down, provider error), we show UnavailableState.
@@ -48,7 +49,7 @@ function VIXGauge({ value }) {
         </text>
       </svg>
       <div className="text-center">
-        <div className="text-[9px] font-bold tracking-widest" style={{ color }}>INDIA VIX • {label}</div>
+        <div className="text-[11px] font-bold tracking-widest" style={{ color }}>INDIA VIX • {label}</div>
       </div>
     </div>
   )
@@ -64,7 +65,7 @@ function BreadthBar({ advancing, declining, unchanged }) {
 
   return (
     <div className="space-y-2">
-      <div className="flex justify-between text-[10px] font-mono">
+      <div className="flex justify-between text-[10px] font-mono tabular-nums">
         <span style={{ color: 'var(--color-emerald)' }}>▲ {advancing} ADV ({aP}%)</span>
         <span style={{ color: 'var(--color-muted)' }}>{unchanged ?? 0} UNCH</span>
         <span style={{ color: 'var(--color-rose)' }}>▼ {declining} DEC ({dP}%)</span>
@@ -85,7 +86,7 @@ function FlowBar({ label, value, max = 3000 }) {
   const pct = Math.min(100, Math.abs(value) / Math.max(1, max) * 100)
   return (
     <div className="space-y-1">
-      <div className="flex justify-between text-[10px] font-mono">
+      <div className="flex justify-between text-[10px] font-mono tabular-nums">
         <span style={{ color: 'var(--color-muted)' }}>{label}</span>
         <span style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)', fontWeight: 700 }}>
           {isPos ? '+' : ''}₹{Math.abs(value).toLocaleString('en-IN')} Cr
@@ -277,23 +278,23 @@ export default function OverviewView() {
                         </div>
                         {isProxy && (
                           <span
-                            className="text-[8px] font-mono px-1 rounded bg-violet-500/15 border border-violet-500/25 text-violet-400 flex-shrink-0"
+                            className="text-[10px] font-mono px-1 rounded bg-violet-500/15 border border-violet-500/25 text-violet-400 flex-shrink-0"
                             title="Research proxy — not your tradable MCX/exchange price"
                           >
                             PROXY
                           </span>
                         )}
                       </div>
-                      <div className="text-xs font-mono font-bold" style={{ color: 'var(--color-text)' }}>
+                      <div className="text-xs font-mono font-bold tabular-nums" style={{ color: 'var(--color-text)' }}>
                         {Number(m.ltp).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                        <span className="text-[9px] font-normal text-muted ml-0.5">{m.unit}</span>
+                        <span className="text-[11px] font-normal text-muted ml-0.5">{m.unit}</span>
                       </div>
                       <div
-                        className="text-[10px] font-mono font-bold flex items-center justify-between"
+                        className="text-[10px] font-mono font-bold tabular-nums flex items-center justify-between"
                         style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)' }}
                       >
                         <span>{isPos ? '+' : ''}{Number(m.change_pct).toFixed(2)}%</span>
-                        <span className="text-[8px] opacity-80 uppercase">{m.impact_bias || 'NEUTRAL'}</span>
+                        <span className="text-[10px] opacity-80 uppercase">{m.impact_bias || 'NEUTRAL'}</span>
                       </div>
                     </div>
                   )
@@ -334,7 +335,10 @@ export default function OverviewView() {
             )}
           </div>
 
-          {/* Row 2: VIX + Breadth + FII/DII — P0-A: show UnavailableState when data is missing */}
+          {/* Row 2: Institutional Strategic Horizon Battleground */}
+          <StrategicHorizonBattleground />
+
+          {/* Row 3: VIX + Breadth + FII/DII — P0-A: show UnavailableState when data is missing */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
             {/* VIX Gauge */}
             <div
@@ -347,7 +351,7 @@ export default function OverviewView() {
               {vix != null ? (
                 <>
                   <VIXGauge value={vix} />
-                  <div className="mt-1 text-[9.5px] text-center" style={{ color: 'var(--color-muted)' }}>
+                  <div className="mt-1 text-[11px] text-center" style={{ color: 'var(--color-muted)' }}>
                     Safe zone: VIX &lt; 14.5 | Danger: VIX &gt; 20
                   </div>
                 </>
@@ -381,7 +385,7 @@ export default function OverviewView() {
                   >
                     {advancers > decliners ? '🚀 BULLISH BREADTH' : '🛡️ BEARISH BREADTH'}
                   </div>
-                  <div className="text-[9.5px] text-muted">
+                  <div className="text-[11px] text-muted">
                     A/D Ratio: {(advancers / Math.max(decliners, 1)).toFixed(2)}x &nbsp;|&nbsp;
                     {advancers + decliners + (unchanged ?? 0)} stocks tracked
                   </div>
@@ -411,8 +415,8 @@ export default function OverviewView() {
                   <div className="pt-0.5 border-t" style={{ borderColor: 'var(--color-border)' }}>
                     <FlowBar label="NET" value={fiiNet + diiNet} max={5000} />
                   </div>
-                  <div className="text-[9.5px]" style={{ color: 'var(--color-muted)' }}>
-                    Combined: <span style={{ color: (fiiNet + diiNet) >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)', fontWeight: 700 }}>
+                  <div className="text-[11px]" style={{ color: 'var(--color-muted)' }}>
+                    Combined: <span className="font-mono tabular-nums" style={{ color: (fiiNet + diiNet) >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)', fontWeight: 700 }}>
                       {(fiiNet + diiNet) >= 0 ? '+' : ''}₹{(fiiNet + diiNet).toLocaleString('en-IN')} Cr
                     </span>
                   </div>
@@ -438,7 +442,7 @@ export default function OverviewView() {
               <div className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--color-muted)' }}>
                 🔄 Sector Rotation — RRG Phase Matrix
               </div>
-              <div className="flex items-center gap-3 text-[9px]">
+              <div className="flex items-center gap-3 text-[11px]">
                 {Object.entries(PHASE_STYLE).map(([phase, cfg]) => (
                   <span key={phase} className="font-bold" style={{ color: cfg.color }}>{cfg.label}</span>
                 ))}
@@ -460,7 +464,7 @@ export default function OverviewView() {
                       <div className="text-xs font-bold truncate" style={{ color: 'var(--color-text)' }}>{s.name || s.sector}</div>
                       <div className="text-[10px] font-bold" style={{ color: cfg.color }}>{cfg.label.split(' ')[0]}</div>
                       {chgVal != null ? (
-                        <div className="text-[11px] font-mono font-bold" style={{ color: chgVal >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)' }}>
+                        <div className="text-[11px] font-mono font-bold tabular-nums" style={{ color: chgVal >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)' }}>
                           {chgVal >= 0 ? '+' : ''}{Number(chgVal).toFixed(1)}%
                         </div>
                       ) : (

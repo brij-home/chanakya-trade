@@ -31,7 +31,9 @@ const SECTIONS = [
   {
     title: '💼 Trade Desk',
     keys: [
-      { keys: ['T'],              desc: 'Open Order Ticket' },
+      { keys: ['Shift', 'B'],     desc: 'Stage BUY order ticket (active symbol)' },
+      { keys: ['Shift', 'S'],     desc: 'Stage SELL order ticket (active symbol)' },
+      { keys: ['Ctrl', 'T'],      desc: 'Toggle Order Ticket' },
       { keys: ['P'],              desc: 'Show Position Tracker' },
       { keys: ['R'],              desc: 'Risk Gate Assessment' },
       { keys: ['Ctrl', 'Enter'],  desc: 'Submit / Send command' },
@@ -59,7 +61,7 @@ const SECTIONS = [
 function Kbd({ children }) {
   return (
     <kbd
-      className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono font-bold"
+      className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-bold"
       style={{
         background: 'var(--color-elevated)',
         border: '1px solid var(--color-border)',
@@ -154,7 +156,7 @@ export default function HotkeyPanel({ open, onClose }) {
                   <div className="flex items-center gap-1 flex-shrink-0">
                     {ks.map((k, i) => (
                       <span key={i} className="flex items-center gap-1">
-                        {i > 0 && <span className="text-[9px]" style={{ color: 'var(--color-muted)' }}>+</span>}
+                        {i > 0 && <span className="text-[11px]" style={{ color: 'var(--color-muted)' }}>+</span>}
                         <Kbd>{k}</Kbd>
                       </span>
                     ))}

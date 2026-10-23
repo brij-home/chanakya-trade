@@ -21,7 +21,7 @@ Features:
 from __future__ import annotations
 
 import concurrent.futures
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 import json
 import logging
 import os
@@ -316,30 +316,39 @@ except Exception as e:
 # ── Market Hours & Trading Calendar Helpers ─────────────────────────
 
 
-def get_latest_expected_trading_date() -> str:
+def get_latest_expected_trading_date(
+    exchange: str = "NSE",
+    ref_dt: Optional[datetime] = None,
+) -> str:
     """
-    Returns the most recent completed or active trading date (YYYY-MM-DD).
-    Account for IST market hours (09:15-15:30 IST) and weekends.
+    Returns the most recent completed trading date (YYYY-MM-DD).
+    Accounts for IST market hours (09:15-15:30 IST), exchange trading holidays, and settlement buffer.
+    Before 16:00 IST (market close 15:30 + 30-min settlement buffer), the expected completed EOD bar
+    corresponds to the previous trading day.
+    After 16:00 IST on an active trading day, today's completed EOD bar is expected.
+    On non-trading days (weekends or declared exchange holidays), rolls backward to the last completed official trading day.
     """
-    now_utc = datetime.now(timezone.utc)
-    ist_now = now_utc + timedelta(hours=5, minutes=30)
-    current_date = ist_now.date()
+    from market.calendar import is_trading_day, get_latest_trading_day
+    from config.constants import IST_ZONE as IST
 
-    # If weekend, rollback to Friday
-    if ist_now.weekday() == 5:  # Saturday
-        return (current_date - timedelta(days=1)).strftime("%Y-%m-%d")
-    elif ist_now.weekday() == 6:  # Sunday
-        return (current_date - timedelta(days=2)).strftime("%Y-%m-%d")
+    now = ref_dt or datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+    else:
+        now = now.astimezone(IST)
 
-    # If weekday before 16:00 IST (market close 15:30 + settlement buffer),
-    # the previous completed trading day is the expected full EOD bar.
-    if ist_now.time() < datetime.strptime("16:00", "%H:%M").time():
-        if ist_now.weekday() == 0:  # Monday morning/intraday -> Friday
-            return (current_date - timedelta(days=3)).strftime("%Y-%m-%d")
-        else:
-            return (current_date - timedelta(days=1)).strftime("%Y-%m-%d")
+    today = now.date()
+    exch = (exchange or "NSE").upper()
 
-    return current_date.strftime("%Y-%m-%d")
+    if is_trading_day(today, exchange=exch):
+        # During active trading day before 16:00 IST, today's daily bar is incomplete/unsettled.
+        if now.time() < dtime(16, 0):
+            prev_day = today - timedelta(days=1)
+            return get_latest_trading_day(prev_day, exchange=exch).strftime("%Y-%m-%d")
+        return today.strftime("%Y-%m-%d")
+
+    # Weekend or exchange trading holiday: roll backward to last official trading day
+    return get_latest_trading_day(today, exchange=exch).strftime("%Y-%m-%d")
 
 
 # ── Reading & Writing OHLCV (Multi-Tier Caching) ──────────────────────

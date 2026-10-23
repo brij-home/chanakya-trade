@@ -230,7 +230,7 @@ export default function ChatArea() {
                       </span>
                     )}
                     {tag && (
-                      <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-amber/10 text-amber border border-amber/20 hidden md:inline font-semibold">
+                      <span className="text-[11px] px-1.5 py-0.2 rounded-full bg-amber/10 text-amber border border-amber/20 hidden md:inline font-semibold">
                         {tag}
                       </span>
                     )}

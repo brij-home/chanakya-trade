@@ -7,7 +7,7 @@ const SEGMENTS = [
     name: 'F&O Indices',
     icon: '⚡',
     badge: 'NIFTY / BANKNIFTY / SENSEX',
-    desc: 'Index Options, 0DTE gamma scalps, Straddles, Index Futures (NSE & BSE)',
+    desc: 'Index Options, 0DTE gamma scalps, Straddles, Hedged Spreads (NSE & BSE)',
     color: 'text-indigo-400 bg-indigo-500/10 border-indigo-500/30',
   },
   {
@@ -15,7 +15,7 @@ const SEGMENTS = [
     name: 'F&O Stocks',
     icon: '🎯',
     badge: 'NSE Stock Derivatives',
-    desc: 'Single-stock futures and options momentum, volume breakouts, earnings gamma',
+    desc: 'Single-stock options and defined-risk hedged spreads, volume breakouts, earnings gamma',
     color: 'text-purple-400 bg-purple-500/10 border-purple-500/30',
   },
   {
@@ -349,7 +349,7 @@ export default function AlertRoutingModal({ isOpen, onClose, onSaveSuccess }) {
                           <div className="flex items-center gap-2">
                             <span className="font-bold text-text text-xs">{seg.name}</span>
                             <span
-                              className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${seg.color}`}
+                              className={`text-[11px] font-mono px-1.5 py-0.5 rounded border ${seg.color}`}
                             >
                               {seg.badge}
                             </span>

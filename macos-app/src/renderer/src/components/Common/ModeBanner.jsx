@@ -35,7 +35,7 @@ export default function ModeBanner({ mode, loading = false, pilotSafety = null }
       <span className="opacity-60 font-normal normal-case tracking-normal">{cfg.description}</span>
       {mode === 'DEMO' && (
         <span
-          className="ml-2 px-1.5 py-0.5 rounded border text-[9px] font-bold"
+          className="ml-2 px-1.5 py-0.5 rounded border text-[11px] font-bold"
           style={{
             background: 'rgba(217, 70, 239, 0.15)',
             borderColor: 'rgba(217, 70, 239, 0.4)',
@@ -47,7 +47,7 @@ export default function ModeBanner({ mode, loading = false, pilotSafety = null }
       )}
       {pilotSafety && (
         <span
-          className="ml-2 px-1.5 py-0.5 rounded border text-[9px] font-bold"
+          className="ml-2 px-1.5 py-0.5 rounded border text-[11px] font-bold"
           style={{
             background: pilotSafety.live_execution_enabled ? 'rgba(255, 79, 123, 0.12)' : 'rgba(57, 217, 138, 0.10)',
             borderColor: pilotSafety.live_execution_enabled ? 'rgba(255, 79, 123, 0.45)' : 'rgba(57, 217, 138, 0.35)',

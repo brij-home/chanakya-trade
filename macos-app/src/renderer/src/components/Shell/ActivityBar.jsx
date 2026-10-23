@@ -104,7 +104,7 @@ function ActivityBarIcon({ item, isActive, onClick, badge }) {
         {badge > 0 && (
           <span
             className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full
-              text-[9px] font-bold text-black flex items-center justify-center"
+              text-[11px] font-bold text-black flex items-center justify-center"
             style={{ background: 'var(--color-rose)' }}
           >
             {badge > 99 ? '99+' : badge}
@@ -131,7 +131,7 @@ function ActivityBarIcon({ item, isActive, onClick, badge }) {
           {item.label}
           {item.shortcut && (
             <kbd
-              className="text-[9px] px-1 py-0.5 rounded font-mono"
+              className="text-[11px] px-1 py-0.5 rounded font-mono"
               style={{
                 background: 'var(--color-highlight)',
                 color: 'var(--color-muted)',

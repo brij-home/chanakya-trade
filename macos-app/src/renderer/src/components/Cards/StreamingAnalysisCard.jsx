@@ -318,10 +318,10 @@ function AnalystPill({ result, name, idx, cls }) {
           <span className="opacity-60 text-[10px] font-ui">ERR</span>
         )}
         {hasPoints && (
-          <span className="ml-auto opacity-30 text-[9px] font-mono">{expanded ? '▴' : '▾'}</span>
+          <span className="ml-auto opacity-30 text-[11px] font-mono">{expanded ? '▴' : '▾'}</span>
         )}
         {!hasPoints && result.error && (
-          <span className="ml-auto opacity-30 text-[9px] font-mono text-red">!</span>
+          <span className="ml-auto opacity-30 text-[11px] font-mono text-red">!</span>
         )}
       </div>
 

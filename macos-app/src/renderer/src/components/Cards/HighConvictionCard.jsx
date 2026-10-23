@@ -322,11 +322,11 @@ export default function HighConvictionCard({ data, onOpenOrderTicket }) {
                         <span>•</span>
                         <span className="text-amber font-mono font-bold">1:{opp.risk_reward_ratio} R:R</span>
                         <span>•</span>
-                        <span className={`text-[9px] px-1.5 py-0.2 rounded border font-mono ${liqBadge.color}`}>
+                        <span className={`text-[11px] px-1.5 py-0.2 rounded border font-mono ${liqBadge.color}`}>
                           ₹{opp.est_turnover_cr} Cr / day
                         </span>
                         <span>•</span>
-                        <span className={`text-[9px] px-1.5 py-0.2 rounded border font-mono font-bold ${readinessBadge.color}`}>
+                        <span className={`text-[11px] px-1.5 py-0.2 rounded border font-mono font-bold ${readinessBadge.color}`}>
                           {readinessBadge.label}
                         </span>
                       </p>
@@ -387,7 +387,7 @@ export default function HighConvictionCard({ data, onOpenOrderTicket }) {
                   <span className="text-muted truncate">💡 {opp.catalyst_summary}</span>
                   <div className="flex items-center gap-1 flex-shrink-0 ml-2">
                     {opp.tags?.map((t, idx) => (
-                      <span key={idx} className="bg-panel text-muted text-[9px] px-1.5 py-0.5 rounded border border-border/40">
+                      <span key={idx} className="bg-panel text-muted text-[11px] px-1.5 py-0.5 rounded border border-border/40">
                         {t}
                       </span>
                     ))}

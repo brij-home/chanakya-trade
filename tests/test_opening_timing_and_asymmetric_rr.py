@@ -237,7 +237,7 @@ def test_trade_plan_option_asymmetric_rr():
 
 
 def test_apex_gate_strictly_blocks_low_rr_or_low_conf():
-    """Verify Apex Gate is NOT bypassed: rejects low R:R (<1.6 for index) or low confidence."""
+    """Verify Apex Gate is NOT bypassed: rejects low R:R (<1.5 for index) or low confidence."""
     engine = AutoAlertEngine()
 
     # Low R:R alert (1.2R)
@@ -249,13 +249,13 @@ def test_apex_gate_strictly_blocks_low_rr_or_low_conf():
         ltp=100.0,
         trigger_level=100.0,
         stop_loss=90.0,  # Risk = 10 pts
-        target_level=112.0,  # Reward = 12 pts (R:R = 1.2 < 1.6)
+        target_level=112.0,  # Reward = 12 pts (R:R = 1.2 < 1.5)
         confidence=90,
         segment="FNO_INDEX",
     )
     passed, reason = engine._eval_telegram_apex_gate(alert_low_rr, in_market=True)
     assert not passed
-    assert "below minimum 1:1.6 threshold" in reason
+    assert "below minimum 1:1.5 threshold" in reason
 
     # Low confidence alert (82% for index, where floor is 88%)
     alert_low_conf = _make_test_alert(

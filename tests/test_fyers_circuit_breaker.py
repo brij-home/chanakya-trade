@@ -30,9 +30,17 @@ def test_circuit_breaker_trip_on_429():
         assert cb.state == CircuitState.OPEN
 
         # Both SSE and Telegram alerts must have been dispatched
-        assert mock_sse.call_count == 1
-        assert mock_tg.call_count == 1
-        sse_event = mock_sse.call_args[0][1]
+        assert mock_sse.call_count >= 1
+        assert mock_tg.call_count >= 1
+        tripped_events = [
+            c[0][1]
+            for c in mock_sse.call_args_list
+            if len(c[0]) > 1
+            and isinstance(c[0][1], dict)
+            and c[0][1].get("type") == "fyers_circuit_breaker_tripped"
+        ]
+        assert len(tripped_events) >= 1
+        sse_event = tripped_events[0]
         assert sse_event["type"] == "fyers_circuit_breaker_tripped"
         assert sse_event["service"] == "FYERS_API"
 

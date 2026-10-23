@@ -388,8 +388,8 @@ def detect_swing_inflection_setups(
         ):
             continue
 
-        # Invariant: Positive Risk-Reward ratio check
-        if candidate.risk_reward_ratio < 1.8:
+        # Invariant: Positive Risk-Reward ratio check (accommodates valid 1.5R+ setups)
+        if candidate.risk_reward_ratio < 1.5:
             continue
 
         alert = _format_swing_inflection_alert(candidate, session_dt=now_dt, mkt_open=mkt_open)

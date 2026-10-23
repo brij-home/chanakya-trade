@@ -751,7 +751,16 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
     entry_range = (
         actionable_plan.get("recommended_entry")
         or actionable_plan.get("entry_range")
-        or (f"₹{opt_cmp:.1f}" if opt_cmp else f"₹{alert.ltp:.1f}")
+        or (
+            f"₹{opt_cmp:.1f}"
+            if opt_cmp
+            else (
+                f"₹{alert.ltp:.1f}"
+                if getattr(alert, "ltp", None)
+                and (spot_p <= 0 or getattr(alert, "ltp", 0) < spot_p * 0.35)
+                else ""
+            )
+        )
     )
     sl_val = actionable_plan.get("stop_loss") or f"₹{getattr(alert, 'stop_loss', 0):.1f}"
     t1_val = (
@@ -827,7 +836,7 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
 
     # Spot & Opt CMP info
     price_info_parts = []
-    if opt_cmp and float(opt_cmp) > 0:
+    if opt_cmp and float(opt_cmp) > 0 and (spot_p <= 0 or float(opt_cmp) < (spot_p * 0.35)):
         price_info_parts.append(f"CMP: <b>₹{opt_cmp:,.2f}</b>")
     if spot_p > 0:
         price_info_parts.append(f"Spot: <b>₹{spot_p:,.2f}</b>")

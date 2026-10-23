@@ -164,6 +164,10 @@ class OrderIntent:
     broker_order_id: Optional[str] = None
     charges: dict[str, Any] = field(default_factory=dict)
     rejection_reason: Optional[str] = None
+    stop_loss: Optional[float] = None
+    target: Optional[float] = None
+    auto_gtt_oco: bool = True
+    gtt_order_id: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -208,6 +212,16 @@ def _init_orders_db():
             )
         if "preview_hash" not in existing_cols:
             conn.execute("ALTER TABLE orders_ledger ADD COLUMN preview_hash TEXT")
+        if "stop_loss" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN stop_loss REAL")
+        if "target" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN target REAL")
+        if "auto_gtt_oco" not in existing_cols:
+            conn.execute(
+                "ALTER TABLE orders_ledger ADD COLUMN auto_gtt_oco INTEGER NOT NULL DEFAULT 1"
+            )
+        if "gtt_order_id" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN gtt_order_id TEXT")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idemp ON orders_ledger(idempotency_key)"
         )
@@ -391,6 +405,10 @@ def _intent_from_ledger_row(row: sqlite3.Row | dict[str, Any], expected_hash: st
         charges=json.loads(d["charges_json"] or "{}"),
         rejection_reason=d["rejection_reason"],
         preview_hash=d["preview_hash"],
+        stop_loss=d.get("stop_loss"),
+        target=d.get("target"),
+        auto_gtt_oco=bool(d.get("auto_gtt_oco", 1)),
+        gtt_order_id=d.get("gtt_order_id"),
         created_at=d["created_at"],
         updated_at=d["updated_at"],
     )
@@ -407,6 +425,11 @@ def preview_order_intent(
     *,
     exchange: Optional[str] = None,
     segment: Optional[str] = None,
+    no_chase_boundary: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+    target: Optional[float] = None,
+    trigger_price: Optional[float] = None,
+    auto_gtt_oco: bool = True,
 ) -> OrderIntent:
     """
     Generate an order preview with statutory Indian charges, concurrency-safe idempotency check,
@@ -418,6 +441,53 @@ def preview_order_intent(
     """
     _init_orders_db()
     _validate_preview_inputs(symbol, side, quantity, price, order_type, product)
+    if trigger_price is not None:
+        if (
+            isinstance(trigger_price, bool)
+            or not isinstance(trigger_price, (int, float))
+            or not math.isfinite(trigger_price)
+            or trigger_price <= 0
+        ):
+            raise ValueError("trigger_price must be a finite positive number")
+        trigger_price = float(trigger_price)
+    elif order_type in ("SL_LIMIT", "SL_MARKET"):
+        trigger_price = float(price)
+
+    if stop_loss is not None:
+        if (
+            isinstance(stop_loss, bool)
+            or not isinstance(stop_loss, (int, float))
+            or not math.isfinite(stop_loss)
+            or stop_loss <= 0
+        ):
+            raise ValueError("stop_loss must be a finite positive number")
+        stop_loss = float(stop_loss)
+        if side == "BUY" and stop_loss >= price:
+            raise ValueError(
+                f"Stop loss (₹{stop_loss:.2f}) must be strictly below order price (₹{price:.2f}) for BUY orders."
+            )
+        elif side == "SELL" and stop_loss <= price:
+            raise ValueError(
+                f"Stop loss (₹{stop_loss:.2f}) must be strictly above order price (₹{price:.2f}) for SELL orders."
+            )
+
+    if target is not None:
+        if (
+            isinstance(target, bool)
+            or not isinstance(target, (int, float))
+            or not math.isfinite(target)
+            or target <= 0
+        ):
+            raise ValueError("target must be a finite positive number")
+        target = float(target)
+        if side == "BUY" and target <= price:
+            raise ValueError(
+                f"Target (₹{target:.2f}) must be strictly above order price (₹{price:.2f}) for BUY orders."
+            )
+        elif side == "SELL" and target >= price:
+            raise ValueError(
+                f"Target (₹{target:.2f}) must be strictly below order price (₹{price:.2f}) for SELL orders."
+            )
     _, resolved_exchange, resolved_segment = _resolve_order_instrument(symbol, product)
 
     if exchange is not None and exchange.upper() != resolved_exchange:
@@ -443,6 +513,7 @@ def preview_order_intent(
     canonical_str = (
         f"{resolved_exchange}:{symbol.upper()}:{resolved_segment}:{side}:"
         f"{quantity}:{price:.4f}:{order_type}:{product}:{mode_name}"
+        + (f":trig_{trigger_price:.4f}" if trigger_price is not None else "")
     )
     computed_preview_hash = hashlib.sha256(canonical_str.encode()).hexdigest()
 
@@ -453,6 +524,8 @@ def preview_order_intent(
         side=side,  # type: ignore
     )
     charges_dict = charges.to_dict()
+    if trigger_price is not None:
+        charges_dict["trigger_price"] = float(trigger_price)
 
     try:
         from market.order_book import get_depth_book
@@ -469,9 +542,80 @@ def preview_order_intent(
         if (side.upper() == "BUY" and book.best_ask > 0) or (
             side.upper() == "SELL" and book.best_bid > 0
         ):
-            charges_dict["slippage_model"] = book.simulate_sweep(side=side, quantity=quantity)
+            sweep_res = book.simulate_sweep(side=side, quantity=quantity)
+            charges_dict["slippage_model"] = sweep_res
+            slip_bps = float(sweep_res.get("slippage_bps", 0.0) or 0.0)
+            if slip_bps >= 50.0:
+                charges_dict["slippage_warning"] = (
+                    f"High Slippage Hazard: Sweeping order book incurs {slip_bps:.0f} bps "
+                    f"({slip_bps / 100:.2f}%) adverse price impact. Recommend LIMIT order."
+                )
+            if not sweep_res.get("is_fully_fillable", True):
+                charges_dict["liquidity_warning"] = (
+                    f"Thin Book Liquidity Warning: Requested {quantity} units exceeds visible depth "
+                    f"(shortfall: {sweep_res.get('unfilled_qty')} units). High partial fill risk."
+                )
+            imbalance = book.get_imbalance()
+            if side.upper() == "BUY" and imbalance < -0.65:
+                charges_dict["orderbook_imbalance_warning"] = (
+                    f"Institutional Ask Wall Warning: Order book is heavily supply-skewed "
+                    f"(imbalance: {imbalance:.2f}). Aggressive buyers risk getting trapped into absorption."
+                )
+            elif side.upper() == "SELL" and imbalance > 0.65:
+                charges_dict["orderbook_imbalance_warning"] = (
+                    f"Institutional Bid Wall Warning: Order book is heavily demand-skewed "
+                    f"(imbalance: {imbalance:.2f}). Aggressive sellers risk getting trapped into absorption."
+                )
+
+        if no_chase_boundary is not None and no_chase_boundary > 0:
+            charges_dict["no_chase_boundary"] = float(no_chase_boundary)
+            sweep_vwap = sweep_res.get("sweep_vwap") if sweep_res else None
+            if sweep_vwap:
+                charges_dict["depth_sweep_vwap"] = float(sweep_vwap)
+
+            if side.upper() == "BUY":
+                if sweep_vwap and sweep_vwap > no_chase_boundary:
+                    charges_dict["no_chase_violation"] = (
+                        f"FOMO Depth Sweep Violation: Simulated fill VWAP ₹{sweep_vwap:,.2f} sweeps past "
+                        f"no-chase boundary ₹{no_chase_boundary:,.2f} (best ask was ₹{book.best_ask:,.2f}, "
+                        f"slippage: {charges_dict.get('orderbook_slippage_pct', 0.0):.2f}%)."
+                    )
+                elif book.best_ask > 0 and book.best_ask > no_chase_boundary:
+                    charges_dict["no_chase_violation"] = (
+                        f"FOMO Violation: Best ask ₹{book.best_ask:,.2f} already exceeds "
+                        f"no-chase boundary ₹{no_chase_boundary:,.2f}."
+                    )
+            elif side.upper() == "SELL":
+                if sweep_vwap and sweep_vwap < no_chase_boundary:
+                    charges_dict["no_chase_violation"] = (
+                        f"FOMO Depth Sweep Violation: Simulated fill VWAP ₹{sweep_vwap:,.2f} sweeps below "
+                        f"no-chase boundary ₹{no_chase_boundary:,.2f} (best bid was ₹{book.best_bid:,.2f}, "
+                        f"slippage: {charges_dict.get('orderbook_slippage_pct', 0.0):.2f}%)."
+                    )
+                elif book.best_bid > 0 and book.best_bid < no_chase_boundary:
+                    charges_dict["no_chase_violation"] = (
+                        f"FOMO Violation: Best bid ₹{book.best_bid:,.2f} already below "
+                        f"no-chase boundary ₹{no_chase_boundary:,.2f}."
+                    )
     except Exception as e_sweep:
         logger.debug(f"[order_lifecycle] Depth sweep modeling skipped for {symbol}: {e_sweep}")
+
+    # Exchange Order Quantity Freeze Limit Check
+    try:
+        from engine.smart_order_router import get_exchange_freeze_limit
+
+        freeze_limit = get_exchange_freeze_limit(symbol)
+        if quantity > freeze_limit:
+            num_tranches = math.ceil(quantity / freeze_limit)
+            charges_dict["freeze_limit"] = freeze_limit
+            charges_dict["freeze_warning"] = (
+                f"Exchange Freeze Slicer: Quantity {quantity} exceeds single-order limit ({freeze_limit}). "
+                f"Will be automatically executed across {num_tranches} child tranches."
+            )
+            charges_dict["sliced_execution_required"] = True
+            charges_dict["suggested_tranches"] = num_tranches
+    except Exception as e_fz:
+        logger.debug(f"[order_lifecycle] Freeze limit check skipped for {symbol}: {e_fz}")
 
     intent = OrderIntent(
         order_id=_generate_order_id(is_paper=is_paper),
@@ -488,6 +632,9 @@ def preview_order_intent(
         mode=mode_name,
         preview_hash=computed_preview_hash,
         charges=charges_dict,
+        stop_loss=stop_loss,
+        target=target,
+        auto_gtt_oco=auto_gtt_oco,
     )
 
     # Concurrency-safe atomic insert: INSERT ... ON CONFLICT(idempotency_key) DO NOTHING
@@ -499,8 +646,9 @@ def preview_order_intent(
             INSERT INTO orders_ledger (
                 order_id, idempotency_key, symbol, exchange, segment, side, quantity, price,
                 order_type, product, status, mode, broker_order_id, charges_json,
-                rejection_reason, preview_hash, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rejection_reason, preview_hash, stop_loss, target, auto_gtt_oco, gtt_order_id,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(idempotency_key) DO NOTHING
             """,
             (
@@ -520,6 +668,10 @@ def preview_order_intent(
                 json.dumps(intent.charges),
                 intent.rejection_reason,
                 intent.preview_hash,
+                intent.stop_loss,
+                intent.target,
+                1 if intent.auto_gtt_oco else 0,
+                intent.gtt_order_id,
                 now_iso,
                 now_iso,
             ),
@@ -677,6 +829,10 @@ def _row_to_intent(d: dict) -> OrderIntent:
         charges=json.loads(d.get("charges_json") or "{}"),
         rejection_reason=d.get("rejection_reason"),
         preview_hash=d.get("preview_hash"),
+        stop_loss=d.get("stop_loss"),
+        target=d.get("target"),
+        auto_gtt_oco=bool(d.get("auto_gtt_oco", 1)),
+        gtt_order_id=d.get("gtt_order_id"),
         created_at=d.get("created_at"),
         updated_at=d.get("updated_at"),
     )
@@ -739,9 +895,16 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         )
 
     # ── P0 Invariant 3: Preview Hash Integrity Verification ────────────────
+    charges_d = (
+        json.loads(d.get("charges_json") or "{}")
+        if isinstance(d.get("charges_json"), str)
+        else (d.get("charges") or {})
+    )
+    trig_val = charges_d.get("trigger_price")
     canonical_str = (
         f"{d.get('exchange', 'NSE')}:{d['symbol'].upper()}:{d.get('segment', 'EQUITY_INTRADAY')}:{d['side']}:"
         f"{d['quantity']}:{float(d['price']):.4f}:{d['order_type']}:{d['product']}:{d['mode']}"
+        + (f":trig_{float(trig_val):.4f}" if trig_val is not None else "")
     )
     expected_hash = hashlib.sha256(canonical_str.encode()).hexdigest()
     if d.get("preview_hash") and d["preview_hash"] != expected_hash:
@@ -796,25 +959,81 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             _paper_exchange = d.get("exchange") or inst.exchange
 
             paper_broker = PaperBroker()
-            req = OrderRequest(
-                symbol=d["symbol"],
-                exchange=_paper_exchange,
-                transaction_type=d["side"],
-                order_type=d["order_type"],
-                product=d["product"],
-                quantity=d["quantity"],
-                price=d["price"],
+            from engine.smart_order_router import slice_quantity_by_freeze_limit
+
+            inst_lot = getattr(inst, "lot_size", 1) or 1
+            slices = slice_quantity_by_freeze_limit(d["symbol"], d["quantity"], inst_lot)
+            if not slices:
+                slices = [d["quantity"]]
+
+            charges_dict = (
+                json.loads(d.get("charges_json") or "{}")
+                if isinstance(d.get("charges_json"), str)
+                else (d.get("charges") or {})
             )
-            paper_res = paper_broker.place_order(req)
-            if paper_res.status == "COMPLETE":
-                d["status"] = "FILLED_PAPER"
-                d["broker_order_id"] = f"PAPER-EXEC-{paper_res.order_id}"
-            elif paper_res.status == "REJECTED":
-                d["status"] = "REJECTED"
-                d["rejection_reason"] = paper_res.message or "Rejected by PaperBroker"
+            trigger_px = charges_dict.get("trigger_price")
+
+            if len(slices) == 1:
+                req = OrderRequest(
+                    symbol=d["symbol"],
+                    exchange=_paper_exchange,
+                    transaction_type=d["side"],
+                    order_type=d["order_type"],
+                    product=d["product"],
+                    quantity=d["quantity"],
+                    price=d["price"],
+                    trigger_price=trigger_px,
+                )
+                paper_res = paper_broker.place_order(req)
+                if paper_res.status == "COMPLETE":
+                    d["status"] = "FILLED_PAPER"
+                    d["broker_order_id"] = f"PAPER-EXEC-{paper_res.order_id}"
+                elif paper_res.status == "REJECTED":
+                    d["status"] = "REJECTED"
+                    d["rejection_reason"] = paper_res.message or "Rejected by PaperBroker"
+                else:
+                    d["status"] = "OPEN"
+                    d["broker_order_id"] = f"PAPER-OPEN-{paper_res.order_id}"
             else:
-                d["status"] = "OPEN"
-                d["broker_order_id"] = f"PAPER-OPEN-{paper_res.order_id}"
+                child_ids = []
+                all_complete = True
+                any_rejected = False
+                rej_msg = ""
+                for s_qty in slices:
+                    req = OrderRequest(
+                        symbol=d["symbol"],
+                        exchange=_paper_exchange,
+                        transaction_type=d["side"],
+                        order_type=d["order_type"],
+                        product=d["product"],
+                        quantity=s_qty,
+                        price=d["price"],
+                        trigger_price=trigger_px,
+                    )
+                    paper_res = paper_broker.place_order(req)
+                    if paper_res.status == "COMPLETE":
+                        child_ids.append(paper_res.order_id)
+                    elif paper_res.status == "REJECTED":
+                        any_rejected = True
+                        rej_msg = paper_res.message or "Rejected by PaperBroker"
+                        break
+                    else:
+                        child_ids.append(paper_res.order_id)
+                        all_complete = False
+
+                if any_rejected:
+                    d["status"] = "REJECTED"
+                    d["rejection_reason"] = f"Tranche rejected: {rej_msg}"
+                elif all_complete:
+                    d["status"] = "FILLED_PAPER"
+                    d["broker_order_id"] = (
+                        f"PAPER-EXEC-SLICED-{','.join(str(cid) for cid in child_ids)}"
+                    )
+                else:
+                    d["status"] = "OPEN"
+                    d["broker_order_id"] = (
+                        f"PAPER-OPEN-SLICED-{','.join(str(cid) for cid in child_ids)}"
+                    )
         except Exception as paper_exc:
             d["status"] = "REJECTED"
             d["rejection_reason"] = f"PaperBroker error: {paper_exc}"
@@ -834,10 +1053,64 @@ def execute_order_intent(order_id: str) -> OrderIntent:
 
         with _get_orders_db() as conn:
             conn.execute(
-                "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
-                (d["status"], d["broker_order_id"], d["rejection_reason"], now_iso, order_id),
+                "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, gtt_order_id = ?, updated_at = ? WHERE order_id = ?",
+                (
+                    d["status"],
+                    d["broker_order_id"],
+                    d["rejection_reason"],
+                    d.get("gtt_order_id"),
+                    now_iso,
+                    order_id,
+                ),
             )
             conn.commit()
+
+        # Server-side native GTT OCO bracket auto-arming on paper fill
+        if d["status"] == "FILLED_PAPER" and d.get("auto_gtt_oco") and d.get("stop_loss"):
+            try:
+                from brokers.base import GTTLeg, GTTRequest
+
+                exit_side = "SELL" if d["side"] == "BUY" else "BUY"
+                sl_val = float(d["stop_loss"])
+                leg1 = GTTLeg(price=sl_val, trigger_price=sl_val, quantity=d["quantity"])
+                leg2 = None
+                trigger_type = "SINGLE"
+                if d.get("target"):
+                    tgt_val = float(d["target"])
+                    leg2 = GTTLeg(price=tgt_val, trigger_price=tgt_val, quantity=d["quantity"])
+                    trigger_type = "OCO"
+                gtt_req = GTTRequest(
+                    symbol=d["symbol"],
+                    exchange=d.get("exchange", "NSE"),
+                    transaction_type=exit_side,
+                    trigger_type=trigger_type,
+                    product=d["product"],
+                    leg1=leg1,
+                    leg2=leg2,
+                )
+                gtt_res = paper_broker.place_gtt(gtt_req)
+                if getattr(gtt_res, "status", None) == "ACTIVE":
+                    d["gtt_order_id"] = gtt_res.gtt_id
+                    with _get_orders_db() as conn:
+                        conn.execute(
+                            "UPDATE orders_ledger SET gtt_order_id = ? WHERE order_id = ?",
+                            (d["gtt_order_id"], order_id),
+                        )
+                        conn.commit()
+                    _record_order_event(
+                        order_id,
+                        "GTT_ARMED",
+                        broker_name="paper",
+                        broker_order_id=gtt_res.gtt_id,
+                        payload={
+                            "gtt_id": gtt_res.gtt_id,
+                            "trigger_type": trigger_type,
+                            "stop_loss": sl_val,
+                            "target": d.get("target"),
+                        },
+                    )
+            except Exception as e_gtt:
+                logger.warning(f"[order_lifecycle] Paper GTT arming skipped: {e_gtt}")
 
         record_audit_event(
             event_type="ORDER_FILLED_PAPER" if d["status"] == "FILLED_PAPER" else "ORDER_REJECTED",
@@ -932,6 +1205,18 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 f"Live order {order_id} frozen (pretrade context fetch failed): {_ctx_exc}"
             ) from _ctx_exc
 
+        _no_chase = None
+        _depth_sweep_vwap = None
+        if isinstance(d.get("charges"), dict):
+            _raw_nc = d["charges"].get("no_chase_boundary")
+            if isinstance(_raw_nc, (int, float)) and _raw_nc > 0:
+                _no_chase = float(_raw_nc)
+            _raw_vwap = d["charges"].get("depth_sweep_vwap") or d["charges"].get(
+                "orderbook_expected_vwap"
+            )
+            if isinstance(_raw_vwap, (int, float)) and _raw_vwap > 0:
+                _depth_sweep_vwap = float(_raw_vwap)
+
         pretrade = validate_pretrade(
             symbol=d["symbol"],
             side=d["side"],
@@ -943,6 +1228,9 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             ltp=_ltp,
             quote_age_seconds=_quote_age_seconds,
             available_cash=_available_cash,
+            trigger_price=d["price"] if d.get("order_type") == "MARKET" else None,
+            no_chase_boundary=_no_chase,
+            depth_sweep_vwap=_depth_sweep_vwap,
             correlation_id=pretrade_correlation_id,
         )
         if not pretrade.is_eligible:
@@ -966,119 +1254,265 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             if live_broker is None:
                 raise RuntimeError("No authenticated broker session available for live execution.")
 
-            broker_req = OrderRequest(
-                symbol=d["symbol"],
-                exchange=_live_exchange,
-                transaction_type=d["side"],
-                order_type=d["order_type"],
-                product=d["product"],
-                quantity=d["quantity"],
-                price=d["price"],
-            )
+            from engine.smart_order_router import slice_quantity_by_freeze_limit
 
-            broker_res = live_broker.place_order(broker_req)
+            inst_lot = getattr(inst, "lot_size", 1) or 1
+            slices = slice_quantity_by_freeze_limit(d["symbol"], d["quantity"], inst_lot)
+            if not slices:
+                slices = [d["quantity"]]
+
             execution_provider = (
                 get_execution_broker_key() or live_broker.__class__.__name__.lower()
             )
 
-            if broker_res.status == "COMPLETE" or broker_res.status == "OPEN":
-                d["status"] = "OPEN" if broker_res.status == "OPEN" else "FILLED"
-                d["broker_order_id"] = broker_res.order_id
+            charges_dict = (
+                json.loads(d.get("charges_json") or "{}")
+                if isinstance(d.get("charges_json"), str)
+                else (d.get("charges") or {})
+            )
+            trigger_px = charges_dict.get("trigger_price")
 
-                with _get_orders_db() as conn:
-                    conn.execute(
-                        "UPDATE orders_ledger SET status = ?, broker_order_id = ?, updated_at = ? WHERE order_id = ?",
-                        (d["status"], d["broker_order_id"], now_iso, order_id),
+            if len(slices) == 1:
+                broker_req = OrderRequest(
+                    symbol=d["symbol"],
+                    exchange=_live_exchange,
+                    transaction_type=d["side"],
+                    order_type=d["order_type"],
+                    product=d["product"],
+                    quantity=d["quantity"],
+                    price=d["price"],
+                    trigger_price=trigger_px,
+                )
+
+                broker_res = live_broker.place_order(broker_req)
+
+                if broker_res.status == "COMPLETE" or broker_res.status == "OPEN":
+                    d["status"] = "OPEN" if broker_res.status == "OPEN" else "FILLED"
+                    d["broker_order_id"] = broker_res.order_id
+
+                    with _get_orders_db() as conn:
+                        conn.execute(
+                            "UPDATE orders_ledger SET status = ?, broker_order_id = ?, updated_at = ? WHERE order_id = ?",
+                            (d["status"], d["broker_order_id"], now_iso, order_id),
+                        )
+                        conn.commit()
+
+                    if d["status"] == "OPEN":
+                        try:
+                            from market.fyers_tbt_manager import FyersTbtManager
+
+                            FyersTbtManager().register_in_flight(d["symbol"])
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[engine.order_lifecycle] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+
+                    _record_order_event(
+                        order_id,
+                        "BROKER_RESPONSE",
+                        correlation_id=pretrade_correlation_id,
+                        broker_name=execution_provider,
+                        broker_order_id=d["broker_order_id"],
+                        payload={
+                            "status": d["status"],
+                            "filled_quantity": getattr(broker_res, "filled_quantity", 0),
+                        },
                     )
-                    conn.commit()
 
-                if d["status"] == "OPEN":
+                    # Server-side native GTT OCO bracket auto-arming on live fill
+                    if d["status"] == "FILLED" and d.get("auto_gtt_oco") and d.get("stop_loss"):
+                        try:
+                            from brokers.base import GTTLeg, GTTRequest
+
+                            exit_side = "SELL" if d["side"] == "BUY" else "BUY"
+                            sl_val = float(d["stop_loss"])
+                            sl_limit = (
+                                round(sl_val * 0.995, 2)
+                                if exit_side == "SELL"
+                                else round(sl_val * 1.005, 2)
+                            )
+                            leg1 = GTTLeg(
+                                price=sl_limit, trigger_price=sl_val, quantity=d["quantity"]
+                            )
+                            leg2 = None
+                            trigger_type = "SINGLE"
+                            if d.get("target"):
+                                tgt_val = float(d["target"])
+                                leg2 = GTTLeg(
+                                    price=tgt_val, trigger_price=tgt_val, quantity=d["quantity"]
+                                )
+                                trigger_type = "OCO"
+                            gtt_req = GTTRequest(
+                                symbol=d["symbol"],
+                                exchange=_live_exchange,
+                                transaction_type=exit_side,
+                                trigger_type=trigger_type,
+                                product=d["product"],
+                                leg1=leg1,
+                                leg2=leg2,
+                            )
+                            if hasattr(live_broker, "place_gtt"):
+                                gtt_res = live_broker.place_gtt(gtt_req)
+                                if getattr(gtt_res, "status", None) == "ACTIVE":
+                                    d["gtt_order_id"] = gtt_res.gtt_id
+                                    with _get_orders_db() as conn_gtt:
+                                        conn_gtt.execute(
+                                            "UPDATE orders_ledger SET gtt_order_id = ? WHERE order_id = ?",
+                                            (d["gtt_order_id"], order_id),
+                                        )
+                                        conn_gtt.commit()
+                                    _record_order_event(
+                                        order_id,
+                                        "GTT_ARMED",
+                                        correlation_id=pretrade_correlation_id,
+                                        broker_name=execution_provider,
+                                        broker_order_id=gtt_res.gtt_id,
+                                        payload={
+                                            "gtt_id": gtt_res.gtt_id,
+                                            "trigger_type": trigger_type,
+                                            "stop_loss": sl_val,
+                                            "target": d.get("target"),
+                                        },
+                                    )
+                        except Exception as e_gtt:
+                            logger.warning(
+                                f"[order_lifecycle] Live GTT auto-arming failed: {e_gtt}"
+                            )
+
+                elif broker_res.status == "REJECTED":
+                    d["status"] = "REJECTED"
+                    d["rejection_reason"] = broker_res.message or "Rejected by live broker"
+
+                    with _get_orders_db() as conn:
+                        conn.execute(
+                            "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                            (d["status"], d["rejection_reason"], now_iso, order_id),
+                        )
+                        conn.commit()
+
                     try:
                         from market.fyers_tbt_manager import FyersTbtManager
 
-                        FyersTbtManager().register_in_flight(d["symbol"])
+                        FyersTbtManager().unregister_in_flight(d["symbol"])
                     except Exception as e_suppressed:
                         logger.debug(
                             f"[engine.order_lifecycle] Non-fatal exception suppressed: {e_suppressed}"
                         )
 
-                _record_order_event(
-                    order_id,
-                    "BROKER_RESPONSE",
-                    correlation_id=pretrade_correlation_id,
-                    broker_name=execution_provider,
-                    broker_order_id=d["broker_order_id"],
-                    payload={
-                        "status": d["status"],
-                        "filled_quantity": getattr(broker_res, "filled_quantity", 0),
-                    },
-                )
-
-            elif broker_res.status == "REJECTED":
-                d["status"] = "REJECTED"
-                d["rejection_reason"] = broker_res.message or "Rejected by live broker"
-
-                with _get_orders_db() as conn:
-                    conn.execute(
-                        "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
-                        (d["status"], d["rejection_reason"], now_iso, order_id),
-                    )
-                    conn.commit()
-
-                try:
-                    from market.fyers_tbt_manager import FyersTbtManager
-
-                    FyersTbtManager().unregister_in_flight(d["symbol"])
-                except Exception as e_suppressed:
-                    logger.debug(
-                        f"[engine.order_lifecycle] Non-fatal exception suppressed: {e_suppressed}"
+                    _record_order_event(
+                        order_id,
+                        "BROKER_REJECTED",
+                        correlation_id=pretrade_correlation_id,
+                        broker_name=execution_provider,
+                        payload={"reason": d["rejection_reason"]},
                     )
 
-                _record_order_event(
-                    order_id,
-                    "BROKER_REJECTED",
-                    correlation_id=pretrade_correlation_id,
-                    broker_name=execution_provider,
-                    payload={"reason": d["rejection_reason"]},
-                )
+                else:
+                    # Ambiguous state -> freeze
+                    d["status"] = "UNKNOWN_FREEZE"
+                    d["broker_order_id"] = None
+                    d["rejection_reason"] = (
+                        f"Ambiguous broker response status: {broker_res.status}. "
+                        "Order frozen for manual reconciliation."
+                    )
+
+                    with _get_orders_db() as conn:
+                        conn.execute(
+                            "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                            (
+                                d["status"],
+                                d["broker_order_id"],
+                                d["rejection_reason"],
+                                now_iso,
+                                order_id,
+                            ),
+                        )
+                        conn.commit()
+
+                    record_audit_event(
+                        event_type="ORDER_UNKNOWN_FREEZE",
+                        mode=mode_info.mode.name,
+                        details={
+                            "order_id": order_id,
+                            "correlation_id": pretrade_correlation_id,
+                            "broker_response_status": broker_res.status,
+                        },
+                    )
+                    _record_order_event(
+                        order_id,
+                        "UNKNOWN_FREEZE",
+                        correlation_id=pretrade_correlation_id,
+                        broker_name=execution_provider,
+                        payload={"reason": d["rejection_reason"]},
+                    )
             else:
-                # Ambiguous state -> freeze
-                d["status"] = "UNKNOWN_FREEZE"
-                d["broker_order_id"] = None
-                d["rejection_reason"] = (
-                    f"Ambiguous broker response status: {broker_res.status}. "
-                    "Order frozen for manual reconciliation."
-                )
+                # Sliced institutional execution across child tranches
+                tranche_order_ids = []
+                all_complete = True
+                any_rejected = False
+                rej_msg = ""
+                total_filled_qty = 0
 
-                with _get_orders_db() as conn:
-                    conn.execute(
-                        "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
-                        (
-                            d["status"],
-                            d["broker_order_id"],
-                            d["rejection_reason"],
-                            now_iso,
-                            order_id,
-                        ),
+                for s_qty in slices:
+                    broker_req = OrderRequest(
+                        symbol=d["symbol"],
+                        exchange=_live_exchange,
+                        transaction_type=d["side"],
+                        order_type=d["order_type"],
+                        product=d["product"],
+                        quantity=s_qty,
+                        price=d["price"],
+                        trigger_price=trigger_px,
                     )
-                    conn.commit()
+                    b_res = live_broker.place_order(broker_req)
+                    if b_res.status in ("COMPLETE", "OPEN"):
+                        tranche_order_ids.append(b_res.order_id)
+                        total_filled_qty += getattr(
+                            b_res, "filled_quantity", s_qty if b_res.status == "COMPLETE" else 0
+                        )
+                        if b_res.status == "OPEN":
+                            all_complete = False
+                    elif b_res.status == "REJECTED":
+                        any_rejected = True
+                        rej_msg = b_res.message or "Tranche rejected by live broker"
+                        break
+                    else:
+                        tranche_order_ids.append(b_res.order_id)
+                        all_complete = False
 
-                record_audit_event(
-                    event_type="ORDER_UNKNOWN_FREEZE",
-                    mode=mode_info.mode.name,
-                    details={
-                        "order_id": order_id,
-                        "correlation_id": pretrade_correlation_id,
-                        "broker_response_status": broker_res.status,
-                    },
-                )
-                _record_order_event(
-                    order_id,
-                    "UNKNOWN_FREEZE",
-                    correlation_id=pretrade_correlation_id,
-                    broker_name=execution_provider,
-                    payload={"reason": d["rejection_reason"]},
-                )
+                if any_rejected and not tranche_order_ids:
+                    d["status"] = "REJECTED"
+                    d["rejection_reason"] = rej_msg
+                    with _get_orders_db() as conn:
+                        conn.execute(
+                            "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                            (d["status"], d["rejection_reason"], now_iso, order_id),
+                        )
+                        conn.commit()
+                else:
+                    d["status"] = "FILLED" if all_complete else "OPEN"
+                    d["broker_order_id"] = (
+                        f"SLICED:{','.join(str(tid) for tid in tranche_order_ids)}"
+                    )
+                    with _get_orders_db() as conn:
+                        conn.execute(
+                            "UPDATE orders_ledger SET status = ?, broker_order_id = ?, updated_at = ? WHERE order_id = ?",
+                            (d["status"], d["broker_order_id"], now_iso, order_id),
+                        )
+                        conn.commit()
+
+                    _record_order_event(
+                        order_id,
+                        "BROKER_RESPONSE_SLICED",
+                        correlation_id=pretrade_correlation_id,
+                        broker_name=execution_provider,
+                        broker_order_id=d["broker_order_id"],
+                        payload={
+                            "status": d["status"],
+                            "tranche_count": len(slices),
+                            "filled_quantity": total_filled_qty,
+                        },
+                    )
 
         except Exception as live_exc:
             # Ambiguous or timed-out broker call: MUST NOT fabricate order ID or set OPEN.
@@ -1132,6 +1566,10 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         charges=json.loads(d.get("charges_json") or "{}"),
         rejection_reason=d.get("rejection_reason"),
         preview_hash=d.get("preview_hash"),
+        stop_loss=d.get("stop_loss"),
+        target=d.get("target"),
+        auto_gtt_oco=bool(d.get("auto_gtt_oco", 1)),
+        gtt_order_id=d.get("gtt_order_id"),
         created_at=d.get("created_at", now_iso),
         updated_at=now_iso,
     )
@@ -1208,9 +1646,16 @@ def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
                 )
 
             # Preview hash integrity
+            charges_batch = (
+                json.loads(d.get("charges_json") or "{}")
+                if isinstance(d.get("charges_json"), str)
+                else (d.get("charges") or {})
+            )
+            trig_val = charges_batch.get("trigger_price")
             canonical_str = (
                 f"{d.get('exchange', 'NSE')}:{d['symbol'].upper()}:{d.get('segment', 'EQUITY_INTRADAY')}:{d['side']}:"
                 f"{d['quantity']}:{float(d['price']):.4f}:{d['order_type']}:{d['product']}:{d['mode']}"
+                + (f":trig_{float(trig_val):.4f}" if trig_val is not None else "")
             )
             expected_hash = hashlib.sha256(canonical_str.encode()).hexdigest()
             if d.get("preview_hash") and d["preview_hash"] != expected_hash:
@@ -1286,6 +1731,12 @@ def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
         if callable(_quote_age):
             _quote_age = _quote_age()
 
+        _no_chase = None
+        if isinstance(d.get("charges"), dict):
+            _raw_nc = d["charges"].get("no_chase_boundary")
+            if isinstance(_raw_nc, (int, float)) and _raw_nc > 0:
+                _no_chase = float(_raw_nc)
+
         pretrade = validate_pretrade(
             symbol=d["symbol"],
             side=d["side"],
@@ -1297,6 +1748,8 @@ def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
             ltp=_ltp,
             quote_age_seconds=_quote_age,
             available_cash=_available_cash,
+            trigger_price=d["price"] if d.get("order_type") == "MARKET" else None,
+            no_chase_boundary=_no_chase,
             correlation_id=batch_correlation_id,
         )
         if not pretrade.is_eligible:

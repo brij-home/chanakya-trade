@@ -325,6 +325,7 @@ async def cmd_start(update, context) -> None:
             "/conviction [SYMBOL] — 12-factor trade conviction score (0–100)\n"
             "/movers — daily top gainers & losers forensic autopsy\n"
             "/precursors — high-conviction coiling setups before breakout\n"
+            "/dryup [FNO|ALL] — pre-inflection volume dry-up & fair-value accumulation (anti-FOMO, 1:4+ R:R)\n"
             "/asymmetric — scan low risk : big reward setups (1:3+ R:R)\n"
             "/scan [UNIVERSE] — scan top liquid/F&O list for breakouts & gamma blasts\n"
             "/radar — quick market radar on today's top liquid setups\n"
@@ -648,6 +649,40 @@ async def cmd_brief(update, context) -> None:
         await update.message.reply_text(f"Brief failed: {e}")
 
 
+async def cmd_strike_radar(update, context) -> None:
+    """Handle /strikes or /battleplan — 09:10 IST Pre-Market Index Strike Radar."""
+    try:
+        from market.indices import get_premarket_battle_plan, format_premarket_strike_radar
+
+        loop = asyncio.get_running_loop()
+
+        def _get():
+            plan = get_premarket_battle_plan(["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"])
+            return format_premarket_strike_radar(plan)
+
+        text = await loop.run_in_executor(None, _get)
+        await update.message.reply_text(text, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Strike radar failed: {e}")
+
+
+async def cmd_orb_radar(update, context) -> None:
+    """Handle /orb — 09:18 IST Opening Range Breakout (ORB) Radar."""
+    try:
+        from market.indices import get_opening_range_battle_plan, format_opening_range_radar
+
+        loop = asyncio.get_running_loop()
+
+        def _get():
+            plan = get_opening_range_battle_plan(["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"])
+            return format_opening_range_radar(plan)
+
+        text = await loop.run_in_executor(None, _get)
+        await update.message.reply_text(text, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Opening range radar failed: {e}")
+
+
 async def cmd_eod(update, context) -> None:
     """Handle /eod [date] — daily institutional post-market audit & strategic report."""
     target_date = context.args[0].strip() if (context.args and len(context.args) > 0) else None
@@ -882,7 +917,7 @@ async def cmd_filter(update, context) -> None:
 
             seg_emojis = {
                 "FNO_INDEX": "⚡ F&O Indices (NIFTY, BANKNIFTY, SENSEX)",
-                "FNO_STOCK": "🎯 F&O Stocks (Single-Stock Options & Futures)",
+                "FNO_STOCK": "🎯 F&O Stocks (Single-Stock Options & Hedged Spreads)",
                 "EQUITY": "🏢 Cash Equity",
                 "COMMODITY": "🌙 Commodity (MCX)",
                 "CURRENCY": "💱 Currency (CDS)",
@@ -989,7 +1024,7 @@ async def cmd_channels(update, context) -> None:
                 "segment": "FNO_STOCK",
                 "name": "FnO_Stocks_Premium_Alpha_Vortex",
                 "chat_id": alert_preferences.get_telegram_chat_id("FNO_STOCK"),
-                "desc": "Single-Stock Options (CE/PE) & Stock Futures",
+                "desc": "Single-Stock Options (CE/PE) & Hedged Spreads",
                 "icon": "🎯",
             },
             {
@@ -1483,6 +1518,101 @@ async def cmd_precursors(update, context) -> None:
         await update.message.reply_text(res_text, parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"Precursor scan failed: {e}")
+
+
+async def cmd_dryup(update, context) -> None:
+    """Handle /dryup [fno|all|symbol] — Scans for Pre-Inflection Volume Dry-Up & Fair-Value Accumulation (Anti-FOMO)."""
+    arg = context.args[0].upper() if context.args else "FNO"
+
+    await update.message.reply_text(
+        f"🤫 <b>Scanning Pre-Inflection Dry-Up Radar [{arg}]...</b>\n"
+        "<i>Searching for volume dry-up (seller exhaustion ≤ 40%), daily range coiling (≤ 1.5%), and fair-value accumulation zones...</i>",
+        parse_mode="HTML",
+    )
+
+    def _run_dryup_scan() -> str:
+        from engine.detectors.pre_inflection_dryup import detect_pre_inflection_dryup
+        from market.history import get_ohlcv
+        from analysis.universe import resolve_dynamic_universe
+
+        if arg in ("ALL", "TOTAL"):
+            symbols, _ = resolve_dynamic_universe("auto_market_aware", max_stocks=50)
+        elif arg in ("CASH", "NON_FNO"):
+            symbols, _ = resolve_dynamic_universe("multibagger_hunters", max_stocks=40)
+        elif len(arg) > 2 and not arg.startswith(("-", "/")):
+            # Single symbol lookup
+            symbols = [arg]
+        else:
+            # Default: Liquid F&O core
+            symbols, _ = resolve_dynamic_universe("fno_universe", max_stocks=45)
+
+        candidates = []
+        for sym in symbols:
+            try:
+                clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+                df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
+                if df is None or len(df) < 25:
+                    continue
+                ltp = float(df["close"].iloc[-1])
+                alt = detect_pre_inflection_dryup(clean_sym, df, ltp)
+                if alt:
+                    candidates.append(alt)
+            except Exception as e_sym:
+                logger.debug(f"[telegram_bot.cmd_dryup] Scan failed for {sym}: {e_sym}")
+
+        if not candidates:
+            return (
+                f"🛡️ <b>No Pre-Inflection Dry-Up Setups Found [{arg}].</b>\n"
+                "All scanned candidates failed seller exhaustion volume dry-up (≤ 40% of 50-SMA) or range compression (≤ 1.5%).\n"
+                "<i>Remember: The best traders wait for quiet accumulation bases before expansion.</i>"
+            )
+
+        # Sort by confidence descending
+        candidates.sort(key=lambda a: getattr(a, "confidence", 0), reverse=True)
+        top_candidates = candidates[:6]
+
+        lines = [
+            f"🤫 <b>PRE-INFLECTION DRY-UP RADAR [{arg}] — {len(top_candidates)} SETUPS</b>\n"
+            f"<i>Quiet institutional accumulation bases detected ON OR BEFORE ignition:</i>\n",
+        ]
+
+        for a in top_candidates:
+            p = a.actionable_plan or {}
+            m = a.metrics or {}
+            vol_pct = int(round(float(m.get("vol_dryup_ratio", 0.40)) * 100))
+            range_pct = float(m.get("avg_range_pct", 1.2))
+            fv_name = m.get("fair_value_source", "Fair Value POC")
+            fv_price = float(m.get("fair_value", a.trigger_level or a.ltp))
+            no_chase = (
+                p.get("do_not_chase_above")
+                or f"₹{float(m.get('no_chase_limit', a.ltp * 1.02)):,.1f}"
+            )
+            rr_str = p.get("risk_reward", "1:4.0")
+            entry_rng = p.get("entry_range", f"₹{a.ltp * 0.992:,.1f} – ₹{a.ltp * 1.008:,.1f}")
+
+            icon = "🔥" if a.confidence >= 90 else "🤫"
+            lines.append(
+                f"{icon} <b>{a.symbol}</b> — 🧠 <b>Score: {a.confidence}/100</b> [PRE-INFLECTION DRY-UP]\n"
+                f"  💰 <b>LTP:</b> ₹{a.ltp:,.2f} | <b>Anchor:</b> ₹{fv_price:,.2f} ({fv_name})\n"
+                f"  📦 <b>Volume Dry-Up:</b> <code>{vol_pct}% of 50-SMA</code> (Seller Exhaustion)\n"
+                f"  📏 <b>Range Compression:</b> <code>{range_pct:.1f}% Daily Spread</code> (Coiling Base)\n"
+                f"  🎯 <b>Accumulation Zone:</b> <code>{entry_rng}</code>\n"
+                f"  🛑 <b>SL:</b> <code>₹{a.stop_loss:,.2f}</code> | 🎯 <b>T1 (+2R):</b> <code>{p.get('target_1', f'₹{a.target_level:,.2f}')}</code>\n"
+                f"  🎯 <b>T2 (+4R):</b> <code>{p.get('target_2', '—')}</code> | ⚖️ <b>R:R:</b> <code>{rr_str}</code>\n"
+                f"  🚫 <b>Anti-FOMO Boundary:</b> <i>DO NOT CHASE ABOVE {no_chase}</i>\n"
+            )
+
+        return "\n".join(lines)
+
+    try:
+        loop = asyncio.get_running_loop()
+        res_text = await asyncio.wait_for(
+            loop.run_in_executor(None, _run_dryup_scan),
+            timeout=45,
+        )
+        await update.message.reply_text(res_text, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Dry-up scan failed: {e}")
 
 
 async def cmd_asymmetric(update, context) -> None:
@@ -2541,10 +2671,16 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("analyze", _track_command(cmd_analyze)))
     app.add_handler(CommandHandler("deepanalyze", _track_command(cmd_deepanalyze)))
     app.add_handler(CommandHandler("brief", _track_command(cmd_brief)))
+    app.add_handler(CommandHandler("strikes", _track_command(cmd_strike_radar)))
+    app.add_handler(CommandHandler("battleplan", _track_command(cmd_strike_radar)))
+    app.add_handler(CommandHandler("orb", _track_command(cmd_orb_radar)))
     app.add_handler(CommandHandler("eod", _track_command(cmd_eod)))
     app.add_handler(CommandHandler("conviction", _track_command(cmd_conviction)))
     app.add_handler(CommandHandler("movers", _track_command(cmd_movers)))
     app.add_handler(CommandHandler("precursors", _track_command(cmd_precursors)))
+    app.add_handler(CommandHandler("dryup", _track_command(cmd_dryup)))
+    app.add_handler(CommandHandler("preinflection", _track_command(cmd_dryup)))
+    app.add_handler(CommandHandler("pre_inflection", _track_command(cmd_dryup)))
     app.add_handler(CommandHandler("asymmetric", _track_command(cmd_asymmetric)))
     app.add_handler(CommandHandler("opps", _track_command(cmd_asymmetric)))
     app.add_handler(CommandHandler("scan", _track_command(cmd_scan)))

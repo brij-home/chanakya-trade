@@ -360,12 +360,26 @@ class DailyLevelsStore:
                 "auction_settled": True,
             }
 
-        # 8. Actionable Execution Blueprint
+        # 8. Actionable Execution Blueprint & Pre-Market Strike Pre-Calculation
+        strike_step = (
+            50.0 if clean in ("NIFTY", "FINNIFTY") else (25.0 if clean == "MIDCPNIFTY" else 100.0)
+        )
+        bull_strike = int(round(cam_h4 / strike_step) * strike_step)
+        bear_strike = int(round(cam_l4 / strike_step) * strike_step)
+
         blueprint = {
             "trend_long": f"Buy CE on 5m close above H4 (₹{cam_h4:,.1f}) target H5 (₹{cam_h5:,.1f})",
             "trend_short": f"Buy PE on 5m close below L4 (₹{cam_l4:,.1f}) target L5 (₹{cam_l5:,.1f})",
             "reversal_long": f"Buy CE on bullish rejection wick at L3/PDL (₹{cam_l3:,.1f} - ₹{pdl:,.1f}) with tight SL",
             "reversal_short": f"Buy PE on bearish rejection wick at H3/PDH (₹{cam_h3:,.1f} - ₹{pdh:,.1f}) with tight SL",
+            "bull_strike": bull_strike,
+            "bear_strike": bear_strike,
+            "bull_contract": f"{clean} {bull_strike} CE",
+            "bear_contract": f"{clean} {bear_strike} PE",
+            "h4_trigger": round(cam_h4, 1),
+            "l4_trigger": round(cam_l4, 1),
+            "h5_target": round(cam_h5, 1),
+            "l5_target": round(cam_l5, 1),
             "no_chase_boundary": round(cam_h4 * 1.008, 1),
             "action_guidance": "Wait for spot to reach key boundaries. Never chase in chop zone between L3 and H3.",
         }

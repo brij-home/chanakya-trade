@@ -56,7 +56,7 @@ def _get_calendar_patterns(today: date) -> list[MarketPattern]:
                 "Wait for first 30 min to settle before taking positions.",
                 impact="VOLATILE",
                 confidence=65,
-                action="Wait for 9:45 AM before entering. Watch SGX Nifty for direction.",
+                action="Wait for 9:45 AM before entering. Watch GIFT Nifty for direction.",
                 tags=["weekly", "intraday"],
             )
         )
@@ -65,9 +65,9 @@ def _get_calendar_patterns(today: date) -> list[MarketPattern]:
     if weekday == 3:
         patterns.append(
             MarketPattern(
-                name="Weekly Expiry Day",
-                description="NIFTY/BANKNIFTY weekly options expire today. High gamma risk, "
-                "sharp moves possible near 22000/23000 round levels. Max pain gravitational pull.",
+                name="Weekly Expiry Day (NIFTY)",
+                description="NIFTY weekly options expire today (Thursday). High gamma risk, "
+                "sharp moves possible near round strike levels. Max pain gravitational pull.",
                 impact="VOLATILE",
                 confidence=80,
                 action="Avoid selling naked options. Use spreads. Close positions before 2:30 PM.",
@@ -75,17 +75,17 @@ def _get_calendar_patterns(today: date) -> list[MarketPattern]:
             )
         )
 
-    # Friday profit booking
+    # Friday profit booking & BSE SENSEX Weekly Expiry
     if weekday == 4:
         patterns.append(
             MarketPattern(
-                name="Friday Profit Booking",
-                description="Traders often book profits on Friday to avoid weekend risk. "
-                "Mild bearish bias in last 1-2 hours.",
-                impact="BEARISH",
-                confidence=55,
-                action="Avoid fresh long entries after 2 PM. Good time to sell covered calls.",
-                tags=["weekly", "intraday"],
+                name="Friday Profit Booking & SENSEX Expiry",
+                description="BSE SENSEX weekly options expire today (Friday). Traders often book profits "
+                "to avoid weekend risk. High gamma pins on round SENSEX strikes with profit booking in last 1-2 hours.",
+                impact="VOLATILE",
+                confidence=70,
+                action="Manage SENSEX options risk before 2:30 PM. Avoid fresh naked longs after 2 PM.",
+                tags=["weekly", "expiry", "options", "intraday"],
             )
         )
 

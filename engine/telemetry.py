@@ -21,6 +21,7 @@ logger = logging.getLogger("engine.telemetry")
 
 import json
 import threading
+import time
 import traceback
 import uuid
 from collections import Counter, deque
@@ -77,12 +78,35 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
     comp = (component or "").upper()
     rsn = (reason or "").upper()
 
+    # Multi-key LLM failover, Guardian screening vetoes, risk suppressions, delisted/expired symbols,
+    # in-flight trade coaching/warnings, and self-healing rewrites are informational audits (P3)
+    if event_type == EVENT_LLM_FAILOVER or any(
+        k in rsn
+        for k in (
+            "VETO",
+            "CODE -300",
+            "INVALID_SYMBOLS",
+            "PLEASE PROVIDE A VALID SYMBOL",
+            "DELISTED",
+            "EXPIRED",
+            "SUPPRESS",
+            "POLARIZATION",
+            "REWRITING",
+            "IN-FLIGHT WARNING",
+            "NO PRICE DATA FOUND",
+            "POSSIBLY DELISTED",
+            "FAILOVER TO FALLBACK",
+            "THROTTLED OR HIGH DEMAND",
+        )
+    ):
+        return "P3"
+
     if (
         sev == "CRITICAL"
         or "ORDER" in comp
         or "EXECUTION" in comp
         or "FREEZE" in rsn
-        or "CIRCUIT" in rsn
+        or "CIRCUIT BREAKER" in rsn
         or "LOCKOUT" in rsn
     ):
         return "P0"
@@ -134,8 +158,65 @@ def _load_recent_events_from_disk(limit: int = 250) -> None:
                     comp = data.get("component", "SYSTEM")
                     sev = data.get("severity", "INFO")
                     rsn = data.get("reason", "")
+                    # Suppress spurious Starlette SSE client disconnect or Windows socket teardown artifacts from historical memory
+                    if any(
+                        s in rsn
+                        for s in (
+                            "RuntimeError: No response returned.",
+                            "Accept failed on a socket",
+                            "IocpProactor.accept",
+                            "Task exception was never retrieved",
+                        )
+                    ):
+                        continue
                     prio = data.get("priority")
-                    if not prio or prio not in ("P0", "P1", "P2", "P3"):
+                    comp_lower = comp.lower()
+                    is_ext = any(
+                        ign in comp_lower
+                        for ign in (
+                            "yfinance",
+                            "urllib3",
+                            "websocket",
+                            "fyerswebsocket",
+                            "fyersdatasocket",
+                            "fyerstbtsocket",
+                            "httpcore",
+                            "starlette",
+                        )
+                    )
+                    is_rate_lim = (
+                        "429" in rsn
+                        or "RATE LIMIT" in rsn.upper()
+                        or "TOO MANY REQUESTS" in rsn.upper()
+                    )
+                    if is_ext:
+                        if is_rate_lim:
+                            prio = "P2"
+                        else:
+                            prio = "P3" if sev != "ERROR" else "P2"
+                    elif ev_type == EVENT_LLM_FAILOVER or any(
+                        k in rsn.upper()
+                        for k in (
+                            "VETO",
+                            "CODE -300",
+                            "INVALID_SYMBOLS",
+                            "PLEASE PROVIDE A VALID SYMBOL",
+                            "DELISTED",
+                            "EXPIRED",
+                            "SUPPRESS",
+                            "POLARIZATION",
+                            "REWRITING",
+                            "IN-FLIGHT WARNING",
+                            "THROTTLED OR HIGH DEMAND",
+                        )
+                    ):
+                        prio = "P3"
+                    elif (
+                        not prio
+                        or prio not in ("P0", "P1", "P2", "P3")
+                        or "CIRCUIT" in rsn.upper()
+                        or "VETO" in rsn.upper()
+                    ):
                         prio = derive_priority(ev_type, comp, sev, rsn)
                     ev = TelemetryEvent(
                         event_type=ev_type,
@@ -282,6 +363,22 @@ def record_exception(
     """
     Record an unhandled exception with full stack trace, system vitals, and unique incident_id.
     """
+    err_str = str(error)
+    # Ignore spurious Starlette SSE client disconnect artifacts
+    if (
+        "No response returned" in err_str
+        and context
+        and (
+            "stream" in context.get("path", "")
+            or "text/event-stream" in str(context.get("headers", {}).get("accept", "")).lower()
+        )
+    ):
+        return {
+            "incident_id": "DISCONNECT-IGNORED",
+            "error_type": type(error).__name__,
+            "error_message": err_str,
+        }
+
     now = datetime.now(timezone.utc)
     incident_id = f"ERR-{now.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
     tb_str = "".join(traceback.format_exception(type(error), error, error.__traceback__))
@@ -548,6 +645,7 @@ def clear_telemetry() -> None:
     """Clear in-memory and disk telemetry logs."""
     with _lock:
         _events_buffer.clear()
+        TelemetryLogHandler._seen_hashes.clear()
         try:
             telemetry_dir = app_data_path("telemetry")
             target_file = telemetry_dir / "events.jsonl"
@@ -559,3 +657,148 @@ def clear_telemetry() -> None:
                     bf.unlink()
         except Exception as e_suppressed:
             logger.debug(f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}")
+
+
+class TelemetryLogHandler(logging.Handler):
+    """
+    Automatic logging bridge: Captures application ERROR/CRITICAL logs (and important warnings)
+    and records them as prioritized incidents in engine.telemetry for OpsDeck visibility.
+    """
+
+    _seen_hashes: dict[str, float] = {}
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            # Prevent infinite recursion if logging comes from telemetry itself
+            if record.name.startswith("engine.telemetry"):
+                return
+
+            if record.levelno < logging.WARNING:
+                return
+
+            msg = str(record.getMessage())
+            rec_name = str(record.name or "")
+
+            # Deduplicate frequent identical log messages within 10 seconds
+            import hashlib
+
+            h = hashlib.md5(f"{record.name}:{msg}".encode("utf-8")).hexdigest()
+            now_ts = time.time()
+            last_ts = self._seen_hashes.get(h, 0.0)
+            if now_ts - last_ts < 10.0:
+                return
+            self._seen_hashes[h] = now_ts
+            if len(self._seen_hashes) > 200:
+                cutoff = now_ts - 60.0
+                self._seen_hashes = {k: v for k, v in self._seen_hashes.items() if v > cutoff}
+
+            # Ignore routine process shutdown socket teardowns
+            if any(
+                s in msg
+                for s in (
+                    "Accept failed on a socket",
+                    "IocpProactor.accept",
+                    "RuntimeError: No response returned.",
+                )
+            ):
+                return
+
+            # Benign external scraper noise or normal socket closures should not trigger P1 critical alert
+            is_external_noise = any(
+                ign in rec_name.lower()
+                for ign in (
+                    "yfinance",
+                    "urllib3",
+                    "websocket",
+                    "httpcore",
+                    "starlette",
+                    "fyerswebsocket",
+                    "fyersdatasocket",
+                    "fyerstbtsocket",
+                )
+            )
+            is_rate_limit = (
+                "429" in msg or "RATE LIMIT" in msg.upper() or "TOO MANY REQUESTS" in msg.upper()
+            )
+
+            if is_external_noise:
+                # Scraper ticker misses or routine socket drops are operational diagnostics
+                # Fyers broker socket invalid_symbols feedback is P3 informational audit
+                if any(
+                    k in msg.upper()
+                    for k in ("CODE -300", "INVALID_SYMBOLS", "PLEASE PROVIDE A VALID SYMBOL")
+                ):
+                    severity = "INFO"
+                    priority = "P3"
+                elif is_rate_limit:
+                    # External socket/scraper rate throttle with active backoff is P2 Warning (degraded rate gate)
+                    severity = "WARNING"
+                    priority = "P2"
+                else:
+                    severity = "INFO" if record.levelno < logging.ERROR else "WARNING"
+                    priority = "P3" if record.levelno < logging.ERROR else "P2"
+            else:
+                prio = derive_priority("SYSTEM_LOG", record.name, record.levelname, msg)
+                if any(
+                    k in msg.upper()
+                    for k in (
+                        "VETO",
+                        "CODE -300",
+                        "INVALID_SYMBOLS",
+                        "PLEASE PROVIDE A VALID SYMBOL",
+                        "DELISTED",
+                        "EXPIRED",
+                        "SUPPRESS",
+                        "POLARIZATION",
+                        "REWRITING",
+                        "IN-FLIGHT WARNING",
+                        "THROTTLED OR HIGH DEMAND",
+                    )
+                ):
+                    severity = "INFO"
+                    priority = "P3"
+                elif record.levelno >= logging.ERROR:
+                    severity = "ERROR"
+                    priority = prio if prio in ("P0", "P1") else "P1"
+                else:
+                    severity = "WARNING"
+                    priority = prio if prio in ("P2", "P3") else "P2"
+
+            record_event(
+                event_type="SYSTEM_LOG",
+                component=record.name,
+                action_taken="LOG_RECORDED",
+                reason=msg[:140],
+                severity=severity,
+                priority=priority,
+                details={
+                    "logger": record.name,
+                    "level": record.levelname,
+                    "message": msg,
+                    "pathname": record.pathname,
+                    "lineno": record.lineno,
+                },
+            )
+        except Exception:
+            self.handleError(record)
+
+
+_telemetry_handler_installed = False
+
+
+def install_telemetry_log_handler() -> None:
+    """Attach TelemetryLogHandler to the root logger to bridge all logs to OpsDeck."""
+    global _telemetry_handler_installed
+    if _telemetry_handler_installed:
+        return
+    try:
+        handler = TelemetryLogHandler()
+        handler.setLevel(logging.WARNING)
+        logging.getLogger().addHandler(handler)
+        _telemetry_handler_installed = True
+    except Exception as exc:
+        logger.debug(f"[engine.telemetry] Could not attach log handler: {exc}")
+
+
+# Auto-install log handler on module load
+install_telemetry_log_handler()

@@ -157,13 +157,14 @@ def detect_turtle_soup_sweep(
         clean_sym, "TURTLE_SOUP_SWEEP", session_date=sess_date, variant=variant
     )
 
-    # Ballistic Level Calibration
-    # Add 0.15*ATR buffer beyond sweep wick
-    sl_buffer = max(0.15 * atr, curr_ltp * 0.002)
+    # Ballistic Level Calibration with Institutional Volatility Floor
+    min_risk_floor = max(0.70 * atr, curr_ltp * 0.008)
+    sl_buffer = max(0.35 * atr, curr_ltp * 0.004)
     if is_bullish:
-        stop_loss = round(sweep_wick_ext - sl_buffer, 2)
+        raw_stop = round(sweep_wick_ext - sl_buffer, 2)
         entry_price = round(curr_ltp, 2)
-        risk = max(entry_price - stop_loss, curr_ltp * 0.003)
+        risk = max(entry_price - raw_stop, min_risk_floor)
+        stop_loss = round(entry_price - risk, 2)
         target_1 = round(entry_price + (2.0 * risk), 2)
         target_2 = round(entry_price + (3.5 * risk), 2)
         runner_target = round(entry_price + (5.5 * risk), 2)
@@ -177,9 +178,10 @@ def detect_turtle_soup_sweep(
             f"before printing an aggressive rejection spring. Smart money absorbed selling. Enter Long near ₹{entry_price:,.2f}."
         )
     else:
-        stop_loss = round(sweep_wick_ext + sl_buffer, 2)
+        raw_stop = round(sweep_wick_ext + sl_buffer, 2)
         entry_price = round(curr_ltp, 2)
-        risk = max(stop_loss - entry_price, curr_ltp * 0.003)
+        risk = max(raw_stop - entry_price, min_risk_floor)
+        stop_loss = round(entry_price + risk, 2)
         target_1 = round(entry_price - (2.0 * risk), 2)
         target_2 = round(entry_price - (3.5 * risk), 2)
         runner_target = round(entry_price - (5.5 * risk), 2)
@@ -193,48 +195,87 @@ def detect_turtle_soup_sweep(
 
     rr_ratio = round(abs(target_1 - entry_price) / risk, 2)
 
+    # SMT Inter-Market Divergence Confirmation for Benchmark Indices
+    smt_confirmed = False
+    smt_sibling = None
+    if is_index_symbol(clean_sym):
+        try:
+            from engine.smt_divergence import evaluate_smt_divergence
+
+            smt_eval = evaluate_smt_divergence(
+                primary_symbol=clean_sym,
+                direction=direction,
+                primary_spot=curr_ltp,
+                primary_day_high=prior_high,
+                primary_day_low=prior_low,
+                primary_vwap=vwap,
+            )
+            if smt_eval and smt_eval.has_divergence:
+                smt_confirmed = True
+                smt_sibling = smt_eval.sibling_symbol
+                headline += f" | ⚡ SMT Confirmed ({smt_sibling})"
+                summary += f" SMT inter-market divergence confirmed against {smt_sibling} ({smt_eval.rationale})."
+        except Exception as e_smt:
+            logger.debug(f"[TurtleSoup] SMT divergence check skipped: {e_smt}")
+
     # Option Contract Resolution for Index & F&O
     contract_symbol = None
     strike = None
     option_type = None
     expiry_date_str = None
+    resolved_opt = None
 
     try:
-        from engine.position_sizer import is_fno_symbol
-
-        if is_index_symbol(clean_sym) or is_fno_symbol(clean_sym):
-            opt_type_req = "CE" if is_bullish else "PE"
-            resolved = resolve_option_contract(
+        if is_index_symbol(clean_sym):
+            resolved_opt = resolve_option_contract(
                 symbol=clean_sym,
-                spot_price=curr_ltp,
-                option_type=opt_type_req,
-                moneyness="ATM",
+                spot=curr_ltp,
+                direction=direction,
+                underlying_sl=stop_loss,
+                underlying_target=target_1,
+                strike_tier="ATM",
+                prefer_options=True,
             )
-            if resolved:
-                contract_symbol = getattr(resolved, "contract_symbol", None)
-                strike = getattr(resolved, "strike", None)
-                option_type = opt_type_req
-                expiry_date_str = getattr(resolved, "expiry_date", None)
+            if resolved_opt and getattr(resolved_opt, "contract_symbol", None):
+                contract_symbol = resolved_opt.contract_symbol
+                strike = resolved_opt.strike
+                option_type = "CE" if is_bullish else "PE"
+                expiry_date_str = resolved_opt.expiry_date
     except Exception as e_suppressed:
         logger.debug(
             f"[engine.detectors.turtle_soup] Non-fatal exception suppressed: {e_suppressed}"
         )
 
+    has_opt = bool(resolved_opt and getattr(resolved_opt, "entry_premium", 0) > 0)
+    opt_entry = getattr(resolved_opt, "entry_premium", 0.0) if has_opt else 0.0
+    opt_sl = getattr(resolved_opt, "sl_premium", 0.0) if has_opt else 0.0
+    opt_t1 = getattr(resolved_opt, "t1_premium", 0.0) if has_opt else 0.0
+    opt_t2 = getattr(resolved_opt, "t2_premium", 0.0) if has_opt else 0.0
+    opt_t3 = (
+        getattr(resolved_opt, "t3_premium", 0.0) if has_opt else (opt_t2 * 1.25 if opt_t2 else 0.0)
+    )
+    opt_nc = round(opt_entry * 1.05, 2) if has_opt else 0.0
+
     blueprint = ActionableBlueprint(
-        action=action_verb if not option_type else ("BUY_CALL" if is_bullish else "BUY_PUT"),
-        entry_range=f"₹{entry_price * 0.998:,.2f} – ₹{entry_price * 1.002:,.2f}",
-        trigger_level=entry_price,
-        invalidation_stop=stop_loss,
-        target_1=target_1,
-        target_2=target_2,
-        runner_target=runner_target,
+        action=("BUY_CALL" if is_bullish else "BUY_PUT") if has_opt else action_verb,
+        entry_range=f"₹{opt_entry * 0.98:,.2f} – ₹{opt_entry * 1.02:,.2f}"
+        if has_opt
+        else f"₹{entry_price * 0.998:,.2f} – ₹{entry_price * 1.002:,.2f}",
+        trigger_level=opt_entry if has_opt else entry_price,
+        invalidation_stop=opt_sl if has_opt else stop_loss,
+        target_1=opt_t1 if has_opt else target_1,
+        target_2=opt_t2 if has_opt else target_2,
+        runner_target=opt_t3 if has_opt else runner_target,
         risk_reward=f"1:{rr_ratio:.1f}",
-        no_chase_boundary=no_chase,
+        no_chase_boundary=opt_nc if has_opt else no_chase,
         execution_style="LIMIT_ON_PULLBACK",
-        when_to_buy=f"Limit order at OTE pullback near ₹{entry_price:,.2f} after structural trap rejection.",
-        when_to_wait=f"Do not chase if spot moves beyond ₹{no_chase:,.2f}.",
-        profit_rule="Book 50% at Target 1 (+2R) and shift SL to Breakeven (+0.2%). Trail runner to Target 2.",
-        segment="INDEX" if is_index_symbol(clean_sym) else "EQUITY",
+        when_to_buy=f"Limit order at OTE pullback near ₹{opt_entry:,.2f} after structural trap rejection."
+        if has_opt
+        else f"Limit order at OTE pullback near ₹{entry_price:,.2f} after structural trap rejection.",
+        when_to_wait=f"Do not chase if premium moves beyond ₹{opt_nc:,.2f}."
+        if has_opt
+        else f"Do not chase if spot moves beyond ₹{no_chase:,.2f}.",
+        segment="FNO_INDEX" if is_index_symbol(clean_sym) else "EQUITY",
         contract=contract_symbol,
         strike=strike,
         option_type=option_type,
@@ -264,8 +305,11 @@ def detect_turtle_soup_sweep(
         alert_id=alert_id,
         alert_type="TURTLE_SOUP_SWEEP",
         stage="IGNITED",
-        symbol=f"{exchange}:{clean_sym}",
+        symbol=clean_sym,
         exchange=exchange,
+        segment="FNO_INDEX"
+        if is_index_symbol(clean_sym)
+        else ("FNO_STOCK" if contract_symbol else "EQUITY"),
         direction=direction,
         headline=headline,
         summary=summary,
@@ -276,7 +320,7 @@ def detect_turtle_soup_sweep(
         strike=strike,
         option_type=option_type,
         contract_symbol=contract_symbol,
-        confidence=82,
+        confidence=89 if smt_confirmed else 82,
         time_horizon=horizon_val,
         eta_label=eta_desc,
         setup_style=style_val,
@@ -291,6 +335,8 @@ def detect_turtle_soup_sweep(
             "rvol": rvol,
             "rr_ratio": rr_ratio,
             "vwap": vwap,
+            "smt_confirmed": smt_confirmed,
+            "smt_sibling": smt_sibling,
         },
     )
 

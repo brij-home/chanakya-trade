@@ -32,6 +32,11 @@ class TestLotSizes:
 
 
 class TestPositionSizer:
+    def setup_method(self):
+        from engine.market_regime_gate import clear_cached_regime
+
+        clear_cached_regime()
+
     def test_atr_volatility_sizing(self):
         res = calculate_position_size(
             symbol="INFY",

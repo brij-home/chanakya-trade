@@ -314,12 +314,40 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     if atype == "COMMODITY_MOMENTUM":
         deriv = str(_g("derivative_type", "") or "").upper()
         csym_check = str(_g("contract_symbol", "") or "").upper()
+        ltp = float(_g("ltp", 0.0) or 0.0)
+        opt_prem = _g("option_premium", None)
+        if opt_prem is not None and float(opt_prem) > 0 and ltp > 0:
+            prem = float(opt_prem)
+            return abs(ltp - prem) <= max(5.0, prem * 0.35)
+        stk_val = _g("strike", None)
+        if stk_val is not None and float(stk_val) > 0 and ltp > 0:
+            stk = float(stk_val)
+            if abs(ltp - stk) <= (stk * 0.35):
+                return False
         if deriv == "OPT" or csym_check.endswith("CE") or csym_check.endswith("PE"):
             return True
         return False
 
+    # If the alert's LTP has explicitly been mapped to option premium space, it IS option premium levels
+    opt_prem = _g("option_premium", None)
+    ltp = float(_g("ltp", 0.0) or 0.0)
+    deriv = str(_g("derivative_type", "") or "").upper()
+    spot_val = _g("underlying_spot", None)
+
+    if opt_prem is not None and float(opt_prem) > 0 and ltp > 0:
+        prem = float(opt_prem)
+        if abs(ltp - prem) <= max(1.0, prem * 0.15):
+            return True
+
+    if deriv == "OPT" and spot_val is not None and float(spot_val) > 0 and ltp > 0:
+        if ltp < float(spot_val) * 0.35:
+            return True
+
     # Underlying stock/index setups are anchored to spot even if an option recommendation is attached
     if atype in (
+        "BREAKOUT",
+        "BREAKDOWN",
+        "MOMENTUM_BREAKOUT",
         "ASYMMETRIC_OPPORTUNITY",
         "SQUEEZE_BREAKOUT",
         "SQUEEZE_BREAKDOWN",
@@ -330,15 +358,44 @@ def is_alert_option_premium_level(alert: Any) -> bool:
         "PRECURSOR_RADAR",
         "SMC_SWEEP",
         "CIRCUIT_WARNING",
+        "MULTIBAGGER",
+        "STAGE_1_TO_2_EXPANSION",
+        "RRG_SECTOR_ROTATION",
+        "DCF_UNDERVALUED",
+        "FORENSIC_GEM",
+        "SWING_INFLECTION",
     ):
         return False
 
     csym = str(_g("contract_symbol", "") or "").upper()
     opt_t = str(_g("option_type", "") or "").upper()
+    ltp = float(_g("ltp", 0.0) or 0.0)
+    opt_prem = _g("option_premium", None)
+    stk_val = _g("strike", None)
+
+    # If option_premium is provided and ltp differs significantly from it, ltp is the spot price
+    if opt_prem is not None and float(opt_prem) > 0 and ltp > 0:
+        prem = float(opt_prem)
+        if abs(ltp - prem) > max(5.0, prem * 0.35):
+            return False
+
+    # If strike is provided and ltp is near the strike (within 35%), ltp is the underlying spot price
+    if stk_val is not None and float(stk_val) > 0 and ltp > 0:
+        stk = float(stk_val)
+        if abs(ltp - stk) <= (stk * 0.35):
+            if atype not in (
+                "OPTIONS_MOMENTUM",
+                "OPTION_WRITE",
+                "INDEX_CALL_SETUP",
+                "INDEX_PUT_SETUP",
+                "INDEX_MICRO_SCALP",
+                "GAMMA_BLAST",
+            ):
+                return False
 
     # If an option contract is explicitly attached with strike/premium, levels are option premiums
     if (csym.endswith("CE") or csym.endswith("PE") or opt_t in ("CE", "PE")) and (
-        _g("option_premium") is not None or _g("strike") is not None
+        opt_prem is not None or stk_val is not None
     ):
         return True
 
@@ -347,7 +404,7 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     ):
         return True
 
-    has_opt_marker = bool(csym or opt_t in ("CE", "PE") or _g("strike", None))
+    has_opt_marker = bool(csym or opt_t in ("CE", "PE") or stk_val is not None)
     if not has_opt_marker:
         return False
 
@@ -355,12 +412,10 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     if csym and (csym.endswith("CE") or csym.endswith("PE")):
         return True
 
-    if opt_t in ("CE", "PE") and _g("strike", None):
+    if opt_t in ("CE", "PE") and stk_val is not None:
         return True
 
     # Check if ltp is close to option_premium (within 25% tolerance) for other derivatives
-    ltp = float(_g("ltp", 0.0) or 0.0)
-    opt_prem = _g("option_premium", None)
     if opt_prem is not None and float(opt_prem) > 0 and ltp > 0:
         prem = float(opt_prem)
         return abs(ltp - prem) <= max(2.0, prem * 0.25)

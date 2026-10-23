@@ -42,6 +42,8 @@ def compute_gamma_conviction(
     spread_pct: Optional[float] = None,
     is_wall_breakout: bool = False,
     is_physical_week: bool = False,
+    gamma_regime: str = "NEUTRAL",
+    is_acceleration_zone: bool = False,
 ) -> int:
     """
     Computes institutional conviction score (60 - 98) for Gamma Blast setups.
@@ -59,6 +61,7 @@ def compute_gamma_conviction(
       9. Major OI Wall Breakout (+6 pts for breaking through max OI wall with negative ΔOI)
       10. Order Book Spread Audit (+3 pts for tight spread <= 1.0%, -4 pts for wide > 2.5%)
       11. SEBI Physical Settlement Week Friction (-4 pts for single stock near-month unless explosive)
+      12. Institutional Dealer GEX Acceleration Zone (+4 pts for acceleration, -2 pts for pinning)
     """
     score = 62.0
 
@@ -112,6 +115,12 @@ def compute_gamma_conviction(
     # 10. Physical settlement week penalty (single stock near-month)
     if is_physical_week and vol_oi_ratio < 2.0:
         score -= 4.0
+
+    # 11. Institutional Dealer GEX Acceleration Zone
+    if is_acceleration_zone or gamma_regime == "NEGATIVE_GAMMA_ACCELERATION":
+        score += 4.0
+    elif gamma_regime == "POSITIVE_GAMMA_PIN" and not sweep_active and vol_oi_ratio < 2.0:
+        score -= 2.0
 
     return min(98, max(60, int(round(score))))
 
@@ -188,6 +197,15 @@ def detect_gamma_blast(
     pe_contracts = [c for c in chain if getattr(c, "option_type", "") == "PE"]
 
     effective_vwap = vwap if (vwap and vwap > 0) else spot
+
+    # ── Institutional Dealer Gamma Exposure (GEX) Surface Analysis ─────────────
+    from market.options import compute_chain_gex
+
+    gex_data = compute_chain_gex(chain, spot, underlying=underlying, lot_size=lot_sz)
+    net_gex = gex_data.get("net_gex", 0.0)
+    gamma_regime = gex_data.get("gamma_regime", "NEUTRAL")
+    gex_flip_strike = gex_data.get("gex_flip_strike", spot)
+    is_acceleration_zone = gex_data.get("is_acceleration_zone", False)
 
     # ── PDH / PDL Liquidity Sweep Detection (Fix 3) ────────────────────────────
     # Detects when spot has swept previous session or intraday extreme and rejected/bounced
@@ -663,6 +681,8 @@ def detect_gamma_blast(
                     spread_pct=spread_pct,
                     is_wall_breakout=is_ce_wall_breakout,
                     is_physical_week=is_phys_week,
+                    gamma_regime=gamma_regime,
+                    is_acceleration_zone=is_acceleration_zone,
                 )
 
                 # PDL Proximity Boost: CE at PDL is a structural demand bounce — extra conviction
@@ -752,8 +772,14 @@ def detect_gamma_blast(
             else:
                 oi_desc = f"Institutional Call turnover surge ({volume:,} contracts traded). "
 
+            vwap_diff_ce = spot - effective_vwap
+            vwap_text_ce = (
+                f"holding VWAP (+{vwap_diff_ce:.1f} pts)"
+                if vwap_diff_ce >= 0
+                else f"below VWAP ({vwap_diff_ce:.1f} pts)"
+            )
             summary = (
-                f"{oi_desc}Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} holding VWAP. "
+                f"{oi_desc}Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} {vwap_text_ce}. "
                 f"{'Explosive short-covering underway!' if is_ignited else 'Early-warning coiling before gamma surge!'}"
             )
 
@@ -881,6 +907,10 @@ def detect_gamma_blast(
                         "friction_pts": friction_pts_ce,
                         "net_risk_reward": net_rr_ce,
                         "max_loss_rupees": max_loss_ce_inr,
+                        "net_gex": net_gex,
+                        "gamma_regime": gamma_regime,
+                        "gex_flip_strike": gex_flip_strike,
+                        "is_acceleration_zone": is_acceleration_zone,
                     },
                     actionable_plan={
                         "action": "BUY CE",
@@ -1151,8 +1181,8 @@ def detect_gamma_blast(
         is_high_turnover = (
             vol_oi_ratio >= (0.80 if is_opening_drive else 1.4) or volume >= min_turnover_vol
         )
-        # Relaxed VWAP gate for PE (1.002 → 1.008)
-        _pe_vwap_multiplier = 1.008 if is_index else 1.004
+        # Strict VWAP boundary for index PE (1.000 for index, 1.002 for single-stock) to prevent CE/PE overlap
+        _pe_vwap_multiplier = 1.000 if is_index else 1.002
         spot_below_vwap = spot <= (effective_vwap * _pe_vwap_multiplier)
         # PDH sweep bypass: if spot swept the day_high and wicked back, lift the VWAP gate
         if _pdh_sweep_active and not spot_below_vwap:
@@ -1320,6 +1350,8 @@ def detect_gamma_blast(
                     spread_pct=spread_pct,
                     is_wall_breakout=is_pe_wall_breakout,
                     is_physical_week=is_phys_week,
+                    gamma_regime=gamma_regime,
+                    is_acceleration_zone=is_acceleration_zone,
                 )
 
                 # PDH Proximity Boost: PE at PDH is a structural supply rejection — extra conviction
@@ -1411,8 +1443,14 @@ def detect_gamma_blast(
             else:
                 oi_desc = f"Institutional Put turnover surge ({volume:,} contracts traded). "
 
+            vwap_diff_pe = spot - effective_vwap
+            vwap_text_pe = (
+                f"below VWAP ({vwap_diff_pe:.1f} pts)"
+                if vwap_diff_pe <= 0
+                else f"above VWAP (+{vwap_diff_pe:.1f} pts)"
+            )
             summary = (
-                f"{oi_desc}Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} below VWAP. "
+                f"{oi_desc}Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} {vwap_text_pe}. "
                 f"{'Aggressive long put / short spot momentum!' if is_ignited else 'Early-warning coiling before put gamma surge!'}"
             )
 
@@ -1542,6 +1580,10 @@ def detect_gamma_blast(
                         "friction_pts": friction_pts_pe,
                         "net_risk_reward": net_rr_pe,
                         "max_loss_rupees": max_loss_pe_inr,
+                        "net_gex": net_gex,
+                        "gamma_regime": gamma_regime,
+                        "gex_flip_strike": gex_flip_strike,
+                        "is_acceleration_zone": is_acceleration_zone,
                     },
                     actionable_plan={
                         "action": "BUY PE",

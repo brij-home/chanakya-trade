@@ -229,31 +229,31 @@ export default function ConvictionScoreCard({
         {/* Labels & Verdict Badges */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 mb-1 flex-wrap">
-            <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border ${vs.badge} tracking-wide uppercase`}>
+            <span className={`text-[11px] font-black px-1.5 py-0.5 rounded border ${vs.badge} tracking-wide uppercase`}>
               {verdict === 'MAX_CONVICTION' ? '🔥 MAX CONVICTION' :
                verdict === 'HIGH' ? '✅ HIGH CONVICTION' :
                verdict === 'MODERATE' ? '⚠️ MODERATE' : '🛑 WAIT / STAND DOWN'}
             </span>
-            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${posSizeBadge[posSize] ?? posSizeBadge.FLAT}`}>
+            <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded border ${posSizeBadge[posSize] ?? posSizeBadge.FLAT}`}>
               {posSize === '2X' ? '⚡ 2× Sizing' :
                posSize === 'NORMAL' ? '✓ Normal Sizing' :
                posSize === 'HALF' ? '½ Sizing' : 'Flat / No Trade'}
             </span>
             {veto?.vetoed && (
-              <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/50 uppercase tracking-wider animate-pulse">
+              <span className="text-[11px] font-black px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/50 uppercase tracking-wider animate-pulse">
                 ⛔ Veto Active
               </span>
             )}
-            <span className="ml-auto text-[9px] text-muted font-mono">{score.as_of}</span>
+            <span className="ml-auto text-[11px] text-muted font-mono">{score.as_of}</span>
           </div>
 
-          <div className="flex items-center gap-1.5 text-[9px] font-mono">
+          <div className="flex items-center gap-1.5 text-[11px] font-mono">
             <span className="text-emerald-600 dark:text-emerald-400 font-bold">{score.bullish_count}▲ Bullish</span>
             <span className="text-muted">/</span>
             <span className="text-rose-600 dark:text-rose-400 font-bold">{score.bearish_count}▼ Bearish</span>
             <span className="text-muted">/</span>
             <span className="text-muted">{score.unavailable_count}— Neutral</span>
-            <span className="text-muted/60 text-[8px] ml-auto font-sans font-semibold">12-Factor Orthogonal Engine</span>
+            <span className="text-muted/60 text-[10px] ml-auto font-sans font-semibold">12-Factor Orthogonal Engine</span>
           </div>
 
           <p className={`text-[10px] ${vs.text} font-medium font-ui leading-snug mt-1 line-clamp-2`}>
@@ -263,7 +263,7 @@ export default function ConvictionScoreCard({
 
         {/* Expand toggle */}
         <div className="flex items-center gap-1 text-[10px] font-mono text-muted shrink-0 pl-1">
-          <span className="hidden sm:inline text-[9px] uppercase tracking-wider">
+          <span className="hidden sm:inline text-[11px] uppercase tracking-wider">
             {expanded ? 'Hide Axes' : 'View 5 Axes'}
           </span>
           <span className={`text-xs ${vs.text} transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`}>
@@ -277,7 +277,7 @@ export default function ConvictionScoreCard({
         <div className="mx-3 mb-2 p-2 rounded-xl bg-rose-500/15 border border-rose-500/40 flex items-start gap-2 text-rose-300 text-[10px] leading-tight">
           <span className="text-xs shrink-0">⛔</span>
           <div>
-            <div className="font-black tracking-wide uppercase text-[9px] text-rose-400">Institutional Safety Veto Enforced</div>
+            <div className="font-black tracking-wide uppercase text-[11px] text-rose-400">Institutional Safety Veto Enforced</div>
             <div className="mt-0.5 opacity-90">{veto.reason} (Score capped at 55)</div>
           </div>
         </div>
@@ -294,7 +294,7 @@ export default function ConvictionScoreCard({
                   <span className="text-[10px] font-black uppercase tracking-wider text-text flex items-center gap-1">
                     <span>📐</span> Data-Driven Trade Plan
                   </span>
-                  <span className={`text-[8px] font-black px-1.5 py-0.2 rounded border uppercase ${
+                  <span className={`text-[10px] font-black px-1.5 py-0.2 rounded border uppercase ${
                     score.trade_plan.direction === 'LONG'
                       ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40'
                       : 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/40'
@@ -303,14 +303,14 @@ export default function ConvictionScoreCard({
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                  <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded border ${
                     score.trade_plan.is_asymmetry_viable
                       ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40'
                       : 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40'
                   }`}>
                     ⚖️ R:R {score.trade_plan.rr_t2}:1
                   </span>
-                  <span className="text-[9px] font-mono text-muted">
+                  <span className="text-[11px] font-mono text-muted">
                     Entry: ₹{score.trade_plan.entry_price?.toLocaleString('en-IN', { minimumFractionDigits: 1 })}
                   </span>
                 </div>
@@ -320,55 +320,55 @@ export default function ConvictionScoreCard({
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[10px]">
                 {/* Invalidation Stop-Loss */}
                 <div className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/20">
-                  <div className="flex items-center justify-between text-rose-600 dark:text-rose-400 font-bold text-[9px] uppercase">
+                  <div className="flex items-center justify-between text-rose-600 dark:text-rose-400 font-bold text-[11px] uppercase">
                     <span>🛑 Invalidation (SL)</span>
                     <span className="font-mono">-{score.trade_plan.stop_distance_pts} pts</span>
                   </div>
                   <div className="font-mono font-black text-sm text-text mt-0.5">
                     ₹{score.trade_plan.invalidation_stop?.toLocaleString('en-IN', { minimumFractionDigits: 1 })}
                   </div>
-                  <div className="text-[8px] text-muted leading-tight mt-1 line-clamp-2">
+                  <div className="text-[10px] text-muted leading-tight mt-1 line-clamp-2">
                     {score.trade_plan.sl_rationale}
                   </div>
                 </div>
 
                 {/* Target 1 (Friction Point) */}
                 <div className="p-2 rounded-lg bg-cyan-500/10 border border-cyan-500/20">
-                  <div className="flex items-center justify-between text-cyan-700 dark:text-cyan-400 font-bold text-[9px] uppercase">
+                  <div className="flex items-center justify-between text-cyan-700 dark:text-cyan-400 font-bold text-[11px] uppercase">
                     <span>🎯 Target 1 ({score.trade_plan.rr_t1}:1 R:R)</span>
                     <span className="font-mono">+{score.trade_plan.t1_distance_pts} pts</span>
                   </div>
                   <div className="font-mono font-black text-sm text-text mt-0.5">
                     ₹{score.trade_plan.target_1?.toLocaleString('en-IN', { minimumFractionDigits: 1 })}
                   </div>
-                  <div className="flex items-center gap-1 text-[8px] font-mono text-cyan-700/90 dark:text-cyan-300/80 mt-1">
+                  <div className="flex items-center gap-1 text-[10px] font-mono text-cyan-700/90 dark:text-cyan-300/80 mt-1">
                     <span>⏱️ ETA: {score.trade_plan.eta_t1_str}</span>
                   </div>
-                  <div className="text-[8px] text-muted leading-tight mt-0.5 line-clamp-1">
+                  <div className="text-[10px] text-muted leading-tight mt-0.5 line-clamp-1">
                     {score.trade_plan.t1_rationale}
                   </div>
                 </div>
 
                 {/* Target 2 (Liquidity Expansion) */}
                 <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
-                  <div className="flex items-center justify-between text-emerald-600 dark:text-emerald-400 font-bold text-[9px] uppercase">
+                  <div className="flex items-center justify-between text-emerald-600 dark:text-emerald-400 font-bold text-[11px] uppercase">
                     <span>🚀 Target 2 ({score.trade_plan.rr_t2}:1 R:R)</span>
                     <span className="font-mono">+{score.trade_plan.t2_distance_pts} pts</span>
                   </div>
                   <div className="font-mono font-black text-sm text-text mt-0.5">
                     ₹{score.trade_plan.target_2?.toLocaleString('en-IN', { minimumFractionDigits: 1 })}
                   </div>
-                  <div className="flex items-center gap-1 text-[8px] font-mono text-emerald-700/90 dark:text-emerald-300/80 mt-1">
+                  <div className="flex items-center gap-1 text-[10px] font-mono text-emerald-700/90 dark:text-emerald-300/80 mt-1">
                     <span>⏱️ ETA: {score.trade_plan.eta_t2_str}</span>
                   </div>
-                  <div className="text-[8px] text-muted leading-tight mt-0.5 line-clamp-1">
+                  <div className="text-[10px] text-muted leading-tight mt-0.5 line-clamp-1">
                     {score.trade_plan.t2_rationale}
                   </div>
                 </div>
               </div>
 
               {/* ETA, Clock & Options Friction Insights */}
-              <div className="pt-1.5 border-t border-border/30 flex flex-col gap-1 text-[9px]">
+              <div className="pt-1.5 border-t border-border/30 flex flex-col gap-1 text-[11px]">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-muted font-mono">
                     ATR Velocity: <b className="text-text">{score.trade_plan.velocity_pts_per_bar} pts/5m bar</b>
@@ -379,7 +379,7 @@ export default function ConvictionScoreCard({
                   </span>
                 </div>
                 {score.trade_plan.structure_advice && (
-                  <div className="text-[9px] text-text/80 bg-surface/40 p-1.5 rounded border border-border/30 flex items-start gap-1.5">
+                  <div className="text-[11px] text-text/80 bg-surface/40 p-1.5 rounded border border-border/30 flex items-start gap-1.5">
                     <span className="text-xs">🛡️</span>
                     <div className="flex-1">
                       <span className="font-bold text-amber mr-1">Structure Guidance:</span>
@@ -393,7 +393,7 @@ export default function ConvictionScoreCard({
 
           {/* Axis Filter Pills + View Mode Toggle */}
           <div className="flex items-center justify-between gap-2 flex-wrap pb-1">
-            <div className="flex items-center gap-1 overflow-x-auto text-[9px] scrollbar-none">
+            <div className="flex items-center gap-1 overflow-x-auto text-[11px] scrollbar-none">
               <button
                 type="button"
                 onClick={(e) => { e.stopPropagation(); setSelectedAxis('ALL'); }}
@@ -421,14 +421,14 @@ export default function ConvictionScoreCard({
                   >
                     <span>{meta.icon}</span>
                     <span>{meta.label}</span>
-                    <span className="text-[8px] opacity-70">({count})</span>
+                    <span className="text-[10px] opacity-70">({count})</span>
                   </button>
                 )
               })}
             </div>
 
             {/* View Mode Toggle: Table (Compact) vs Cards */}
-            <div className="flex items-center gap-0.5 bg-surface border border-border/60 p-0.5 rounded-lg text-[9px] font-mono shrink-0 ml-auto">
+            <div className="flex items-center gap-0.5 bg-surface border border-border/60 p-0.5 rounded-lg text-[11px] font-mono shrink-0 ml-auto">
               <button
                 type="button"
                 onClick={(e) => { e.stopPropagation(); setViewMode('TABLE'); }}
@@ -457,7 +457,7 @@ export default function ConvictionScoreCard({
             <div className="overflow-x-auto rounded-xl border border-border/50 bg-panel/60 shadow-xs">
               <table className="w-full text-left text-xs font-mono border-collapse">
                 <thead>
-                  <tr className="border-b border-border/60 bg-surface/80 text-[9px] uppercase tracking-wider text-muted font-bold">
+                  <tr className="border-b border-border/60 bg-surface/80 text-[11px] uppercase tracking-wider text-muted font-bold">
                     <th className="py-2 px-3">Factor / Dimension</th>
                     <th className="py-2 px-2.5 hidden sm:table-cell">Pillar</th>
                     <th className="py-2 px-2.5 text-center">Score</th>
@@ -488,7 +488,7 @@ export default function ConvictionScoreCard({
 
                         {/* Pillar / Axis */}
                         <td className="py-1.5 px-2.5 hidden sm:table-cell whitespace-nowrap">
-                          <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded border ${meta.border} ${meta.bg} ${meta.color}`}>
+                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${meta.border} ${meta.bg} ${meta.color}`}>
                             {meta.label}
                           </span>
                         </td>
@@ -501,7 +501,7 @@ export default function ConvictionScoreCard({
                                 {factorSignalIcon(f.signal)}
                               </span>
                               <span className="text-text">{f.score}</span>
-                              <span className="text-[8px] text-muted font-normal">/10</span>
+                              <span className="text-[10px] text-muted font-normal">/10</span>
                             </div>
                             <div className="w-full h-1 rounded-full bg-surface overflow-hidden border border-border/40">
                               <div
@@ -517,14 +517,14 @@ export default function ConvictionScoreCard({
 
                         {/* Live Observation / Reading */}
                         <td className="py-1.5 px-3">
-                          <span className="text-muted font-ui text-[9px] leading-relaxed line-clamp-2">
+                          <span className="text-muted font-ui text-[11px] leading-relaxed line-clamp-2">
                             {f.detail || '—'}
                           </span>
                         </td>
 
                         {/* Signal Badge */}
                         <td className="py-1.5 px-3 text-right whitespace-nowrap">
-                          <span className={`text-[8px] font-black px-2 py-0.5 rounded border uppercase tracking-wider ${
+                          <span className={`text-[10px] font-black px-2 py-0.5 rounded border uppercase tracking-wider ${
                             isBull ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30' :
                             isBear ? 'bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30' :
                             isUnavailable ? 'bg-slate-500/10 text-muted border-border/40' :
@@ -556,7 +556,7 @@ export default function ConvictionScoreCard({
                           {factorSignalIcon(f.signal)}
                         </span>
                         <span className="font-mono font-black text-[11px] text-text">
-                          {f.score}<span className="text-[8px] text-muted font-normal">/10</span>
+                          {f.score}<span className="text-[10px] text-muted font-normal">/10</span>
                         </span>
                       </div>
                       <div className="w-full h-1.5 rounded-full bg-surface overflow-hidden">
@@ -576,15 +576,15 @@ export default function ConvictionScoreCard({
                         <span className="font-bold text-text text-[10px]">
                           {f.label}
                         </span>
-                        <span className={`text-[8px] font-bold px-1 py-0.2 rounded border ${meta.border} ${meta.bg} ${meta.color}`}>
+                        <span className={`text-[10px] font-bold px-1 py-0.2 rounded border ${meta.border} ${meta.bg} ${meta.color}`}>
                           {meta.icon} {meta.label}
                         </span>
-                        <span className={`text-[8px] font-bold uppercase ml-auto ${factorSignalBadge(f.signal)}`}>
+                        <span className={`text-[10px] font-bold uppercase ml-auto ${factorSignalBadge(f.signal)}`}>
                           {f.signal}
                         </span>
                       </div>
                       {f.detail && (
-                        <div className="text-muted text-[9px] leading-relaxed mt-0.5">
+                        <div className="text-muted text-[11px] leading-relaxed mt-0.5">
                           {f.detail}
                         </div>
                       )}
@@ -596,21 +596,21 @@ export default function ConvictionScoreCard({
           )}
 
           {/* Institutional Calibration Guide */}
-          <div className="pt-2 border-t border-border/30 grid grid-cols-4 gap-1 text-[8px] font-mono text-center">
+          <div className="pt-2 border-t border-border/30 grid grid-cols-4 gap-1 text-[10px] font-mono text-center">
             <div className="p-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-700 dark:text-emerald-400">
-              <div className="font-black text-[9px]">85–100</div>
+              <div className="font-black text-[11px]">85–100</div>
               <div className="text-muted font-sans font-semibold">2× Size</div>
             </div>
             <div className="p-1 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-cyan-700 dark:text-cyan-400">
-              <div className="font-black text-[9px]">70–84</div>
+              <div className="font-black text-[11px]">70–84</div>
               <div className="text-muted font-sans font-semibold">Normal</div>
             </div>
             <div className="p-1 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-400">
-              <div className="font-black text-[9px]">50–69</div>
+              <div className="font-black text-[11px]">50–69</div>
               <div className="text-muted font-sans font-semibold">½ Size</div>
             </div>
             <div className="p-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-700 dark:text-rose-400">
-              <div className="font-black text-[9px]">{'<'}50</div>
+              <div className="font-black text-[11px]">{'<'}50</div>
               <div className="text-muted font-sans font-semibold">Stand Down</div>
             </div>
           </div>

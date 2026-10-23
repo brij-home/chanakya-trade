@@ -25,6 +25,8 @@ Usage:
 from __future__ import annotations
 import logging
 
+from config.constants import DEFAULT_PAIR_MAX_ADVERSE_PCT
+
 logger = logging.getLogger("engine.backtest")
 
 
@@ -336,6 +338,12 @@ STRATEGIES = {
     "turtle_soup": lambda args: TurtleSoupStrategy(
         period=int(args[0]) if args else 20,
     ),
+    "smt_sweep": lambda args: SMTSweepStrategy(
+        lookback=int(args[0]) if args else 20,
+    ),
+    "smt": lambda args: SMTSweepStrategy(
+        lookback=int(args[0]) if args else 20,
+    ),
 }
 
 
@@ -476,6 +484,142 @@ class TurtleSoupStrategy(Strategy):
         spring = (df["low"] < low_prev) & (df["close"] > low_prev)
         upthrust = (df["high"] > high_prev) & (df["close"] < high_prev)
 
+        signals[spring] = 1
+        signals[upthrust] = -1
+        return signals
+
+
+class SMTSweepStrategy(Strategy):
+    """
+    Smart Money Technique (SMT) Inter-Market Divergence Liquidity Sweep Strategy.
+
+    Institutional upgrade to Turtle Soup: fades swing high/low liquidity sweeps on a primary
+    symbol ONLY when a correlated sibling index (e.g., BANKNIFTY vs NIFTY) diverges (non-confirms).
+
+    Key Invariants:
+      1. Spring (Bullish Reversal / Buy):
+         Primary sweeps rolling N-period low (low < low_prev, close > low_prev).
+         Correlated sibling non-confirms: sibling holds above its prior low (sib_low >= sib_low_prev).
+         Primary candle demonstrates absorption wick (lower wick >= min_wick_pct) or positive close.
+         -> Signal: +1 (BUY / Enter Long)
+      2. Upthrust (Bearish Reversal / Exit):
+         Primary sweeps rolling N-period high (high > high_prev, close < high_prev).
+         Correlated sibling non-confirms: sibling fails to make higher high (sib_high <= sib_high_prev).
+         Primary candle demonstrates rejection wick (upper wick >= min_wick_pct) or negative close.
+         -> Signal: -1 (SELL / Exit Long)
+      3. Harmonious Breakout Protection:
+         If BOTH primary and sibling make new highs/lows in unison, SMT divergence is FALSE.
+         The trade is strictly passed over, shielding the account from runaway trend breakout losses.
+    """
+
+    def __init__(
+        self,
+        lookback: int = 20,
+        sibling_symbol: Optional[str] = None,
+        sibling_df: Optional[pd.DataFrame] = None,
+        min_wick_pct: float = 25.0,
+        primary_symbol: Optional[str] = None,
+    ):
+        self.lookback = lookback
+        self.sibling_symbol = sibling_symbol
+        self.sibling_df = sibling_df
+        self.min_wick_pct = min_wick_pct
+        self.primary_symbol = primary_symbol
+        self.name = f"SMT Sweep({lookback})"
+
+    def _resolve_sibling_df(self, primary_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        if self.sibling_df is not None and not self.sibling_df.empty:
+            return self.sibling_df
+
+        # Check if primary_df has sibling columns directly (e.g. synthetic paired test DataFrame)
+        if "sib_close" in primary_df.columns:
+            return pd.DataFrame(
+                {
+                    "open": primary_df.get("sib_open", primary_df["sib_close"]),
+                    "high": primary_df.get("sib_high", primary_df["sib_close"]),
+                    "low": primary_df.get("sib_low", primary_df["sib_close"]),
+                    "close": primary_df["sib_close"],
+                    "volume": primary_df.get("sib_volume", 0),
+                },
+                index=primary_df.index,
+            )
+
+        # Attempt to load sibling from market history
+        try:
+            from engine.smt_divergence import get_sibling_index
+            from market.history import get_ohlcv
+
+            primary_name = self.primary_symbol or "NIFTY"
+            sib_sym = self.sibling_symbol or get_sibling_index(primary_name)
+
+            if len(primary_df) > 0:
+                start_dt = primary_df.index[0]
+                end_dt = primary_df.index[-1]
+                days = (
+                    max(30, (end_dt - start_dt).days + 15)
+                    if hasattr(start_dt, "days") or isinstance(start_dt, pd.Timestamp)
+                    else 365
+                )
+                sib_data = get_ohlcv(symbol=sib_sym, interval="day", days=int(days))
+                if sib_data is not None and not sib_data.empty:
+                    sib_data = sib_data.dropna(subset=["close"])
+                    if hasattr(sib_data.index, "tz") and sib_data.index.tz is not None:
+                        sib_data.index = sib_data.index.tz_localize(None)
+                    return sib_data
+        except Exception as e:
+            logger.debug(f"[SMTSweepStrategy] Sibling auto-fetch note: {e}")
+
+        return None
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        high_prev = df["high"].rolling(self.lookback).max().shift(1)
+        low_prev = df["low"].rolling(self.lookback).min().shift(1)
+
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+        open_val = df["open"] if "open" in df.columns else close
+
+        body_top = pd.concat([open_val, close], axis=1).max(axis=1)
+        body_bottom = pd.concat([open_val, close], axis=1).min(axis=1)
+        candle_range = (high - low).replace(0, float("nan"))
+        upper_wick_pct = (high - body_top) / candle_range * 100.0
+        lower_wick_pct = (body_bottom - low) / candle_range * 100.0
+
+        sib_df = self._resolve_sibling_df(df)
+        if sib_df is not None and not sib_df.empty:
+            sib_aligned = sib_df.reindex(df.index, method="ffill")
+            sib_high = (
+                sib_aligned["high"] if "high" in sib_aligned.columns else sib_aligned["close"]
+            )
+            sib_low = sib_aligned["low"] if "low" in sib_aligned.columns else sib_aligned["close"]
+            sib_high_prev = sib_high.rolling(self.lookback).max().shift(1)
+            sib_low_prev = sib_low.rolling(self.lookback).min().shift(1)
+
+            # SMT Divergence conditions:
+            # Bearish SMT: sibling failed to exceed prior high (non-confirmation of primary's new high)
+            bearish_smt_div = sib_high <= sib_high_prev
+            # Bullish SMT: sibling held above prior low (non-confirmation of primary's new low)
+            bullish_smt_div = sib_low >= sib_low_prev
+        else:
+            bearish_smt_div = pd.Series(True, index=df.index)
+            bullish_smt_div = pd.Series(True, index=df.index)
+
+        # Sweep signals with rejection candle filter
+        spring = (
+            (low < low_prev)
+            & (close > low_prev)
+            & bullish_smt_div
+            & ((lower_wick_pct >= self.min_wick_pct) | (close > open_val))
+        )
+        upthrust = (
+            (high > high_prev)
+            & (close < high_prev)
+            & bearish_smt_div
+            & ((upper_wick_pct >= self.min_wick_pct) | (close < open_val))
+        )
+
+        signals = pd.Series(0, index=df.index)
         signals[spring] = 1
         signals[upthrust] = -1
         return signals
@@ -1079,11 +1223,13 @@ class MultiBacktester:
         exchange: str = "NSE",
         period: str = "1y",
         capital: float = 100000,
+        max_adverse_pct: float = DEFAULT_PAIR_MAX_ADVERSE_PCT,
     ) -> None:
         self.symbols = [s.upper() for s in symbols]
         self.exchange = exchange.upper()
         self.period = period
         self.initial_capital = capital
+        self.max_adverse_pct = max_adverse_pct
         self._data: dict[str, pd.DataFrame] = {}
 
     def _load_data(self) -> dict[str, pd.DataFrame]:
@@ -1205,6 +1351,29 @@ class MultiBacktester:
                         if new_sig == 0 or (new_sig != 0 and new_sig != positions[sym]):
                             should_exit = True
                             break
+
+                # Cointegration Ruin Circuit Breaker:
+                # If cointegration permanently breaks and pairs drift apart without reverting,
+                # exit immediately once combined mark-to-market drawdown exceeds max_adverse_pct.
+                if not should_exit and getattr(self, "max_adverse_pct", 0.0) > 0:
+                    unrealized_pct_sum = 0.0
+                    active_cnt = 0
+                    for sym in self.symbols:
+                        if positions[sym] != 0:
+                            ep = entry_prices[sym]
+                            xp = prices[sym]
+                            if ep > 0:
+                                leg_pct = (
+                                    ((xp - ep) / ep * 100)
+                                    if positions[sym] == 1
+                                    else ((ep - xp) / ep * 100)
+                                )
+                                unrealized_pct_sum += leg_pct
+                                active_cnt += 1
+                    if active_cnt > 0:
+                        avg_dd = unrealized_pct_sum / active_cnt
+                        if avg_dd <= -self.max_adverse_pct:
+                            should_exit = True
 
                 if should_exit:
                     # Close all positions
@@ -1419,6 +1588,8 @@ def run_backtest(
         )
 
     strategy = factory(strategy_args or [])
+    if hasattr(strategy, "primary_symbol") and not getattr(strategy, "primary_symbol", None):
+        strategy.primary_symbol = symbol
     bt = Backtester(symbol=symbol, period=period, capital=capital)
     return bt.run(strategy)
 

@@ -708,7 +708,7 @@ class MarketTickerStream:
                         item.updated_at = now_iso
                         item.updated_ts = now_ts
         except Exception as e:
-            logger.warning(f"[TickerStream] Global macro refresh error: {e}", exc_info=True)
+            logger.info(f"[TickerStream] Global macro refresh skipped: {e}")
 
         self._notify_listeners()
 

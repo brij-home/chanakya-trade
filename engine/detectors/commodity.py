@@ -1219,6 +1219,8 @@ def detect_commodity_breakouts(
                     )
                     else default_t2
                 )
+                if t2_price <= t1_price + 0.5 * risk_pts:
+                    t2_price = round(max(default_t2, t1_price + 1.5 * risk_pts), 2)
                 t3_price = round(max(default_t3, t2_price + 2.0 * risk_pts), 2)
             else:
                 t1_price = default_t1
@@ -1295,6 +1297,8 @@ def detect_commodity_breakouts(
                     )
                     else default_t2
                 )
+                if t2_price >= t1_price - 0.5 * risk_pts:
+                    t2_price = round(min(default_t2, t1_price - 1.5 * risk_pts), 2)
                 t3_price = round(min(default_t3, t2_price - 2.0 * risk_pts), 2)
             else:
                 t1_price = default_t1
@@ -1549,8 +1553,10 @@ def detect_commodity_breakouts(
             opt_recommendation
             and opt_recommendation.get("delta_tier") in ("ATM (Δ≈0.50)", "ITM (Δ>0.50)")
         )
+        is_base_metal = clean_sym in ("COPPER", "ZINC", "ALUMINIUM", "LEAD")
         should_use_option_primary = bool(
-            opt_recommendation
+            not is_base_metal
+            and opt_recommendation
             and not is_synthetic_options
             and (opt_delta_safe or os.environ.get("CHANAKYA_TESTING") == "1")
             and (is_golden_hours or rvol >= 1.5 or os.environ.get("CHANAKYA_TESTING") == "1")
@@ -1681,11 +1687,12 @@ def detect_commodity_breakouts(
                     f"Confluence: {confluence_str}."
                 )
         else:
-            fut_risk = round(risk_pts * lot_sz, 0)
+            comm_risk = round(risk_pts * lot_sz, 0)
+            pref_vehicle = "FUTURES" if is_base_metal else "COMMODITY"
             plan_dict = {
                 "action": action,
                 "segment": "COMMODITY",
-                "instrument_type": "FUTURES",
+                "instrument_type": "FUTURES" if is_base_metal else "COMMODITY",
                 "contract": f"MCX:{clean_sym}",
                 "entry_range": f"₹{e_low:,.1f} – ₹{e_high:,.1f}",
                 "stop_loss": f"₹{sl_price:,.1f}",
@@ -1697,11 +1704,11 @@ def detect_commodity_breakouts(
                 "no_chase_boundary": f"₹{no_chase:,.1f}",
                 "risk_reward": rr_str,
                 "lot_size": lot_sz,
-                "preferred_vehicle": "FUTURES",
+                "preferred_vehicle": pref_vehicle,
                 "setup_confluence": confluence_str,
                 "when_to_buy": when_buy_action if is_bullish else when_sell_action,
                 "when_to_wait": f"Do not chase if move exceeds {round(abs(chg) + 1.0, 1)}% or price moves beyond ₹{e_high if is_bullish else e_low:,.1f}.",
-                "profit_rule": f"Book 50% at T1 (+2.8R), move stop to breakeven, hold 25% for T2 (+5.0R), runner for T3 (+8.0R). Capped risk ₹{fut_risk:,.0f} per lot.",
+                "profit_rule": f"Book 50% at T1 (+2.8R), move stop to breakeven, hold 25% for T2 (+5.0R), runner for T3 (+8.0R). Capped risk ₹{comm_risk:,.0f} per lot.",
                 "trade_plan": {
                     "symbol": clean_sym,
                     "direction": "LONG" if is_bullish else "SHORT",
@@ -1883,13 +1890,13 @@ def detect_commodity_breakouts(
             primary_sl = sl_price
             primary_no_chase = round(no_chase, 2)
             primary_contract = f"MCX:{clean_sym}"
-            primary_deriv = "FUT"
+            primary_deriv = "FUT" if is_base_metal else "COMMODITY"
             opt_t = None
             opt_s = None
             opt_p = None
             opt_stop = None
             opt_tgt = None
-            variant_slug = f"{direction.lower()}-fut"
+            variant_slug = f"{direction.lower()}"
 
         alert_id = generate_alert_id(clean_sym, alert_type, variant=variant_slug)
 
@@ -1993,8 +2000,8 @@ def detect_commodity_breakouts(
             alert.target_level = opt_recommendation["target_1"]
             alert.no_chase_boundary = round(opt_recommendation["no_chase_boundary"], 2)
         else:
-            alert.derivative_type = "FUT"
-            alert.contract_symbol = f"MCX:{clean_sym}"
+            alert.derivative_type = "FUT" if is_base_metal else "COMMODITY"
+            alert.contract_symbol = f"MCX:{clean_sym}" if is_base_metal else None
             alert.option_premium = None
             alert.underlying_spot = ltp
 

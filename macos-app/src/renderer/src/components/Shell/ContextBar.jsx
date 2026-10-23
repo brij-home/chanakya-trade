@@ -49,14 +49,14 @@ export function MarketClock() {
     >
       <div className="flex flex-col items-end">
         <span
-          className="text-[9px] font-bold tracking-widest font-mono"
+          className="text-[11px] font-bold tracking-widest font-mono"
           style={{ color: statusColor }}
         >
           {statusLabel}
         </span>
         <span className="text-xs font-mono font-semibold" style={{ color: 'var(--color-text)' }}>
           {istStr}
-          <span className="text-[9px] text-muted ml-1">IST</span>
+          <span className="text-[11px] text-muted ml-1">IST</span>
         </span>
       </div>
     </div>
@@ -113,7 +113,7 @@ export function LiveIndexTicker({ onSymbolChange }) {
             title={`Switch view to ${idx.display_name || idx.symbol}`}
           >
             <span
-              className="text-[9px] font-bold tracking-wider font-mono"
+              className="text-[11px] font-bold tracking-wider font-mono"
               style={{ color: 'var(--color-subtle)' }}
             >
               {idx.display_name?.replace(' 50', '') || idx.symbol}
@@ -216,7 +216,7 @@ export default function ContextBar({
             style={{ color: 'var(--color-text)' }}
           />
           <kbd
-            className="hidden sm:inline-block text-[9px] px-1 py-0.5 rounded font-mono"
+            className="hidden sm:inline-block text-[11px] px-1 py-0.5 rounded font-mono"
             style={{
               background: 'var(--color-panel)',
               border: '1px solid var(--color-border)',

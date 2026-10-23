@@ -129,7 +129,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
             {scrutinyStatus === 'APPROVED' ? '🛡️ AI APPROVED' : scrutinyStatus === 'QUANT_VERIFIED' ? '⚡ QUANT VERIFIED' : `⚠️ ${scrutinyStatus}`}
           </span>
           {scrutiny?.auditor_model && (
-            <span className="text-[8px] font-mono text-muted ml-auto">{scrutiny.auditor_model}</span>
+            <span className="text-[10px] font-mono text-muted ml-auto">{scrutiny.auditor_model}</span>
           )}
         </div>
 
@@ -150,19 +150,19 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
         {/* Scrutiny dossier */}
         {scrutiny?.logic_confirmation && (
           <div className="p-2 rounded-lg bg-emerald-500/8 border border-emerald-500/25 space-y-0.5">
-            <div className="text-[9px] font-black uppercase tracking-wider text-emerald-400">✅ Logic Confirmation</div>
+            <div className="text-[11px] font-black uppercase tracking-wider text-emerald-400">✅ Logic Confirmation</div>
             <p className="text-[10px] text-zinc-300 leading-relaxed">{scrutiny.logic_confirmation}</p>
           </div>
         )}
         {scrutiny?.trap_risk_warning && (
           <div className="p-2 rounded-lg bg-amber-500/8 border border-amber-500/25 space-y-0.5">
-            <div className="text-[9px] font-black uppercase tracking-wider text-amber-400">⚠️ Trap Risk Warning</div>
+            <div className="text-[11px] font-black uppercase tracking-wider text-amber-400">⚠️ Trap Risk Warning</div>
             <p className="text-[10px] text-zinc-300 leading-relaxed">{scrutiny.trap_risk_warning}</p>
           </div>
         )}
         {scrutiny?.actionable_guidance && (
           <div className="p-2 rounded-lg bg-sky-500/8 border border-sky-500/25 space-y-0.5">
-            <div className="text-[9px] font-black uppercase tracking-wider text-sky-400">🎯 Execution Guidance</div>
+            <div className="text-[11px] font-black uppercase tracking-wider text-sky-400">🎯 Execution Guidance</div>
             <p className="text-[10px] text-zinc-300 leading-relaxed">{scrutiny.actionable_guidance}</p>
           </div>
         )}
@@ -180,7 +180,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
               <button
                 type="button"
                 onClick={() => setDestMode('DEFAULT')}
-                className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                className={`text-[11px] px-2 py-0.5 rounded font-bold transition-all ${
                   destMode === 'DEFAULT'
                     ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
                     : 'text-muted hover:text-text'
@@ -192,7 +192,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                 <button
                   type="button"
                   onClick={() => setDestMode('FNO_INDEX_GROUP')}
-                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                  className={`text-[11px] px-2 py-0.5 rounded font-bold transition-all ${
                     destMode === 'FNO_INDEX_GROUP'
                       ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
                       : 'text-muted hover:text-text'
@@ -205,7 +205,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                 <button
                   type="button"
                   onClick={() => setDestMode('FNO_GROUP')}
-                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                  className={`text-[11px] px-2 py-0.5 rounded font-bold transition-all ${
                     destMode === 'FNO_GROUP'
                       ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                       : 'text-muted hover:text-text'
@@ -218,7 +218,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                 <button
                   type="button"
                   onClick={() => setDestMode('MCX_GROUP')}
-                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                  className={`text-[11px] px-2 py-0.5 rounded font-bold transition-all ${
                     destMode === 'MCX_GROUP'
                       ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
                       : 'text-muted hover:text-text'
@@ -231,7 +231,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                 <button
                   type="button"
                   onClick={() => setDestMode('CRYPTO_GROUP')}
-                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                  className={`text-[11px] px-2 py-0.5 rounded font-bold transition-all ${
                     destMode === 'CRYPTO_GROUP'
                       ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
                       : 'text-muted hover:text-text'
@@ -244,7 +244,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                 <button
                   type="button"
                   onClick={() => setDestMode('EQUITY_GROUP')}
-                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                  className={`text-[11px] px-2 py-0.5 rounded font-bold transition-all ${
                     destMode === 'EQUITY_GROUP'
                       ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                       : 'text-muted hover:text-text'
@@ -256,7 +256,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
               <button
                 type="button"
                 onClick={() => setDestMode('CHANNEL')}
-                className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                className={`text-[11px] px-2 py-0.5 rounded font-bold transition-all ${
                   destMode === 'CHANNEL'
                     ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
                     : 'text-muted hover:text-text'
@@ -268,7 +268,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
           </div>
 
           {destMode === 'DEFAULT' ? (
-            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+            <div className="text-[11px] text-zinc-400 font-mono flex items-center justify-between px-1">
               <span>Target: <span className="text-text font-bold">
                 {destInfo?.default_chat_id ? `Private Chat (${destInfo.default_chat_id.slice(0, 4)}***)` : 'Configured Telegram Chat'}
               </span></span>
@@ -279,35 +279,35 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
               )}
             </div>
           ) : destMode === 'FNO_INDEX_GROUP' ? (
-            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+            <div className="text-[11px] text-zinc-400 font-mono flex items-center justify-between px-1">
               <span>Target: <span className="text-sky-400 font-bold">
                 ⚡ {destInfo?.fno_index_chat_name || 'Premium_Alpha_Vortex_FnO_Index'} ({destInfo?.fno_index_chat_id})
               </span></span>
               <span className="text-sky-400 font-bold">● Active</span>
             </div>
           ) : destMode === 'FNO_GROUP' ? (
-            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+            <div className="text-[11px] text-zinc-400 font-mono flex items-center justify-between px-1">
               <span>Target: <span className="text-emerald-400 font-bold">
                 🎯 {destInfo?.fno_chat_name || 'Premium_Alpha_Vortex_FnO_Channel'} ({destInfo?.fno_chat_id})
               </span></span>
               <span className="text-emerald-400 font-bold">● Active</span>
             </div>
           ) : destMode === 'MCX_GROUP' ? (
-            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+            <div className="text-[11px] text-zinc-400 font-mono flex items-center justify-between px-1">
               <span>Target: <span className="text-amber-400 font-bold">
                 🪙 {destInfo?.mcx_chat_name || 'Premium_Alpha_Vortex_MCX_Channel'} ({destInfo?.mcx_chat_id})
               </span></span>
               <span className="text-amber-400 font-bold">● Active</span>
             </div>
           ) : destMode === 'CRYPTO_GROUP' ? (
-            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+            <div className="text-[11px] text-zinc-400 font-mono flex items-center justify-between px-1">
               <span>Target: <span className="text-purple-400 font-bold">
                 🪙 {destInfo?.crypto_chat_name || 'Crypto_Premium_Alpha_Vortex'} ({destInfo?.crypto_chat_id})
               </span></span>
               <span className="text-purple-400 font-bold">● Active</span>
             </div>
           ) : destMode === 'EQUITY_GROUP' ? (
-            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+            <div className="text-[11px] text-zinc-400 font-mono flex items-center justify-between px-1">
               <span>Target: <span className="text-emerald-400 font-bold">
                 🏢 {destInfo?.equity_chat_name || 'Premium_Alpha_Vortex_Equity_Channel'} ({destInfo?.equity_chat_id})
               </span></span>
@@ -333,14 +333,14 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                       setCustomChannel(destInfo.channel_id)
                       localStorage.setItem('chanakya_telegram_channel', destInfo.channel_id)
                     }}
-                    className="text-[8px] px-1.5 py-1 rounded bg-sky-500/10 text-sky-300 border border-sky-500/25 hover:bg-sky-500/20 whitespace-nowrap"
+                    className="text-[10px] px-1.5 py-1 rounded bg-sky-500/10 text-sky-300 border border-sky-500/25 hover:bg-sky-500/20 whitespace-nowrap"
                     title="Use channel ID configured in environment"
                   >
                     Env Channel
                   </button>
                 )}
               </div>
-              <div className="text-[8px] text-zinc-500 px-1">
+              <div className="text-[10px] text-zinc-500 px-1">
                 Enter public channel handle (e.g. <code>@chanakya_alerts</code>) or private channel/group ID (-100...)
               </div>
             </div>
@@ -349,7 +349,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
 
         {/* Telegram Message Preview */}
         <div className="p-2.5 rounded-xl bg-surface border border-border/80 space-y-1 font-mono text-[10px]">
-          <div className="flex items-center justify-between text-[9px] font-bold text-muted border-b border-border/40 pb-1">
+          <div className="flex items-center justify-between text-[11px] font-bold text-muted border-b border-border/40 pb-1">
             <span>TELEGRAM PREVIEW</span>
             <span className="text-gold font-bold">🧠 Confidence: {conviction}%</span>
           </div>

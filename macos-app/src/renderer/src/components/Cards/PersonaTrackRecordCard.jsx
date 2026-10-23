@@ -167,11 +167,11 @@ export default function PersonaTrackRecordCard() {
               {/* Sector Affinity Tags & Consultation Button */}
               <div className="flex items-center justify-between gap-2 pt-1 border-t border-border/30">
                 <div className="flex flex-wrap gap-1 items-center">
-                  <span className="text-[9px] text-muted font-ui">{p.total_calls} resolved</span>
+                  <span className="text-[11px] text-muted font-ui">{p.total_calls} resolved</span>
                   {Object.keys(p.sector_affinity || {}).slice(0, 2).map((sec) => (
                     <span
                       key={sec}
-                      className="text-[9px] bg-panel text-muted/90 px-1.5 py-0.5 rounded border border-border/40 font-ui"
+                      className="text-[11px] bg-panel text-muted/90 px-1.5 py-0.5 rounded border border-border/40 font-ui"
                     >
                       {sec}
                     </span>

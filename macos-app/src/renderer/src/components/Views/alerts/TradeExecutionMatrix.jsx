@@ -20,15 +20,6 @@ export function TradeExecutionMatrix({
   const freeRollPlan = alert?.free_roll_plan || alert?.actionable_plan?.free_roll_plan || optPlan?.free_roll_plan || tp?.free_roll_plan || null
   const mktSt = marketStatus || 'SESSION_CLOSED'
 
-  // Single Source of Truth Lifecycle evaluated against the exact current price
-  const lifecycle = useMemo(
-    () => (alert ? resolveAlertLifecycle(alert, { liveSpot: { ltp: currentPriceProp }, liveContract: { ltp: currentPriceProp } }) : null),
-    [alert, currentPriceProp]
-  )
-
-  const isTerminal = lifecycle?.isTerminal ?? false
-  const currentPrice = isTerminal ? (lifecycle?.currentPrice ?? currentPriceProp) : (currentPriceProp ?? lifecycle?.currentPrice)
-
   const isCrypto = (alert?.exchange || '').toUpperCase() === 'CRYPTO' || (alert?.exchange || '').toUpperCase() === 'BINANCE' || (alert?.segment || '').toUpperCase() === 'CRYPTO'
   const currSym = isCrypto ? '$' : '₹'
 
@@ -40,6 +31,152 @@ export function TradeExecutionMatrix({
       maximumFractionDigits: 2,
     })
   }
+
+  const hedgedSpreadData = useMemo(() => {
+    if (!hedgedSpread) return null
+
+    const parseLegObj = (leg, defaultAction = 'BUY') => {
+      if (!leg) return null
+      if (typeof leg === 'string') {
+        const cleanStr = leg.replace(/^(NSE|BSE|NFO|MCX|BFO|CDS|CRYPTO|BINANCE):/, '')
+        return {
+          action: defaultAction,
+          symbol: cleanStr,
+          strikeLabel: cleanStr,
+          strike: null,
+          optionType: cleanStr.endsWith('CE') ? 'CE' : cleanStr.endsWith('PE') ? 'PE' : '',
+          premium: null,
+          premiumLabel: '—',
+          fullText: leg,
+        }
+      }
+      const action = (leg.side || leg.action || defaultAction).toUpperCase()
+      const strike = leg.strike ? Number(leg.strike) : null
+      const optionType = leg.option_type || (leg.symbol && leg.symbol.endsWith('CE') ? 'CE' : leg.symbol && leg.symbol.endsWith('PE') ? 'PE' : '')
+      const premium = (leg.premium !== undefined && leg.premium !== null) ? Number(leg.premium) : null
+      const cleanSym = (leg.symbol || '').replace(/^(NSE|BSE|NFO|MCX|BFO|CDS|CRYPTO|BINANCE):/, '')
+      const strikeLabel = strike ? `${Math.round(strike)} ${optionType}`.trim() : cleanSym
+      const premiumLabel = premium !== null ? `₹${formatNum(premium)}` : '—'
+      const fullText = `${strikeLabel}${premium !== null ? ` @ ₹${formatNum(premium)}` : ''}`
+
+      return {
+        action,
+        strike,
+        optionType,
+        premium,
+        symbol: cleanSym,
+        strikeLabel,
+        premiumLabel,
+        quantity: leg.quantity || leg.lot_size || null,
+        fullText,
+      }
+    }
+
+    let buyLeg = null
+    let sellLeg = null
+
+    if (Array.isArray(hedgedSpread.legs) && hedgedSpread.legs.length >= 2) {
+      const b = hedgedSpread.legs.find((l) => (l.side || l.action || '').toUpperCase() === 'BUY') || hedgedSpread.legs[0]
+      const s = hedgedSpread.legs.find((l) => (l.side || l.action || '').toUpperCase() === 'SELL') || hedgedSpread.legs[1]
+      buyLeg = parseLegObj(b, 'BUY')
+      sellLeg = parseLegObj(s, 'SELL')
+    } else {
+      buyLeg = parseLegObj(hedgedSpread.long_leg, 'BUY')
+      sellLeg = parseLegObj(hedgedSpread.short_leg, 'SELL')
+    }
+
+    // Fallbacks if legs were not complete:
+    const fallbackBuyStrike = hedgedSpread.buy_strike || optPlan?.strike || alert?.strike
+    const fallbackSellStrike = hedgedSpread.sell_strike || hedgedSpread.hedge_strike
+    const fallbackOptType = hedgedSpread.option_type || optPlan?.option_type || alert?.option_type || (isBull ? 'CE' : 'PE')
+
+    if (!buyLeg && fallbackBuyStrike) {
+      const bStrike = Number(fallbackBuyStrike)
+      const bPrem = optPlan?.entry_premium || alert?.option_premium || alert?.ltp || null
+      buyLeg = {
+        action: 'BUY',
+        strike: bStrike,
+        optionType: fallbackOptType,
+        premium: bPrem,
+        strikeLabel: `${Math.round(bStrike)} ${fallbackOptType}`,
+        premiumLabel: bPrem !== null ? `₹${formatNum(bPrem)}` : '—',
+        symbol: alert?.contract_symbol || `${alert?.symbol || ''} ${Math.round(bStrike)} ${fallbackOptType}`.trim(),
+        fullText: `${Math.round(bStrike)} ${fallbackOptType}${bPrem ? ` @ ₹${formatNum(bPrem)}` : ''}`,
+      }
+    }
+    if (!sellLeg && fallbackSellStrike) {
+      const sStrike = Number(fallbackSellStrike)
+      const sPrem = hedgedSpread.hedge_premium || optPlan?.hedge_premium || null
+      sellLeg = {
+        action: 'SELL',
+        strike: sStrike,
+        optionType: fallbackOptType,
+        premium: sPrem,
+        strikeLabel: `${Math.round(sStrike)} ${fallbackOptType}`,
+        premiumLabel: sPrem !== null ? `₹${formatNum(sPrem)}` : '—',
+        symbol: hedgedSpread.hedge_contract_symbol || `${alert?.symbol || ''} ${Math.round(sStrike)} ${fallbackOptType}`.trim(),
+        fullText: `${Math.round(sStrike)} ${fallbackOptType}${sPrem ? ` @ ₹${formatNum(sPrem)}` : ''}`,
+      }
+    }
+
+    // Economics
+    const netDebit = hedgedSpread.net_debit ?? hedgedSpread.net_cashflow ?? hedgedSpread.capital_required ?? (
+      buyLeg?.premium !== null && buyLeg?.premium !== undefined && sellLeg?.premium !== null && sellLeg?.premium !== undefined
+        ? Math.max(0.1, Math.round((buyLeg.premium - sellLeg.premium) * 100) / 100)
+        : null
+    )
+    const maxProfit = hedgedSpread.max_profit_pts ?? hedgedSpread.max_profit ?? (
+      buyLeg?.strike && sellLeg?.strike && netDebit
+        ? Math.max(0, Math.round((Math.abs(buyLeg.strike - sellLeg.strike) - netDebit) * 100) / 100)
+        : null
+    )
+    const rrRatio = hedgedSpread.spread_rr ?? (
+      hedgedSpread.risk_reward_ratio
+        ? `1:${hedgedSpread.risk_reward_ratio}`
+        : (netDebit && maxProfit ? `1:${(maxProfit / netDebit).toFixed(1)}` : '1:2.5')
+    )
+    const breakeven = hedgedSpread.breakeven_point ?? hedgedSpread.breakeven_spot ?? (
+      buyLeg?.strike && netDebit
+        ? (isBull ? buyLeg.strike + netDebit : buyLeg.strike - netDebit)
+        : null
+    )
+    const lotSize = alert?.lot_size || hedgedSpread.lot_size || optPlan?.lot_size || null
+    const maxLoss = hedgedSpread.max_loss ?? (
+      netDebit && lotSize
+        ? Math.round(netDebit * lotSize)
+        : null
+    )
+    const spreadName = hedgedSpread.spread_name || (
+      hedgedSpread.strategy_name ? hedgedSpread.strategy_name.replace(/_/g, ' ') : (isBull ? 'Bull Call Spread' : 'Bear Put Spread')
+    )
+    const guidance = hedgedSpread.guidance || hedgedSpread.thesis || `${hedgedSpread.theta_reduction_pct || 75}% Theta decay offset via short leg.`
+    const thetaReductionPct = hedgedSpread.theta_reduction_pct ? `${hedgedSpread.theta_reduction_pct}%` : '75%'
+
+    return {
+      longLeg: buyLeg?.fullText || '',
+      shortLeg: sellLeg?.fullText || '',
+      buyLeg,
+      sellLeg,
+      netDebit,
+      maxProfit,
+      maxLoss,
+      lotSize,
+      rrRatio,
+      breakeven,
+      spreadName,
+      guidance,
+      thetaReductionPct,
+    }
+  }, [hedgedSpread, optPlan, alert, isBull])
+
+  // Single Source of Truth Lifecycle evaluated against the exact current price
+  const lifecycle = useMemo(
+    () => (alert ? resolveAlertLifecycle(alert, { liveSpot: { ltp: currentPriceProp }, liveContract: { ltp: currentPriceProp } }) : null),
+    [alert, currentPriceProp]
+  )
+
+  const isTerminal = lifecycle?.isTerminal ?? false
+  const currentPrice = isTerminal ? (lifecycle?.currentPrice ?? currentPriceProp) : (currentPriceProp ?? lifecycle?.currentPrice)
 
   const formatPnl = (pnl) => {
     if (pnl === null || pnl === undefined || isNaN(pnl)) return null
@@ -144,33 +281,33 @@ export function TradeExecutionMatrix({
           </span>
           {/* Real-time Status Pill */}
           {lifecycle?.stagePill ? (
-            <span className={`text-[8px] font-black px-1.5 py-0.5 rounded-full border ${lifecycle.stagePill.cls}`}>
+            <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full border ${lifecycle.stagePill.cls}`}>
               {lifecycle.stagePill.label}
             </span>
           ) : isSLHit ? (
-            <span className="text-[8px] font-black px-1.5 py-0.5 rounded-full bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-pulse">
+            <span className="text-[10px] font-black px-1.5 py-0.5 rounded-full bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-pulse">
               🛑 STOP LOSS HIT
             </span>
           ) : isT3Hit ? (
-            <span className="text-[8px] font-black px-1.5 py-0.5 rounded-full bg-purple-500/25 text-purple-200 border border-purple-400/50 animate-pulse">
+            <span className="text-[10px] font-black px-1.5 py-0.5 rounded-full bg-purple-500/25 text-purple-200 border border-purple-400/50 animate-pulse">
               🚀 ALL TARGETS HIT
             </span>
           ) : isT2Hit ? (
-            <span className="text-[8px] font-black px-1.5 py-0.5 rounded-full bg-cyan-500/25 text-cyan-200 border border-cyan-400/50 animate-pulse">
+            <span className="text-[10px] font-black px-1.5 py-0.5 rounded-full bg-cyan-500/25 text-cyan-200 border border-cyan-400/50 animate-pulse">
               🏁 T2 HIT · RUNNER ACTIVE
             </span>
           ) : isT1Hit ? (
-            <span className="text-[8px] font-black px-1.5 py-0.5 rounded-full bg-emerald-500/25 text-emerald-200 border border-emerald-400/50 animate-pulse">
+            <span className="text-[10px] font-black px-1.5 py-0.5 rounded-full bg-emerald-500/25 text-emerald-200 border border-emerald-400/50 animate-pulse">
               🎯 T1 HIT · 50% BOOKED · SL RISK-FREE
             </span>
           ) : currentPrice && levels.entry ? (
-            <span className="text-[8px] font-black px-1.5 py-0.5 rounded-full bg-gold/15 text-gold border border-gold/30">
+            <span className="text-[10px] font-black px-1.5 py-0.5 rounded-full bg-gold/15 text-gold border border-gold/30">
               ⚡ ACTIVE · IN FLIGHT
             </span>
           ) : null}
         </div>
 
-        <div className="flex items-center gap-1.5 text-[9px] font-mono font-bold flex-wrap">
+        <div className="flex items-center gap-1.5 text-[11px] font-mono font-bold flex-wrap">
           <span className={`px-1.5 py-0.5 rounded border ${mktBadge.cls}`}>
             {mktBadge.label}
           </span>
@@ -206,7 +343,7 @@ export function TradeExecutionMatrix({
             ? 'bg-rose-500/25 border-2 border-rose-500 ring-2 ring-rose-500/40 shadow-[0_0_12px_rgba(244,63,94,0.3)] animate-pulse'
             : 'bg-rose-500/5 border border-rose-500/20'
         }`}>
-          <div className="flex items-center justify-between text-[9px]">
+          <div className="flex items-center justify-between text-[11px]">
             <span className={`font-black uppercase tracking-wider ${isSLHit ? 'text-rose-200' : 'text-rose-400'}`}>
               🛑 Invalidation SL
             </span>
@@ -218,15 +355,15 @@ export function TradeExecutionMatrix({
             {currSym}{formatNum(levels.sl)}
           </div>
           {trailingStop ? (
-            <div className="text-[8px] text-cyan-300 font-bold truncate">
+            <div className="text-[10px] text-cyan-300 font-bold truncate">
               ⚡ Trail {currSym}{formatNum(trailingStop)}
             </div>
           ) : levels.max_loss !== null && levels.max_loss !== undefined ? (
-            <div className="text-[8px] text-rose-400 font-bold truncate" title="Maximum Risk per lot (incl. STT & slippage)">
+            <div className="text-[10px] text-rose-400 font-bold truncate" title="Maximum Risk per lot (incl. STT & slippage)">
               Risk: -{currSym}{formatNum(levels.max_loss)}/lot
             </div>
           ) : levels.optPlanRef?.sl_pnl_per_lot !== undefined ? (
-            <div className="text-[8px] text-rose-400/80 font-bold">
+            <div className="text-[10px] text-rose-400/80 font-bold">
               {formatPnl(levels.optPlanRef.sl_pnl_per_lot)}
             </div>
           ) : null}
@@ -240,7 +377,7 @@ export function TradeExecutionMatrix({
             ? 'bg-gold/15 border border-gold/50 shadow-sm'
             : 'bg-gold/5 border border-gold/25'
         }`}>
-          <div className="flex items-center justify-between text-[9px]">
+          <div className="flex items-center justify-between text-[11px]">
             <span className={`font-black uppercase tracking-wider ${isExtended ? 'text-amber-400' : 'text-gold'}`}>
               {isExtended ? '🛑 No Chase' : '⚡ Entry Trigger'}
             </span>
@@ -252,17 +389,29 @@ export function TradeExecutionMatrix({
             {currSym}{formatNum(levels.entry)}
           </div>
           {isExtended ? (
-            <div className="text-[8px] text-amber-300 font-bold truncate" title="Price is extended beyond buy zone. Wait for pullback to 50-SMA or secondary base consolidation.">
+            <div className="text-[10px] text-amber-300 font-bold truncate" title="Price is extended beyond buy zone. Wait for pullback to 50-SMA or secondary base consolidation.">
               ⏳ WAIT FOR PULLBACK
             </div>
           ) : levels.entry_range ? (
-            <div className="text-[8px] text-amber-300/90 font-mono font-medium truncate" title="Optimal Trade Entry (OTE) Pullback Range">
+            <div className="text-[10px] text-amber-300/90 font-mono font-medium truncate" title="Optimal Trade Entry (OTE) Pullback Range">
               🎯 OTE {levels.entry_range}
             </div>
           ) : null}
-          {levels.no_chase_boundary ? (
-            <div className="text-[8px] text-rose-400 font-bold truncate" title="No-Chase Maximum Entry Limit">
+          {levels?.no_chase_boundary ? (
+            <div
+              className="text-[10px] text-rose-400 font-bold truncate"
+              title={
+                levels.spot_no_chase_boundary
+                  ? `No-Chase Option Limit: ${currSym}${formatNum(levels.no_chase_boundary)} (Underlying Spot Max: ${currSym}${formatNum(levels.spot_no_chase_boundary)})`
+                  : 'No-Chase Maximum Entry Limit'
+              }
+            >
               🛑 NoChase {currSym}{formatNum(levels.no_chase_boundary)}
+              {levels.spot_no_chase_boundary && (
+                <span className="text-[9px] text-zinc-400 ml-1 font-normal hidden xl:inline" title="Underlying Spot Breakout Ceiling">
+                  (Spot {currSym}{formatNum(levels.spot_no_chase_boundary)})
+                </span>
+              )}
             </div>
           ) : null}
         </div>
@@ -275,7 +424,7 @@ export function TradeExecutionMatrix({
             ? 'bg-emerald-500/10 border border-emerald-500/40'
             : 'bg-emerald-500/5 border border-emerald-500/20'
         }`}>
-          <div className="flex items-center justify-between text-[9px]">
+          <div className="flex items-center justify-between text-[11px]">
             <span className={`font-black uppercase tracking-wider ${isT1Hit ? 'text-emerald-200' : 'text-emerald-400'}`}>
               🎯 Target 1 (T1)
             </span>
@@ -287,11 +436,11 @@ export function TradeExecutionMatrix({
             {currSym}{formatNum(levels.t1)}
           </div>
           {t1DistInfo && !isT1Hit ? (
-            <div className="text-[8px] text-emerald-300 font-bold truncate">
+            <div className="text-[10px] text-emerald-300 font-bold truncate">
               {t1DistInfo.pct}% · {currSym}{formatNum(t1DistInfo.remPts)} away
             </div>
           ) : isT1Hit ? (
-            <div className="text-[8px] text-emerald-200 font-bold truncate">
+            <div className="text-[10px] text-emerald-200 font-bold truncate">
               50% Booked · SL BE
             </div>
           ) : null}
@@ -305,7 +454,7 @@ export function TradeExecutionMatrix({
             ? 'bg-cyan-500/10 border border-cyan-500/40'
             : 'bg-cyan-500/5 border border-cyan-500/20'
         }`}>
-          <div className="flex items-center justify-between text-[9px]">
+          <div className="flex items-center justify-between text-[11px]">
             <span className={`font-black uppercase tracking-wider ${isT2Hit ? 'text-cyan-200' : 'text-cyan-400'}`}>
               🏁 Target 2 (T2)
             </span>
@@ -317,11 +466,11 @@ export function TradeExecutionMatrix({
             {currSym}{formatNum(levels.t2)}
           </div>
           {t2DistInfo && !isT2Hit ? (
-            <div className="text-[8px] text-cyan-300 font-bold truncate">
+            <div className="text-[10px] text-cyan-300 font-bold truncate">
               {t2DistInfo.pct}% · {currSym}{formatNum(t2DistInfo.remPts)} away
             </div>
           ) : isT2Hit ? (
-            <div className="text-[8px] text-cyan-200 font-bold truncate">
+            <div className="text-[10px] text-cyan-200 font-bold truncate">
               Runner Locked
             </div>
           ) : null}
@@ -335,7 +484,7 @@ export function TradeExecutionMatrix({
             ? 'bg-purple-500/10 border border-purple-500/40'
             : 'bg-purple-500/5 border border-purple-500/20'
         }`}>
-          <div className="flex items-center justify-between text-[9px]">
+          <div className="flex items-center justify-between text-[11px]">
             <span className={`font-black uppercase tracking-wider ${isT3Hit ? 'text-purple-100' : 'text-purple-700 dark:text-purple-300'}`}>
               🚀 Target 3 (T3)
             </span>
@@ -347,15 +496,15 @@ export function TradeExecutionMatrix({
             {currSym}{formatNum(levels.t3)}
           </div>
           {t3DistInfo && !isT3Hit ? (
-            <div className="text-[8px] text-purple-300 font-bold truncate">
+            <div className="text-[10px] text-purple-300 font-bold truncate">
               {t3DistInfo.pct}% · {currSym}{formatNum(t3DistInfo.remPts)} away
             </div>
           ) : isT3Hit ? (
-            <div className="text-[8px] text-purple-200 font-bold truncate">
+            <div className="text-[10px] text-purple-200 font-bold truncate">
               Max Profit Hit
             </div>
           ) : alert?.actionable_plan?.runner_strike?.symbol ? (
-            <div className="text-[7.5px] font-mono text-purple-300 font-bold truncate" title={`High-Beta Runner: ${alert.actionable_plan.runner_strike.symbol}`}>
+            <div className="text-[10px] font-mono text-purple-300 font-bold truncate" title={`High-Beta Runner: ${alert.actionable_plan.runner_strike.symbol}`}>
               ⚡ {alert.actionable_plan.runner_strike.symbol.replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '')}
             </div>
           ) : null}
@@ -388,45 +537,218 @@ export function TradeExecutionMatrix({
         ) : null}
       </div>
 
-      {/* ── Institutional Defined-Risk Vertical Spread Blueprint ── */}
-      {hedgedSpread && (
-        <div className="p-2 rounded-lg bg-sky-950/40 border border-sky-500/30 flex flex-col gap-1.5 text-[9.5px]">
+      {/* ── Institutional Broker Pre-Order (STAGE PRIMED) ── */}
+      {(alert?.stage === 'PRIMED' || alert?.actionable_plan?.broker_order_type === 'BUY SL-LIMIT' || alert?.actionable_plan?.sl_limit_trigger) && (
+        <div className="p-2 rounded-lg bg-amber-500/15 border border-amber-400/50 flex flex-col gap-1.5 text-[11px]">
           <div className="flex items-center justify-between">
-            <span className="font-black text-sky-300 flex items-center gap-1 uppercase tracking-wide">
-              <span>🛡️</span> DEFINED-RISK VERTICAL SPREAD (Theta-Neutral)
+            <span className="font-black text-amber-300 flex items-center gap-1.5 uppercase tracking-wide">
+              <span>⚡</span> BROKER PRE-ORDER: {alert?.actionable_plan?.broker_order_type || 'BUY SL-LIMIT'}
             </span>
-            <span className="font-mono font-bold text-sky-200 bg-sky-500/20 px-1.5 py-0.5 rounded border border-sky-500/30">
-              R:R {hedgedSpread.spread_rr || '1:2.5'} · Max Profit: ₹{hedgedSpread.max_profit_pts ? formatNum(hedgedSpread.max_profit_pts) : '—'}
+            <span className="text-[10px] font-mono font-bold text-amber-200 bg-amber-500/25 px-2 py-0.5 rounded border border-amber-400/40">
+              STAGE PRIMED · ZERO LATENCY
             </span>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 text-[9px] font-mono">
-            <div className="bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-1 rounded text-emerald-300 truncate" title={hedgedSpread.long_leg}>
-              🟢 <span className="font-bold">BUY:</span> {hedgedSpread.long_leg}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[11px] font-mono">
+            <div className="bg-surface/80 border border-amber-500/30 px-2 py-1 rounded">
+              <span className="text-muted block text-[10px] uppercase font-bold tracking-wider">Trigger</span>
+              <span className="font-black text-amber-300">{currSym}{formatNum(alert?.actionable_plan?.sl_limit_trigger || levels.entry)}</span>
             </div>
-            <div className="bg-rose-500/10 border border-rose-500/20 px-1.5 py-1 rounded text-rose-300 truncate" title={hedgedSpread.short_leg}>
-              🔴 <span className="font-bold">SELL:</span> {hedgedSpread.short_leg}
+            <div className="bg-surface/80 border border-amber-500/30 px-2 py-1 rounded">
+              <span className="text-muted block text-[10px] uppercase font-bold tracking-wider">Limit Price</span>
+              <span className="font-black text-text">{currSym}{formatNum(alert?.actionable_plan?.sl_limit_price || levels.entry)}</span>
             </div>
-            <div className="bg-amber-500/10 border border-amber-500/20 px-1.5 py-1 rounded text-amber-300 truncate">
-              ⚡ <span className="font-bold">Net Debit:</span> ₹{formatNum(hedgedSpread.net_debit)}
+            <div className="bg-surface/80 border border-rose-500/30 px-2 py-1 rounded">
+              <span className="text-muted block text-[10px] uppercase font-bold tracking-wider">Stop Loss</span>
+              <span className="font-black text-rose-400">{currSym}{formatNum(levels.sl)}</span>
+            </div>
+            <div className="bg-surface/80 border border-emerald-500/30 px-2 py-1 rounded">
+              <span className="text-muted block text-[10px] uppercase font-bold tracking-wider">Target 1 (+2R)</span>
+              <span className="font-black text-emerald-300">{currSym}{formatNum(levels.t1)}</span>
             </div>
           </div>
-          <div className="text-[8.5px] text-sky-200/80 flex items-center gap-1 font-sans">
-            <span>🛡️</span>
-            <span>{hedgedSpread.guidance || `${hedgedSpread.theta_reduction_pct || 75}% Theta decay offset via short leg.`}</span>
+          <div className="text-[10px] text-amber-200/90 flex items-center gap-1 font-sans">
+            <span>💡</span>
+            <span>Stage pending SL-Limit order in broker OMS now. Exchange matching engine will auto-fill on breach with zero execution latency.</span>
+          </div>
+        </div>
+      )}
+
+      {/* ── Institutional Defined-Risk Vertical Spread Blueprint ── */}
+      {hedgedSpreadData && (
+        <div className="rounded-xl border border-sky-500/40 bg-gradient-to-b from-[#0c182c] via-[#091222] to-[#060c18] p-3 space-y-2.5 shadow-lg shadow-sky-950/40 text-xs">
+          {/* Header Bar: Strategy & Key Metrics */}
+          <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-sky-500/25">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="flex items-center justify-center w-6 h-6 rounded-lg bg-sky-500/20 text-sky-300 text-xs shadow-inner border border-sky-400/30">
+                🛡️
+              </span>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-black text-white uppercase tracking-wider text-xs sm:text-[13px] font-sans">
+                  {hedgedSpreadData.spreadName || 'DEFINED-RISK VERTICAL SPREAD'}
+                </span>
+                <span className="px-2 py-0.5 rounded-full text-[10.5px] font-mono font-bold uppercase tracking-wider bg-sky-500/15 text-sky-200 border border-sky-400/30">
+                  THETA-NEUTRAL HEDGE
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5 flex-wrap font-mono">
+              <span className="px-2 py-0.5 rounded-md bg-sky-900/60 text-sky-200 border border-sky-400/30 font-bold text-[10.5px]">
+                R:R <span className="text-white font-black">{hedgedSpreadData.rrRatio}</span>
+              </span>
+              {hedgedSpreadData.maxProfit !== null && (
+                <span className="px-2 py-0.5 rounded-md bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 font-bold text-[10.5px]">
+                  Max Profit: <span className="text-white font-black">₹{formatNum(hedgedSpreadData.maxProfit)}</span>
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* 3-Column Execution Matrix */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 font-mono">
+            {/* 🟢 BUY LEG (Long Contract) */}
+            <div className="p-2.5 rounded-lg bg-gradient-to-b from-[#082318] to-[#04140d] border border-emerald-500/40 hover:border-emerald-400/70 transition-all flex flex-col justify-between shadow-sm">
+              <div className="flex items-center justify-between pb-1 border-b border-emerald-500/20">
+                <div className="flex items-center gap-1.5">
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-500 text-slate-950 font-black text-[10px] uppercase tracking-wider shadow-sm">
+                    BUY +1
+                  </span>
+                  <span className="font-bold text-[10px] text-emerald-300/90 uppercase tracking-wide">
+                    Long Leg
+                  </span>
+                </div>
+                <span className="text-[10px] text-emerald-400 font-bold">
+                  {hedgedSpreadData.buyLeg?.optionType || 'OPTION'}
+                </span>
+              </div>
+
+              <div className="my-2">
+                <div className="text-base sm:text-lg font-black text-white tracking-wide">
+                  {hedgedSpreadData.buyLeg?.strikeLabel || hedgedSpreadData.longLeg || '—'}
+                </div>
+                {hedgedSpreadData.buyLeg?.symbol && hedgedSpreadData.buyLeg.symbol !== hedgedSpreadData.buyLeg.strikeLabel && (
+                  <div className="text-[10px] text-emerald-300/70 truncate mt-0.5 font-sans" title={hedgedSpreadData.buyLeg.symbol}>
+                    {hedgedSpreadData.buyLeg.symbol}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-emerald-500/20">
+                <span className="text-emerald-300/80 uppercase font-semibold text-[10px]">
+                  Entry Premium
+                </span>
+                <span className="font-black text-emerald-200 text-xs">
+                  {hedgedSpreadData.buyLeg?.premium !== null && hedgedSpreadData.buyLeg?.premium !== undefined
+                    ? `₹${formatNum(hedgedSpreadData.buyLeg.premium)}`
+                    : hedgedSpreadData.longLeg?.includes('@')
+                    ? hedgedSpreadData.longLeg.split('@')[1].trim()
+                    : '—'}
+                </span>
+              </div>
+            </div>
+
+            {/* 🔴 SELL LEG (Short Hedge Contract) */}
+            <div className="p-2.5 rounded-lg bg-gradient-to-b from-[#290d15] to-[#16050a] border border-rose-500/40 hover:border-rose-400/70 transition-all flex flex-col justify-between shadow-sm">
+              <div className="flex items-center justify-between pb-1 border-b border-rose-500/20">
+                <div className="flex items-center gap-1.5">
+                  <span className="px-1.5 py-0.5 rounded bg-rose-500 text-white font-black text-[10px] uppercase tracking-wider shadow-sm">
+                    SELL -1
+                  </span>
+                  <span className="font-bold text-[10px] text-rose-300/90 uppercase tracking-wide">
+                    Hedge Leg
+                  </span>
+                </div>
+                <span className="text-[10px] text-rose-400 font-bold">
+                  {hedgedSpreadData.sellLeg?.optionType || 'HEDGE'}
+                </span>
+              </div>
+
+              <div className="my-2">
+                <div className="text-base sm:text-lg font-black text-white tracking-wide">
+                  {hedgedSpreadData.sellLeg?.strikeLabel || hedgedSpreadData.shortLeg || '—'}
+                </div>
+                {hedgedSpreadData.sellLeg?.symbol && hedgedSpreadData.sellLeg.symbol !== hedgedSpreadData.sellLeg.strikeLabel && (
+                  <div className="text-[10px] text-rose-300/70 truncate mt-0.5 font-sans" title={hedgedSpreadData.sellLeg.symbol}>
+                    {hedgedSpreadData.sellLeg.symbol}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-rose-500/20">
+                <span className="text-rose-300/80 uppercase font-semibold text-[10px]">
+                  Credit Received
+                </span>
+                <span className="font-black text-rose-200 text-xs">
+                  {hedgedSpreadData.sellLeg?.premium !== null && hedgedSpreadData.sellLeg?.premium !== undefined
+                    ? `₹${formatNum(hedgedSpreadData.sellLeg.premium)}`
+                    : hedgedSpreadData.shortLeg?.includes('@')
+                    ? hedgedSpreadData.shortLeg.split('@')[1].trim()
+                    : '—'}
+                </span>
+              </div>
+            </div>
+
+            {/* ⚡ NET DEBIT & RISK CAP */}
+            <div className="p-2.5 rounded-lg bg-gradient-to-b from-[#251b07] to-[#140e02] border border-amber-500/40 hover:border-amber-400/70 transition-all flex flex-col justify-between shadow-sm">
+              <div className="flex items-center justify-between pb-1 border-b border-amber-500/20">
+                <div className="flex items-center gap-1.5">
+                  <span className="px-1.5 py-0.5 rounded bg-amber-500 text-slate-950 font-black text-[10px] uppercase tracking-wider shadow-sm">
+                    NET DEBIT:
+                  </span>
+                  <span className="font-bold text-[10px] text-amber-300/90 uppercase tracking-wide">
+                    Max Capital Risk
+                  </span>
+                </div>
+                <span className="text-[10px] text-amber-400 font-bold">
+                  {hedgedSpreadData.breakeven ? `BE ₹${formatNum(hedgedSpreadData.breakeven)}` : 'CAPPED RISK'}
+                </span>
+              </div>
+
+              <div className="my-2">
+                <div className="text-base sm:text-lg font-black text-amber-200 tracking-wide flex items-baseline gap-1.5">
+                  <span className="font-bold">Net Debit:</span>
+                  <span>₹{formatNum(hedgedSpreadData.netDebit)}</span>
+                  <span className="text-[10px] text-amber-300/70 font-normal">/ share</span>
+                </div>
+                {hedgedSpreadData.maxLoss !== null && (
+                  <div className="text-[10px] text-amber-300/90 truncate mt-0.5 font-mono">
+                    Max Loss: <span className="font-bold text-rose-300">₹{formatNum(hedgedSpreadData.maxLoss)}</span> / lot
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-amber-500/20">
+                <span className="text-amber-300/80 uppercase font-semibold text-[10px]">
+                  Theta Decay Offset
+                </span>
+                <span className="font-black text-emerald-300 text-xs">
+                  {hedgedSpreadData.thetaReductionPct || '75%'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Institutional Guidance Banner */}
+          <div className="p-2 rounded-lg bg-sky-950/60 border border-sky-500/25 flex items-start gap-2 text-[11px] leading-relaxed text-sky-100">
+            <span className="text-sky-300 text-sm flex-shrink-0">🛡️</span>
+            <div className="flex-1 font-sans">
+              <span className="font-bold text-sky-200">Execution Edge: </span>
+              <span className="text-slate-200">{hedgedSpreadData.guidance}</span>
+            </div>
           </div>
         </div>
       )}
 
       {/* ── Free-Roll Execution Protocol (+2R Scale 50% & Zero-Risk Runner) ── */}
       {freeRollPlan && (
-        <div className="p-2 rounded-lg bg-emerald-950/40 border border-emerald-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-1.5 text-[9.5px]">
+        <div className="p-2 rounded-lg bg-emerald-950/40 border border-emerald-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-1.5 text-[11px]">
           <div className="flex items-center gap-1.5 font-bold text-emerald-300">
             <span className="text-xs">💎</span>
             <span>
               FREE-ROLL PROTOCOL: Bank {freeRollPlan.scale_pct || '50%'} at T1 (₹{formatNum(freeRollPlan.t1_target_premium || levels.t1)}) & ratchet SL to Cost (Risk = ₹0.00).
             </span>
           </div>
-          <div className="text-[8.5px] font-mono text-cyan-300 bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/20 whitespace-nowrap">
+          <div className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/20 whitespace-nowrap">
             🏃 Runner: {freeRollPlan.runner_trailing_strategy || '1.5x ATR dynamic trail'}
           </div>
         </div>
@@ -434,13 +756,13 @@ export function TradeExecutionMatrix({
 
       {/* Dynamic Institutional Guidance: Extended / Pullback / Pyramiding */}
       {isExtended && (
-        <div className="px-2 py-1 rounded bg-amber-500/10 border border-amber-500/25 flex items-center justify-between text-[9.5px] text-amber-200 flex-wrap gap-1">
+        <div className="px-2 py-1 rounded bg-amber-500/10 border border-amber-500/25 flex items-center justify-between text-[11px] text-amber-200 flex-wrap gap-1">
           <div className="flex items-center gap-1.5 font-bold">
             <span>⏳</span>
             <span>WAIT FOR PULLBACK: Price is +{extendedPct}% past base entry. Institutional accumulation floor: {structuralFloor50 ? `Rising 50-SMA ₹${formatNum(structuralFloor50)}` : 'Rising 50-Day Moving Average'}.</span>
           </div>
           {pyramidRule && (
-            <div className="text-[9px] text-cyan-300 font-semibold" title={pyramidRule}>
+            <div className="text-[11px] text-cyan-300 font-semibold" title={pyramidRule}>
               🧗 Pyramiding: Add +30% on secondary base breakout only
             </div>
           )}

@@ -177,12 +177,28 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         from market.fyers_tbt_manager import FyersTbtManager
 
         tbt_mgr = FyersTbtManager()
-        tbt_mgr._connected = False
-        with tbt_mgr._depth_lock:
-            tbt_mgr._depth_cache.clear()
-        with tbt_mgr._slots_lock:
-            tbt_mgr._in_flight.clear()
-            tbt_mgr._scout.clear()
+        tbt_mgr.reset_for_testing()
+    except Exception:
+        pass
+
+    try:
+        from market.universe_depth_radar import clear_radar_cache
+
+        clear_radar_cache()
+    except Exception:
+        pass
+
+    try:
+        from engine.market_regime_gate import clear_cached_regime
+
+        clear_cached_regime()
+    except Exception:
+        pass
+
+    try:
+        from engine.index_velocity import clear_velocity_cache
+
+        clear_velocity_cache()
     except Exception:
         pass
 
@@ -231,6 +247,30 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         yield
     finally:
         _PROCESS_ALLOW_NETWORK = False
+        try:
+            from engine.market_regime_gate import clear_cached_regime
+
+            clear_cached_regime()
+        except Exception:
+            pass
+        try:
+            from market.universe_depth_radar import clear_radar_cache
+
+            clear_radar_cache()
+        except Exception:
+            pass
+        try:
+            from market.fyers_tbt_manager import FyersTbtManager
+
+            FyersTbtManager().reset_for_testing()
+        except Exception:
+            pass
+        try:
+            from engine.index_velocity import clear_velocity_cache
+
+            clear_velocity_cache()
+        except Exception:
+            pass
 
 
 @pytest.fixture(autouse=True)
