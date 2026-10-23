@@ -196,6 +196,13 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         pass
 
     try:
+        from engine.index_velocity import clear_velocity_cache
+
+        clear_velocity_cache()
+    except Exception:
+        pass
+
+    try:
         from market.websocket import FyersWebSocket
 
         ws = FyersWebSocket._instance
@@ -256,6 +263,12 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
             from market.fyers_tbt_manager import FyersTbtManager
 
             FyersTbtManager().reset_for_testing()
+        except Exception:
+            pass
+        try:
+            from engine.index_velocity import clear_velocity_cache
+
+            clear_velocity_cache()
         except Exception:
             pass
 

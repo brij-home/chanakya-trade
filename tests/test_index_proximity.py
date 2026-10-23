@@ -190,6 +190,10 @@ def test_camarilla_l4_proximity_put():
     ohlcv = _make_dummy_5m_ohlcv(bars=12, base_price=25000.0, trend="DOWN")
     ref_t = datetime(2026, 10, 19, 9, 45, tzinfo=IST)
 
+    from engine.index_velocity import clear_velocity_cache
+
+    clear_velocity_cache()
+
     alerts = detect_index_put_setup(
         underlying="NIFTY",
         spot=spot,
@@ -238,6 +242,10 @@ def test_day_low_proximity_put():
     ]
     ohlcv = _make_dummy_5m_ohlcv(bars=12, base_price=25120.0, trend="DOWN")
     ref_t = datetime(2026, 10, 19, 10, 10, tzinfo=IST)
+
+    from engine.index_velocity import clear_velocity_cache
+
+    clear_velocity_cache()
 
     alerts = detect_index_put_setup(
         underlying="NIFTY",
