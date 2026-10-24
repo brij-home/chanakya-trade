@@ -319,6 +319,14 @@ CORPORATE_ALIASES: dict[str, str] = {
     "WELSPUNIND": "WELSPUNLIV",  # Welspun Living
     "IDFC": "IDFCFIRSTB",  # Merged into IDFC First Bank
     "HDFC": "HDFCBANK",  # Merged into HDFC Bank
+    "ADANITRANS": "ADANIENSOL",  # Adani Transmission renamed to Adani Energy Solutions
+    "MCDOWELL-N": "UNITDSPR",  # United Spirits (McDowell)
+    "L&T": "LT",  # Larsen & Toubro
+    "NAMINDIA": "NAM-INDIA",  # Nippon Life India Asset Management
+    "BAJAJAUTO": "BAJAJ-AUTO",  # Bajaj Auto
+    "BAJAJ_AUTO": "BAJAJ-AUTO",
+    "TATASTEELBSL": "TATASTEEL",  # Tata Steel BSL merged into Tata Steel
+    "NSLNISP": "NMDCSTEEL",  # NMDC Steel
 }
 
 # Known Active NSE Trade-for-Trade (BE Series) Stocks in Top Benchmarks

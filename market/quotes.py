@@ -237,20 +237,10 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
 
                         clean = inst.split(":")[-1].split("-")[0].strip().upper()
                         canon = resolve_corporate_alias(clean)
-                        if canon != clean:
+                        if not inst.startswith(("BSE:SENSEX", "BSE:BANKEX")):
                             alt_tick = ws_manager.get_tick(
-                                f"NSE:{canon}-EQ"
-                            ) or ws_manager.get_tick(f"NSE:{canon}-BE")
-                            if alt_tick and getattr(alt_tick, "ltp", 0.0) > 0:
-                                tick = alt_tick
-                        if (
-                            (not tick or getattr(tick, "ltp", 0.0) <= 0)
-                            and inst.startswith("BSE:")
-                            and not inst.startswith(("BSE:SENSEX", "BSE:BANKEX"))
-                        ):
-                            alt_tick = ws_manager.get_tick(
-                                f"NSE:{canon}-EQ"
-                            ) or ws_manager.get_tick(f"NSE:{canon}-BE")
+                                f"NSE:{canon}-BE"
+                            ) or ws_manager.get_tick(f"NSE:{canon}-EQ")
                             if alt_tick and getattr(alt_tick, "ltp", 0.0) > 0:
                                 tick = alt_tick
                     if tick and tick.ltp > 0:

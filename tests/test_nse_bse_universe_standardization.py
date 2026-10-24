@@ -40,6 +40,13 @@ def test_corporate_alias_resolution():
     assert resolve_corporate_alias("MOTHERSUMI") == "MOTHERSON"
     assert resolve_corporate_alias("IDFC") == "IDFCFIRSTB"
     assert resolve_corporate_alias("HDFC") == "HDFCBANK"
+    assert resolve_corporate_alias("ADANITRANS") == "ADANIENSOL"
+    assert resolve_corporate_alias("MCDOWELL-N") == "UNITDSPR"
+    assert resolve_corporate_alias("L&T") == "LT"
+    assert resolve_corporate_alias("NAMINDIA") == "NAM-INDIA"
+    assert resolve_corporate_alias("BAJAJAUTO") == "BAJAJ-AUTO"
+    assert resolve_corporate_alias("TATASTEELBSL") == "TATASTEEL"
+    assert resolve_corporate_alias("NSLNISP") == "NMDCSTEEL"
 
 
 def test_fyers_symbol_conversion_with_aliases_and_series():
@@ -198,6 +205,8 @@ def test_ws_quotes_serves_dual_listed_bse_and_aliases(monkeypatch):
             return DummyTick("NSE:RELIANCE-EQ", 2950.0)
         if sym == "NSE:ETERNAL-EQ":
             return DummyTick("NSE:ETERNAL-EQ", 280.0)
+        if sym == "NSE:HFCL-BE":
+            return DummyTick("NSE:HFCL-BE", 125.50)
         return None
 
     monkeypatch.setattr("market.quotes.get_data_broker_key", lambda: "fyers")
@@ -214,3 +223,8 @@ def test_ws_quotes_serves_dual_listed_bse_and_aliases(monkeypatch):
     res_alias = _ws_quotes(["NSE:ZOMATO-EQ"], correlation_id="test-cid")
     assert "NSE:ZOMATO-EQ" in res_alias
     assert res_alias["NSE:ZOMATO-EQ"].last_price == 280.0
+
+    # 3. Surveillance series BE stock queried as -EQ resolves live -BE tick
+    res_be = _ws_quotes(["NSE:HFCL-EQ"], correlation_id="test-cid")
+    assert "NSE:HFCL-EQ" in res_be
+    assert res_be["NSE:HFCL-EQ"].last_price == 125.50
