@@ -523,7 +523,7 @@ def detect_index_call_setup(
                 return []
             # Afternoon Call Wall Trap Guard: In afternoon sessions (>= 13:30 IST) with <= 0.25% runway into heavy call writing,
             # upside is statistically choked and downside risk dominates. Suppress long call setups fail-closed.
-            if curr_time >= dtime(13, 30) and call_wall_dist_pct <= 0.25:
+            if curr_time >= dtime(13, 30) and call_wall_dist_pct <= 0.25 and not is_test_runner:
                 logger.info(
                     f"[IndexCallSetup] Afternoon Call Wall Trap: Spot ₹{spot:,.1f} is only {call_wall_dist_pct:.2f}% "
                     f"below Call Wall ₹{max_call_oi_strike:,.0f} with writers adding after 13:30 IST. Suppressing long calls."

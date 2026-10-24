@@ -839,6 +839,11 @@ class TestAdanientOrbRcaRegression:
             ltp=2490.50,
             is_live=True,
             environment="LIVE",
+            metrics={
+                "underlying_spot": 2506.70,
+                "atr": 45.0,
+                "vwap": 2520.00,
+            },
             actionable_plan={
                 "action": "SELL_ORB_PRIMED",
                 "entry_type": "LIMIT_ON_PULLBACK",

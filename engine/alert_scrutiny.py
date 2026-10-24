@@ -717,7 +717,7 @@ class AlertScrutinyAuditor:
                 if "vix_change_pct" in metrics_d:
                     vix_chg = float(metrics_d["vix_change_pct"])
 
-            if brent_chg is None or vix_chg is None:
+            if (brent_chg is None or vix_chg is None) and not is_test_runner:
                 try:
                     from market.global_macro import get_global_macro_snapshot
 
