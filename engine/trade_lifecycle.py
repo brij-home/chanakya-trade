@@ -130,8 +130,9 @@ def audit_position_lifecycle(
       - GENERATIONAL: 1–3+ year wealth builder (200-SMA / 40-week trail, fundamental review).
     """
     pos_mode = (mode or "SWING").upper().strip()
+    df_provided = df is not None and len(df) > 0
     # Fetch historical data if not provided
-    if df is None or len(df) == 0:
+    if not df_provided:
         try:
             from market.history import get_ohlcv
 
@@ -359,14 +360,16 @@ def audit_position_lifecycle(
                 curr_h = float(df["high"].iloc[-1])
                 curr_l = float(df["low"].iloc[-1])
                 c_range = max(0.01, curr_h - curr_l)
-                if is_long:
-                    upper_wick = curr_h - max(curr_c, curr_o)
-                    if (upper_wick / c_range) >= 0.55:
-                        is_exhaustion_wick = True
-                else:
-                    lower_wick = min(curr_c, curr_o) - curr_l
-                    if (lower_wick / c_range) >= 0.55:
-                        is_exhaustion_wick = True
+                candle_ltp = current_ltp if current_ltp is not None else curr_c
+                if df_provided or abs(candle_ltp - curr_c) / max(1.0, curr_c) <= 0.03:
+                    if is_long:
+                        upper_wick = curr_h - max(curr_c, curr_o)
+                        if (upper_wick / c_range) >= 0.55:
+                            is_exhaustion_wick = True
+                    else:
+                        lower_wick = min(curr_c, curr_o) - curr_l
+                        if (lower_wick / c_range) >= 0.55:
+                            is_exhaustion_wick = True
             except Exception:
                 is_exhaustion_wick = False
 
