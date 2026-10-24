@@ -72,6 +72,8 @@ STANDARD_LOT_SIZES: dict[str, int] = {
     "360ONE": 500,
     "ABB": 125,
     "ABCAPITAL": 3100,
+    "ABREL": 450,
+    "CENTURYTEX": 450,
     "ADANIENSOL": 675,
     "ADANIENT": 309,
     "ADANIGREEN": 600,
@@ -285,6 +287,59 @@ STANDARD_LOT_SIZES: dict[str, int] = {
     "ZYDUSLIFE": 900,
 }
 
+# Canonical Corporate Restructuring, Demerger, and Renaming Aliases (October 2026 Master)
+CORPORATE_ALIASES: dict[str, str] = {
+    "TATAMOTORS": "TMPV",  # Demerged into TMPV (PV) & TMCV (CV)
+    "ZOMATO": "ETERNAL",  # Rebranded to Eternal Ltd
+    "CENTURYTEX": "ABREL",  # Aditya Birla Real Estate
+    "UNOINDA": "UNOMINDA",  # Uno Minda Ltd
+    "REC": "RECLTD",  # REC Ltd
+    "CEINFO": "MAPMYINDIA",  # C.E. Info Systems (MapMyIndia)
+    "ASTRA": "ASTRAMICRO",  # Astra Microwave Products
+    "SWANENERGY": "SWANCORP",  # Swan Energy / Swan Corp
+    "CAPLIPHARM": "CAPLIPOINT",  # Caplin Point Laboratories
+    "RPGPHILIFE": "RPGLIFE",  # RPG Life Sciences
+    "METRO": "METROBRAND",  # Metro Brands
+    "HITACHI": "POWERINDIA",  # Hitachi Energy India (Power India)
+    "KALPATPOWR": "KPIL",  # Kalpataru Projects International
+    "KBL": "KIRLOSBROS",  # Kirloskar Brothers Ltd
+    "GSHIP": "GESHIP",  # Great Eastern Shipping
+    "JUPITERWAG": "JWL",  # Jupiter Wagons Ltd
+    "L&TFH": "LTF",  # L&T Finance Ltd (formerly L&T Finance Holdings)
+    "LTFH": "LTF",
+    "IBULHSGFIN": "SAMMAANCAP",  # Sammaan Capital (formerly Indiabulls Housing Finance)
+    "MOTHERSUMI": "MOTHERSON",  # Samvardhana Motherson International
+    "CADILAHC": "ZYDUSLIFE",  # Zydus Lifesciences
+    "LTI": "LTIM",  # LTIMindtree
+    "MINDTREE": "LTIM",
+    "LTM": "LTIM",
+    "PVR": "PVRINOX",  # PVR INOX Ltd
+    "INOXLEISUR": "PVRINOX",
+    "SRTRANSFIN": "SHRIRAMFIN",  # Shriram Finance (merged with Shriram Transport)
+    "WELSPUNIND": "WELSPUNLIV",  # Welspun Living
+    "IDFC": "IDFCFIRSTB",  # Merged into IDFC First Bank
+    "HDFC": "HDFCBANK",  # Merged into HDFC Bank
+}
+
+# Known Active NSE Trade-for-Trade (BE Series) Stocks in Top Benchmarks
+BE_SERIES_STOCKS: frozenset[str] = frozenset(
+    {
+        "DIACABS",
+        "HFCL",
+        "INDIAGLYCO",
+        "MTARTECH",
+        "LOTUSDEV",
+        "STLTECH",
+    }
+)
+
+
+def resolve_corporate_alias(symbol: str) -> str:
+    """Resolve symbol through canonical corporate action / renaming alias master."""
+    clean = (symbol or "").strip().upper()
+    return CORPORATE_ALIASES.get(clean, clean)
+
+
 # Standard Tick Sizes
 STANDARD_TICK_SIZES: dict[str, float] = {
     "EQUITY": 0.05,
@@ -428,6 +483,8 @@ def resolve_canonical_instrument(query: str, price: Optional[float] = None) -> C
         clean_sym = parts[1].strip()
         if prefix in ("BSE", "MCX", "CDS", "NSE_IFSC", "NSE"):
             venue = prefix  # type: ignore
+
+    clean_sym = resolve_corporate_alias(clean_sym)
 
     # Detect Indices
     if clean_sym in INDEX_SYMBOLS or clean_sym.startswith("^"):
@@ -696,6 +753,7 @@ def get_fno_lot_size(symbol: str) -> int:
     Falls back to 1 for equities without F&O contracts.
     """
     clean = (symbol or "").upper().split(":")[-1].strip()
+    clean = resolve_corporate_alias(clean)
     # Normalize index aliases if present
     alias_map = {
         "NIFTY 50": "NIFTY",
@@ -730,6 +788,8 @@ def is_derivative_eligible(symbol: str) -> bool:
     )
     if not clean:
         return False
+
+    clean = resolve_corporate_alias(clean)
 
     if clean in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
         return True

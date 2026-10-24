@@ -457,6 +457,10 @@ def _to_fyers_symbol(instrument: str) -> str:
     exch_upper = exch.upper().strip()
     sym_upper = sym.upper().strip()
 
+    from market.instruments import resolve_corporate_alias, BE_SERIES_STOCKS
+
+    sym_upper = resolve_corporate_alias(sym_upper)
+
     # Direct index map check
     if sym_upper in _FYERS_INDEX_MAP:
         return _FYERS_INDEX_MAP[sym_upper]
@@ -528,6 +532,10 @@ def _to_fyers_symbol(instrument: str) -> str:
         if not any(sym_upper.endswith(sfx) for sfx in ("-A", "-B", "-X", "-XT", "-T", "-Z", "-EQ")):
             return f"BSE:{sym_upper}-A"
         return f"BSE:{sym_upper}"
+
+    # Check if stock trades in NSE BE (Trade-for-Trade surveillance) series
+    if exch_upper == "NSE" and sym_upper in BE_SERIES_STOCKS:
+        return f"NSE:{sym_upper}-BE"
 
     return f"NSE:{sym_upper}-EQ"
 

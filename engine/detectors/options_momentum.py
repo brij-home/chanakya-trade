@@ -288,18 +288,20 @@ def detect_options_momentum_breakouts(
                         f"[OptionsBreakout] Next-month rollover check failed for {clean_sym}: {e_exp}"
                     )
 
+            if (
+                not is_idx
+                and "exp_res" in locals()
+                and exp_res
+                and exp_res.get("is_next_month_routed")
+                and not is_next_month_routed
+            ):
+                logger.info(
+                    f"[OptionsBreakout] {clean_sym} next-month chain unavailable during expiry week. "
+                    f"Suppressed current-month stock options to eliminate SEBI physical delivery margin risk."
+                )
+                return None
+
             if chain is None:
-                if (
-                    not is_idx
-                    and "exp_res" in locals()
-                    and exp_res
-                    and exp_res.get("is_next_month_routed")
-                ):
-                    logger.info(
-                        f"[OptionsBreakout] {clean_sym} next-month chain unavailable during expiry week. "
-                        f"Suppressed current-month stock options to eliminate SEBI physical delivery margin risk."
-                    )
-                    return None
                 chain = get_options_chain(clean_sym)
 
             if not chain:
@@ -1113,6 +1115,17 @@ def detect_options_momentum_breakouts(
 
                 confidence = min(96, max(50, conf_score))
 
+                best_bid = float(getattr(c, "best_bid", 0.0) or getattr(c, "bid", 0.0) or 0.0)
+                best_ask = float(getattr(c, "best_ask", 0.0) or getattr(c, "ask", 0.0) or 0.0)
+                sfr = 0.0
+                is_wide_spread = False
+                midpoint_price = opt_ltp
+                if best_bid > 0 and best_ask > 0 and opt_ltp > 0:
+                    sfr = round(((best_ask - best_bid) / opt_ltp) * 100.0, 2)
+                    midpoint_price = round((best_bid + best_ask) / 2.0, 2)
+                    if sfr >= 3.0:
+                        is_wide_spread = True
+
                 ote_lower = round(max(0.05, opt_ltp * 0.96), 1)
                 ote_upper = round(opt_ltp * 1.01, 1)
                 max_chase = round(opt_ltp * 1.08, 1)
@@ -1123,11 +1136,17 @@ def detect_options_momentum_breakouts(
                     if (tp and tp.invalidation_stop > 0)
                     else ""
                 )
-                when_to_buy_str = (
-                    f"Buy on ask/limit within entry range with spot invalidation anchor at ₹{tp.invalidation_stop:,.1f} (Option SL ₹{opt_sl:,.1f})."
-                    if (tp and tp.invalidation_stop > 0)
-                    else f"Buy on ask/limit within entry range with tight defined risk below ₹{opt_sl:,.1f}."
-                )
+                if is_wide_spread:
+                    when_to_buy_str = (
+                        f"LIMIT ORDER ONLY: Best bid ₹{best_bid:,.2f} / Best ask ₹{best_ask:,.2f} (Spread {sfr:.1f}%). "
+                        f"Enter via Limit Order at midpoint ₹{midpoint_price:,.2f} to eliminate -{sfr / 2.0:.1f}% immediate market slippage."
+                    )
+                else:
+                    when_to_buy_str = (
+                        f"Buy on ask/limit within entry range with spot invalidation anchor at ₹{tp.invalidation_stop:,.1f} (Option SL ₹{opt_sl:,.1f})."
+                        if (tp and tp.invalidation_stop > 0)
+                        else f"Buy on ask/limit within entry range with tight defined risk below ₹{opt_sl:,.1f}."
+                    )
 
                 lot_tag = f" (Lot: {lot_sz})" if (lot_sz and lot_sz > 1) else ""
                 sec_badge = ""
@@ -1340,8 +1359,16 @@ def detect_options_momentum_breakouts(
                             else None
                         ),
                         "hedge_plan": hedge_plan,
-                        "recommended_entry": f"₹{opt_ltp:,.2f}",
+                        "recommended_entry": (
+                            f"₹{midpoint_price:,.2f} (Midpoint Limit)"
+                            if is_wide_spread
+                            else f"₹{opt_ltp:,.2f}"
+                        ),
                         "entry_range": entry_range_str,
+                        "spread_friction_ratio": sfr,
+                        "is_wide_spread": is_wide_spread,
+                        "recommended_limit_price": midpoint_price if is_wide_spread else None,
+                        "broker_order_type": "BUY LIMIT" if is_wide_spread else "LIMIT_OR_MARKET",
                         "stop_loss": f"₹{opt_sl:,.1f}",
                         "target_0_5": f"₹{opt_t0_5:,.1f}",
                         "target_1": f"₹{opt_t1:,.1f}",
@@ -1358,6 +1385,7 @@ def detect_options_momentum_breakouts(
                             "scalp_target_eta": "10m–15m",
                             "scalp_profit_rule": "Book 70% at scalp target (+20%), move SL to Breakeven (+0.2%), let 30% runner ride",
                             "time_stop_mins": 20,
+                            "is_micro_scalp": False,
                             "time_stop_rule": "If position has < +0.40R or < +5% gain after 20 minutes, scratch at CMP to halt theta decay",
                         },
                         "profit_rule": (

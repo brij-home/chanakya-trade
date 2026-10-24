@@ -224,7 +224,81 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
         broker_key = get_data_broker_key()
         result: dict[str, Quote] = {}
 
-        # 1. m.Stock WebSocket
+        # 1. Fyers WebSocket (Primary institutional feed)
+        if broker_key == "fyers" or broker_key is None:
+            from market.websocket import ws_manager
+
+            if ws_manager.connected:
+                missing = []
+                for inst in instruments:
+                    tick = ws_manager.get_tick(inst)
+                    if not tick or getattr(tick, "ltp", 0.0) <= 0:
+                        from market.instruments import resolve_corporate_alias
+
+                        clean = inst.split(":")[-1].split("-")[0].strip().upper()
+                        canon = resolve_corporate_alias(clean)
+                        if canon != clean:
+                            alt_tick = ws_manager.get_tick(
+                                f"NSE:{canon}-EQ"
+                            ) or ws_manager.get_tick(f"NSE:{canon}-BE")
+                            if alt_tick and getattr(alt_tick, "ltp", 0.0) > 0:
+                                tick = alt_tick
+                        if (
+                            (not tick or getattr(tick, "ltp", 0.0) <= 0)
+                            and inst.startswith("BSE:")
+                            and not inst.startswith(("BSE:SENSEX", "BSE:BANKEX"))
+                        ):
+                            alt_tick = ws_manager.get_tick(
+                                f"NSE:{canon}-EQ"
+                            ) or ws_manager.get_tick(f"NSE:{canon}-BE")
+                            if alt_tick and getattr(alt_tick, "ltp", 0.0) > 0:
+                                tick = alt_tick
+                    if tick and tick.ltp > 0:
+                        ws_vwap = (
+                            float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0)
+                            or None
+                        )
+                        ws_bid = float(getattr(tick, "bid", 0.0) or 0.0) or None
+                        ws_ask = float(getattr(tick, "ask", 0.0) or 0.0) or None
+                        result[inst] = _enrich_quote(
+                            Quote(
+                                symbol=tick.symbol.split(":")[-1].split("-")[0]
+                                if ":" in tick.symbol
+                                else tick.symbol,
+                                last_price=tick.ltp,
+                                open=tick.open,
+                                high=tick.high,
+                                low=tick.low,
+                                close=tick.close,
+                                volume=tick.volume,
+                                bid=ws_bid,
+                                ask=ws_ask,
+                                change=tick.change,
+                                change_pct=tick.change_pct,
+                                vwap=ws_vwap,
+                                exchange_timestamp=(
+                                    datetime.fromtimestamp(
+                                        tick.timestamp, tz=timezone.utc
+                                    ).isoformat()
+                                    if tick.timestamp and tick.timestamp > 0
+                                    else None
+                                ),
+                            ),
+                            instrument=inst,
+                            provider="fyers",
+                            source="STREAM",
+                            correlation_id=correlation_id,
+                        )
+                    else:
+                        missing.append(inst)
+
+                # Subscribe to missing symbols for next time
+                if missing:
+                    ws_manager.subscribe(missing)
+
+                return result
+
+        # 2. m.Stock WebSocket
         if broker_key == "mstock":
             try:
                 from market.mstock_websocket import mstock_ws
@@ -293,7 +367,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
             except Exception:
                 return {}
 
-        # 2. Kotak Neo WebSocket
+        # 3. Kotak Neo WebSocket
         if broker_key == "kotak":
             try:
                 from market.kotak_websocket import kotak_ws
@@ -360,58 +434,6 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                 return result
             except Exception:
                 return {}
-
-        # 3. Fyers WebSocket
-        if broker_key != "fyers":
-            return {}
-
-        from market.websocket import ws_manager
-
-        if not ws_manager.connected:
-            return {}
-
-        missing = []
-        for inst in instruments:
-            tick = ws_manager.get_tick(inst)
-            if tick and tick.ltp > 0:
-                ws_vwap = (
-                    float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0) or None
-                )
-                ws_bid = float(getattr(tick, "bid", 0.0) or 0.0) or None
-                ws_ask = float(getattr(tick, "ask", 0.0) or 0.0) or None
-                result[inst] = _enrich_quote(
-                    Quote(
-                        symbol=tick.symbol.split(":")[-1].split("-")[0]
-                        if ":" in tick.symbol
-                        else tick.symbol,
-                        last_price=tick.ltp,
-                        open=tick.open,
-                        high=tick.high,
-                        low=tick.low,
-                        close=tick.close,
-                        volume=tick.volume,
-                        bid=ws_bid,
-                        ask=ws_ask,
-                        change=tick.change,
-                        change_pct=tick.change_pct,
-                        vwap=ws_vwap,
-                        exchange_timestamp=(
-                            datetime.fromtimestamp(tick.timestamp, tz=timezone.utc).isoformat()
-                            if tick.timestamp and tick.timestamp > 0
-                            else None
-                        ),
-                    ),
-                    instrument=inst,
-                    provider="fyers",
-                    source="STREAM",
-                    correlation_id=correlation_id,
-                )
-            else:
-                missing.append(inst)
-
-        # Subscribe to missing symbols for next time
-        if missing:
-            ws_manager.subscribe(missing)
 
         return result
     except Exception:

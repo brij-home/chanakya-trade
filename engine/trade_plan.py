@@ -1692,6 +1692,10 @@ def calculate_option_execution_plan(
     scalp_pct = (
         round(((scalp_target_prem - option_ltp) / option_ltp) * 100, 1) if option_ltp > 0 else 18.0
     )
+    is_micro_scalp = (getattr(trade_plan, "timeframe", "") or "").upper() in (
+        "SCALP",
+        "MICRO_SCALP",
+    )
     fast_scalp_plan = {
         "scalp_target_premium": scalp_target_prem,
         "scalp_target_pct": scalp_pct,
@@ -1701,6 +1705,7 @@ def calculate_option_execution_plan(
             f"move SL to Cost (₹{breakeven_stop:,.2f}), or exit on first 5m candle close below prior low."
         ),
         "time_stop_mins": 20,
+        "is_micro_scalp": is_micro_scalp,
         "time_stop_rule": (
             "If trade active 20m with < +5% gain, exit or convert to defined-risk spread to eliminate theta decay."
         ),
@@ -1868,6 +1873,14 @@ def calculate_option_execution_plan(
         # Free-Roll Execution Protocol (+2R Scale 50% & Zero-Risk Runner)
         "free_roll_plan": free_roll_plan,
         "time_stop_minutes": time_stop_mins,
+        # Broker Disaster Parachute Stop (-25% ceiling against disconnects)
+        "broker_disaster_stop": round(max(0.05, option_ltp * 0.75), 2) if option_ltp > 0 else None,
+        "disaster_stop_rule": (
+            f"Hard catastrophic broker parachute stop placed at ₹{round(max(0.05, option_ltp * 0.75), 2):,.2f} (-25% ceiling) "
+            "directly with broker to eliminate tail risk if local network/terminal disconnects."
+        )
+        if option_ltp > 0
+        else None,
     }
 
 

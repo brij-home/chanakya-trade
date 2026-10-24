@@ -2138,14 +2138,31 @@ def evaluate_alert_targets_and_trailing(
                     ):
                         elapsed_mins = (now_ist - c_dt).total_seconds() / 60.0
                         fast_scalp = plan.get("fast_scalp", {}) or {}
-                        is_explicit_scalp = bool(fast_scalp.get("time_stop_mins"))
-                        time_stop_limit = float(fast_scalp.get("time_stop_mins") or 45.0)
+                        is_micro_explicit = bool(
+                            fast_scalp.get("is_micro_scalp")
+                            or getattr(alert, "alert_type", "")
+                            in ("INDEX_MICRO_SCALP", "FAST_SCALP", "INTRADAY_SPARK")
+                        )
+                        is_explicit_scalp = is_micro_explicit or bool(
+                            fast_scalp.get("time_stop_mins")
+                        )
+                        time_stop_limit = float(
+                            fast_scalp.get("time_stop_mins")
+                            if is_explicit_scalp
+                            else (plan.get("time_stop_limit") or 45.0)
+                        )
 
                         # Structural health check
                         spot = float(alert.underlying_spot or 0.0)
                         metrics_d = alert.metrics if isinstance(alert.metrics, dict) else {}
                         vwap = float(
                             getattr(alert, "vwap", 0.0) or metrics_d.get("vwap", 0.0) or 0.0
+                        )
+                        spot_anchor = float(
+                            metrics_d.get("spot_anchor", 0.0)
+                            or metrics_d.get("support_anchor", 0.0)
+                            or (plan.get("spot_anchor") if isinstance(plan, dict) else 0.0)
+                            or 0.0
                         )
                         opt_t = str(getattr(alert, "option_type", "") or "").upper()
                         is_spot_bullish = (
@@ -2155,12 +2172,18 @@ def evaluate_alert_targets_and_trailing(
                         )
 
                         is_struct_intact = True
-                        if spot > 0 and vwap > 0:
-                            if is_spot_bullish and spot < (vwap * 0.997):
-                                is_struct_intact = False
-                            elif not is_spot_bullish and spot > (vwap * 1.003):
-                                is_struct_intact = False
-                        elif pnl_pct < -4.0:
+                        if spot > 0:
+                            if spot_anchor > 0:
+                                if is_spot_bullish and spot < (spot_anchor * 0.998):
+                                    is_struct_intact = False
+                                elif not is_spot_bullish and spot > (spot_anchor * 1.002):
+                                    is_struct_intact = False
+                            elif vwap > 0:
+                                if is_spot_bullish and spot < (vwap * 0.995):
+                                    is_struct_intact = False
+                                elif not is_spot_bullish and spot > (vwap * 1.005):
+                                    is_struct_intact = False
+                        if stop and stop > 0 and current_ltp <= (stop * 1.01):
                             is_struct_intact = False
 
                         # Institutional Regime-Adaptive Time-Stop Guardrail:
@@ -2191,15 +2214,20 @@ def evaluate_alert_targets_and_trailing(
                         is_0dte = (dte == 0) if dte is not None else False
 
                         effective_time_limit = time_stop_limit
+                        has_spot_structure = spot > 0 and (spot_anchor > 0 or vwap > 0)
                         if is_0dte:
                             # 0-DTE Expiry Day: Theta accelerates aggressively; strictly cap time stop at 20m
                             effective_time_limit = min(20.0, time_stop_limit)
+                        elif is_micro_explicit:
+                            effective_time_limit = time_stop_limit
                         elif (
-                            (is_trend_day or is_dir_aligned)
-                            and is_struct_intact
-                            and pnl_pct >= -3.5
-                        ):
-                            effective_time_limit = max(60.0, time_stop_limit * 2.5)
+                            is_trend_day
+                            or is_dir_aligned
+                            or (has_spot_structure and is_struct_intact)
+                        ) and pnl_pct >= -12.0:
+                            effective_time_limit = max(
+                                45.0, time_stop_limit * (2.5 if is_trend_day else 2.0)
+                            )
 
                         # Institutional Session Horizon Boundary:
                         # For INTRADAY setups, consolidation runway must never extend past the session cutoff (15:15 IST for NSE/BSE/NFO, 23:15 for MCX)
@@ -2690,16 +2718,63 @@ def evaluate_alert_in_flight_decay(
         if is_danger:
             eff_consumed = max(50.0, min(99.0, risk_consumed_pct))
             headline = f"⚠️ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (Danger Zone: {eff_consumed:.0f}% Risk Consumed)"
-            summary = (
-                f"LTP ₹{current_ltp:,.2f} is within {dist_to_sl_pct:.1f}% of Stop-Loss (₹{stop:,.2f}). "
-                f"{eff_consumed:.0f}% of risk budget is eroded (P&L: {pnl_pct:+.1f}%). "
-                f"DECISION: SCRATCH POSITION AT MARKET OR TIGHTEN STOP TO PREVENT FULL CAPITAL LOSS."
+
+            # Check spot structural health for danger zone context
+            spot_val = float(getattr(alert, "underlying_spot", 0.0) or 0.0)
+            metrics_dict = alert.metrics if isinstance(alert.metrics, dict) else {}
+            spot_anchor_val = float(
+                metrics_dict.get("spot_anchor", 0.0)
+                or metrics_dict.get("support_anchor", 0.0)
+                or 0.0
             )
+            vwap_val = float(
+                current_vwap or getattr(alert, "vwap", 0.0) or metrics_dict.get("vwap", 0.0) or 0.0
+            )
+            opt_t = str(getattr(alert, "option_type", "") or "").upper()
+            is_bullish_dir = (
+                False
+                if opt_t == "PE"
+                else (
+                    True
+                    if opt_t == "CE"
+                    else (getattr(alert, "direction", "").upper() != "BEARISH")
+                )
+            )
+            spot_holding = False
+            if spot_val > 0:
+                if spot_anchor_val > 0:
+                    spot_holding = (
+                        (spot_val >= spot_anchor_val * 0.998)
+                        if is_bullish_dir
+                        else (spot_val <= spot_anchor_val * 1.002)
+                    )
+                elif vwap_val > 0:
+                    spot_holding = (
+                        (spot_val >= vwap_val * 0.997)
+                        if is_bullish_dir
+                        else (spot_val <= vwap_val * 1.003)
+                    )
+
+            if spot_holding:
+                coaching_dec = "HOLD_AND_MONITOR_SPOT"
+                summary = (
+                    f"LTP ₹{current_ltp:,.2f} is within {dist_to_sl_pct:.1f}% of Stop-Loss (₹{stop:,.2f}). "
+                    f"{eff_consumed:.0f}% of risk budget is eroded (P&L: {pnl_pct:+.1f}%). "
+                    f"Underlying spot is holding structural support above anchor. "
+                    f"DECISION: HOLD BASE PARAMETERS — DO NOT PANIC SCRATCH AT LIQUIDITY RETEST. Honor planned SL."
+                )
+            else:
+                coaching_dec = "SCRATCH_OR_TIGHTEN_STOP"
+                summary = (
+                    f"LTP ₹{current_ltp:,.2f} is within {dist_to_sl_pct:.1f}% of Stop-Loss (₹{stop:,.2f}). "
+                    f"{eff_consumed:.0f}% of risk budget is eroded (P&L: {pnl_pct:+.1f}%). "
+                    f"DECISION: SCRATCH POSITION AT MARKET OR TIGHTEN STOP TO PREVENT FULL CAPITAL LOSS."
+                )
             return InFlightWarningEvaluation(
                 triggered=True,
                 warning_type="DANGER_ZONE",
                 reason=f"DANGER ZONE: {eff_consumed:.0f}% risk budget consumed. LTP ₹{current_ltp:,.2f} near SL ₹{stop:,.2f}",
-                coaching_decision="SCRATCH_OR_TIGHTEN_STOP",
+                coaching_decision=coaching_dec,
                 current_ltp=current_ltp,
                 entry_price=entry,
                 stop_loss=stop,
@@ -2780,16 +2855,39 @@ def evaluate_alert_in_flight_decay(
 
         # Dynamic Greeks-Aware Decay Horizon
         # On 0DTE after 13:30 IST, gamma flip and rapid theta acceleration demand an 8-minute exit window.
-        # On 0DTE morning/midday, compress to 10 minutes. Standard weekly/monthly is 15 minutes.
+        # On 0DTE morning/midday, compress to 10 minutes.
+        # On standard weekly/monthly contracts, if underlying spot is holding structural support (VWAP/anchor),
+        # grant a 35-minute runway for base consolidation to prevent premature shakeouts!
+        # Only collapse to 15m if spot structure is deteriorating or unverified.
         is_afternoon_0dte = is_0dte and (
             now_dt.hour > 13 or (now_dt.hour == 13 and now_dt.minute >= 30)
         )
+        spot_ref_val = float(getattr(alert, "underlying_spot", 0.0) or 0.0)
+        vwap_ref_val = float(
+            current_vwap
+            or getattr(alert, "vwap", 0.0)
+            or (alert.metrics.get("vwap", 0.0) if isinstance(alert.metrics, dict) else 0.0)
+            or 0.0
+        )
+        opt_t_upper = str(getattr(alert, "option_type", "") or "").upper()
+        is_bull_opt = False if opt_t_upper == "PE" else True
+        spot_struct_ok = False
+        if spot_ref_val > 0 and vwap_ref_val > 0:
+            spot_struct_ok = (
+                (spot_ref_val >= vwap_ref_val * 0.998)
+                if is_bull_opt
+                else (spot_ref_val <= vwap_ref_val * 1.002)
+            )
+
         if is_afternoon_0dte:
             stagnation_threshold_secs = 480.0  # 8 minutes
             decay_profile = "0DTE_AFTERNOON_THETA_CLIFF"
         elif is_0dte:
             stagnation_threshold_secs = 600.0  # 10 minutes
             decay_profile = "0DTE_INTRADAY_DECAY"
+        elif spot_struct_ok:
+            stagnation_threshold_secs = 2100.0  # 35 minutes (grant coiling base runway)
+            decay_profile = "THETA_STAGNATION"
         else:
             stagnation_threshold_secs = 900.0  # 15 minutes
             decay_profile = "THETA_STAGNATION"

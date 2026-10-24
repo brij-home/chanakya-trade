@@ -1937,7 +1937,9 @@ def _shoonya_auth() -> bool:
 
 # m.Stock (Mirae Asset)
 def _has_mstock() -> bool:
-    return bool(_env("MSTOCK_API_KEY") or _env("MSTOCK_CLIENT_CODE"))
+    k = _env("MSTOCK_API_KEY").strip()
+    c = _env("MSTOCK_CLIENT_CODE").strip()
+    return bool(k and c)
 
 
 def _mstock_auth() -> bool:

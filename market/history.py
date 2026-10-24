@@ -766,6 +766,11 @@ def _yfinance_fallback(
     if os.environ.get("CHANAKYA_TESTING") == "1":
         return []
 
+    from market.quotes import is_yf_eligible
+
+    if not is_yf_eligible(symbol):
+        return []
+
     global _YF_CONSECUTIVE_FAILURES, _YF_GLOBAL_BACKOFF
     sym_key = f"{exchange}:{symbol}:{interval}".upper()
     now = time.time()

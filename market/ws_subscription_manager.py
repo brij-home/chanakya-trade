@@ -65,7 +65,7 @@ CORE_BASE_SYMBOLS: list[str] = [
     "NSE:BHARTIARTL-EQ",
     "NSE:AXISBANK-EQ",
     "NSE:KOTAKBANK-EQ",
-    "NSE:TATAMOTORS-EQ",
+    "NSE:TMPV-EQ",
     "NSE:MARUTI-EQ",
     "NSE:BAJFINANCE-EQ",
     "NSE:HINDUNILVR-EQ",
@@ -96,17 +96,36 @@ CORE_BASE_SYMBOLS: list[str] = [
     "NSE:HEROMOTOCO-EQ",
 ]
 
-# Dynamically populate liquid taxonomy equities from analysis.universe if available
+# Dynamically populate liquid taxonomy equities and benchmarks
 try:
     from analysis.universe import SECTOR_TAXONOMY
+    from market.instruments import resolve_corporate_alias, BE_SERIES_STOCKS
+    import json
+    from pathlib import Path
 
     for _sec_info in SECTOR_TAXONOMY.values():
         for _s in _sec_info.get("symbols", []):
-            _eq_sym = f"NSE:{_s}-EQ"
+            _clean = resolve_corporate_alias(_s)
+            _sfx = "-BE" if _clean in BE_SERIES_STOCKS else "-EQ"
+            _eq_sym = f"NSE:{_clean}{_sfx}"
             if _eq_sym not in CORE_BASE_SYMBOLS:
                 CORE_BASE_SYMBOLS.append(_eq_sym)
+
+    # Pre-seed top institutional benchmarks from nifty_total_market.json (up to 750)
+    _tot_path = Path("data/universes/nifty_total_market.json")
+    if _tot_path.exists():
+        _tot_data = json.load(open(_tot_path, "r", encoding="utf-8"))
+        for _item in _tot_data:
+            _raw_sym = _item.get("symbol", "").strip().upper()
+            if _raw_sym:
+                _clean = resolve_corporate_alias(_raw_sym)
+                _series = _item.get("series", "EQ").upper()
+                _sfx = "-BE" if (_clean in BE_SERIES_STOCKS or _series == "BE") else "-EQ"
+                _sym = f"NSE:{_clean}{_sfx}"
+                if _sym not in CORE_BASE_SYMBOLS:
+                    CORE_BASE_SYMBOLS.append(_sym)
 except Exception as e:
-    logger.warning(f"Could not load SECTOR_TAXONOMY into CORE_BASE_SYMBOLS: {e}")
+    logger.warning(f"Could not load universe into CORE_BASE_SYMBOLS: {e}")
 
 from config.paths import app_data_path
 

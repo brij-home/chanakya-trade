@@ -1540,11 +1540,19 @@ class AutoAlert:
             in ("GAMMA_BLAST", "OPTIONS_MOMENTUM", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
         )
 
-        # 1. Check explicit expiry_date
-        if self.expiry_date:
+        # 1. Check explicit expiry_date or contract_symbol
+        exp_date_str = self.expiry_date
+        if not exp_date_str and self.contract_symbol:
+            import re
+
+            m = re.search(r"20(\d{2})(\d{2})(\d{2})", self.contract_symbol)
+            if m:
+                exp_date_str = f"20{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+        if exp_date_str:
             for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
                 try:
-                    exp_dt = datetime.strptime(self.expiry_date.strip(), fmt).replace(
+                    exp_dt = datetime.strptime(exp_date_str.strip(), fmt).replace(
                         hour=15, minute=30, second=0, tzinfo=IST
                     )
                     if now >= exp_dt:

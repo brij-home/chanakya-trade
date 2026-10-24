@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import struct
 import threading
 import time
@@ -481,6 +482,14 @@ class MStockWebSocket:
         if access_token:
             self.access_token = access_token
 
+        eff_key = (self.api_key or os.environ.get("MSTOCK_API_KEY", "")).strip()
+        eff_tok = (self.access_token or os.environ.get("MSTOCK_TOKEN", "")).strip()
+        if not eff_key or not eff_tok:
+            logger.debug(
+                "[mstock_websocket] mStock credentials not configured, skipping WebSocket start."
+            )
+            return
+
         if self._running:
             return
 
@@ -932,3 +941,7 @@ mstock_ws = MStockWebSocket()
 def get_mstock_ws() -> MStockWebSocket:
     """Return the global MStockWebSocket client instance."""
     return mstock_ws
+
+
+# Backward-compatible alias
+get_mstock_websocket = get_mstock_ws

@@ -37,25 +37,8 @@ class StockProfile:
     beta: float = 1.0
 
 
-# ── Corporate Restructuring & Demerger Aliases ─────────────────────
-CORPORATE_ALIASES: dict[str, str] = {
-    "TATAMOTORS": "TMPV",
-    "ZOMATO": "ETERNAL",
-    "CEINFO": "MAPMYINDIA",
-    "UNOINDA": "UNOMINDA",
-    "REC": "RECLTD",
-    "ASTRA": "ASTRAMICRO",
-    "SWANENERGY": "SWANCORP",
-    "CAPLIPHARM": "CAPLIPOINT",
-    "RPGPHILIFE": "RPGLIFE",
-    "METRO": "METROBRAND",
-    "CENTURYTEX": "ABREL",
-    "HITACHI": "POWERINDIA",
-    "KALPATPOWR": "KPIL",
-    "KBL": "KIRLOSBROS",
-    "GSHIP": "GESHIP",
-    "JUPITERWAG": "JWL",
-}
+# ── Corporate Restructuring & Demerger Aliases (SSOT from market.instruments) ──
+from market.instruments import CORPORATE_ALIASES
 
 
 # ── Complete Institutional Equities Taxonomy ────────────────────────

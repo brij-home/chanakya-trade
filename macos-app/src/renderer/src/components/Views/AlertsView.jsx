@@ -1924,9 +1924,14 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }, [autoViewMode, chimeEnabled])
 
-  // Re-fetch when autoViewMode toggles (view filter changed — must re-query)
+  // Re-fetch when autoViewMode toggles (view filter changed — must re-query).
+  // Debounced 500ms: rapid tab/filter clicks collapse into a single HTTP request
+  // instead of one fetch per click (RC-1 polling storm fix).
+  const _autoViewDebounceRef = useRef(null)
   useEffect(() => {
-    loadAutoAlerts(false)
+    clearTimeout(_autoViewDebounceRef.current)
+    _autoViewDebounceRef.current = setTimeout(() => loadAutoAlerts(false), 500)
+    return () => clearTimeout(_autoViewDebounceRef.current)
   }, [autoViewMode, loadAutoAlerts])
 
   // Sync store notifications into local autoAlerts so SSE-driven store updates
@@ -2029,10 +2034,10 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
     window.addEventListener('auto-alerts-cleared', handleClearEvent)
 
-    // 4. Background polling — MANUAL alerts only (30s); auto-alerts come from SSE + store.
+    // 4. Background polling — MANUAL alerts only (60s); auto-alerts come from SSE + store.
     const syncTimer = setInterval(() => {
       loadAlerts(false)
-    }, 30_000)
+    }, 60_000)
 
     return () => {
       window.removeEventListener('new-market-alert', handleLiveAlert)
@@ -2043,31 +2048,28 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }, [loadAlerts, loadAutoAlerts, chimeEnabled])
 
-  // Extract all active / visible symbols to stream spot prices and option/future contract prices for.
+  // Extract all active / visible underlying spot symbols to stream spot prices for.
   // Crucial: Only stream quotes for TRULY ACTIVE setups (filter out archived, invalidated, expired, or completed)
   // to prevent saturating the broker rate limits and starving API requests.
+  // Derivative option & futures contracts are strictly excluded here (handled via broker WebSocket or option chains).
   const activeSymbols = useMemo(() => {
     const syms = new Set()
     const addSym = (raw) => {
       if (!raw || typeof raw !== 'string') return
       const clean = raw.replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
-      if (clean) syms.add(clean)
+      const isDerivative =
+        /^(?:[A-Z&]+?)(?:\d{2,4}[A-Z0-9]{3,6})(\d+(?:\.\d+)?)(?:CE|PE)$/i.test(clean) ||
+        /^(?:[A-Z&]+?)(?:\d{2}[A-Z]{3}FUT|\d{4}FUT|FUT)$/i.test(clean)
+      if (clean && !isDerivative) syms.add(clean)
     }
 
     for (const alt of autoAlerts) {
       if (!isAlertActive(alt)) continue
       addSym(alt.symbol)
-      addSym(alt.contract_symbol)
-      addSym(alt.actionable_plan?.option_plan?.contract_symbol)
-      addSym(alt.actionable_plan?.option_contract)
-      addSym(alt.metrics?.option_symbol)
     }
     for (const a of alerts) {
       if (a.triggered || a.is_invalidated || a.target_achieved) continue
       addSym(a.symbol)
-      addSym(a.contract_symbol)
-      addSym(a.actionable_plan?.option_plan?.contract_symbol)
-      addSym(a.actionable_plan?.option_contract)
     }
     // Cap to top 50 active symbols max per cycle to strictly preserve broker rate limit quotas
     return Array.from(syms).slice(0, 50)
@@ -2187,9 +2189,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       const fresh = res?.data ?? []
       if (Array.isArray(fresh) && fresh.length > 0) {
         setAutoAlerts((prev) => mergeAlertsInPlace(prev, fresh))
-      } else {
-        await loadAutoAlerts(false)
       }
+      // Do NOT call loadAutoAlerts() here — SSE stream will deliver new alerts in-place.
+      // If the scan returned nothing, the empty state is correct; no REST re-fetch needed.
       setHorizonFilter('SWING_ALL')
       setViewMode('ACTIVE')
     } catch (_) {
@@ -2208,7 +2210,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         symbol: isInvalidation ? 'RELIANCE' : 'NIFTY',
         is_invalidation: isInvalidation,
       })
-      await loadAutoAlerts(false)
+      // SSE stream delivers the test alert in-place — no REST re-fetch needed.
     } catch (_) {
     } finally {
       setTesting(false)
@@ -2219,7 +2221,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const handleCheckInvalidations = async () => {
     try {
       await callRef.current('/skills/alerts/auto/check_invalidations', {})
-      await loadAutoAlerts(false)
+      // SSE broadcasts invalidation updates in real-time — no REST re-fetch needed.
     } catch (_) {}
   }
 
@@ -2232,7 +2234,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         should_trail: shouldTrail,
         symbol: 'RELIANCE',
       })
-      await loadAutoAlerts(false)
+      // SSE stream delivers the test target alert — no REST re-fetch needed.
     } catch (_) {
     } finally {
       setTesting(false)
@@ -2243,7 +2245,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const handleCheckTargets = async () => {
     try {
       await callRef.current('/skills/alerts/auto/check_targets', {})
-      await loadAutoAlerts(false)
+      // SSE broadcasts target milestone updates — no REST re-fetch needed.
     } catch (_) {}
   }
 
@@ -2267,9 +2269,10 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         archive,
         reason: archive ? 'Manual user archive to avoid clutter' : 'Restored to active trades',
       })
-      await loadAutoAlerts(false)
+      // Optimistic local state already applied above; SSE will confirm server-side change.
     } catch (err) {
       console.error('Failed to toggle archive status:', err)
+      // On error, revert optimistic update via a fresh server fetch.
       await loadAutoAlerts(false)
     } finally {
       setArchiving(null)
@@ -2312,6 +2315,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
           ? `🧹 Successfully purged ${purged} expired contracts from alerts storage.`
           : '✨ No expired derivative contracts found to purge.'
       )
+      // After a full expiry-purge, force a clean reload so the list reflects the purged state.
       await loadAutoAlerts(true)
       setTimeout(() => setCleanupNotice(null), 5000)
     } catch (err) {
@@ -2468,7 +2472,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const handleClearLockout = useCallback(async (symbol) => {
     try {
       await callRef.current('/skills/alerts/auto/clear_lockout', { symbol })
-      await loadAutoAlerts(false)
+      // SSE broadcasts lockout cleared — no REST re-fetch needed.
     } catch (err) {
       console.error('Failed to clear lockout:', err)
     }

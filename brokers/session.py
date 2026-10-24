@@ -911,7 +911,10 @@ def _recreate_broker_from_token(key: str):
         elif key == "mstock":
             from brokers.mstock import MStockAPI, TOKEN_FILE
 
-            if TOKEN_FILE.exists():
+            if TOKEN_FILE.exists() and (
+                os.environ.get("MSTOCK_API_KEY", "").strip()
+                and os.environ.get("MSTOCK_CLIENT_CODE", "").strip()
+            ):
                 b = MStockAPI()
                 if b.is_authenticated():
                     return b
