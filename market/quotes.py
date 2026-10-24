@@ -444,7 +444,9 @@ def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
             m = _OPTION_PATTERN.match(clean)
             if not m:
                 continue
-            und = m.group("underlying")
+            from market.instruments import resolve_corporate_alias
+
+            und = resolve_corporate_alias(m.group("underlying"))
             exp_iso = m.group("exp_iso")
             exp_weekly = m.group("exp_weekly")
             exp_num = m.group("exp_num")

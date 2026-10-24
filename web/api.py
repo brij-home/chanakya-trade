@@ -852,13 +852,14 @@ async def telemetry_health():
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     mstock_ws_connected = False
-    try:
-        from market.mstock_websocket import get_mstock_websocket
+    if _has_mstock():
+        try:
+            from market.mstock_websocket import get_mstock_websocket
 
-        ws = get_mstock_websocket()
-        mstock_ws_connected = bool(ws and ws.is_connected)
-    except Exception as e_suppressed:
-        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+            ws = get_mstock_websocket()
+            mstock_ws_connected = bool(ws and ws.is_connected)
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     fyers_ws_connected = False
     try:
