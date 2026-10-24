@@ -263,12 +263,9 @@ def evaluate_alert_invalidation(
     if alert.stop_loss and alert.stop_loss > 0:
         if is_option:
             # Check if option writing / selling position:
-            act = str((alert.actionable_plan or {}).get("action", "")).upper()
-            is_option_sell = act in ("SELL", "WRITE", "SHORT")
-            if not is_option_sell and alert.stop_loss > 0 and alert.target_level > 0:
-                ref_entry = alert.option_premium or alert.ltp
-                if ref_entry and alert.stop_loss > ref_entry and alert.target_level < ref_entry:
-                    is_option_sell = True
+            from engine.alert_expiry import is_option_seller
+
+            is_option_sell = is_option_seller(alert)
 
             if is_option_sell:
                 # Option writing / selling (Short CE / Short PE):
@@ -607,8 +604,7 @@ def evaluate_alert_invalidation(
             if alert.direction == "BEARISH":
                 # For short positions, stop loss is moved downward below entry
                 ref_entry = (
-                    getattr(alert, "initial_entry_premium", None)
-                    or getattr(alert, "entry_price", None)
+                    getattr(alert, "entry_price", None)
                     or alert.trigger_level
                     or (init_sl_val * 0.95 if init_sl_val else 0.0)
                 )
@@ -689,8 +685,7 @@ def evaluate_alert_invalidation(
                 # Use initial_stop_loss to derive original entry proxy; alert.ltp is the
                 # LIVE ticker (not entry) and must NOT be used as entry reference here.
                 ref_entry = (
-                    getattr(alert, "initial_entry_premium", None)
-                    or getattr(alert, "entry_price", None)
+                    getattr(alert, "entry_price", None)
                     or alert.trigger_level
                     or (init_sl_val * 1.05 if init_sl_val else 0.0)
                 )
@@ -2474,28 +2469,42 @@ def evaluate_alert_in_flight_decay(
             or getattr(alert, "ltp", None)
         )
     else:
-        plan = getattr(alert, "actionable_plan", None)
-        if plan and plan.get("recommended_entry"):
-            m_ent = re.findall(r"[\d,]+(?:\.\d+)?", str(plan["recommended_entry"]))
-            if len(m_ent) >= 2:
-                try:
-                    entry = round(
-                        (float(m_ent[0].replace(",", "")) + float(m_ent[1].replace(",", ""))) / 2.0,
-                        2,
-                    )
-                except ValueError as e_suppressed:
-                    logger.debug(
-                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
-                    )
-            elif len(m_ent) == 1:
-                try:
-                    entry = float(m_ent[0].replace(",", ""))
-                except ValueError as e_suppressed:
-                    logger.debug(
-                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
-                    )
-        if not entry and getattr(alert, "trigger_level", None) and alert.trigger_level > 0:
+        # Non-option (Underlying Spot setup): canonical entry is trigger_level, entry_price, or spot from plan
+        if getattr(alert, "trigger_level", None) and alert.trigger_level > 0:
             entry = alert.trigger_level
+        elif getattr(alert, "entry_price", None) and alert.entry_price > 0:
+            entry = alert.entry_price
+
+        plan = getattr(alert, "actionable_plan", None)
+        if not entry and plan:
+            if plan.get("optimal_entry_limit"):
+                try:
+                    entry = float(plan["optimal_entry_limit"])
+                except (ValueError, TypeError) as e_conv:
+                    logger.debug(
+                        f"[alert_evaluator] optimal_entry_limit float parse note: {e_conv}"
+                    )
+            elif plan.get("underlying_spot"):
+                m_spot = re.search(r"[\d,]+(?:\.\d+)?", str(plan["underlying_spot"]))
+                if m_spot:
+                    try:
+                        entry = float(m_spot.group(0).replace(",", ""))
+                    except ValueError as e_conv:
+                        logger.debug(
+                            f"[alert_evaluator] underlying_spot float parse note: {e_conv}"
+                        )
+            elif plan.get("recommended_entry"):
+                # Only use recommended_entry if it matches current_ltp scale (not an option premium recommendation)
+                m_ent = re.findall(r"[\d,]+(?:\.\d+)?", str(plan["recommended_entry"]))
+                if m_ent:
+                    try:
+                        cand = float(m_ent[0].replace(",", ""))
+                        if current_ltp and 0.25 <= (cand / current_ltp) <= 4.0:
+                            entry = cand
+                    except ValueError as e_conv:
+                        logger.debug(
+                            f"[alert_evaluator] recommended_entry float parse note: {e_conv}"
+                        )
         if not entry:
             entry = alert.ltp if getattr(alert, "ltp", 0) > 0 else current_ltp
 
@@ -2534,24 +2543,92 @@ def evaluate_alert_in_flight_decay(
     # 3. Extract Stop Loss
     stop = None
     plan = getattr(alert, "actionable_plan", None)
-    if plan and plan.get("stop_loss"):
-        m_sl = re.search(r"[\d,]+(?:\.\d+)?", str(plan["stop_loss"]))
-        if m_sl:
-            try:
-                stop = float(m_sl.group(0).replace(",", ""))
-            except ValueError as e_suppressed:
-                logger.debug(
-                    f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+    if is_option:
+        if plan and plan.get("stop_loss"):
+            m_sl = re.search(r"[\d,]+(?:\.\d+)?", str(plan["stop_loss"]))
+            if m_sl:
+                try:
+                    stop = float(m_sl.group(0).replace(",", ""))
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+        if not stop and getattr(alert, "stop_loss", None) and alert.stop_loss > 0:
+            stop = alert.stop_loss
+    else:
+        # Non-option (Underlying Spot): SL MUST be spot scale
+        if getattr(alert, "stop_loss", None) and alert.stop_loss > 0:
+            cand_sl = alert.stop_loss
+            if (
+                current_ltp
+                and current_ltp > 50
+                and (cand_sl < current_ltp * 0.50 or cand_sl > current_ltp * 1.60)
+            ):
+                cand_sl = None
+            stop = cand_sl
+        if plan:
+            if not stop or (current_ltp and abs(stop - current_ltp) / current_ltp > 0.35):
+                und_sl = plan.get("underlying_sl") or plan.get("spot_invalidation_anchor")
+                if und_sl:
+                    m_und = re.search(r"[\d,]+(?:\.\d+)?", str(und_sl))
+                    if m_und:
+                        try:
+                            cand = float(m_und.group(0).replace(",", ""))
+                            if current_ltp and (
+                                cand >= current_ltp * 0.50 and cand <= current_ltp * 1.60
+                            ):
+                                stop = cand
+                        except ValueError as e_conv:
+                            logger.debug(
+                                f"[alert_evaluator] underlying_sl float parse note: {e_conv}"
+                            )
+            if not stop and plan.get("stop_loss"):
+                m_sl = re.search(r"[\d,]+(?:\.\d+)?", str(plan["stop_loss"]))
+                if m_sl:
+                    try:
+                        cand = float(m_sl.group(0).replace(",", ""))
+                        if current_ltp and 0.50 <= (cand / current_ltp) <= 1.60:
+                            stop = cand
+                    except ValueError as e_conv:
+                        logger.debug(f"[alert_evaluator] stop_loss float parse note: {e_conv}")
+
+    # Universal Scale Separation Guard (Invariant 14.1):
+    # If entry or stop is on a totally different scale than current_ltp, suppress evaluation!
+    if not is_option:
+        if current_ltp and current_ltp > 50:
+            if entry and (entry < current_ltp * 0.50 or entry > current_ltp * 1.60):
+                logger.warning(
+                    f"[evaluate_alert_in_flight_decay] Suppressed evaluation for {getattr(alert, 'symbol', '')}: "
+                    f"Scale mismatch (quote LTP ₹{current_ltp:,.2f} vs entry ₹{entry:,.2f})"
                 )
-    if not stop and getattr(alert, "stop_loss", None) and alert.stop_loss > 0:
-        stop = alert.stop_loss
+                return None
+            raw_sl = getattr(alert, "stop_loss", None)
+            if (stop and (stop < current_ltp * 0.50 or stop > current_ltp * 1.60)) or (
+                raw_sl and (raw_sl < current_ltp * 0.50 or raw_sl > current_ltp * 1.60)
+            ):
+                logger.warning(
+                    f"[evaluate_alert_in_flight_decay] Suppressed evaluation for {getattr(alert, 'symbol', '')}: "
+                    f"Scale mismatch (quote LTP ₹{current_ltp:,.2f} vs stop ₹{(stop or raw_sl):,.2f})"
+                )
+                return None
+    else:
+        if current_ltp and entry and (current_ltp > entry * 4.0 or entry > current_ltp * 4.0):
+            logger.warning(
+                f"[evaluate_alert_in_flight_decay] Suppressed evaluation for {getattr(alert, 'symbol', '')}: "
+                f"Scale mismatch (quote LTP ₹{current_ltp:,.2f} vs entry ₹{entry:,.2f})"
+            )
+            return None
+        if current_ltp and stop and (current_ltp > stop * 4.0 or stop > current_ltp * 4.0):
+            logger.warning(
+                f"[evaluate_alert_in_flight_decay] Suppressed evaluation for {getattr(alert, 'symbol', '')}: "
+                f"Scale mismatch (quote LTP ₹{current_ltp:,.2f} vs stop ₹{stop:,.2f})"
+            )
+            return None
 
     is_bullish = str(getattr(alert, "direction", "BULLISH")).upper() != "BEARISH"
-    act_str = str((plan or {}).get("action", "")).upper()
-    is_option_sell = is_option and (
-        act_str in ("SELL", "WRITE", "SHORT")
-        or (stop and entry and stop > entry and getattr(alert, "target_level", 0) < entry)
-    )
+    from engine.alert_expiry import is_option_seller
+
+    is_option_sell = is_option and is_option_seller(alert)
 
     # 4. Compute Risk Budget & Payoff
     if is_option and not is_option_sell:
@@ -2594,6 +2671,10 @@ def evaluate_alert_in_flight_decay(
         dist_to_sl_pct = (
             ((stop - current_ltp) / current_ltp) * 100 if (stop and current_ltp > 0) else 999.0
         )
+
+    # Defensive boundary clamping
+    pnl_pct = max(-100.0, min(1000.0, pnl_pct))
+    risk_consumed_pct = max(-500.0, min(500.0, risk_consumed_pct))
 
     # 5. Trigger A: Danger Zone Warning (>= 70% Risk Consumed OR within 1.5% of SL)
     # INVARIANT: Danger Zone STRICTLY applies to positions in an active LOSS.

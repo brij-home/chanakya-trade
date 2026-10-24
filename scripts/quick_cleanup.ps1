@@ -30,7 +30,7 @@ try {
     $zombieProcs = Get-CimInstance Win32_Process -Filter $wqlFilter -ErrorAction SilentlyContinue | 
         Where-Object { 
             $_.ProcessId -ne $currentPid -and 
-            ($_.CommandLine -notmatch "jedi|pylance|language-server|pylsp|debugpy|ms-python|antigravity-ide") -and (
+            ($_.CommandLine -notmatch "jedi|pylance|language-server|pylsp|debugpy|ms-python|antigravity-ide|service\.py|service\.ps1") -and (
                 (($_.Name -match "python|pytest|uvicorn|electron") -and
                  ($_.CommandLine -match "chanakya-trade" -or $_.CommandLine -match "pytest" -or $_.CommandLine -match "uvicorn" -or $_.CommandLine -match "validate_all" -or $_.CommandLine -match "exec\(eval")) -or
                 (($_.Name -match "node|electron") -and ($_.CommandLine -match "electron-vite|macos-app")) -or

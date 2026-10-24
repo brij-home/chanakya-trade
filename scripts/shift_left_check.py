@@ -58,13 +58,32 @@ def get_optimal_workers(file_count: int | None = None, max_cap: int = 8) -> int:
 
 
 def get_python_exe() -> str:
-    """Resolve python executable, preferring virtualenv if active."""
+    """Resolve python executable, preferring virtualenv if active, else py -3.12 on Windows."""
     venv_win = ROOT_DIR / ".venv" / "Scripts" / "python.exe"
     venv_nix = ROOT_DIR / ".venv" / "bin" / "python"
     if venv_win.exists():
         return str(venv_win)
     if venv_nix.exists():
         return str(venv_nix)
+    # If running on Windows and current Python lacks pytest, check for py -3.12
+    if sys.platform == "win32":
+        try:
+            import pytest  # noqa: F401
+        except ImportError:
+            import shutil
+
+            if shutil.which("py"):
+                try:
+                    res = subprocess.run(
+                        ["py", "-3.12", "-c", "import sys; print(sys.executable)"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if res.returncode == 0 and res.stdout.strip():
+                        return res.stdout.strip()
+                except Exception:
+                    pass
     return sys.executable
 
 

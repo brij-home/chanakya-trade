@@ -643,7 +643,95 @@ def detect_intraday_mover_sparks(
             except Exception as e_smc:
                 logger.debug(f"[IntradaySpark] Spark candle/divergence check error: {e_smc}")
 
+        # Chop-to-Trend Phase Transition (CHOP -> ROC Expansion):
+        # Detects the exact bar where consolidation compression releases into directional expansion
+        phase_transition_bonus = 0
+        is_phase_transition = False
+        chop_val = None
+        roc_val = None
+        if df_5m is not None and len(df_5m) >= 15:
+            try:
+                import pandas as pd
+                from analysis.technical import choppiness_index, roc
+
+                chop_s = choppiness_index(df_5m, 14)
+                if len(chop_s) >= 2 and not pd.isna(chop_s.iloc[-1]):
+                    chop_curr = float(chop_s.iloc[-1])
+                    chop_val = round(chop_curr, 2)
+                    c_series = df_5m["close"] if "close" in df_5m.columns else df_5m["Close"]
+                    roc_s = roc(c_series, 12)
+                    if not roc_s.empty and not pd.isna(roc_s.iloc[-1]):
+                        roc_val = round(float(roc_s.iloc[-1]), 2)
+                        # Phase transition: recent consolidation coiling (chop >= 55) releases into expansion (chop <= 52)
+                        # with directional rate of change acceleration
+                        recent_coiling = any(
+                            float(c) >= 55.0 for c in chop_s.iloc[-4:-1] if not pd.isna(c)
+                        )
+                        is_expanding = chop_curr <= 52.0
+                        if is_bullish and recent_coiling and is_expanding and roc_val >= 0.8:
+                            is_phase_transition = True
+                            phase_transition_bonus = 6
+                        elif is_bearish and recent_coiling and is_expanding and roc_val <= -0.8:
+                            is_phase_transition = True
+                            phase_transition_bonus = 6
+            except Exception as e_phase:
+                logger.debug(
+                    f"[IntradaySpark] Phase transition check note for {clean_sym}: {e_phase}"
+                )
+
+        # Second-Derivative Volume Velocity Sensor (d²V/dt² / Tape Speed Acceleration):
+        # Measures explosive volume acceleration where volume growth is compounding
+        # (V_t - 2*V_{t-1} + V_{t-2} > 0 with current volume >= 1.8x average)
+        tape_accel_bonus = 0
+        is_tape_accelerating = False
+        vol_accel_ratio = 1.0
+        d2v_val = None
+        if df_5m is not None and len(df_5m) >= 5:
+            try:
+                v_series = df_5m["volume"].values
+                if len(v_series) >= 3:
+                    v_curr = float(v_series[-1])
+                    v_prev = float(v_series[-2])
+                    v_prior = float(v_series[-3])
+                    avg_v = (
+                        float(np.mean(v_series[-6:-1]))
+                        if len(v_series) >= 6
+                        else float(np.mean(v_series[:-1]))
+                    )
+
+                    delta_curr = v_curr - v_prev
+                    delta_prev = v_prev - v_prior
+                    d2v = delta_curr - delta_prev
+                    d2v_val = round(d2v, 2)
+
+                    if avg_v > 0:
+                        vol_accel_ratio = round(v_curr / avg_v, 2)
+                        if d2v > 0 and delta_curr > 0 and vol_accel_ratio >= 1.80:
+                            is_tape_accelerating = True
+                            tape_accel_bonus = 5
+            except Exception as e_tape:
+                logger.debug(
+                    f"[IntradaySpark] Tape acceleration check note for {clean_sym}: {e_tape}"
+                )
+
         from engine.alert_identity import generate_alert_id, get_session_phase_slot
+
+        # Relative Strength & Decoupler Recognition:
+        # If stock is surging while Nifty is in markdown (or dumping while Nifty is in markup),
+        # recognize this stock as an independent institutional decoupler.
+        is_decoupler = False
+        if is_bullish and is_nifty_markdown and chg >= 1.20 and rvol >= 1.50:
+            is_decoupler = True
+        elif is_bearish and is_nifty_markup and chg <= -1.20 and rvol >= 1.50:
+            is_decoupler = True
+
+        decoupler_status = "VERIFIED_DECOUPLER" if is_decoupler else "CORRELATED"
+        if is_decoupler:
+            headline = f"💎 [DECOUPLER] {headline}"
+        if is_phase_transition:
+            headline = f"⚡ [PHASE EXPANSION] {headline}"
+        if is_tape_accelerating:
+            headline = f"🔥 [TAPE SURGE] {headline}"
 
         now_dt_for_phase = None
         try:
@@ -672,9 +760,19 @@ def detect_intraday_mover_sparks(
             target_level=t1_price,
             stop_loss=sl_price,
             no_chase_boundary=no_chase_lvl,
+            decoupler_status=decoupler_status,
             confidence=min(
                 95,
-                int(75 + rvol * 5 + sector_tailwind_bonus + confirmation_bonus + divergence_bonus),
+                int(
+                    75
+                    + rvol * 5
+                    + sector_tailwind_bonus
+                    + confirmation_bonus
+                    + divergence_bonus
+                    + phase_transition_bonus
+                    + tape_accel_bonus
+                    + (5 if is_decoupler else 0)
+                ),
             ),
             created_at=now_iso,
             is_live=is_authentic_spark,
@@ -713,6 +811,14 @@ def detect_intraday_mover_sparks(
                 "divergence_bias": div_bias,
                 "alignment_count": alignment_count,
                 "sector_tailwind_bonus": sector_tailwind_bonus,
+                "decoupler_status": decoupler_status,
+                "is_decoupler": is_decoupler,
+                "is_phase_transition": is_phase_transition,
+                "chop_index": chop_val,
+                "roc_12": roc_val,
+                "is_tape_accelerating": is_tape_accelerating,
+                "vol_accel_ratio": vol_accel_ratio,
+                "d2_vol": d2v_val,
             },
             actionable_plan=plan,
         )

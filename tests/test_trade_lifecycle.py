@@ -74,3 +74,77 @@ def test_audit_position_lifecycle_stall_kill_switch():
     assert report.health_score == 40
     assert report.recommended_action == "SCRATCH_POSITION"
     assert any("Momentum Stalled" in d for d in report.diagnostic_bullet_points)
+
+
+def test_chandelier_convexity_ratchet_long_and_short():
+    """
+    Verifies that as profit expands:
+    1. At +1.2R, stop moves to HALF_RISK_LOCKED (cuts initial risk by 50%).
+    2. At +2.8R, stop moves to CHANDELIER_CONVEXITY_RATCHET locking at least +1.0R.
+    3. Short trades symmetrically ratchet DOWNWARDS below entry.
+    """
+    # 1. Long at +1.2R (Entry: 1000, Initial SL: 950 -> risk: 50. LTP: 1060)
+    rep_long_1r = audit_position_lifecycle(
+        symbol="TCS",
+        entry_price=1000.0,
+        initial_stop_loss=950.0,
+        current_ltp=1060.0,
+        position_type="LONG",
+    )
+    assert rep_long_1r.current_r_multiple == pytest.approx(1.2, abs=0.05)
+    assert rep_long_1r.trailing_stops.stop_method == "HALF_RISK_LOCKED"
+    assert rep_long_1r.trailing_stops.recommended_active_stop == 975.0  # entry - 0.5 * 50
+
+    # 2. Long at +2.8R (LTP: 1140 -> R = 2.8)
+    rep_long_28r = audit_position_lifecycle(
+        symbol="TCS",
+        entry_price=1000.0,
+        initial_stop_loss=950.0,
+        current_ltp=1140.0,
+        position_type="LONG",
+    )
+    assert rep_long_28r.current_r_multiple == pytest.approx(2.8, abs=0.05)
+    assert "CHANDELIER" in rep_long_28r.trailing_stops.stop_method
+    assert (
+        rep_long_28r.trailing_stops.recommended_active_stop >= 1050.0
+    )  # Locked at least +1R (1050.0)
+
+    # 3. Short at +2.8R (Entry: 1000, Initial SL: 1050 -> risk: 50. LTP: 860)
+    rep_short_28r = audit_position_lifecycle(
+        symbol="TCS",
+        entry_price=1000.0,
+        initial_stop_loss=1050.0,
+        current_ltp=860.0,
+        position_type="SHORT",
+    )
+    assert rep_short_28r.current_r_multiple == pytest.approx(2.8, abs=0.05)
+    assert "CHANDELIER" in rep_short_28r.trailing_stops.stop_method
+    assert (
+        rep_short_28r.trailing_stops.recommended_active_stop <= 950.0
+    )  # Trailed DOWN to lock at least +1R (950.0)
+
+
+def test_exhaustion_wick_harvest_detection():
+    """Verify that a position at +3R printing a massive upper wick triggers EXHAUSTION_HARVEST."""
+    dates = pd.date_range(start="2025-01-01", periods=15, freq="D")
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": [1000.0] * 14 + [1140.0],
+            "high": [1010.0] * 14 + [1180.0],  # 40-point range, peak at 1180
+            "low": [990.0] * 14 + [1140.0],
+            "close": [1005.0] * 14
+            + [1145.0],  # Close near bottom (wick = 1180-1145 = 35 / 40 = 87.5% wick)
+        }
+    )
+    rep = audit_position_lifecycle(
+        symbol="RELIANCE",
+        entry_price=1000.0,
+        initial_stop_loss=950.0,  # Risk = 50
+        df=df,
+        current_ltp=1145.0,  # +2.9R
+        position_type="LONG",
+    )
+    assert rep.recommended_action == "EXHAUSTION_HARVEST"
+    assert rep.health_status == "EXHAUSTION_CLIMAX"
+    assert any("Exhaustion" in d for d in rep.diagnostic_bullet_points)

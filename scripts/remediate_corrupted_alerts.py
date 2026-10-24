@@ -1,143 +1,120 @@
 """
-scripts/remediate_corrupted_alerts.py
-──────────────────────────────────────
-Invalidates corrupted MCX commodity option alerts in auto_alerts.json
-and purges false win records from pattern_outcomes.json with institutionally
-honest invalidation reasons so that they are never counted as trading wins.
+scripts/remediate_corrupted_alerts.py — Offline Alert Data Remediation
+
+Remediates corrupted alert records in ~/.trading_platform/auto_alerts.json that were
+falsely flagged with IN_FLIGHT_WARNING / DANGER ZONE due to scale contamination
+(comparing equity spot prices against derivative option premium stop-losses).
+
+Follows Invariant 18 (Zero In-Line Startup Migrations) & Invariant 20 (SSOT & Auditability).
 """
 
 import json
 import os
-import shutil
-from datetime import datetime, timezone, timedelta
+import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-IST = timezone(timedelta(hours=5, minutes=30))
-now_str = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
-now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-base_dir = os.path.expanduser("~/.trading_platform")
-auto_alerts_path = os.path.join(base_dir, "auto_alerts.json")
-pattern_outcomes_path = os.path.join(base_dir, "pattern_outcomes.json")
+IST = ZoneInfo("Asia/Kolkata")
 
-print("=== REMEDIATING CORRUPTED ALERTS & PURGING FALSE WINS ===")
 
-# 1. Remediate auto_alerts.json
-if os.path.exists(auto_alerts_path):
-    # Create timestamped backup
-    backup_path = f"{auto_alerts_path}.pre_invalidation_{now_str}.bak"
-    shutil.copy2(auto_alerts_path, backup_path)
-    print(f"Created backup of auto_alerts.json at: {backup_path}")
+def remediate_auto_alerts(dry_run: bool = False) -> int:
+    path = os.path.expanduser("~/.trading_platform/auto_alerts.json")
+    if not os.path.exists(path):
+        print(f"File not found: {path}")
+        return 0
 
-    with open(auto_alerts_path, "r", encoding="utf-8") as f:
-        alerts = json.load(f)
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    invalidated_count = 0
-    for a in alerts:
-        aid = a.get("alert_id", "")
-        sym = a.get("symbol", "")
-        ex = a.get("exchange", "")
-        rm = a.get("r_multiple") or 0
-        pnl = a.get("pnl_pct") or 0
+    remediated_count = 0
+    now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
-        # Target criteria: MCX base metal option alerts, or alerts with corrupted >500% PnL / >20R from units confusion
+    for a in data:
+        warn_sent = a.get("in_flight_warning_sent", False)
+        warn_reason = str(a.get("in_flight_warning_reason") or "")
+        stage = a.get("stage", "")
+
+        # Detect scale contamination signatures
         is_corrupted = False
-        reasons = []
-
-        if ex == "MCX" and sym in ("COPPER", "ZINC", "ALUMINIUM", "LEAD", "SILVER"):
-            # Check if it was generated as an option trade
-            plan = a.get("actionable_plan") or {}
-            if (
-                a.get("strike")
-                or plan.get("instrument_type") == "OPTION"
-                or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION"
-            ):
+        if warn_sent and ("99% risk budget consumed" in warn_reason or "near SL" in warn_reason):
+            act_plan = a.get("actionable_plan") or {}
+            opt_plan = act_plan.get("option_plan") if isinstance(act_plan, dict) else {}
+            has_opt = bool(opt_plan or a.get("strike") or a.get("option_type"))
+            ltp = float(a.get("ltp") or 0.0)
+            if has_opt and ltp > 50.0:
                 is_corrupted = True
-                reasons.append(
-                    f"Illiquid MCX option contract for base metal {sym} with zero institutional open interest"
-                )
 
-        if rm > 20 or pnl > 500:
-            is_corrupted = True
-            reasons.append(
-                f"Unit scale mismatch between spot price and option premium levels (R: {rm}, PnL: {pnl}%)"
-            )
+        if not is_corrupted:
+            continue
 
-        if is_corrupted and not a.get("is_invalidated"):
-            full_reason = (
-                "Corrupted alert: MCX option vehicle evaluated against spot price with uncalibrated COMEX basis "
-                f"and illiquid contract ({'; '.join(reasons)})."
-            )
-            a["is_invalidated"] = True
-            a["invalidation_reason"] = full_reason
-            a["invalidated_at"] = now_iso
-            a["stage"] = "INVALIDATED"
-            a["target_status"] = "INVALIDATED"
-            a["achieved_milestones"] = []
-            a["should_trail"] = False
-            a["trailing_decision"] = "INVALIDATED"
-            a["trailing_stop"] = None
-            a["r_multiple"] = 0.0
-            a["pnl_pct"] = 0.0
-            a["locked_profit_pts"] = 0.0
-            a["locked_profit_pct"] = 0.0
-            a["is_archived"] = True
-            a["archived_at"] = now_iso
-            a["archive_reason"] = full_reason
-            is_test = (a.get("environment") == "TEST") or (not a.get("is_live", True))
-            tag = "[TEST]" if is_test else "[REAL/LIVE]"
-            a["headline"] = (
-                f"⚠️ {tag} VIEW INVALIDATED: {sym} {a.get('alert_type', '').replace('_', ' ')}"
-            )
-            a["summary"] = full_reason
-            invalidated_count += 1
-            print(f"-> Invalidated alert {aid} ({sym}): {full_reason}")
+        remediated_count += 1
+        aid = a.get("alert_id")
+        sym = a.get("symbol")
+        prev_stage = stage
 
-    with open(auto_alerts_path, "w", encoding="utf-8") as f:
-        json.dump(alerts, f, indent=2, ensure_ascii=False)
-    print(f"Successfully remediated {invalidated_count} alert(s) in auto_alerts.json.")
-
-# 2. Remediate pattern_outcomes.json
-if os.path.exists(pattern_outcomes_path):
-    backup_po = f"{pattern_outcomes_path}.pre_invalidation_{now_str}.bak"
-    shutil.copy2(pattern_outcomes_path, backup_po)
-    print(f"Created backup of pattern_outcomes.json at: {backup_po}")
-
-    with open(pattern_outcomes_path, "r", encoding="utf-8") as f:
-        outcomes = json.load(f)
-
-    purged_count = 0
-    cleaned_outcomes = []
-    for item in outcomes:
-        aid = str(item.get("alert_id") or "")
-        sym = str(item.get("symbol") or "")
-        out = item.get("outcome")
-        en = float(item.get("entry_price") or 0)
-        ex = float(item.get("exit_price") or 0)
-
-        # Flag false wins from unit mismatches
-        is_false_win = False
-        if out in ("WIN_T1", "WIN_T2", "WIN_TARGET"):
-            if "comm-copper" in aid or sym.upper() == "COPPER":
-                is_false_win = True
-            elif "midcpnifty-pe-13750" in aid:
-                is_false_win = True
-            elif en > 0 and (ex / en > 5.0 or ex / en < 0.2):
-                is_false_win = True
-
-        if is_false_win:
-            purged_count += 1
-            print(
-                f"-> Purged false win outcome: alert={aid}, sym={sym}, outcome={out}, entry={en}, exit={ex}"
-            )
-            # Mark as INVALIDATED and set realized_rr to 0.0 so it is excluded from win analytics
-            item["outcome"] = "INVALIDATED"
-            item["realized_rr"] = 0.0
-            cleaned_outcomes.append(item)
+        # Determine recovered stage
+        achieved = a.get("achieved_milestones") or []
+        tgt_status = str(a.get("target_status") or "").upper()
+        if stage in ("COMPLETED", "INVALIDATED", "RUNNER_EXIT"):
+            new_stage = stage
+        elif a.get("is_invalidated") or tgt_status in ("INVALIDATED", "STOPPED_OUT"):
+            new_stage = "INVALIDATED"
+        elif "RUNNER_EXIT" in achieved or "RUNNER_CLOSED" in tgt_status:
+            new_stage = "RUNNER_EXIT"
+        elif "T2_ACHIEVED" in achieved:
+            new_stage = "T2_ACHIEVED"
+        elif "T1_ACHIEVED" in achieved:
+            new_stage = "T1_ACHIEVED"
+        elif "T0_5_ACHIEVED" in achieved or "DE_RISK" in tgt_status:
+            new_stage = "DE_RISK_0_5R"
+        elif "TRAILING_UPDATE" in achieved or a.get("trailing_stop"):
+            new_stage = "TRAILING_UPDATE"
+        elif a.get("triggered_at") or a.get("is_ignited"):
+            new_stage = "IGNITED"
         else:
-            cleaned_outcomes.append(item)
+            new_stage = "PRIMED"
 
-    with open(pattern_outcomes_path, "w", encoding="utf-8") as f:
-        json.dump(cleaned_outcomes, f, indent=2, ensure_ascii=False)
-    print(f"Successfully cleaned {purged_count} false win outcome(s) in pattern_outcomes.json.")
+        print(f"[{sym}] {aid}: {prev_stage} -> {new_stage} (Reason was: {warn_reason[:50]}...)")
 
-print("=== REMEDIATION COMPLETED ===")
+        if not dry_run:
+            a["in_flight_warning_sent"] = False
+            a["in_flight_warning_reason"] = None
+            if stage == "IN_FLIGHT_WARNING":
+                a["stage"] = new_stage
+
+            if "audit_trail" not in a or not isinstance(a["audit_trail"], list):
+                a["audit_trail"] = []
+            a["audit_trail"].append(
+                {
+                    "timestamp": now_iso,
+                    "event_type": "DATA_REMEDIATION",
+                    "action": "DATA_REMEDIATION",
+                    "message": f"Offline remediation: cleared false IN_FLIGHT_WARNING caused by legacy scale contamination. Restored stage {prev_stage} -> {new_stage}.",
+                    "actor": "OFFLINE_REMEDIATION",
+                    "details": {
+                        "previous_reason": warn_reason,
+                        "previous_stage": prev_stage,
+                        "restored_stage": new_stage,
+                    },
+                }
+            )
+
+    if not dry_run and remediated_count > 0:
+        # Atomic file write
+        temp_path = f"{path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(temp_path, path)
+        print(f"\nSuccessfully remediated {remediated_count} alerts in {path}.")
+    else:
+        print(f"\nDry run complete. {remediated_count} alerts identified for remediation.")
+
+    return remediated_count
+
+
+if __name__ == "__main__":
+    is_dry = "--dry-run" in sys.argv
+    remediate_auto_alerts(dry_run=is_dry)

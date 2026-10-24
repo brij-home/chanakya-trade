@@ -573,5 +573,6 @@ def fetch_global_macro_report(
     return report
 
 
-# Unified alias for global macro snapshot
+# Unified aliases for global macro snapshot
 get_global_macro_snapshot = fetch_global_macro_report
+get_global_macro_report = fetch_global_macro_report

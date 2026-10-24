@@ -247,7 +247,18 @@ class AutoAlert:
         actor: str = "ENGINE",
         details: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Records an immutable audit event in the alert's chronological trail."""
+        audit_details = dict(details or {})
+        if "code_commit" not in audit_details:
+            try:
+                from engine.code_provenance import get_code_provenance
+
+                prov = get_code_provenance()
+                audit_details["code_commit"] = prov.git_commit
+                audit_details["code_boot_ts"] = prov.boot_timestamp
+                audit_details["code_stale"] = prov.is_stale_in_memory
+            except Exception as e_prov:
+                logger.debug(f"[engine.alert_model] Code provenance resolution skipped: {e_prov}")
+
         evt = {
             "timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
             "event_type": event_type,
@@ -258,7 +269,7 @@ class AutoAlert:
             "ltp": self.ltp,
             "trace_id": self.trace_id or self.correlation_id,
             "correlation_id": self.correlation_id or self.trace_id,
-            "details": details or {},
+            "details": audit_details,
         }
         if self.audit_trail is None:
             self.audit_trail = []
@@ -1391,8 +1402,8 @@ class AutoAlert:
                     continue
                 try:
                     num = float(str(src).replace(",", "").replace("₹", "").replace("$", "").strip())
-                    # Discard leaked option premiums (e.g. 118.24 when spot is 2838.6)
-                    if entry_ref > 100 and num < (entry_ref * 0.5) and not is_short:
+                    # Discard leaked option premiums (e.g. 118.24 when spot is 2838.6, or 198.16 when spot is 6158.5)
+                    if entry_ref > 100 and num < (entry_ref * 0.40):
                         continue
                     target_sources.append(num)
                 except Exception as e_suppressed:
@@ -1916,15 +1927,18 @@ class AutoAlert:
                 if m:
                     val = float(m[0])
                     # Guard against option premium leakage into spot coordinate:
-                    # If spot entry > 100 and target < 50% of entry on a non-option bullish setup, ignore leaked option target
-                    if (
-                        not is_opt
-                        and ep
-                        and ep > 100
-                        and val < (ep * 0.5)
-                        and str(self.direction).upper() not in ("BEARISH", "SHORT", "SELL")
-                    ):
-                        if self.target_level and self.target_level > ep:
+                    # If spot entry > 100 and target < 40% of entry, ignore leaked option target (both long and short)
+                    if not is_opt and ep and ep > 100 and val < (ep * 0.40):
+                        if self.target_level and (
+                            (
+                                self.target_level > ep
+                                and str(self.direction).upper() in ("BULLISH", "LONG", "BUY")
+                            )
+                            or (
+                                self.target_level < ep
+                                and str(self.direction).upper() in ("BEARISH", "SHORT", "SELL")
+                            )
+                        ):
                             return float(self.target_level)
                     else:
                         return val
@@ -2014,18 +2028,28 @@ class AutoAlert:
                 if m:
                     val = float(m[0])
                     ep_chk = self.entry_price
-                    if (
-                        not is_opt
-                        and ep_chk
-                        and ep_chk > 100
-                        and val < (ep_chk * 0.5)
-                        and str(self.direction).upper() not in ("BEARISH", "SHORT", "SELL")
-                    ):
+                    if not is_opt and ep_chk and ep_chk > 100 and val < (ep_chk * 0.40):
                         t2_num = None
                     else:
                         t2_num = val
             except Exception as e_suppressed:
                 logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
+        if t2_num is None and isinstance(plan.get("trade_plan"), dict):
+            tp_t2 = plan["trade_plan"].get("target_2")
+            if tp_t2:
+                try:
+                    import re
+
+                    m = re.findall(r"[\d.]+", str(tp_t2).replace(",", ""))
+                    if m:
+                        val = float(m[0])
+                        ep_chk = self.entry_price
+                        if not (not is_opt and ep_chk and ep_chk > 100 and val < (ep_chk * 0.40)):
+                            t2_num = val
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
         t1 = self.target_1
         ep = self.entry_price
         sl = getattr(self, "initial_stop_loss", None) or self.stop_loss

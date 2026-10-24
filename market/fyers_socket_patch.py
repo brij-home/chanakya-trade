@@ -42,11 +42,28 @@ class _ThreadingProxy:
 
 
 def patch_fyers_websocket_daemon_threads() -> None:
-    """Ensure all threads spawned by fyers_apiv3 are daemon threads."""
+    """Ensure all threads spawned by fyers_apiv3 are daemon threads and shim pkg_resources with modern importlib."""
     global _PATCHED
     if _PATCHED:
         return
     try:
+        import sys
+
+        # Institutional shim: fyers_apiv3 only uses pkg_resources to locate map.json:
+        # resource_filename('fyers_apiv3.FyersWebsocket', 'map.json')
+        # Providing a modern importlib.resources shim prevents setuptools.pkg_resources
+        # from loading, scanning site-packages, and emitting deprecation warnings.
+        if "pkg_resources" not in sys.modules:
+            import importlib.resources
+            import types
+
+            shim = types.ModuleType("pkg_resources")
+            shim.resource_filename = lambda pkg, res: str(
+                importlib.resources.files(pkg).joinpath(res)
+            )
+            shim.declare_namespace = lambda ns: None
+            sys.modules["pkg_resources"] = shim
+
         from fyers_apiv3.FyersWebsocket import data_ws, order_ws, tbt_ws
 
         proxy = _ThreadingProxy()

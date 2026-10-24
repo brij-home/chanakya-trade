@@ -221,15 +221,16 @@ def resolve_option_contract(
                 and (abs(float(getattr(c, "strike", 0.0)) - spot) / max(1.0, spot)) <= 0.025
             ]
             # Liquidity & Bid-Ask Spread Guard:
-            # If live top-of-book bid/ask are present, enforce spread <= 3.5%
+            # If live top-of-book bid/ask are present, enforce spread <= 3.5% (index) or <= 6.0% (stock)
             liquid_matching = []
+            max_spr_matching = 0.035 if is_idx else 0.06
             for c in matching:
                 b = float(getattr(c, "bid", 0.0) or 0.0)
                 a = float(getattr(c, "ask", 0.0) or 0.0)
                 lp = float(getattr(c, "last_price", 0.0) or 0.0)
                 if b > 0 and a > 0 and lp > 0:
                     spr = (a - b) / lp
-                    if spr <= 0.035:
+                    if spr <= max_spr_matching:
                         liquid_matching.append(c)
                 else:
                     liquid_matching.append(c)
@@ -306,6 +307,17 @@ def resolve_option_contract(
                 a = float(getattr(chosen, "ask", 0.0) or 0.0)
                 if b > 0 and a > 0 and opt_ltp > 0:
                     spread_pct_val = round((a - b) / opt_ltp, 4)
+                    max_viable_spr = 0.04 if is_idx else 0.08
+                    if spread_pct_val > max_viable_spr:
+                        if not prefer_options:
+                            logger.info(
+                                f"[OptionResolver] Discarding illiquid option contract for {clean_sym}: "
+                                f"bid={b}, ask={a}, ltp={opt_ltp}, spread={spread_pct_val * 100:.1f}% > {max_viable_spr * 100:.1f}%. "
+                                f"Defaulting to clean underlying spot execution."
+                            )
+                            return None
+                        else:
+                            is_est = True
     except Exception as e:
         logger.debug(f"[OptionResolver] Options chain query error for {clean_sym}: {e}")
 

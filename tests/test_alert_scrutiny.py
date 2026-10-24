@@ -900,3 +900,122 @@ def test_defensive_parse_scrutiny_json(auditor):
     assert data3["score"] == 85
     assert "Strong reclaim above VWAP" in data3["logic_confirmation"]
     assert "Overhead supply zone near 25200" in data3["trap_risk_warning"]
+
+
+def test_cvd_divergence_bull_trap_veto(auditor):
+    """Verify that a breakout with bearish CVD divergence / absorption is vetoed as a bull trap."""
+    alert_trap = AutoAlert(
+        alert_id="test-cvd-trap-01",
+        alert_type="ORB_BREAKOUT",
+        stage="IGNITED",
+        symbol="NSE:TCS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="TCS Breakout Trap",
+        summary="Test",
+        ltp=3000.0,
+        trigger_level=3000.0,
+        stop_loss=2950.0,
+        target_level=3150.0,
+        metrics={
+            "cvd_divergence": "BEARISH_ABSORPTION",
+            "atr": 40.0,
+            "vwap": 2980.0,
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_trap)
+    assert passed is False
+    assert "Bull Trap Veto" in reason
+    assert flags["order_book_sanctity_valid"] is False
+
+
+def test_order_book_depth_wall_veto(auditor):
+    """Verify that a breakout with massive ask depth overhang (3.5x seller skew) is vetoed as an order book wall trap."""
+    alert_wall = AutoAlert(
+        alert_id="test-depth-wall-01",
+        alert_type="ORB_BREAKOUT",
+        stage="IGNITED",
+        symbol="NSE:INFY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="INFY Wall Trap",
+        summary="Test",
+        ltp=1500.0,
+        trigger_level=1500.0,
+        stop_loss=1480.0,
+        target_level=1560.0,
+        metrics={
+            "depth_imbalance": 3.5,
+            "depth_skew": "SELLER_HEAVY",
+            "atr": 20.0,
+            "vwap": 1490.0,
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_wall)
+    assert passed is False
+    assert "Order Book Wall Trap" in reason
+    assert flags["order_book_sanctity_valid"] is False
+
+
+def test_macro_brent_crude_headwind_veto(auditor):
+    """Verify that a Long breakout on ASIANPAINT is vetoed if Brent Crude is spiking +2.4%."""
+    alert = AutoAlert(
+        alert_id="test-asianpaint-brent-trap",
+        alert_type="INTRADAY_BREAKOUT_SPARK",
+        stage="IGNITED",
+        symbol="NSE:ASIANPAINT",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="ASIANPAINT Breakout",
+        summary="Test",
+        ltp=2800.0,
+        trigger_level=2800.0,
+        stop_loss=2760.0,
+        target_level=2900.0,
+        confidence=80,
+        metrics={
+            "brent_change_pct": 2.4,
+            "atr": 35.0,
+            "vwap": 2790.0,
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert)
+    assert passed is False
+    assert "Macro Headwind Veto" in reason
+    assert flags.get("macro_headwind_trap") is True
+
+
+def test_macro_india_vix_shock_veto(auditor):
+    """Verify that a cash equity breakout with low conviction is vetoed if India VIX spikes +6.2%."""
+    alert = AutoAlert(
+        alert_id="test-vix-shock-01",
+        alert_type="ORB_BREAKOUT",
+        stage="IGNITED",
+        symbol="NSE:HDFCBANK",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="HDFCBANK ORB",
+        summary="Test",
+        ltp=1650.0,
+        trigger_level=1650.0,
+        stop_loss=1630.0,
+        target_level=1700.0,
+        confidence=78,  # < 85 required during VIX shock
+        metrics={
+            "vix_change_pct": 6.2,
+            "atr": 20.0,
+            "vwap": 1645.0,
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert)
+    assert passed is False
+    assert "Volatility Shock Veto" in reason
+    assert flags.get("vix_shock_veto") is True

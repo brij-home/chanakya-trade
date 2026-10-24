@@ -206,3 +206,147 @@ def test_auto_alert_market_status_resolution():
         environment="EOD_SCAN",
     )
     assert alert_eod.market_status == "SESSION_CLOSED"
+
+
+def test_scale_isolation_in_fno_enrichment():
+    """Verify that _enrich_fno_contract_if_applicable isolates option premiums in option_plan without overwriting spot coordinates."""
+    from unittest.mock import MagicMock, patch
+    from engine.auto_alert_engine import AutoAlertEngine
+
+    engine = AutoAlertEngine()
+    alert = AutoAlert(
+        alert_id="aa-orb-breakdown-abb-bear-20261023",
+        alert_type="ORB_BREAKDOWN",
+        stage="IGNITED",
+        symbol="ABB",
+        exchange="NSE",
+        direction="BEARISH",
+        ltp=6152.0,
+        trigger_level=6150.0,
+        stop_loss=6212.0,
+        target_level=6050.0,
+        headline="ABB Breakdown",
+        summary="Bearish breakdown",
+        actionable_plan={
+            "action": "SELL_SHORT_OR_BUY_PUT",
+            "stop_loss": "₹6,212.00",
+            "target_1": "₹6,050.00",
+            "target_2": "₹5,950.00",
+            "no_chase_boundary": "₹6,120.00",
+        },
+    )
+
+    mock_opt_plan = MagicMock()
+    mock_opt_plan.contract_symbol = "NSE:ABB26OCT6200PE"
+    mock_opt_plan.strike = 6200.0
+    mock_opt_plan.expiry = "2026-10-29"
+    mock_opt_plan.entry_premium = 139.55
+    mock_opt_plan.sl_premium = 112.48
+    mock_opt_plan.t1_premium = 168.0
+    mock_opt_plan.t2_premium = 198.16
+    mock_opt_plan.lot_size = 125
+    mock_opt_plan.as_dict.return_value = {
+        "contract_symbol": "NSE:ABB26OCT6200PE",
+        "entry_premium": 139.55,
+        "sl_premium": 112.48,
+        "t1_premium": 168.0,
+        "t2_premium": 198.16,
+    }
+
+    with patch("engine.option_resolver.resolve_option_contract", return_value=mock_opt_plan):
+        engine._enrich_fno_contract_if_applicable(alert)
+
+    # Invariant: Primary actionable_plan coordinates MUST remain on spot scale!
+    assert alert.actionable_plan["stop_loss"] == "₹6,212.00"
+    assert alert.actionable_plan["target_1"] == "₹6,050.00"
+    assert alert.actionable_plan["target_2"] == "₹5,950.00"
+    assert alert.actionable_plan["no_chase_boundary"] == "₹6,120.00"
+
+    # Invariant: Option premiums MUST be isolated in dedicated keys
+    assert alert.actionable_plan["option_entry"] == "₹139.55"
+    assert alert.actionable_plan["option_sl"] == "₹112.48"
+    assert alert.actionable_plan["option_target_2"] == "₹198.16"
+    assert "option_plan" in alert.actionable_plan
+    assert alert.actionable_plan["option_plan"]["sl_premium"] == 112.48
+
+
+def test_tri_directional_symmetry_in_target_properties():
+    """Verify that target_1 and target_2 properties never return sub-scale option premiums for BEARISH or BULLISH spot setups."""
+    # Spot stock alert with contaminated option target_2 in plan
+    alert_bear = AutoAlert(
+        alert_id="aa-test-bear-scale-01",
+        alert_type="ORB_BREAKDOWN",
+        stage="IGNITED",
+        symbol="ABB",
+        exchange="NSE",
+        direction="BEARISH",
+        ltp=6152.0,
+        trigger_level=6150.0,
+        stop_loss=6212.0,
+        target_level=6050.0,
+        headline="ABB Breakdown",
+        summary="Test",
+        actionable_plan={
+            "stop_loss": "₹6,212.00",
+            "target_1": "₹6,050.00",
+            "target_2": 198.16,  # Corrupted option premium
+            "trade_plan": {
+                "target_1": 6050.0,
+                "target_2": 5950.0,  # Legitimate spot target_2
+            },
+        },
+    )
+    # The property MUST reject 198.16 (< 40% of spot 6152) and return genuine spot target
+    assert alert_bear.target_2 == 5950.0
+    assert alert_bear.target_2 != 198.16
+
+
+def test_alert_evaluator_suppresses_scale_mismatch():
+    """Verify that evaluate_alert_in_flight_decay suppresses evaluation when LTP and SL have > 50% scale mismatch."""
+    from engine.alert_evaluator import evaluate_alert_in_flight_decay
+
+    alert = AutoAlert(
+        alert_id="aa-test-mismatch-01",
+        alert_type="ORB_BREAKDOWN",
+        stage="IGNITED",
+        symbol="ABB",
+        exchange="NSE",
+        direction="BEARISH",
+        ltp=6152.0,
+        trigger_level=6150.0,
+        stop_loss=112.48,  # Option premium stop on a 6000 stock!
+        target_level=6050.0,
+        headline="Scale Mismatch Test",
+        summary="Test",
+        environment="TEST",
+    )
+    # Evaluation must return None instead of triggering a false 99% Danger Zone
+    res = evaluate_alert_in_flight_decay(alert, current_ltp=6150.0)
+    assert res is None
+
+
+def test_option_resolver_rejects_illiquid_spreads():
+    """Verify that resolve_option_contract rejects strikes with > 8% bid-ask spread on cash equity setups."""
+    from unittest.mock import MagicMock, patch
+    from engine.option_resolver import resolve_option_contract
+
+    mock_contract = MagicMock()
+    mock_contract.option_type = "PE"
+    mock_contract.strike = 3000.0
+    mock_contract.last_price = 10.0
+    mock_contract.bid = 5.0
+    mock_contract.ask = 35.0  # (35 - 5) / 10 = 300% spread!
+    mock_contract.symbol = "NSE:KAYNES26OCT3000PE"
+
+    mock_chain = MagicMock()
+    mock_chain.contracts = [mock_contract]
+
+    with patch("market.options.get_options_chain", return_value=mock_chain):
+        res = resolve_option_contract(
+            symbol="KAYNES",
+            spot=3000.0,
+            direction="BEARISH",
+            prefer_options=False,  # Standard cash equity setup
+        )
+        # Must discard predatory illiquid option and return None for clean spot execution
+        assert res is None

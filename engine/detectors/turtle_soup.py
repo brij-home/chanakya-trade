@@ -258,28 +258,37 @@ def detect_turtle_soup_sweep(
 
     blueprint = ActionableBlueprint(
         action=("BUY_CALL" if is_bullish else "BUY_PUT") if has_opt else action_verb,
-        entry_range=f"₹{opt_entry * 0.98:,.2f} – ₹{opt_entry * 1.02:,.2f}"
-        if has_opt
-        else f"₹{entry_price * 0.998:,.2f} – ₹{entry_price * 1.002:,.2f}",
-        trigger_level=opt_entry if has_opt else entry_price,
-        invalidation_stop=opt_sl if has_opt else stop_loss,
-        target_1=opt_t1 if has_opt else target_1,
-        target_2=opt_t2 if has_opt else target_2,
-        runner_target=opt_t3 if has_opt else runner_target,
+        entry_range=f"₹{entry_price * 0.998:,.2f} – ₹{entry_price * 1.002:,.2f}",
+        trigger_level=entry_price,
+        invalidation_stop=stop_loss,
+        target_1=target_1,
+        target_2=target_2,
+        runner_target=runner_target,
         risk_reward=f"1:{rr_ratio:.1f}",
-        no_chase_boundary=opt_nc if has_opt else no_chase,
+        no_chase_boundary=no_chase,
         execution_style="LIMIT_ON_PULLBACK",
-        when_to_buy=f"Limit order at OTE pullback near ₹{opt_entry:,.2f} after structural trap rejection."
-        if has_opt
-        else f"Limit order at OTE pullback near ₹{entry_price:,.2f} after structural trap rejection.",
-        when_to_wait=f"Do not chase if premium moves beyond ₹{opt_nc:,.2f}."
-        if has_opt
-        else f"Do not chase if spot moves beyond ₹{no_chase:,.2f}.",
+        when_to_buy=f"Limit order at OTE pullback near ₹{entry_price:,.2f} after structural trap rejection."
+        + (f" (Option {contract_symbol} near ₹{opt_entry:,.2f})" if has_opt else ""),
+        when_to_wait=f"Do not chase if spot moves beyond ₹{no_chase:,.2f}."
+        + (f" (or premium beyond ₹{opt_nc:,.2f})" if has_opt else ""),
         segment="FNO_INDEX" if is_index_symbol(clean_sym) else "EQUITY",
         contract=contract_symbol,
         strike=strike,
         option_type=option_type,
         expiry_date=expiry_date_str,
+        extra_details={
+            "option_entry": f"₹{opt_entry:,.2f}" if has_opt else None,
+            "option_sl": f"₹{opt_sl:,.2f}" if has_opt else None,
+            "option_target_1": f"₹{opt_t1:,.2f}" if has_opt else None,
+            "option_target_2": f"₹{opt_t2:,.2f}" if has_opt else None,
+            "option_runner_target": f"₹{opt_t3:,.2f}" if has_opt else None,
+            "option_no_chase_boundary": f"₹{opt_nc:,.2f}" if has_opt else None,
+            "underlying_spot": f"₹{curr_ltp:,.2f}",
+            "underlying_sl": f"₹{stop_loss:,.2f}",
+            "underlying_target": f"₹{target_1:,.2f}",
+        }
+        if has_opt
+        else {},
     )
 
     # Horizon & ETA Calibration

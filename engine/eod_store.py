@@ -85,11 +85,9 @@ def _get_connection() -> sqlite3.Connection:
             check_same_thread=False,
         )
         conn.row_factory = sqlite3.Row
-        # Set performance pragmas
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute("PRAGMA cache_size = -64000")  # 64MB cache
-        conn.execute("PRAGMA temp_store = MEMORY")
+        from engine.db_pool import configure_sqlite_connection
+
+        configure_sqlite_connection(conn, timeout_sec=30.0, page_cache_kb=64000)
         _local_connections[tid] = conn
     return conn
 

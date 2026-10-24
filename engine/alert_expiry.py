@@ -354,9 +354,21 @@ def is_alert_option_premium_level(alert: Any) -> bool:
         "INTRADAY_BREAKOUT_SPARK",
         "INTRADAY_BREAKDOWN_SPARK",
         "INTRADAY_SPARK",
+        "ORB_BREAKOUT",
+        "ORB_BREAKDOWN",
+        "ORB_PRIMED",
+        "ORB_RETEST",
+        "OPENING_RANGE_BREAKOUT",
+        "THEMATIC_SYMPATHY_IGNITION",
+        "THEMATIC_EXPANSION",
+        "SMC_OB_RETEST",
+        "SMC_SWEEP",
+        "PREDATOR_SWEEP",
+        "LIQUIDITY_PURGE",
+        "VWAP_REVERSAL",
+        "GAP_AND_GO",
         "POCKET_PIVOT",
         "PRECURSOR_RADAR",
-        "SMC_SWEEP",
         "CIRCUIT_WARNING",
         "MULTIBAGGER",
         "STAGE_1_TO_2_EXPANSION",
@@ -419,6 +431,72 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     if opt_prem is not None and float(opt_prem) > 0 and ltp > 0:
         prem = float(opt_prem)
         return abs(ltp - prem) <= max(2.0, prem * 0.25)
+
+    return False
+
+
+def is_option_seller(alert: Any) -> bool:
+    """
+    Determines if an option alert represents option writing/selling (short premium, short volatility),
+    where profit is realized on premium decay (downward price movement of the option).
+    Returns False for option buyers (long CE / long PE) which profit on premium expansion (upward).
+    Strictly prevents mistaking short equity/futures setups (e.g. action='SELL_ORB_BREAKDOWN') for option writing.
+    Follows Invariant 10 (Zero AI Hallucinations) & Invariant 20 (SSOT & Provenance).
+    """
+
+    def _g(key: str, default: Any = None) -> Any:
+        if isinstance(alert, dict):
+            return alert.get(key, default)
+        return getattr(alert, key, default)
+
+    atype = str(_g("alert_type", "") or "").upper()
+    if atype == "OPTION_WRITE" or atype in ("SHORT_STRADDLE", "SHORT_STRANGLE"):
+        return True
+
+    deriv = str(_g("derivative_type", "") or "").upper()
+    if deriv in ("OPTION_SELL", "SHORT_OPTION", "WRITE"):
+        return True
+
+    if str(_g("option_write", False)).lower() in ("true", "1"):
+        return True
+
+    plan = _g("actionable_plan") or {}
+    if isinstance(plan, dict):
+        strat = str(plan.get("strategy_type", "")).upper()
+        if strat in (
+            "CREDIT_SPREAD",
+            "SHORT_STRADDLE",
+            "SHORT_STRANGLE",
+            "BEAR_CALL_SPREAD",
+            "BULL_PUT_SPREAD",
+        ):
+            return True
+
+        act = str(plan.get("action", "")).upper()
+        if act in (
+            "SELL_OPTION",
+            "WRITE_OPTION",
+            "SHORT_OPTION",
+            "WRITE",
+            "SELL_CE",
+            "SELL_PE",
+            "SHORT_CE",
+            "SHORT_PE",
+        ):
+            return True
+
+    # Check structural premium levels if this is an option premium level alert
+    if is_alert_option_premium_level(alert):
+        sl = float(_g("stop_loss", 0.0) or 0.0)
+        tgt = float(_g("target_level", 0.0) or _g("target_1", 0.0) or 0.0)
+        entry = float(
+            _g("initial_entry_premium", 0.0)
+            or _g("option_premium", 0.0)
+            or _g("trigger_level", 0.0)
+            or 0.0
+        )
+        if entry > 0 and sl > entry and 0 < tgt < entry:
+            return True
 
     return False
 

@@ -41,6 +41,7 @@ EVENT_DATA_FALLBACK = "DATA_FALLBACK"
 EVENT_BROKER_FAILOVER = "BROKER_FAILOVER"
 EVENT_EXCEPTION = "EXCEPTION"
 EVENT_API_RETRY = "API_RETRY"
+EVENT_CODE_STALE = "CODE_STALE"
 
 VALID_EVENT_TYPES = {
     EVENT_LLM_FAILOVER,
@@ -50,6 +51,7 @@ VALID_EVENT_TYPES = {
     EVENT_BROKER_FAILOVER,
     EVENT_EXCEPTION,
     EVENT_API_RETRY,
+    EVENT_CODE_STALE,
 }
 
 MAX_LOG_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB per rotated log
@@ -112,11 +114,14 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
         return "P0"
     if sev in ("ERROR", "WARNING") and (
         sev == "ERROR"
-        or event_type in (EVENT_LLM_COOLDOWN, EVENT_DATA_FALLBACK, EVENT_QUANT_FALLBACK)
+        or event_type
+        in (EVENT_LLM_COOLDOWN, EVENT_DATA_FALLBACK, EVENT_QUANT_FALLBACK, EVENT_CODE_STALE)
         or "RATE LIMIT" in rsn
         or "429" in rsn
         or "TIMEOUT" in rsn
         or "-360" in rsn
+        or "CODE STALE" in rsn
+        or "STALE BYTECODE" in rsn
     ):
         return "P1"
     if sev == "WARNING" or event_type == EVENT_API_RETRY or "LATENCY" in rsn or "DEGRADED" in rsn:

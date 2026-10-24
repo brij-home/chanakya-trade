@@ -176,8 +176,7 @@ def render_free_index_milestone(
         in ("OPTIONS MOMENTUM", "GAMMA BLAST", "INDEX CALL SETUP", "INDEX PUT SETUP")
     )
     if is_opt:
-        act_str = str(getattr(d, "decisive_action", "") or "").upper()
-        is_option_seller = any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
+        is_option_seller = not getattr(d, "is_payoff_bullish", True)
         is_downward_target = is_option_seller
     else:
         if d.target_1 and d.entry_price and d.entry_price > 0:
@@ -563,7 +562,6 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
 
             # Determine downward target payoff accurately
             alert_type_raw = str(getattr(alert, "alert_type", "") or "").upper()
-            act_str = str((getattr(alert, "actionable_plan", {}) or {}).get("action", "")).upper()
             is_opt = bool(
                 getattr(alert, "option_type", None)
                 or getattr(alert, "strike", None)
@@ -573,11 +571,9 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
                 in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
             )
             if is_opt:
-                is_option_seller = (
-                    any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
-                    or alert_type_raw == "OPTION_WRITE"
-                    or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
-                )
+                from engine.alert_expiry import is_option_seller
+
+                is_option_seller = is_option_seller(alert)
                 is_downward = is_option_seller
             else:
                 if entry_p and entry_p > 0 and getattr(alert, "target_1", None):

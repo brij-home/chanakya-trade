@@ -211,3 +211,44 @@ class TestSebiPhysicalSettlementRiskGate:
         )
         assert allowed.allowed is True
         assert "SEBI_PHYSICAL_DELIVERY_RISK" not in allowed.flags
+
+    def test_estimate_market_impact_liquid_and_slicing(self):
+        from engine.position_sizer import estimate_market_impact, calculate_position_size
+
+        # 1. Liquid order (100 shares vs 10,000 top depth)
+        impact_low = estimate_market_impact(
+            symbol="INFY",
+            shares=100,
+            entry_price=1500.0,
+            depth_data={
+                "asks": [{"price": 1500.5, "quantity": 2000}] * 5,
+                "bids": [{"price": 1500.0, "quantity": 2000}] * 5,
+            },
+        )
+        assert impact_low.impact_tier == "LOW_IMPACT"
+        assert impact_low.execution_mode == "DIRECT_MARKET"
+        assert impact_low.expected_slippage_bps < 12.0
+
+        # 2. Large order requiring slicing (3,000 shares vs 2,500 top depth -> 120% coverage)
+        impact_high = estimate_market_impact(
+            symbol="MIDCAP",
+            shares=3000,
+            entry_price=500.0,
+            depth_data={
+                "asks": [{"price": 500.5, "quantity": 500}] * 5,
+                "bids": [{"price": 500.0, "quantity": 500}] * 5,
+            },
+        )
+        assert impact_high.impact_tier == "HIGH_IMPACT_SLICING_REQUIRED"
+        assert impact_high.execution_mode == "TWAP_ICEBERG_3_TRANCHES"
+        assert "HIGH MARKET IMPACT" in impact_high.recommendation
+
+        # 3. Verify calculate_position_size output includes market_impact
+        res = calculate_position_size(
+            symbol="INFY",
+            entry_price=1500.0,
+            stop_loss=1470.0,
+            capital=500000.0,
+        )
+        assert res.market_impact is not None
+        assert "market_impact" in res.as_dict()

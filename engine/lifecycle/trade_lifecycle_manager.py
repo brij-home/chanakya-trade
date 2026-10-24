@@ -13,7 +13,7 @@ import re
 from datetime import timezone, timedelta
 from typing import Any, Optional, Tuple
 
-from engine.alert_expiry import is_alert_option_premium_level
+from engine.alert_expiry import is_alert_option_premium_level, is_option_seller
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("engine.lifecycle.trade_lifecycle_manager")
@@ -45,18 +45,12 @@ class TradeLifecycleManager:
         dir_str = str(getattr(alert, "direction", "BULLISH")).upper()
         plan = getattr(alert, "actionable_plan", {}) or {}
         is_opt = is_alert_option_premium_level(alert)
-        act_str = str(plan.get("action", getattr(alert, "action", "")) or "").upper()
-        alert_type = str(getattr(alert, "alert_type", "") or "").upper()
 
         if is_opt:
             # Option writing / selling profits on premium decay (downward)
             # Option buying (both Call CE and Put PE) profits on premium expansion (upward)
-            is_option_seller = (
-                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
-                or alert_type == "OPTION_WRITE"
-                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
-            )
-            is_payoff_upward = not is_option_seller
+            is_opt_sell = is_option_seller(alert)
+            is_payoff_upward = not is_opt_sell
 
             # Scale Sanity Gate (Invariants 10 & 23):
             # Guard against unit-scale cross-contamination (e.g. comparing spot price ₹1,420 or underlying ₹13,750 against option premium ₹168)
@@ -239,16 +233,10 @@ class TradeLifecycleManager:
         dir_str = str(getattr(alert, "direction", "BULLISH")).upper()
         plan = getattr(alert, "actionable_plan", {}) or {}
         is_opt = is_alert_option_premium_level(alert)
-        act_str = str(plan.get("action", getattr(alert, "action", "")) or "").upper()
-        alert_type = str(getattr(alert, "alert_type", "") or "").upper()
 
         if is_opt:
-            is_option_seller = (
-                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
-                or alert_type == "OPTION_WRITE"
-                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
-            )
-            is_payoff_upward = not is_option_seller
+            is_opt_sell = is_option_seller(alert)
+            is_payoff_upward = not is_opt_sell
 
             # Scale Sanity Gate (Invariants 10 & 23):
             ref_entry = float(

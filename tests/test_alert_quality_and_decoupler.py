@@ -333,3 +333,98 @@ def test_session_end_resolves_partial_milestone_alert():
     assert alert.is_archived is True
     assert "T0_5_ACHIEVED" in alert.archive_reason  # milestone preserved in reason
     assert alert.pnl_pct == pytest.approx(17.81, abs=0.6)  # (107.8 - 91.5) / 91.5 * 100
+
+
+def test_intraday_spark_phase_transition_recognition(monkeypatch):
+    """
+    Verifies that IntradaySpark detects the exact bar where consolidation compression
+    transitions into directional impulse (CHOP drops from >=55 to <=52 while ROC accelerates),
+    awarding conviction bonus and the PHASE EXPANSION tag.
+    """
+    import pandas as pd
+    from brokers.base import Quote
+    from engine.detectors.intraday_spark import detect_intraday_mover_sparks
+
+    q_stock = Quote(
+        symbol="TCS",
+        last_price=3500.0,
+        vwap=3480.0,
+        open=3475.0,
+        change=25.0,
+        change_pct=1.8,
+        volume=2000000,
+    )
+    q_nifty = Quote(
+        symbol="NIFTY",
+        last_price=24000.0,
+        vwap=24000.0,
+        open=24000.0,
+        change=10.0,
+        change_pct=0.04,
+    )
+
+    # 30 daily bars
+    d_dates = pd.date_range(end=pd.Timestamp.now(), periods=30, freq="D")
+    df_daily = pd.DataFrame(
+        {
+            "open": [3450.0] * 30,
+            "high": [3520.0] * 30,
+            "low": [3440.0] * 30,
+            "close": [3490.0] * 30,
+            "volume": [1000000] * 30,
+        },
+        index=d_dates,
+    )
+
+    # 20 5m bars: tight consolidation for first 18 bars (high chop), then explosive expansion on last 2 bars
+    m_dates = pd.date_range(end=pd.Timestamp.now(), periods=20, freq="5min")
+    closes = [3460.0 + (i % 2) * 1.5 for i in range(18)] + [3480.0, 3500.0]
+    highs = [c + 2.0 for c in closes]
+    lows = [c - 2.0 for c in closes]
+    vols = [10000] * 18 + [50000, 120000]
+    df_5m = pd.DataFrame(
+        {
+            "open": closes,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": vols,
+        },
+        index=m_dates,
+    )
+
+    def mock_get_ohlcv(symbol, exchange="NSE", interval="1d", days=30):
+        if "5min" in interval:
+            return df_5m
+        return df_daily
+
+    monkeypatch.setattr("market.history.get_ohlcv", mock_get_ohlcv)
+    monkeypatch.setattr(
+        "market.quotes.get_quote",
+        lambda syms: {
+            "NSE:TCS": q_stock,
+            "TCS": q_stock,
+            "NSE:NIFTY 50": q_nifty,
+            "NIFTY": q_nifty,
+        },
+    )
+    monkeypatch.setattr(
+        "engine.precursor_radar.precursor_radar.get_scan_universe",
+        lambda segment="ALL": ["TCS"],
+    )
+
+    alerts = detect_intraday_mover_sparks(
+        universe=["TCS"],
+        quotes_map={"NSE:TCS": q_stock, "NSE:NIFTY 50": q_nifty},
+    )
+
+    assert len(alerts) >= 1
+    tcs_alert = alerts[0]
+    assert tcs_alert.symbol == "TCS"
+    assert tcs_alert.metrics.get("is_phase_transition") is True
+    assert "PHASE EXPANSION" in tcs_alert.headline
+    assert tcs_alert.metrics.get("chop_index") is not None
+    assert tcs_alert.metrics.get("roc_12") is not None
+    assert tcs_alert.metrics.get("is_tape_accelerating") is True
+    assert "TAPE SURGE" in tcs_alert.headline
+    assert tcs_alert.metrics.get("d2_vol") is not None and tcs_alert.metrics.get("d2_vol") > 0

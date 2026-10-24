@@ -257,3 +257,80 @@ def test_session_scorecard_aggregates_microstructure():
     assert "Microstructure Root Causes" in tg_text
     assert "1 Wall Absorption" in tg_text
     assert "1 OBI Skew" in tg_text
+
+
+def test_session_scorecard_calibration_recommendations_and_persistence(tmp_path, monkeypatch):
+    """
+    Verifies Phase 5: Autonomous Post-Mortem & Scrutiny Calibration Loop.
+    1. Detects repeated wall traps and low win rate to produce actionable scrutiny recommendations.
+    2. Correctly formats autonomous scrutiny calibrations into Telegram EOD scorecard.
+    3. Persists daily scorecard JSON to disk and recalibrates factor weights without error.
+    """
+    from engine.alert_postmortem_runner import run_eod_alert_postmortems
+    from pathlib import Path
+
+    # Redirect app_data_path to tmp_path
+    monkeypatch.setattr(
+        "engine.alert_postmortem_runner.app_data_path", lambda *parts: tmp_path.joinpath(*parts)
+    )
+
+    alerts = []
+    # 4 stopped-out alerts with wall traps and spread drag (0% win rate -> triggers recommendations)
+    for i in range(4):
+        alerts.append(
+            AutoAlert(
+                alert_id=f"aa-test-loss-{i}",
+                alert_type="INTRADAY_BREAKOUT_SPARK",
+                stage="INVALIDATED",
+                symbol=f"SYM{i}",
+                exchange="NSE",
+                direction="BULLISH",
+                headline=f"SPARK: SYM{i}",
+                summary="Test loss",
+                ltp=500.0,
+                trigger_level=500.0,
+                target_level=530.0,
+                stop_loss=490.0,
+                created_at="2026-10-24 11:30:00 IST",
+                is_invalidated=True,
+                r_multiple=-1.0,
+                metrics={
+                    "post_mortem": {
+                        "primary_failure_reason": "ORDER_BOOK_ABSORPTION_WALL_TRAP"
+                        if i < 2
+                        else "EXCESSIVE_SPREAD_FRICTION_DRAG"
+                    }
+                },
+            )
+        )
+
+    scorecard = generate_session_scorecard(alerts, session_date="2026-10-24")
+    assert scorecard["win_rate_pct"] == 0.0
+    assert scorecard["microstructure_attribution"]["wall_traps"] == 2
+    assert scorecard["microstructure_attribution"]["spread_friction"] == 2
+
+    # Check calibration recommendations
+    recs = scorecard.get("calibration_recommendations", [])
+    assert len(recs) >= 2
+    rec_targets = [r["target"] for r in recs]
+    assert "scrutiny_conviction_threshold" in rec_targets
+    assert "depth_wall_scrutiny" in rec_targets
+    assert "spread_bps_cap" in rec_targets
+
+    # Check telegram formatting
+    tg = format_eod_scorecard_telegram(scorecard)
+    assert "Autonomous Scrutiny Calibrations" in tg
+    assert "depth_wall_scrutiny" in tg
+    assert "spread_bps_cap" in tg
+
+    # Test runner execution and persistence
+    class MockEngine:
+        def get_alerts(self):
+            return alerts
+
+    report = run_eod_alert_postmortems(auto_engine=MockEngine(), force=True, broadcast=False)
+    assert report["status"] == "COMPLETED"
+    assert report.get("scorecard_path") is not None
+    assert Path(report["scorecard_path"]).exists()
+    assert report["processed_count"] == 4
+    assert isinstance(report.get("factor_weights"), dict)

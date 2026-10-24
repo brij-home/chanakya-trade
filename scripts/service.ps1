@@ -20,7 +20,8 @@ param (
     [string]$ApiHost = "127.0.0.1",
     [int]$ApiPort = 8765,
     [int]$VitePort = 5173,
-    [int]$TimeoutSeconds = 45
+    [int]$TimeoutSeconds = 45,
+    [switch]$Reload
 )
 
 $ErrorActionPreference = "Stop"
@@ -80,6 +81,15 @@ function Get-ServiceStatus {
         if ($bPort) {
             $backendLive = $true
             Write-Host " [+] Backend (FastAPI):  RUNNING on http://${ApiHost}:${ApiPort} (PID: $($bPort.OwningProcess))" -ForegroundColor Green
+            try {
+                $prov = Invoke-RestMethod -Uri "http://${ApiHost}:${ApiPort}/api/system/code-provenance" -TimeoutSec 2 -ErrorAction SilentlyContinue
+                if ($prov -and $prov.is_stale_in_memory) {
+                    Write-Host " [!] STALE BYTECODE:     In-memory code lags disk! $($prov.stale_files_count) file(s) modified after boot." -ForegroundColor Yellow
+                    Write-Host "     Action Needed:      Run .\scripts\service.ps1 -Action restart to reload fresh bytecode." -ForegroundColor Yellow
+                } elseif ($prov) {
+                    Write-Host "     Code Provenance:    FRESH (Commit: $($prov.git_commit), Uptime: $($prov.uptime_seconds)s)" -ForegroundColor DarkGray
+                }
+            } catch {}
         } else {
             Write-Host " [-] Backend (FastAPI):  STOPPED (port $ApiPort not listening)" -ForegroundColor DarkGray
         }
@@ -168,7 +178,8 @@ $startupInfo = $startupClass.CreateInstance()
 $startupInfo.ShowWindow = 0  # SW_HIDE (0): guarantees zero black console window
 
 $processClass = [wmiclass]"Win32_Process"
-$backendCmd = "cmd.exe /c `"`"$PythonExe`" -m uvicorn web.api:app --host $ApiHost --port $ApiPort > `"$backendOut`" 2> `"$backendErr`"`""
+$reloadFlag = if ($Reload) { "--reload" } else { "" }
+$backendCmd = "cmd.exe /c `"`"$PythonExe`" -m uvicorn web.api:app --host $ApiHost --port $ApiPort $reloadFlag > `"$backendOut`" 2> `"$backendErr`"`""
 $bRes = $processClass.Create($backendCmd, $RootDir, $startupInfo)
 $backendPid = $bRes.ProcessId
 

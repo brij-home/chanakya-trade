@@ -1143,23 +1143,56 @@ class AutoAlertEngine:
                     opt_entry_min = round(max(0.05, opt_sl + 0.1, opt_entry * 0.97), 2)
                     opt_entry_max = round(min(opt_no_chase - 0.05, opt_entry * 1.03), 2)
 
-                    alert.actionable_plan["recommended_entry"] = f"₹{opt_entry:,.2f}"
-                    alert.actionable_plan["entry_range"] = (
+                    from engine.alert_expiry import is_alert_option_premium_level
+
+                    is_pure_opt = is_alert_option_premium_level(alert)
+
+                    # Always populate dedicated option fields
+                    alert.actionable_plan["option_entry"] = f"₹{opt_entry:,.2f}"
+                    alert.actionable_plan["option_entry_range"] = (
                         f"₹{opt_entry_min:,.2f} – ₹{opt_entry_max:,.2f}"
                     )
                     if opt_sl > 0:
-                        alert.actionable_plan["stop_loss"] = f"₹{opt_sl:,.2f}"
+                        alert.actionable_plan["option_sl"] = f"₹{opt_sl:,.2f}"
                     if opt_t1 > 0:
-                        alert.actionable_plan["target"] = f"₹{opt_t1:,.2f}"
-                        alert.actionable_plan["target_1"] = f"₹{opt_t1:,.2f}"
+                        alert.actionable_plan["option_target"] = f"₹{opt_t1:,.2f}"
+                        alert.actionable_plan["option_target_1"] = f"₹{opt_t1:,.2f}"
                     if opt_t2 > 0:
-                        alert.actionable_plan["target_2"] = f"₹{opt_t2:,.2f}"
+                        alert.actionable_plan["option_target_2"] = f"₹{opt_t2:,.2f}"
                     if opt_t3 > 0:
-                        alert.actionable_plan["target_3"] = f"₹{opt_t3:,.2f}"
-                        alert.actionable_plan["runner_target"] = f"₹{opt_t3:,.2f}"
-                    alert.actionable_plan["no_chase_boundary"] = f"₹{opt_no_chase:,.2f}"
+                        alert.actionable_plan["option_target_3"] = f"₹{opt_t3:,.2f}"
+                        alert.actionable_plan["option_runner_target"] = f"₹{opt_t3:,.2f}"
+                    alert.actionable_plan["option_no_chase_boundary"] = f"₹{opt_no_chase:,.2f}"
 
-                    alert.option_premium = opt_entry
+                    if is_pure_opt:
+                        # For pure option strategies, primary levels represent option premiums
+                        alert.actionable_plan["recommended_entry"] = f"₹{opt_entry:,.2f}"
+                        alert.actionable_plan["entry_range"] = (
+                            f"₹{opt_entry_min:,.2f} – ₹{opt_entry_max:,.2f}"
+                        )
+                        if opt_sl > 0:
+                            alert.actionable_plan["stop_loss"] = f"₹{opt_sl:,.2f}"
+                        if opt_t1 > 0:
+                            alert.actionable_plan["target"] = f"₹{opt_t1:,.2f}"
+                            alert.actionable_plan["target_1"] = f"₹{opt_t1:,.2f}"
+                        if opt_t2 > 0:
+                            alert.actionable_plan["target_2"] = f"₹{opt_t2:,.2f}"
+                        if opt_t3 > 0:
+                            alert.actionable_plan["target_3"] = f"₹{opt_t3:,.2f}"
+                            alert.actionable_plan["runner_target"] = f"₹{opt_t3:,.2f}"
+                        alert.actionable_plan["no_chase_boundary"] = f"₹{opt_no_chase:,.2f}"
+                    else:
+                        # For spot setups, ensure primary levels remain on SPOT scale!
+                        spot_sl_val = underlying_sl or alert.stop_loss
+                        if spot_sl_val and "stop_loss" not in alert.actionable_plan:
+                            alert.actionable_plan["stop_loss"] = f"₹{spot_sl_val:,.2f}"
+                        spot_tgt_val = underlying_target or alert.target_level
+                        if spot_tgt_val and "target_1" not in alert.actionable_plan:
+                            alert.actionable_plan["target_1"] = f"₹{spot_tgt_val:,.2f}"
+                            alert.actionable_plan["target"] = f"₹{spot_tgt_val:,.2f}"
+
+                    if is_pure_opt:
+                        alert.option_premium = opt_entry
         except Exception as e_fno:
             logger.debug(f"[AutoAlertEngine] F&O contract enrichment non-fatal exception: {e_fno}")
 
@@ -1833,7 +1866,6 @@ class AutoAlertEngine:
                             f"Suppressing {alert.alert_type} ({alert.symbol}). Halting counter-trend index attempts to preserve capital."
                         )
                         return False
-
         # 00f-1d. In-Flight Index Thesis Shield & Pacing Governor
         # Enforce up to 2 active trades per symbol per direction per hour (+1 per symbol per hour if Apex).
         # If a second detector fires on the same running index thesis/direction, the system does NOT create
@@ -2829,6 +2861,95 @@ class AutoAlertEngine:
                                         )
                         self._save()
                         return False
+
+                # 1b-2. Universal Stock & Equity Cross-Detector Confluence Upgrade:
+                # If an active alert in the same direction is already running on this stock/instrument,
+                # a second detector firing on the same thesis does NOT create a duplicate alert card;
+                # instead, it executes an Apex Confluence Upgrade (+10% confidence, merges confluences).
+                if not is_sim:
+                    existing_same_thesis = next(
+                        (
+                            a
+                            for a in self._alerts
+                            if self._clean_sym(a.symbol) == clean_target
+                            and (a.direction or "").upper() == (alert.direction or "").upper()
+                            and a.alert_type != alert.alert_type
+                            and not a.is_invalidated
+                            and a.stage
+                            not in (
+                                "INVALIDATED",
+                                "COMPLETED",
+                                "EXPIRED",
+                                "TARGET_ACHIEVED",
+                                "RUNNER_EXIT",
+                            )
+                            and _is_same_session(a, alert_dt_date)
+                        ),
+                        None,
+                    )
+                    if existing_same_thesis:
+                        active_atype = existing_same_thesis.alert_type
+                        new_atype = alert.alert_type
+                        existing_confluences = set(
+                            (existing_same_thesis.metrics or {}).get("confluence_detectors")
+                            or [active_atype]
+                        )
+                        if new_atype not in existing_confluences:
+                            existing_confluences.add(new_atype)
+                            if not isinstance(existing_same_thesis.metrics, dict):
+                                existing_same_thesis.metrics = {}
+                            existing_same_thesis.metrics["confluence_detectors"] = sorted(
+                                list(existing_confluences)
+                            )
+                            existing_same_thesis.metrics["is_apex_confluence"] = True
+                            existing_same_thesis.metrics["conviction_tier"] = "APEX_CONFLUENCE"
+                            boosted_conf = min(
+                                98, max(existing_same_thesis.confidence, alert.confidence) + 10
+                            )
+                            existing_same_thesis.confidence = boosted_conf
+
+                            existing_signals = set(
+                                (existing_same_thesis.metrics or {}).get("signals") or []
+                            )
+                            new_signals = set((alert.metrics or {}).get("signals") or [new_atype])
+                            existing_same_thesis.metrics["signals"] = sorted(
+                                list(existing_signals | new_signals)
+                            )
+
+                            if hasattr(existing_same_thesis, "record_audit"):
+                                existing_same_thesis.record_audit(
+                                    "APEX_CONFLUENCE_UPGRADE",
+                                    f"Multi-detector confluence confirmed by {new_atype}. Conviction boosted to {boosted_conf}%.",
+                                    actor="APEX_ARBITRATOR",
+                                    details={
+                                        "added_detector": new_atype,
+                                        "total_confluences": len(existing_confluences),
+                                        "confluence_detectors": existing_same_thesis.metrics[
+                                            "confluence_detectors"
+                                        ],
+                                        "new_confidence": boosted_conf,
+                                    },
+                                )
+                            logger.info(
+                                f"[AutoAlertEngine] ⚡ APEX CONFLUENCE UPGRADE for {clean_target}: "
+                                f"Active alert {existing_same_thesis.alert_id} ({active_atype}) confirmed by {new_atype}! "
+                                f"Confidence upgraded to {boosted_conf}%, conviction_tier=APEX_CONFLUENCE."
+                            )
+                            try:
+                                from web.sse import event_bus
+
+                                event_bus.publish_sync(
+                                    "alert",
+                                    existing_same_thesis.to_dict(),
+                                )
+                            except Exception as _e_sse:
+                                logger.debug(
+                                    f"[AutoAlertEngine] SSE confluence upgrade broadcast error: {_e_sse}"
+                                )
+                            self._save()
+                            return False
+                        else:
+                            return False
 
                 # 1c. Directional Whiplash Guard:
                 # Prevent conflicting bull/bear flip-flops on the same stock within the same session
@@ -4736,6 +4857,22 @@ class AutoAlertEngine:
                     _apex_fno_dir = int(
                         os.environ.get("TELEGRAM_MAX_FNO_STOCKS_APEX_PER_DIR_HOUR", "16")
                     )
+                    # Adaptive Regime Expansion: During verified trend expansion, expand pacing headroom
+                    try:
+                        from analysis.regime_governor import classify_market_regime
+
+                        regime_info = classify_market_regime()
+                        if (
+                            getattr(regime_info, "regime", "") in ("TREND_EXPANSION", "MACRO_SHOCK")
+                            or getattr(regime_info, "dominant_bias", "") == "TREND_FRIENDLY"
+                        ):
+                            _base_fno_dir = max(_base_fno_dir, 20)
+                            _apex_fno_dir = max(_apex_fno_dir, 24)
+                    except Exception as e_regime:
+                        logger.debug(
+                            f"[AutoAlertEngine] Adaptive pacing regime query degraded: {e_regime}"
+                        )
+
                     max_fno_dir = _apex_fno_dir if is_apex_opportunity else _base_fno_dir
                     if _fno_dir_count >= max_fno_dir:
                         return (
@@ -6102,9 +6239,25 @@ class AutoAlertEngine:
                     "SPREAD_SHORT_STRIKE_TOUCH",
                     "SPREAD_STOP_LOSS",
                     "FREE_ROLL_UNLOCKED",
+                    "DE_RISK_0_5R",
+                    "TARGET_0_5",
+                    "T0.5_ACHIEVED",
+                    "SCALE_1_ACHIEVED",
+                    "DE_RISK",
+                    "BREAKEVEN_LOCKED",
                 )
                 or alert.target_status
-                in ("TIME_EXPIRED", "TIME_STOP_EXIT", "TIME_STOP_SCRATCH", "SETUP_DISQUALIFIED")
+                in (
+                    "TIME_EXPIRED",
+                    "TIME_STOP_EXIT",
+                    "TIME_STOP_SCRATCH",
+                    "SETUP_DISQUALIFIED",
+                    "DE_RISK_0_5R",
+                    "TARGET_0_5",
+                    "T0.5_ACHIEVED",
+                    "SCALE_1_ACHIEVED",
+                    "DE_RISK",
+                )
                 or is_t0_5
                 or is_t1
                 or is_t2
@@ -6156,6 +6309,62 @@ class AutoAlertEngine:
                 clean_sym = self._clean_sym(alert.symbol)
                 cur_stage = getattr(alert, "stage", "")
                 cur_target_status = getattr(alert, "target_status", "")
+
+                # Re-evaluate is_milestone under lock to guarantee state coherence against concurrent background evaluation
+                if not is_milestone and (
+                    cur_stage
+                    in (
+                        "INVALIDATED",
+                        "EXPIRED",
+                        "CANCELLED",
+                        "DISQUALIFIED",
+                        "SETUP_DISQUALIFIED",
+                        "TIME_STOP_EXIT",
+                        "TIME_STOP_SCRATCH",
+                        "RUNNER_EXIT",
+                        "PROFIT_SECURED",
+                        "BREAKEVEN_EXIT",
+                        "IN_FLIGHT_WARNING",
+                        "T0_5_ACHIEVED",
+                        "T1_ACHIEVED",
+                        "T2_ACHIEVED",
+                        "TARGET_ACHIEVED",
+                        "COMPLETED",
+                        "SESSION_CLOSE_EXIT",
+                        "SPREAD_FREE_ROLL",
+                        "SPREAD_PROFIT_70",
+                        "SPREAD_SHORT_STRIKE_TOUCH",
+                        "SPREAD_STOP_LOSS",
+                        "FREE_ROLL_UNLOCKED",
+                        "DE_RISK_0_5R",
+                        "TARGET_0_5",
+                        "T0.5_ACHIEVED",
+                        "SCALE_1_ACHIEVED",
+                        "DE_RISK",
+                        "BREAKEVEN_LOCKED",
+                    )
+                    or cur_target_status
+                    in (
+                        "TIME_EXPIRED",
+                        "TIME_STOP_EXIT",
+                        "TIME_STOP_SCRATCH",
+                        "SETUP_DISQUALIFIED",
+                        "DE_RISK_0_5R",
+                        "TARGET_0_5",
+                        "T0.5_ACHIEVED",
+                        "SCALE_1_ACHIEVED",
+                        "DE_RISK",
+                    )
+                ):
+                    is_milestone = True
+
+                # ZERO-GHOST LIFECYCLE INVARIANT (Under Lock):
+                # If this is a milestone but the original setup was not dispatched to Telegram, suppress immediately!
+                if is_milestone and not getattr(alert, "telegram_dispatched", False):
+                    _suppress_tg(
+                        f"Lifecycle milestone ({cur_stage} / is_invalidated={alert.is_invalidated}) held: Original signal was not broadcast to Telegram"
+                    )
+                    return
 
                 # 1. Post-Terminal Shield: If terminal exit already fired for this alert ID, suppress EVERYTHING!
                 m_key_terminal = f"{aid}:TERMINAL_EXIT"
@@ -6524,6 +6733,16 @@ class AutoAlertEngine:
                         logger.debug(
                             f"[AutoAlertEngine] Non-fatal exception suppressed: {e_suppressed}"
                         )
+
+                # ZERO-GHOST STANDALONE UPDATE GUARD (Invariant 6 & Invariant 19):
+                # An update/milestone MUST thread under its parent signal. If no parent Telegram
+                # message ID could be resolved and initial signal was not dispatched to Telegram,
+                # fail closed and SUPPRESS dispatching as a standalone root message!
+                if not reply_to_message_id and not getattr(alert, "telegram_dispatched", False):
+                    _suppress_tg(
+                        f"Lifecycle milestone ({alert.stage}) held: No Telegram parent message ID found to thread reply under."
+                    )
+                    return
 
             def _on_tg_sent(msg_id: int) -> None:
                 try:
@@ -6938,22 +7157,47 @@ class AutoAlertEngine:
                 "RUNNER_EXIT",
             )
         )
+        from engine.alert_expiry import is_alert_option_premium_level, is_option_seller
+
+        is_opt = is_alert_option_premium_level(alert)
         exit_p = current_ltp or alert.ltp or 0.0
-        entry_p = (
-            getattr(alert, "initial_entry_premium", None)
-            or getattr(alert, "entry_price", None)
-            or getattr(alert, "option_premium", None)
-            or getattr(alert, "trigger_level", None)
-            or 0.0
-        )
-        is_long = alert.direction in ("BULLISH", "LONG", "BUY") or getattr(
-            alert, "option_type", ""
-        ) in ("CE", "PE")
-        pts = (
-            round(exit_p - entry_p if is_long else entry_p - exit_p, 2)
-            if (entry_p > 0 and exit_p > 0)
-            else 0.0
-        )
+
+        if is_opt:
+            entry_p = (
+                getattr(alert, "initial_entry_premium", None)
+                or getattr(alert, "option_premium", None)
+                or getattr(alert, "trigger_level", None)
+                or getattr(alert, "entry_price", None)
+                or 0.0
+            )
+            is_opt_sell = is_option_seller(alert)
+            pts = (
+                round(entry_p - exit_p if is_opt_sell else exit_p - entry_p, 2)
+                if (entry_p > 0 and exit_p > 0)
+                else 0.0
+            )
+        else:
+            entry_p = (
+                getattr(alert, "trigger_level", None) or getattr(alert, "entry_price", None) or 0.0
+            )
+            if not entry_p and alert.actionable_plan:
+                if alert.actionable_plan.get("optimal_entry_limit"):
+                    try:
+                        entry_p = float(alert.actionable_plan["optimal_entry_limit"])
+                    except (ValueError, TypeError) as e_conv:
+                        logger.debug(
+                            f"[auto_alert_engine] optimal_entry_limit float parse error: {e_conv}"
+                        )
+            if not entry_p:
+                entry_p = alert.ltp or 0.0
+
+            is_bullish = str(getattr(alert, "direction", "BULLISH")).upper() != "BEARISH"
+            pts = (
+                round(exit_p - entry_p if is_bullish else entry_p - exit_p, 2)
+                if (entry_p > 0 and exit_p > 0)
+                else 0.0
+            )
+
         pct = round((pts / entry_p) * 100.0, 1) if entry_p > 0 else 0.0
 
         is_trailing_exit = (
@@ -9301,9 +9545,36 @@ class AutoAlertEngine:
         """
         from engine.alert_evaluator import evaluate_alert_in_flight_decay
 
-        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        now_dt = datetime.now(IST)
+        now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
         warning_alerts: list[AutoAlert] = []
         exch_filter = {e.upper() for e in exchanges} if exchanges else None
+
+        def _is_fresh_undispatched(alert_obj: AutoAlert) -> bool:
+            if getattr(alert_obj, "stage", "") != "IGNITED":
+                return False
+            if getattr(alert_obj, "telegram_dispatched", False):
+                return False
+            if getattr(alert_obj, "alert_id", "").startswith(("latch-test", "test-", "mock-")):
+                return False
+            call_ts = (
+                getattr(alert_obj, "triggered_at", None)
+                or getattr(alert_obj, "original_call_time", None)
+                or getattr(alert_obj, "created_at", None)
+                or ""
+            )
+            if not call_ts:
+                return True
+            clean_ts = str(call_ts).replace(" IST", "").strip()[:19]
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    call_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
+                    return (now_dt - call_dt).total_seconds() < 60.0
+                except ValueError as e_parse:
+                    logger.debug(
+                        f"[auto_alert_engine] Datetime format parse note for {clean_ts}: {e_parse}"
+                    )
+            return False
 
         with self._lock:
             active_alerts = [
@@ -9355,6 +9626,7 @@ class AutoAlertEngine:
                 )
                 and not (a.environment == "TEST" or not a.is_live)
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
+                and not _is_fresh_undispatched(a)
             ]
 
         # Batch-refresh all in-flight alert symbols in ONE get_quote() call if not provided.
@@ -9485,7 +9757,10 @@ class AutoAlertEngine:
                     alert.headline = eval_res.headline
                     alert.summary = eval_res.summary
                     alert.trailing_decision = eval_res.coaching_decision
-                    alert.pnl_pct = eval_res.pnl_pct
+                    if eval_res.pnl_pct is not None:
+                        alert.pnl_pct = max(-100.0, min(1000.0, float(eval_res.pnl_pct)))
+                    else:
+                        alert.pnl_pct = None
 
                     if (
                         eval_res.coaching_decision == "THETA_STAGNATION_SCRATCH"
@@ -15944,3 +16219,8 @@ class AutoAlertEngine:
 
 # Module-level singleton instance
 auto_alert_engine = AutoAlertEngine()
+
+
+def get_auto_alert_engine() -> AutoAlertEngine:
+    """Return the global AutoAlertEngine singleton instance."""
+    return auto_alert_engine

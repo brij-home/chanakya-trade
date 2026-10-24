@@ -62,18 +62,12 @@ class SQLiteConnectionPool:
             isolation_level=None,  # Autocommit mode by default; explicit transactions when needed
         )
         conn.row_factory = sqlite3.Row
-
-        # Execute institutional performance PRAGMAs once upon connection creation
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute(f"PRAGMA busy_timeout={int(self.timeout * 1000)}")
-            conn.execute(f"PRAGMA cache_size=-{self.page_cache_kb}")
-            conn.execute(f"PRAGMA mmap_size={self.mmap_size}")
-        except Exception as exc:
-            logger.debug("PRAGMA configuration note for %s: %s", self.db_path, exc)
-
-        return conn
+        return configure_sqlite_connection(
+            conn,
+            timeout_sec=self.timeout,
+            page_cache_kb=self.page_cache_kb,
+            mmap_size=self.mmap_size,
+        )
 
     @contextmanager
     def acquire(self) -> Generator[sqlite3.Connection, None, None]:
@@ -146,3 +140,27 @@ class SQLiteConnectionPool:
                 except Exception as e_suppressed:
                     logger.debug(f"[engine.db_pool] Non-fatal exception suppressed: {e_suppressed}")
             self._created = 0
+
+
+def configure_sqlite_connection(
+    conn: sqlite3.Connection,
+    timeout_sec: float = 30.0,
+    page_cache_kb: int = 32000,
+    mmap_size: int = 134217728,
+) -> sqlite3.Connection:
+    """
+    Apply institutional SQLite PRAGMAs for Windows concurrency, crash-resilience, and high-frequency read/write.
+    Ensures WAL mode, busy timeout, synchronous=NORMAL, and tuned cache/mmap sizes.
+    """
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")
+        conn.execute("PRAGMA temp_store = MEMORY")
+        if page_cache_kb > 0:
+            conn.execute(f"PRAGMA cache_size = -{page_cache_kb}")
+        if mmap_size > 0:
+            conn.execute(f"PRAGMA mmap_size = {mmap_size}")
+    except Exception as exc:
+        logger.debug(f"[engine.db_pool] PRAGMA configuration note: {exc}")
+    return conn

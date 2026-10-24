@@ -1476,6 +1476,7 @@ class FyersTbtManager:
             "symbol": symbol,
             "status": "LIVE",
             "timestamp": getattr(depth, "timestamp", int(time.time())),
+            "received_at": time.time(),
             "ltp": ltp,
             "micro_price": micro_price,
             "micro_price_skew_bps": micro_price_skew_bps,
@@ -2790,6 +2791,7 @@ class FyersTbtManager:
             "symbol": symbol,
             "status": "L2_FALLBACK",
             "timestamp": int(time.time()),
+            "received_at": time.time(),
             "ltp": ltp,
             "spread": spread,
             "tbq": tbq,
@@ -2811,11 +2813,31 @@ class FyersTbtManager:
         res["sentinel_intel"] = build_sentinel_decision_intel(res)
         return res
 
-    def simulate_slippage(self, symbol: str, quantity: int, side: str = "BUY") -> dict[str, Any]:
+    def simulate_slippage(
+        self,
+        symbol: str,
+        quantity: int,
+        side: str = "BUY",
+        max_age_seconds: Optional[float] = 3.0,
+    ) -> dict[str, Any]:
         """
         Calculate volume-weighted fill price and slippage through the order book.
+        Enforces depth freshness gate (max_age_seconds <= 3.0s) to prevent computing
+        slippage against disconnected or stale order books.
         """
         depth = self.get_50_depth(symbol)
+        now = time.time()
+        if max_age_seconds is not None and "received_at" in depth:
+            age = now - float(depth["received_at"])
+            if age > max_age_seconds:
+                return {
+                    "status": "STALE_DEPTH",
+                    "error": f"Order book depth is stale ({age:.1f}s > {max_age_seconds}s limit)",
+                    "message": f"Order book depth is stale ({age:.1f}s > {max_age_seconds}s limit)",
+                    "depth_age_seconds": round(age, 2),
+                    "expected_vwap_price": None,
+                }
+
         book = depth.get("asks", []) if side.upper() == "BUY" else depth.get("bids", [])
         if not book:
             return {"status": "UNAVAILABLE", "message": "Order book empty"}
@@ -2948,6 +2970,9 @@ class FyersTbtManager:
             else:
                 bonuses += 10
                 findings.append(f"Minimal execution slippage ({slip_pct:.2f}%)")
+        elif slip.get("status") == "STALE_DEPTH":
+            penalties += 15
+            findings.append("Stale depth stream (slippage unverified)")
 
         raw_score = 50 + bonuses - penalties
         final_conviction = max(0, min(100, raw_score))

@@ -169,6 +169,49 @@ async def _background_maintenance_scheduler():
             logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
 
+async def _background_code_staleness_sentinel():
+    """
+    Background sentinel monitoring in-memory code provenance against disk files.
+    Runs every 30s. If code on disk changes after boot, logs prominent warning
+    and publishes a 'code_stale' event to connected clients over SSE.
+    """
+    from engine.code_provenance import get_code_provenance
+    from web.sse import event_bus
+    import time as _time
+
+    await asyncio.sleep(15)  # Initial grace window after boot
+    last_reported_stale = False
+
+    while True:
+        try:
+            await asyncio.sleep(30)
+            prov = await asyncio.to_thread(get_code_provenance, force_refresh=True)
+            if prov.is_stale_in_memory:
+                if not last_reported_stale:
+                    sample_path = prov.stale_files[0]["path"] if prov.stale_files else "unknown"
+                    logger.warning(
+                        f"[CodeStalenessSentinel] 🚨 RUNTIME BYTECODE STALE: "
+                        f"{prov.stale_files_count} file(s) modified on disk since boot! "
+                        f"Earliest modification: {prov.staleness_latency_seconds}s ago. "
+                        f"Latest file: {sample_path}. Server restart/reload recommended."
+                    )
+                    last_reported_stale = True
+                event_bus.publish_sync(
+                    "system",
+                    {
+                        "type": "code_stale",
+                        "provenance": prov.to_dict(),
+                        "ts": _time.time(),
+                    },
+                )
+            else:
+                last_reported_stale = False
+        except asyncio.CancelledError:
+            break
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Code staleness sentinel exception: {e_suppressed}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
@@ -206,6 +249,7 @@ async def lifespan(app: FastAPI):
 
     warmer_task = asyncio.create_task(_background_cache_warmer())
     maintenance_task = asyncio.create_task(_background_maintenance_scheduler())
+    staleness_task = asyncio.create_task(_background_code_staleness_sentinel())
 
     # Start the autonomous periodic data synchronization engine
     try:
@@ -218,6 +262,7 @@ async def lifespan(app: FastAPI):
     yield
     warmer_task.cancel()
     maintenance_task.cancel()
+    staleness_task.cancel()
     try:
         from engine.data_sync_scheduler import data_sync_scheduler
 
@@ -1169,6 +1214,7 @@ async def get_system_health_hub(
 
     from market.fyers_rate_gate import get_fyers_rate_gate
     from market.fyers_tbt_manager import fyers_tbt_manager
+    from engine.code_provenance import get_code_provenance
 
     cb_diag = get_fyers_circuit_breaker().get_diagnostics()
     ws_diag = get_ws_subscription_manager().get_diagnostics()
@@ -1184,6 +1230,36 @@ async def get_system_health_hub(
     incidents = get_prioritized_incidents(limit=limit, priority=priority, component=component)
     mem_status = get_memory_status().to_dict()
     storage_bd = await asyncio.to_thread(get_storage_breakdown)
+    code_prov = await asyncio.to_thread(get_code_provenance, force_refresh=False)
+    code_prov_dict = code_prov.to_dict()
+
+    # If runtime in-memory bytecode is stale compared to disk, inject P1 incident and elevate status
+    if code_prov.is_stale_in_memory:
+        sample_path = code_prov.stale_files[0]["path"] if code_prov.stale_files else "unknown"
+        incidents.insert(
+            0,
+            {
+                "incident_id": f"INC-CODE-STALE-{code_prov.git_commit}",
+                "priority": "P1",
+                "severity": "WARNING",
+                "component": "RuntimeCodeProvenance",
+                "action_taken": "Restart or reload required",
+                "reason": (
+                    f"Stale in-memory bytecode: {code_prov.stale_files_count} file(s) modified on disk since boot "
+                    f"(latest: {sample_path})"
+                ),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "details": {
+                    "boot_timestamp": code_prov.boot_timestamp,
+                    "uptime_seconds": code_prov.uptime_seconds,
+                    "stale_count": code_prov.stale_files_count,
+                    "stale_files": code_prov.stale_files[:5],
+                    "staleness_latency_seconds": code_prov.staleness_latency_seconds,
+                },
+            },
+        )
+        active_counts["P1"] = active_counts.get("P1", 0) + 1
+        incident_counts["P1"] = incident_counts.get("P1", 0) + 1
 
     # Compute single truth overall health status based on active state and recent 15m window
     if (
@@ -1199,6 +1275,7 @@ async def get_system_health_hub(
         or provider_health.get("overall_health") == "DEGRADED"
         or slo_report.get("overall_status") == "BREACHED"
         or rate_gate_diag.get("status") == "SATURATED"
+        or code_prov.is_stale_in_memory
     ):
         overall_status = "DEGRADED"
     else:
@@ -1220,7 +1297,53 @@ async def get_system_health_hub(
             "incidents": incidents,
             "memory": mem_status,
             "storage": storage_bd.to_dict(),
+            "code_provenance": code_prov_dict,
             "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+@app.get("/api/system/code-provenance", tags=["Observability", "Operations"])
+async def get_system_code_provenance(force_refresh: bool = False):
+    """
+    Runtime Code Provenance & Bytecode Staleness Sentinel.
+    Returns server boot timestamp, git commit, uptime, and whether any
+    in-memory bytecode has lagged behind source files modified on disk.
+    """
+    from engine.code_provenance import get_code_provenance
+
+    prov = await asyncio.to_thread(get_code_provenance, force_refresh=force_refresh)
+    return JSONResponse(prov.to_dict())
+
+
+@app.post("/api/system/reload", tags=["Observability", "Operations"])
+async def reload_system_service():
+    """
+    Triggers a graceful reload / restart of the backend service to purge
+    stale in-memory bytecode and recompile fresh source files from disk.
+    """
+    from engine.code_provenance import get_code_provenance
+
+    prov = get_code_provenance(force_refresh=True)
+
+    async def _graceful_exit():
+        await asyncio.sleep(0.5)
+        logger.warning(
+            "[web.api] Graceful reload triggered via /api/system/reload. Exiting process..."
+        )
+        if sys.platform == "win32":
+            os._exit(0)
+        else:
+            import signal
+
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(_graceful_exit())
+    return JSONResponse(
+        {
+            "status": "RELOADING",
+            "message": "Graceful server reload initiated. Process exiting to reload fresh bytecode from disk.",
+            "provenance_before_reload": prov.to_dict(),
         }
     )
 
@@ -4121,12 +4244,22 @@ async def stream_system_status():
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
+            # Code Provenance
+            code_prov = None
+            try:
+                from engine.code_provenance import get_code_provenance
+
+                code_prov = get_code_provenance().to_dict()
+            except Exception as e_suppressed:
+                logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+
             snapshot = {
                 "type": "system_status",
                 "broker_statuses": broker_statuses,
                 "mode": ui_mode,
                 "backend_mode": mode_info.mode.value,
                 "pilot": pilot,
+                "code_provenance": code_prov,
                 "ts": _time.time(),
             }
             yield f"data: {json.dumps(snapshot)}\n\n"

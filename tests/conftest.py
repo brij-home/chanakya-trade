@@ -40,7 +40,9 @@ os.environ.setdefault("PYTHONKEYRING_BACKEND", "keyring.backends.null.Keyring")
 # Institutional thread safety & leak prevention:
 # 1. Patch fyers_apiv3 WebSocket SDK so all its internal ping/worker threads are daemon threads.
 try:
-    pass
+    from market.fyers_socket_patch import patch_fyers_websocket_daemon_threads
+
+    patch_fyers_websocket_daemon_threads()
 except Exception:
     pass
 

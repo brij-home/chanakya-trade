@@ -22,6 +22,111 @@ from typing import Any, Optional
 
 
 @dataclass
+class MarketImpactEstimate:
+    """Pre-trade market impact & liquidity horizon estimate (Almgren-Chriss formulation)."""
+
+    order_shares: int
+    top_depth_shares: int
+    depth_coverage_pct: float
+    expected_slippage_bps: float
+    expected_slippage_pts: float
+    impact_tier: str  # "LOW_IMPACT" | "MODERATE_SLIPPAGE" | "HIGH_IMPACT_SLICING_REQUIRED"
+    execution_mode: str  # "DIRECT_MARKET" | "PASSIVE_LIMIT_BID_2" | "TWAP_ICEBERG_3_TRANCHES"
+    recommendation: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "order_shares": self.order_shares,
+            "top_depth_shares": self.top_depth_shares,
+            "depth_coverage_pct": round(self.depth_coverage_pct, 1),
+            "expected_slippage_bps": round(self.expected_slippage_bps, 1),
+            "expected_slippage_pts": round(self.expected_slippage_pts, 2),
+            "impact_tier": self.impact_tier,
+            "execution_mode": self.execution_mode,
+            "recommendation": self.recommendation,
+        }
+
+
+def estimate_market_impact(
+    symbol: str,
+    shares: int,
+    entry_price: float,
+    depth_data: Optional[dict[str, Any]] = None,
+    avg_5m_vol: Optional[float] = None,
+) -> MarketImpactEstimate:
+    """
+    Computes pre-trade market impact and expected slippage using top-of-book depth
+    and Almgren-Chriss power-law temporary impact estimation.
+    """
+    if shares <= 0 or entry_price <= 0:
+        return MarketImpactEstimate(
+            order_shares=0,
+            top_depth_shares=1,
+            depth_coverage_pct=0.0,
+            expected_slippage_bps=0.0,
+            expected_slippage_pts=0.0,
+            impact_tier="LOW_IMPACT",
+            execution_mode="DIRECT_MARKET",
+            recommendation="Zero shares specified.",
+        )
+
+    # 1. Resolve Top-5 Depth Shares
+    top_depth = 0
+    spread_pts = max(0.05, round(entry_price * 0.0005, 2))  # baseline 5 bps spread
+    if depth_data and isinstance(depth_data, dict):
+        asks = depth_data.get("asks", [])
+        bids = depth_data.get("bids", [])
+        cand_list = asks if asks else bids
+        if cand_list:
+            top_depth = sum(int(x.get("quantity", 0) or 0) for x in cand_list[:5])
+        if asks and bids and asks[0].get("price") and bids[0].get("price"):
+            best_ask = float(asks[0]["price"])
+            best_bid = float(bids[0]["price"])
+            if best_ask > best_bid:
+                spread_pts = best_ask - best_bid
+
+    if top_depth <= 0:
+        if avg_5m_vol and avg_5m_vol > 0:
+            top_depth = max(500, int(avg_5m_vol * 0.08))
+        else:
+            top_depth = 5000  # Default baseline for liquid F&O equities
+
+    depth_coverage = (shares / max(1, top_depth)) * 100.0
+    spread_bps = (spread_pts / entry_price) * 10000.0
+
+    # Almgren-Chriss Temporary Impact Power-Law:
+    # Slippage (bps) = Half-Spread + gamma * (order_size / available_depth)^0.6 * base_impact
+    gamma_factor = 12.0
+    impact_bps = (spread_bps * 0.5) + (gamma_factor * ((shares / max(1, top_depth)) ** 0.6))
+    expected_slippage_bps = round(float(impact_bps), 1)
+    expected_slippage_pts = round(entry_price * (expected_slippage_bps / 10000.0), 2)
+
+    if depth_coverage <= 5.0 and expected_slippage_bps <= 12.0:
+        tier = "LOW_IMPACT"
+        exec_mode = "DIRECT_MARKET"
+        rec = "Liquid book. Direct market execution authorized with negligible slippage."
+    elif depth_coverage <= 15.0 and expected_slippage_bps <= 25.0:
+        tier = "MODERATE_SLIPPAGE"
+        exec_mode = "PASSIVE_LIMIT_BID_2"
+        rec = f"Moderate depth consumption ({depth_coverage:.1f}% of top-5 depth). Recommend limit order at Depth Level 1/2 to save ₹{expected_slippage_pts * shares:,.1f} slippage."
+    else:
+        tier = "HIGH_IMPACT_SLICING_REQUIRED"
+        exec_mode = "TWAP_ICEBERG_3_TRANCHES"
+        rec = f"⚠️ HIGH MARKET IMPACT: Order is {depth_coverage:.1f}% of top-5 depth (~{expected_slippage_bps:.1f} bps slippage). Mandate 3-tranche TWAP/Iceberg slicing over 2-3 minutes to prevent dislocation."
+
+    return MarketImpactEstimate(
+        order_shares=shares,
+        top_depth_shares=top_depth,
+        depth_coverage_pct=depth_coverage,
+        expected_slippage_bps=expected_slippage_bps,
+        expected_slippage_pts=expected_slippage_pts,
+        impact_tier=tier,
+        execution_mode=exec_mode,
+        recommendation=rec,
+    )
+
+
+@dataclass
 class PositionSizeResult:
     """Institutional position sizing output."""
 
@@ -39,9 +144,10 @@ class PositionSizeResult:
     r_multiple: float
     sizing_model: str
     notes: str = ""
+    market_impact: Optional[MarketImpactEstimate] = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "symbol": self.symbol,
             "shares": self.shares,
             "lots": self.lots,
@@ -57,6 +163,9 @@ class PositionSizeResult:
             "sizing_model": self.sizing_model,
             "notes": self.notes,
         }
+        if self.market_impact:
+            d["market_impact"] = self.market_impact.as_dict()
+        return d
 
 
 # Standard F&O Lot Sizes for Indian Instruments (Imported from authoritative SSOT market.instruments)
@@ -387,6 +496,15 @@ def calculate_position_size(
     if (is_fno or lot_size > 1) and lots == 1 and actual_risk_pct > max_risk_pct:
         notes += f" [HIGH_TICKET_RISK: Single lot risk ({actual_risk_pct:.1f}%) exceeds max risk tolerance ({max_risk_pct:.1f}%). Consider cash equity shares or defined-risk spread.]"
 
+    # 4. Pre-Trade Market Impact & Liquidity Horizon Evaluation
+    impact = estimate_market_impact(
+        symbol=clean_sym,
+        shares=shares,
+        entry_price=entry_price,
+    )
+    if impact.impact_tier == "HIGH_IMPACT_SLICING_REQUIRED":
+        notes += f" [{impact.recommendation}]"
+
     return PositionSizeResult(
         symbol=clean_sym,
         shares=shares,
@@ -402,6 +520,7 @@ def calculate_position_size(
         r_multiple=r_multiple,
         sizing_model=sizing_model,
         notes=notes,
+        market_impact=impact,
     )
 
 

@@ -4,7 +4,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from analysis.technical import rsi, ema, sma, macd, bollinger_bands, atr
+from analysis.technical import (
+    rsi,
+    ema,
+    sma,
+    macd,
+    bollinger_bands,
+    atr,
+    roc,
+    choppiness_index,
+    relative_strength,
+)
 
 
 class TestRSI:
@@ -94,3 +104,48 @@ class TestATR:
     def test_atr_length(self, ohlcv_df):
         result = atr(ohlcv_df)
         assert len(result) == len(ohlcv_df)
+
+
+class TestROC:
+    def test_roc_calculation(self):
+        """ROC of [100, 105, 110] with period 1 -> +5% and +4.76%."""
+        s = pd.Series([100.0, 105.0, 110.0])
+        res = roc(s, period=1)
+        assert res.iloc[0] != res.iloc[0]  # NaN
+        assert res.iloc[1] == pytest.approx(5.0)
+        assert res.iloc[2] == pytest.approx(4.7619, rel=1e-3)
+
+    def test_roc_length(self, ohlcv_df):
+        res = roc(ohlcv_df["close"], period=12)
+        assert len(res) == len(ohlcv_df)
+
+
+class TestChoppinessIndex:
+    def test_chop_range(self, ohlcv_df):
+        """Choppiness index must be bounded between 0 and 100."""
+        res = choppiness_index(ohlcv_df, period=14).dropna()
+        assert (res >= 0.0).all()
+        assert (res <= 100.0).all()
+
+    def test_chop_trending_vs_choppy(self):
+        """Strong trending sequence produces low chop, oscillating sequence produces high chop."""
+        # Strong directional trend
+        trend_df = pd.DataFrame(
+            {
+                "high": [100 + i * 2 for i in range(30)],
+                "low": [98 + i * 2 for i in range(30)],
+                "close": [99 + i * 2 for i in range(30)],
+            }
+        )
+        chop_trend = choppiness_index(trend_df, period=14).iloc[-1]
+        assert chop_trend < 45.0, f"Trending market should have low chop, got {chop_trend}"
+
+
+class TestRelativeStrength:
+    def test_relative_strength_ratio(self):
+        stock = pd.Series([100.0, 110.0, 120.0])
+        bench = pd.Series([100.0, 100.0, 100.0])
+        rs = relative_strength(stock, bench)
+        assert rs.iloc[0] == pytest.approx(100.0)
+        assert rs.iloc[1] == pytest.approx(110.0)
+        assert rs.iloc[2] == pytest.approx(120.0)

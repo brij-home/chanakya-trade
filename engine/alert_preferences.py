@@ -955,6 +955,10 @@ class AlertPreferencesManager:
                 or stage
                 in (
                     "T0_5_ACHIEVED",
+                    "DE_RISK_0_5R",
+                    "TARGET_0_5",
+                    "T0.5_ACHIEVED",
+                    "SCALE_1_ACHIEVED",
                     "T1_ACHIEVED",
                     "T2_ACHIEVED",
                     "TARGET_ACHIEVED",
@@ -968,6 +972,7 @@ class AlertPreferencesManager:
                 )
                 or "T0_5" in target_status
                 or "T0.5" in target_status
+                or "DE_RISK" in target_status
                 or "T1" in target_status
                 or "T2" in target_status
                 or "TARGET" in target_status

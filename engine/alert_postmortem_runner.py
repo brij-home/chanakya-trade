@@ -15,11 +15,14 @@ persists outcomes to pattern_outcomes.json, and recalibrates factor weights.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 from config.constants import IST
+from config.paths import app_data_path
 from engine.learning_engine import pattern_learning_engine
 
 logger = logging.getLogger("engine.alert_postmortem_runner")
@@ -163,6 +166,44 @@ def generate_session_scorecard(
     )
     net_r = round(pos_r_sum - neg_r_sum, 2)
 
+    recommendations: list[dict[str, Any]] = []
+    if total_closed >= 4 and win_rate < 50.0:
+        recommendations.append(
+            {
+                "target": "scrutiny_conviction_threshold",
+                "action": "INCREASE_MIN_CONVICTION",
+                "adjustment": +5,
+                "reason": f"Session win rate {win_rate:.1f}% below 50% baseline across {total_closed} closed setups.",
+            }
+        )
+    if microstructure_stats.get("wall_traps", 0) >= 2:
+        recommendations.append(
+            {
+                "target": "depth_wall_scrutiny",
+                "action": "STRICT_RESTING_WALL_VETO",
+                "adjustment": True,
+                "reason": f"{microstructure_stats['wall_traps']} setups stopped out by Order Book absorption wall traps.",
+            }
+        )
+    if microstructure_stats.get("spread_friction", 0) >= 2:
+        recommendations.append(
+            {
+                "target": "spread_bps_cap",
+                "action": "TIGHTEN_SPREAD_CAP",
+                "adjustment": 20.0,
+                "reason": f"{microstructure_stats['spread_friction']} setups suffered excessive spread friction drag.",
+            }
+        )
+    if microstructure_stats.get("obi_imbalances", 0) >= 2:
+        recommendations.append(
+            {
+                "target": "obi_skew_threshold",
+                "action": "ENFORCE_COUNTER_FLOW_FILTER",
+                "adjustment": 0.35,
+                "reason": f"{microstructure_stats['obi_imbalances']} setups suffered severe order book imbalance sweeps.",
+            }
+        )
+
     return {
         "session_date": session_date,
         "total_alerts": len(today_alerts),
@@ -178,6 +219,7 @@ def generate_session_scorecard(
         "best_trade": best_trade,
         "archetype_breakdown": archetype_stats,
         "microstructure_attribution": microstructure_stats,
+        "calibration_recommendations": recommendations,
     }
 
 
@@ -222,6 +264,16 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
         f"🔬 <b>Microstructure Root Causes:</b> {', '.join(micro_parts)}\n" if micro_parts else ""
     )
 
+    recs = scorecard.get("calibration_recommendations") or []
+    recs_parts = []
+    for r in recs:
+        recs_parts.append(f"  • <b>{r.get('target')}</b>: {r.get('action')} ({r.get('reason')})")
+    recs_str = (
+        "🛠️ <b>Autonomous Scrutiny Calibrations:</b>\n" + "\n".join(recs_parts) + "\n\n"
+        if recs_parts
+        else ""
+    )
+
     return (
         f"🏁 <b>[EOD QUANTITATIVE SESSION SCORECARD]</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -234,7 +286,10 @@ def format_eod_scorecard_telegram(scorecard: dict[str, Any]) -> str:
         f"{r_icon} <b>Net Realized PnL:</b> <b>{r_sign}{net_r:.1f}R</b>\n\n"
         f"🏆 <b>Best Setup:</b> {best_str}\n\n"
         f"📋 <b>Strategy Attribution:</b>\n"
-        f"{bd_str}\n" + (f"\n{micro_str}" if micro_str else "") + "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{bd_str}\n"
+        + (f"\n{micro_str}" if micro_str else "")
+        + (f"\n{recs_str}" if recs_str else "")
+        + "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🧠 <i>Factor weights recalibrated in Pattern Learning Engine.</i>"
     )
 
@@ -341,6 +396,28 @@ def run_eod_alert_postmortems(
     # Compute institutional session scorecard
     scorecard = generate_session_scorecard(today_alerts, session_date=today_date)
     report["scorecard"] = scorecard
+
+    # Persist daily scorecard to app_data postmortem storage and data/postmortem/
+    session_slug = today_date.replace("-", "")
+    scorecard_filename = f"daily_scorecard_{session_slug}.json"
+    try:
+        sc_dir = app_data_path("postmortem")
+        sc_dir.mkdir(parents=True, exist_ok=True)
+        sc_file = sc_dir / scorecard_filename
+        sc_file.write_text(json.dumps(scorecard, indent=2), encoding="utf-8")
+        report["scorecard_path"] = str(sc_file)
+    except Exception as e_sc:
+        logger.warning(f"[AlertPostMortem] Could not persist daily scorecard to app_data: {e_sc}")
+
+    try:
+        local_dir = Path("data/postmortem")
+        local_dir.mkdir(parents=True, exist_ok=True)
+        (local_dir / scorecard_filename).write_text(
+            json.dumps(scorecard, indent=2), encoding="utf-8"
+        )
+    except Exception as e_local:
+        logger.debug(f"[AlertPostMortem] Optional local scorecard save note: {e_local}")
+
     if broadcast and len(today_alerts) > 0:
         broadcast_eod_scorecard(scorecard)
 

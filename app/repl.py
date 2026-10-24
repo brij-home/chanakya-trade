@@ -623,11 +623,12 @@ def _cmd_web(port: int = 8765) -> None:
 
     threading.Thread(target=_open, daemon=True).start()
 
-    # Run uvicorn (blocks until Ctrl+C)
+    # Run uvicorn (blocks until Ctrl+C) with auto-reload to prevent stale in-memory bytecode
     uvicorn.run(
         "web.api:app",
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=port,
+        reload=True,
         log_level="warning",  # quiet — the REPL already has UI
     )
     console.print("[dim]\nWeb server stopped. Back in REPL.[/dim]\n")

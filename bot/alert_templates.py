@@ -1859,8 +1859,21 @@ class MilestoneAlertData:
         if is_opt_contract:
             # Option sellers/writers profit on premium decay; Option buyers (both CE and PE) profit on premium expansion!
             is_option_seller = (
-                any(k in action_str for k in ("SELL", "WRITE", "SHORT"))
+                action_str
+                in (
+                    "SELL_OPTION",
+                    "WRITE_OPTION",
+                    "SHORT_OPTION",
+                    "WRITE",
+                    "SELL_CE",
+                    "SELL_PE",
+                    "SHORT_CE",
+                    "SHORT_PE",
+                )
                 or alert_type_raw == "OPTION_WRITE"
+                or getattr(alert, "derivative_type", "") == "OPTION_SELL"
+                or act_plan.get("strategy_type")
+                in ("CREDIT_SPREAD", "SHORT_STRADDLE", "SHORT_STRANGLE")
             )
             is_payoff_bullish = not is_option_seller
         else:
@@ -1893,38 +1906,82 @@ class MilestoneAlertData:
 
         # Entry Price resolution (Actionable plan recommended_entry takes canonical precedence)
         entry_price = getattr(alert, "initial_entry_premium", None)
-        if not entry_price and is_opt_contract and getattr(alert, "entry_price", None):
-            try:
-                entry_price = float(alert.entry_price)
-            except (ValueError, TypeError):
-                entry_price = None
         opt_plan = act_plan.get("option_plan") if isinstance(act_plan, dict) else None
+        spot_ref = (
+            getattr(alert, "underlying_spot", None)
+            or (opt_plan.get("underlying_spot") if isinstance(opt_plan, dict) else None)
+            or (
+                alert.metrics.get("spot")
+                if isinstance(getattr(alert, "metrics", None), dict)
+                else None
+            )
+            or getattr(alert, "trigger_level", None)
+        )
+
+        # For option contracts, extract explicit option premium first
         if not entry_price and is_opt_contract and isinstance(opt_plan, dict):
             if opt_plan.get("entry_premium"):
-                entry_price = float(opt_plan["entry_premium"])
+                try:
+                    entry_price = float(opt_plan["entry_premium"])
+                except (ValueError, TypeError) as e_conv:
+                    logger.debug(f"[alert_templates] entry_premium float parse error: {e_conv}")
 
         entry_range = act_plan.get("entry_range")
         rec_entry = act_plan.get("recommended_entry")
         if not entry_price and rec_entry:
             m = re.search(r"[\d,]+(?:\.\d+)?", str(rec_entry))
             if m:
-                entry_price = float(m.group(0).replace(",", ""))
+                cand_r = float(m.group(0).replace(",", ""))
+                if (
+                    not is_opt_contract
+                    or not spot_ref
+                    or abs(cand_r - spot_ref) / max(1.0, spot_ref) >= 0.20
+                ):
+                    entry_price = cand_r
+
+        if not entry_price and is_opt_contract:
+            # For option contracts, verify that alert.entry_price is option premium, NOT spot scale!
+            cand_ep = getattr(alert, "entry_price", None)
+            if cand_ep:
+                try:
+                    cand_ep_f = float(cand_ep)
+                    # If spot_ref exists and cand_ep is near spot_ref, it is spot, NOT option premium!
+                    if spot_ref and abs(cand_ep_f - spot_ref) / max(1.0, spot_ref) < 0.20:
+                        cand_ep_f = None
+                    elif cand_ep_f > 500 and not str(contract or "").startswith("BTC"):
+                        cand_ep_f = None
+                    if cand_ep_f and cand_ep_f > 0:
+                        entry_price = cand_ep_f
+                except (ValueError, TypeError) as e_conv:
+                    logger.debug(f"[alert_templates] cand_ep float parse error: {e_conv}")
         if not entry_price and entry_range:
             matches = re.findall(r"[\d,]+(?:\.\d+)?", str(entry_range))
             if len(matches) >= 2:
                 try:
-                    entry_price = round(
+                    cand_mid = round(
                         (float(matches[0].replace(",", "")) + float(matches[1].replace(",", "")))
                         / 2.0,
                         2,
                     )
+                    if (
+                        not is_opt_contract
+                        or not spot_ref
+                        or abs(cand_mid - spot_ref) / max(1.0, spot_ref) >= 0.20
+                    ):
+                        entry_price = cand_mid
                 except ValueError as e_suppressed:
                     logger.debug(
                         f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
                     )
             elif len(matches) == 1:
                 try:
-                    entry_price = float(matches[0].replace(",", ""))
+                    cand_1 = float(matches[0].replace(",", ""))
+                    if (
+                        not is_opt_contract
+                        or not spot_ref
+                        or abs(cand_1 - spot_ref) / max(1.0, spot_ref) >= 0.20
+                    ):
+                        entry_price = cand_1
                 except ValueError as e_suppressed:
                     logger.debug(
                         f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
@@ -1946,18 +2003,32 @@ class MilestoneAlertData:
                 alert, "threshold", None
             )
 
-        # Strict Option LTP & Spot Contamination Interceptor
+        # Strict Option LTP & Spot Contamination Interceptor (Rule 14.1)
         if is_opt_contract and entry_price and entry_price > 0:
             spot_ref = getattr(alert, "underlying_spot", None)
-            is_spot_scale = (ltp > entry_price * 3.5) or (
+            # Case 1: LTP is spot scale while entry is option scale
+            is_ltp_spot_scale = (ltp > entry_price * 3.5) or (
                 spot_ref and abs(ltp - spot_ref) / max(1.0, spot_ref) < 0.15
             )
-            if is_spot_scale:
+            if is_ltp_spot_scale:
                 opt_prem_saved = getattr(alert, "option_premium", None)
                 if opt_prem_saved and 0 < float(opt_prem_saved) <= (entry_price * 3.5):
                     ltp = float(opt_prem_saved)
                 else:
                     ltp = entry_price
+
+            # Case 2: Entry is spot scale while LTP is option scale
+            is_entry_spot_scale = (entry_price > ltp * 3.5) or (
+                spot_ref and abs(entry_price - spot_ref) / max(1.0, spot_ref) < 0.15
+            )
+            if is_entry_spot_scale and spot_ref and entry_price > spot_ref * 0.5:
+                opt_prem_saved = getattr(alert, "option_premium", None)
+                if opt_prem_saved and 0 < float(opt_prem_saved) <= (ltp * 3.5):
+                    entry_price = float(opt_prem_saved)
+                elif isinstance(opt_plan, dict) and opt_plan.get("entry_premium"):
+                    entry_price = float(opt_plan["entry_premium"])
+                else:
+                    entry_price = ltp
 
         # Initial Stop Loss resolution
         initial_sl = None
@@ -4816,11 +4887,9 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
         )
         if is_opt:
-            is_option_seller = (
-                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
-                or alert_type_raw == "OPTION_WRITE"
-                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
-            )
+            from engine.alert_expiry import is_option_seller
+
+            is_option_seller = is_option_seller(alert)
             is_downward = is_option_seller
         else:
             if t1_num and entry_p and entry_p > 0:
@@ -4931,11 +5000,9 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
         )
         if is_opt:
-            is_option_seller = (
-                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
-                or alert_type_raw == "OPTION_WRITE"
-                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
-            )
+            from engine.alert_expiry import is_option_seller
+
+            is_option_seller = is_option_seller(alert)
             is_t2_downward = is_option_seller
         else:
             if t2_num and entry_p and entry_p > 0:

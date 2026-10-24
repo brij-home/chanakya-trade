@@ -3020,6 +3020,7 @@ def test_offmarket_intraday_suppressed_while_swing_allowed(tmp_path, monkeypatch
         trigger_level=150.0,
         target_level=140.0,
         stop_loss=155.0,
+        metrics={"rvol": 2.5},
         created_at=now_str,
     )
     rec_swing = engine.record_alert(swing_alert)
@@ -3219,6 +3220,11 @@ def test_options_momentum_is_gated_in_alert_scrutiny(tmp_path, monkeypatch):
             auditor_model="TEST_AUDITOR",
             audited_at="2026-09-11 15:00:00 IST",
         ),
+    )
+    monkeypatch.setattr(
+        alert_scrutiny_auditor,
+        "verify_tier1_sanity",
+        lambda a: (True, "Sanity OK", {"benchmark_regime_valid": True}),
     )
 
     alert = AutoAlert(
