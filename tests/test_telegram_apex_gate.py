@@ -718,13 +718,11 @@ def test_telegram_stocks_daily_limit_env_override():
     engine = AutoAlertEngine()
     today_k = datetime.now(IST).strftime("%Y-%m-%d")
 
-    # Simulate 10 total stock alerts across sectors today
-    engine._sector_daily_telegram[today_k]["banking"] = 3
-    engine._sector_daily_telegram[today_k]["it"] = 3
-    engine._sector_daily_telegram[today_k]["auto"] = 4
+    # Simulate exactly 10 total stock alerts across sectors today
+    engine._sector_daily_telegram[today_k] = {"banking": 3, "it": 3, "auto": 4}
     # Total = 10
 
-    alert_next = _make_dummy_alert("stk-pharma-1", "SUNPHARMA", segment="FNO_STOCK", confidence=90)
+    alert_next = _make_dummy_alert("stk-pharma-1", "SUNPHARMA", segment="FNO_STOCK", confidence=80)
     alert_next.metrics["sector_id"] = "pharma"
 
     with patch.dict(os.environ, {"TELEGRAM_MAX_STOCKS_PER_DAY": "10"}):

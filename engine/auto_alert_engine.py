@@ -1143,10 +1143,6 @@ class AutoAlertEngine:
                     opt_entry_min = round(max(0.05, opt_sl + 0.1, opt_entry * 0.97), 2)
                     opt_entry_max = round(min(opt_no_chase - 0.05, opt_entry * 1.03), 2)
 
-                    from engine.alert_expiry import is_alert_option_premium_level
-
-                    is_pure_opt = is_alert_option_premium_level(alert)
-
                     # Always populate dedicated option fields
                     alert.actionable_plan["option_entry"] = f"₹{opt_entry:,.2f}"
                     alert.actionable_plan["option_entry_range"] = (
@@ -1164,35 +1160,22 @@ class AutoAlertEngine:
                         alert.actionable_plan["option_runner_target"] = f"₹{opt_t3:,.2f}"
                     alert.actionable_plan["option_no_chase_boundary"] = f"₹{opt_no_chase:,.2f}"
 
-                    if is_pure_opt:
-                        # For pure option strategies, primary levels represent option premiums
-                        alert.actionable_plan["recommended_entry"] = f"₹{opt_entry:,.2f}"
-                        alert.actionable_plan["entry_range"] = (
-                            f"₹{opt_entry_min:,.2f} – ₹{opt_entry_max:,.2f}"
-                        )
-                        if opt_sl > 0:
-                            alert.actionable_plan["stop_loss"] = f"₹{opt_sl:,.2f}"
-                        if opt_t1 > 0:
-                            alert.actionable_plan["target"] = f"₹{opt_t1:,.2f}"
-                            alert.actionable_plan["target_1"] = f"₹{opt_t1:,.2f}"
-                        if opt_t2 > 0:
-                            alert.actionable_plan["target_2"] = f"₹{opt_t2:,.2f}"
-                        if opt_t3 > 0:
-                            alert.actionable_plan["target_3"] = f"₹{opt_t3:,.2f}"
-                            alert.actionable_plan["runner_target"] = f"₹{opt_t3:,.2f}"
-                        alert.actionable_plan["no_chase_boundary"] = f"₹{opt_no_chase:,.2f}"
-                    else:
-                        # For spot setups, ensure primary levels remain on SPOT scale!
-                        spot_sl_val = underlying_sl or alert.stop_loss
-                        if spot_sl_val and "stop_loss" not in alert.actionable_plan:
-                            alert.actionable_plan["stop_loss"] = f"₹{spot_sl_val:,.2f}"
-                        spot_tgt_val = underlying_target or alert.target_level
-                        if spot_tgt_val and "target_1" not in alert.actionable_plan:
-                            alert.actionable_plan["target_1"] = f"₹{spot_tgt_val:,.2f}"
-                            alert.actionable_plan["target"] = f"₹{spot_tgt_val:,.2f}"
-
-                    if is_pure_opt:
-                        alert.option_premium = opt_entry
+                    alert.actionable_plan["recommended_entry"] = f"₹{opt_entry:,.2f}"
+                    alert.actionable_plan["entry_range"] = (
+                        f"₹{opt_entry_min:,.2f} – ₹{opt_entry_max:,.2f}"
+                    )
+                    if opt_sl > 0:
+                        alert.actionable_plan["stop_loss"] = f"₹{opt_sl:,.2f}"
+                    if opt_t1 > 0:
+                        alert.actionable_plan["target"] = f"₹{opt_t1:,.2f}"
+                        alert.actionable_plan["target_1"] = f"₹{opt_t1:,.2f}"
+                    if opt_t2 > 0:
+                        alert.actionable_plan["target_2"] = f"₹{opt_t2:,.2f}"
+                    if opt_t3 > 0:
+                        alert.actionable_plan["target_3"] = f"₹{opt_t3:,.2f}"
+                        alert.actionable_plan["runner_target"] = f"₹{opt_t3:,.2f}"
+                    alert.actionable_plan["no_chase_boundary"] = f"₹{opt_no_chase:,.2f}"
+                    alert.option_premium = opt_entry
         except Exception as e_fno:
             logger.debug(f"[AutoAlertEngine] F&O contract enrichment non-fatal exception: {e_fno}")
 
@@ -8776,7 +8759,13 @@ class AutoAlertEngine:
                     _ltp = float(
                         getattr(alert, "option_premium", 0.0) or alert.initial_entry_premium
                     )
-                    _t1 = float(getattr(alert, "target_1", 0.0) or 0.0)
+                    _plan = alert.actionable_plan if isinstance(alert.actionable_plan, dict) else {}
+                    _t1 = float(
+                        _plan.get("target_1")
+                        or getattr(alert, "option_target_level", None)
+                        or getattr(alert, "target_1", 0.0)
+                        or 0.0
+                    )
                     if _entry > 0 and _ltp > 0:
                         _pnl = round(((_ltp - _entry) / _entry) * 100.0, 2)
                         _pnl_sign = "+" if _pnl >= 0 else ""

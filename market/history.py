@@ -112,6 +112,7 @@ def get_ohlcv(
         Index: date (datetime)
     """
     # Defensively map yfinance-style period to days if provided
+    orig_from_date = from_date
     if period and isinstance(period, str):
         p = period.strip().lower()
         if p.endswith("d"):
@@ -248,7 +249,7 @@ def get_ohlcv(
                 wh_df = historical_warehouse.load_bars(
                     clean_sym,
                     interval=kite_interval,
-                    from_date=from_date,
+                    from_date=orig_from_date,
                     to_date=to_date,
                     days=days,
                 )

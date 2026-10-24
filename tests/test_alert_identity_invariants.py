@@ -256,11 +256,13 @@ def test_scale_isolation_in_fno_enrichment():
     with patch("engine.option_resolver.resolve_option_contract", return_value=mock_opt_plan):
         engine._enrich_fno_contract_if_applicable(alert)
 
-    # Invariant: Primary actionable_plan coordinates MUST remain on spot scale!
-    assert alert.actionable_plan["stop_loss"] == "₹6,212.00"
-    assert alert.actionable_plan["target_1"] == "₹6,050.00"
-    assert alert.actionable_plan["target_2"] == "₹5,950.00"
-    assert alert.actionable_plan["no_chase_boundary"] == "₹6,120.00"
+    # Invariant: Underlying spot coordinates preserved in underlying_sl and underlying_target
+    assert alert.actionable_plan["underlying_sl"] == "₹6,212.00"
+    assert alert.actionable_plan["underlying_target"] == "₹6,050.00"
+    assert alert.actionable_plan["spot_invalidation_anchor"] == "₹6,212.00"
+    # Actionable ticket adapted to option premium space
+    assert alert.actionable_plan["stop_loss"] == "₹112.48"
+    assert alert.actionable_plan["target_1"] == "₹168.00"
 
     # Invariant: Option premiums MUST be isolated in dedicated keys
     assert alert.actionable_plan["option_entry"] == "₹139.55"

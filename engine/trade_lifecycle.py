@@ -392,7 +392,7 @@ def audit_position_lifecycle(
                 )
             elif r_multiple >= 1.8:
                 recommended_stop = max(be_stop, structure_stop)
-                stop_method = "BREAKEVEN_LOCKED"
+                stop_method = "BREAKEVEN"
             elif r_multiple >= 1.0:
                 recommended_stop = max(half_risk_stop, initial_stop_loss)
                 stop_method = "HALF_RISK_LOCKED"
@@ -437,7 +437,7 @@ def audit_position_lifecycle(
                 recommended_stop = min(
                     be_stop, structure_stop if structure_stop < entry_price else be_stop
                 )
-                stop_method = "BREAKEVEN_LOCKED"
+                stop_method = "BREAKEVEN"
             elif r_multiple >= 1.0:
                 recommended_stop = min(half_risk_stop, initial_stop_loss)
                 stop_method = "HALF_RISK_LOCKED"

@@ -94,6 +94,10 @@ def test_apex_confluence_upgrade_does_not_redispatch_primary_card(clean_engine):
     with (
         patch.object(clean_engine, "_dispatch") as mock_dispatch,
         patch("web.sse.event_bus.publish_sync") as mock_sse,
+        patch(
+            "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+            return_value=(True, "OK", {}),
+        ),
     ):
         res = clean_engine.record_alert(alert2)
 

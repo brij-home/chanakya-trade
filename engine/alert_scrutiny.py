@@ -670,9 +670,10 @@ class AlertScrutinyAuditor:
                         "PASSIVE_DISTRIBUTION",
                     ):
                         flags["order_book_sanctity_valid"] = False
+                        flags["cvd_flow_valid"] = False
                         return (
                             False,
-                            f"Bull Trap Veto: Passive institutional distribution / CVD divergence detected at resistance on {clean_sym} ({cvd_bias}).",
+                            f"Order Flow CVD Exhaustion Veto / Bull Trap Veto: Passive institutional distribution / CVD divergence detected at resistance on {clean_sym} ({cvd_bias}).",
                             flags,
                         )
                     if depth_ratio > 3.0 and depth_skew == "SELLER_HEAVY":
@@ -690,9 +691,10 @@ class AlertScrutinyAuditor:
                         "PASSIVE_ACCUMULATION",
                     ):
                         flags["order_book_sanctity_valid"] = False
+                        flags["cvd_flow_valid"] = False
                         return (
                             False,
-                            f"Bear Trap Veto: Passive institutional accumulation / CVD divergence detected at support on {clean_sym} ({cvd_bias}).",
+                            f"Order Flow CVD Absorption Veto: Passive institutional accumulation / CVD divergence detected at support on {clean_sym} ({cvd_bias}). Aggressive sellers are being absorbed by passive institutional limit bids at the lows.",
                             flags,
                         )
                     if depth_ratio > 3.0 and depth_skew == "BUYER_HEAVY":
