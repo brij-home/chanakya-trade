@@ -191,7 +191,11 @@ def get_options_chain(
     Returns:
         List of OptionsContract sorted by strike then type (CE/PE).
     """
-    from market.instruments import COMMODITY_SYMBOLS, is_derivative_eligible
+    from market.instruments import (
+        COMMODITY_SYMBOLS,
+        is_derivative_eligible,
+        resolve_corporate_alias,
+    )
 
     clean_sym = (
         underlying.upper()
@@ -202,6 +206,7 @@ def get_options_chain(
         .replace("BSE:", "")
         .strip()
     )
+    clean_sym = resolve_corporate_alias(clean_sym)
     is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
     is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
 
@@ -578,7 +583,9 @@ def get_expiries(underlying: str, allow_chain_fallback: bool = False) -> list[st
         .upper()
         .strip()
     )
-    from market.instruments import is_derivative_eligible
+    from market.instruments import is_derivative_eligible, resolve_corporate_alias
+
+    clean_u = resolve_corporate_alias(clean_u)
 
     if not is_derivative_eligible(clean_u):
         return []
@@ -648,9 +655,10 @@ def get_options_snapshot(
     from datetime import datetime, timezone
     from brokers.session import get_data_broker, get_data_broker_key
     from market.calendar import is_market_open
-    from market.instruments import is_derivative_eligible
+    from market.instruments import is_derivative_eligible, resolve_corporate_alias
 
     clean_u = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()
+    clean_u = resolve_corporate_alias(clean_u)
     is_bse = clean_u in ("SENSEX", "BANKEX")
     market_open = is_market_open("BSE" if is_bse else "NSE")
     now_utc = datetime.now(timezone.utc).isoformat()

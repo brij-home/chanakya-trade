@@ -431,7 +431,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
 
 
 def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quote]:
-    """Resolve derivative option contract quotes directly from options snapshot (mStock / NSE scraper) without hitting yfinance."""
+    """Resolve derivative option contract quotes directly from options snapshot (Fyers / broker / NSE scraper) without hitting yfinance."""
     try:
         from market.options import get_options_snapshot
 
