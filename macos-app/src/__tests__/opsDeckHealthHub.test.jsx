@@ -190,4 +190,55 @@ describe('OpsDeck & System Health Hub UI Tests', () => {
       expect(screen.getByText(/Sync Fundamentals/i)).toBeInTheDocument()
     })
   })
+
+  it('OpsDeckView incident matrix enables error text selection and copy actions', async () => {
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: vi.fn().mockResolvedValue(),
+      },
+    })
+
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            overall_status: 'HEALTHY',
+            incident_counts: { P0: 0, P1: 0, P2: 1, P3: 0 },
+            incidents: [
+              {
+                priority: 'P2',
+                component: 'MARKET_QUOTES',
+                incident_id: 'inc-999',
+                event_type: 'LATENCY',
+                reason: 'Critical timeout on quote gateway',
+                action_taken: 'Rerouted to backup socket',
+                timestamp: new Date().toISOString(),
+                details: {
+                  traceback: 'Traceback (most recent call last):\n  File "quotes.py", line 42',
+                },
+              },
+            ],
+          }),
+      })
+    )
+
+    render(<OpsDeckView />)
+
+    await waitFor(() => {
+      const errorMsg = screen.getByText('Critical timeout on quote gateway')
+      expect(errorMsg).toBeInTheDocument()
+      expect(errorMsg.className).toContain('select-text')
+      expect(screen.getByText('[inc-999]')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Copy Error/i })).toBeInTheDocument()
+    })
+
+    const copyBtn = screen.getByRole('button', { name: /Copy Error/i })
+    await act(async () => {
+      fireEvent.click(copyBtn)
+    })
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+      expect.stringContaining('Critical timeout on quote gateway')
+    )
+  })
 })

@@ -38,7 +38,6 @@ class StockProfile:
 
 
 # ── Corporate Restructuring & Demerger Aliases (SSOT from market.instruments) ──
-from market.instruments import CORPORATE_ALIASES
 
 
 # ── Complete Institutional Equities Taxonomy ────────────────────────
@@ -89,6 +88,7 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "HCLTECH",
             "WIPRO",
             "TECHM",
+            "LTIM",
             "COFORGE",
             "PERSISTENT",
             "MPHASIS",
@@ -96,14 +96,12 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "TATAELXSI",
             "OFSS",
             "CYIENT",
-            "ETERNAL",
             "NAUKRI",
             "MAPMYINDIA",
             "DIXON",
             "POLICYBZR",
             "AFFLE",
             "BSOFT",
-            "SWIGGY",
             "HAPPSTMNDS",
             "INTELLECT",
             "JUSTDIAL",
@@ -126,6 +124,7 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
         "index_symbol": "^CNXAUTO",
         "description": "4W & 2W OEMs, Commercial Vehicles, EV Components, and Tyres.",
         "symbols": [
+            "TATAMOTORS",
             "TMPV",
             "TMCV",
             "MARUTI",
@@ -184,6 +183,8 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "BPCL",
             "IOC",
             "GAIL",
+            "MGL",
+            "IGL",
             "ADANIGREEN",
             "ADANIENT",
             "ADANIPOWER",
@@ -217,7 +218,7 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "VEDL",
             "NATIONALUM",
             "HINDZINC",
-            "APLAPOLLO",
+            "NMDCSTEEL",
             "RATNAMANI",
             "JINDALSAW",
             "GALLANTT",
@@ -315,6 +316,9 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "SAPPHIRE",
             "WESTLIFE",
             "AVANTIFEED",
+            "SWIGGY",
+            "ZOMATO",
+            "ETERNAL",
         ],
     },
     "realty": {
@@ -406,7 +410,6 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "FLUOROCHEM",
             "AETHER",
             "FINEORG",
-            "MGL",
             "CHAMBLFERT",
             "DEEPAKFERT",
             "DHANUKA",
@@ -1408,7 +1411,7 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "LODHA",
             "LT",
             "LTF",
-            "LTM",
+            "LTIM",
             "LUPIN",
             "M&M",
             "MAHABANK",
@@ -1657,11 +1660,22 @@ def _load_bundled_index_sectors() -> None:
                     if sym and ind:
                         if sym not in _STOCK_INDUSTRY:
                             _STOCK_INDUSTRY[sym] = ind
-                        if sym not in _STOCK_TO_SECTOR:
-                            mapped = _NSE_INDUSTRY_TO_SECTOR.get(ind)
-                            if mapped:
+                        mapped = _NSE_INDUSTRY_TO_SECTOR.get(ind)
+                        if mapped:
+                            if sym not in _STOCK_TO_SECTOR:
                                 _STOCK_TO_SECTOR[sym] = mapped
                                 _STOCK_SECTOR_SOURCE[sym] = "NIFTY_TOTAL_MARKET"
+                            try:
+                                from market.instruments import canonical_symbol
+
+                                canon = canonical_symbol(sym)
+                                if canon and canon not in _STOCK_TO_SECTOR:
+                                    _STOCK_TO_SECTOR[canon] = mapped
+                                    _STOCK_SECTOR_SOURCE[canon] = "NIFTY_TOTAL_MARKET"
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[universe] Canonical symbol sector mapping non-fatal: {e_suppressed}"
+                                )
             except Exception as e:
                 logger.warning(f"[universe] Failed loading bundled index sectors: {e}")
 
@@ -1677,16 +1691,19 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
       2. Dynamic GICS/Industry metadata discovery for newly listed / BSE equities.
       3. Defaults to ("broad_market", "Broad Market") if completely unclassified.
     """
-    clean = (
-        symbol.upper()
-        .replace(".NS", "")
-        .replace("NSE:", "")
-        .replace("MCX:", "")
-        .replace("CDS:", "")
-        .replace("BSE:", "")
-        .strip()
-    )
-    clean = CORPORATE_ALIASES.get(clean, clean)
+    from market.instruments import canonical_symbol
+
+    clean = canonical_symbol(symbol)
+    clean_u = clean.upper()
+    if (
+        clean_u.startswith("CRYPTO:")
+        or clean_u.endswith("USDT")
+        or clean_u.endswith("USDC")
+        or clean_u.endswith("BTC")
+        or clean_u in ("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE")
+    ):
+        return ("crypto", "Crypto 24x7")
+
     if clean in _STOCK_TO_SECTOR:
         return _STOCK_TO_SECTOR[clean]
 
@@ -1936,16 +1953,9 @@ _LARGE_CAP_SET = (
 
 def get_stock_cap_tier(symbol: str) -> str:
     """Classifies stock as LARGE, MID, SMALL, or MICRO based on SEBI canonical market-cap rules."""
-    clean = (
-        symbol.upper()
-        .replace(".NS", "")
-        .replace("NSE:", "")
-        .replace("MCX:", "")
-        .replace("CDS:", "")
-        .replace("BSE:", "")
-        .strip()
-    )
-    clean = CORPORATE_ALIASES.get(clean, clean)
+    from market.instruments import canonical_symbol
+
+    clean = canonical_symbol(symbol)
     if clean in _LARGE_CAP_SET:
         return "LARGE"
     if clean in _MID_CAP_SET:
@@ -2370,17 +2380,24 @@ def normalize_symbol_exchange(symbol: str, exchange: str | None = None) -> tuple
         exch = prefix.upper().strip()
         sym = clean_sym.upper().strip()
     elif exch == "NSE":
-        from market.quotes import _BSE_SYMBOLS, _CDS_SYMBOLS, _MCX_SYMBOLS, _CRYPTO_SYMBOLS
+        from config.market_universes import (
+            BSE_EQUITY_SYMBOLS,
+            CDS_CURRENCY_SYMBOLS,
+            CRYPTO_SYMBOLS,
+            MCX_COMMODITY_SYMBOLS,
+        )
 
-        if sym in _MCX_SYMBOLS:
+        if sym in MCX_COMMODITY_SYMBOLS:
             exch = "MCX"
-        elif sym in _CDS_SYMBOLS:
+        elif sym in CDS_CURRENCY_SYMBOLS:
             exch = "CDS"
-        elif sym in _BSE_SYMBOLS:
+        elif sym in BSE_EQUITY_SYMBOLS:
             exch = "BSE"
-        elif sym in _CRYPTO_SYMBOLS:
+        elif sym in CRYPTO_SYMBOLS:
             exch = "CRYPTO"
 
     clean_sym = sym.replace("_", "-")
-    clean_sym = CORPORATE_ALIASES.get(clean_sym, clean_sym)
+    from market.instruments import canonical_symbol
+
+    clean_sym = canonical_symbol(clean_sym)
     return clean_sym, exch

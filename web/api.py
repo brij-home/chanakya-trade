@@ -184,7 +184,7 @@ async def _background_code_staleness_sentinel():
 
     while True:
         try:
-            await asyncio.sleep(30)
+            await asyncio.sleep(300)  # Checked every 5 minutes (low-overhead background advisory)
             prov = await asyncio.to_thread(get_code_provenance, force_refresh=True)
             if prov.is_stale_in_memory:
                 if not last_reported_stale:
@@ -1190,6 +1190,7 @@ async def get_system_health_hub(
     priority: Optional[str] = None,
     component: Optional[str] = None,
     limit: int = 100,
+    since_boot: bool = False,
 ):
     """
     Unified Operations & Maintenance Health Hub (OpsDeck) API.
@@ -1226,25 +1227,29 @@ async def get_system_health_hub(
     provider_health = obs_reg.get_provider_health()
     slo_report = obs_reg.get_slo_report()
     telem_summary = get_telemetry_summary()
-    incident_counts = get_incident_counts()
-    active_counts = get_incident_counts(window_minutes=15)
-    incidents = get_prioritized_incidents(limit=limit, priority=priority, component=component)
-    mem_status = get_memory_status().to_dict()
-    storage_bd = await asyncio.to_thread(get_storage_breakdown)
     code_prov = await asyncio.to_thread(get_code_provenance, force_refresh=False)
     code_prov_dict = code_prov.to_dict()
+    since_ts = code_prov.boot_timestamp if since_boot else None
 
-    # If runtime in-memory bytecode is stale compared to disk, inject P1 incident and elevate status
+    incident_counts = get_incident_counts(since_timestamp=since_ts)
+    active_counts = get_incident_counts(window_minutes=15, since_timestamp=since_ts)
+    incidents = get_prioritized_incidents(
+        limit=limit, priority=priority, component=component, since_timestamp=since_ts
+    )
+    mem_status = get_memory_status().to_dict()
+    storage_bd = await asyncio.to_thread(get_storage_breakdown)
+
+    # If runtime in-memory bytecode is stale compared to disk, inject P3 advisory note (maintenance, not operational impairment)
     if code_prov.is_stale_in_memory:
         sample_path = code_prov.stale_files[0]["path"] if code_prov.stale_files else "unknown"
         incidents.insert(
             0,
             {
                 "incident_id": f"INC-CODE-STALE-{code_prov.git_commit}",
-                "priority": "P1",
-                "severity": "WARNING",
+                "priority": "P3",
+                "severity": "INFO",
                 "component": "RuntimeCodeProvenance",
-                "action_taken": "Restart or reload required",
+                "action_taken": "Reload recommended when convenient",
                 "reason": (
                     f"Stale in-memory bytecode: {code_prov.stale_files_count} file(s) modified on disk since boot "
                     f"(latest: {sample_path})"
@@ -1259,8 +1264,8 @@ async def get_system_health_hub(
                 },
             },
         )
-        active_counts["P1"] = active_counts.get("P1", 0) + 1
-        incident_counts["P1"] = incident_counts.get("P1", 0) + 1
+        active_counts["P3"] = active_counts.get("P3", 0) + 1
+        incident_counts["P3"] = incident_counts.get("P3", 0) + 1
 
     # Compute single truth overall health status based on active state and recent 15m window
     if (
@@ -1276,7 +1281,6 @@ async def get_system_health_hub(
         or provider_health.get("overall_health") == "DEGRADED"
         or slo_report.get("overall_status") == "BREACHED"
         or rate_gate_diag.get("status") == "SATURATED"
-        or code_prov.is_stale_in_memory
     ):
         overall_status = "DEGRADED"
     else:
@@ -3661,8 +3665,9 @@ async def api_get_volatility_surface(
     """Calibrates Hagan's SABR (2002) Volatility Surface, extracts parameter smile, and flags strike mispricings."""
     _require_localhost(request)
     from analysis.vol_surface import analyze_volatility_surface
+    from market.instruments import canonical_symbol
 
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = canonical_symbol(symbol)
     result = await asyncio.to_thread(analyze_volatility_surface, clean_sym, expiry, beta)
     if not result:
         return JSONResponse(
@@ -4592,8 +4597,9 @@ def get_multibagger_analysis(symbol: str):
     Mid-Term Stage 2 Compounder, and Long-Term Generational tickets.
     """
     from analysis.multibagger import scan_multibagger_opportunity
+    from market.instruments import canonical_symbol
 
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = canonical_symbol(symbol)
     report = scan_multibagger_opportunity(clean_sym)
     return JSONResponse(report.to_dict())
 

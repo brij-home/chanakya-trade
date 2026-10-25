@@ -253,14 +253,14 @@ class CodeProvenanceSentinel:
             self._cached_report = report
             self._cache_time = now
 
-            if is_stale and (now - self._last_telemetry_emit_time) > 60.0:
+            if is_stale and (now - self._last_telemetry_emit_time) > 300.0:
                 self._last_telemetry_emit_time = now
                 self._emit_staleness_telemetry(report)
 
             return report
 
     def _emit_staleness_telemetry(self, report: CodeProvenanceReport) -> None:
-        """Records a P1 incident in institutional telemetry when staleness occurs."""
+        """Records a P3 advisory incident in institutional telemetry when staleness occurs."""
         try:
             from engine.telemetry import record_event, EVENT_CODE_STALE
 
@@ -269,10 +269,10 @@ class CodeProvenanceSentinel:
             record_event(
                 event_type=EVENT_CODE_STALE,
                 component="RuntimeCodeProvenance",
-                action_taken="Elevation to DEGRADED & reload recommended",
+                action_taken="Reload recommended when convenient",
                 reason=f"Stale in-memory bytecode: {report.stale_files_count} file(s) modified after boot. (e.g. {sample_str})",
-                severity="WARNING",
-                priority="P1",
+                severity="INFO",
+                priority="P3",
                 details={
                     "boot_timestamp": report.boot_timestamp,
                     "uptime_seconds": report.uptime_seconds,

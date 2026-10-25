@@ -966,6 +966,22 @@ def parse_contract_components(
     opt = str(option_type or "").strip().upper()
     exp_extracted: Optional[str] = None
 
+    try:
+        from market.instruments import parse_derivative_contract
+
+        parsed = parse_derivative_contract(contract)
+        if parsed:
+            if not und:
+                und = parsed.underlying
+            if stk is None:
+                stk = parsed.strike
+            if not opt:
+                opt = parsed.contract_type
+            if not expiry_date and parsed.expiry_date:
+                expiry_date = parsed.expiry_date
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}")
+
     # 1. Spaced format: e.g. "HAL 4800 PE", "HAL 26SEP 4500 CE", "MIDCPNIFTY 14250 CE"
     m_spaced = re.match(
         r"^([A-Z]+)\s+(?:(\d{1,2}[A-Z]{3}|\d{2}[A-Z]{3})\s+)?(\d+(?:\.\d+)?)\s*(CE|PE|FUT)$",
@@ -1165,16 +1181,16 @@ def escape_tg(text: Any) -> str:
 
 
 def format_price(val: Any) -> str:
-    """Format numeric value as Indian Rupee string or pass through if string."""
+    """Format numeric value as currency string or pass through if string."""
     if val is None:
         return ""
     if isinstance(val, (int, float)):
         return f"₹{val:,.2f}"
     s = str(val).strip()
-    if s.startswith("₹") or s.startswith("`") or s == "Open":
+    if s.startswith("₹") or s.startswith("$") or s.startswith("`") or s == "Open":
         return s
     try:
-        f = float(s.replace(",", "").replace("₹", ""))
+        f = float(s.replace(",", "").replace("₹", "").replace("$", ""))
         return f"₹{f:,.2f}"
     except ValueError:
         return s
@@ -1218,7 +1234,7 @@ def strip_provenance_and_icons(text: str) -> str:
         flags=re.IGNORECASE,
     )
     # Strip leading alert emojis followed by optional space
-    s = re.sub(r"^[🚨🎯🚀⚡🛢️💱🟢⚠️🏆💎🔔🌙\s]+", "", s)
+    s = re.sub(r"^[🚨🎯🚀⚡🛢️💱🟢🔴🪙🦅🌟⚠️🏆💎🔔🌙\s]+", "", s)
     return s.strip()
 
 
@@ -1301,7 +1317,7 @@ def _resolve_monotonic_display_targets(
         dec = 2
     elif seg == "CDS":
         dec = 4
-    elif candidates[0] < 100 and seg in ("FNO_INDEX", "NFO", "BFO"):
+    elif candidates[0] < 100:
         dec = 2
     else:
         dec = 1
@@ -1382,6 +1398,7 @@ class FNOAlertData:
     spot_invalidation_anchor: Optional[float] = None
     structural_spot_sl: Optional[float] = None
     disaster_stop_floor: Optional[float] = None
+    is_do_not_miss: bool = False
 
     @classmethod
     def from_dict(
@@ -1568,6 +1585,7 @@ class FNOAlertData:
             spot_invalidation_anchor=spot_anchor_val,
             structural_spot_sl=spot_anchor_val,
             disaster_stop_floor=disaster_floor,
+            is_do_not_miss=bool(d.get("is_do_not_miss", False)),
         )
 
 
@@ -1601,6 +1619,7 @@ class EquityAlertData:
     quick_command: Optional[str] = None
     environment: str = "LIVE"
     in_market: bool = True
+    is_do_not_miss: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any], in_market: bool = True) -> EquityAlertData:
@@ -1695,6 +1714,7 @@ class EquityAlertData:
             quick_command=quick_cmd,
             environment=final_env,
             in_market=in_market,
+            is_do_not_miss=bool(d.get("is_do_not_miss", False)),
         )
 
 
@@ -2914,6 +2934,8 @@ def render_fno_alert(
         f"{conv_badge}\n"
         f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
     )
+    if getattr(d, "is_do_not_miss", False):
+        msg = f"🌟 <b>DO NOT MISS SETUP · APEX ASYMMETRY</b>\n{msg}"
     return msg
 
 
@@ -2984,6 +3006,8 @@ def render_equity_alert(data: EquityAlertData | dict[str, Any], in_market: bool 
         f"⚡ <b>Quick Size:</b> <code>{d.quick_command}</code>\n"
         f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
     )
+    if getattr(d, "is_do_not_miss", False):
+        msg = f"🌟 <b>DO NOT MISS SETUP · APEX ASYMMETRY</b>\n{msg}"
     return msg
 
 
@@ -3025,7 +3049,7 @@ def render_precursor_alert(data: dict[str, Any], in_market: bool = True) -> str:
 
     env_tag = normalize_env_tag(data.get("environment", "LIVE"), in_market)
     if not in_market:
-        header_line = f"🌙 <b>{env_tag} POST-MARKET EOD WATCHLIST [{seg}]</b>"
+        header_line = f"🌙 <b>{env_tag} NEW CALL · POST-MARKET EOD WATCHLIST [{seg}]</b>"
         off_note = (
             "\n\n⏸️ <i>Market is closed. Setup calibrated for tomorrow's opening gameplan.</i>"
         )
@@ -3104,7 +3128,7 @@ def render_primed_strike_clock_alert(data: dict[str, Any] | Any, in_market: bool
     rr = plan.get("risk_reward") or "1:2.0"
 
     env_tag = normalize_env_tag(d.get("environment", "LIVE"), in_market)
-    header = f"🎯 <b>{env_tag} PREDATOR STRIKE CLOCK · T-60s [{seg}]</b>"
+    header = f"🎯 <b>{env_tag} ADVANCE CALL · PREDATOR STRIKE CLOCK (T-60s) [{seg}]</b>"
 
     lines = [
         header,
@@ -3300,9 +3324,7 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
         setup_title_tag = "ASYMMETRIC SETUP"
 
     if not in_market:
-        header_line = (
-            f"🌙 <b>{env_tag} POST-MARKET EOD WATCHLIST — {setup_title_tag} [{rr_display} R:R]</b>"
-        )
+        header_line = f"🌙 <b>{env_tag} NEW CALL · POST-MARKET EOD WATCHLIST — {setup_title_tag} [{rr_display} R:R]</b>"
         off_note = (
             "\n\n⏸️ <i>Market is closed. Setup calibrated for tomorrow's opening gameplan.</i>"
         )
@@ -3577,6 +3599,13 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
             f"{off_note}\n"
             f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
         )
+    is_dnm = bool(
+        data.get("is_do_not_miss")
+        or metrics.get("is_do_not_miss")
+        or (float(score or 0) >= 85 and float(str(raw_rr).replace("1:", "").strip() or 0) >= 2.5)
+    )
+    if is_dnm:
+        msg = f"🌟 <b>DO NOT MISS SETUP · APEX ASYMMETRY</b>\n{msg}"
     return msg
 
 
@@ -4650,7 +4679,7 @@ def render_price_alert(
     env_tag = normalize_env_tag(environment, in_market)
     ltp_str = f" · LTP: <b>₹{ltp:,.2f}</b>" if ltp is not None else ""
     return (
-        f"🟢 <b>{env_tag} ALERT TRIGGERED</b>\n"
+        f"🟢 <b>{env_tag} UPDATE · PRICE ALERT TRIGGERED</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔔 <b>{symbol}</b>: {condition_desc}{ltp_str}"
     )
@@ -5116,7 +5145,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     elif is_crypto:
         tg_header = "🪙 <b>[CRYPTO 24x7] NEW CALL · ALPHA VORTEX</b>"
     elif not in_market:
-        tg_header = f"🌙 <b>{env_tag} NEW EOD WATCHLIST</b>"
+        tg_header = f"🌙 <b>{env_tag} NEW CALL · NEW EOD WATCHLIST</b>"
     else:
         if (
             getattr(alert, "exchange", "") == "MCX"
@@ -5262,6 +5291,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
     actionable_plan = getattr(alert, "actionable_plan", {}) or {}
     plan_str = ""
+    sector_line_str = ""
+    signals_line_str = ""
 
     # Options Contract Plan
     is_option_plan = bool(
@@ -5316,8 +5347,9 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             act = re.sub(r"\b(CE|PE)\b", "", act, flags=re.IGNORECASE).strip()
             act = re.sub(r"\s+", " ", act)
 
-        # If action is labelled as SPREAD but the target instrument is a single option contract (CE/PE),
-        # normalize action verb to BUY so that the single leg's entry/SL/target match the action,
+        # If action is labelled as SPREAD but a hedge plan box is rendered below,
+        # the primary top ticket represents the single option contract (Naked Leg).
+        # Normalize action verb to BUY, resolve instrument to the single contract,
         # and attach a clear reference to the attached Defined-Risk Spread below.
         spread_ref_inline = ""
         has_hedge_box = bool(
@@ -5327,10 +5359,18 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 and alert.metrics.get("hedge_plan")
             )
         )
-        if "SPREAD" in act.upper() and any(tok in inst_u for tok in (" CE", " PE", "CE", "PE")):
-            act = "BUY"
-
         if has_hedge_box:
+            if "SPREAD" in act.upper():
+                act = "BUY"
+            if "SPREAD" in inst.upper() or "/" in inst:
+                naked_sym = getattr(alert, "contract_symbol", None)
+                if not naked_sym or "SPREAD" in str(naked_sym).upper():
+                    strk = int(getattr(alert, "strike", 0) or 0)
+                    if strk > 0 and opt_type_hint:
+                        naked_sym = f"{alert.symbol} {strk} {opt_type_hint}"
+                if naked_sym and "SPREAD" not in str(naked_sym).upper():
+                    inst = format_contract_display(naked_sym)
+                    inst_u = inst.upper()
             pref_veh = ""
             hp = actionable_plan.get("hedge_plan") or (
                 alert.metrics.get("hedge_plan")
@@ -5343,12 +5383,19 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 spread_ref_inline = " <i>(Hedged Spread Preferred 👇)</i> [Naked Leg]"
             else:
                 spread_ref_inline = " <i>(or Hedged Spread below 👇)</i> [Naked Leg]"
+        elif "SPREAD" in act.upper() and any(tok in inst_u for tok in (" CE", " PE", "CE", "PE")):
+            act = "BUY"
 
         entry = (
             actionable_plan.get("recommended_entry")
             or actionable_plan.get("entry_range")
             or f"₹{alert.ltp:.1f}"
         )
+        # Extract clean limit range if entry contains embedded pullback note (e.g. "₹4.65 (OTE Pullback: ₹4.4 – ₹4.7)")
+        m_ote = re.search(r"\(OTE Pullback:\s*([^)]+)\)", str(entry), flags=re.IGNORECASE)
+        if m_ote:
+            entry = m_ote.group(1).strip()
+
         sl = actionable_plan.get("stop_loss", f"₹{getattr(alert, 'stop_loss', 0):.1f}")
 
         # Spot-leakage defense: if entry or SL is in underlying spot units, rescue from option_plan
@@ -5610,18 +5657,41 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             disaster_stop = round(entry_val * 0.68, 2)
 
         if spot_anchor and str(spot_anchor) not in str(sl):
+            try:
+                spot_anchor_num = float(
+                    re.findall(r"[\d,]+(?:\.\d+)?", str(spot_anchor))[0].replace(",", "")
+                )
+                spot_anchor_fmt = f"₹{spot_anchor_num:,.1f}"
+            except Exception:
+                spot_anchor_fmt = str(spot_anchor)
+                if not spot_anchor_fmt.startswith("₹") and not spot_anchor_fmt.startswith("$"):
+                    spot_anchor_fmt = f"₹{spot_anchor_fmt}"
             disaster_str = (
                 f" [Disaster Floor: -32% @ ₹{disaster_stop:,.1f}]" if disaster_stop else ""
             )
             sl_line = (
                 f"• <b>🛑 Safe SL (Tactical):</b> <code>{sl}</code> <i>(1m close — filters freak wicks)</i>\n"
-                f"• <b>🏛️ Structural SL (Spot):</b> <code>{spot_anchor}</code><i>{disaster_str}</i>{max_loss_str}\n"
+                f"• <b>🏛️ Structural SL (Spot):</b> <code>{spot_anchor_fmt}</code><i>{disaster_str}</i>{max_loss_str}\n"
             )
         else:
             sl_line = f"• <b>SL:</b> <code>{sl}</code>{max_loss_str}\n"
 
+        free_roll_data = actionable_plan.get("free_roll_plan") or (
+            isinstance(actionable_plan.get("option_plan"), dict)
+            and actionable_plan["option_plan"].get("free_roll_plan")
+        )
+        has_eligible_free_roll = bool(
+            isinstance(free_roll_data, dict)
+            and free_roll_data.get("status") == "ELIGIBLE"
+            and free_roll_data.get("protocol_summary")
+        )
         profit_rule = actionable_plan.get("profit_rule")
-        rule_str = f"\n• <b>Playbook:</b> <i>{profit_rule}</i>" if profit_rule else ""
+        # Suppress duplicate Playbook line when Free-Roll Protocol is active
+        rule_str = (
+            f"\n• <b>Playbook:</b> <i>{profit_rule}</i>"
+            if (profit_rule and not has_eligible_free_roll)
+            else ""
+        )
 
         no_chase_val = getattr(alert, "no_chase_boundary", None)
         if is_option_plan and entry_val and entry_val > 0:
@@ -6120,9 +6190,9 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 wait_str = f"\n• <b>Discipline:</b> <i>{wait_rule}</i>"
         plan_str = (
             f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>\n"
-            f"• <b>SL:</b> <code>{sl}</code>\n"
+            f"• <b>SL:</b> <code>{sl}</code>{no_chase_inline}\n"
             f"• <b>T1:</b> <code>{tgt1}</code>{tgt2_str}{tgt3_str}\n"
-            f"• <b>R:R:</b> <b>{rr}</b> | 24x7 Continuous Liquidity{no_chase_inline}\n"
+            f"• <b>R:R:</b> <b>{rr}</b> | 24x7 Continuous Liquidity\n"
             f"• <b>Structure:</b> <i>{confluence}</i>\n"
             f"• <b>Playbook:</b> <i>{rule}</i>"
             f"{wait_str}"
@@ -6366,7 +6436,19 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         )
         plan_str = (plan_str + hedge_box) if plan_str else hedge_box.strip()
 
-    # Execution style mandate note (when defined-risk spread is required)
+    # Execution style mandate note (when defined-risk spread or risk haircut is required)
+    has_opt_vehicle = bool(
+        getattr(alert, "option_type", None)
+        or getattr(alert, "strike", None)
+        or getattr(alert, "segment", "") in ("FNO", "NFO", "BFO")
+        or getattr(alert, "alert_type", "") in ("GAMMA_BLAST", "OPTIONS_MOMENTUM")
+        or "PE" in str(getattr(alert, "contract_symbol", "")).upper()
+        or "CE" in str(getattr(alert, "contract_symbol", "")).upper()
+        or (actionable_plan.get("instrument_type") == "OPTION")
+        or actionable_plan.get("option_alternative")
+        or actionable_plan.get("option_plan")
+    )
+    is_spot_asset = is_crypto or (not has_opt_vehicle)
     if actionable_plan.get("execution_style_mandate") == "HEDGED_SPREAD_MANDATORY" or (
         isinstance(getattr(alert, "metrics", None), dict)
         and alert.metrics.get("execution_style_mandate") == "HEDGED_SPREAD_MANDATORY"
@@ -6376,15 +6458,33 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             or actionable_plan.get("trap_warning")
             or "Defined-risk vertical spread required to monetize resistance & neutralize theta decay."
         )
-        if "DEFINED-RISK HEDGE SPREAD" not in (plan_str or "") and "MANDATE:" not in (
-            plan_str or ""
-        ):
-            spread_guidance = (
-                "\n• ⚠️ <i>Automated spread legs unavailable on illiquid strikes. Convert naked leg to vertical spread (sell OTM wing) or size at 50% risk.</i>"
-                if not has_hedge_legs
-                else ""
+        if is_spot_asset:
+            if "RISK MANDATE:" not in (plan_str or "") and "MANDATE:" not in (plan_str or ""):
+                mandate_box = f"\n\n🛡️ <b>RISK MANDATE: 50% POSITION SIZING HAIRCUT</b>\n• <i>{mandate_note} Size at 50% risk.</i>"
+                plan_str = (plan_str + mandate_box) if plan_str else mandate_box.strip()
+        else:
+            if "DEFINED-RISK HEDGE SPREAD" not in (plan_str or "") and "MANDATE:" not in (
+                plan_str or ""
+            ):
+                spread_guidance = (
+                    "\n• ⚠️ <i>Automated spread legs unavailable on illiquid strikes. Convert naked leg to vertical spread (sell OTM wing) or size at 50% risk.</i>"
+                    if not has_hedge_legs
+                    else ""
+                )
+                mandate_box = f"\n\n🛡️ <b>EXECUTION MANDATE: DEFINED-RISK SPREAD REQUIRED</b>\n• <i>{mandate_note}</i>{spread_guidance}"
+                plan_str = (plan_str + mandate_box) if plan_str else mandate_box.strip()
+    elif actionable_plan.get("execution_style_mandate") == "SIZE_HAIRCUT_50PCT" or (
+        isinstance(getattr(alert, "metrics", None), dict)
+        and alert.metrics.get("execution_style_mandate") == "SIZE_HAIRCUT_50PCT"
+    ):
+        mandate_note = (
+            actionable_plan.get("sector_concurrency_warning")
+            or "Position concentration limit reached. Size at 50% capital risk."
+        )
+        if "RISK MANDATE:" not in (plan_str or "") and "MANDATE:" not in (plan_str or ""):
+            mandate_box = (
+                f"\n\n🛡️ <b>RISK MANDATE: 50% POSITION SIZING HAIRCUT</b>\n• <i>{mandate_note}</i>"
             )
-            mandate_box = f"\n\n🛡️ <b>EXECUTION MANDATE: DEFINED-RISK SPREAD REQUIRED</b>\n• <i>{mandate_note}</i>{spread_guidance}"
             plan_str = (plan_str + mandate_box) if plan_str else mandate_box.strip()
 
     # Free-roll execution protocol (+2R Scale 50% & Zero-Risk Runner)
@@ -6599,6 +6699,14 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             if re.search(r"\bSL\s+at\s+₹?[\d,.]+", p, flags=re.IGNORECASE):
                 continue
             if re.search(
+                r"^(?:OTE Entry|OTE|Entry Zone|No Chase|OTE No Chase|DO NOT CHASE|Rule)\b",
+                p,
+                flags=re.IGNORECASE,
+            ):
+                continue
+            if re.search(r"\bNo Chase\s*[><=]\s*₹?[\d,.]+", p, flags=re.IGNORECASE):
+                continue
+            if re.search(
                 r"^(?:Wait for minor pullback|Immediate market/limit entry|Stalk pivot|Accumulate in range)\b",
                 p,
                 flags=re.IGNORECASE,
@@ -6670,6 +6778,73 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 clean_summary = f"Institutional {opt_type_val} order flow and volatility expansion on {getattr(alert, 'symbol', '')}."
             else:
                 clean_summary = f"Technical momentum surge and volume expansion on {getattr(alert, 'symbol', '')}."
+
+    if clean_summary:
+        # Strip duplicate Target prices (e.g. Target 1: $2,451.54 or Target: ₹250) if already in plan_str
+        if plan_str and any(k in plan_str for k in ("T1:", "Target:", "target")):
+            clean_summary = re.sub(
+                r"(?:Target\s*\d*|Upside\s+target):\s*[\$₹]?[\d,]+(?:\.\d+)?\.?\s*",
+                "",
+                clean_summary,
+                flags=re.IGNORECASE,
+            ).strip()
+        # If RVOL is already in clean_hl or plan_str, strip RVOL from Reason
+        if ("RVOL" in (clean_hl or "") or "RVOL" in (plan_str or "")) and "RVOL" in clean_summary:
+            clean_summary = re.sub(
+                r"\(?RVOL\s*[\d.]+x(?:,\s*)?",
+                "",
+                clean_summary,
+                flags=re.IGNORECASE,
+            ).strip(" ,()")
+        # If 20-EMA is already in Structure or plan_str, strip 20-EMA confirmation sentence
+        if (
+            "20-EMA" in (plan_str or "") or "EMA" in (plan_str or "")
+        ) and "20-EMA" in clean_summary:
+            clean_summary = re.sub(
+                r"Structure confirmed (?:above|below) 20-EMA\s*\(?[\$₹]?[\d,.]*\)?\.?\s*",
+                "",
+                clean_summary,
+                flags=re.IGNORECASE,
+            ).strip()
+        # Strip duplicate OTE, No Chase, or Rule boilerplate if present in Reason
+        clean_summary = re.sub(
+            r"[·\-|]?\s*OTE:\s*₹?[\d,.\s–—-]+",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip(" .·,|")
+        clean_summary = re.sub(
+            r"[·\-|]?\s*(?:OTE\s+)?No\s+Chase\s*[><=]\s*₹?[\d,.]+\.?\s*",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip(" .·,|")
+        clean_summary = re.sub(
+            r"[·\-|]?\s*Rule:\s*50%\s*@\s*T1\s*->\s*SL\s*to\s*BE\.?\s*",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip(" .·,|")
+        # If Vol/OI turnover or V/OI is already reported in metrics, plan_str, or clean_hl, strip from Reason
+        metrics_d_chk = getattr(alert, "metrics", {}) or {}
+        has_voi = bool(
+            (metrics_d_chk.get("vol_oi_ratio") if isinstance(metrics_d_chk, dict) else 0)
+            or getattr(alert, "vol_oi_ratio", None)
+            or "V/OI" in (clean_hl or "")
+            or "V/OI" in (plan_str or "")
+        )
+        if has_voi and "OI" in clean_summary:
+            clean_summary = re.sub(
+                r"\bVol(?:ume)?/OI(?:\s+turnover)?\s+[\d.]+x\.?\s*",
+                "",
+                clean_summary,
+                flags=re.IGNORECASE,
+            ).strip(" .·,|")
+        # Clean dangling punctuation and empty parentheses like '()'
+        clean_summary = re.sub(r"\(\s*\)", "", clean_summary).strip(" .·,|")
+        # If clean_summary has become a pure substring of plan_str, suppress it to prevent duplication
+        if clean_summary and clean_summary.lower() in (plan_str or "").lower():
+            clean_summary = ""
 
     reason_line = f"💡 <b>Reason:</b> <i>{clean_summary}</i>" if clean_summary else ""
 
@@ -6954,7 +7129,12 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         tier_tag = " [🛡️ SPREAD]"
     conf_badge = f" | 🧠 <b>Confidence:</b> <b>{conf_val or 85}%</b>{tier_tag}"
     style_short = setup_style_val.replace("_", " ")
-    horizon_line = f"• <b>Horizon:</b> {horizon_display} | 🎯 <b>ETA:</b> <b>{eta_val}</b> | <b>Style:</b> <i>{style_short}</i>{conf_badge}"
+    if is_crypto:
+        horizon_line = (
+            f"• <b>Horizon:</b> 🪙 24h Rolling | <b>Style:</b> <i>{style_short}</i>{conf_badge}"
+        )
+    else:
+        horizon_line = f"• <b>Horizon:</b> {horizon_display} | 🎯 <b>ETA:</b> <b>{eta_val}</b> | <b>Style:</b> <i>{style_short}</i>{conf_badge}"
 
     # Order flow / broker depth provenance
     order_flow = getattr(alert, "order_flow_signals", None) or {}
@@ -7004,6 +7184,15 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
         # Sector name + RRG quadrant
         sec_name_val = metrics_d.get("sector_name") or getattr(alert, "sector", None)
+        if not sec_name_val:
+            try:
+                from analysis.universe import get_stock_sector
+
+                sec_res = get_stock_sector(getattr(alert, "symbol", ""))
+                if sec_res and sec_res[1]:
+                    sec_name_val = sec_res[1]
+            except Exception as e_suppressed:
+                logger.debug(f"[bot.alert_templates] Sector lookup non-fatal: {e_suppressed}")
         rrg_q = metrics_d.get("rrg_quadrant") or metrics_d.get("rrg_phase")
         rrg_icons = {
             "LEADING": "📈 Leading",
@@ -7024,15 +7213,25 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         imbal_v = metrics_d.get("imbalance_ratio")
 
         sec_parts: list[str] = []
-        if sec_name_val:
+        if sec_name_val and str(sec_name_val).lower() not in (
+            "broad market",
+            "general",
+            "crypto 24x7",
+            "crypto",
+        ):
             sec_short = shorten_sector_name(sec_name_val, symbol=getattr(alert, "symbol", ""))
-            sec_parts.append(f"Sec: <b>{sec_short}</b>")
+            if sec_short:
+                sec_parts.append(f"Sec: <b>{sec_short}</b>")
         if rrg_short:
             sec_parts.append(f"RRG: {rrg_short}")
         if rvol_v is not None and float(rvol_v) > 0:
-            sec_parts.append(f"RVOL: {float(rvol_v):.1f}x")
+            rvol_str = f"{float(rvol_v):.1f}x"
+            if rvol_str not in (clean_hl or "") and rvol_str not in (plan_str or ""):
+                sec_parts.append(f"RVOL: {rvol_str}")
         if vol_oi_v is not None and float(vol_oi_v) > 0:
-            sec_parts.append(f"V/OI: {float(vol_oi_v):.1f}x")
+            voi_str = f"{float(vol_oi_v):.1f}x"
+            if voi_str not in (clean_hl or "") and voi_str not in (plan_str or ""):
+                sec_parts.append(f"V/OI: {voi_str}")
         if sec_rs_v is not None:
             sec_parts.append(f"RS: {float(sec_rs_v):+.2f}")
         if imbal_v is not None and float(imbal_v) > 1.2:
@@ -7119,6 +7318,11 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                         "pre-trade sanity",
                     )
                 ):
+                    lc_str = re.sub(r"\b(?:NSE|BSE|NFO|MCX):[A-Z0-9_]+\b", "", lc_str)
+                    lc_str = re.sub(
+                        r"\b[A-Z0-9_]+(?:\d{2}[A-Z]{3}|\d{4}[0-9A-Z]{2})\d+(?:CE|PE)\b", "", lc_str
+                    )
+                    lc_str = re.sub(r"\s+", " ", lc_str).strip()
                     c_excerpt = _clean_sig_phrase(lc_str, 50)
                     if c_excerpt and c_excerpt not in clean_summary and c_excerpt not in plan_str:
                         sigs.append(f"AI: {c_excerpt}")
@@ -7129,9 +7333,14 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         logger.debug(f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Final message assembly: action first, context next, meta at bottom ─────
-    # Surface APEX Confluence header badge
+    # Surface APEX Confluence header badge without wiping out NEW CALL / UPDATE lifecycle state
     if getattr(alert, "is_apex_confluence", False) or c_tier == "APEX_CONFLUENCE":
-        tg_header = tg_header.replace("NEW CALL", "💎 APEX CONFLUENCE")
+        if "NEW CALL" in tg_header:
+            tg_header = tg_header.replace("NEW CALL", "NEW CALL · 💎 APEX CONFLUENCE")
+        elif "UPDATE" in tg_header:
+            tg_header = tg_header.replace("UPDATE", "UPDATE · 💎 APEX CONFLUENCE")
+        elif "💎 APEX CONFLUENCE" not in tg_header:
+            tg_header = f"{tg_header} · 💎 APEX CONFLUENCE"
 
     # Surface Execution Friction & Slippage Mandate
     friction_badge = (
@@ -7146,7 +7355,25 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     slip_bps = getattr(alert, "estimated_slippage_bps", None) or (
         actionable_plan.get("estimated_slippage_bps") if isinstance(actionable_plan, dict) else None
     )
-    if friction_badge and str(friction_badge) not in (plan_str or ""):
+    is_real_friction = bool(
+        friction_badge
+        and any(
+            w in str(friction_badge).upper()
+            for w in (
+                "WIDE SPREAD",
+                "ILLIQUID",
+                "THIN",
+                "STRICT LIMIT",
+                "HIGH SLIPPAGE",
+                "FRICTION",
+            )
+        )
+        and "✓ LIQUID" not in str(friction_badge).upper()
+        and "NORMAL DEPTH" not in str(friction_badge).upper()
+        and "PRIME LIQUIDITY" not in str(friction_badge).upper()
+        and "TIGHT SPREAD" not in str(friction_badge).upper()
+    )
+    if is_real_friction and str(friction_badge) not in (plan_str or ""):
         slip_note = (
             f" <i>(Est. Slippage: {slip_bps:.0f} bps)</i>"
             if (slip_bps and float(slip_bps) > 0)
@@ -7171,6 +7398,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         "━━━━━━━━━━━━━━━━━━━━",
         hl_line,
     ]
+    if getattr(alert, "is_do_not_miss", False) or getattr(alert, "do_not_miss_label", None):
+        lines.insert(0, "🌟 <b>DO NOT MISS SETUP · APEX ASYMMETRY</b>")
     if plan_str:
         lines.append(plan_str.strip())
     if sector_line_str:

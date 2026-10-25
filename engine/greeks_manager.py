@@ -639,20 +639,10 @@ def build_commodity_option_chain_synthetic(
     if F <= 0:
         return []
 
-    # Strike step mapping for Indian MCX contracts
-    strike_step_map = {
-        "CRUDEOIL": 50.0,
-        "CRUDEOILM": 50.0,
-        "NATURALGAS": 5.0,
-        "NATGASMINI": 5.0,
-        "GOLD": 500.0,
-        "GOLDM": 100.0,
-        "SILVER": 1000.0,
-        "SILVERM": 500.0,
-        "COPPER": 10.0,
-        "ZINC": 5.0,
-    }
-    step = strike_step_map.get(sym, 50.0)
+    # Authoritative strike step from SSOT
+    from market.symbol_master import get_strike_step
+
+    step = get_strike_step(sym, spot=F)
 
     # Base typical IVs for commodities
     base_iv_map = {

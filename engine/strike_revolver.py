@@ -29,6 +29,7 @@ from datetime import date, datetime
 from typing import Any, Optional
 
 from config.constants import IST
+from market.instruments import canonical_symbol
 
 logger = logging.getLogger("chanakya.engine.strike_revolver")
 
@@ -76,29 +77,10 @@ class StrikeRevolveAdvisory:
 
 
 def get_strike_step_for_symbol(symbol: str, spot: float = 0.0) -> float:
-    """Canonical strike step resolver for Indian Equity & Index Derivatives."""
-    clean = (
-        (symbol or "").replace("NSE:", "").replace("NFO:", "").replace("BSE:", "").strip().upper()
-    )
-    if clean in ("BANKNIFTY", "SENSEX", "BANKEX"):
-        return 100.0
-    if clean == "MIDCPNIFTY":
-        return 25.0
-    if clean in ("NIFTY", "FINNIFTY"):
-        return 50.0
+    """Canonical strike step resolver for Indian Equity & Index Derivatives (delegates to SSOT)."""
+    from market.symbol_master import get_strike_step
 
-    # Stock option strike steps based on underlying spot tier
-    if spot >= 5000:
-        return 100.0
-    elif spot >= 2500:
-        return 50.0
-    elif spot >= 1000:
-        return 20.0
-    elif spot >= 500:
-        return 10.0
-    elif spot >= 200:
-        return 5.0
-    return 2.5
+    return get_strike_step(symbol, spot=spot)
 
 
 def derive_new_contract_symbol(
@@ -149,14 +131,7 @@ def evaluate_strike_revolving(
     # 1. Basic Eligibility Gate
     cur_strike = getattr(alert, "strike", None)
     opt_type = getattr(alert, "option_type", None)
-    sym = (
-        (getattr(alert, "symbol", "") or "")
-        .replace("NSE:", "")
-        .replace("NFO:", "")
-        .replace("BSE:", "")
-        .strip()
-        .upper()
-    )
+    sym = canonical_symbol(getattr(alert, "symbol", "") or "")
 
     if not cur_strike or not opt_type or not sym:
         return None

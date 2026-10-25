@@ -20,7 +20,7 @@ import threading
 import time
 from calendar import monthrange
 from collections import OrderedDict
-from datetime import date, datetime, timedelta, time as dtime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -99,16 +99,16 @@ CORE_BASE_SYMBOLS: list[str] = [
 # Dynamically populate liquid taxonomy equities and benchmarks
 try:
     from analysis.universe import SECTOR_TAXONOMY
-    from market.instruments import resolve_corporate_alias, BE_SERIES_STOCKS
+    from market.instruments import resolve_corporate_alias
+    from market.symbol_master import resolve_fyers_equity_symbol
     import json
     from pathlib import Path
 
     for _sec_info in SECTOR_TAXONOMY.values():
         for _s in _sec_info.get("symbols", []):
             _clean = resolve_corporate_alias(_s)
-            _sfx = "-BE" if _clean in BE_SERIES_STOCKS else "-EQ"
-            _eq_sym = f"NSE:{_clean}{_sfx}"
-            if _eq_sym not in CORE_BASE_SYMBOLS:
+            _eq_sym = resolve_fyers_equity_symbol(_clean, exch="NSE")
+            if _eq_sym and _eq_sym not in CORE_BASE_SYMBOLS:
                 CORE_BASE_SYMBOLS.append(_eq_sym)
 
     # Pre-seed top institutional benchmarks from nifty_total_market.json (up to 750)
@@ -119,11 +119,9 @@ try:
             _raw_sym = _item.get("symbol", "").strip().upper()
             if _raw_sym:
                 _clean = resolve_corporate_alias(_raw_sym)
-                _series = _item.get("series", "EQ").upper()
-                _sfx = "-BE" if (_clean in BE_SERIES_STOCKS or _series == "BE") else "-EQ"
-                _sym = f"NSE:{_clean}{_sfx}"
-                if _sym not in CORE_BASE_SYMBOLS:
-                    CORE_BASE_SYMBOLS.append(_sym)
+                _eq_sym = resolve_fyers_equity_symbol(_clean, exch="NSE")
+                if _eq_sym and _eq_sym not in CORE_BASE_SYMBOLS:
+                    CORE_BASE_SYMBOLS.append(_eq_sym)
 except Exception as e:
     logger.warning(f"Could not load universe into CORE_BASE_SYMBOLS: {e}")
 
@@ -198,89 +196,23 @@ def _calc_monthly_expiry_date(exch: str, underlying: str, yr: int, mo: int) -> d
 
 def parse_contract_expiry(symbol: str) -> Optional[date]:
     """
-    Parse the official expiry date from any Indian market derivative contract symbol
-    (Fyers / NSE / BSE / MCX / CDS options and futures).
-    Returns None if the symbol is a cash equity, index, or non-derivative.
+    Parse the official expiry date from any Indian market derivative contract symbol.
+    Delegates to institutional SSOT market.instruments.parse_derivative_contract.
     """
-    if not symbol or not isinstance(symbol, str):
-        return None
-    s = symbol.strip()
-    exch = "NSE"
-    if ":" in s:
-        parts = s.split(":", 1)
-        exch = parts[0].upper().strip()
-        clean = parts[1].strip()
-    else:
-        clean = s
+    from market.instruments import parse_derivative_contract
 
-    # 1. Weekly Option (e.g., NIFTY26O1922900CE)
-    m_w = WEEKLY_OPT_RE.match(clean)
-    if m_w:
-        _, yy, mo_code, dd, _, _ = m_w.groups()
-        yr = 2000 + int(yy)
-        mo = WEEKLY_MONTH_MAP.get(mo_code.upper())
-        day = int(dd)
-        if mo:
-            try:
-                return date(yr, mo, day)
-            except ValueError:
-                return None
-
-    # 2. Monthly Option (e.g., NIFTY26OCT23000CE)
-    m_m = MONTHLY_OPT_RE.match(clean)
-    if m_m:
-        underlying, yy, mo_str, _, _ = m_m.groups()
-        yr = 2000 + int(yy)
-        mo = MONTH_NAME_MAP.get(mo_str.upper())
-        if mo:
-            return _calc_monthly_expiry_date(exch, underlying, yr, mo)
-
-    # 3. Monthly Future (e.g., NIFTY26OCTFUT)
-    m_f = FUT_RE.match(clean)
-    if m_f:
-        underlying, yy, mo_str = m_f.groups()
-        yr = 2000 + int(yy)
-        mo = MONTH_NAME_MAP.get(mo_str.upper())
-        if mo:
-            return _calc_monthly_expiry_date(exch, underlying, yr, mo)
-
-    return None
+    parsed = parse_derivative_contract(symbol)
+    return parsed.expiry_date if parsed else None
 
 
 def is_contract_expired(symbol: str, ref_dt: Optional[datetime] = None) -> bool:
     """
     Determine if a derivative contract is expired relative to current IST market time.
-    Equities, benchmark indices, and cash symbols return False (never expire).
+    Delegates to institutional SSOT market.instruments.is_contract_expired.
     """
-    exp_date = parse_contract_expiry(symbol)
-    if exp_date is None:
-        return False
+    from market.instruments import is_contract_expired as _inst_is_contract_expired
 
-    from config.constants import IST_ZONE as IST
-
-    now = ref_dt or datetime.now(IST)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=IST)
-    else:
-        now = now.astimezone(IST)
-
-    today = now.date()
-    if today > exp_date:
-        return True
-    if today < exp_date:
-        return False
-
-    # Today is expiry date: verify session close cutoff
-    current_time = now.time()
-    exch = symbol.split(":", 1)[0].upper() if ":" in symbol else "NSE"
-    if exch == "MCX":
-        close_cutoff = dtime(23, 30)
-    elif exch in ("CDS", "CURRENCY"):
-        close_cutoff = dtime(17, 0)
-    else:
-        close_cutoff = dtime(15, 30)
-
-    return current_time >= close_cutoff
+    return _inst_is_contract_expired(symbol, ref_dt=ref_dt)
 
 
 # Known blacklisted/delisted symbols that Fyers socket rejects with -300
@@ -335,7 +267,7 @@ def get_active_index_options_grid(num_strikes_per_side: int = 8) -> list[str]:
         "BANKNIFTY": ("NSE", 52000.0, 100, num_strikes_per_side),
         "MIDCPNIFTY": ("NSE", 13200.0, 25, num_strikes_per_side),
         "SENSEX": ("BSE", 81500.0, 100, max(4, num_strikes_per_side - 2)),
-        "FINNIFTY": ("NSE", 24000.0, 50, max(4, num_strikes_per_side - 3)),
+        "FINNIFTY": ("NSE", 24000.0, 100, max(4, num_strikes_per_side - 3)),
     }
 
     try:
@@ -361,11 +293,14 @@ def get_active_index_options_grid(num_strikes_per_side: int = 8) -> list[str]:
             f"[market.ws_subscription_manager] Non-fatal exception suppressed: {e_suppressed}"
         )
 
+    from market.symbol_master import get_strike_step
+
     grid: list[str] = []
-    for idx_name, (exch, spot, step, n_stk) in estimated_spots.items():
+    for idx_name, (exch, spot, default_step, n_stk) in estimated_spots.items():
+        step = get_strike_step(idx_name, spot=spot) or default_step
         atm_strike = int(round(spot / float(step)) * step)
         for offset in range(-n_stk, n_stk + 1):
-            strike = atm_strike + (offset * step)
+            strike = int(round(atm_strike + (offset * step)))
             grid.append(f"{exch}:{idx_name}{month_suffix}{strike}CE")
             grid.append(f"{exch}:{idx_name}{month_suffix}{strike}PE")
 
@@ -400,6 +335,47 @@ def get_active_index_options_grid(num_strikes_per_side: int = 8) -> list[str]:
         logger.debug(
             f"[market.ws_subscription_manager] Non-fatal exception suppressed: {e_suppressed}"
         )
+
+    # Authoritative Pre-Subscription Filter: validate existence against exchange masters
+    try:
+        from market.symbol_master import load_master
+
+        nse_fo_data = None
+        try:
+            nse_fo_data = load_master("NSE_FO", offline_fallback=True)
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[market.ws_subscription_manager] NSE_FO master load non-fatal: {e_suppressed}"
+            )
+
+        bse_fo_data = None
+        try:
+            bse_fo_data = load_master("BSE_FO", offline_fallback=True)
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[market.ws_subscription_manager] BSE_FO master load non-fatal: {e_suppressed}"
+            )
+
+        filtered_grid = []
+        for s in grid:
+            if s.startswith("NSE:") and nse_fo_data is not None:
+                if s in nse_fo_data:
+                    filtered_grid.append(s)
+            elif s.startswith("BSE:") and bse_fo_data is not None:
+                if s in bse_fo_data:
+                    filtered_grid.append(s)
+            else:
+                # Retain candidate if master for that exchange was not loaded
+                filtered_grid.append(s)
+
+        pruned = len(grid) - len(filtered_grid)
+        if pruned > 0:
+            logger.info(
+                f"[ws_sub_manager] Proactive pre-subscription filter pruned {pruned} phantom option strikes before broker dispatch."
+            )
+        grid = filtered_grid
+    except Exception as e_grid_flt:
+        logger.debug(f"[ws_sub_manager] Non-fatal options grid filter: {e_grid_flt}")
 
     return grid
 
@@ -439,10 +415,61 @@ def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
             f"[market.ws_subscription_manager] Non-fatal exception suppressed: {e_suppressed}"
         )
 
+    crude_step = 50.0
+    try:
+        from market.symbol_master import get_strike_step
+
+        crude_step = get_strike_step("CRUDEOIL", spot=cl)
+    except Exception as e_suppressed:
+        logger.debug(
+            f"[market.ws_subscription_manager] Crude step resolution non-fatal: {e_suppressed}"
+        )
+
     for offset in (-2, -1, 0, 1, 2):
-        stk = crude_atm + (offset * 50)
+        stk = int(round(crude_atm + (offset * crude_step)))
         comm_symbols.append(f"MCX:CRUDEOIL{c_suffix}{stk}CE")
         comm_symbols.append(f"MCX:CRUDEOIL{c_suffix}{stk}PE")
+
+    # Authoritative Pre-Subscription Filter: validate commodity/CDS contracts when running live (ref_time is None)
+    if ref_time is None:
+        try:
+            from market.symbol_master import load_master
+
+            mcx_data = None
+            try:
+                mcx_data = load_master("MCX_COM", offline_fallback=True)
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.ws_subscription_manager] MCX_COM master load non-fatal: {e_suppressed}"
+                )
+
+            cd_data = None
+            try:
+                cd_data = load_master("NSE_CD", offline_fallback=True)
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.ws_subscription_manager] NSE_CD master load non-fatal: {e_suppressed}"
+                )
+
+            filtered_comm = []
+            for s in comm_symbols:
+                if s.startswith("MCX:") and mcx_data is not None:
+                    if s in mcx_data:
+                        filtered_comm.append(s)
+                elif s.startswith("NSE:") and cd_data is not None:
+                    if s in cd_data:
+                        filtered_comm.append(s)
+                else:
+                    filtered_comm.append(s)
+
+            pruned = len(comm_symbols) - len(filtered_comm)
+            if pruned > 0:
+                logger.info(
+                    f"[ws_sub_manager] Proactive pre-subscription filter pruned {pruned} invalid commodity/CDS contracts before broker dispatch."
+                )
+            comm_symbols = filtered_comm
+        except Exception as e_comm_flt:
+            logger.debug(f"[ws_sub_manager] Non-fatal commodity grid filter: {e_comm_flt}")
 
     return comm_symbols
 

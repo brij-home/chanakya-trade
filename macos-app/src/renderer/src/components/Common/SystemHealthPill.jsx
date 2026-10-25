@@ -19,7 +19,7 @@ export default function SystemHealthPill({ onOpenDrawer, onOpenOpsDeck }) {
     if (!port || sidecarError) return
     try {
       setLoading(true)
-      const res = await fetch(`${getBaseUrl(port)}/api/system/health-hub?limit=10`, {
+      const res = await fetch(`${getBaseUrl(port)}/api/system/health-hub?limit=10&since_boot=true`, {
         signal: AbortSignal.timeout(3000),
       })
       if (res.ok) {

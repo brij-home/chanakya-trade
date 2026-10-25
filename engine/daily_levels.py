@@ -361,9 +361,10 @@ class DailyLevelsStore:
             }
 
         # 8. Actionable Execution Blueprint & Pre-Market Strike Pre-Calculation
-        strike_step = (
-            50.0 if clean in ("NIFTY", "FINNIFTY") else (25.0 if clean == "MIDCPNIFTY" else 100.0)
-        )
+        from market.symbol_master import get_strike_step
+
+        spot_price = ltp if ltp > 0 else pdc
+        strike_step = get_strike_step(clean, spot=spot_price)
         bull_strike = int(round(cam_h4 / strike_step) * strike_step)
         bear_strike = int(round(cam_l4 / strike_step) * strike_step)
 

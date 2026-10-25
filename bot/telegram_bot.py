@@ -195,6 +195,7 @@ def _get_telegram():
             CommandHandler,
             ContextTypes,
             MessageHandler,
+            CallbackQueryHandler,
             filters,
         )
 
@@ -205,6 +206,7 @@ def _get_telegram():
             CommandHandler,
             ContextTypes,
             MessageHandler,
+            CallbackQueryHandler,
             filters,
         )
     except ImportError:
@@ -338,6 +340,8 @@ async def cmd_start(update, context) -> None:
             "/channels — multi-channel routing destinations & status\n"
             "/ping_all — diagnostic heartbeat test across all channels\n"
             "/filter [SEGMENTS] — view or update allowed alert segments\n"
+            "/mute — quiet mode: silence audible alerts during meetings/zoom calls\n"
+            "/unmute — enable audible chime alerts\n"
             "/memory — recent analyses\n"
             "/pnl — portfolio P&L\n"
             "/help — this message\n\n"
@@ -2198,6 +2202,235 @@ def clear_signal_message_ids() -> None:
         logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
 
+# ── Quiet Mode & 1-Tap Execution Handlers ──────────────────────
+
+
+async def cmd_mute(update, context) -> None:
+    """Silence audible alert chimes (Quiet mode during meetings/zoom calls)."""
+    try:
+        from engine.alert_preferences import get_alert_preferences_manager
+
+        mgr = get_alert_preferences_manager()
+        mgr.update_preferences({"sound": {"enabled": False}})
+        msg = (
+            "🔇 <b>Quiet Mode Active:</b> Audio alerts are muted.\n"
+            "System is operating in silent mode. All quantitative scanning, "
+            "terminal SSE updates, and Telegram setups run at full unconstrained power."
+        )
+    except Exception as e:
+        msg = f"⚠️ Could not set quiet mode: {e}"
+    if update and update.message:
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_unmute(update, context) -> None:
+    """Enable audible alert chimes."""
+    try:
+        from engine.alert_preferences import get_alert_preferences_manager
+
+        mgr = get_alert_preferences_manager()
+        mgr.update_preferences({"sound": {"enabled": True}})
+        msg = "🔊 <b>Audio Unmuted:</b> Audio chime alerts are now active."
+    except Exception as e:
+        msg = f"⚠️ Could not unmute audio: {e}"
+    if update and update.message:
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def handle_alert_callback(update, context) -> None:
+    """Handle 1-tap mobile interactive actions: Execute Live, Paper Trade, Dismiss."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    data = str(query.data or "").strip()
+    if ":" not in data:
+        return
+    action, alert_id = data.split(":", 1)
+
+    if action == "dismiss":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as e_suppressed:
+            logger.debug(f"[TelegramBot] Callback markup remove exception: {e_suppressed}")
+        if query.message:
+            await query.message.reply_text(
+                f"❌ <b>Alert Dismissed:</b> <code>{alert_id}</code>", parse_mode="HTML"
+            )
+        return
+
+    if action == "exec_paper":
+        try:
+            from engine.auto_alert_engine import get_auto_alert_engine
+
+            engine = get_auto_alert_engine()
+            alert = engine.get_alert(alert_id)
+            if not alert:
+                if query.message:
+                    await query.message.reply_text(
+                        f"⚠️ <b>Alert Not Found:</b> <code>{alert_id}</code>", parse_mode="HTML"
+                    )
+                return
+
+            plan = getattr(alert, "actionable_plan", {}) or {}
+            hedge_plan = plan.get("hedge_plan") or getattr(alert, "hedge_plan", None)
+            if hedge_plan and isinstance(hedge_plan, dict) and hedge_plan.get("legs"):
+                from engine.multi_leg_executor import execute_defined_risk_spread
+                from engine.defined_risk_spreads import DefinedRiskSpread, SpreadLeg
+
+                legs = [
+                    SpreadLeg(
+                        symbol=l.get("symbol", ""),
+                        option_type=l.get("option_type", "CE"),
+                        strike=float(l.get("strike", 0.0)),
+                        side=l.get("side", "BUY"),
+                        premium=float(l.get("premium", 0.0)),
+                        lot_size=int(l.get("lot_size", 1)),
+                        quantity=int(l.get("quantity", l.get("lot_size", 1))),
+                    )
+                    for l in hedge_plan.get("legs", [])
+                ]
+                spread_obj = DefinedRiskSpread(
+                    strategy_name=hedge_plan.get("strategy_name", "BULL_CALL_SPREAD"),
+                    underlying=getattr(alert, "canonical_symbol", None)
+                    or getattr(alert, "symbol", "NIFTY"),
+                    spot_price=float(getattr(alert, "ltp", 0.0) or 0.0),
+                    legs=legs,
+                    net_debit=float(hedge_plan.get("net_debit_per_share", 0.0) or 0.0),
+                    max_profit=float(hedge_plan.get("max_profit", 0.0) or 0.0),
+                    max_loss=float(hedge_plan.get("max_loss", 0.0) or 0.0),
+                    risk_reward_ratio=2.5,
+                    breakeven_points=[],
+                )
+                res = execute_defined_risk_spread(spread=spread_obj, product="MIS")
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[telegram_bot] Non-fatal reply markup edit error: {e_suppressed}"
+                    )
+                if query.message:
+                    await query.message.reply_text(
+                        f"🛡️ <b>PAPER SPREAD DISPATCHED</b>\n"
+                        f"• Alert: <code>{alert_id}</code>\n"
+                        f"• Strategy: <b>{res.strategy_name}</b>\n"
+                        f"• Status: <b>{res.status}</b>\n"
+                        f"• Legs Filled: {len(res.executed_legs)}/{len(res.executed_legs) + len(res.failed_legs)}\n"
+                        f"• Net Fill: ₹{res.net_fill_price:.2f}/sh",
+                        parse_mode="HTML",
+                    )
+            else:
+                from engine.order_lifecycle import (
+                    preview_order_intent,
+                    confirm_order_intent,
+                    execute_order_intent,
+                )
+
+                sym = getattr(alert, "canonical_symbol", None) or getattr(alert, "symbol", "NIFTY")
+                act = (plan.get("action") or "BUY").upper()
+                side = "SELL" if "SELL" in act or "SHORT" in act else "BUY"
+                qty = int(getattr(alert, "lot_size", 1) or 1)
+                px = float(getattr(alert, "entry_price", getattr(alert, "ltp", 100.0)) or 100.0)
+                import uuid
+
+                intent = preview_order_intent(
+                    symbol=sym,
+                    side=side,
+                    quantity=qty,
+                    price=px,
+                    idempotency_key=f"TG-PAPER-{alert_id}-{uuid.uuid4().hex[:8]}",
+                )
+                conf = confirm_order_intent(intent.order_id, intent.preview_hash)
+                exec_res = execute_order_intent(conf.order_id)
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[telegram_bot] Non-fatal reply markup edit error: {e_suppressed}"
+                    )
+                if query.message:
+                    await query.message.reply_text(
+                        f"🛡️ <b>PAPER ORDER EXECUTED</b>\n"
+                        f"• Symbol: <b>{sym}</b> ({side} {qty} qty)\n"
+                        f"• Order ID: <code>{exec_res.order_id}</code>\n"
+                        f"• Status: <b>{exec_res.status}</b>\n"
+                        f"• Price: ₹{exec_res.price:.2f}",
+                        parse_mode="HTML",
+                    )
+        except Exception as e:
+            logger.error(f"[TelegramBot] Paper execution error for {alert_id}: {e}", exc_info=True)
+            if query.message:
+                await query.message.reply_text(f"❌ <b>Execution Error:</b> {e}", parse_mode="HTML")
+        return
+
+    if action == "exec_live":
+        if os.environ.get("ALLOW_LIVE_TRADING") != "1":
+            if query.message:
+                await query.message.reply_text(
+                    "⚠️ <b>LIVE EXECUTION LOCKED (Safety Guardrail)</b>\n"
+                    "Live trading is guarded by <code>ALLOW_LIVE_TRADING=1</code>.\n"
+                    "Tap <b>[🛡️ Paper Trade]</b> to execute in simulation mode.",
+                    parse_mode="HTML",
+                )
+            return
+
+        try:
+            from engine.auto_alert_engine import get_auto_alert_engine
+
+            engine = get_auto_alert_engine()
+            alert = engine.get_alert(alert_id)
+            if not alert:
+                if query.message:
+                    await query.message.reply_text(
+                        f"⚠️ <b>Alert Not Found:</b> <code>{alert_id}</code>", parse_mode="HTML"
+                    )
+                return
+
+            plan = getattr(alert, "actionable_plan", {}) or {}
+            from engine.order_lifecycle import (
+                preview_order_intent,
+                confirm_order_intent,
+                execute_order_intent,
+            )
+
+            sym = getattr(alert, "canonical_symbol", None) or getattr(alert, "symbol", "NIFTY")
+            act = (plan.get("action") or "BUY").upper()
+            side = "SELL" if "SELL" in act or "SHORT" in act else "BUY"
+            qty = int(getattr(alert, "lot_size", 1) or 1)
+            px = float(getattr(alert, "entry_price", getattr(alert, "ltp", 100.0)) or 100.0)
+            import uuid
+
+            intent = preview_order_intent(
+                symbol=sym,
+                side=side,
+                quantity=qty,
+                price=px,
+                idempotency_key=f"TG-LIVE-{alert_id}-{uuid.uuid4().hex[:8]}",
+            )
+            conf = confirm_order_intent(intent.order_id, intent.preview_hash)
+            exec_res = execute_order_intent(conf.order_id)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception as e_suppressed:
+                logger.debug(f"[telegram_bot] Non-fatal reply markup edit error: {e_suppressed}")
+            if query.message:
+                await query.message.reply_text(
+                    f"⚡ <b>LIVE BROKER ORDER SUBMITTED</b>\n"
+                    f"• Symbol: <b>{sym}</b> ({side} {qty} qty)\n"
+                    f"• Order ID: <code>{exec_res.order_id}</code>\n"
+                    f"• Status: <b>{exec_res.status}</b>\n"
+                    f"• Broker Order ID: <code>{exec_res.broker_order_id}</code>",
+                    parse_mode="HTML",
+                )
+        except Exception as e:
+            logger.error(f"[TelegramBot] Live execution error for {alert_id}: {e}", exc_info=True)
+            if query.message:
+                await query.message.reply_text(
+                    f"❌ <b>Live Execution Failure:</b> {e}", parse_mode="HTML"
+                )
+        return
+
+
 def format_telegram_push_payload(
     message: str,
     chat_id: Optional[str] = None,
@@ -2208,6 +2441,7 @@ def format_telegram_push_payload(
     parse_mode: str = "HTML",
     alert_id: Optional[str] = None,
     is_update: Optional[bool] = None,
+    reply_markup: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
     Construct the canonical Telegram sendMessage payload.
@@ -2334,6 +2568,27 @@ def format_telegram_push_payload(
     if disable_notification:
         payload["disable_notification"] = True
 
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    elif alert_id and not is_update:
+        is_actionable = not bool(
+            re.search(
+                r"\b(?:VIEW INVALIDATED|STOP LOSS HIT|TARGET \d|RUNNER EXIT)\b",
+                message,
+                re.IGNORECASE,
+            )
+        )
+        if is_actionable:
+            payload["reply_markup"] = {
+                "inline_keyboard": [
+                    [
+                        {"text": "⚡ Execute Live", "callback_data": f"exec_live:{alert_id}"},
+                        {"text": "🛡️ Paper Trade", "callback_data": f"exec_paper:{alert_id}"},
+                        {"text": "❌ Dismiss", "callback_data": f"dismiss:{alert_id}"},
+                    ]
+                ]
+            }
+
     return payload
 
 
@@ -2349,6 +2604,7 @@ def send_push(
     on_success: Optional[Callable[[int], None]] = None,
     alert_id: Optional[str] = None,
     is_update: Optional[bool] = None,
+    reply_markup: Optional[dict[str, Any]] = None,
 ) -> None:
     """
     Send a push notification to the configured Telegram chat, group, or channel.
@@ -2404,6 +2660,7 @@ def send_push(
         parse_mode=parse_mode,
         alert_id=alert_id,
         is_update=is_update,
+        reply_markup=reply_markup,
     )
     if not payload or not payload.get("text"):
         return
@@ -2656,9 +2913,16 @@ def patch_alert_manager() -> None:
 
 def run_bot() -> None:
     """Start the Telegram bot (blocking — runs the event loop)."""
-    Update, Bot, ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters = (
-        _get_telegram()
-    )
+    (
+        Update,
+        Bot,
+        ApplicationBuilder,
+        CommandHandler,
+        ContextTypes,
+        MessageHandler,
+        CallbackQueryHandler,
+        filters,
+    ) = _get_telegram()
 
     token = _get_bot_token()
 
@@ -2693,10 +2957,13 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("alerts", _track_command(cmd_alerts)))
     app.add_handler(CommandHandler("filter", _track_command(cmd_filter)))
     app.add_handler(CommandHandler("segments", _track_command(cmd_filter)))
+    app.add_handler(CommandHandler("mute", _track_command(cmd_mute)))
+    app.add_handler(CommandHandler("unmute", _track_command(cmd_unmute)))
     app.add_handler(CommandHandler("channels", _track_command(cmd_channels)))
     app.add_handler(CommandHandler("ping_all", _track_command(cmd_ping_all)))
     app.add_handler(CommandHandler("memory", _track_command(cmd_memory)))
     app.add_handler(CommandHandler("pnl", _track_command(cmd_pnl)))
+    app.add_handler(CallbackQueryHandler(_track_command(handle_alert_callback)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _track_command(cmd_unknown)))
 
     async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

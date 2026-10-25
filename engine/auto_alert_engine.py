@@ -3810,6 +3810,8 @@ class AutoAlertEngine:
                             "general",
                             "commodities",
                             "currencies",
+                            "crypto",
+                            "broad_market",
                         ):
                             if not isinstance(alert.metrics, dict):
                                 alert.metrics = {}
@@ -15979,6 +15981,17 @@ class AutoAlertEngine:
             self._dispatch_cooldowns.clear()
             self._directional_quarantine.clear()
             self._directional_failure_history.clear()
+            self._stopped_strike_quarantine.clear()
+            self._winner_cooldowns.clear()
+            self._sector_daily_dispatched.clear()
+            self._sector_daily_telegram.clear()
+            self._daily_index_telegram.clear()
+            self._index_half_telegram.clear()
+            self._sector_hourly_telegram.clear()
+            for k in self._hourly_telegram_dispatches:
+                self._hourly_telegram_dispatches[k].clear()
+            self._hourly_index_directional.clear()
+            self._hourly_fno_stock_directional.clear()
             self._save()
 
     # ── Persistence ─────────────────────────────────────────────

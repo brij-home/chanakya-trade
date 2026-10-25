@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 from config.constants import IST_ZONE as IST
 from config.paths import app_data_path
+from market.instruments import canonical_symbol
 
 
 def _get_cache_dir() -> Path:
@@ -134,7 +135,7 @@ class VwapSessionCache:
         Get cached VWAP if fresh.
         Returns None if expired or not found.
         """
-        clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        clean = canonical_symbol(symbol)
         now = time.time()
         with self._lock:
             entry = self._memory_cache.get(clean)
@@ -151,7 +152,7 @@ class VwapSessionCache:
         """Store computed VWAP in memory and schedule disk persistence."""
         if vwap_val <= 0:
             return
-        clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        clean = canonical_symbol(symbol)
         now = time.time()
         with self._lock:
             self._memory_cache[clean] = (now, float(vwap_val))
@@ -159,7 +160,7 @@ class VwapSessionCache:
 
     def is_cached_fresh(self, symbol: str) -> tuple[bool, Optional[float]]:
         """Check if symbol is cached (including negative cache). Returns (is_fresh, value_or_none)."""
-        clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        clean = canonical_symbol(symbol)
         now = time.time()
         with self._lock:
             entry = self._memory_cache.get(clean)
@@ -186,7 +187,7 @@ class VwapSessionCache:
         if is_fresh:
             return val
 
-        clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+        clean = canonical_symbol(symbol)
         lock = self._get_in_flight_lock(clean)
 
         # Single-flight gate

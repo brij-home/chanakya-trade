@@ -446,7 +446,7 @@ def _resolve_currency_contract(symbol: str) -> str:
     return f"NSE:{clean}{target_dt.strftime('%y%b').upper()}FUT"
 
 
-def _to_fyers_symbol(instrument: str) -> str:
+def to_fyers_symbol(instrument: str) -> str:
     """Convert any instrument format ('NSE:RELIANCE', 'GOLD', 'USDINR', 'NIFTY') to Fyers API format."""
     s = str(instrument).strip()
     if ":" in s:
@@ -457,7 +457,7 @@ def _to_fyers_symbol(instrument: str) -> str:
     exch_upper = exch.upper().strip()
     sym_upper = sym.upper().strip()
 
-    from market.instruments import resolve_corporate_alias, BE_SERIES_STOCKS
+    from market.instruments import resolve_corporate_alias
 
     sym_upper = resolve_corporate_alias(sym_upper)
 
@@ -527,17 +527,17 @@ def _to_fyers_symbol(instrument: str) -> str:
     if clean.startswith(_INDEX_PREFIXES) or clean in ("VIX", "INDIAVIX"):
         return f"{exch_upper}:{clean}-INDEX"
 
-    # BSE Equity
-    if exch_upper == "BSE":
-        if not any(sym_upper.endswith(sfx) for sfx in ("-A", "-B", "-X", "-XT", "-T", "-Z", "-EQ")):
-            return f"BSE:{sym_upper}-A"
-        return f"BSE:{sym_upper}"
+    # Dynamic Fyers symbol mapping for equities via authoritative symbol master
+    if exch_upper in ("NSE", "BSE"):
+        from market.symbol_master import resolve_fyers_equity_symbol
 
-    # Check if stock trades in NSE BE (Trade-for-Trade surveillance) series
-    if exch_upper == "NSE" and sym_upper in BE_SERIES_STOCKS:
-        return f"NSE:{sym_upper}-BE"
+        return resolve_fyers_equity_symbol(sym_upper, exch=exch_upper)
 
     return f"NSE:{sym_upper}-EQ"
+
+
+# Backward compatibility alias
+_to_fyers_symbol = to_fyers_symbol
 
 
 def _get_sdk():

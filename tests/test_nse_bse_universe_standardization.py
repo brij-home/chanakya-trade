@@ -58,15 +58,16 @@ def test_fyers_symbol_conversion_with_aliases_and_series():
     assert _to_fyers_symbol("UNOINDA") == "NSE:UNOMINDA-EQ"
     assert _to_fyers_symbol("REC") == "NSE:RECLTD-EQ"
 
-    # BE Series stocks route to -BE
+    # BE Series stocks route to -BE dynamically or from advisory fallback
     assert _to_fyers_symbol("HFCL") == "NSE:HFCL-BE"
-    assert _to_fyers_symbol("MTARTECH") == "NSE:MTARTECH-BE"
     assert _to_fyers_symbol("STLTECH") == "NSE:STLTECH-BE"
     assert _to_fyers_symbol("DIACABS") == "NSE:DIACABS-BE"
-    assert _to_fyers_symbol("INDIAGLYCO") == "NSE:INDIAGLYCO-BE"
     assert _to_fyers_symbol("LOTUSDEV") == "NSE:LOTUSDEV-BE"
+    assert _to_fyers_symbol("RAMASTEEL") == "NSE:RAMASTEEL-BE"
 
-    # Regular EQ stocks route to -EQ
+    # Regular EQ stocks (including those graduated from BE surveillance) route to -EQ
+    assert _to_fyers_symbol("MTARTECH") == "NSE:MTARTECH-EQ"
+    assert _to_fyers_symbol("INDIAGLYCO") == "NSE:INDIAGLYCO-EQ"
     assert _to_fyers_symbol("RELIANCE") == "NSE:RELIANCE-EQ"
     assert _to_fyers_symbol("TCS") == "NSE:TCS-EQ"
     assert _to_fyers_symbol("INFY") == "NSE:INFY-EQ"
@@ -82,7 +83,8 @@ def test_websocket_symbol_resolution():
     assert _to_ws_symbol("ZOMATO") == "NSE:ETERNAL-EQ"
     assert _to_ws_symbol("TATAMOTORS") == "NSE:TMPV-EQ"
     assert _to_ws_symbol("HFCL") == "NSE:HFCL-BE"
-    assert _to_ws_symbol("MTARTECH") == "NSE:MTARTECH-BE"
+    assert _to_ws_symbol("MTARTECH") == "NSE:MTARTECH-EQ"
+    assert _to_ws_symbol("RAMASTEEL") == "NSE:RAMASTEEL-BE"
 
 
 def test_fno_lot_size_and_derivative_eligibility():
@@ -175,7 +177,7 @@ def test_core_base_symbols_preseeding():
     assert "NSE:ABREL-EQ" in CORE_BASE_SYMBOLS
     # BE Series stocks correctly pre-seeded with -BE
     assert "NSE:HFCL-BE" in CORE_BASE_SYMBOLS
-    assert "NSE:MTARTECH-BE" in CORE_BASE_SYMBOLS
+    assert "NSE:MTARTECH-EQ" in CORE_BASE_SYMBOLS
     assert "NSE:STLTECH-BE" in CORE_BASE_SYMBOLS
 
 

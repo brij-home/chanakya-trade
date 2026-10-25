@@ -96,7 +96,8 @@ def test_is_derivative_eligible_and_options_fast_exit():
 
     # Cash-only equities
     assert is_derivative_eligible("NON_FNO_STOCK_XYZ") is False
-    assert is_derivative_eligible("ZOMATO") is False
+    assert is_derivative_eligible("TATATECH") is False
+    assert is_derivative_eligible("ZOMATO") is True  # Rebranded to ETERNAL (lot 2425)
     assert is_derivative_eligible("") is False
 
     # Fast-exit verification: non-derivative stock returns [] instantly without calling broker or NSE scraper

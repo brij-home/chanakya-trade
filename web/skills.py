@@ -80,6 +80,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from rich.console import Console
 
 from agent.tools import _serialise
+from market.instruments import canonical_symbol
 
 console = Console(legacy_windows=False)
 router = APIRouter(prefix="/skills", tags=["OpenClaw Skills"])
@@ -256,19 +257,17 @@ _VALID_EXCHANGES = frozenset({"NSE", "BSE", "NFO", "BFO", "MCX", "CDS"})
 
 
 def _normalize_symbol_and_exchange(symbol: str, exchange: Optional[str] = "NSE") -> tuple[str, str]:
-    sym = (symbol or "").upper().strip()
+    raw_s = str(symbol or "").strip().upper()
     exch = (exchange or "NSE").upper().strip()
-    if exch not in _VALID_EXCHANGES:
-        exch = "NSE"
-    if ":" in sym:
-        parts = sym.split(":", 1)
+    if ":" in raw_s:
+        parts = raw_s.split(":", 1)
         exch_candidate = parts[0].strip().upper()
         if exch_candidate in _VALID_EXCHANGES:
             exch = exch_candidate
-            sym = parts[1].strip().upper()
-        else:
-            sym = parts[1].strip().upper()
-    elif exch == "NSE":
+    if exch not in _VALID_EXCHANGES:
+        exch = "NSE"
+    sym = canonical_symbol(raw_s)
+    if exch == "NSE":
         from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
 
         if sym in _MCX_SYMBOLS:
@@ -4474,7 +4473,7 @@ async def skill_pre_inflection_early_warning(
         def _do_early_warning_scan():
             alerts = []
             for sym in universe:
-                clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+                clean_sym = canonical_symbol(sym)
                 df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
                 if df is not None and len(df) >= 25:
                     ltp = float(df["close"].iloc[-1])
@@ -7606,14 +7605,7 @@ async def skill_gex_snapshot(
         elif req:
             raw_in = req.symbol or req.underlying
         clean_raw = (raw_in if raw_in else "NIFTY").strip().upper()
-        clean_sym = (
-            clean_raw.replace("NSE:", "")
-            .replace("BSE:", "")
-            .replace("NFO:", "")
-            .replace("MCX:", "")
-            .replace("CDS:", "")
-            .strip()
-        )
+        clean_sym = canonical_symbol(clean_raw)
         norm_inst = normalize_instrument(clean_sym)
 
         # 1. Fetch authentic live spot quote & option contracts off the event loop

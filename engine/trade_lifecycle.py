@@ -622,3 +622,72 @@ def audit_position_lifecycle(
         summary=summary,
         diagnostic_bullet_points=diagnostics,
     )
+
+
+def apply_autonomous_breakeven_lock(
+    symbol: str,
+    current_price: float,
+    entry_price: float,
+    initial_stop_loss: float,
+    target_1: Optional[float] = None,
+    position_type: str = "LONG",
+    cost_buffer_pct: float = 0.002,  # 0.20% to cover STT, GST, Exchange & Brokerage charges
+    actor: str = "AUTONOMOUS_LIFECYCLE",
+) -> dict[str, Any]:
+    """
+    Autonomous Breakeven Locking Engine (Advisor & Automated Protection Mode):
+    When Target 1 (+1.8R to +2.0R) is achieved, automatically ratchets resting stop-loss
+    orders to Breakeven (+ transactional cost buffer) without requiring manual trader
+    intervention, guaranteeing a risk-free position ('Free-Roll').
+
+    Returns structured status dictionary with details of ratcheted orders.
+    """
+    initial_risk = max(0.01, abs(entry_price - initial_stop_loss))
+    is_long = position_type.upper() in ("LONG", "BUY")
+
+    # Evaluate if Target 1 is reached
+    t1_reached = False
+    if target_1 and target_1 > 0:
+        if is_long:
+            t1_reached = current_price >= (target_1 * 0.998)
+        else:
+            t1_reached = current_price <= (target_1 * 1.002)
+    else:
+        # Measure via R-multiple (>= 1.8R)
+        pnl = (current_price - entry_price) if is_long else (entry_price - current_price)
+        r_mult = pnl / initial_risk
+        t1_reached = r_mult >= 1.8
+
+    if not t1_reached:
+        return {
+            "locked": False,
+            "symbol": symbol,
+            "target_1": target_1,
+            "current_price": current_price,
+            "reason": "Target 1 not yet reached",
+            "ratcheted_orders_count": 0,
+        }
+
+    # Calculate Breakeven Stop Level (+ buffer for costs)
+    if is_long:
+        breakeven_sl = round(entry_price * (1.0 + cost_buffer_pct), 2)
+    else:
+        breakeven_sl = round(entry_price * (1.0 - cost_buffer_pct), 2)
+
+    from engine.order_lifecycle import ratchet_stop_loss_on_milestone
+
+    modified_orders = ratchet_stop_loss_on_milestone(
+        symbol=symbol,
+        new_stop_loss=breakeven_sl,
+        milestone="T1_ACHIEVED",
+        actor=actor,
+    )
+
+    return {
+        "locked": True,
+        "symbol": symbol,
+        "breakeven_stop": breakeven_sl,
+        "milestone": "T1_ACHIEVED",
+        "ratcheted_orders_count": len(modified_orders),
+        "modified_order_ids": [o.order_id for o in modified_orders],
+    }

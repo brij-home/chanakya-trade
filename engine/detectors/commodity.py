@@ -550,11 +550,9 @@ def detect_commodity_breakouts(
             trough_recent = float(lookback_bars["low"].min())
 
             # Round number strike inflection levels (e.g. 8800 on Crude, 250 on Natgas)
-            strike_step = (
-                50.0
-                if clean_sym in ("CRUDEOIL", "CRUDEOILM")
-                else (100.0 if "GOLD" in clean_sym else (500.0 if "SILVER" in clean_sym else 1.0))
-            )
+            from market.symbol_master import get_strike_step
+
+            strike_step = get_strike_step(clean_sym, spot=peak_recent)
             nearest_round_high = (
                 round(peak_recent / strike_step) * strike_step if peak_recent > 0 else 0.0
             )

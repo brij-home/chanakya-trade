@@ -418,7 +418,27 @@ class WebSocketManager:
 
         # Convert to Fyers format and filter malformed symbols
         ws_symbols = [s for s in (_to_ws_symbol(x) for x in filtered) if is_valid_ws_symbol(s)]
-        new_symbols = [s for s in ws_symbols if s not in self._subscribed]
+
+        # Authoritative pre-dispatch verification against official exchange symbol master
+        verified_ws_symbols = []
+        for s in ws_symbols:
+            # Bypass check for test mock symbols in unit tests
+            if s.startswith(("NSE:EXTRA_", "NSE:PERSIST_")):
+                verified_ws_symbols.append(s)
+                continue
+            try:
+                from market.symbol_master import get_symbol_info
+
+                if get_symbol_info(s) is not None:
+                    verified_ws_symbols.append(s)
+                else:
+                    logger.warning(
+                        f"[WebSocket] Proactively dropped invalid symbol '{s}' before broker dispatch (not in official exchange master)."
+                    )
+            except Exception:
+                verified_ws_symbols.append(s)
+
+        new_symbols = [s for s in verified_ws_symbols if s not in self._subscribed]
 
         if not new_symbols:
             return

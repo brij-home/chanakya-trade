@@ -299,3 +299,144 @@ def test_radar_and_slot_status_zero_rest_api_calls():
         radar_rows = get_universe_depth_radar(limit=20)
         assert isinstance(radar_rows, list)
         assert mock_broker.get_market_depth.call_count == 0
+
+
+def test_tbt_worker_429_exponential_backoff():
+    """Verify that TbtSocketWorker applies exponential backoff on 429 and resets on connect."""
+    from market.fyers_tbt_manager import TbtSocketWorker
+
+    status_records = []
+    worker = TbtSocketWorker(
+        worker_id=1,
+        auth_token_getter=lambda: "MOCK:TOKEN",
+        on_depth=lambda s, d: None,
+        on_status=lambda wid, st: status_records.append((wid, st)),
+    )
+
+    t_start = time.time()
+    # Strike 1: 60s
+    worker._on_error("Handshake status 429 Too Many Requests")
+    assert worker.status == "DEGRADED_429"
+    assert worker._consecutive_429 == 1
+    assert 59.0 <= (worker.degraded_until - t_start) <= 61.0
+
+    # Strike 2: 120s
+    worker._on_error("429 Client Error: Too Many Requests")
+    assert worker._consecutive_429 == 2
+    assert 119.0 <= (worker.degraded_until - t_start) <= 121.0
+
+    # Strike 3: 240s
+    worker._on_error("429 Too Many Requests")
+    assert worker._consecutive_429 == 3
+    assert 239.0 <= (worker.degraded_until - t_start) <= 241.0
+
+    # Successful connect resets backoff
+    worker._on_connect()
+    assert worker.status == "CONNECTED"
+    assert worker._consecutive_429 == 0
+
+
+def test_tbt_connect_off_market_standby():
+    """Verify that _connect defers live socket handshakes during OFF_MARKET session."""
+    from unittest.mock import patch
+    from market.fyers_tbt_manager import FyersTbtManager
+
+    mgr = FyersTbtManager()
+    with (
+        patch.object(mgr, "_get_auth_token", return_value="MOCK:AUTH_TOKEN"),
+        patch("market.fyers_tbt_manager.get_market_session", return_value="OFF_MARKET"),
+    ):
+        mgr._workers = []
+        mgr._connect()
+        # Workers are created in pool
+        assert len(mgr._workers) == 3
+        # But none are connected (standby mode)
+        assert all(not w.connected for w in mgr._workers)
+
+
+def test_tbt_cooldown_recalibration_and_intent_bypass():
+    """Verify default 60s cooldown and that active trader intent (subscribe/sample) immediately bypasses cooldown."""
+    mgr = FyersTbtManager()
+    sym = "NSE:RECALIBTEST"
+
+    # Evict with default cooldown (now recalibrated to 60.0s, not 300.0s)
+    res = mgr.evict_symbol(sym)
+    assert res["status"] == "ok"
+    assert res["cooldown_seconds"] == 60.0
+    status = mgr.get_active_slots_status()
+    assert sym in status["cooldowns"]
+
+    # Active trader intent: subscribe immediately bypasses and clears cooldown
+    mgr.subscribe([sym])
+    status_sub = mgr.get_active_slots_status()
+    tradable = res["evicted_symbol"]
+    assert sym not in status_sub["cooldowns"]
+    assert tradable not in status_sub["cooldowns"]
+    assert tradable in status_sub["subscribed"] or tradable in status_sub["scout"]
+
+    # Evict again and test sample_symbol intent bypass
+    mgr.evict_symbol(sym)
+    status_evict2 = mgr.get_active_slots_status()
+    assert sym in status_evict2["cooldowns"] or tradable in status_evict2["cooldowns"]
+
+    mgr.sample_symbol(sym)
+    status_sample = mgr.get_active_slots_status()
+    assert sym not in status_sample["cooldowns"]
+    assert tradable not in status_sample["cooldowns"]
+
+
+def test_tbt_clear_eviction_cooldowns_method_and_endpoint(client):
+    """Verify programmatic and API-driven clearance of eviction cooldowns."""
+    from market.fyers_tbt_manager import fyers_tbt_manager
+
+    sym1 = "NSE:COOLDOWN1"
+    sym2 = "NSE:COOLDOWN2"
+
+    with fyers_tbt_manager._slots_lock:
+        fyers_tbt_manager._evicted_cooldowns[sym1] = time.time() + 60.0
+        fyers_tbt_manager._evicted_cooldowns[sym2] = time.time() + 60.0
+
+    # Test clearing single symbol via method
+    res1 = fyers_tbt_manager.clear_eviction_cooldowns(symbol=sym1)
+    assert res1["status"] == "ok"
+    assert res1["cleared"] == sym1
+    assert sym1 not in fyers_tbt_manager._evicted_cooldowns
+    assert sym2 in fyers_tbt_manager._evicted_cooldowns
+
+    # Test clearing all cooldowns via API endpoint
+    resp = client.post("/api/fyers/tbt-clear-cooldowns", json={})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["cleared"] == "ALL"
+    assert len(data.get("remaining_cooldowns", {})) == 0
+    assert len(fyers_tbt_manager._evicted_cooldowns) == 0
+
+
+def test_cleanse_stale_scouts_respects_market_hours():
+    """Verify that zero-packet scout eviction is suppressed during off-market hours and weekends."""
+    from unittest.mock import patch
+
+    mgr = FyersTbtManager()
+    sym = "NSE:MARUTI26OCTFUT"
+
+    # Simulate allocated sector scout with 0 packets for 60s
+    with mgr._slots_lock:
+        mgr._sector_scouts = [sym]
+        mgr._subscribed.add(sym)
+        mgr._slot_allocated_at[sym] = time.time() - 60.0
+        mgr._depth_cache[sym] = {"timestamp": None}  # Zero packets
+
+    # Case 1: Market is CLOSED (Sunday / Off-market) -> NO eviction should occur
+    with patch("market.calendar.is_market_open", return_value=False):
+        cleansed = mgr.cleanse_stale_scouts()
+        assert cleansed == 0
+        assert sym in mgr._sector_scouts
+        assert sym not in mgr._evicted_cooldowns
+
+    # Case 2: Market is OPEN (Live trading hours) -> Idle scout is revolved and cooled down
+    with patch("market.calendar.is_market_open", return_value=True):
+        cleansed = mgr.cleanse_stale_scouts()
+        assert cleansed >= 1
+        assert sym in mgr._evicted_cooldowns
+        assert sym not in mgr.compute_desired_subscriptions()

@@ -60,29 +60,11 @@ _INDEX_ALIAS_MAP = {
 def canonical_alert_symbol(raw_sym: str) -> str:
     """
     Normalizes any asset symbol into its canonical clean uppercase identifier.
-    Strips broker and exchange routing prefixes across all supported market venues
-    as well as data provider suffixes (.NS, .BO), broker suffixes (-EQ, -INDEX),
-    and index markers (^).
+    Delegates to institutional SSOT market.instruments.canonical_symbol.
     """
-    if not raw_sym:
-        return ""
-    s = str(raw_sym).strip().upper()
-    for pfx in _KNOWN_PREFIXES:
-        if s.startswith(pfx):
-            s = s[len(pfx) :]
-            break
-    if s.endswith(".NS"):
-        s = s[:-3]
-    elif s.endswith(".BO"):
-        s = s[:-3]
-    if s.endswith("-EQ"):
-        s = s[:-3]
-    elif s.endswith("-INDEX"):
-        s = s[:-6]
-    if s.startswith("^"):
-        s = s[1:]
-    s = s.strip()
-    return _INDEX_ALIAS_MAP.get(s, s)
+    from market.instruments import canonical_symbol
+
+    return canonical_symbol(raw_sym)
 
 
 def generate_alert_id(

@@ -3484,3 +3484,97 @@ def test_mcx_institutional_commodity_alert_hygiene():
     # 7. Spread Mandate guidance & Option Alternative honest labeling
     assert "Option Alternative (Naked Leg · Spread Recommended):" in rendered
     assert "Automated spread legs unavailable on illiquid strikes" in rendered
+
+
+def test_index_option_alert_action_line_and_spot_sl_currency():
+    """Verify that when an index alert has actionable_plan['action'] == 'BEAR PUT SPREAD'
+    and contract has spread notation while a hedge_plan box is attached:
+    1. The Action line renders BUY SENSEX 72700 PE [Naked Leg] with Hedged Spread Preferred signpost.
+    2. Structural SL (Spot) formats with currency ₹ and commas (e.g. ₹72,853.9).
+    3. Prime liquidity is NOT rendered as an Execution Friction warning.
+    4. Trailing OTE and Rule boilerplate are stripped from Reason.
+    """
+    from bot.alert_templates import format_auto_alert_telegram
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-index-put-setup-sensex-pe-72700-midday-20261023",
+        alert_type="INDEX_PUT_SETUP",
+        stage="IGNITED",
+        symbol="SENSEX",
+        exchange="BSE",
+        direction="BEARISH",
+        headline="🛡️ [HEDGED SPREAD MANDATE] ⚡️ INTRADAY CAPITULATION TOP: SENSEX 72700 PE (Lot: 20)",
+        summary="Climax exhaustion & V-top reversal: Spot overbought +1.07% above session VWAP (₹72,985.3) and rejected Day High (₹73,766.5) with 5m CHoCH structure breakdown. High-probability mean-reversion retest back towards VWAP. | OTE: ₹546.3 – ₹583.7 | No Chase > ₹601.0 | Rule: 50% @ T1 -> SL to BE",
+        ltp=575.10,
+        trigger_level=575.10,
+        target_level=765.10,
+        stop_loss=480.10,
+        no_chase_boundary=601.0,
+        strike=72700.0,
+        option_type="PE",
+        contract_symbol="SENSEX 72700 PE",
+        expiry_date="2026-10-29",
+        expiry_type="WEEKLY_AND_MONTHLY",
+        underlying_spot=72658.53,
+        confidence=100,
+        metrics={"conviction_tier": "APEX_CONFLUENCE", "rvol": 20.7, "vol_oi_ratio": 20.7},
+        actionable_plan={
+            "action": "BEAR PUT SPREAD",
+            "contract": "SENSEX 72700/72100 Bear Put Spread",
+            "recommended_entry": "₹575.10 (OTE Pullback: ₹546.3 – ₹583.7)",
+            "stop_loss": "₹480.10",
+            "spot_invalidation_anchor": 72853.9,
+            "target_1": "₹765.1",
+            "target_2": "₹907.6",
+            "target_3": "₹1,050.1",
+            "lot_size": 20,
+            "net_risk_reward": "1:2.0",
+            "profit_rule": "Scale Blueprint: At T0.5 (₹670.1) scale 35-50% & move SL to Cost (+0.25R profit floor). At T1 (₹765.1) book balance to 75% total & trail SL to +0.50R. Leave 25% runner trailing on 5m 9-EMA.",
+            "execution_friction_badge": "⚡️ PRIME LIQUIDITY — TIGHT SPREAD",
+            "estimated_slippage_bps": 29.0,
+            "hedge_plan": {
+                "strategy": "BEAR_PUT_SPREAD",
+                "sentiment": "BEARISH",
+                "preferred_vehicle": "HEDGED_SPREAD",
+                "buy_leg": "BUY SENSEX 72700 PE @ ₹575.1",
+                "sell_leg": "SELL SENSEX 72100 PE @ ₹344.9",
+                "net_debit_per_share": 230.2,
+                "max_loss": 4603.0,
+                "max_profit": 7397.0,
+                "risk_reward": "1:1.6",
+                "booking_target_70": 489.0,
+                "short_strike": 72100.0,
+                "spread_stop_loss": 115.1,
+                "adaptive_regime": "CHOP / RANGE DEFENSE (400 pt width)",
+                "net_delta": -0.15,
+                "long_delta": -0.49,
+                "short_delta": -0.34,
+                "legs": [
+                    {"strike": 72700, "side": "BUY"},
+                    {"strike": 72100, "side": "SELL"},
+                ],
+            },
+        },
+    )
+    alert.is_apex_confluence = True
+
+    rendered = format_auto_alert_telegram(alert)
+
+    # 1. Action line must NOT say BEAR PUT SPREAD SENSEX 72700/72100 Bear Put Spread
+    assert "BEAR PUT SPREAD" not in rendered.split("• <b>Action:</b>")[1].split("\n")[0]
+    assert "BUY <b>SENSEX 72700 PE</b>" in rendered
+    assert "[Naked Leg]" in rendered
+    assert "(Hedged Spread Preferred 👇)" in rendered
+
+    # 2. Structural SL (Spot) formatted with ₹ and comma
+    assert "• <b>🏛️ Structural SL (Spot):</b> <code>₹72,853.9</code>" in rendered
+
+    # 3. Suppress Execution Friction warning for PRIME LIQUIDITY
+    assert "Execution Friction:" not in rendered
+
+    # 4. Reason line must be clean without trailing OTE / Rule
+    reason_line = rendered.split("Reason:</b>")[1].split("\n")[0]
+    assert "OTE:" not in reason_line
+    assert "Rule:" not in reason_line
+    assert "Climax exhaustion & V-top reversal" in reason_line

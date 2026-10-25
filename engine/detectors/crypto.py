@@ -1658,7 +1658,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     segment="CRYPTO",
                     time_horizon="ROLLING_24H",
                     eta_label="24h Rolling",
-                    direction="NEUTRAL" if is_iv_rich else "BULLISH",
+                    direction="BEARISH" if is_iv_rich else "BULLISH",
                     headline=headline,
                     summary=summary,
                     ltp=ltp,

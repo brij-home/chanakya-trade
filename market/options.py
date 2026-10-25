@@ -467,22 +467,15 @@ def build_index_synthetic_option_chain(
     """
     from datetime import date, datetime, timedelta
     from zoneinfo import ZoneInfo
-    from engine.position_sizer import get_lot_size
+
+    from market.instruments import canonical_symbol, get_fno_lot_size
+    from market.symbol_master import get_strike_step
 
     _ist = ZoneInfo("Asia/Kolkata")
-    clean_sym = (
-        symbol.upper()
-        .replace("NSE:", "")
-        .replace("BSE:", "")
-        .replace("BFO:", "")
-        .replace("NFO:", "")
-        .strip()
-    )
+    clean_sym = canonical_symbol(symbol)
     is_bse = clean_sym in ("SENSEX", "BANKEX")
     exch = "BFO" if is_bse else "NFO"
-    lot_sz = get_lot_size(clean_sym) or (
-        10 if clean_sym == "SENSEX" else (15 if clean_sym == "BANKEX" else 25)
-    )
+    lot_sz = get_fno_lot_size(clean_sym)
 
     today = date.today()
     if expiry:
@@ -510,11 +503,7 @@ def build_index_synthetic_option_chain(
                 exp_date_obj = _last_thursday(ny_next, nm_next)
             exp_str = exp_date_obj.isoformat()
 
-    step = (
-        100
-        if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX")
-        else (25 if clean_sym == "MIDCPNIFTY" else 50)
-    )
+    step = get_strike_step(clean_sym, spot=spot)
     atm_strike = round(spot / step) * step
 
     contracts: list[OptionsContract] = []
@@ -893,57 +882,29 @@ def get_max_pain(underlying: str, expiry: Optional[str] = None) -> Optional[floa
 def parse_option_symbol(symbol: str) -> dict[str, Any]:
     """
     Parses Indian exchange option symbols (MCX, NFO, BFO, CDS) into components.
+    Delegates to institutional SSOT market.instruments.parse_derivative_contract.
     e.g. 'MCX:CRUDEOIL26SEP6500CE' ->
          {'exchange': 'MCX', 'underlying': 'CRUDEOIL', 'expiry_tag': '26SEP', 'strike': 6500.0, 'option_type': 'CE'}
     """
-    import re
+    from market.instruments import parse_derivative_contract
+
+    parsed = parse_derivative_contract(symbol)
+    if parsed and parsed.is_option:
+        return {
+            "exchange": parsed.exchange,
+            "underlying": parsed.underlying,
+            "expiry_tag": parsed.expiry_tag,
+            "strike": parsed.strike or 0.0,
+            "option_type": parsed.contract_type,
+            "raw_symbol": symbol,
+        }
 
     clean = symbol.strip()
-    exchange = ""
-    if ":" in clean:
-        parts = clean.split(":", 1)
-        exchange = parts[0].upper()
-        clean = parts[1]
-
-    # Pattern 1: Underlying + Expiry(2 digits day/year + 3 letters month or digits) + Strike + (CE|PE)
-    # e.g., CRUDEOIL26SEP6500CE or GOLD26OCT75000PE or NIFTY24DEC24000CE
-    m = re.match(
-        r"^([A-Z]+?)(\d{2}[A-Z]{3}|\d{4,8})?(\d+(?:\.\d+)?)(CE|PE)$",
-        clean,
-        re.IGNORECASE,
-    )
-    if m:
-        underlying = m.group(1).upper()
-        expiry_tag = m.group(2) or ""
-        strike_val = float(m.group(3))
-        opt_type = m.group(4).upper()
-        return {
-            "exchange": exchange,
-            "underlying": underlying,
-            "expiry_tag": expiry_tag,
-            "strike": strike_val,
-            "option_type": opt_type,
-            "raw_symbol": symbol,
-        }
-
-    # Fallback: simple extraction of trailing CE/PE
-    m2 = re.match(r"^(.*?)(?:(\d+(?:\.\d+)?))(CE|PE)$", clean, re.IGNORECASE)
-    if m2:
-        prefix = m2.group(1)
-        strike_val = float(m2.group(2))
-        opt_type = m2.group(3).upper()
-        return {
-            "exchange": exchange,
-            "underlying": prefix.upper(),
-            "expiry_tag": "",
-            "strike": strike_val,
-            "option_type": opt_type,
-            "raw_symbol": symbol,
-        }
-
+    exchange = clean.split(":", 1)[0].upper() if ":" in clean else ""
+    und = clean.split(":", 1)[1] if ":" in clean else clean
     return {
         "exchange": exchange,
-        "underlying": clean,
+        "underlying": und,
         "expiry_tag": "",
         "strike": 0.0,
         "option_type": "",

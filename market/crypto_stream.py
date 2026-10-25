@@ -105,12 +105,20 @@ CRYPTO_ALIAS_MAP = {
     "DOGEUSDT": "DOGEUSDT",
 }
 
-BINANCE_WS_URL = (
-    "wss://stream.binance.com:9443/stream?streams="
+BINANCE_WS_STREAM_PATH = (
     "btcusdt@ticker/ethusdt@ticker/solusdt@ticker/bnbusdt@ticker/xrpusdt@ticker/dogeusdt@ticker/"
     "btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/bnbusdt@bookTicker/xrpusdt@bookTicker/dogeusdt@bookTicker/"
     "btcusdt@kline_1m/ethusdt@kline_1m/solusdt@kline_1m/bnbusdt@kline_1m/xrpusdt@kline_1m/dogeusdt@kline_1m"
 )
+
+# Multi-endpoint failover: Binance Vision mirror + Binance stream ports 9443 & 443
+BINANCE_WS_ENDPOINTS = [
+    f"wss://stream.binance.com:9443/stream?streams={BINANCE_WS_STREAM_PATH}",
+    f"wss://data-stream.binance.vision/stream?streams={BINANCE_WS_STREAM_PATH}",
+    f"wss://stream.binance.com:443/stream?streams={BINANCE_WS_STREAM_PATH}",
+]
+
+BINANCE_WS_URL = BINANCE_WS_ENDPOINTS[0]
 
 BINANCE_REST_KLINES = "https://api.binance.com/api/v3/klines"
 
@@ -210,18 +218,23 @@ class CryptoStreamManager:
             self._loop.close()
 
     async def _stream_loop(self) -> None:
-        """Main WebSocket loop with automated backoff and reconnects."""
+        """Main WebSocket loop with automated backoff, multi-endpoint failover, and resilient keepalive."""
         import websockets
 
         backoff = 1.0
+        endpoint_idx = 0
         while self._running:
+            endpoint = BINANCE_WS_ENDPOINTS[endpoint_idx % len(BINANCE_WS_ENDPOINTS)]
+            endpoint_host = endpoint.split("/stream")[0]
             try:
-                logger.info("CryptoStreamManager: connecting to Binance streams...")
+                logger.info(
+                    f"CryptoStreamManager: connecting to Binance stream endpoint {endpoint_host}..."
+                )
                 async with websockets.connect(
-                    BINANCE_WS_URL,
-                    ping_interval=20,
-                    ping_timeout=20,
-                    close_timeout=5,
+                    endpoint,
+                    ping_interval=None,
+                    close_timeout=10,
+                    max_size=10_000_000,
                 ) as ws:
                     with self._lock:
                         self._connected = True
@@ -230,21 +243,36 @@ class CryptoStreamManager:
 
                     while self._running:
                         try:
-                            msg = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                            msg = await asyncio.wait_for(ws.recv(), timeout=60.0)
                             data = json.loads(msg)
                             self._handle_ws_message(data)
                         except asyncio.TimeoutError:
-                            # Send ping to keep connection alive
-                            pong_waiter = await ws.ping()
-                            await asyncio.wait_for(pong_waiter, timeout=10.0)
+                            # Verify socket liveness if idle for 60s
+                            try:
+                                pong_waiter = await ws.ping()
+                                await asyncio.wait_for(pong_waiter, timeout=15.0)
+                            except Exception as ping_exc:
+                                logger.info(
+                                    f"CryptoStreamManager: Liveness ping failed ({ping_exc}), recycling socket..."
+                                )
+                                break
             except Exception as e:
                 with self._lock:
                     self._connected = False
                 if not self._running:
                     break
-                logger.warning(
-                    f"CryptoStreamManager: WS connection dropped ({e}), retrying in {backoff:.1f}s..."
-                )
+                endpoint_idx += 1
+                next_endpoint_host = BINANCE_WS_ENDPOINTS[
+                    endpoint_idx % len(BINANCE_WS_ENDPOINTS)
+                ].split("/stream")[0]
+                if backoff <= 1.0:
+                    logger.info(
+                        f"CryptoStreamManager: WS connection recycled ({e}), reconnecting in {backoff:.1f}s via {next_endpoint_host}..."
+                    )
+                else:
+                    logger.warning(
+                        f"CryptoStreamManager: WS connection dropped ({e}), retrying in {backoff:.1f}s via {next_endpoint_host}..."
+                    )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 1.5, 30.0)
 

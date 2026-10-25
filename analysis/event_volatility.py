@@ -121,8 +121,10 @@ def evaluate_event_volatility_strategy(
     )
     avg_move = float(iv_data.get("avg_earnings_move") or _AVG_EARNINGS_MOVE.get(clean_sym, 3.5))
 
-    # Standard strike step: approximate ~1% of spot for equities
-    strike_step = max(5.0, round((spot * 0.01) / 5.0) * 5.0)
+    # Authoritative strike step from SSOT
+    from market.symbol_master import get_strike_step
+
+    strike_step = get_strike_step(clean_sym, spot=spot)
     atm_strike = round(spot / strike_step) * strike_step
 
     legs: list[OptionLeg] = []

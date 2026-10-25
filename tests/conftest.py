@@ -529,3 +529,23 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         ticker_stream.stop(timeout=0.2)
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def reset_auto_alert_engine_pacing():
+    """Ensure hermetic test isolation for AutoAlertEngine pacing & dispatch tables."""
+    yield
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        if auto_alert_engine is not None:
+            auto_alert_engine._sector_daily_telegram.clear()
+            auto_alert_engine._daily_index_telegram.clear()
+            auto_alert_engine._index_half_telegram.clear()
+            auto_alert_engine._sector_hourly_telegram.clear()
+            for k in auto_alert_engine._hourly_telegram_dispatches:
+                auto_alert_engine._hourly_telegram_dispatches[k].clear()
+            auto_alert_engine._hourly_index_directional.clear()
+            auto_alert_engine._hourly_fno_stock_directional.clear()
+    except Exception:
+        pass

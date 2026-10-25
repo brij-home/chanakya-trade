@@ -528,6 +528,7 @@ class TbtSocketWorker:
         self.last_connected_at: float = 0.0
         self.last_packet_at: float = 0.0
         self.degraded_until: float = 0.0
+        self._consecutive_429: int = 0
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
@@ -588,6 +589,7 @@ class TbtSocketWorker:
             self.connected = True
             self.status = "CONNECTED"
             self.last_connected_at = time.time()
+            self._consecutive_429 = 0
         logger.info(
             f"[TbtWorker-{self.worker_id}] Connection confirmed. Synchronizing {len(self.desired)} symbols..."
         )
@@ -605,14 +607,22 @@ class TbtSocketWorker:
     def _on_error(self, err: Any, *args, **kwargs) -> None:
         err_msg = str(err)
         if "429" in err_msg or "Too Many Requests" in err_msg:
-            logger.warning(
-                f"[TbtWorker-{self.worker_id}] Handshake 429 Too Many Requests (Fyers connection cap/throttle). "
-                f"Backing off for 60s."
-            )
             with self._lock:
+                self._consecutive_429 += 1
+                # Exponential backoff with ceiling: 60s, 120s, 240s, 480s, max 1800s (30m)
+                cooldown = min(60.0 * (2 ** (self._consecutive_429 - 1)), 1800.0)
                 self.status = "DEGRADED_429"
-                self.degraded_until = time.time() + 60.0
+                self.degraded_until = time.time() + cooldown
                 self.connected = False
+            if self._consecutive_429 <= 2:
+                logger.warning(
+                    f"[TbtWorker-{self.worker_id}] Handshake 429 Too Many Requests (Fyers connection cap/throttle). "
+                    f"Backing off for {cooldown:.0f}s (strike {self._consecutive_429})."
+                )
+            else:
+                logger.info(
+                    f"[TbtWorker-{self.worker_id}] Connection cap active (429 rate limit). Cooldown: {cooldown:.0f}s (strike {self._consecutive_429})."
+                )
             self._on_status(self.worker_id, "DEGRADED_429")
         else:
             logger.debug(f"[TbtWorker-{self.worker_id}] Socket message: {err}")
@@ -1148,17 +1158,19 @@ class FyersTbtManager:
                             self._last_packet_time = time.time()  # Reset to prevent storm
                             self.force_reconnect()
 
-                # 5. Connection Pool Sentinel: recover disconnected or backoff-expired workers
-                now_w = time.time()
-                for w in self._workers:
-                    if not w.connected and (
-                        w.status == "DISCONNECTED"
-                        or (w.status == "DEGRADED_429" and now_w >= w.degraded_until)
-                    ):
-                        logger.debug(
-                            f"[TbtManager] Pool sentinel reconnecting worker {w.worker_id} (status={w.status})"
-                        )
-                        w.connect()
+                # 5. Connection Pool Sentinel: recover disconnected or backoff-expired workers during active market sessions
+                active_session = get_market_session()
+                if active_session != "OFF_MARKET":
+                    now_w = time.time()
+                    for w in self._workers:
+                        if not w.connected and (
+                            w.status == "DISCONNECTED"
+                            or (w.status == "DEGRADED_429" and now_w >= w.degraded_until)
+                        ):
+                            logger.debug(
+                                f"[TbtManager] Pool sentinel reconnecting worker {w.worker_id} (status={w.status})"
+                            )
+                            w.connect()
 
             except Exception as e:
                 logger.debug(f"[TbtManager] Guardian loop pass error: {e}")
@@ -1201,6 +1213,14 @@ class FyersTbtManager:
                     on_status=self._handle_worker_status,
                 )
                 self._workers.append(worker)
+
+        session = get_market_session()
+        if session == "OFF_MARKET":
+            logger.info(
+                "[TbtManager] Market session is OFF_MARKET. Worker pool initialized in standby mode; "
+                "live socket connection will engage at market open (09:15 IST)."
+            )
+            return
 
         # Worker 0 connects immediately
         self._workers[0].connect()
@@ -1821,6 +1841,15 @@ class FyersTbtManager:
         )
         with self._slots_lock:
             if session_name == "EQUITY_NFO":
+                # If workers are in standby (not connected) and we have an auth token, engage connection
+                if (
+                    self._workers
+                    and not any(w.connected for w in self._workers)
+                    and self._access_token
+                ):
+                    self._thread = threading.Thread(target=self._connect, daemon=True)
+                    self._thread.start()
+
                 # Morning Handover (09:15 IST): Evict all commodity/currency scouts
                 # to liberate all 15 slots for daytime index options & equity scouts.
                 to_evict = [
@@ -1886,6 +1915,9 @@ class FyersTbtManager:
         if not tradable:
             return
         with self._slots_lock:
+            # In-flight active trade strictly clears any eviction cooldown
+            self._evicted_cooldowns.pop(tradable, None)
+            self._evicted_cooldowns.pop(symbol, None)
             if tradable not in self._in_flight:
                 self._in_flight.append(tradable)
                 while len(self._in_flight) > MAX_IN_FLIGHT_SLOTS:
@@ -2220,6 +2252,10 @@ class FyersTbtManager:
                     stock_fut = resolve_stock_future(tradable)
                     if stock_fut:
                         tradable = stock_fut
+
+                # Intent-driven subscription clears eviction cooldown
+                self._evicted_cooldowns.pop(tradable, None)
+                self._evicted_cooldowns.pop(s, None)
                 if (
                     tradable not in self._subscribed
                     and tradable not in self._core_grid
@@ -2290,6 +2326,9 @@ class FyersTbtManager:
             )
             return False
         with self._slots_lock:
+            # Operator/sampling intent overrides eviction cooldown
+            self._evicted_cooldowns.pop(tradable, None)
+            self._evicted_cooldowns.pop(symbol, None)
             self._scout[tradable] = time.time()
             self.sync_subscriptions()
             logger.info(
@@ -2344,6 +2383,9 @@ class FyersTbtManager:
                 tradable = stock_fut
 
         with self._slots_lock:
+            # Active JIT scout promotion overrides eviction cooldown
+            self._evicted_cooldowns.pop(tradable, None)
+            self._evicted_cooldowns.pop(symbol, None)
             if (
                 tradable in self._core_grid
                 or tradable in self._todays_expiry
@@ -2403,6 +2445,13 @@ class FyersTbtManager:
         """
         now = time.time()
         cleansed = 0
+        try:
+            from market.calendar import is_market_open
+
+            is_active_market = is_market_open("NSE")
+        except Exception:
+            is_active_market = self._current_session not in ("OFF_MARKET", "COMMODITY_CDS")
+
         with self._slots_lock:
             stale_keys = []
             for sym, promoted_at in list(self._scout.items()):
@@ -2424,14 +2473,15 @@ class FyersTbtManager:
                     stale_keys.append(sym)
                     continue
 
-                # Condition 2: Dead scout fast-eviction
-                # If held for >= 30s and has received ZERO packets, it is dead on exchange/feed
-                if duration >= 30.0 and not last_pkt_ts:
-                    logger.warning(
-                        f"[TbtManager] Evicting dead TBT scout {sym}: zero packets received after {duration:.0f}s"
+                # Condition 2: Dead scout fast-eviction (strictly during active market hours)
+                # If held for >= 30s during active trading hours and has received ZERO packets,
+                # it is dead on exchange/feed. During off-market/weekend, silence is normal.
+                if is_active_market and duration >= 30.0 and not last_pkt_ts:
+                    logger.info(
+                        f"[TbtManager] Revolving idle TBT scout {sym}: zero packets received after {duration:.0f}s"
                     )
                     stale_keys.append(sym)
-                    self._evicted_cooldowns[sym] = now + 300.0
+                    self._evicted_cooldowns[sym] = now + 60.0
                     continue
 
             for k in stale_keys:
@@ -2439,28 +2489,30 @@ class FyersTbtManager:
                 self._slot_allocated_at.pop(k, None)
                 cleansed += 1
 
-            # Condition 3: Dead sector scout fast-eviction
-            # If an active sector scout has received zero packets for >= 45s, cool it down for 5m
-            # and rotate in another sector leader
-            for sym in list(self._sector_scouts):
-                if (
-                    sym in self._subscribed
-                    and sym not in self._in_flight
-                    and sym not in self._core_grid
-                    and sym not in self._scout
-                ):
-                    alloc_t = self._slot_allocated_at.get(sym, now)
-                    if (now - alloc_t) >= 45.0:
-                        depth_data = self._depth_cache.get(sym, {})
-                        if not depth_data.get("timestamp"):
-                            logger.warning(
-                                f"[TbtManager] Evicting unresponsive sector scout {sym}: zero packets received after {now - alloc_t:.0f}s"
-                            )
-                            self._evicted_cooldowns[sym] = now + 300.0
-                            if sym in self._sector_scouts:
-                                self._sector_scouts.remove(sym)
-                            self._slot_allocated_at.pop(sym, None)
-                            cleansed += 1
+            # Condition 3: Dead sector scout fast-eviction (strictly during active market hours)
+            # If an active sector scout has received zero packets for >= 45s during active market,
+            # cool it down for 60s and rotate in another sector leader.
+            # During off-market/weekend, silence is the normal exchange state.
+            if is_active_market:
+                for sym in list(self._sector_scouts):
+                    if (
+                        sym in self._subscribed
+                        and sym not in self._in_flight
+                        and sym not in self._core_grid
+                        and sym not in self._scout
+                    ):
+                        alloc_t = self._slot_allocated_at.get(sym, now)
+                        if (now - alloc_t) >= 45.0:
+                            depth_data = self._depth_cache.get(sym, {})
+                            if not depth_data.get("timestamp"):
+                                logger.info(
+                                    f"[TbtManager] Revolving idle sector scout {sym}: zero packets received after {now - alloc_t:.0f}s"
+                                )
+                                self._evicted_cooldowns[sym] = now + 60.0
+                                if sym in self._sector_scouts:
+                                    self._sector_scouts.remove(sym)
+                                self._slot_allocated_at.pop(sym, None)
+                                cleansed += 1
 
             # Also scrub any invalid/BSE/MCX from core and todays_expiry if any slipped in
             self._core_grid = [s for s in self._core_grid if resolve_tradable_tbt_symbol(s)]
@@ -2473,7 +2525,7 @@ class FyersTbtManager:
                 )
         return cleansed
 
-    def evict_symbol(self, symbol: str, cooldown_sec: float = 300.0) -> dict[str, Any]:
+    def evict_symbol(self, symbol: str, cooldown_sec: float = 60.0) -> dict[str, Any]:
         """
         Manually evict a symbol from 15-slot TBT market depth.
         Immediately unsubscribes from WebSocket and applies an eviction cooldown
@@ -2535,6 +2587,36 @@ class FyersTbtManager:
                 "evicted_symbol": tradable,
                 "evicted_from": evicted_from,
                 "cooldown_seconds": cooldown_sec,
+                "active_total": len(self._subscribed),
+                "free_slots": max(0, MAX_TBT_SYMBOLS - len(self._subscribed)),
+                "subscribed": sorted(self._subscribed),
+            }
+
+    def clear_eviction_cooldowns(self, symbol: Optional[str] = None) -> dict[str, Any]:
+        """
+        Instantly clears eviction cooldowns so symbols can be immediately re-subscribed
+        without waiting for automated expiration timers.
+        """
+        now = time.time()
+        with self._slots_lock:
+            if symbol:
+                tradable = resolve_tradable_tbt_symbol(symbol) or symbol
+                self._evicted_cooldowns.pop(tradable, None)
+                self._evicted_cooldowns.pop(symbol.strip().upper(), None)
+                self._evicted_cooldowns.pop(symbol, None)
+            else:
+                self._evicted_cooldowns.clear()
+            self.sync_subscriptions()
+            remaining = {
+                s: round(exp - now, 1) for s, exp in self._evicted_cooldowns.items() if exp > now
+            }
+            logger.info(
+                f"[TbtManager] Eviction cooldowns cleared (target={symbol or 'ALL'}). Remaining: {len(remaining)}"
+            )
+            return {
+                "status": "ok",
+                "cleared": symbol or "ALL",
+                "remaining_cooldowns": remaining,
                 "active_total": len(self._subscribed),
                 "free_slots": max(0, MAX_TBT_SYMBOLS - len(self._subscribed)),
                 "subscribed": sorted(self._subscribed),

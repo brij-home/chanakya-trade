@@ -11,6 +11,7 @@ logger = logging.getLogger("engine.alert_expiry")
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 from config.constants import IST_ZONE as IST
+from market.instruments import canonical_symbol, parse_derivative_contract
 
 
 def classify_expiry_type(expiry_str: Optional[str], symbol: Optional[str] = None) -> str:
@@ -34,15 +35,7 @@ def classify_expiry_type(expiry_str: Optional[str], symbol: Optional[str] = None
                 continue
         if not dt:
             return "MONTHLY"
-        sym = (
-            (symbol or "")
-            .upper()
-            .replace("NSE:", "")
-            .replace("BSE:", "")
-            .replace("NFO:", "")
-            .replace("BFO:", "")
-            .strip()
-        )
+        sym = canonical_symbol(symbol)
         # Only NIFTY and SENSEX support weekly contracts
         if sym not in _WEEKLY_INDEX_SYMBOLS:
             return "MONTHLY"
@@ -77,18 +70,27 @@ def get_expiry_metadata(
 
     # Fallback to contract_symbol parsing if expiry_str is missing or unparsed
     if not dt and contract_symbol:
+        parsed_c = parse_derivative_contract(str(contract_symbol))
+        if parsed_c and parsed_c.expiry_date:
+            try:
+                dt = datetime.strptime(parsed_c.expiry_date, "%Y-%m-%d").date()
+                if not expiry_type:
+                    clean_und = canonical_symbol(symbol or parsed_c.underlying)
+                    if clean_und in ("NIFTY", "SENSEX"):
+                        expiry_type = (
+                            "MONTHLY" if (dt + timedelta(days=7)).month != dt.month else "WEEKLY"
+                        )
+                    else:
+                        expiry_type = "MONTHLY"
+            except Exception as e_p:
+                logger.debug(
+                    f"[engine.alert_expiry] parse_derivative_contract date conversion error: {e_p}"
+                )
+
         import re
         from datetime import date
 
-        csym = (
-            str(contract_symbol)
-            .upper()
-            .replace("NSE:", "")
-            .replace("NFO:", "")
-            .replace("MCX:", "")
-            .replace("BSE:", "")
-            .strip()
-        )
+        csym = canonical_symbol(str(contract_symbol))
 
         # 1. Broker YYYYMMDD format: e.g. HAL202609294800PE, UNITDSPR202609291380PE, M&M202610272950PE
         m_yyyymmdd = re.search(
@@ -560,15 +562,7 @@ def is_monthly_physical_expiry_week(
       - If symbol is provided: checks available expiries from broker; returns True if DTE <= 4.
       - Calendar fallback: returns True if current date is within 4 days of month-end or last Thursday.
     """
-    clean_sym = (
-        (symbol or "")
-        .upper()
-        .replace("NSE:", "")
-        .replace("NFO:", "")
-        .replace("BSE:", "")
-        .replace("BFO:", "")
-        .strip()
-    )
+    clean_sym = canonical_symbol(symbol)
     is_idx = clean_sym in (
         "NIFTY",
         "BANKNIFTY",
@@ -662,15 +656,7 @@ def check_monthly_physical_settlement_status(
     dte_days is the days remaining until the active month's last Thursday.
     """
     now_d = (ref_dt or datetime.now(IST)).date()
-    clean_sym = (
-        (symbol or "")
-        .upper()
-        .replace("NSE:", "")
-        .replace("NFO:", "")
-        .replace("BSE:", "")
-        .replace("BFO:", "")
-        .strip()
-    )
+    clean_sym = canonical_symbol(symbol)
     if clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
         return (False, 999)
 
@@ -739,15 +725,7 @@ def resolve_recommended_derivative_expiry(
     """
     now_dt = ref_dt or datetime.now(IST)
     now_d = now_dt.date()
-    clean_sym = (
-        (symbol or "")
-        .upper()
-        .replace("NSE:", "")
-        .replace("NFO:", "")
-        .replace("BSE:", "")
-        .replace("BFO:", "")
-        .strip()
-    )
+    clean_sym = canonical_symbol(symbol)
     is_idx = clean_sym in (
         "NIFTY",
         "BANKNIFTY",

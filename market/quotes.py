@@ -529,20 +529,19 @@ def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
         return {}
 
 
-def _calculate_cost_of_carry_factor(ref_date: Optional[datetime] = None) -> float:
+def _calculate_cost_of_carry_factor(
+    ref_date: Optional[datetime] = None, underlying: str = "NIFTY"
+) -> float:
     """Calculate institutional cost-of-carry factor F = S * (1 + r * (days / 365.0))."""
-    import calendar
-    from datetime import date
+    from market.instruments import _calc_monthly_expiry_date
 
     now = ref_date or datetime.now(timezone.utc)
-    year, month = now.year, now.month
-    last_day = calendar.monthrange(year, month)[1]
-    thursdays = [
-        day for day in range(last_day - 6, last_day + 1) if calendar.weekday(year, month, day) == 3
-    ]
-    exp_day = thursdays[-1] if thursdays else last_day
-    exp_date = date(year, month, exp_day)
     curr_date = now.date()
+    exp_date = _calc_monthly_expiry_date("NSE", underlying, now.year, now.month)
+    if exp_date < curr_date:
+        nm = now.month + 1 if now.month < 12 else 1
+        ny = now.year if now.month < 12 else now.year + 1
+        exp_date = _calc_monthly_expiry_date("NSE", underlying, ny, nm)
     days_to_expiry = max(1, (exp_date - curr_date).days)
     repo_rate = 0.065  # RBI base repo rate (6.50%)
     return 1.0 + (repo_rate * (days_to_expiry / 365.0))

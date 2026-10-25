@@ -111,13 +111,10 @@ def is_index_symbol(symbol: str) -> bool:
     return clean in INDEX_SYMBOLS
 
 
-def get_strike_step(symbol: str) -> int:
-    clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
-    if clean in ("BANKNIFTY", "SENSEX", "BANKEX"):
-        return 100
-    if clean == "MIDCPNIFTY":
-        return 25
-    return 50
+def get_strike_step(symbol: str, spot: float = 0.0) -> float:
+    from market.symbol_master import get_strike_step as _get_master_step
+
+    return _get_master_step(symbol, spot=spot)
 
 
 def resolve_option_contract(
@@ -201,7 +198,7 @@ def resolve_option_contract(
     opt_sym = ""
     spread_pct_val: Optional[float] = None
     contracts: list[Any] = []
-    step = get_strike_step(clean_sym)
+    step = get_strike_step(clean_sym, spot=spot)
 
     try:
         from market.options import get_options_chain

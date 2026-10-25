@@ -112,26 +112,26 @@ def test_code_provenance_cache_ttl(tmp_path: Path):
 
 
 def test_telemetry_event_code_stale_priority():
-    """Verify EVENT_CODE_STALE maps to P1 institutional incident."""
+    """Verify EVENT_CODE_STALE maps to P3 institutional advisory incident (not P1)."""
     clear_telemetry()
     assert (
         derive_priority(
-            EVENT_CODE_STALE, "RuntimeCodeProvenance", "WARNING", "Stale in-memory bytecode"
+            EVENT_CODE_STALE, "RuntimeCodeProvenance", "INFO", "Stale in-memory bytecode"
         )
-        == "P1"
+        == "P3"
     )
 
     record_event(
         event_type=EVENT_CODE_STALE,
         component="RuntimeCodeProvenance",
-        action_taken="Reload recommended",
+        action_taken="Reload recommended when convenient",
         reason="Stale in-memory bytecode: 3 files modified after boot",
-        severity="WARNING",
+        severity="INFO",
     )
     counts = get_incident_counts()
-    assert counts["P1"] >= 1
-    p1s = get_prioritized_incidents(priority="P1")
-    assert any("RuntimeCodeProvenance" in inc["component"] for inc in p1s)
+    assert counts["P3"] >= 1
+    p3s = get_prioritized_incidents(priority="P3")
+    assert any("RuntimeCodeProvenance" in inc["component"] for inc in p3s)
     clear_telemetry()
 
 
@@ -179,8 +179,8 @@ def test_health_hub_endpoint_includes_code_provenance():
     assert prov["status"] in ("FRESH", "STALE")
 
 
-def test_health_hub_elevates_to_degraded_when_code_stale():
-    """Verify health hub elevates overall_status to DEGRADED when code is stale."""
+def test_health_hub_records_advisory_incident_when_code_stale():
+    """Verify health hub records an advisory P3 incident when code is stale without degrading operational health."""
     from web.api import app
 
     mock_prov = CodeProvenanceReport(
@@ -212,10 +212,14 @@ def test_health_hub_elevates_to_degraded_when_code_stale():
         resp = client.get("/api/system/health-hub")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["overall_status"] in ("DEGRADED", "CRITICAL")
-        assert any(
-            inc.get("component") == "RuntimeCodeProvenance" for inc in data.get("incidents", [])
-        )
+        # Stale bytecode is advisory P3, so operational health does not degrade on its own
+        prov_incidents = [
+            inc
+            for inc in data.get("incidents", [])
+            if inc.get("component") == "RuntimeCodeProvenance"
+        ]
+        assert len(prov_incidents) >= 1
+        assert prov_incidents[0]["priority"] == "P3"
 
 
 def test_code_provenance_direct_endpoint():

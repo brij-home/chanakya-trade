@@ -57,14 +57,14 @@ TRADING_PLATFORM_DATA_ENV: str = "TRADING_PLATFORM_DATA"
 #: Default data directory name under user home
 DEFAULT_DATA_DIR_NAME: str = ".trading_platform"
 
-# ── F&O Lot Sizes (canonical as of Aug 2026 — check SEBI circular on changes) ─
+# ── F&O Lot Sizes (Official NSE/BSE October 2026 Master — SSOT from market.instruments) ─
 
 NIFTY_LOT_SIZE: int = 65
-BANKNIFTY_LOT_SIZE: int = 15
-FINNIFTY_LOT_SIZE: int = 25
+BANKNIFTY_LOT_SIZE: int = 30
+FINNIFTY_LOT_SIZE: int = 60
 MIDCPNIFTY_LOT_SIZE: int = 120
-SENSEX_LOT_SIZE: int = 10
-BANKEX_LOT_SIZE: int = 15
+SENSEX_LOT_SIZE: int = 20
+BANKEX_LOT_SIZE: int = 30
 
 
 # ── Alert & Analysis TTLs ─────────────────────────────────────────────────────

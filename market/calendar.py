@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger("market.calendar")
 from config.constants import IST_ZONE as IST
+from market.instruments import canonical_symbol
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Trading Holiday Master Data (NSE / BSE / MCX / CDS)
@@ -623,18 +624,10 @@ def get_nearest_weekly_expiry(
         except Exception as e_suppressed:
             logger.debug(f"[market.calendar] Non-fatal exception suppressed: {e_suppressed}")
 
-    clean = (
-        underlying.upper()
-        .replace("NSE:", "")
-        .replace("BSE:", "")
-        .replace("NFO:", "")
-        .replace("BFO:", "")
-        .replace("-INDEX", "")
-        .strip()
-    )
+    clean = canonical_symbol(underlying)
 
     is_bse_weekly = clean == "SENSEX"
-    is_nse_weekly = clean in ("NIFTY", "NIFTY50")
+    is_nse_weekly = clean == "NIFTY"
 
     # Under SEBI mandate, only NIFTY (NSE) and SENSEX (BSE) offer weekly contracts.
     # BANKEX, BANKNIFTY, MIDCPNIFTY, FINNIFTY, and equities offer strictly monthly contracts.
@@ -681,15 +674,7 @@ def get_nearest_monthly_expiry(
         except Exception as e_suppressed:
             logger.debug(f"[market.calendar] Non-fatal exception suppressed: {e_suppressed}")
 
-    clean = (
-        underlying.upper()
-        .replace("NSE:", "")
-        .replace("BSE:", "")
-        .replace("NFO:", "")
-        .replace("BFO:", "")
-        .replace("-INDEX", "")
-        .strip()
-    )
+    clean = canonical_symbol(underlying)
 
     is_bse = clean in ("SENSEX", "BANKEX")
     target_weekday = 4 if is_bse else 3
@@ -728,16 +713,8 @@ def get_active_derivative_expiry(
     if is_future:
         return get_nearest_monthly_expiry(underlying, ref_date=ref_date, ref_time=ref_time)
 
-    clean = (
-        underlying.upper()
-        .replace("NSE:", "")
-        .replace("BSE:", "")
-        .replace("NFO:", "")
-        .replace("BFO:", "")
-        .replace("-INDEX", "")
-        .strip()
-    )
-    is_weekly_allowed = clean in ("NIFTY", "NIFTY50", "SENSEX")
+    clean = canonical_symbol(underlying)
+    is_weekly_allowed = clean in ("NIFTY", "SENSEX")
     if not is_weekly_allowed:
         return get_nearest_monthly_expiry(underlying, ref_date=ref_date, ref_time=ref_time)
 
@@ -777,15 +754,8 @@ def is_expiry_day(
     for the given underlying symbol, fully accounting for holiday rolls (SEBI Rule 37).
     """
     cur_date = ref_date or datetime.now(IST).date()
-    clean = (
-        underlying.upper()
-        .replace("NSE:", "")
-        .replace("BSE:", "")
-        .replace("NFO:", "")
-        .replace("BFO:", "")
-        .strip()
-    )
-    if clean in ("NIFTY", "NIFTY 50", "NIFTY50", "SENSEX", "BSE SENSEX"):
+    clean = canonical_symbol(underlying)
+    if clean in ("NIFTY", "SENSEX"):
         exp = get_nearest_weekly_expiry(clean, ref_date=cur_date)
         return exp == cur_date
     else:

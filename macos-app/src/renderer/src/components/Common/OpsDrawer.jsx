@@ -15,12 +15,35 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
   const [loading, setLoading] = useState(false)
   const [actionInProgress, setActionInProgress] = useState('')
   const [expandedIncident, setExpandedIncident] = useState(null)
+  const [copiedIncidentId, setCopiedIncidentId] = useState(null)
+
+  const handleCopyIncident = useCallback((inc, id) => {
+    try {
+      const parts = [
+        `[${inc.priority || 'P2'}] ${inc.component || 'SYSTEM'} ${inc.incident_id ? `[${inc.incident_id}]` : ''}`.trim(),
+        `Time: ${inc.timestamp ? new Date(inc.timestamp).toLocaleString('en-IN') : 'N/A'}`,
+        `Error: ${inc.reason || inc.action_taken || 'Unknown anomaly'}`,
+      ]
+      if (inc.action_taken && inc.reason) {
+        parts.push(`Action: ${inc.action_taken}`)
+      }
+      if (inc.details?.traceback) {
+        parts.push(`\nTraceback:\n${inc.details.traceback}`)
+      }
+      navigator.clipboard.writeText(parts.join('\n'))
+      setCopiedIncidentId(id)
+      setTimeout(() => setCopiedIncidentId(null), 2000)
+      if (addToast) {
+        addToast({ title: 'Copied', message: 'Incident error details copied.', type: 'info' })
+      }
+    } catch {}
+  }, [addToast])
 
   const fetchHubData = useCallback(async () => {
     if (!port || !isOpen) return
     try {
       setLoading(true)
-      const res = await fetch(`${getBaseUrl(port)}/api/system/health-hub?limit=30`, {
+      const res = await fetch(`${getBaseUrl(port)}/api/system/health-hub?limit=30&since_boot=true`, {
         signal: AbortSignal.timeout(10000),
       })
       if (res.ok) {
@@ -369,25 +392,27 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
                 ✓ No active system errors or warnings recorded.
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="space-y-2 select-text">
                 {incidents.slice(0, 10).map((inc, i) => {
                   const isP0 = inc.priority === 'P0'
                   const isP1 = inc.priority === 'P1'
                   const pColor = isP0 ? 'var(--color-rose)' : isP1 ? 'var(--color-gold)' : 'var(--color-sapphire)'
-                  const isExp = expandedIncident === inc.incident_id || expandedIncident === i
+                  const incId = inc.incident_id || i
+                  const isExp = expandedIncident === incId
+                  const isCopied = copiedIncidentId === incId
 
                   return (
                     <div
-                      key={inc.incident_id || i}
-                      className="p-2.5 rounded-lg border text-xs font-mono space-y-1 transition-all"
+                      key={incId}
+                      className="p-2.5 rounded-lg border text-xs font-mono space-y-1 transition-all select-text"
                       style={{
                         background: isP0 ? 'rgba(255, 79, 123, 0.06)' : 'var(--color-surface)',
                         borderColor: isP0 ? 'rgba(255, 79, 123, 0.4)' : 'var(--color-border)',
                       }}
                     >
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between gap-1">
                         <span
-                          className="px-1.5 py-0.2 rounded font-bold text-[11px]"
+                          className="px-1.5 py-0.2 rounded font-bold text-[11px] select-none"
                           style={{
                             background: isP0 ? 'rgba(255, 79, 123, 0.2)' : isP1 ? 'rgba(245, 166, 35, 0.2)' : 'rgba(77, 155, 255, 0.15)',
                             color: pColor,
@@ -395,18 +420,28 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
                         >
                           {inc.priority || 'P2'} • {inc.component || 'SYSTEM'}
                         </span>
-                        <span className="text-[10px] text-muted">
-                          {inc.timestamp?.slice(11, 19) || 'Just now'}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-muted select-text">
+                            {inc.timestamp?.slice(11, 19) || 'Just now'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleCopyIncident(inc, incId)}
+                            className="text-[10px] font-mono text-muted hover:text-text cursor-pointer select-none px-1 py-0.5 rounded border border-border/60 hover:bg-elevated"
+                            title="Copy incident error details"
+                          >
+                            {isCopied ? '✓' : '📋'}
+                          </button>
+                        </div>
                       </div>
 
-                      <p className="font-semibold text-text leading-tight">
+                      <p className="font-semibold text-text leading-tight select-text cursor-text">
                         {inc.reason || inc.action_taken || 'Unknown anomaly'}
                       </p>
 
                       {inc.action_taken && (
-                        <p className="text-[10px] text-muted">
-                          <span className="text-muted/70">Action:</span> {inc.action_taken}
+                        <p className="text-[10px] text-muted select-text">
+                          <span className="text-muted/70 select-none">Action:</span> {inc.action_taken}
                         </p>
                       )}
 
@@ -415,13 +450,13 @@ export default function OpsDrawer({ isOpen, onClose, onOpenOpsDeck }) {
                         <div>
                           <button
                             type="button"
-                            onClick={() => setExpandedIncident(isExp ? null : inc.incident_id || i)}
-                            className="text-[10px] text-sapphire hover:underline cursor-pointer"
+                            onClick={() => setExpandedIncident(isExp ? null : incId)}
+                            className="text-[10px] text-sapphire hover:underline cursor-pointer select-none"
                           >
                             {isExp ? 'Hide Traceback ▲' : 'Show Traceback ▼'}
                           </button>
                           {isExp && (
-                            <pre className="mt-1.5 p-2 rounded bg-black/40 text-[11px] text-muted overflow-x-auto max-h-40 no-scrollbar">
+                            <pre className="mt-1.5 p-2 rounded bg-black/40 text-[11px] text-muted overflow-x-auto max-h-40 no-scrollbar select-text cursor-text whitespace-pre-wrap">
                               {inc.details.traceback}
                             </pre>
                           )}

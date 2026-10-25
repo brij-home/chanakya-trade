@@ -599,7 +599,9 @@ class OptionsBacktester:
         self.period = period
         self.initial_capital = capital
         self.lot_size = lot_size or LOT_SIZES.get(self.underlying, 1)
-        self.strike_step = strike_step or STRIKE_STEPS.get(self.underlying, 50)
+        from market.symbol_master import get_strike_step
+
+        self.strike_step = strike_step or get_strike_step(self.underlying)
         self.use_real_fno = use_real_fno
         self._spot_data: Optional[pd.DataFrame] = None
         self._vix_data: Optional[pd.DataFrame] = None

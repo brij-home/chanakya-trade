@@ -1195,7 +1195,17 @@ class AutoAlert:
                 or (opt_plan_dict.get("t1_premium") and opt_plan_dict.get("t2_premium"))
                 or (is_opt_action and (raw_t1 or raw_t2) and (t1_f and t1_f < (ltp * 0.5)))
             )
-            if is_short and not has_opt_target_premiums:
+            is_downward_trade = (
+                is_short
+                or str(self.direction).upper() in ("BEARISH", "SHORT", "SELL")
+                or (
+                    t1_f is not None
+                    and entry_anchor > 0
+                    and t1_f < entry_anchor
+                    and sl > entry_anchor
+                )
+            )
+            if is_downward_trade and not has_opt_target_premiums:
                 # Bearish underlying spot / futures trade: targets extend strictly DOWNWARD
                 if t1_f and t2_f and t2_f >= t1_f:
                     return (
@@ -2075,6 +2085,30 @@ class AutoAlert:
         return t2_num
 
     @property
+    def risk_reward_ratio(self) -> float:
+        """Calculates effective Risk:Reward ratio based on targets and stop loss."""
+        plan = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
+        if plan.get("risk_reward"):
+            try:
+                import re
+
+                m = re.findall(r"[\d.]+", str(plan["risk_reward"]))
+                if m:
+                    return float(m[-1])
+            except Exception as e_suppressed:
+                logger.debug(f"[alert_model] Failed parsing risk_reward from plan: {e_suppressed}")
+        ep = self.entry_price
+        sl = getattr(self, "initial_stop_loss", None) or self.stop_loss
+        t1 = self.target_1
+        t2 = self.target_2
+        if ep and sl and ep != sl:
+            risk = abs(ep - sl)
+            tgt = t2 or t1
+            if tgt and risk > 0.001:
+                return round(abs(tgt - ep) / risk, 2)
+        return 2.5
+
+    @property
     def conviction_tier(self) -> str:
         """Institutional conviction tier (APEX_CONFLUENCE, HIGH_CONVICTION, DEFINED_RISK_ONLY, or LOW_CONVICTION)."""
         if self.metrics and isinstance(self.metrics, dict):
@@ -2091,6 +2125,20 @@ class AutoAlert:
         elif self.confidence >= 70:
             return "DEFINED_RISK_ONLY"
         return "LOW_CONVICTION"
+
+    @property
+    def is_do_not_miss(self) -> bool:
+        """
+        Flags top-tier 'DoNotMiss' institutional setups (Advisor model):
+        Requires both apex conviction (confidence >= 85 or tier in APEX_CONFLUENCE/DO_NOT_MISS)
+        AND strong mathematical asymmetry (effective R:R >= 2.5).
+        Highlighted prominently without suppressing other setups.
+        """
+        tier_match = (
+            self.conviction_tier in ("APEX_CONFLUENCE", "DO_NOT_MISS") or self.confidence >= 85
+        )
+        rr = self.risk_reward_ratio or 0.0
+        return tier_match and rr >= 2.5
 
     @property
     def execution_style_mandate(self) -> Optional[str]:
@@ -2114,6 +2162,9 @@ class AutoAlert:
         d["target_1"] = self.target_1
         d["target_2"] = self.target_2
         d["conviction_tier"] = self.conviction_tier
+        d["is_do_not_miss"] = self.is_do_not_miss
+        if self.is_do_not_miss:
+            d["do_not_miss_label"] = "🌟 DO NOT MISS"
         d["execution_style_mandate"] = self.execution_style_mandate
         d["timestamp"] = (
             self.invalidated_at
