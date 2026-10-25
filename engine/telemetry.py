@@ -509,7 +509,7 @@ def get_prioritized_incidents(
         comp = getattr(ev, "component", "SYSTEM")
         sev = getattr(ev, "severity", "INFO")
         rsn = getattr(ev, "reason", "")
-        ev_prio = derive_priority(ev_type, comp, sev, rsn)
+        ev_prio = getattr(ev, "priority", None) or derive_priority(ev_type, comp, sev, rsn)
         ev.priority = ev_prio
         if target_prio and ev_prio != target_prio:
             continue
@@ -560,7 +560,7 @@ def get_incident_counts(
         comp = getattr(ev, "component", "SYSTEM")
         sev = getattr(ev, "severity", "INFO")
         rsn = getattr(ev, "reason", "")
-        p = derive_priority(ev_type, comp, sev, rsn)
+        p = getattr(ev, "priority", None) or derive_priority(ev_type, comp, sev, rsn)
         ev.priority = p
         counts[p] = counts.get(p, 0) + 1
     return counts

@@ -328,7 +328,9 @@ def test_session_scorecard_calibration_recommendations_and_persistence(tmp_path,
         def get_alerts(self):
             return alerts
 
-    report = run_eod_alert_postmortems(auto_engine=MockEngine(), force=True, broadcast=False)
+    report = run_eod_alert_postmortems(
+        auto_engine=MockEngine(), force=True, broadcast=False, session_date="2026-10-24"
+    )
     assert report["status"] == "COMPLETED"
     assert report.get("scorecard_path") is not None
     assert Path(report["scorecard_path"]).exists()

@@ -318,6 +318,7 @@ def run_eod_alert_postmortems(
     auto_engine: Optional[Any] = None,
     force: bool = False,
     broadcast: bool = False,
+    session_date: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Scan today's alerts, compute session quantitative scorecard, run retrospective
@@ -383,7 +384,7 @@ def run_eod_alert_postmortems(
         logger.warning("[AlertPostMortem] Error fetching alerts: %s", e)
         alerts = []
 
-    today_date = now_ist.strftime("%Y-%m-%d")
+    today_date = session_date or now_ist.strftime("%Y-%m-%d")
     today_alerts = []
     for a in alerts:
         created_at = getattr(a, "created_at", "") or ""

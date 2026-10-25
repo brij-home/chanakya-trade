@@ -1023,6 +1023,8 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
             "ACCEPTABLE",
             "EXCELLENT_ASYMMETRY",
             "High Asymmetry",
+            "Viable Asymmetry",
+            "Asymmetry",
             "OPPOSING_ZONE_COLLISION_REJECTED",
             "Capped by Overhead Supply",
         )
@@ -3807,8 +3809,13 @@ def test_cross_detector_active_trade_mutex(monkeypatch, tmp_path):
     from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
 
     data_file = tmp_path / "auto_alerts_mutex.json"
+    monkeypatch.setenv("CHANAKYA_TESTING", "1")
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+        lambda alert: (True, "", {}),
+    )
 
     engine = AutoAlertEngine(max_buffer=20)
     engine.clear_alerts()

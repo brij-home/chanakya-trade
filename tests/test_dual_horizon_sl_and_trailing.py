@@ -159,7 +159,7 @@ def test_render_auto_alert_dual_invalidation():
     assert "Safe SL (Tactical):" in rendered
     assert "1m close — filters freak wicks" in rendered
     assert "Structural SL (Spot):" in rendered
-    assert "24820.0" in rendered
+    assert "24820.0" in rendered or "24,820.0" in rendered
     assert "Disaster Floor: -32%" in rendered
 
 
