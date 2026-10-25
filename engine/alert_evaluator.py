@@ -60,7 +60,11 @@ def evaluate_alert_invalidation(
 
         # 0a. Hard Intraday Cutoff (15:15 IST NSE/BSE/NFO, 23:15 IST MCX; Crypto is 24x7 rolling)
         # Enforce unconditionally on all INTRADAY setups (equity & derivatives) to eliminate zombie in-flight positions.
-        if th == "INTRADAY" and not getattr(alert, "_force_test_expiry", False):
+        if th == "INTRADAY" and getattr(alert, "stage", "") not in (
+            "EARLY_WARNING",
+            "STALK",
+            "PRIMED",
+        ):
             exch = (getattr(alert, "exchange", "NSE") or "NSE").upper()
             cutoff_reached = False
             if exch in ("CRYPTO", "BINANCE", "DERIBIT"):
