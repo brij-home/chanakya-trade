@@ -989,6 +989,7 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
     engine = AutoAlertEngine()
     alert = AutoAlert(
         alert_id="coiling-header-1",
+        expiry_date="2026-11-05",
         alert_type="PATTERN_COILING",
         stage="EARLY_WARNING",
         symbol="MANKIND",
@@ -1003,6 +1004,17 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
         confidence=90,
         is_live=True,
         environment="LIVE",
+        actionable_plan={
+            "trade_plan": {
+                "direction": "LONG",
+                "entry_price": 2285.4,
+                "invalidation_stop": 2271.5,
+                "target_1": 2320.0,
+                "target_2": 2350.0,
+                "is_asymmetry_viable": True,
+                "asymmetry_verdict": "ACCEPTABLE",
+            }
+        },
     )
 
     engine._dispatch(alert)
@@ -1528,7 +1540,7 @@ def test_auto_alert_expiration_and_reaping(tmp_path, monkeypatch):
         target_level=950.0,
         stop_loss=1040.0,
         created_at="2026-09-09 13:25:48 IST",
-        expiry_date="2026-10-29",
+        expiry_date="2026-11-26",
         strike=1010.0,
         option_type="PE",
         contract_symbol="SBIN1010PE",

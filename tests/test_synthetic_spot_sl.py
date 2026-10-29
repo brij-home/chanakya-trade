@@ -87,6 +87,7 @@ def test_freak_wick_shielding_bullish():
         strike=55000.0,
         option_type="CE",
         contract_symbol="BANKNIFTY26OCT55000CE",
+        expiry_date="2026-11-05",
         ltp=250.0,  # Entry was around 250
         trigger_level=250.0,
         stop_loss=200.0,  # Nominal SL = 200
@@ -127,6 +128,7 @@ def test_decisive_spot_invalidation_bullish():
         strike=55000.0,
         option_type="CE",
         contract_symbol="BANKNIFTY26OCT55000CE",
+        expiry_date="2026-11-05",
         ltp=250.0,
         trigger_level=250.0,
         stop_loss=200.0,
@@ -142,7 +144,7 @@ def test_decisive_spot_invalidation_bullish():
     eval_res = evaluate_synthetic_spot_sl(
         alert=alert,
         current_option_ltp=190.0,
-        current_spot_override=54750.0,
+        current_spot_override=54700.0,
     )
 
     assert eval_res.is_invalidated is True
@@ -164,6 +166,7 @@ def test_freak_wick_shielding_bearish_put():
         strike=24800.0,
         option_type="PE",
         contract_symbol="NIFTY26OCT24800PE",
+        expiry_date="2026-11-05",
         ltp=110.0,
         trigger_level=110.0,
         stop_loss=85.0,
@@ -200,6 +203,7 @@ def test_catastrophic_drawdown_protection():
         strike=12800.0,
         option_type="CE",
         contract_symbol="MIDCPNIFTY26OCT12800CE",
+        expiry_date="2026-11-05",
         ltp=100.0,
         trigger_level=100.0,
         stop_loss=75.0,
@@ -236,6 +240,7 @@ def test_evaluate_alert_invalidation_integration_with_synthetic_sl(monkeypatch):
         strike=56000.0,
         option_type="CE",
         contract_symbol="BANKNIFTY26OCT56000CE",
+        expiry_date="2026-11-05",
         ltp=200.0,
         trigger_level=200.0,
         stop_loss=160.0,

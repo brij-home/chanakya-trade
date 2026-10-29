@@ -268,7 +268,8 @@ class TestOptionsOiVelocity:
         import itertools
 
         with patch(
-            "time.time", side_effect=itertools.chain([1000.0, 1060.0], itertools.repeat(1060.0))
+            "engine.detectors.gamma_blast.time.time",
+            side_effect=itertools.chain([1000.0, 1060.0], itertools.repeat(1060.0)),
         ):
             _STRIKE_OI_SNAPSHOTS["NIFTY_25000_CE"] = (1000.0, 80000, 5000)
             c2 = OptionsContract(
@@ -403,15 +404,18 @@ class TestContagionHolisticSanity:
     def test_midcpnifty_contagion_evaluation(self):
         """MIDCPNIFTY constituent synchronization triggers early warning for Midcap index."""
         dt = datetime(2026, 10, 16, 10, 15, tzinfo=IST)
+        mid_q = Quote(
+            symbol="MIDCPNIFTY",
+            last_price=13790.0,
+            vwap=13770.0,
+            change_pct=0.45,
+            high=13800.0,
+            low=13750.0,
+        )
         quotes = {
-            "NSE:NIFTY MID SELECT": Quote(
-                symbol="NIFTY MID SELECT",
-                last_price=13820.0,
-                vwap=13780.0,
-                change_pct=0.45,
-                high=13830.0,
-                low=13750.0,
-            ),
+            "NSE:NIFTY MID SELECT": mid_q,
+            "NSE:MIDCPNIFTY": mid_q,
+            "MIDCPNIFTY": mid_q,
             "NSE:PERSISTENT": Quote(
                 symbol="PERSISTENT",
                 last_price=5800.0,

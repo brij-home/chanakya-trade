@@ -34,7 +34,7 @@ def test_token_expired_across_0600_ist_boundary():
     token_dt = datetime(2026, 10, 27, 0, 1, 57, tzinfo=IST)
     now_dt = datetime(2026, 10, 27, 6, 2, 51, tzinfo=IST)
 
-    with patch("time.time", return_value=now_dt.timestamp()):
+    with patch("brokers.fyers.time.time", return_value=now_dt.timestamp()):
         assert api._is_token_expired(token_dt.timestamp()) is True
 
 
@@ -45,7 +45,7 @@ def test_token_valid_before_0600_ist_boundary():
     token_dt = datetime(2026, 10, 27, 0, 1, 57, tzinfo=IST)
     now_dt = datetime(2026, 10, 27, 2, 30, 0, tzinfo=IST)
 
-    with patch("time.time", return_value=now_dt.timestamp()):
+    with patch("brokers.fyers.time.time", return_value=now_dt.timestamp()):
         assert api._is_token_expired(token_dt.timestamp()) is False
 
 
@@ -56,7 +56,7 @@ def test_token_valid_same_day_after_0600_ist():
     token_dt = datetime(2026, 10, 27, 8, 30, 0, tzinfo=IST)
     now_dt = datetime(2026, 10, 27, 11, 45, 0, tzinfo=IST)
 
-    with patch("time.time", return_value=now_dt.timestamp()):
+    with patch("brokers.fyers.time.time", return_value=now_dt.timestamp()):
         assert api._is_token_expired(token_dt.timestamp()) is False
 
 
@@ -67,7 +67,7 @@ def test_token_expired_next_day_after_0600_ist():
     token_dt = datetime(2026, 10, 27, 8, 30, 0, tzinfo=IST)
     now_dt = datetime(2026, 10, 28, 6, 5, 0, tzinfo=IST)
 
-    with patch("time.time", return_value=now_dt.timestamp()):
+    with patch("brokers.fyers.time.time", return_value=now_dt.timestamp()):
         assert api._is_token_expired(token_dt.timestamp()) is True
 
 
