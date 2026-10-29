@@ -11,6 +11,7 @@ Institutional invariant tests for:
 import time
 import pytest
 from datetime import datetime
+from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 from engine.alert_model import AutoAlert
@@ -25,6 +26,16 @@ def clean_engine(tmp_path, monkeypatch):
     from engine.alert_scrutiny import alert_scrutiny_auditor
 
     monkeypatch.setattr(alert_scrutiny_auditor, "verify_tier1_sanity", lambda a: (True, "", {}))
+    mock_scrutiny = MagicMock(
+        status="QUANT_VERIFIED",
+        score=85,
+        trap_risk_warning=None,
+        rejection_reason=None,
+        to_dict=lambda: {"status": "QUANT_VERIFIED", "score": 85},
+    )
+    monkeypatch.setattr(
+        alert_scrutiny_auditor, "scrutinize_alert", lambda a, timeout=3.5: mock_scrutiny
+    )
     data_file = tmp_path / "test_auto_alerts.json"
     engine = AutoAlertEngine()
     engine._data_file = data_file

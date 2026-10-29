@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 
 from engine.alert_evaluator import evaluate_alert_targets_and_trailing
 from engine.alert_expiry import is_alert_option_premium_level
@@ -323,6 +324,7 @@ def test_telemetry_priority_routing_for_opsdeck():
 
 def test_fyers_tbt_socket_subscription_info_and_403_resilience():
     """Verify Fyers TBT socket patch fixes KeyError on getSymbolsInfo and halts on 403."""
+    pytest.importorskip("fyers_apiv3", reason="fyers_apiv3 is an optional broker SDK")
     from fyers_apiv3.FyersWebsocket import tbt_ws
 
     # A: SubscriptionInfo KeyError prevention

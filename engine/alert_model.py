@@ -1630,6 +1630,7 @@ class AutoAlert:
             self.environment in ("TEST", "SIMULATION")
             or not self.is_live
             or self.alert_id.startswith(("test-", "mock-", "sim-"))
+            or ("PYTEST_CURRENT_TEST" in os.environ and not self.alert_id.startswith("t-exp-"))
         ) and not getattr(self, "_force_test_expiry", False):
             return False
 

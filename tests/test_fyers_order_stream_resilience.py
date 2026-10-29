@@ -15,10 +15,21 @@ def test_order_stream_connect_disables_sdk_reconnect():
     mgr._access_token = "TEST_APP:TEST_TOKEN"
     mgr._running = True
 
-    with patch("fyers_apiv3.FyersWebsocket.order_ws.FyersOrderSocket") as mock_ws_cls:
-        mock_instance = MagicMock()
-        mock_ws_cls.return_value = mock_instance
+    mock_ws_cls = MagicMock()
+    mock_instance = MagicMock()
+    mock_ws_cls.return_value = mock_instance
+    mock_order_ws_mod = MagicMock(FyersOrderSocket=mock_ws_cls)
+    mock_fyers_ws = MagicMock(order_ws=mock_order_ws_mod)
+    mock_fyers_pkg = MagicMock(FyersWebsocket=mock_fyers_ws)
 
+    with patch.dict(
+        "sys.modules",
+        {
+            "fyers_apiv3": mock_fyers_pkg,
+            "fyers_apiv3.FyersWebsocket": mock_fyers_ws,
+            "fyers_apiv3.FyersWebsocket.order_ws": mock_order_ws_mod,
+        },
+    ):
         mgr._connect()
 
         # Must pass reconnect=False to avoid the Fyers SDK silent abandonment bug

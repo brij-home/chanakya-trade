@@ -212,6 +212,7 @@ def test_fyers_order_stream_403_halts_reconnect_loop():
 
 def test_fyers_socket_patch_sets_restart_flag_false_on_403():
     """Verify that patched On_error sets restart_flag=False on 403 Forbidden handshake rejections."""
+    pytest.importorskip("fyers_apiv3", reason="fyers_apiv3 is an optional broker SDK")
     from fyers_apiv3.FyersWebsocket import order_ws, data_ws
 
     dummy_order_sock = MagicMock()

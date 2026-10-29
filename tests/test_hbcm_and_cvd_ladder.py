@@ -220,7 +220,7 @@ def test_alert_evaluator_4r_milestone_trail_sl():
         stop_loss=80.0,  # 20 pts risk
         target_level=220.0,  # 6.0R runner
         achieved_milestones=["T1_ACHIEVED"],  # Already passed T1
-        actionable_plan={"target_2": 180.0},  # +4R level (100 + 4*20)
+        actionable_plan={"target_1": 140.0, "target_2": 180.0},  # +2R and +4R levels
         metrics={"vol_oi_ratio": 1.5},
     )
 

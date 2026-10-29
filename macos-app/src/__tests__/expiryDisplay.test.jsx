@@ -1,5 +1,5 @@
 import React from 'react'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { formatExpiryDetails } from '../renderer/src/components/Views/alerts/alertHelpers'
 import { AlertCompactRow } from '../renderer/src/components/Views/alerts/AlertCompactRow'
@@ -7,6 +7,14 @@ import { AlertTriageCard } from '../renderer/src/components/Views/alerts/AlertTr
 import { LiveSpotsProvider } from '../renderer/src/components/Views/alerts/LiveSpotsContext'
 
 describe('Options Expiry Clarity & Badging (Weekly ⚡W vs Monthly 📅M)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-01T00:00:00Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
   describe('formatExpiryDetails Helper', () => {
     it('accurately resolves an explicit weekly index option contract', () => {
       const alert = {

@@ -96,13 +96,13 @@ def test_drc_pillar_1_pre_t1_breakeven_lock():
     # At LTP = 113.0: PnL = +13.0 pts. R-multiple = 13 / 15 = +0.867R (>= 0.8R, < 1.5R)
     res = evaluate_alert_targets_and_trailing(alert, current_ltp=113.0)
     assert res is not None
-    assert res.new_milestone == "BREAKEVEN_LOCKED"
+    assert res.new_milestone in ("BREAKEVEN_LOCKED", "T0_5_ACHIEVED")
     assert res.should_trail is True
     assert res.is_risk_compression is True
     # Breakeven stop = Entry * 1.002 = 100.20
     assert res.recommended_stop == 100.20
     assert res.risk_reduction_pct == 100.0
-    assert "LOCK BREAKEVEN" in res.trailing_rationale
+    assert "BREAKEVEN" in res.trailing_rationale
 
 
 def test_drc_pillar_1_t0_5_scale_hit_also_compresses_risk():

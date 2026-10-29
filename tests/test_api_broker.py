@@ -172,7 +172,12 @@ class TestStartupAutoRestore:
             patch("web.api._has_groww", return_value=False),
             patch("web.api._has_angelone", return_value=False),
             patch("web.api._has_upstox", return_value=False),
-            patch("web.api._env", return_value="fake_value"),
+            patch(
+                "web.api._env",
+                side_effect=lambda k, d="": (
+                    "" if k in ("FYERS_FY_ID", "FYERS_TOTP_SECRET", "FYERS_PIN") else "fake_value"
+                ),
+            ),
             patch("brokers.session.register_broker") as mock_register,
             patch.dict(
                 "sys.modules",
@@ -205,7 +210,12 @@ class TestStartupAutoRestore:
             patch("web.api._has_groww", return_value=False),
             patch("web.api._has_angelone", return_value=False),
             patch("web.api._has_upstox", return_value=False),
-            patch("web.api._env", return_value="fake_value"),
+            patch(
+                "web.api._env",
+                side_effect=lambda k, d="": (
+                    "" if k in ("FYERS_FY_ID", "FYERS_TOTP_SECRET", "FYERS_PIN") else "fake_value"
+                ),
+            ),
             patch("brokers.session.register_broker") as mock_register,
             patch.dict(
                 "sys.modules",
@@ -256,7 +266,12 @@ class TestStartupAutoRestore:
             patch("web.api._has_groww", return_value=False),
             patch("web.api._has_angelone", return_value=False),
             patch("web.api._has_upstox", return_value=False),
-            patch("web.api._env", return_value="fake_value"),
+            patch(
+                "web.api._env",
+                side_effect=lambda k, d="": (
+                    "" if k in ("FYERS_FY_ID", "FYERS_TOTP_SECRET", "FYERS_PIN") else "fake_value"
+                ),
+            ),
             patch("brokers.session.register_broker") as mock_register,
             patch.dict(
                 "sys.modules",
@@ -286,7 +301,12 @@ class TestStartupAutoRestore:
             patch("web.api._has_groww", return_value=False),
             patch("web.api._has_angelone", return_value=False),
             patch("web.api._has_upstox", return_value=False),
-            patch("web.api._env", return_value="fake_value"),
+            patch(
+                "web.api._env",
+                side_effect=lambda k, d="": (
+                    "" if k in ("FYERS_FY_ID", "FYERS_TOTP_SECRET", "FYERS_PIN") else "fake_value"
+                ),
+            ),
             patch("brokers.session.register_broker") as mock_register,
             patch.dict(
                 "sys.modules",

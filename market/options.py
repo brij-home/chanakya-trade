@@ -431,17 +431,14 @@ def get_options_chain(
             or hasattr(nse_get_options_chain, "mock")
             or hasattr(nse_get_options_chain, "assert_called")
         )
-        if is_test_env and not is_mocked:
-            _store_in_chain_cache(cache_key, [])
-            return []
-
-        chain = nse_get_options_chain(underlying, expiry)
-        if chain:
-            chain = enrich_options_chain_deltas(chain, underlying, expiry)
-            record_source("options", "nse_scraper")
-            _store_in_chain_cache(cache_key, chain)
-            chain_result = chain
-            return chain
+        if not (is_test_env and not is_mocked):
+            chain = nse_get_options_chain(underlying, expiry)
+            if chain:
+                chain = enrich_options_chain_deltas(chain, underlying, expiry)
+                record_source("options", "nse_scraper")
+                _store_in_chain_cache(cache_key, chain)
+                chain_result = chain
+                return chain
 
         # Tier 4: Synthetic chain ONLY in explicit Mock/Demo mode (never during LIVE/PAPER trading with real brokers)
 

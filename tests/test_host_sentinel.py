@@ -6,8 +6,9 @@ Unit tests for engine/host_sentinel.py hardware and power sentinel.
 
 from __future__ import annotations
 
+import ctypes
 import platform
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from engine.host_sentinel import HostSentinel, host_sentinel
 
@@ -42,13 +43,14 @@ def test_cpu_affinity_recommendation():
 
 
 def test_sleep_prevention_mocked():
-    with patch("ctypes.windll.kernel32.SetThreadExecutionState", create=True) as mock_set_state:
-        mock_set_state.return_value = 1
+    mock_windll = MagicMock()
+    mock_windll.kernel32.SetThreadExecutionState.return_value = 1
+    with patch.object(ctypes, "windll", mock_windll, create=True):
         with patch.object(host_sentinel, "is_windows", True):
             success = host_sentinel.prevent_sleep(keep_display_on=False)
             assert success is True
             assert host_sentinel.get_capabilities().sleep_prevention_active is True
-            mock_set_state.assert_called_once()
+            mock_windll.kernel32.SetThreadExecutionState.assert_called_once()
 
             # Test allow sleep
             restore_success = host_sentinel.allow_sleep()
@@ -57,15 +59,15 @@ def test_sleep_prevention_mocked():
 
 
 def test_priority_elevation_mocked():
-    with patch("ctypes.windll.kernel32.GetCurrentProcess", create=True) as mock_get_proc:
-        with patch("ctypes.windll.kernel32.SetPriorityClass", create=True) as mock_set_prio:
-            mock_get_proc.return_value = 1234
-            mock_set_prio.return_value = True
-            with patch.object(host_sentinel, "is_windows", True):
-                elevate_ok = host_sentinel.elevate_process_priority()
-                assert elevate_ok is True
-                assert host_sentinel.get_capabilities().priority_elevated is True
+    mock_windll = MagicMock()
+    mock_windll.kernel32.GetCurrentProcess.return_value = 1234
+    mock_windll.kernel32.SetPriorityClass.return_value = True
+    with patch.object(ctypes, "windll", mock_windll, create=True):
+        with patch.object(host_sentinel, "is_windows", True):
+            elevate_ok = host_sentinel.elevate_process_priority()
+            assert elevate_ok is True
+            assert host_sentinel.get_capabilities().priority_elevated is True
 
-                restore_ok = host_sentinel.restore_process_priority()
-                assert restore_ok is True
-                assert host_sentinel.get_capabilities().priority_elevated is False
+            restore_ok = host_sentinel.restore_process_priority()
+            assert restore_ok is True
+            assert host_sentinel.get_capabilities().priority_elevated is False
