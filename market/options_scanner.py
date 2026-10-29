@@ -19,6 +19,7 @@ logger = logging.getLogger("market.options_scanner")
 
 
 from typing import Optional
+from market.instruments import format_strike
 
 from rich.console import Console
 from rich.table import Table
@@ -176,14 +177,14 @@ def scan_options(
                             oi_chg_pct = (c.oi_change / max(c.oi - c.oi_change, 1)) * 100
                             if oi_chg_pct >= 100:
                                 contract_sym = getattr(
-                                    c, "symbol", f"{sym}{int(c.strike)}{c.option_type}"
+                                    c, "symbol", f"{sym}{format_strike(c.strike)}{c.option_type}"
                                 )
                                 unusual_oi.append(
                                     {
                                         "symbol": sym,
                                         "strike": c.strike,
                                         "option_type": c.option_type,
-                                        "contract": f"{sym} {int(c.strike)} {c.option_type}",
+                                        "contract": f"{sym} {format_strike(c.strike)} {c.option_type}",
                                         "tradingsymbol": contract_sym,
                                         "expiry": getattr(c, "expiry", ""),
                                         "oi": c.oi,

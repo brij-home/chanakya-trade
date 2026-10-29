@@ -88,10 +88,19 @@ def _format_swing_inflection_alert(
 
     # 1. Actionable Levels & Risk Management (Invariant 12)
     entry_p = float(setup.entry_price or setup.ltp)
-    sl = float(setup.stop_loss)
     ltp_val = float(setup.ltp or entry_p)
-    # Strict Invariant: Bullish Stop Loss must be strictly below BOTH entry price AND current LTP
-    baseline_p = min(entry_p, ltp_val)
+
+    trigger_lvl = entry_p
+    if setup.timing_state in ("COILING_IMMINENT", "PULLBACK_RETEST"):
+        if setup.vcp_pivot_price > 0 and setup.vcp_pivot_price > ltp_val:
+            trigger_lvl = setup.vcp_pivot_price
+        elif trigger_lvl <= ltp_val:
+            trigger_lvl = round(ltp_val * 1.008, 1)
+
+    entry_anchor = trigger_lvl
+    sl = float(setup.stop_loss)
+    # Strict Invariant: Bullish Stop Loss must be strictly below BOTH entry anchor AND current LTP
+    baseline_p = min(entry_anchor, ltp_val)
     if sl >= baseline_p or sl <= 0:
         sl = round(baseline_p * 0.94, 2)
 
@@ -102,32 +111,33 @@ def _format_swing_inflection_alert(
     if (baseline_p - sl) < min_sl_floor:
         sl = round(baseline_p - min_sl_floor, 2)
 
+    risk_pts = max(min_sl_floor, round(entry_anchor - sl, 2))
+
     tgt1 = float(setup.target_1)
-    if tgt1 <= entry_p:
-        tgt1 = round(entry_p + abs(entry_p - sl) * 2.0, 2)
+    if tgt1 <= entry_anchor:
+        tgt1 = round(entry_anchor + risk_pts * 2.0, 2)
 
     tgt2 = float(setup.target_2)
     if tgt2 <= tgt1:
-        tgt2 = round(entry_p + abs(entry_p - sl) * 3.5, 2)
+        tgt2 = round(entry_anchor + risk_pts * 3.5, 2)
 
-    tgt_moon = float(setup.target_moonshot or round(entry_p + (entry_p - sl) * 5.0, 1))
+    tgt_moon = float(setup.target_moonshot or round(entry_anchor + risk_pts * 5.0, 1))
     if tgt_moon <= tgt2:
-        tgt_moon = round(entry_p + abs(entry_p - sl) * 6.0, 2)
+        tgt_moon = round(entry_anchor + risk_pts * 6.0, 2)
 
     # Defensive boundary calculations
-    risk_pts = max(0.1, abs(entry_p - sl))
-    reward_pts = max(0.1, abs(tgt1 - entry_p))
+    reward_pts = max(0.1, abs(tgt1 - entry_anchor))
     rr_ratio = round(reward_pts / risk_pts, 1) if risk_pts > 0 else 3.0
     if rr_ratio < 2.0:
         rr_ratio = 2.5
 
-    # Exact Entry Range (±0.8% of entry pivot)
-    e_min = round(max(sl + 0.1, entry_p * 0.995), 1)
-    e_max = round(entry_p * 1.012, 1)
+    # Exact Entry Range (±0.8% of entry anchor)
+    e_min = round(max(sl + 0.1, entry_anchor * 0.995), 1)
+    e_max = round(entry_anchor * 1.012, 1)
     entry_rg = f"₹{e_min:,.1f} – ₹{e_max:,.1f}"
 
-    # Strict No-Chase Boundary (+2.5% max extension above pivot)
-    no_chase_val = round(entry_p * 1.025, 1)
+    # Strict No-Chase Boundary (+2.5% max extension above anchor)
+    no_chase_val = round(entry_anchor * 1.025, 1)
 
     # 2. Timing State & Interception Pipeline Stage
     is_weekend = now_dt.weekday() in (5, 6)
@@ -223,13 +233,6 @@ def _format_swing_inflection_alert(
         "MULTIBAGGER": 86400 * 180,
     }
     ttl_val = ttl_map.get(time_horizon, 86400 * 14)
-
-    trigger_lvl = entry_p
-    if setup.timing_state in ("COILING_IMMINENT", "PULLBACK_RETEST"):
-        if setup.vcp_pivot_price > 0 and setup.vcp_pivot_price > ltp_val:
-            trigger_lvl = setup.vcp_pivot_price
-        elif trigger_lvl <= ltp_val:
-            trigger_lvl = round(ltp_val * 1.008, 1)
 
     return AutoAlert(
         alert_id=alert_id,

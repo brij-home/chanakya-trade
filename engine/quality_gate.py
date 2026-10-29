@@ -622,23 +622,8 @@ def evaluate_institutional_quality_gate(
     except Exception as e_suppressed:
         logger.debug(f"[engine.quality_gate] Non-fatal exception suppressed: {e_suppressed}")
 
-    if (
-        confidence >= 90
-        or len(confluences) >= 3
-        or (mtscm_res and mtscm_res.tier == "APEX_CONFLUENCE")
-    ):
-        # Downgrade if MTSCM detects severe multi-timeframe structural conflict
-        if mtscm_res and mtscm_res.tier == "DEFENSIVE_VETO" and len(mtscm_res.headwinds) >= 2:
-            conviction_tier = "DEFINED_RISK_ONLY"
-            execution_mandate = "HEDGED_SPREAD_MANDATORY"
-        else:
-            conviction_tier = "APEX_CONFLUENCE"
-    elif confidence >= 80 and execution_mandate == "STANDARD":
-        conviction_tier = "HIGH_CONVICTION"
-    elif confidence >= 70:
-        conviction_tier = "DEFINED_RISK_ONLY"
-        execution_mandate = "HEDGED_SPREAD_MANDATORY"
-    else:
+    # 1. Floor Gate: Sub-par conviction (<70) is immediately vetoed
+    if confidence < 70:
         return VetoVerdict(
             is_vetoed=True,
             veto_reason=f"Sub-Par Conviction ({confidence}/100 < 70 institutional floor). Mediocre expectancy rejected.",
@@ -649,6 +634,29 @@ def evaluate_institutional_quality_gate(
                 "Conviction score does not meet minimum institutional alpha threshold."
             ],
         )
+
+    # 2. Multi-Timeframe Structural Caution Downgrade:
+    # If MTSCM detects defensive posture (DEFENSIVE_VETO or DEFENSIVE_CAUTION),
+    # it strictly blocks APEX_CONFLUENCE and forces defined-risk spread mandate.
+    if mtscm_res and mtscm_res.tier in ("DEFENSIVE_VETO", "DEFENSIVE_CAUTION"):
+        conviction_tier = "DEFINED_RISK_ONLY"
+        execution_mandate = "HEDGED_SPREAD_MANDATORY"
+        confidence = min(confidence, 75)
+        verdict_metrics["confidence"] = confidence
+        notes.append(
+            f"MTSCM Downgrade: Multi-timeframe trend score ({mtscm_res.total_score:.1f}/100, {mtscm_res.tier}) lacks apex confluence. Defined-risk spread mandated."
+        )
+    elif (
+        confidence >= 90
+        or len(confluences) >= 3
+        or (mtscm_res and mtscm_res.tier == "APEX_CONFLUENCE")
+    ):
+        conviction_tier = "APEX_CONFLUENCE"
+    elif confidence >= 80 and execution_mandate == "STANDARD":
+        conviction_tier = "HIGH_CONVICTION"
+    else:
+        conviction_tier = "DEFINED_RISK_ONLY"
+        execution_mandate = "HEDGED_SPREAD_MANDATORY"
 
     return VetoVerdict(
         is_vetoed=False,

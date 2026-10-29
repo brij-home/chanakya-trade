@@ -230,3 +230,144 @@ def test_format_premarket_strike_radar(monkeypatch):
     assert "CE" in card
     assert "PE" in card
     assert "Chop Trap Zone" in card
+
+
+def test_daily_levels_save_to_disk_windows_file_lock_resilience(tmp_path, monkeypatch):
+    """
+    Verifies that save_to_disk survives Windows file locks ([WinError 5] Access is denied)
+    using exponential backoff retry and direct-write fallback.
+    """
+    store = DailyLevelsStore(persist_dir=tmp_path)
+    mock_df = pd.DataFrame(
+        [
+            {"open": 100, "high": 110, "low": 90, "close": 105, "volume": 100},
+            {"open": 105, "high": 115, "low": 95, "close": 110, "volume": 150},
+        ],
+        index=pd.to_datetime(["2026-10-06", "2026-10-07"]),
+    )
+    monkeypatch.setattr("market.history.get_ohlcv", lambda *a, **k: mock_df)
+    monkeypatch.setattr("market.quotes.get_quote", lambda *a, **k: {})
+
+    import os
+
+    store.compute_and_store("INFY", session_date="2026-10-26", persist=False)
+
+    replace_calls = 0
+    orig_replace = os.replace
+
+    def mock_replace(src, dst):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls < 3:
+            raise PermissionError("[WinError 5] Access is denied: 'data\\daily_levels\\test.tmp'")
+        return orig_replace(src, dst)
+
+    monkeypatch.setattr("os.replace", mock_replace)
+
+    # Should retry and succeed without raising PermissionError
+    store.save_to_disk("2026-10-26")
+    target_file = tmp_path / "daily_levels_2026-10-26.json"
+    assert target_file.exists()
+    assert replace_calls >= 3
+
+    # Also test permanent lock triggering direct-write fallback
+    replace_calls = 0
+
+    def mock_replace_always_fail(src, dst):
+        nonlocal replace_calls
+        replace_calls += 1
+        raise PermissionError("[WinError 5] Access is denied: permanent lock")
+
+    monkeypatch.setattr("os.replace", mock_replace_always_fail)
+    store.save_to_disk("2026-10-26")
+    assert (
+        replace_calls >= 5
+    )  # Retried 5 times on primary, plus sidecar attempt before direct-write fallback
+
+
+def test_daily_levels_concurrent_save_threads(tmp_path, monkeypatch):
+    """
+    Verifies that multiple concurrent threads calling compute_and_store and save_to_disk
+    do not trigger temporary file collisions or WinError 5 on Windows.
+    """
+    import concurrent.futures
+
+    store = DailyLevelsStore(persist_dir=tmp_path)
+    mock_df = pd.DataFrame(
+        [
+            {"open": 100, "high": 110, "low": 90, "close": 105, "volume": 100},
+            {"open": 105, "high": 115, "low": 95, "close": 110, "volume": 150},
+        ],
+        index=pd.to_datetime(["2026-10-06", "2026-10-07"]),
+    )
+    monkeypatch.setattr("market.history.get_ohlcv", lambda *a, **k: mock_df)
+    monkeypatch.setattr("market.quotes.get_quote", lambda *a, **k: {})
+
+    symbols = ["NIFTY", "BANKNIFTY", "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN"]
+
+    def worker(sym):
+        return store.compute_and_store(sym, session_date="2026-10-26", persist=True)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(worker, sym) for sym in symbols]
+        results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+    assert len(results) == len(symbols)
+    target_file = tmp_path / "daily_levels_2026-10-26.json"
+    assert target_file.exists()
+    with open(target_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    assert len(data) == len(symbols)
+
+
+def test_options_reentrant_lock_and_no_deadlock():
+    """Verifies that market.options locks are re-entrant and _store_in_chain_cache does not deadlock."""
+    from market.options import _CHAIN_CACHE_LOCK, _store_in_chain_cache
+    import threading
+
+    assert isinstance(_CHAIN_CACHE_LOCK, type(threading.RLock()))
+    # Test re-entrant lock acquisition
+    with _CHAIN_CACHE_LOCK:
+        _store_in_chain_cache("TEST_SYM:nearest", [])
+
+
+def test_fyers_symbol_etf_prefix_integrity():
+    """Verifies that equity ETFs starting with index names (e.g. NIFTYBEES) are mapped to -EQ, never -INDEX."""
+    from brokers.fyers import to_fyers_symbol
+
+    assert to_fyers_symbol("NIFTYBEES") == "NSE:NIFTYBEES-EQ"
+    assert to_fyers_symbol("NIFTYBEES-EQ") == "NSE:NIFTYBEES-EQ"
+    assert to_fyers_symbol("NIFTY 50") == "NSE:NIFTY50-INDEX"
+    assert to_fyers_symbol("BANKNIFTY") == "NSE:NIFTYBANK-INDEX"
+
+
+def test_is_valid_ws_symbol_rejects_multi_suffix():
+    """Verifies that corrupted multi-suffix symbols are rejected by the WebSocket validator."""
+    from market.ws_subscription_manager import is_valid_ws_symbol
+
+    assert is_valid_ws_symbol("NSE:NIFTYBEES-EQ-INDEX") is False
+    assert is_valid_ws_symbol("NSE:NIFTY-INDEX-INDEX") is False
+    assert is_valid_ws_symbol("NSE:NIFTY50-INDEX") is True
+    assert is_valid_ws_symbol("NSE:RELIANCE-EQ") is True
+
+
+def test_daily_levels_endpoints_benchmarks_and_symbol():
+    """Verifies that GET /api/levels/benchmarks and GET /api/levels/{symbol} return valid CPR and blueprints."""
+    from fastapi.testclient import TestClient
+    from web.api import app
+
+    client = TestClient(app)
+    resp = client.get("/api/levels/benchmarks")
+    assert resp.status_code == 200
+    b_data = resp.json()
+    assert "indices" in b_data
+    assert "session_date" in b_data
+
+    # Test single symbol endpoint
+    s_resp = client.get("/api/levels/NIFTY")
+    assert s_resp.status_code == 200
+    s_data = s_resp.json()
+    assert s_data.get("symbol") == "NIFTY"
+    assert "cpr" in s_data
+    assert "camarilla" in s_data
+    assert "blueprint" in s_data

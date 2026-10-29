@@ -18,8 +18,9 @@ Features:
 from __future__ import annotations
 
 from collections import OrderedDict
-from datetime import datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 import logging
+import os
 import threading
 import time
 from typing import Any, Callable, Optional, Set
@@ -38,11 +39,19 @@ MAX_SCOUT_SLOTS = 12  # Elastic scout capacity: utilizes all unallocated dynamic
 MIN_SCOUT_DWELL_SECONDS = 10.0  # Anti-thrashing minimum dwell time before idle eviction
 
 
-def _resolve_index_future(index_name: str) -> str:
+def _resolve_index_future(index_name: str, ref_date: Optional[date] = None) -> str:
     """Resolve spot index name to the active near-month tradable Index Future."""
+    now = datetime.now()
+    cur_date = ref_date or now.date()
+
+    from market.symbol_master import resolve_active_future
+
+    fut = resolve_active_future(index_name, ref_date=cur_date)
+    if fut:
+        return fut
+
     from market.calendar import get_active_derivative_expiry
 
-    now = datetime.now()
     name = index_name.upper().replace(" ", "").replace("-INDEX", "")
     if name in ("NIFTY50", "NIFTY_50"):
         name = "NIFTY"
@@ -55,15 +64,15 @@ def _resolve_index_future(index_name: str) -> str:
 
     prefix = "BSE" if name in ("SENSEX", "BANKEX") else "NSE"
     exp_date = get_active_derivative_expiry(
-        name, is_future=True, ref_date=now.date(), ref_time=now.time()
+        name, is_future=True, ref_date=cur_date, ref_time=now.time()
     )
     return f"{prefix}:{name}{exp_date.strftime('%y%b').upper()}FUT"
 
 
-def resolve_stock_future(symbol: str) -> str:
+def resolve_stock_future(symbol: str, ref_date: Optional[date] = None) -> str:
     """
     Resolve any stock symbol to its active near-month Fyers Stock Future.
-    E.g. 'RELIANCE', 'NSE:RELIANCE-EQ', 'BAJFINANCE' -> 'NSE:RELIANCE26OCTFUT'
+    E.g. 'RELIANCE', 'NSE:RELIANCE-EQ', 'BAJFINANCE' -> 'NSE:RELIANCE26NOVFUT'
     Returns empty string if not an eligible F&O stock or resolution fails.
     """
     if not symbol or not isinstance(symbol, str):
@@ -88,12 +97,20 @@ def resolve_stock_future(symbol: str) -> str:
     if clean not in STANDARD_LOT_SIZES:
         return ""
 
+    now = datetime.now()
+    cur_date = ref_date or now.date()
+
+    from market.symbol_master import resolve_active_future
+
+    fut = resolve_active_future(clean, ref_date=cur_date)
+    if fut:
+        return fut
+
     from market.calendar import get_active_derivative_expiry
 
-    now = datetime.now()
     try:
         exp_date = get_active_derivative_expiry(
-            clean, is_future=True, ref_date=now.date(), ref_time=now.time()
+            clean, is_future=True, ref_date=cur_date, ref_time=now.time()
         )
         return f"NSE:{clean}{exp_date.strftime('%y%b').upper()}FUT"
     except Exception as e_suppressed:
@@ -338,9 +355,9 @@ def get_default_core_grid(
     if session in ("EQUITY_NFO", "OFF_MARKET"):
         # Daytime: Primary Index Futures in user's priority order:
         # NIFTY, BANKNIFTY, MIDCPNIFTY (SENSEX & FINNIFTY sampled on need-basis via Scout)
-        nifty_fut = _resolve_index_future("NIFTY")
-        banknifty_fut = _resolve_index_future("BANKNIFTY")
-        midcp_fut = _resolve_index_future("MIDCPNIFTY")
+        nifty_fut = _resolve_index_future("NIFTY", ref_date=now.date())
+        banknifty_fut = _resolve_index_future("BANKNIFTY", ref_date=now.date())
+        midcp_fut = _resolve_index_future("MIDCPNIFTY", ref_date=now.date())
 
         core = [nifty_fut, banknifty_fut, midcp_fut]
 
@@ -375,7 +392,7 @@ def get_default_core_grid(
                 ]
             )
         elif focus == "SENSEX":
-            s_fut = _resolve_index_future("SENSEX")
+            s_fut = _resolve_index_future("SENSEX", ref_date=now.date())
             s_exp = get_active_derivative_expiry(
                 "SENSEX", is_future=False, ref_date=now.date(), ref_time=cur_time
             )
@@ -396,7 +413,7 @@ def get_default_core_grid(
             in STANDARD_LOT_SIZES
         ):
             clean_stk = focus.replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").strip()
-            stk_fut = resolve_stock_future(clean_stk)
+            stk_fut = resolve_stock_future(clean_stk, ref_date=now.date())
             if stk_fut and stk_fut not in core:
                 core.insert(0, stk_fut)
             stk_exp = get_active_derivative_expiry(
@@ -410,14 +427,18 @@ def get_default_core_grid(
             )
             from engine.strike_revolver import get_strike_step_for_symbol
 
-            stk_step = get_strike_step_for_symbol(clean_stk, spot=stk_spot)
-            stk_atm = int(round(stk_spot / float(stk_step)) * stk_step)
+            stk_step = float(get_strike_step_for_symbol(clean_stk, spot=stk_spot))
+            stk_atm = round(round(stk_spot / stk_step) * stk_step, 2)
             core.extend(
                 [
                     format_fyers_option_symbol(clean_stk, stk_exp, stk_atm, "CE"),
                     format_fyers_option_symbol(clean_stk, stk_exp, stk_atm, "PE"),
-                    format_fyers_option_symbol(clean_stk, stk_exp, stk_atm + int(stk_step), "CE"),
-                    format_fyers_option_symbol(clean_stk, stk_exp, stk_atm - int(stk_step), "PE"),
+                    format_fyers_option_symbol(
+                        clean_stk, stk_exp, round(stk_atm + stk_step, 2), "CE"
+                    ),
+                    format_fyers_option_symbol(
+                        clean_stk, stk_exp, round(stk_atm - stk_step, 2), "PE"
+                    ),
                 ]
             )
         elif focus == "NIFTY":
@@ -565,7 +586,7 @@ class TbtSocketWorker:
                 on_open=self._on_connect,
                 on_close=self._on_close,
                 on_error=self._on_error,
-                reconnect=True,
+                reconnect=False,  # Autonomous control: prevent Fyers SDK uncontrolled 5s hammer loops
             )
             self.ws.onopen = self._on_connect
             self.ws.background_flag = True
@@ -609,12 +630,32 @@ class TbtSocketWorker:
         if "429" in err_msg or "Too Many Requests" in err_msg:
             with self._lock:
                 self._consecutive_429 += 1
-                # Exponential backoff with ceiling: 60s, 120s, 240s, 480s, max 1800s (30m)
-                cooldown = min(60.0 * (2 ** (self._consecutive_429 - 1)), 1800.0)
+                # Standard exponential backoff (60s, 120s, 240s, max 300s)
+                cooldown = min(60.0 * (2 ** (self._consecutive_429 - 1)), 300.0)
                 self.status = "DEGRADED_429"
                 self.degraded_until = time.time() + cooldown
                 self.connected = False
-            if self._consecutive_429 <= 2:
+                ws_to_close = self.ws
+                self.ws = None
+
+            if ws_to_close:
+                try:
+                    setattr(ws_to_close, "restart_flag", False)
+                    if hasattr(ws_to_close, "close_connection"):
+                        ws_to_close.close_connection()
+                    elif hasattr(ws_to_close, "close"):
+                        ws_to_close.close()
+                except Exception as e_close:
+                    logger.debug(
+                        f"[TbtWorker-{self.worker_id}] Error socket close suppressed: {e_close}"
+                    )
+
+            if self.worker_id > 0:
+                logger.info(
+                    f"[TbtWorker-{self.worker_id}] Fyers single-user account limit active (429 connection cap). "
+                    f"Secondary worker quiescent; primary worker (Worker-0) multiplexes all 15 symbols across channels 1..3."
+                )
+            elif self._consecutive_429 <= 2:
                 logger.warning(
                     f"[TbtWorker-{self.worker_id}] Handshake 429 Too Many Requests (Fyers connection cap/throttle). "
                     f"Backing off for {cooldown:.0f}s (strike {self._consecutive_429})."
@@ -631,7 +672,8 @@ class TbtSocketWorker:
         with self._lock:
             if not self.connected or not self.ws:
                 return
-            desired_set = set(self.desired[:5])
+            desired_list = list(self.desired[:5])
+            desired_set = set(desired_list)
             to_remove = self.subscribed - desired_set
             to_add = desired_set - self.subscribed
 
@@ -643,39 +685,45 @@ class TbtSocketWorker:
                     try:
                         from fyers_apiv3.FyersWebsocket.tbt_ws import SubscriptionModes
 
-                        self.ws.unsubscribe(
-                            symbol_tickers=set(to_remove_tbt),
-                            channelNo="1",
-                            mode=SubscriptionModes.DEPTH,
-                        )
+                        for ch in ("1", "2", "3"):
+                            self.ws.unsubscribe(
+                                symbol_tickers=set(to_remove_tbt),
+                                channelNo=ch,
+                                mode=SubscriptionModes.DEPTH,
+                            )
                         logger.info(
                             f"[TbtWorker-{self.worker_id}] Unsubscribed {len(to_remove_tbt)} symbols: {to_remove_tbt}"
                         )
                     except Exception as e:
                         logger.debug(f"[TbtWorker-{self.worker_id}] Unsubscribe failed: {e}")
 
-            to_add_tbt: set[str] = set()
+            to_add_tbt: list[str] = []
             if to_add:
                 self.subscribed.update(to_add)
-                to_add_tbt = {s for s in to_add if is_tbt_eligible_symbol(s)}
+                to_add_tbt = [s for s in desired_list if s in to_add and is_tbt_eligible_symbol(s)]
                 if to_add_tbt:
                     try:
                         from fyers_apiv3.FyersWebsocket.tbt_ws import SubscriptionModes
 
-                        self.ws.subscribe(
-                            symbol_tickers=set(to_add_tbt),
-                            channelNo="1",
-                            mode=SubscriptionModes.DEPTH,
-                        )
+                        for i in range(0, len(to_add_tbt), 5):
+                            ch = str((i // 5) + 1)
+                            chunk = to_add_tbt[i : i + 5]
+                            self.ws.subscribe(
+                                symbol_tickers=set(chunk),
+                                channelNo=ch,
+                                mode=SubscriptionModes.DEPTH,
+                            )
                         logger.info(
-                            f"[TbtWorker-{self.worker_id}] Subscribed to {len(to_add_tbt)} symbols on Versova TBT: {to_add_tbt}"
+                            f"[TbtWorker-{self.worker_id}] Subscribed to {len(to_add_tbt)} symbols across channels: {to_add_tbt}"
                         )
                     except Exception as e:
                         logger.debug(f"[TbtWorker-{self.worker_id}] Subscribe failed: {e}")
 
-            if hasattr(self.ws, "switchChannel") and bool(to_add_tbt or self.subscribed):
+            if hasattr(self.ws, "switchChannel") and self.subscribed:
                 try:
-                    self.ws.switchChannel(set(["1"]), set())
+                    num_channels = min(3, max(1, (len(self.subscribed) + 4) // 5))
+                    active_channels = set(str(i) for i in range(1, num_channels + 1))
+                    self.ws.switchChannel(active_channels, set())
                 except Exception as e:
                     logger.debug(f"[TbtWorker-{self.worker_id}] switchChannel failed: {e}")
 
@@ -917,6 +965,7 @@ class FyersTbtManager:
             return
         self._ws: Any = None
         self._workers: list[TbtSocketWorker] = []
+        self._multi_socket_entitled: bool = os.environ.get("FYERS_TBT_WORKERS", "3") != "1"
         self._connected: bool = False
         self._access_token: str = ""
         self._app_id: str = ""
@@ -933,6 +982,7 @@ class FyersTbtManager:
         self._core_grid: list[str] = []
         self._todays_expiry: list[str] = []
         self._scout: OrderedDict[str, float] = OrderedDict()
+        self._scout_ttl: dict[str, float] = {}
         self._current_session: str = "AUTO"
         self._primary_focus_index: Optional[str] = None
         self._last_atm_strikes: dict[str, int] = {}
@@ -1000,6 +1050,8 @@ class FyersTbtManager:
 
     def start(self, access_token: str, app_id: str) -> None:
         """Start Fyers TBT WebSocket multi-connection pool in background threads."""
+        if os.environ.get("DISABLE_TBT_SOCKET") == "1":
+            return
         if self.is_connected and self._access_token == access_token:
             return
 
@@ -1163,6 +1215,8 @@ class FyersTbtManager:
                 if active_session != "OFF_MARKET":
                     now_w = time.time()
                     for w in self._workers:
+                        if not self._multi_socket_entitled and w.worker_id > 0:
+                            continue
                         if not w.connected and (
                             w.status == "DISCONNECTED"
                             or (w.status == "DEGRADED_429" and now_w >= w.degraded_until)
@@ -1230,10 +1284,20 @@ class FyersTbtManager:
         def _staggered_worker_connect():
             if len(self._workers) > 1 and not self._stop_event.is_set():
                 time.sleep(5.0)
+                if self._workers[0].status == "DEGRADED_429":
+                    logger.info(
+                        "[TbtManager] Primary worker rate-limited (429). Halting secondary worker connection."
+                    )
+                    return
                 if not self._stop_event.is_set():
                     self._workers[1].connect()
             if len(self._workers) > 2 and not self._stop_event.is_set():
                 time.sleep(6.0)
+                if (
+                    self._workers[0].status == "DEGRADED_429"
+                    or self._workers[1].status == "DEGRADED_429"
+                ):
+                    return
                 if not self._stop_event.is_set():
                     self._workers[2].connect()
 
@@ -1250,6 +1314,20 @@ class FyersTbtManager:
                 self.refresh_grid()
             else:
                 self.sync_subscriptions()
+        elif status in ("DEGRADED_429", "DISCONNECTED"):
+            if status == "DEGRADED_429" and worker_id > 0 and self._workers:
+                if self._multi_socket_entitled:
+                    self._multi_socket_entitled = False
+                    logger.info(
+                        f"[TbtManager] Secondary worker {worker_id} rate-limited (429). "
+                        "Recognized single-socket retail account entitlement. "
+                        "Gracefully parking secondary workers in standby to protect IP quota."
+                    )
+                    for w in self._workers[1:]:
+                        w.status = "STANDBY_SINGLE_SOCKET"
+                        w.desired = []
+            # Proactively rebalance top priority slots onto remaining connected workers
+            self.sync_subscriptions()
 
     def _handle_connect(self, *args, **kwargs) -> None:
         """Legacy callback maintained for single-socket compatibility."""
@@ -2198,17 +2276,25 @@ class FyersTbtManager:
             chunks = [desired_list[i : i + 5] for i in range(0, 15, 5)]
 
             if self._workers:
-                for idx, chunk in enumerate(chunks):
-                    if idx < len(self._workers):
-                        worker = self._workers[idx]
-                        worker.desired = chunk
-                        if worker.connected:
-                            worker.sync()
-
                 connected_workers = [w for w in self._workers if w.connected]
+                disconnected_workers = [w for w in self._workers if not w.connected]
+
                 if connected_workers:
+                    # Dynamically prioritize slots onto healthy connected workers
+                    for w in disconnected_workers:
+                        w.desired = []
+
+                    for idx, worker in enumerate(connected_workers):
+                        worker_chunk = desired_list[idx * 5 : (idx + 1) * 5]
+                        worker.desired = worker_chunk
+                        worker.sync()
+
                     self._subscribed = set().union(*(w.subscribed for w in connected_workers))
                 else:
+                    # All workers disconnected or initializing: stage chunks statically
+                    for idx, chunk in enumerate(chunks):
+                        if idx < len(self._workers):
+                            self._workers[idx].desired = chunk
                     self._subscribed = desired_set
             else:
                 self._subscribed = desired_set
@@ -2326,31 +2412,16 @@ class FyersTbtManager:
             )
             return False
         with self._slots_lock:
-            # Operator/sampling intent overrides eviction cooldown
             self._evicted_cooldowns.pop(tradable, None)
             self._evicted_cooldowns.pop(symbol, None)
             self._scout[tradable] = time.time()
+            if duration_sec > 0:
+                self._scout_ttl[tradable] = duration_sec
             self.sync_subscriptions()
             logger.info(
                 f"[TbtManager] Elastic Scout sampling symbol: {tradable} (Duration: {duration_sec}s)"
             )
 
-        if duration_sec > 0:
-
-            def _expire():
-                time.sleep(duration_sec)
-                with self._slots_lock:
-                    if (
-                        tradable in self._scout
-                        and (time.time() - self._scout[tradable]) >= duration_sec
-                    ):
-                        del self._scout[tradable]
-                        self.sync_subscriptions()
-                        logger.info(
-                            f"[TbtManager] Finished sampling, released slot for: {tradable}"
-                        )
-
-            threading.Thread(target=_expire, daemon=True).start()
         return True
 
     def promote_jit_scout(
@@ -2395,6 +2466,8 @@ class FyersTbtManager:
 
             now_t = time.time()
             self._scout[tradable] = now_t
+            if duration_sec > 0:
+                self._scout_ttl[tradable] = duration_sec
 
             if len(self._scout) > MAX_SCOUT_SLOTS:
                 sorted_by_eviction = sorted(
@@ -2409,29 +2482,12 @@ class FyersTbtManager:
                 for k, _ in sorted_by_eviction[:excess]:
                     if k != tradable:
                         del self._scout[k]
+                        self._scout_ttl.pop(k, None)
 
             self.sync_subscriptions()
             logger.info(
                 f"[TbtManager] JIT Scout promoted: {tradable} (Reason: {reason}, Duration: {duration_sec:.0f}s)"
             )
-
-        if duration_sec > 0:
-
-            def _auto_release():
-                time.sleep(duration_sec)
-                with self._slots_lock:
-                    if (
-                        tradable in self._scout
-                        and (time.time() - self._scout[tradable]) >= (duration_sec - 1.0)
-                        and tradable not in self._in_flight
-                    ):
-                        del self._scout[tradable]
-                        self.sync_subscriptions()
-                        logger.debug(f"[TbtManager] JIT Scout released slot for: {tradable}")
-
-            threading.Thread(
-                target=_auto_release, daemon=True, name=f"jit-rel-{tradable[:10]}"
-            ).start()
 
         return True
 
@@ -2465,10 +2521,15 @@ class FyersTbtManager:
 
                 duration = now - promoted_at
                 depth_data = self._depth_cache.get(sym, {})
-                last_pkt_ts = depth_data.get("timestamp")
+                last_pkt_ts = depth_data.get("received_at") or depth_data.get("timestamp")
 
-                # Condition 1: Exceeded normal scout TTL
-                effective_ttl = ttl_sec if ttl_sec is not None else 120.0
+                # Condition 1: Exceeded normal scout TTL or designated duration
+                custom_ttl = self._scout_ttl.get(sym)
+                effective_ttl = (
+                    custom_ttl
+                    if custom_ttl is not None
+                    else (ttl_sec if ttl_sec is not None else 120.0)
+                )
                 if duration >= effective_ttl:
                     stale_keys.append(sym)
                     continue
@@ -2476,7 +2537,13 @@ class FyersTbtManager:
                 # Condition 2: Dead scout fast-eviction (strictly during active market hours)
                 # If held for >= 30s during active trading hours and has received ZERO packets,
                 # it is dead on exchange/feed. During off-market/weekend, silence is normal.
-                if is_active_market and duration >= 30.0 and not last_pkt_ts:
+                # Guard against false eviction when the worker servicing this symbol was offline/degraded.
+                assigned_connected = (
+                    any(w.connected and sym in w.subscribed for w in self._workers)
+                    if self._workers
+                    else True
+                )
+                if is_active_market and duration >= 30.0 and not last_pkt_ts and assigned_connected:
                     logger.info(
                         f"[TbtManager] Revolving idle TBT scout {sym}: zero packets received after {duration:.0f}s"
                     )
@@ -2486,6 +2553,7 @@ class FyersTbtManager:
 
             for k in stale_keys:
                 del self._scout[k]
+                self._scout_ttl.pop(k, None)
                 self._slot_allocated_at.pop(k, None)
                 cleansed += 1
 
@@ -2502,9 +2570,14 @@ class FyersTbtManager:
                         and sym not in self._scout
                     ):
                         alloc_t = self._slot_allocated_at.get(sym, now)
-                        if (now - alloc_t) >= 45.0:
+                        assigned_connected = (
+                            any(w.connected and sym in w.subscribed for w in self._workers)
+                            if self._workers
+                            else True
+                        )
+                        if (now - alloc_t) >= 45.0 and assigned_connected:
                             depth_data = self._depth_cache.get(sym, {})
-                            if not depth_data.get("timestamp"):
+                            if not (depth_data.get("received_at") or depth_data.get("timestamp")):
                                 logger.info(
                                     f"[TbtManager] Revolving idle sector scout {sym}: zero packets received after {now - alloc_t:.0f}s"
                                 )
@@ -2543,6 +2616,7 @@ class FyersTbtManager:
             for c in list(self._scout.keys()):
                 if c in candidates:
                     del self._scout[c]
+                    self._scout_ttl.pop(c, None)
                     evicted_from.append("SCOUT")
 
             # Check in-flight
@@ -2691,6 +2765,9 @@ class FyersTbtManager:
                                 "ltp": tick.ltp,
                                 "status": "WS_L1",
                                 "timestamp": getattr(tick, "timestamp", now),
+                                "received_at": getattr(
+                                    tick, "received_at", getattr(tick, "timestamp", now)
+                                ),
                                 "obi_50": 0.0,
                                 "density_score": 0.0,
                                 "spread": 0.0,
@@ -2709,16 +2786,24 @@ class FyersTbtManager:
                     except Exception as e:
                         logger.debug(f"[TbtManager] Fallback get_quote suppressed: {e}")
 
-                last_pkt_ts = depth_data.get("timestamp")
-                if last_pkt_ts:
-                    ts_val = (
-                        float(last_pkt_ts)
-                        if float(last_pkt_ts) < 2e9
-                        else float(last_pkt_ts) / 1000.0
-                    )
-                    pkt_age_s = round(max(0.0, now - ts_val), 2)
+                # Prefer local packet arrival timestamp to eliminate exchange clock skew
+                last_local_ts = depth_data.get("received_at")
+                if not last_local_ts:
+                    last_pkt_ts = depth_data.get("timestamp")
+                    if last_pkt_ts:
+                        last_local_ts = (
+                            float(last_pkt_ts)
+                            if float(last_pkt_ts) < 2e9
+                            else float(last_pkt_ts) / 1000.0
+                        )
+
+                if last_local_ts and float(last_local_ts) > 0:
+                    pkt_age_s = round(max(0.0, now - float(last_local_ts)), 2)
+                    threshold = 15.0 if depth_data.get("status") == "LIVE" else 30.0
                     is_stale = (
-                        (pkt_age_s > 15.0) if depth_data.get("status") != "L2_FALLBACK" else False
+                        (pkt_age_s > threshold)
+                        if depth_data.get("status") != "L2_FALLBACK"
+                        else False
                     )
                 else:
                     pkt_age_s = None

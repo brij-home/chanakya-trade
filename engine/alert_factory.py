@@ -27,6 +27,7 @@ from typing import Any, Optional
 from config.constants import IST
 from engine.alert_identity import canonical_alert_symbol, generate_alert_id
 from engine.alert_model import AutoAlert
+from market.instruments import format_strike
 
 logger = logging.getLogger("chanakya.engine.alert_factory")
 
@@ -284,7 +285,9 @@ class AlertFactory:
             alert_type=alert_type,
             symbol=clean_und,
             session_date=sess_d,
-            variant=f"{int(strike)}{opt_type_clean}" if not variant else variant,
+            variant=f"{format_strike(strike).replace('.', 'p')}{opt_type_clean}"
+            if not variant
+            else variant,
         )
 
         plan = dict(actionable_plan or {})

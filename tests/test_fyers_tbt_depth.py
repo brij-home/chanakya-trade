@@ -708,6 +708,9 @@ def test_options_chain_single_flight_coalescing():
                 option_type="CE",
                 expiry="2026-10-29",
                 last_price=120.0,
+                oi=50000,
+                oi_change=1200,
+                volume=15000,
             )
         ]
 

@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta, date
 from typing import Any, Optional
 
+from market.instruments import format_strike
+
 logger = logging.getLogger("bot.alert_templates")
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -330,7 +332,7 @@ def resolve_expiry_cycle(
         # Pattern B0: Broker YYYYMMDD format e.g. M&M202610272950PE, HAL202609294800PE, UNITDSPR202609291380PE
         if dt is None:
             m_yyyymmdd = re.search(
-                r"([A-Za-z0-9_&]+?)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d*(?:CE|PE)",
+                r"([A-Za-z0-9_&]+?)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d*(?:\.\d+)?(?:CE|PE)",
                 c_upper,
             )
             if m_yyyymmdd:
@@ -344,7 +346,8 @@ def resolve_expiry_cycle(
         # Only index options have weekly expiries; day must be valid 01-31
         if dt is None and is_index:
             m_weekly = re.search(
-                r"([A-Za-z0-9_&]+?)(\d{2})([1-9OND])(0[1-9]|[12]\d|3[01])\d*(?:CE|PE)", c_upper
+                r"([A-Za-z0-9_&]+?)(\d{2})([1-9OND])(0[1-9]|[12]\d|3[01])\d*(?:\.\d+)?(?:CE|PE)",
+                c_upper,
             )
             if m_weekly:
                 _sym, yy_str, m_code, dd_str = m_weekly.groups()
@@ -373,7 +376,7 @@ def resolve_expiry_cycle(
 
         # Pattern C: NSE Monthly format e.g. RELIANCE26SEP3000PE or MCX CRUDEOIL26OCT8750CE
         if dt is None:
-            m_monthly = re.search(r"[A-Z0-9_&]+(\d{2})([A-Z]{3})\d+(?:CE|PE)", c_upper)
+            m_monthly = re.search(r"[A-Z0-9_&]+(\d{2})([A-Z]{3})\d+(?:\.\d+)?(?:CE|PE)", c_upper)
             if m_monthly:
                 yy_str, mon_str = m_monthly.groups()
                 month_map = {
@@ -558,7 +561,9 @@ def _parse_ts_to_dt(ts_str: Optional[str]) -> Optional[datetime]:
         try:
             dt = datetime.strptime(cleaned, fmt)
             if fmt == "%H:%M:%S":
-                now = datetime.now()
+                from config.constants import now_ist
+
+                now = now_ist()
                 dt = dt.replace(year=now.year, month=now.month, day=now.day)
             return dt
         except ValueError:
@@ -692,13 +697,13 @@ def format_contract_display(contract: str) -> str:
     if m_fut_spaced:
         return f"{m_fut_spaced.group(1)} {m_fut_spaced.group(2)} FUT"
 
-    # Already well-formatted (has spaces): e.g. "HAL 4800 PE", "NIFTY 25000 CE"
-    m_spaced = re.match(r"^([A-Z0-9_]+)\s+(\d+)\s*(CE|PE|FUT)$", c.upper().strip())
+    # Already well-formatted (has spaces): e.g. "HAL 4800 PE", "NIFTY 25000 CE", "ASHOKLEY 142.5 PE"
+    m_spaced = re.match(r"^([A-Z0-9_]+)\s+(\d+(?:\.\d+)?)\s*(CE|PE|FUT)$", c.upper().strip())
     if m_spaced:
         sym, strike, opt = m_spaced.groups()
         if opt == "FUT":
             return f"{sym} FUT"
-        return f"{sym} {int(strike)} {opt}"
+        return f"{sym} {format_strike(strike)} {opt}"
 
     c_upper = c.upper()
 
@@ -721,28 +726,28 @@ def format_contract_display(contract: str) -> str:
 
     # MStock / broker YYYYMMDD format: e.g. HAL202609294800PE, M&M202610272950PE
     # Must start with "20" followed by 6 digits (8-digit date YYYYMMDD)
-    m_yyyymmdd = re.match(r"^([A-Z&]+)(20\d{6})(\d+)(CE|PE)$", c_upper)
+    m_yyyymmdd = re.match(r"^([A-Z&]+)(20\d{6})(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
     if m_yyyymmdd:
         sym, _date, strike_str, opt = m_yyyymmdd.groups()
-        return f"{sym} {int(strike_str)} {opt}"
+        return f"{sym} {format_strike(strike_str)} {opt}"
 
     # NSE Weekly compact: e.g. NIFTY2692524800CE (YY + month-code(1-9/O/N/D) + DD(2) + strike + CE/PE)
-    m_weekly = re.match(r"^([A-Z&]+)\d{2}[1-9OND]\d{2}(\d+)(CE|PE)$", c_upper)
+    m_weekly = re.match(r"^([A-Z&]+)\d{2}[1-9OND]\d{2}(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
     if m_weekly:
         sym, strike_str, opt = m_weekly.groups()
-        return f"{sym} {int(strike_str)} {opt}"
+        return f"{sym} {format_strike(strike_str)} {opt}"
 
-    # NSE Monthly: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE
-    m_monthly = re.match(r"^([A-Z0-9_&]+)\d{2}[A-Z]{3}(\d+)(CE|PE)$", c_upper)
+    # NSE Monthly: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE, ASHOKLEY26NOV142.5PE
+    m_monthly = re.match(r"^([A-Z0-9_&]+)\d{2}[A-Z]{3}(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
     if m_monthly:
         sym, strike_str, opt = m_monthly.groups()
-        return f"{sym} {int(strike_str)} {opt}"
+        return f"{sym} {format_strike(strike_str)} {opt}"
 
-    # Compact without date: e.g. HDFCBANK680CE, MIDCPNIFTY14250CE, M&M2950PE
-    m_compact = re.match(r"^([A-Z0-9_&]+?)(\d+)(CE|PE)$", c_upper)
+    # Compact without date: e.g. HDFCBANK680CE, MIDCPNIFTY14250CE, M&M2950PE, ASHOKLEY142.5PE
+    m_compact = re.match(r"^([A-Z0-9_&]+?)(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
     if m_compact:
         sym, strike_str, opt = m_compact.groups()
-        return f"{sym} {int(strike_str)} {opt}"
+        return f"{sym} {format_strike(strike_str)} {opt}"
 
     # Fallback: return as-is (already clean or unrecognised format)
     return c.strip()
@@ -781,7 +786,7 @@ def format_signal_badge_and_lot(
     # 1. Infer or lookup symbol
     inferred_sym = symbol
     if not inferred_sym:
-        m_sym = re.search(r"\b([A-Z0-9_&]{2,})\s+\d+\s*(?:CE|PE)\b", s)
+        m_sym = re.search(r"\b([A-Z0-9_&]{2,})\s+\d+(?:\.\d+)?\s*(?:CE|PE)\b", s)
         if m_sym:
             inferred_sym = m_sym.group(1)
         else:
@@ -911,8 +916,8 @@ def format_signal_badge_and_lot(
         pattern = r"(@\s*₹?\s*[\d,]+(?:\.\d+)?)"
         if re.search(pattern, s):
             s = re.sub(pattern, rf"\1 (Lot: {resolved_lot})", s, count=1)
-        elif bool(re.search(r"\b\d+\s*(?:CE|PE)\b", s)):
-            s = re.sub(r"(\b\d+\s*(?:CE|PE)\b)", rf"\1 (Lot: {resolved_lot})", s, count=1)
+        elif bool(re.search(r"\b\d+(?:\.\d+)?\s*(?:CE|PE)\b", s)):
+            s = re.sub(r"(\b\d+(?:\.\d+)?\s*(?:CE|PE)\b)", rf"\1 (Lot: {resolved_lot})", s, count=1)
 
     # 5. Prepend Badge if not already present
     has_leading_badge = bool(re.match(r"^[🟢🔴🟡⚡🎯🏆🛑⚠️🚨💎🌙🛢️💱🪙🛡️]", s))
@@ -1005,7 +1010,7 @@ def parse_contract_components(
 
     # 2. Broker YYYYMMDD format: e.g. HAL202609294800PE, MIDCPNIFTY2026092914250CE
     if stk is None:
-        m_yyyymmdd = re.match(r"^([A-Z]+)(20\d{6})(\d+)(CE|PE)$", c_upper)
+        m_yyyymmdd = re.match(r"^([A-Z]+)(20\d{6})(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
         if m_yyyymmdd:
             und_found, dt_str, stk_raw, opt_found = m_yyyymmdd.groups()
             if not und:
@@ -1023,7 +1028,7 @@ def parse_contract_components(
 
     # 3. NSE Weekly compact: e.g. NIFTY2692524800CE
     if stk is None:
-        m_weekly = re.match(r"^([A-Z]+)(\d{2}[1-9OND]\d{2})(\d+)(CE|PE)$", c_upper)
+        m_weekly = re.match(r"^([A-Z]+)(\d{2}[1-9OND]\d{2})(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
         if m_weekly:
             und_found, exp_code, stk_raw, opt_found = m_weekly.groups()
             if not und:
@@ -1033,9 +1038,9 @@ def parse_contract_components(
             if not expiry_date:
                 exp_extracted = exp_code
 
-    # 4. NSE Monthly compact: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE
+    # 4. NSE Monthly compact: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE, ASHOKLEY26NOV142.5PE
     if stk is None:
-        m_monthly = re.match(r"^([A-Z]+)(\d{2}[A-Z]{3})(\d+)(CE|PE)$", c_upper)
+        m_monthly = re.match(r"^([A-Z]+)(\d{2}[A-Z]{3})(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
         if m_monthly:
             und_found, exp_code, stk_raw, opt_found = m_monthly.groups()
             if not und:
@@ -1045,9 +1050,9 @@ def parse_contract_components(
             if not expiry_date:
                 exp_extracted = exp_code
 
-    # 5. Compact no-date: e.g. HDFCBANK680CE, MIDCPNIFTY14250CE
+    # 5. Compact no-date: e.g. HDFCBANK680CE, MIDCPNIFTY14250CE, ASHOKLEY142.5PE
     if stk is None:
-        m_compact = re.match(r"^([A-Z]+?)(\d+)(CE|PE)$", c_upper)
+        m_compact = re.match(r"^([A-Z]+?)(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
         if m_compact:
             und_found, stk_raw, opt_found = m_compact.groups()
             if not und:
@@ -1070,9 +1075,7 @@ def parse_contract_components(
         und = re.sub(r"[^A-Z]", "", c_upper) if c_upper else "STOCK"
 
     # Formatted strike string
-    stk_str = ""
-    if stk is not None and stk > 0:
-        stk_str = f"{int(stk)}" if stk.is_integer() else f"{stk}"
+    stk_str = format_strike(stk) if stk is not None and stk > 0 else ""
 
     is_option = bool(stk_str and opt in ("CE", "PE"))
 
@@ -1416,11 +1419,11 @@ class FNOAlertData:
         if not contract or contract.strip().endswith("OPTION"):
             strike = d.get("strike")
             if strike:
-                contract = f"{und} {int(float(strike))} {opt_type}"
+                contract = f"{und} {format_strike(strike)} {opt_type}"
             elif spot and spot > 0:
                 step = 100 if "BANK" in und.upper() else (50 if "NIFTY" in und.upper() else 10)
-                atm_strike = int(round(spot / step) * step)
-                contract = f"{und} {atm_strike} {opt_type}"
+                atm_strike = round(spot / step) * step
+                contract = f"{und} {format_strike(atm_strike)} {opt_type}"
             else:
                 contract = f"{und} OPTION"
 
@@ -1859,9 +1862,7 @@ class MilestoneAlertData:
             or act_plan.get("contract")
         )
         if not contract and getattr(alert, "strike", None) and getattr(alert, "option_type", None):
-            contract = (
-                f"{getattr(alert, 'symbol', '')} {int(alert.strike)} {alert.option_type}".strip()
-            )
+            contract = f"{getattr(alert, 'symbol', '')} {format_strike(alert.strike)} {alert.option_type}".strip()
 
         # Determine payoff direction (higher price = profit vs lower price = profit)
         alert_type_raw = str(getattr(alert, "alert_type", "SETUP") or "").upper()
@@ -3814,8 +3815,10 @@ def render_milestone_alert(
         act_verb = "Roll Down" if "DOWN" in action else "Roll Up" if "UP" in action else "Roll"
         pnl_pct = rec.get("pnl_pct")
         pnl_str = f"Lock +{pnl_pct:.0f}% ITM Gains · " if pnl_pct else ""
-        target_disp = rec_contract or (f"{int(rec_strike)}" if rec_strike else "ATM strike")
-        cur_disp = f"{int(cur_strike)}" if cur_strike else "current strike"
+        target_disp = rec_contract or (
+            f"{format_strike(rec_strike)}" if rec_strike else "ATM strike"
+        )
+        cur_disp = f"{format_strike(cur_strike)}" if cur_strike else "current strike"
         base_line = f"\n🔄 <b>STRIKE ROLL:</b> Book <code>{cur_disp}</code> &amp; {act_verb} to <code>{target_disp}</code> ({pnl_str}Reset Gamma Leverage)"
 
         # Institutional financial enrichment
@@ -5333,7 +5336,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         inst = format_contract_display(
             raw_contract
             or (
-                f"{alert.symbol} {int(getattr(alert, 'strike', 0) or 0)} {opt_type_hint}".strip()
+                f"{alert.symbol} {format_strike(getattr(alert, 'strike', 0))} {opt_type_hint}".strip()
                 if getattr(alert, "strike", None)
                 else alert.symbol
             )
@@ -5365,8 +5368,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             if "SPREAD" in inst.upper() or "/" in inst:
                 naked_sym = getattr(alert, "contract_symbol", None)
                 if not naked_sym or "SPREAD" in str(naked_sym).upper():
-                    strk = int(getattr(alert, "strike", 0) or 0)
-                    if strk > 0 and opt_type_hint:
+                    strk = format_strike(getattr(alert, "strike", 0))
+                    if strk and opt_type_hint:
                         naked_sym = f"{alert.symbol} {strk} {opt_type_hint}"
                 if naked_sym and "SPREAD" not in str(naked_sym).upper():
                     inst = format_contract_display(naked_sym)
@@ -5686,6 +5689,11 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             and free_roll_data.get("protocol_summary")
         )
         profit_rule = actionable_plan.get("profit_rule")
+        if profit_rule and isinstance(profit_rule, str):
+            if tgt and "Target 1" in profit_rule:
+                profit_rule = re.sub(r"Target\s*1\s*\([^)]+\)", f"Target 1 ({tgt})", profit_rule)
+            if tgt2 and "Target 2" in profit_rule:
+                profit_rule = re.sub(r"Target\s*2\s*\([^)]+\)", f"Target 2 ({tgt2})", profit_rule)
         # Suppress duplicate Playbook line when Free-Roll Protocol is active
         rule_str = (
             f"\n• <b>Playbook:</b> <i>{profit_rule}</i>"
@@ -6517,7 +6525,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         return format_contract_display(m.group(0))
 
     clean_hl = re.sub(
-        r"(?:[A-Z0-9_&]{2,})(?:\d{8}|\d{2}[A-Z]{3}|\d{2}[1-9OND]\d{2})\d+(?:CE|PE)",
+        r"(?:[A-Z0-9_&]{2,})(?:\d{8}|\d{2}[A-Z]{3}|\d{2}[1-9OND]\d{2})\d+(?:\.\d+)?(?:CE|PE)",
         _replace_contract_token,
         clean_hl,
     )
@@ -6612,7 +6620,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         opt_type_val = getattr(alert, "option_type", "") or ""
         sym_val = getattr(alert, "symbol", "ALERT")
         if strike_val and opt_type_val:
-            clean_hl = f"{sym_val} {int(strike_val)} {opt_type_val} · Momentum Surge"
+            clean_hl = f"{sym_val} {format_strike(strike_val)} {opt_type_val} · Momentum Surge"
         else:
             clean_hl = f"{sym_val} · {getattr(alert, 'alert_type', 'BREAKOUT').replace('_', ' ')}"
 
@@ -6627,15 +6635,46 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             clean_summary,
             flags=re.IGNORECASE,
         ).strip()
+        # Strip duplicate execution directives (e.g. "Enter JSWSTEEL 1210 PE @ ₹32.15.", "Enter ₹1,212.4.")
+        clean_summary = re.sub(
+            r"\bEnter\s+[^.!?|]*?@\s*[^.!?|]+[.!?|]?",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip()
+        clean_summary = re.sub(
+            r"\bEnter\s+[\$₹]?[\d,]+(?:\.\d+)?[.!?|]?",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip()
+        # Strip duplicate Stop Loss statements (e.g. "Stop loss: ₹30.2.", "SL: ₹30.2.")
+        clean_summary = re.sub(
+            r"\b(?:Stop\s*loss|Stoploss|SL)\s*:[^.!?|]+[.!?|]?",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip()
+        # Strip duplicate Target statements (e.g. "Target 1: ₹39.2.", "Target: ₹39.2.")
+        clean_summary = re.sub(
+            r"\b(?:Target\s*\d*|T[123]|Upside\s+target)\s*:[^.!?|]+[.!?|]?",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip()
+        # Strip trailing/embedded R:R notes (e.g. "(R:R 2.0)", "R:R 1:2.0")
+        clean_summary = re.sub(
+            r"\(?\s*R:R\s*(?:1:)?[\d.]+\s*(?:\([^)]*\))?\)?\.?",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip()
         # Strip redundant Entry/SL/Target lists if plan_str already formats them
         clean_summary = re.sub(
             r"\s*(?:Entry|SL|T1|T2|Target|Risk|Reward|R:R)\s*:[^|]+(?:\||$)",
             "",
             clean_summary,
             flags=re.IGNORECASE,
-        ).strip()
-        clean_summary = re.sub(
-            r"R:R\s*1:[\d.]+\s*\([^)]*\)", "", clean_summary, flags=re.IGNORECASE
         ).strip()
         # Strip high-conviction inflection / scanner catalyst boilerplate
         clean_summary = re.sub(
@@ -6695,6 +6734,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             if re.search(r"^(?:Risk|Max Loss|Capped Risk|Reward|R:R)\s*:", p, flags=re.IGNORECASE):
                 continue
             if re.search(r"^(?:Entry|SL|T1|T2|Target)\s*:", p, flags=re.IGNORECASE):
+                continue
+            if re.search(r"^(?:Stop\s*loss|Stoploss)\s*:", p, flags=re.IGNORECASE):
+                continue
+            if re.search(r"^Enter\s+", p, flags=re.IGNORECASE):
                 continue
             if re.search(r"\bSL\s+at\s+₹?[\d,.]+", p, flags=re.IGNORECASE):
                 continue
@@ -6930,7 +6973,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             and inst
             and (
                 inst not in clean_hl
-                and (not getattr(alert, "strike", None) or str(int(alert.strike)) not in clean_hl)
+                and (
+                    not getattr(alert, "strike", None)
+                    or format_strike(alert.strike) not in clean_hl
+                )
             )
         ):
             if clean_hl in ("BUY PE", "BUY CE", "BUY_PE", "BUY_CE"):
@@ -7320,7 +7366,9 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 ):
                     lc_str = re.sub(r"\b(?:NSE|BSE|NFO|MCX):[A-Z0-9_]+\b", "", lc_str)
                     lc_str = re.sub(
-                        r"\b[A-Z0-9_]+(?:\d{2}[A-Z]{3}|\d{4}[0-9A-Z]{2})\d+(?:CE|PE)\b", "", lc_str
+                        r"\b[A-Z0-9_]+(?:\d{2}[A-Z]{3}|\d{4}[0-9A-Z]{2})\d+(?:\.\d+)?(?:CE|PE)\b",
+                        "",
+                        lc_str,
                     )
                     lc_str = re.sub(r"\s+", " ", lc_str).strip()
                     c_excerpt = _clean_sig_phrase(lc_str, 50)
@@ -7393,6 +7441,70 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         scratch_line = f"\n• 🛑 <b>0DTE Stagnation Bailout:</b> <i>{scratch_reason}</i>"
         plan_str = f"{plan_str.strip()}{scratch_line}" if plan_str else scratch_line.strip()
 
+    # ── Central Pivot Range (CPR) & Daily Levels Anchor Line ─────────────
+    cpr_line_str = ""
+    try:
+        cpr_dict = metrics_d.get("cpr")
+        if not cpr_dict:
+            try:
+                from engine.daily_levels import get_daily_levels
+
+                dl = get_daily_levels(getattr(alert, "symbol", ""))
+                if dl and dl.cpr:
+                    cpr_dict = dl.cpr
+            except Exception:
+                cpr_dict = None
+
+        if isinstance(cpr_dict, dict) and (
+            cpr_dict.get("pivot") or cpr_dict.get("tc") or cpr_dict.get("bc")
+        ):
+            c_piv = float(cpr_dict.get("pivot", 0.0) or 0.0)
+            c_tc = float(cpr_dict.get("tc", 0.0) or cpr_dict.get("top_central", 0.0) or 0.0)
+            c_bc = float(cpr_dict.get("bc", 0.0) or cpr_dict.get("bottom_central", 0.0) or 0.0)
+            c_top = float(cpr_dict.get("top", 0.0) or max(c_tc, c_bc) or 0.0)
+            c_btm = float(cpr_dict.get("bottom", 0.0) or min(c_tc, c_bc) or 0.0)
+            c_width = float(
+                cpr_dict.get("width_pct", 0.0) or cpr_dict.get("cpr_width_pct", 0.0) or 0.0
+            )
+            c_type = str(metrics_d.get("cpr_type") or cpr_dict.get("cpr_type") or "").upper()
+            if not c_type or c_type == "UNKNOWN":
+                c_type = (
+                    "NARROW"
+                    if cpr_dict.get("is_narrow")
+                    else ("WIDE" if cpr_dict.get("is_wide") else "AVERAGE")
+                )
+
+            # Spot proximity/position vs CPR
+            spot_px = float(
+                getattr(alert, "underlying_spot", 0.0) or getattr(alert, "ltp", 0.0) or 0.0
+            )
+            if spot_px > 0 and c_top > 0 and c_btm > 0:
+                if spot_px > c_top:
+                    pos_tag = "Above CPR (Support)"
+                elif spot_px < c_btm:
+                    pos_tag = "Below CPR (Resistance)"
+                else:
+                    pos_tag = "Inside CPR (Trap Zone)"
+            else:
+                pos_tag = ""
+
+            if c_type == "NARROW":
+                badge = f"🎯 <b>CPR:</b> NARROW ({c_width:.2f}%) | Pivot: <code>₹{c_piv:,.1f}</code> [BC: ₹{c_btm:,.1f} / TC: ₹{c_top:,.1f}] · <i>Trend Expansion</i>"
+            elif c_type == "WIDE":
+                badge = f"⚠️ <b>CPR:</b> WIDE ({c_width:.2f}%) | Pivot: <code>₹{c_piv:,.1f}</code> [Btm: ₹{c_btm:,.1f} / Top: ₹{c_top:,.1f}] · <i>Chop Containment</i>"
+            else:
+                pos_suffix = f" · <i>{pos_tag}</i>" if pos_tag else ""
+                badge = f"📍 <b>CPR:</b> Pivot: <code>₹{c_piv:,.1f}</code> [BC: ₹{c_btm:,.1f} / TC: ₹{c_top:,.1f}] ({c_width:.2f}%){pos_suffix}"
+
+            # Append ADR exhaustion if available
+            adr_exh = metrics_d.get("adr_exhaustion_pct")
+            if adr_exh is not None and float(adr_exh) > 0:
+                badge += f" · ADR: {float(adr_exh):.0f}%"
+
+            cpr_line_str = "• " + badge if not badge.startswith("•") else badge
+    except Exception as e_cpr_tpl:
+        logger.debug(f"[bot.alert_templates] CPR rendering error non-fatal: {e_cpr_tpl}")
+
     lines = [
         tg_header,
         "━━━━━━━━━━━━━━━━━━━━",
@@ -7404,6 +7516,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         lines.append(plan_str.strip())
     if sector_line_str:
         lines.append(sector_line_str)
+    if cpr_line_str:
+        lines.append(cpr_line_str)
     if signals_line_str:
         lines.append(signals_line_str)
     if reason_line:

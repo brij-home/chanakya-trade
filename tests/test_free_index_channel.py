@@ -655,3 +655,93 @@ def test_free_index_new_call_vs_update_number_header_disambiguation():
     rendered_trail = render_free_index_alert(put_alert, in_market=True)
     assert "UPDATE #2 · TRAIL SL" in rendered_trail
     assert "NEW CALL" not in rendered_trail
+
+
+def test_free_index_router_coordinate_sanctity_and_spot_scaling(monkeypatch):
+    """
+    Verify coordinate sanctity:
+    1. Tight option setup with wide structural spot anchor (e.g. 6.3 pt option risk, 60 pt spot anchor)
+       is APPROVED because the option risk is tight, and spot anchor is for synthetic SL, not rupee risk.
+    2. Spot / Futures setup with excessive relative risk (>0.60% of spot price) is REJECTED.
+    3. Spot / Futures setup with tight relative risk (<=0.60% of spot price) is APPROVED.
+    """
+    monkeypatch.setenv("TELEGRAM_FREE_INDEX_CHAT_ID", "-1004298387260")
+    monkeypatch.setenv("TELEGRAM_FREE_INDEX_ENABLED", "1")
+
+    # 1. Option trade: tight option risk (6.3 pts), wide spot anchor (60.9 pts on MIDCPNIFTY) -> MUST PASS
+    opt_trade = AutoAlert(
+        alert_id="aa-midcp-tight-opt-001",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="MIDCPNIFTY",
+        contract_symbol="MIDCPNIFTY13275CE",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="MIDCPNIFTY 13275 CE Call Setup",
+        summary="Tight option scalp",
+        ltp=326.45,
+        trigger_level=326.45,
+        target_level=424.3,
+        stop_loss=320.13,  # 6.32 pts risk
+        underlying_spot=13314.3,
+        confidence=90,
+        segment="FNO_INDEX",
+        actionable_plan={
+            "action": "BULL CALL SPREAD",
+            "spot_stop_loss": 13253.4,  # 60.9 pts away on spot
+            "option_plan": {
+                "contract_symbol": "MIDCPNIFTY13275CE",
+                "entry_premium": 326.45,
+                "sl_premium": 320.13,
+            },
+        },
+    )
+    assert free_index_router.is_candidate(opt_trade) is True
+
+    # 2. Spot/Futures trade: wide stop (>0.60% of spot price, e.g. 1.2% risk on BANKNIFTY) -> MUST FAIL
+    wide_spot_trade = AutoAlert(
+        alert_id="aa-bn-wide-spot-001",
+        alert_type="ORB_BREAKOUT",
+        stage="IGNITED",
+        symbol="BANKNIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="BANKNIFTY Spot Breakout",
+        summary="Wide swing stop",
+        ltp=50000.0,
+        trigger_level=50000.0,
+        target_level=51500.0,
+        stop_loss=49400.0,  # 600 pts risk = 1.2% > 0.60%
+        underlying_spot=50000.0,
+        confidence=88,
+        segment="FNO_INDEX",
+        actionable_plan={
+            "action": "BUY FUT",
+            "spot_stop_loss": 49400.0,
+        },
+    )
+    assert free_index_router.is_candidate(wide_spot_trade) is False
+
+    # 3. Spot/Futures trade: tight intraday stop (<=0.60% of spot price, e.g. 150 pts on 50,000 BANKNIFTY = 0.30%) -> MUST PASS
+    tight_spot_trade = AutoAlert(
+        alert_id="aa-bn-tight-spot-001",
+        alert_type="ORB_BREAKOUT",
+        stage="IGNITED",
+        symbol="BANKNIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="BANKNIFTY Tight Breakout",
+        summary="Tight intraday stop",
+        ltp=50000.0,
+        trigger_level=50000.0,
+        target_level=50500.0,
+        stop_loss=49850.0,  # 150 pts risk = 0.30% <= 0.60%
+        underlying_spot=50000.0,
+        confidence=88,
+        segment="FNO_INDEX",
+        actionable_plan={
+            "action": "BUY FUT",
+            "spot_stop_loss": 49850.0,
+        },
+    )
+    assert free_index_router.is_candidate(tight_spot_trade) is True

@@ -606,6 +606,20 @@ class AlertManager:
                     continue
                 if not _is_market_hours(alert.exchange):
                     continue
+
+                # Invalidate if option contract has expired
+                try:
+                    from engine.alert_expiry import is_contract_expired
+
+                    if is_contract_expired(alert.symbol):
+                        alert.is_invalidated = True
+                        alert.invalidated_at = now_iso
+                        alert.invalidation_reason = f"Option contract expired: {alert.symbol}"
+                        invalidated.append(alert)
+                        continue
+                except Exception as e_exp:
+                    logger.debug(f"[engine.alerts] Expiry check error for {alert.symbol}: {e_exp}")
+
                 if alert.invalidation_threshold is None:
                     continue
 
@@ -1027,6 +1041,28 @@ class AlertManager:
         except Exception as e:
             logger.warning(f"[AlertManager] _save error: {e}")
 
+    def purge_expired_option_alerts(self) -> int:
+        """Invalidate and purge any option contract alerts whose contract expiry has passed."""
+        try:
+            from engine.alert_expiry import is_contract_expired
+
+            purged = 0
+            now_iso = datetime.now().isoformat(timespec="seconds")
+            for alert in self._alerts:
+                if alert.triggered or alert.is_invalidated:
+                    continue
+                if is_contract_expired(alert.symbol):
+                    alert.is_invalidated = True
+                    alert.invalidated_at = now_iso
+                    alert.invalidation_reason = f"Option contract expired: {alert.symbol}"
+                    purged += 1
+            if purged > 0:
+                self._save()
+            return purged
+        except Exception as exc:
+            logger.debug(f"[AlertManager] Error purging expired option alerts: {exc}")
+            return 0
+
     def _load(self) -> None:
         try:
             target_path = get_alerts_file()
@@ -1038,6 +1074,7 @@ class AlertManager:
                     for d in data
                     if isinstance(d, dict)
                 ]
+                self.purge_expired_option_alerts()
         except Exception as e:
             logger.warning(f"[AlertManager] _load error: {e}")
             self._alerts = []

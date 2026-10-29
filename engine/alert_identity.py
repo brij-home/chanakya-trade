@@ -95,7 +95,8 @@ def generate_alert_id(
 
     parts = [p for p in (prefix, type_slug, clean_sym) if p]
     if variant:
-        clean_var = re.sub(r"[^a-zA-Z0-9-]", "", str(variant).lower().strip().replace(" ", "-"))
+        clean_var = str(variant).lower().strip().replace(" ", "-").replace(".", "p")
+        clean_var = re.sub(r"[^a-zA-Z0-9-]", "", clean_var)
         if clean_var:
             parts.append(clean_var)
     parts.append(date_str)

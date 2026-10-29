@@ -16,7 +16,7 @@ logger = logging.getLogger("market.history")
 
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -59,6 +59,9 @@ MAX_MEMORY_DFS = (
 _df_memory_cache: OrderedDict[str, tuple[float, pd.DataFrame]] = OrderedDict()
 _DF_TTL_SECONDS = 3600.0  # 1 hour in-memory cache for daily EOD history (immutable past bars)
 _INTRADAY_TTL_SECONDS = 300.0  # 5 minutes in-memory cache for intraday (5m, 15m) bars
+
+_IN_FLIGHT_HISTORY_LOCK = threading.Lock()
+_IN_FLIGHT_HISTORY_EVENTS: dict[str, tuple[threading.Event, list[Any]]] = {}
 
 
 def clear_df_memory_cache() -> int:
@@ -378,23 +381,14 @@ def get_ohlcv(
             logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
     # Tier 2.8: 24x7 Crypto Provider (Binance REST & Stream)
+    from config.market_universes import CRYPTO_BASE_ASSETS, CRYPTO_SYMBOLS
+
     is_crypto = (
         exchange.upper() in ("CRYPTO", "BINANCE")
         or symbol.upper().startswith("CRYPTO:")
-        or clean_sym
-        in (
-            "BTC",
-            "ETH",
-            "SOL",
-            "BNB",
-            "BTCUSDT",
-            "ETHUSDT",
-            "SOLUSDT",
-            "BNBUSDT",
-            "BTC-USD",
-            "ETH-USD",
-            "SOL-USD",
-        )
+        or clean_sym in CRYPTO_SYMBOLS
+        or clean_sym in CRYPTO_BASE_ASSETS
+        or clean_sym.endswith(("USDT", "USDC"))
     )
     if not raw and is_crypto:
         try:
@@ -419,28 +413,59 @@ def get_ohlcv(
         except Exception as e_suppressed:
             logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
-    # Tier 3: explicit data-provider API → yfinance → disk cache.
-    if not raw:
-        try:
-            from brokers.session import get_data_broker, get_data_broker_key
+    # Tier 3: explicit data-provider API → yfinance → disk cache with in-flight coalescing.
+    # CRITICAL: Indian equity brokers (Fyers, Zerodha, etc.) do not host crypto assets.
+    if not raw and not is_crypto:
+        flight_key = (
+            f"{clean_sym}:{exchange}:{kite_interval}:{orig_from_date}:{to_date}:{days}:{as_of}"
+        )
+        is_leader = False
+        evt: Optional[threading.Event] = None
+        box: Optional[list[Any]] = None
 
-            broker = get_data_broker()
-            # Only use broker for real data — skip if it's the mock broker
-            if not getattr(broker, "_is_mock", False):
-                raw = broker.get_historical_data(
-                    symbol=symbol,
-                    exchange=exchange,
-                    interval=kite_interval,
-                    from_date=from_date,
-                    to_date=to_date,
-                )
-                provider_name = get_data_broker_key() or broker.__class__.__name__.lower()
+        with _IN_FLIGHT_HISTORY_LOCK:
+            if flight_key in _IN_FLIGHT_HISTORY_EVENTS:
+                evt, box = _IN_FLIGHT_HISTORY_EVENTS[flight_key]
             else:
-                # Mock broker: use yfinance
-                raw = _yfinance_fallback(symbol, exchange, kite_interval, from_date, to_date)
-                provider_name = "yfinance"
-        except Exception as e_suppressed:
-            logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
+                is_leader = True
+                evt = threading.Event()
+                box = [None, None]  # [raw, provider_name]
+                _IN_FLIGHT_HISTORY_EVENTS[flight_key] = (evt, box)
+
+        if not is_leader and evt is not None and box is not None:
+            # Follower thread: wait for leader to complete fetch without issuing duplicate broker calls
+            if evt.wait(timeout=15.0):
+                if box[0] is not None:
+                    raw = box[0]
+                    provider_name = box[1] or "broker_coalesced"
+        else:
+            try:
+                from brokers.session import get_data_broker, get_data_broker_key
+
+                broker = get_data_broker()
+                # Only use broker for real data — skip if it's the mock broker
+                if not getattr(broker, "_is_mock", False):
+                    raw = broker.get_historical_data(
+                        symbol=symbol,
+                        exchange=exchange,
+                        interval=kite_interval,
+                        from_date=from_date,
+                        to_date=to_date,
+                    )
+                    provider_name = get_data_broker_key() or broker.__class__.__name__.lower()
+                else:
+                    # Mock broker: use yfinance
+                    raw = _yfinance_fallback(symbol, exchange, kite_interval, from_date, to_date)
+                    provider_name = "yfinance"
+            except Exception as e_suppressed:
+                logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
+            finally:
+                if box is not None and evt is not None:
+                    box[0] = raw
+                    box[1] = provider_name
+                    evt.set()
+                    with _IN_FLIGHT_HISTORY_LOCK:
+                        _IN_FLIGHT_HISTORY_EVENTS.pop(flight_key, None)
 
     if not raw:
         raw = _yfinance_fallback(symbol, exchange, kite_interval, from_date, to_date)
@@ -486,6 +511,48 @@ def get_ohlcv(
             logger.debug(f"[market.history] Non-fatal exception suppressed: {e_suppressed}")
 
     if not raw:
+        # Tier 4.5: Mathematical Resampling from Daily Bars for Weekly / Monthly Intervals
+        if kite_interval in ("week", "month"):
+            try:
+                lookback_days = max(days * 7 if kite_interval == "week" else days * 30, 90)
+                df_day_base = get_ohlcv(
+                    symbol=symbol,
+                    exchange=exchange,
+                    interval="day",
+                    from_date=from_date,
+                    to_date=to_date,
+                    days=lookback_days,
+                    as_of=as_of,
+                    include_live_candle=include_live_candle,
+                )
+                if df_day_base is not None and len(df_day_base) >= 5:
+                    col_map = {"open": "first", "high": "max", "low": "min", "close": "last"}
+                    if "volume" in df_day_base.columns:
+                        col_map["volume"] = "sum"
+                    freq = "W-FRI" if kite_interval == "week" else "ME"
+                    try:
+                        resampled_df = df_day_base.resample(freq).agg(col_map).dropna()
+                    except ValueError:
+                        resampled_df = df_day_base.resample("M").agg(col_map).dropna()
+
+                    if not resampled_df.empty:
+                        resampled_df.attrs["provenance"] = {
+                            "data_source": "RESAMPLED_FROM_DAILY",
+                            "provider": "resampler",
+                            "as_of": to_date.isoformat(),
+                            "snapshot_id": None,
+                            "reproducible": not include_live_candle,
+                        }
+                        with _df_memory_cache_lock:
+                            while len(_df_memory_cache) >= MAX_MEMORY_DFS:
+                                _df_memory_cache.popitem(last=False)
+                            _df_memory_cache[cache_key] = (now_ts, resampled_df.copy())
+                        return resampled_df
+            except Exception as e_resample:
+                logger.debug(
+                    f"[market.history] Daily to {kite_interval} resample error: {e_resample}"
+                )
+
         empty_df = pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
         with _df_memory_cache_lock:
             while len(_df_memory_cache) >= MAX_MEMORY_DFS:

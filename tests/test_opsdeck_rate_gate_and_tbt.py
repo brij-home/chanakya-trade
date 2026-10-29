@@ -440,3 +440,71 @@ def test_cleanse_stale_scouts_respects_market_hours():
         assert cleansed >= 1
         assert sym in mgr._evicted_cooldowns
         assert sym not in mgr.compute_desired_subscriptions()
+
+
+def test_tbt_dynamic_rebalance_on_worker_degradation():
+    """Verify that when worker 1 or 2 is degraded/disconnected, top-priority symbols are consolidated on healthy workers."""
+    from market.fyers_tbt_manager import TbtSocketWorker
+
+    mgr = FyersTbtManager()
+    w0 = TbtSocketWorker(0, lambda: "TOK", lambda s, d: None, lambda wid, st: None)
+    w1 = TbtSocketWorker(1, lambda: "TOK", lambda s, d: None, lambda wid, st: None)
+    w2 = TbtSocketWorker(2, lambda: "TOK", lambda s, d: None, lambda wid, st: None)
+
+    w0.connected = True
+    w1.connected = False
+    w1.status = "DEGRADED_429"
+    w2.connected = False
+    w2.status = "DEGRADED_429"
+
+    mgr._workers = [w0, w1, w2]
+    desired_symbols = [f"NSE:HIGHPRIORITY{i}FUT" for i in range(15)]
+    mgr._core_grid = desired_symbols[:15]
+
+    mgr.sync_subscriptions()
+
+    # Only w0 is connected: it must get the top 5 high-priority symbols, while degraded workers get 0
+    assert len(w0.desired) == 5
+    assert w0.desired == desired_symbols[:5]
+    assert len(w1.desired) == 0
+    assert len(w2.desired) == 0
+
+    # When w1 recovers:
+    w1.connected = True
+    w1.status = "CONNECTED"
+    mgr.sync_subscriptions()
+
+    assert len(w0.desired) == 5
+    assert w0.desired == desired_symbols[:5]
+    assert len(w1.desired) == 5
+    assert w1.desired == desired_symbols[5:10]
+    assert len(w2.desired) == 0
+
+
+def test_tbt_staleness_calculation_uses_local_received_at():
+    """Verify that exchange clock skew (timestamp 60s behind) does not cause false staleness when received_at is fresh."""
+    mgr = FyersTbtManager()
+    sym = "NSE:RELIANCE-EQ"
+    now = time.time()
+
+    with mgr._slots_lock:
+        mgr._subscribed = {sym}
+        mgr._core_grid = [sym]
+        mgr._slot_allocated_at[sym] = now - 120.0
+        # Simulated exchange clock skew: exchange timestamp is 60s in the past, but packet arrived 1s ago locally
+        mgr._depth_cache[sym] = {
+            "symbol": sym,
+            "status": "LIVE",
+            "timestamp": now - 60.0,  # Exchange clock skew
+            "received_at": now - 1.0,  # Real local arrival time
+            "ltp": 2500.0,
+            "obi_50": 0.25,
+            "density_score": 80.0,
+        }
+
+    slots_status = mgr.get_active_slots_status()
+    slot = next((s for s in slots_status["slots"] if s["symbol"] == sym), None)
+    assert slot is not None
+    # Must use received_at (approx 1.0s), NOT timestamp (60s)
+    assert slot["last_packet_age_seconds"] <= 2.5
+    assert slot["is_stale"] is False

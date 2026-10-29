@@ -152,6 +152,96 @@ def detect_turtle_soup_sweep(
     sess_date = session_date or datetime.now(IST).date()
     is_bullish = sweep_type == "BULLISH_SPRING"
     direction = "BULLISH" if is_bullish else "BEARISH"
+
+    # ── VWAP Trend Alignment Guard ──
+    effective_vwap = vwap if (vwap and vwap > 0) else None
+    if effective_vwap:
+        if is_bullish and curr_ltp < effective_vwap * 0.985:
+            logger.debug(
+                f"[TurtleSoup] Suppressed bullish spring on {clean_sym}: Deeply submerged below VWAP "
+                f"(Spot ₹{curr_ltp:,.1f} vs VWAP ₹{effective_vwap:,.1f})"
+            )
+            return None
+        if not is_bullish and curr_ltp > effective_vwap * 1.015:
+            logger.debug(
+                f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: Extended high above VWAP "
+                f"(Spot ₹{curr_ltp:,.1f} vs VWAP ₹{effective_vwap:,.1f})"
+            )
+            return None
+
+    # ── Microstructure / TBT 50-Depth Order Book Confirmation ──
+    try:
+        from market.fyers_tbt_manager import (
+            fyers_tbt_manager,
+            FyersTbtManager,
+            resolve_tradable_tbt_symbol,
+        )
+
+        mgr = (
+            fyers_tbt_manager
+            if getattr(fyers_tbt_manager, "is_connected", False)
+            else FyersTbtManager()
+        )
+        tradable = resolve_tradable_tbt_symbol(clean_sym)
+        depth = mgr.get_50_depth(tradable or clean_sym)
+        if depth and depth.get("status") not in ("UNAVAILABLE", None):
+            obi_val = float(depth.get("obi_50", 0.0) or 0.0)
+            fortress_bid = bool(depth.get("fortress_bid_wall_confirmed", False))
+            fortress_ask = bool(depth.get("fortress_ask_wall_confirmed", False))
+
+            if is_bullish and (obi_val <= -0.20 or fortress_ask):
+                logger.debug(
+                    f"[TurtleSoup] Suppressed bullish spring on {clean_sym}: "
+                    f"Heavy ask resistance (OBI={obi_val:.2f}, AskWall={fortress_ask})"
+                )
+                return None
+            if not is_bullish and (obi_val >= +0.20 or fortress_bid):
+                logger.debug(
+                    f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: "
+                    f"Heavy bid support (OBI={obi_val:.2f}, BidWall={fortress_bid})"
+                )
+                return None
+    except Exception as e_tbt:
+        logger.debug(f"[TurtleSoup] TBT order book check non-fatal exception: {e_tbt}")
+
+    # ── Camarilla Floor/Ceiling Trap Prevention ──
+    try:
+        from engine.daily_levels import get_daily_levels
+
+        dl = get_daily_levels(clean_sym, session_date=str(sess_date))
+        if dl and dl.camarilla:
+            cam = dl.camarilla
+            cam_l4 = float(cam.get("l4", 0.0) or 0.0)
+            cam_h4 = float(cam.get("h4", 0.0) or 0.0)
+
+            # If bullish spring: verify we aren't trapped below Camarilla L4 breakdown floor
+            if (
+                is_bullish
+                and cam_l4 > 0
+                and curr_ltp < cam_l4
+                and abs(curr_ltp - cam_l4) / cam_l4 <= 0.10
+            ):
+                logger.debug(
+                    f"[TurtleSoup] Suppressed bullish spring on {clean_sym}: "
+                    f"Spot ₹{curr_ltp:,.1f} trapped below Camarilla L4 floor ₹{cam_l4:,.1f}"
+                )
+                return None
+
+            # If bearish upthrust: verify we aren't shorting an active Camarilla H4 breakout
+            if (
+                not is_bullish
+                and cam_h4 > 0
+                and curr_ltp > cam_h4
+                and abs(curr_ltp - cam_h4) / cam_h4 <= 0.10
+            ):
+                logger.debug(
+                    f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: "
+                    f"Spot ₹{curr_ltp:,.1f} above Camarilla H4 breakout ceiling ₹{cam_h4:,.1f}"
+                )
+                return None
+    except Exception as e_cam:
+        logger.debug(f"[TurtleSoup] Camarilla check non-fatal exception: {e_cam}")
+
     variant = "spring" if is_bullish else "upthrust"
     alert_id = generate_alert_id(
         clean_sym, "TURTLE_SOUP_SWEEP", session_date=sess_date, variant=variant

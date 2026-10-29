@@ -53,6 +53,8 @@ class PairAnalysis:
     a_return_30d: float = 0.0  # 30-day return %
     b_return_30d: float = 0.0
     spread_return: float = 0.0  # A return - B return (30d)
+    last_close_a: float = 0.0
+    last_close_b: float = 0.0
 
     def print_analysis(self) -> None:
         sig_style = {
@@ -192,6 +194,8 @@ def analyze_pair(
         a_return_30d=round(a_ret, 1),
         b_return_30d=round(b_ret, 1),
         spread_return=round(a_ret - b_ret, 1),
+        last_close_a=round(float(a[-1]), 2) if len(a) > 0 else 0.0,
+        last_close_b=round(float(b[-1]), 2) if len(b) > 0 else 0.0,
     )
 
 

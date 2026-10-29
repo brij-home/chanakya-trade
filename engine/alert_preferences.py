@@ -984,7 +984,8 @@ class AlertPreferencesManager:
                 or "DE_RISK" in target_status
                 or "T1" in target_status
                 or "T2" in target_status
-                or "TARGET" in target_status
+                or ("TARGET" in target_status and "PENDING" not in target_status)
+                or "FINAL" in target_status
             )
 
             # Milestones check

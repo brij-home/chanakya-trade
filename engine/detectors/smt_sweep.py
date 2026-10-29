@@ -39,6 +39,7 @@ import pandas as pd
 from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 from engine.smt_divergence import evaluate_smt_divergence
+from market.instruments import format_strike
 
 logger = logging.getLogger("chanakya.detectors.smt_sweep")
 IST = ZoneInfo("Asia/Kolkata")
@@ -112,6 +113,16 @@ def detect_smt_sweep(
     except Exception:
         lot_sz = 1
 
+    # ── Institutional Daily Levels & Central Pivot Range (CPR) ───────────
+    from engine.daily_levels import evaluate_cpr_gate
+
+    cpr_bear = evaluate_cpr_gate(
+        clean_sym, spot, "BEARISH", session_date=str(now_dt.date()), is_reversal=True
+    )
+    cpr_bull = evaluate_cpr_gate(
+        clean_sym, spot, "BULLISH", session_date=str(now_dt.date()), is_reversal=True
+    )
+
     # Candle price action extraction from 5m OHLCV
     last_c = spot
     last_o = spot
@@ -143,6 +154,8 @@ def detect_smt_sweep(
         dist_to_dh_pct = (day_high - spot) / max(1.0, day_high) * 100.0
         # Testing or swept day high (within 0.28% of Day High)
         is_near_high = -0.15 <= dist_to_dh_pct <= 0.28
+        if cpr_bear.is_vetoed:
+            is_near_high = False
 
         if is_near_high:
             smt_res = evaluate_smt_divergence(
@@ -175,7 +188,10 @@ def detect_smt_sweep(
                     if pe_cand:
                         pe_strike = float(getattr(pe_cand, "strike", 0.0) or 0.0)
                         pe_ltp = float(getattr(pe_cand, "last_price", 0.0) or 0.0)
-                        pe_sym = getattr(pe_cand, "symbol", "") or f"{clean_sym}{int(pe_strike)}PE"
+                        pe_sym = (
+                            getattr(pe_cand, "symbol", "")
+                            or f"{clean_sym}{format_strike(pe_strike)}PE"
+                        )
 
                         tick_step = (
                             2.0
@@ -235,7 +251,7 @@ def detect_smt_sweep(
                             option_type="PE",
                             option_premium=pe_ltp,
                             contract_symbol=pe_sym,
-                            headline=f"🎯 [SMT REVERSAL] {reason_lead.upper()}: {clean_sym} {int(pe_strike)} PE @ ₹{pe_ltp:,.1f}",
+                            headline=f"🎯 [SMT REVERSAL] {reason_lead.upper()}: {clean_sym} {format_strike(pe_strike)} PE @ ₹{pe_ltp:,.1f}",
                             summary=(
                                 f"Institutional liquidity sweep detected at Day High (₹{day_high:,.1f}). "
                                 f"{detail_desc} Invalidation anchor pegged strictly above swing high at ₹{sl_spot:,.1f}."
@@ -267,6 +283,11 @@ def detect_smt_sweep(
                                     else "LOCOMOTIVE_POLARIZATION_DISTRIBUTION",
                                     "DAY_HIGH_SUPPLY_REJECTION",
                                     "LIQUIDITY_SWEEP_REVERSAL",
+                                    *(
+                                        ["CPR_TOP_CONFLUENCE"]
+                                        if cpr_bear.confluence_tag == "CPR_TOP_CONFLUENCE"
+                                        else []
+                                    ),
                                 ],
                                 "smt_divergence": smt_res.divergence_type,
                                 "sibling_index": smt_res.sibling_symbol,
@@ -278,7 +299,12 @@ def detect_smt_sweep(
                                 "ad_ratio": ad_ratio,
                                 "is_locomotive_polarized": is_loco,
                                 "is_institutional_thrust": True,
-                                "smart_money_score": 92,
+                                "smart_money_score": 92
+                                + (3 if cpr_bear.confluence_tag == "CPR_TOP_CONFLUENCE" else 0),
+                                "cpr": cpr_bear.cpr_data,
+                                "cpr_type": cpr_bear.cpr_type,
+                                "is_narrow_cpr": cpr_bear.is_narrow,
+                                "is_wide_cpr": cpr_bear.is_wide,
                             },
                         )
                         alerts.append(a)
@@ -293,6 +319,8 @@ def detect_smt_sweep(
         dist_to_dl_pct = (spot - day_low) / max(1.0, day_low) * 100.0
         # Testing or swept day low (within 0.28% of Day Low)
         is_near_low = -0.15 <= dist_to_dl_pct <= 0.28
+        if cpr_bull.is_vetoed:
+            is_near_low = False
 
         if is_near_low:
             smt_res_bull = evaluate_smt_divergence(
@@ -324,7 +352,10 @@ def detect_smt_sweep(
                     if ce_cand:
                         ce_strike = float(getattr(ce_cand, "strike", 0.0) or 0.0)
                         ce_ltp = float(getattr(ce_cand, "last_price", 0.0) or 0.0)
-                        ce_sym = getattr(ce_cand, "symbol", "") or f"{clean_sym}{int(ce_strike)}CE"
+                        ce_sym = (
+                            getattr(ce_cand, "symbol", "")
+                            or f"{clean_sym}{format_strike(ce_strike)}CE"
+                        )
 
                         tick_step = (
                             2.0
@@ -377,7 +408,7 @@ def detect_smt_sweep(
                             option_type="CE",
                             option_premium=ce_ltp,
                             contract_symbol=ce_sym,
-                            headline=f"🚀 [SMT SPRING] SMT BULLISH ABSORPTION: {clean_sym} {int(ce_strike)} CE @ ₹{ce_ltp:,.1f}",
+                            headline=f"🚀 [SMT SPRING] SMT BULLISH ABSORPTION: {clean_sym} {format_strike(ce_strike)} CE @ ₹{ce_ltp:,.1f}",
                             summary=(
                                 f"Institutional accumulation spring detected at Day Low (₹{day_low:,.1f}). "
                                 f"{smt_res_bull.rationale} Invalidation anchor pegged strictly below swing low at ₹{sl_spot:,.1f}."
@@ -409,6 +440,11 @@ def detect_smt_sweep(
                                     "SMT_BULLISH_DIVERGENCE",
                                     "DAY_LOW_DEMAND_ABSORPTION",
                                     "LIQUIDITY_SWEEP_ACCUMULATION",
+                                    *(
+                                        ["CPR_BOTTOM_CONFLUENCE"]
+                                        if cpr_bull.confluence_tag == "CPR_BOTTOM_CONFLUENCE"
+                                        else []
+                                    ),
                                 ],
                                 "smt_divergence": smt_res_bull.divergence_type,
                                 "sibling_index": smt_res_bull.sibling_symbol,
@@ -419,7 +455,12 @@ def detect_smt_sweep(
                                 "invalidation_spot": sl_spot,
                                 "ad_ratio": ad_ratio,
                                 "is_institutional_thrust": True,
-                                "smart_money_score": 90,
+                                "smart_money_score": 90
+                                + (3 if cpr_bull.confluence_tag == "CPR_BOTTOM_CONFLUENCE" else 0),
+                                "cpr": cpr_bull.cpr_data,
+                                "cpr_type": cpr_bull.cpr_type,
+                                "is_narrow_cpr": cpr_bull.is_narrow,
+                                "is_wide_cpr": cpr_bull.is_wide,
                             },
                         )
                         alerts.append(a)

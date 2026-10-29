@@ -161,6 +161,7 @@ STANDARD_LOT_SIZES: dict[str, int] = {
     "ICICIBANK": 700,
     "ICICIGI": 325,
     "ICICIPRULI": 925,
+    "ICICILIFE": 925,
     "IDEA": 71475,
     "IDFCFIRSTB": 9275,
     "IEX": 4350,
@@ -328,6 +329,10 @@ CORPORATE_ALIASES: dict[str, str] = {
     "BAJAJ_AUTO": "BAJAJ-AUTO",
     "TATASTEELBSL": "TATASTEEL",  # Tata Steel BSL merged into Tata Steel
     "NSLNISP": "NMDCSTEEL",  # NMDC Steel
+    "NMDCSTEEL": "NSLNISP",  # NMDC Steel listed on NSE/Fyers as NSLNISP
+    "ICICIPRULI": "ICICILIFE",  # ICICI Prudential Life Insurance -> ICICILIFE on Fyers / derivatives
+    "HEG": "HEGAM",  # HEG Ltd demerger into HEGAM
+    "SILLYMONKS": "CRESTO",  # Silly Monks Entertainment renamed to Cresto
 }
 
 # Known Active NSE Trade-for-Trade (BE Series) Stocks in Top Benchmarks (Advisory fallback; prefer market.symbol_master)
@@ -340,13 +345,6 @@ BE_SERIES_STOCKS: frozenset[str] = frozenset(
         "STLTECH",
     }
 )
-
-
-def resolve_corporate_alias(symbol: str) -> str:
-    """Resolve symbol through canonical corporate action / renaming alias master."""
-    clean = (symbol or "").strip().upper()
-    return CORPORATE_ALIASES.get(clean, clean)
-
 
 _KNOWN_VENUE_PREFIXES: tuple[str, ...] = (
     "NSE:",
@@ -361,6 +359,41 @@ _KNOWN_VENUE_PREFIXES: tuple[str, ...] = (
     "FX:",
     "FOREX:",
 )
+
+
+@lru_cache(maxsize=4096)
+def resolve_corporate_alias(symbol: str) -> str:
+    """Resolve symbol through canonical corporate action / renaming alias master.
+
+    Handles:
+      - Bare symbols: 'ZOMATO' -> 'ETERNAL', 'ICICIPRULI' -> 'ICICILIFE'
+      - Qualified symbols: 'NSE:ZOMATO-EQ' -> 'NSE:ETERNAL-EQ'
+      - Suffix-only symbols: 'ZOMATO-EQ' -> 'ETERNAL-EQ'
+      - Prefix-only symbols: 'NSE:ZOMATO' -> 'NSE:ETERNAL'
+    """
+    clean = (symbol or "").strip().upper()
+    if not clean:
+        return ""
+    if clean in CORPORATE_ALIASES:
+        return CORPORATE_ALIASES[clean]
+
+    prefix = ""
+    for pfx in _KNOWN_VENUE_PREFIXES:
+        if clean.startswith(pfx):
+            prefix = pfx
+            clean = clean[len(pfx) :]
+            break
+
+    suffix = ""
+    for sfx in ("-EQ", "-BE", "-SM", "-BZ", "-GB", "-INDEX"):
+        if clean.endswith(sfx):
+            suffix = sfx
+            clean = clean[: -len(sfx)]
+            break
+
+    resolved = CORPORATE_ALIASES.get(clean, clean)
+    return f"{prefix}{resolved}{suffix}"
+
 
 _INDEX_CANONICAL_MAP: dict[str, str] = {
     "NIFTY 50": "NIFTY",
@@ -451,7 +484,12 @@ MONTH_NAME_TO_INT: dict[str, int] = {
     "DEC": 12,
 }
 
-_WEEKLY_OPT_RE = re.compile(r"^([A-Za-z0-9_&]+?)(\d{2})([1-9ONDond])(\d{2})(\d+(?:\.\d+)?)(CE|PE)$")
+_ISO_OPT_RE = re.compile(
+    r"^([A-Za-z0-9_&]+?)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(\d+(?:\.\d+)?)(CE|PE)$"
+)
+_WEEKLY_OPT_RE = re.compile(
+    r"^([A-Za-z0-9_&]+?)(\d{2})([1-9ONDond])(0[1-9]|[12]\d|3[01])(\d+(?:\.\d+)?)(CE|PE)$"
+)
 _MONTHLY_OPT_RE = re.compile(r"^([A-Za-z0-9_&]+?)(\d{2})([A-Za-z]{3})(\d+(?:\.\d+)?)(CE|PE)$")
 _FUT_RE = re.compile(r"^([A-Za-z0-9_&]+?)(\d{2})([A-Za-z]{3})FUT$")
 _SPACED_OPT_RE = re.compile(
@@ -544,7 +582,39 @@ def parse_derivative_contract(symbol: str) -> Optional[ParsedDerivativeContract]
     else:
         clean = s
 
-    # 1. Weekly Option (e.g. NIFTY26O1922900CE or SENSEX26O0872000PE)
+    # 1. Broker YYYYMMDD Option (e.g. HAL202609294800PE, ASHOKLEY20261126142.5PE)
+    m_iso = _ISO_OPT_RE.match(clean)
+    if m_iso:
+        und_raw, yyyy, mm, dd, stk_str, opt_type = m_iso.groups()
+        und = canonical_symbol(und_raw)
+        stk = float(stk_str)
+        try:
+            exp_d = date(int(yyyy), int(mm), int(dd))
+        except ValueError:
+            exp_d = None
+        exp_tag = f"{yyyy[2:]}{mm}{dd}"
+        lot = get_fno_lot_size(und)
+        tick = STANDARD_TICK_SIZES.get("FNO", 0.05)
+        from market.symbol_master import get_strike_step
+
+        step = get_strike_step(und, spot=stk)
+        return ParsedDerivativeContract(
+            raw_symbol=symbol,
+            exchange=exch,
+            underlying=und,
+            contract_type=opt_type.upper(),
+            strike=stk,
+            expiry_date=exp_d,
+            expiry_tag=exp_tag,
+            is_option=True,
+            is_future=False,
+            is_weekly=False,
+            lot_size=lot,
+            tick_size=tick,
+            strike_step=step,
+        )
+
+    # 2. Weekly Option (e.g. NIFTY26O1922900CE or SENSEX26O0872000PE)
     m_w = _WEEKLY_OPT_RE.match(clean)
     if m_w:
         und_raw, yy, mo_code, dd, stk_str, opt_type = m_w.groups()
@@ -1130,3 +1200,22 @@ def is_derivative_eligible(symbol: str) -> bool:
         return True
 
     return clean in STANDARD_LOT_SIZES
+
+
+def format_strike(strike: float | int | str | None) -> str:
+    """
+    Canonical Institutional Strike Formatter (SSOT).
+    Preserves exact fractional strikes (e.g., 142.5 in ASHOKLEY, 7.5 in IDEA, 83.25 in USDINR)
+    while cleanly stripping decimal points for integer strikes (e.g., 140.0 -> "140", 24500 -> "24500").
+    """
+    if strike is None:
+        return ""
+    if isinstance(strike, str) and not strike.strip():
+        return ""
+    try:
+        val = float(str(strike).replace(",", "").strip())
+        if val == int(val):
+            return str(int(val))
+        return f"{val:.4f}".rstrip("0").rstrip(".")
+    except (ValueError, TypeError):
+        return str(strike).strip()

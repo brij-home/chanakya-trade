@@ -892,7 +892,7 @@ async def skill_sector_heatmap():
         ]
 
         instruments = [inst for _, inst, _ in canonical_sectors]
-        quotes = get_quote(instruments)
+        quotes = await asyncio.to_thread(get_quote, instruments)
 
         sectors = []
         for code, inst, name in canonical_sectors:
@@ -2626,7 +2626,7 @@ async def skill_scan(req: ScanRequest):
             symbols = [s.upper() for s in symbols]
         quick = bool(req.filters.get("quick", False))
 
-        results = scan_options(symbols=symbols, quick=quick)
+        results = await asyncio.to_thread(scan_options, symbols=symbols, quick=quick)
         return _ok(results)
     except Exception as e:
         raise _err(str(e))
@@ -3861,7 +3861,9 @@ async def skill_block_deals(symbol: str, days: int = 30):
 
         q = get_quote(symbol)
         ltp = getattr(q, "last_price", 1000.0) if q else 1000.0
-        rep = analyze_block_deal_absorption(symbol, current_price=ltp, days=days)
+        rep = await asyncio.to_thread(
+            analyze_block_deal_absorption, symbol, current_price=ltp, days=days
+        )
         return _ok({"block_deal_report": rep.to_dict()})
     except Exception as e:
         raise _err(str(e))
@@ -3880,10 +3882,10 @@ async def skill_capex_inflections(symbol: Optional[str] = None):
         )
 
         if symbol:
-            rep = analyze_capex_inflection(symbol)
+            rep = await asyncio.to_thread(analyze_capex_inflection, symbol)
             return _ok({"capex_inflection": rep.to_dict()})
 
-        universe = scan_capex_inflection_universe()
+        universe = await asyncio.to_thread(scan_capex_inflection_universe)
         return _ok({"capex_inflections": [u.to_dict() for u in universe], "count": len(universe)})
     except Exception as e:
         raise _err(str(e))
@@ -3902,10 +3904,10 @@ async def skill_rrg_orderbook_convergence(symbol: Optional[str] = None):
         )
 
         if symbol:
-            rep = evaluate_rrg_orderbook_convergence(symbol)
+            rep = await asyncio.to_thread(evaluate_rrg_orderbook_convergence, symbol)
             return _ok({"convergence_report": rep.to_dict()})
 
-        matrix = scan_rrg_orderbook_matrix()
+        matrix = await asyncio.to_thread(scan_rrg_orderbook_matrix)
         return _ok({"convergence_matrix": [m.to_dict() for m in matrix], "count": len(matrix)})
     except Exception as e:
         raise _err(str(e))
@@ -3921,10 +3923,10 @@ async def skill_insider_radar(symbol: Optional[str] = None):
         from analysis.insider_radar import analyze_insider_activity, scan_insider_radar
 
         if symbol:
-            rep = analyze_insider_activity(symbol)
+            rep = await asyncio.to_thread(analyze_insider_activity, symbol)
             return _ok({"insider_report": rep.to_dict()})
 
-        radar = scan_insider_radar()
+        radar = await asyncio.to_thread(scan_insider_radar)
         return _ok({"insider_radar": [r.to_dict() for r in radar], "count": len(radar)})
     except Exception as e:
         raise _err(str(e))

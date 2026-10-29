@@ -195,19 +195,22 @@ class Tick:
     bid: float = 0.0
     ask: float = 0.0
     atp: float = 0.0
+    received_at: float = 0.0
 
     def is_stale(self, max_age_seconds: float = 60.0) -> bool:
         """Return True if tick age exceeds max_age_seconds or timestamp is zero."""
-        if self.timestamp <= 0:
+        check_ts = self.received_at if self.received_at > 0 else self.timestamp
+        if check_ts <= 0:
             return True
-        return (time.time() - self.timestamp) > max_age_seconds
+        return (time.time() - check_ts) > max_age_seconds
 
     @property
     def age_seconds(self) -> float:
         """Return tick age in seconds."""
-        if self.timestamp <= 0:
+        check_ts = self.received_at if self.received_at > 0 else self.timestamp
+        if check_ts <= 0:
             return float("inf")
-        return max(0.0, time.time() - self.timestamp)
+        return max(0.0, time.time() - check_ts)
 
 
 class WebSocketManager:
@@ -230,6 +233,13 @@ class WebSocketManager:
         self._dispatch_queue: queue.Queue[Optional[Tick]] = queue.Queue(maxsize=32768)
         self._dispatch_thread: Optional[threading.Thread] = None
         self._running = False
+        self._reconnect_lock = threading.Lock()
+        self._is_reconnecting: bool = False
+        self._reconnect_thread: Optional[threading.Thread] = None
+        self._refreshing_token: bool = False
+        self._token_refresh_thread: Optional[threading.Thread] = None
+        self._last_packet_at: float = 0.0
+        self._watchdog_thread: Optional[threading.Thread] = None
 
     @property
     def connected(self) -> bool:
@@ -243,6 +253,92 @@ class WebSocketManager:
                 target=self._run_dispatch_worker, daemon=True, name="WsTickDispatcher"
             )
             self._dispatch_thread.start()
+        if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+            self._watchdog_thread = threading.Thread(
+                target=self._run_connection_watchdog, daemon=True, name="WsConnectionWatchdog"
+            )
+            self._watchdog_thread.start()
+
+    def _check_connection_health(self) -> bool:
+        """Evaluates connection health. Returns False and initiates reconnect if connection is a zombie."""
+        if not self._connected or not self._access_token:
+            return True
+
+        with self._lock:
+            sub_count = len(self._subscribed)
+        if sub_count == 0:
+            return True
+
+        # Check if any subscribed exchange market is open
+        try:
+            from market.calendar import is_market_open
+
+            mkt_open = is_market_open("NSE") or is_market_open("MCX") or is_market_open("BSE")
+        except Exception:
+            mkt_open = True
+
+        if not mkt_open:
+            return True
+
+        now = time.time()
+        silence_sec = now - self._last_packet_at if self._last_packet_at > 0 else 0.0
+        # If market is active, connected is True, subscribed to >0 symbols, but zero packets in 30s:
+        if self._last_packet_at > 0 and silence_sec > 30.0:
+            logger.warning(
+                f"[WebSocket] 🚨 Zombie WebSocket detected: 0 packets received for {silence_sec:.1f}s "
+                f"during active market session ({sub_count} subscriptions). Triggering proactive reconnect."
+            )
+            self._connected = False
+            self._schedule_proactive_reconnect(delay_sec=1.0)
+            return False
+        return True
+
+    def _run_connection_watchdog(self) -> None:
+        """Background watchdog: detects silent WebSocket disconnects during active market hours."""
+        while self._running:
+            time.sleep(5.0)
+            if not self._running:
+                break
+            try:
+                self._check_connection_health()
+            except Exception as e:
+                logger.debug(f"[WebSocket] Watchdog loop error: {e}")
+
+    def _run_connection_watchdog(self) -> None:
+        """Background watchdog: detects silent WebSocket disconnects during active market hours."""
+        while self._running:
+            time.sleep(5.0)
+            if not self._running:
+                break
+            if not self._connected or not self._access_token:
+                continue
+
+            with self._lock:
+                sub_count = len(self._subscribed)
+            if sub_count == 0:
+                continue
+
+            # Check if any subscribed exchange market is open
+            try:
+                from market.calendar import is_market_open
+
+                mkt_open = is_market_open("NSE") or is_market_open("MCX") or is_market_open("BSE")
+            except Exception:
+                mkt_open = True
+
+            if not mkt_open:
+                continue
+
+            now = time.time()
+            silence_sec = now - self._last_packet_at if self._last_packet_at > 0 else 0.0
+            # If market is active, connected is True, subscribed to >0 symbols, but zero packets in 30s:
+            if self._last_packet_at > 0 and silence_sec > 30.0:
+                logger.warning(
+                    f"[WebSocket] 🚨 Zombie WebSocket detected: 0 packets received for {silence_sec:.1f}s "
+                    f"during active market session ({sub_count} subscriptions). Triggering proactive reconnect."
+                )
+                self._connected = False
+                self._schedule_proactive_reconnect(delay_sec=1.0)
 
     def _run_dispatch_worker(self) -> None:
         """Asynchronously dispatches incoming ticks to registered listeners without stalling the socket thread."""
@@ -334,6 +430,9 @@ class WebSocketManager:
         if self._access_token != access_token or not self._connected:
             self.start(access_token=access_token, app_id=app)
 
+    # Method alias for backward compatibility
+    connect = start
+
     def stop(self, timeout: float = 1.0) -> None:
         """Disconnect the WebSocket and gracefully shut down without blocking."""
         self._running = False
@@ -419,7 +518,14 @@ class WebSocketManager:
         # Convert to Fyers format and filter malformed symbols
         ws_symbols = [s for s in (_to_ws_symbol(x) for x in filtered) if is_valid_ws_symbol(s)]
 
-        # Authoritative pre-dispatch verification against official exchange symbol master
+        # Authoritative pre-dispatch verification against official exchange symbol master.
+        # Semantics:
+        #   - get_symbol_info() returns a dict  → symbol confirmed valid, allow through.
+        #   - get_symbol_info() returns None AND the master loaded OK → symbol genuinely absent; drop.
+        #   - get_symbol_info() raises / master load itself fails (DEGRADED) → pass through;
+        #     Fyers broker SDK will report genuine invalids via its own -300 error path.
+        #     Dropping a valid symbol due to a transient cache miss is a worse failure than
+        #     submitting an invalid one (the latter is caught by the broker, the former is silent data loss).
         verified_ws_symbols = []
         for s in ws_symbols:
             # Bypass check for test mock symbols in unit tests
@@ -427,15 +533,41 @@ class WebSocketManager:
                 verified_ws_symbols.append(s)
                 continue
             try:
-                from market.symbol_master import get_symbol_info
+                from market.symbol_master import get_symbol_info, load_master
 
-                if get_symbol_info(s) is not None:
-                    verified_ws_symbols.append(s)
-                else:
+                # Probe whether the relevant master file is actually available (not stale/offline).
+                # If load_master itself raises, we are in DEGRADED mode — pass through.
+                exch_prefix = s.split(":", 1)[0].upper() if ":" in s else "NSE"
+                from market.symbol_master import _EXCHANGE_MASTERS
+
+                _probe_master = _EXCHANGE_MASTERS.get(exch_prefix, ("NSE_CM",))[0]
+                try:
+                    load_master(_probe_master)  # raises RuntimeError when truly unavailable
+                    master_available = True
+                except Exception as _e_probe:
+                    master_available = False
                     logger.warning(
-                        f"[WebSocket] Proactively dropped invalid symbol '{s}' before broker dispatch (not in official exchange master)."
+                        f"[WebSocket] Symbol master DEGRADED for '{s}' (master='{_probe_master}'): {_e_probe}."
+                        " Passing through to broker — Fyers SDK will reject genuine invalids via -300."
                     )
-            except Exception:
+
+                if master_available:
+                    info = get_symbol_info(s)
+                    if info is not None:
+                        canon_sym = info.get("symTicker") or s
+                        verified_ws_symbols.append(canon_sym)
+                    else:
+                        logger.warning(
+                            f"[WebSocket] Proactively dropped invalid symbol '{s}' before broker dispatch"
+                            " (master loaded OK but symbol absent from official exchange master)."
+                        )
+                else:
+                    # DEGRADED: master unavailable — pass through rather than silently drop valid symbols
+                    verified_ws_symbols.append(s)
+            except Exception as _e_guard:
+                logger.warning(
+                    f"[WebSocket] Symbol master guard exception for '{s}': {_e_guard}. Passing through."
+                )
                 verified_ws_symbols.append(s)
 
         new_symbols = [s for s in verified_ws_symbols if s not in self._subscribed]
@@ -535,6 +667,12 @@ class WebSocketManager:
                 self._callbacks.append(callback)
         self._ensure_dispatcher_running()
 
+    def off_tick(self, callback: Callable[[Tick], None]) -> None:
+        """Deregister a previously registered tick callback."""
+        with self._lock:
+            if callback in self._callbacks:
+                self._callbacks.remove(callback)
+
     def get_all_ticks(self) -> dict[str, Tick]:
         """Get all cached ticks."""
         with self._lock:
@@ -552,7 +690,7 @@ class WebSocketManager:
                 log_path="",
                 litemode=False,
                 write_to_file=True,
-                reconnect=True,
+                reconnect=False,  # Autonomous control: ensures on_close triggers our self-healing reconnect and resubscription
                 on_connect=self._on_connect,
                 on_close=self._on_close,
                 on_error=self._on_error,
@@ -566,6 +704,7 @@ class WebSocketManager:
 
     def _on_connect(self) -> None:
         self._connected = True
+        self._last_packet_at = time.time()
         logger.info("WebSocket: connected")
         try:
             from market.ws_subscription_manager import get_ws_subscription_manager
@@ -577,26 +716,115 @@ class WebSocketManager:
                 exc_info=True,
             )
 
+    def _schedule_proactive_reconnect(self, delay_sec: Optional[float] = None) -> None:
+        """Schedules proactive reconnect with single-flight thread safety and market-aware cadence."""
+        with self._reconnect_lock:
+            if self._is_reconnecting or (
+                self._reconnect_thread is not None and self._reconnect_thread.is_alive()
+            ):
+                logger.debug("[WebSocket] Reconnect worker already in flight; deduplicating.")
+                return
+            self._is_reconnecting = True
+
+            # Adaptive delay: back off to 60.0s during off-market hours to avoid thread/socket storms
+            if delay_sec is None:
+                try:
+                    from market.calendar import is_market_open
+
+                    market_open = is_market_open("NSE")
+                except Exception:
+                    market_open = True
+                effective_delay = 3.0 if market_open else 60.0
+            else:
+                effective_delay = delay_sec
+
+            logger.info(
+                f"[WebSocket] Connection lost while running; scheduling proactive reconnect in {effective_delay:.1f}s..."
+            )
+
+            def _reconnect_worker():
+                try:
+                    time.sleep(effective_delay)
+                    if getattr(self, "_running", False) and not getattr(self, "_connected", False):
+                        # Re-check market status before attempting connection
+                        try:
+                            from market.calendar import is_market_open
+
+                            if not is_market_open("NSE"):
+                                logger.info(
+                                    "[WebSocket] Off-market session detected ('NSE' closed). Pausing proactive reconnect."
+                                )
+                                return
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[WebSocket] Reconnect market status non-fatal: {e_suppressed}"
+                            )
+
+                        logger.info("[WebSocket] Executing proactive reconnect...")
+                        self._connect()
+                except Exception as e_recon:
+                    logger.warning(f"[WebSocket] Proactive reconnect failed: {e_recon}")
+                finally:
+                    with self._reconnect_lock:
+                        self._is_reconnecting = False
+
+            self._reconnect_thread = threading.Thread(
+                target=_reconnect_worker, daemon=True, name="WsWatchdogReconnect"
+            )
+            self._reconnect_thread.start()
+
+    def _schedule_token_refresh(self) -> None:
+        """Refreshes broker access token with single-flight thread safety."""
+        with self._reconnect_lock:
+            now = time.time()
+            if (now - getattr(self, "_last_token_refresh", 0.0)) < 10.0:
+                logger.debug(
+                    "[WebSocket] Token refresh cooldown active (<10s); skipping duplicate trigger."
+                )
+                return
+            if self._refreshing_token or (
+                self._token_refresh_thread is not None and self._token_refresh_thread.is_alive()
+            ):
+                logger.debug(
+                    "[WebSocket] Token refresh already in flight; skipping duplicate trigger."
+                )
+                return
+            self._refreshing_token = True
+            self._last_token_refresh = now
+
+            def _async_reconnect():
+                try:
+                    from brokers.session import get_data_broker
+
+                    b = get_data_broker()
+                    if hasattr(b, "_handle_auth_failure"):
+                        b._handle_auth_failure()
+                    elif hasattr(b, "is_authenticated"):
+                        b.is_authenticated()
+
+                    fresh_token = getattr(b, "_access_token", "")
+                    app_id = getattr(b, "_app_id", "")
+                    if fresh_token:
+                        logger.info(
+                            "[WebSocket] Reconnecting Fyers WebSocket with fresh access token..."
+                        )
+                        self.start(access_token=fresh_token, app_id=app_id)
+                except Exception as e_recon:
+                    logger.warning(f"[WebSocket] Auto-reconnect failed: {e_recon}")
+                finally:
+                    with self._reconnect_lock:
+                        self._refreshing_token = False
+
+            self._token_refresh_thread = threading.Thread(
+                target=_async_reconnect, daemon=True, name="WsTokenRefresh"
+            )
+            self._token_refresh_thread.start()
+
     def _on_close(self, *args, **kwargs) -> None:
         self._connected = False
         logger.info("WebSocket: disconnected")
         if getattr(self, "_running", False) and getattr(self, "_access_token", ""):
-            logger.info(
-                "[WebSocket] Connection lost while running; scheduling proactive reconnect in 3.0s..."
-            )
-
-            def _delayed_reconnect():
-                time.sleep(3.0)
-                if getattr(self, "_running", False) and not getattr(self, "_connected", False):
-                    try:
-                        logger.info("[WebSocket] Executing proactive reconnect...")
-                        self._connect()
-                    except Exception as e_recon:
-                        logger.warning(f"[WebSocket] Proactive reconnect failed: {e_recon}")
-
-            threading.Thread(
-                target=_delayed_reconnect, daemon=True, name="WsWatchdogReconnect"
-            ).start()
+            self._schedule_proactive_reconnect()
 
     def _on_error(self, *args, **kwargs) -> None:
         if args:
@@ -650,33 +878,11 @@ class WebSocketManager:
                 logger.warning(
                     "[WebSocket] Fyers WebSocket token expired (-99). Triggering broker re-authentication..."
                 )
-
-                def _async_reconnect():
-                    try:
-                        from brokers.session import get_data_broker
-
-                        b = get_data_broker()
-                        if hasattr(b, "_handle_auth_failure"):
-                            b._handle_auth_failure()
-                        elif hasattr(b, "is_authenticated"):
-                            b.is_authenticated()
-
-                        fresh_token = getattr(b, "_access_token", "")
-                        app_id = getattr(b, "_app_id", "")
-                        if fresh_token:
-                            logger.info(
-                                "[WebSocket] Reconnecting Fyers WebSocket with fresh access token..."
-                            )
-                            self.connect(access_token=fresh_token, app_id=app_id)
-                    except Exception as e_recon:
-                        logger.warning(f"[WebSocket] Auto-reconnect failed: {e_recon}")
-
-                threading.Thread(
-                    target=_async_reconnect, daemon=True, name="WsTokenRefresh"
-                ).start()
+                self._schedule_token_refresh()
 
     def _on_message(self, message) -> None:
         """Process incoming tick data."""
+        self._last_packet_at = time.time()
         try:
             if isinstance(message, str):
                 data_list = json.loads(message)
@@ -797,6 +1003,7 @@ class WebSocketManager:
                     bid=final_bid,
                     ask=final_ask,
                     atp=final_atp,
+                    received_at=time.time(),
                 )
 
                 with self._lock:

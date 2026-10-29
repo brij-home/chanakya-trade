@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
+from market.instruments import format_strike
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -81,14 +82,16 @@ def detect_preopen_bias(
     t2_prem = round(chosen_ltp * 1.60, 1) if chosen_ltp > 0 else 0.0
     no_chase = round(chosen_ltp * 1.06, 1) if chosen_ltp > 0 else 0.0
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
-    contract_sym = f"{clean_sym}{int(atm_strike)}{option_type}"
+    contract_sym = f"{clean_sym}{format_strike(atm_strike)}{option_type}"
     bias_dir = "BULLISH GAP-UP" if is_bullish else "BEARISH GAP-DOWN"
-    headline = f"{strength} PREOPEN {bias_dir}: {clean_sym} {int(atm_strike)} {option_type} SETUP"
+    headline = f"{strength} PREOPEN {bias_dir}: {clean_sym} {format_strike(atm_strike)} {option_type} SETUP"
     entry_str = f"Rs{chosen_ltp:.1f}" if chosen_ltp > 0 else "Await 09:15 open print"
     summary = f"GIFT Nifty at Rs{gift_futures_price:.1f} ({gap_pct:+.2f}% vs prev close Rs{prev_close:.1f}). Implies {bias_dir}. Entry: {entry_str} | SL: Rs{sl_prem:.1f} | T1: Rs{t1_prem:.1f} (+30%) | T2: Rs{t2_prem:.1f} (+60%). Strength: {strength} ({abs_gap:.2f}%)"
     a = AutoAlert(
         alert_id=generate_alert_id(
-            clean_sym, "PREOPEN_BIAS", variant=f"{option_type.lower()}-{int(atm_strike)}"
+            clean_sym,
+            "PREOPEN_BIAS",
+            variant=f"{option_type.lower()}-{format_strike(atm_strike).replace('.', 'p')}",
         ),
         alert_type="GAMMA_BLAST",
         stage="EARLY_WARNING",
@@ -148,6 +151,6 @@ def detect_preopen_bias(
         },
     )
     logger.info(
-        f"[PreopenBias] {signal_type}: {clean_sym} GIFT={gift_futures_price:.1f} ({gap_pct:+.2f}%) -> {int(atm_strike)} {option_type}"
+        f"[PreopenBias] {signal_type}: {clean_sym} GIFT={gift_futures_price:.1f} ({gap_pct:+.2f}%) -> {format_strike(atm_strike)} {option_type}"
     )
     return [a]

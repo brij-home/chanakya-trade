@@ -24,6 +24,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from market.instruments import format_strike
+
 logger = logging.getLogger("chanakya.engine.option_resolver")
 
 INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"}
@@ -300,6 +302,36 @@ def resolve_option_contract(
                 opt_ltp = float(chosen.last_price)
                 opt_strike = float(chosen.strike)
                 chosen_contract = chosen
+
+                # Step 2.5: Implied Volatility (IV) vs Realized Volatility (RV) Vega Trap Shield
+                contract_iv = float(
+                    getattr(chosen, "iv", 0.0) or getattr(chosen, "implied_volatility", 0.0) or 0.0
+                )
+                if contract_iv > 0:
+                    from engine.index_calibration import get_calibrated_adr
+
+                    calib_adr = get_calibrated_adr(clean_sym)
+                    if calib_adr and calib_adr > 0 and spot > 0:
+                        realized_vol = (calib_adr / spot) * 15.8745 * 100.0
+                        iv_rv_ratio = contract_iv / max(1.0, realized_vol)
+                    else:
+                        iv_rv_ratio = contract_iv / (13.5 if is_idx else 30.0)
+
+                    # When IV is bloated (IV/RV >= 1.40 or raw IV elevated), mandate defined-risk spread
+                    if (
+                        (iv_rv_ratio >= 1.40)
+                        or (is_idx and contract_iv >= 24.0)
+                        or (not is_idx and contract_iv >= 50.0)
+                    ):
+                        is_elevated_vix = True
+                        vix_regime = "ELEVATED_VOL_SPREAD"
+                        strategy_type = "BULL_CALL_SPREAD" if is_bull else "BEAR_PUT_SPREAD"
+                        exec_mandate = "HEDGED_SPREAD_MANDATORY"
+                        logger.info(
+                            f"[OptionResolver] High IV Vega Trap detected for {clean_sym}: "
+                            f"IV={contract_iv:.1f}%, IV/RV ratio={iv_rv_ratio:.2f}x. "
+                            f"Mandating {strategy_type} to eliminate Vega crush risk."
+                        )
                 b = float(getattr(chosen, "bid", 0.0) or 0.0)
                 a = float(getattr(chosen, "ask", 0.0) or 0.0)
                 if b > 0 and a > 0 and opt_ltp > 0:
@@ -339,7 +371,7 @@ def resolve_option_contract(
             base_prem = spot * 0.007 if is_idx else max(15.0, spot * 0.015)
             opt_ltp = round(max(20.0 if is_idx else 5.0, base_prem), 1)
 
-        opt_sym = f"{clean_sym} {int(opt_strike)} {opt_type}"
+        opt_sym = f"{clean_sym} {format_strike(opt_strike)} {opt_type}"
         is_est = True
 
     # Step 4: Compute Premium-Space Invalidation Stop and Targets with Tiered Feasibility
@@ -453,7 +485,7 @@ def resolve_option_contract(
                 hedge_prem = float(chosen_hedge.last_price)
 
         if not chosen_hedge or not hedge_prem:
-            hedge_contract_sym = f"{clean_sym} {int(hedge_strike)} {opt_type}"
+            hedge_contract_sym = f"{clean_sym} {format_strike(hedge_strike)} {opt_type}"
             hedge_prem = round(max(2.0, opt_ltp * 0.42), 1)
 
         net_debit = round(max(1.0, opt_ltp - hedge_prem), 2)

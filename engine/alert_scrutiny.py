@@ -32,6 +32,7 @@ import time
 from typing import Any, Optional
 
 logger = logging.getLogger("engine.alert_scrutiny")
+from engine.alert_identity import canonical_alert_symbol
 from config.constants import (
     IST,
     MIN_OPTION_PREMIUM_SL_PTS,
@@ -76,6 +77,26 @@ INDEX_MIN_SL_FLOORS: dict[str, float] = {
     "BSE SENSEX": 85.0,
     "BANKEX": 85.0,
 }
+
+
+def get_dynamic_index_min_sl_floor(
+    symbol: str,
+    spot: float = 0.0,
+    atr_14: float = 0.0,
+    vix: Optional[float] = None,
+) -> float:
+    """
+    Computes dynamic minimum stop loss floor for index futures or underlying spot
+    scaled by India VIX and live 5m ATR to eliminate static hardcoding.
+    """
+    clean = canonical_alert_symbol(symbol).upper()
+    base_floor = INDEX_MIN_SL_FLOORS.get(clean, 25.0)
+    vix_val = float(vix) if (vix and float(vix) > 0) else 15.0
+    vix_scalar = max(0.75, min(2.0, (vix_val / 15.0) ** 0.5))
+
+    if atr_14 and atr_14 > 0:
+        return round(max(atr_14 * 0.85 * vix_scalar, base_floor * 0.70 * vix_scalar), 1)
+    return round(base_floor * vix_scalar, 1)
 
 
 @dataclass
@@ -390,21 +411,69 @@ class AlertScrutinyAuditor:
                     flags,
                 )
 
-        if clean_sym in INDEX_MIN_SL_FLOORS and not is_option_premium_levels:
-            idx_floor = INDEX_MIN_SL_FLOORS[clean_sym]
-            if risk_pts < (idx_floor * 0.95):
-                flags["risk_within_bounds"] = False
-                return (
-                    False,
-                    f"Sub-Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < minimum institutional volatility floor ({idx_floor:.1f} pts). Mandate wider structural stop.",
-                    flags,
-                )
-
         metrics = (
             (getattr(alert, "metrics", {}) or {})
             if not isinstance(alert, dict)
             else (alert.get("metrics") or {})
         )
+
+        if clean_sym in INDEX_MIN_SL_FLOORS and not is_option_premium_levels:
+            idx_vix = float(
+                (metrics.get("india_vix") or metrics.get("vix") or 15.0)
+                if isinstance(metrics, dict)
+                else 15.0
+            )
+            idx_atr = float(
+                (metrics.get("atr") or metrics.get("atr_14") or 0.0)
+                if isinstance(metrics, dict)
+                else 0.0
+            )
+            dynamic_idx_floor = get_dynamic_index_min_sl_floor(
+                clean_sym, spot=ltp, atr_14=idx_atr, vix=idx_vix
+            )
+            if risk_pts < (dynamic_idx_floor * 0.95):
+                flags["risk_within_bounds"] = False
+                return (
+                    False,
+                    f"Sub-Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < minimum institutional volatility floor ({dynamic_idx_floor:.1f} pts). Mandate wider structural stop.",
+                    flags,
+                )
+
+        # For index option setups: verify that the structural spot anchor is not pinned inside normal candle noise
+        if is_option_premium_levels and (clean_sym in INDEX_MIN_SL_FLOORS or underlying_idx):
+            spot_anchor = float(
+                getattr(alert, "structural_spot_sl", 0.0)
+                or (metrics.get("spot_invalidation_anchor") if isinstance(metrics, dict) else 0.0)
+                or 0.0
+            )
+            und_spot = float(
+                getattr(alert, "underlying_spot", 0.0)
+                or (metrics.get("spot") if isinstance(metrics, dict) else 0.0)
+                or 0.0
+            )
+            if spot_anchor > 0 and und_spot > 0:
+                spot_risk = abs(und_spot - spot_anchor)
+                target_sym = clean_sym if clean_sym in INDEX_MIN_SL_FLOORS else underlying_idx
+                idx_vix = float(
+                    (metrics.get("india_vix") or metrics.get("vix") or 15.0)
+                    if isinstance(metrics, dict)
+                    else 15.0
+                )
+                idx_atr = float(
+                    (metrics.get("atr") or metrics.get("atr_14") or 0.0)
+                    if isinstance(metrics, dict)
+                    else 0.0
+                )
+                dynamic_spot_floor = get_dynamic_index_min_sl_floor(
+                    target_sym or "NIFTY", spot=und_spot, atr_14=idx_atr, vix=idx_vix
+                )
+                if spot_risk < (dynamic_spot_floor * 0.70):
+                    flags["risk_within_bounds"] = False
+                    return (
+                        False,
+                        f"Sub-Noise Spot Trap: {target_sym} structural spot SL distance ({spot_risk:.1f} pts) < minimum dynamic volatility floor ({dynamic_spot_floor:.1f} pts). Stop is inside candle noise.",
+                        flags,
+                    )
         if (
             not is_option_premium_levels
             and clean_sym not in COMMODITY_MIN_SL_FLOORS
@@ -1861,9 +1930,20 @@ class AlertScrutinyAuditor:
         # 4. Reject setups capped by confirmed Fortress Ask/Bid walls
         # 5. Seamlessly fallback to L2 5-depth BisectDepthBook for BSE (SENSEX/BANKEX) or when TBT is unavailable
         try:
-            from market.fyers_tbt_manager import FyersTbtManager, resolve_tradable_tbt_symbol
+            from market.fyers_tbt_manager import (
+                FyersTbtManager,
+                fyers_tbt_manager,
+                resolve_tradable_tbt_symbol,
+            )
 
-            tbt_mgr = FyersTbtManager()
+            if getattr(fyers_tbt_manager, "is_connected", False):
+                tbt_mgr = fyers_tbt_manager
+            else:
+                try:
+                    tbt_mgr = FyersTbtManager()
+                except Exception:
+                    tbt_mgr = fyers_tbt_manager
+
             depth = None
             is_index_sym = clean_sym in INDEX_MIN_SL_FLOORS or any(
                 idx in clean_sym
@@ -1876,9 +1956,12 @@ class AlertScrutinyAuditor:
             tradable_sym = resolve_tradable_tbt_symbol(alert.symbol) or resolve_tradable_tbt_symbol(
                 clean_sym
             )
+            contract_sym = getattr(alert, "contract_symbol", None) or getattr(
+                alert, "option_symbol", None
+            )
 
-            if tbt_mgr.is_connected:
-                for sym_cand in (tradable_sym, alert.symbol, clean_sym):
+            if tbt_mgr and getattr(tbt_mgr, "is_connected", False):
+                for sym_cand in (tradable_sym, contract_sym, alert.symbol, clean_sym):
                     if sym_cand and not depth:
                         d = tbt_mgr.get_50_depth(sym_cand)
                         if d and d.get("status") not in ("UNAVAILABLE", None):
@@ -4972,6 +5055,10 @@ class AlertScrutinyAuditor:
                 or (getattr(alert, "actionable_plan", {}) or {}).get("execution_style_mandate")
                 == "HEDGED_SPREAD_MANDATORY"
             )
+            is_apex = bool(
+                getattr(alert, "confidence", 0) >= 90
+                or metrics_d.get("conviction_tier") in ("APEX_CONFLUENCE", "SUPERPERFORMER")
+            )
             runway_eval = evaluate_session_runway(
                 symbol=sym,
                 alert_type=atype,
@@ -4980,6 +5067,7 @@ class AlertScrutinyAuditor:
                 rvol=alert_rvol,
                 direction=direction,
                 is_hedged_spread=is_hedged_spread,
+                is_apex=is_apex,
             )
             if not runway_eval.is_allowed:
                 logger.info(
@@ -5595,9 +5683,15 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
                 "INTRADAY_MOVER_IGNITED",
                 "STAGE_1_TO_2_EXPANSION",
                 "OPTIONS_MOMENTUM",
+                "INDEX_PUT_SETUP",
+                "INDEX_CALL_SETUP",
+                "SQUEEZE_BREAKDOWN",
+                "SQUEEZE_BREAKOUT",
+                "GAMMA_BLAST",
             )
             or "BREAKOUT" in alert_type
             or "ORB" in alert_type
+            or "BREAKDOWN" in alert_type
         )
         is_fade = (
             alert_type

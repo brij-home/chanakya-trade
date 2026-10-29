@@ -24,6 +24,53 @@ from engine.dynamic_risk import resolve_price_tier
 logger = logging.getLogger("chanakya.detectors.intraday_spark")
 IST = timezone(timedelta(hours=5, minutes=30))
 
+_AVG_VOL_SESSION_CACHE: dict[str, tuple[str, float]] = {}
+
+
+def get_cached_avg_volume_20(symbol: str) -> float:
+    """Returns 20-day average daily volume with L1 in-session caching (< 0.01ms lookup)."""
+    clean_sym = canonical_alert_symbol(symbol)
+    today_str = datetime.now(IST).strftime("%Y%m%d")
+    cached = _AVG_VOL_SESSION_CACHE.get(clean_sym)
+    if cached and cached[0] == today_str and cached[1] > 0:
+        return cached[1]
+
+    # 1. Try DailyLevelsStore if available
+    try:
+        from engine.daily_levels import get_daily_levels
+
+        dl = get_daily_levels(clean_sym)
+        if dl and getattr(dl, "avg_vol_20", 0.0) > 0:
+            avg_v = float(dl.avg_vol_20)
+            _AVG_VOL_SESSION_CACHE[clean_sym] = (today_str, avg_v)
+            return avg_v
+    except Exception as e_dl:
+        logger.debug("[IntradaySpark] get_daily_levels failed for %s: %s", clean_sym, e_dl)
+
+    # 2. Fetch from history once per session and cache
+    try:
+        from market.history import get_ohlcv
+
+        df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=30)
+        if df is not None and len(df) >= 15:
+            col_v = (
+                "volume"
+                if "volume" in df.columns
+                else ("Volume" if "Volume" in df.columns else None)
+            )
+            if col_v:
+                vols = df[col_v].values
+                avg_v = (
+                    float(np.mean(vols[-21:-1])) if len(vols) >= 21 else float(np.mean(vols[:-1]))
+                )
+                if avg_v > 0:
+                    _AVG_VOL_SESSION_CACHE[clean_sym] = (today_str, avg_v)
+                    return avg_v
+    except Exception as e_hist:
+        logger.debug("[IntradaySpark] get_ohlcv failed for %s: %s", clean_sym, e_hist)
+
+    return 1.0
+
 
 def expected_volume_fraction(minutes_from_open: float) -> float:
     """Returns expected cumulative volume fraction (0.03 to 1.0) for 09:15-15:30 IST."""
@@ -95,7 +142,7 @@ def detect_intraday_mover_sparks(
         or (os.environ.get("DEPLOY_MODE") == "test")
         or ("PYTEST_CURRENT_TEST" in os.environ)
     )
-    if not is_test_env and (curr_t < dtime(9, 20) or curr_t >= dtime(15, 0)):
+    if not is_test_env and (curr_t < dtime(9, 20) or curr_t >= dtime(14, 0)):
         return found
 
     scan_universe = list(universe) if universe else precursor_radar.get_scan_universe(segment="ALL")
@@ -155,26 +202,16 @@ def detect_intraday_mover_sparks(
         if abs(chg) < min_move:
             continue
 
-        # Calculate TOD-RVOL
+        # Calculate TOD-RVOL using L1 session-cached 20-day average volume
         df = None
+        avg_vol = get_cached_avg_volume_20(clean_sym)
         try:
-            df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=30)
-            if df is not None and len(df) >= 15:
-                vols = df["volume"].values
-                avg_vol = (
-                    float(np.mean(vols[-21:-1])) if len(vols) >= 21 else float(np.mean(vols[:-1]))
-                )
-                try:
-                    import engine.auto_alert_engine as aae
+            import engine.auto_alert_engine as aae
 
-                    _rvol_fn = getattr(aae, "compute_time_of_day_rvol", compute_time_of_day_rvol)
-                except Exception:
-                    _rvol_fn = compute_time_of_day_rvol
-                rvol = _rvol_fn(vol, avg_vol, ref_dt=datetime.now(IST))
-            else:
-                rvol = 1.0
+            _rvol_fn = getattr(aae, "compute_time_of_day_rvol", compute_time_of_day_rvol)
         except Exception:
-            rvol = 1.0
+            _rvol_fn = compute_time_of_day_rvol
+        rvol = _rvol_fn(vol, avg_vol, ref_dt=datetime.now(IST))
 
         min_pos_chg = 0.22 if seg == "INDEX" else 0.85
         min_neg_chg = -0.22 if seg == "INDEX" else -0.80
@@ -221,6 +258,35 @@ def detect_intraday_mover_sparks(
         lc = float(getattr(q, "lower_circuit", 0.0) or 0.0)
         if lc > 0 and ltp <= (lc * 1.008) and is_bearish:
             continue
+
+        # CPR & Daily Levels Overhead Audit via centralized SSOT
+        cpr_d = {}
+        is_narrow_cpr = False
+        is_wide_cpr = False
+        try:
+            from engine.daily_levels import evaluate_cpr_gate
+
+            spark_dir = "BULLISH" if is_bullish else "BEARISH"
+            cpr_gate = evaluate_cpr_gate(
+                clean_sym,
+                ltp,
+                spark_dir,
+                boundary_proximity_pct=0.004,
+            )
+            if cpr_gate.is_vetoed:
+                is_trapped_core = "trapped inside Wide CPR" in (cpr_gate.veto_reason or "")
+                if is_trapped_core and rvol >= 2.5:
+                    pass  # explosive volume absorption override
+                else:
+                    logger.info(
+                        f"[IntradaySpark] Suppressed Spark on {clean_sym}: {cpr_gate.veto_reason}"
+                    )
+                    continue
+            cpr_d = cpr_gate.cpr_data
+            is_narrow_cpr = cpr_gate.is_narrow
+            is_wide_cpr = cpr_gate.is_wide
+        except Exception as e_cpr:
+            logger.debug(f"[IntradaySpark] Daily levels check skipped for {clean_sym}: {e_cpr}")
 
         sec_id = None
         sec_name = None
@@ -316,6 +382,7 @@ def detect_intraday_mover_sparks(
                 else max(price_tier.abs_min_risk_pts, round(0.80 * atr_val, 2))
             )
 
+            tick_offset = max(0.05, min(0.5, round(ltp * 0.001, 2)))
             if tp and tp.is_asymmetry_viable and tp.target_1 > ltp and tp.invalidation_stop < ltp:
                 risk_pts = max(min_risk, round(ltp - tp.invalidation_stop, 2))
                 sl_price = round(ltp - risk_pts, 2)
@@ -328,9 +395,9 @@ def detect_intraday_mover_sparks(
                 )
                 if seg != "INDEX":
                     max_circuit_t = round(ltp * 1.18, 2)
-                    t1_price = min(t1_price, max_circuit_t)
-                    t2_price = min(t2_price, max_circuit_t)
                     t3_price = min(t3_price, max_circuit_t)
+                    t2_price = min(t2_price, round(t3_price - tick_offset, 2))
+                    t1_price = min(t1_price, round(t2_price - tick_offset, 2))
                 rr_str = f"1:{round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
                 tp_dict["invalidation_stop"] = sl_price
@@ -349,13 +416,11 @@ def detect_intraday_mover_sparks(
                 t3_price = round(ltp + 5.5 * risk_pts, 2)
                 if seg != "INDEX":
                     max_circuit_t = round(ltp * 1.18, 2)
-                    t1_price = min(t1_price, max_circuit_t)
-                    t2_price = min(t2_price, max_circuit_t)
                     t3_price = min(t3_price, max_circuit_t)
+                    t2_price = min(t2_price, round(t3_price - tick_offset, 2))
+                    t1_price = min(t1_price, round(t2_price - tick_offset, 2))
                 rr_str = f"1:{round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)}"
                 tp_dict = None
-
-            tick_offset = max(0.05, min(0.5, round(ltp * 0.001, 2)))
             no_chase_lvl = round(min(t1_price - tick_offset, ltp * 1.008), 2)
             e_min = round(max(sl_price + tick_offset, ltp * 0.998), 1)
             e_max = round(min(no_chase_lvl - tick_offset, ltp * 1.005), 1)
@@ -390,6 +455,7 @@ def detect_intraday_mover_sparks(
             plan = {
                 "action": "BUY / LONG",
                 "segment": seg,
+                "recommended_entry": f"₹{ltp:,.1f}",
                 "entry_range": f"₹{e_min:,.1f} – ₹{e_max:,.1f}",
                 "stop_loss": f"₹{sl_price:,.1f}",
                 "target": f"₹{t1_price:,.1f}",
@@ -470,6 +536,7 @@ def detect_intraday_mover_sparks(
                 else max(price_tier.abs_min_risk_pts, round(0.80 * atr_val, 2))
             )
 
+            tick_offset = max(0.05, min(0.5, round(ltp * 0.001, 2)))
             if tp and tp.is_asymmetry_viable and tp.target_1 < ltp and tp.invalidation_stop > ltp:
                 risk_pts = max(min_risk, round(tp.invalidation_stop - ltp, 2))
                 sl_price = round(ltp + risk_pts, 2)
@@ -484,9 +551,9 @@ def detect_intraday_mover_sparks(
                 )
                 if seg != "INDEX":
                     min_circuit_t = round(ltp * 0.82, 2)
-                    t1_price = max(t1_price, min_circuit_t)
-                    t2_price = max(t2_price, min_circuit_t)
                     t3_price = max(t3_price, min_circuit_t)
+                    t2_price = max(t2_price, round(t3_price + tick_offset, 2))
+                    t1_price = max(t1_price, round(t2_price + tick_offset, 2))
                 rr_str = f"1:{round(abs(ltp - t1_price) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
                 tp_dict["invalidation_stop"] = sl_price
@@ -505,13 +572,11 @@ def detect_intraday_mover_sparks(
                 t3_price = round(max(0.05, ltp - 5.5 * risk_pts), 2)
                 if seg != "INDEX":
                     min_circuit_t = round(ltp * 0.82, 2)
-                    t1_price = max(t1_price, min_circuit_t)
-                    t2_price = max(t2_price, min_circuit_t)
                     t3_price = max(t3_price, min_circuit_t)
+                    t2_price = max(t2_price, round(t3_price + tick_offset, 2))
+                    t1_price = max(t1_price, round(t2_price + tick_offset, 2))
                 rr_str = f"1:{round(abs(ltp - t1_price) / max(0.01, risk_pts), 1)}"
                 tp_dict = None
-
-            tick_offset = max(0.05, min(0.5, round(ltp * 0.001, 2)))
             no_chase_lvl = round(max(t1_price + tick_offset, ltp * 0.992), 2)
             e_max = round(min(sl_price - tick_offset, ltp * 1.002), 1)
             e_min = round(max(no_chase_lvl + tick_offset, ltp * 0.995), 1)
@@ -546,6 +611,7 @@ def detect_intraday_mover_sparks(
             plan = {
                 "action": "SELL_SHORT_OR_BUY_PUT",
                 "segment": seg,
+                "recommended_entry": f"₹{ltp:,.1f}",
                 "entry_range": f"₹{e_min:,.1f} – ₹{e_max:,.1f}",
                 "stop_loss": f"₹{sl_price:,.1f}",
                 "target": f"₹{t1_price:,.1f}",
@@ -771,6 +837,7 @@ def detect_intraday_mover_sparks(
                     + divergence_bonus
                     + phase_transition_bonus
                     + tape_accel_bonus
+                    + (6 if is_narrow_cpr else 0)
                     + (5 if is_decoupler else 0)
                 ),
             ),
@@ -819,6 +886,10 @@ def detect_intraday_mover_sparks(
                 "is_tape_accelerating": is_tape_accelerating,
                 "vol_accel_ratio": vol_accel_ratio,
                 "d2_vol": d2v_val,
+                "cpr": cpr_d,
+                "cpr_type": "NARROW" if is_narrow_cpr else ("WIDE" if is_wide_cpr else "AVERAGE"),
+                "is_narrow_cpr": is_narrow_cpr,
+                "is_wide_cpr": is_wide_cpr,
             },
             actionable_plan=plan,
         )

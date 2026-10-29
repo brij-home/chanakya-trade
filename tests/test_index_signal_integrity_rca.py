@@ -1318,3 +1318,595 @@ def test_rca_pwh_rejection_distance_bound_and_adr_exhaustion(monkeypatch):
         a for a in alerts_active if "PDH_SUPPLY_REJECTION" in a.metrics.get("signals", [])
     ]
     assert len(pwh_alerts) >= 1
+
+
+# ── 25. CVD Bullish Absorption Veto ──────────────────────────────────────────
+def test_rca_cvd_bullish_absorption_vetoes_put_setup(monkeypatch):
+    """When price sweeps morning lows but CVD indicates bullish absorption, PE setups must be vetoed."""
+    chain = [
+        MockOptionContract(
+            "NSE:BANKNIFTY26OCT54000PE", 54000.0, "PE", 280.0, volume=35000, oi=45000, pchange=20.0
+        )
+    ]
+    # Synthetic DataFrame with 15 bars
+    df_5m = _make_dummy_5m_ohlcv(bars=15, base_price=54250.0, trend="DOWN", date_str="2026-10-26")
+
+    # Mock order flow CVD divergence to simulate bullish absorption
+    monkeypatch.setattr(
+        "engine.detectors.order_flow.compute_order_flow_cvd_divergence",
+        lambda *args, **kwargs: {
+            "is_bullish_absorption": True,
+            "is_bearish_exhaustion": False,
+            "cvd_divergence_ratio": 2.1,
+            "current_cvd": 1250.0,
+            "prior_cvd": -500.0,
+        },
+    )
+
+    alerts = detect_index_put_setup(
+        underlying="BANKNIFTY",
+        spot=53800.0,
+        chain=chain,
+        vwap=53966.0,
+        day_high=54250.0,
+        day_low=53777.0,
+        prev_day_high=54990.0,
+        prev_day_low=54138.0,
+        prev_close=54198.0,
+        ohlcv_5m=df_5m,
+        ref_time=datetime(2026, 10, 26, 9, 25, 5, tzinfo=IST),
+        ignore_time_gate=True,
+    )
+    assert len(alerts) == 0, "CVD bullish absorption must veto PE setup at the low"
+
+
+# ── 26. Camarilla L4 Floor Proximity Guard Without Candle Close ───────────────
+def test_rca_camarilla_l4_floor_proximity_without_close_below_vetoes_put(monkeypatch):
+    """Resting at Camarilla L4 support without a 5m bar close below L4 must be vetoed."""
+    from engine.daily_levels import DailyLevels
+
+    mock_dl = DailyLevels(
+        symbol="NSE:BANKNIFTY",
+        canonical_symbol="BANKNIFTY",
+        exchange="NSE",
+        session_date="2026-10-26",
+        pdh=54990.0,
+        pdl=54138.0,
+        pdc=54198.0,
+        camarilla={"l4": 53730.0, "l5": 53200.0, "h3": 54432.0, "h4": 54666.0},
+        cpr={"pivot": 54442.0, "cpr_type": "WIDE"},
+    )
+    monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda sym: mock_dl)
+
+    chain = [
+        MockOptionContract(
+            "NSE:BANKNIFTY26OCT53800PE", 53800.0, "PE", 260.0, volume=35000, oi=45000, pchange=20.0
+        )
+    ]
+    # Candle that dropped to 53777 but closed at 53780 (above L4 53730)
+    df_5m = _make_dummy_5m_ohlcv(bars=15, base_price=54250.0, trend="DOWN", date_str="2026-10-26")
+    df_5m.iloc[-1, df_5m.columns.get_loc("close")] = 53780.0  # Above L4 (53730.0)
+
+    alerts = detect_index_put_setup(
+        underlying="BANKNIFTY",
+        spot=53777.0,  # Within 0.08% of L4 53730.0
+        chain=chain,
+        vwap=53966.0,
+        day_high=54250.0,
+        day_low=53777.0,
+        prev_day_high=54990.0,
+        prev_day_low=54138.0,
+        prev_close=54198.0,
+        ohlcv_5m=df_5m,
+        ref_time=datetime(2026, 10, 26, 9, 25, 9, tzinfo=IST),
+        ignore_time_gate=True,
+    )
+    assert len(alerts) == 0, "Testing Camarilla L4 without a 5m close below L4 must be vetoed"
+
+
+# ── 27. Morning Wide CPR ADR Exhaustion Veto ──────────────────────────────────
+def test_rca_wide_cpr_adr_exhaustion_morning_veto():
+    """Wide CPR sessions with >= 60% ADR consumed must veto edge chasing even before 11:30 AM."""
+    from engine.session_regime_sentinel import evaluate_symbol_session_regime
+
+    reg = evaluate_symbol_session_regime(
+        symbol="BANKNIFTY",
+        current_high=54250.0,
+        current_low=53700.0,  # 550 pt range
+        current_ltp=53720.0,
+        prev_high=54990.0,
+        prev_low=54138.0,
+        prev_close=54198.0,
+        adr_5d=850.0,  # 550/850 = 64.7% ADR consumed
+        ref_time=datetime(2026, 10, 26, 9, 30, tzinfo=IST),
+    )
+    assert reg.regime == "CHOP_MEAN_REVERSION"
+    assert reg.veto_breakout_chase is True, (
+        "Wide CPR + 64% ADR consumed must veto breakout/breakdown chase"
+    )
+    assert reg.favor_mean_reversion is True
+
+
+# ── 28. Index Call Camarilla H4 & TBT Ask Wall Veto ──────────────────────────
+def test_rca_index_call_camarilla_h4_and_tbt_ask_wall_vetoes(monkeypatch):
+    """Index call setup must veto buying calls into Camarilla H4 ceiling or against heavy TBT ask wall."""
+    from engine.detectors.index_call_setup import detect_index_call_setup
+    from unittest.mock import MagicMock
+
+    chain = [
+        MockOptionContract(
+            "NSE:BANKNIFTY26OCT54200CE", 54200.0, "CE", 290.0, volume=35000, oi=45000, pchange=22.0
+        )
+    ]
+    df_5m = _make_dummy_5m_ohlcv(bars=15, base_price=53800.0, trend="UP", date_str="2026-10-26")
+
+    # 1. Test Camarilla H4 Ceiling Guard
+    mock_dl = MagicMock()
+    mock_dl.camarilla = {"h4": 54200.0, "h5": 54600.0}
+    mock_dl.atr_14 = 450.0
+    monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda sym: mock_dl)
+
+    # 5m candle close below H4 (54190 < 54200)
+    df_5m.iloc[-1, df_5m.columns.get_loc("close")] = 54190.0
+
+    alerts_h4 = detect_index_call_setup(
+        underlying="BANKNIFTY",
+        spot=54195.0,  # within 0.05% of H4 54200
+        chain=chain,
+        vwap=54000.0,
+        day_high=54205.0,
+        day_low=53800.0,
+        ohlcv_5m=df_5m,
+        ref_time=datetime(2026, 10, 26, 10, 0, tzinfo=IST),
+        ignore_time_gate=True,
+    )
+    assert len(alerts_h4) == 0, (
+        "Testing Camarilla H4 without a 5m close above H4 must veto call setup"
+    )
+
+    # 2. Test TBT Fortress Ask Wall / OBI-50 Veto
+    mock_dl.camarilla = {"h4": 55000.0, "h5": 55500.0}  # Move H4 far away
+    mock_tbt = MagicMock()
+    mock_tbt.is_connected = True
+    mock_tbt.get_50_depth.return_value = {
+        "status": "LIVE",
+        "obi_50": -0.28,  # Heavy seller/ask dominance
+        "fortress_ask_wall_confirmed": True,
+    }
+    monkeypatch.setattr("market.fyers_tbt_manager.fyers_tbt_manager", mock_tbt)
+
+    alerts_tbt = detect_index_call_setup(
+        underlying="BANKNIFTY",
+        spot=54100.0,
+        chain=chain,
+        vwap=54000.0,
+        day_high=54150.0,
+        day_low=53800.0,
+        ohlcv_5m=df_5m,
+        ref_time=datetime(2026, 10, 26, 10, 0, tzinfo=IST),
+        ignore_time_gate=True,
+    )
+    assert len(alerts_tbt) == 0, "TBT Ask Wall / negative OBI-50 must veto call setup"
+
+
+# ── 29. Squeeze & Gamma Blast Camarilla L4 and TBT Protection ────────────────
+def test_rca_squeeze_and_gamma_blast_camarilla_and_tbt_protection(monkeypatch):
+    """Squeeze breakdown and Gamma Blast PE must veto index breakdowns testing Camarilla L4 or resting on TBT bid wall."""
+    from engine.detectors.squeeze_breakout import detect_squeeze_breakout
+    from engine.detectors.gamma_blast import detect_gamma_blast
+    from unittest.mock import MagicMock
+
+    mock_dl = MagicMock()
+    mock_dl.camarilla = {"l4": 53730.0, "l5": 53400.0}
+    monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda sym: mock_dl)
+
+    # 1. Squeeze Breakdown at L4
+    df_15m = _make_dummy_5m_ohlcv(bars=30, base_price=54000.0, trend="DOWN", date_str="2026-10-26")
+    sq_alert = detect_squeeze_breakout(
+        symbol="BANKNIFTY",
+        df=df_15m,
+        ltp=53735.0,  # Resting right at Camarilla L4 53730
+        timeframe="15m",
+        vwap=53850.0,
+    )
+    assert sq_alert is None, "Squeeze Breakdown on index testing Camarilla L4 must be suppressed"
+
+    # 2. Gamma Blast PE at L4
+    pe_contract = MockOptionContract(
+        "NSE:BANKNIFTY26OCT53800PE", 53800.0, "PE", 260.0, volume=30000, oi=40000, pchange=18.0
+    )
+    gb_alerts = detect_gamma_blast(
+        underlying="BANKNIFTY",
+        spot=53735.0,  # Testing Camarilla L4
+        chain=[pe_contract],
+        vwap=53850.0,
+        day_high=54250.0,
+        day_low=53730.0,
+        now_dt=datetime(2026, 10, 26, 9, 30, tzinfo=IST),
+    )
+    assert len(gb_alerts) == 0, "Gamma Blast PE on index testing Camarilla L4 must be suppressed"
+
+
+# ── 30. Negative CVD Bullish Absorption Detection ────────────────────────────
+def test_rca_negative_cvd_bullish_absorption_detection():
+    """CVD absorption in negative delta regimes (selling dried up) must be detected accurately."""
+    from engine.detectors.order_flow import compute_order_flow_cvd_divergence
+    import pandas as pd
+    import numpy as np
+
+    n = 20
+    # Price plunges down to index 14, bounces slightly, then retests/sweeps low at index 19
+    lows = [100.0 - i * 0.5 for i in range(15)] + [93.0, 93.2, 93.1, 92.8, 92.5]
+    opens = [l + 0.3 for l in lows]
+    highs = [l + 0.8 for l in lows]
+    closes = [l + 0.5 for l in lows]
+    df = pd.DataFrame(
+        {
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": [1000.0] * n,
+        }
+    )
+    # Delta: -500 selling during initial plunge to index 14 (cvd reaches -7500),
+    # but at the retest/sweep (index 15-19), buyers absorb (+400 each bar), so CVD improves from -7500 to -5500!
+    delta_arr = np.array([-500.0] * 15 + [400.0] * 5)
+    df["delta"] = delta_arr
+
+    res = compute_order_flow_cvd_divergence(df, curr_p=df["low"].iloc[-1])
+    assert res["is_bullish_absorption"] is True, (
+        "Negative CVD absorption must be identified when delta improves"
+    )
+    assert res["cvd_divergence_ratio"] >= 1.05
+
+
+# ── 31. Turtle Soup Camarilla and TBT Order Book Guards ──────────────────────
+def test_rca_turtle_soup_camarilla_and_tbt_guards(monkeypatch):
+    """Turtle Soup detector must suppress springs trapped below Camarilla L4 or against TBT ask walls."""
+    from engine.detectors.turtle_soup import detect_turtle_soup_sweep
+    from unittest.mock import MagicMock
+
+    df = _make_dummy_5m_ohlcv(bars=25, base_price=53800.0, trend="DOWN", date_str="2026-10-26")
+    prior_low = float(df["low"].iloc[-15:-2].min())
+    df.iloc[-1, df.columns.get_loc("low")] = prior_low - 15.0
+    df.iloc[-1, df.columns.get_loc("close")] = prior_low + 10.0
+    df.iloc[-1, df.columns.get_loc("open")] = prior_low + 5.0
+    df.iloc[-1, df.columns.get_loc("high")] = prior_low + 25.0
+
+    # 1. Suppressed if trapped below Camarilla L4
+    mock_dl = MagicMock()
+    mock_dl.camarilla = {"l4": prior_low + 50.0, "h4": prior_low + 400.0}
+    monkeypatch.setattr(
+        "engine.daily_levels.get_daily_levels", lambda sym, session_date=None: mock_dl
+    )
+
+    alert_l4 = detect_turtle_soup_sweep(
+        "BANKNIFTY", df=df, ltp=prior_low + 10.0, vwap=prior_low + 15.0
+    )
+    assert alert_l4 is None, "Turtle soup spring trapped below Camarilla L4 must be suppressed"
+
+    # 2. Suppressed if TBT shows Fortress Ask Wall
+    mock_dl.camarilla = {"l4": prior_low - 100.0, "h4": prior_low + 400.0}
+    mock_tbt = MagicMock()
+    mock_tbt.is_connected = True
+    mock_tbt.get_50_depth.return_value = {
+        "status": "LIVE",
+        "obi_50": -0.35,
+        "fortress_ask_wall_confirmed": True,
+    }
+    monkeypatch.setattr("market.fyers_tbt_manager.fyers_tbt_manager", mock_tbt)
+
+    alert_tbt = detect_turtle_soup_sweep(
+        "BANKNIFTY", df=df, ltp=prior_low + 10.0, vwap=prior_low + 15.0
+    )
+    assert alert_tbt is None, "Turtle soup spring facing Fortress Ask Wall must be suppressed"
+
+
+# ── 32. Afternoon Thrust Exhaustion and Wall Guards ──────────────────────────
+def test_rca_afternoon_thrust_exhaustion_and_wall_guards(monkeypatch):
+    """Afternoon thrust must suppress buying calls at Camarilla H5 or flushes at Camarilla L5."""
+    from engine.detectors.afternoon_thrust import detect_afternoon_thrust
+    from unittest.mock import MagicMock
+
+    df = _make_dummy_5m_ohlcv(bars=40, base_price=54000.0, trend="UP", date_str="2026-10-26")
+
+    mock_dl = MagicMock()
+    mock_dl.camarilla = {"h5": 54500.0, "l5": 53500.0, "h4": 54200.0, "l4": 53800.0}
+    monkeypatch.setattr(
+        "engine.daily_levels.get_daily_levels", lambda sym, session_date=None: mock_dl
+    )
+
+    alert_h5 = detect_afternoon_thrust(
+        symbol="BANKNIFTY",
+        df_5m=df,
+        ltp=54505.0,
+        vwap=54200.0,
+        day_high=54510.0,
+        day_low=53900.0,
+        rvol=1.5,
+        ref_time=datetime(2026, 10, 26, 13, 30, tzinfo=IST),
+        ignore_time_gate=True,
+    )
+    assert alert_h5 is None, (
+        "Afternoon thrust at Camarilla H5 terminal exhaustion must be suppressed"
+    )
+
+
+# ── 33. Options Momentum Camarilla L4 and TBT Bid Wall Veto ──────────────────
+def test_rca_options_momentum_camarilla_and_tbt_bid_wall(monkeypatch):
+    """Options momentum must suppress PE when spot is sitting on Camarilla L4 without 5m close below."""
+    from engine.detectors.options_momentum import detect_options_momentum_breakouts
+    from unittest.mock import MagicMock
+
+    pe_contract = MockOptionContract(
+        "NSE:BANKNIFTY26OCT53800PE", 53800.0, "PE", 250.0, volume=35000, oi=45000, pchange=15.0
+    )
+    mock_quote = MagicMock()
+    mock_quote.last_price = 53735.0
+    mock_quote.ltp = 53735.0
+    mock_quote.open = 54200.0
+    mock_quote.high = 54250.0
+    mock_quote.low = 53730.0
+    mock_quote.vwap = 53900.0
+    mock_quote.change_pct = -0.85
+
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym, expiry=None: [pe_contract])
+    monkeypatch.setattr(
+        "market.quotes.get_quote",
+        lambda syms: {"NSE:BANKNIFTY": mock_quote, "BANKNIFTY": mock_quote},
+    )
+    monkeypatch.setattr(
+        "market.history.get_ohlcv",
+        lambda sym, **kwargs: _make_dummy_5m_ohlcv(
+            bars=15, base_price=53800.0, trend="DOWN", date_str="2026-10-26"
+        ),
+    )
+
+    mock_dl = MagicMock()
+    mock_dl.camarilla = {"l4": 53730.0, "h4": 54200.0}
+    monkeypatch.setattr(
+        "engine.daily_levels.get_daily_levels", lambda sym, session_date=None: mock_dl
+    )
+
+    alerts = detect_options_momentum_breakouts(
+        targets=["BANKNIFTY"],
+        now_dt=datetime(2026, 10, 26, 10, 0, tzinfo=IST),
+    )
+    assert len(alerts) == 0, (
+        "PE momentum resting on Camarilla L4 without close below must be suppressed"
+    )
+
+
+# ── 34. Daily Levels Provenance Fail-Closed (Zero Synthetic Price Ranges) ────
+def test_rca_daily_levels_provenance_fail_closed(monkeypatch):
+    """Daily levels engine must fail closed (return None) when OHLCV is unreachable, never fabricating arbitrary ranges."""
+    from engine.daily_levels import DailyLevelsStore
+
+    store = DailyLevelsStore()
+    monkeypatch.setattr("market.history.get_ohlcv", lambda sym, **kwargs: None)
+    monkeypatch.setattr("market.quotes.get_quote", lambda insts: {})
+
+    res = store.compute_and_store(
+        symbol="NON_EXISTENT_UNREACHABLE_SYMBOL", session_date="2026-10-26"
+    )
+    assert res is None, (
+        "Unreachable daily data must return None (Rule 11 Zero-Hallucination Invariant)"
+    )
+
+
+# ── 35. Multi-Timeframe Levels (PWH, PWL, PMH, PML) Resampling ───────────────
+def test_rca_pwh_pwl_pmh_pml_resampling(monkeypatch):
+    """Verify that DailyLevelsStore derives PWH, PWL, PWC, PMH, PML, PMC deterministically from daily bars."""
+    import pandas as pd
+    import numpy as np
+    from engine.daily_levels import DailyLevelsStore
+    from unittest.mock import MagicMock
+
+    # Create 60 daily bars spanning August to October 2026
+    dates = pd.date_range("2026-08-01", "2026-10-23", freq="B")
+    n = len(dates)
+    df_daily = pd.DataFrame(
+        {
+            "open": np.linspace(24000, 25000, n),
+            "high": np.linspace(24200, 25200, n),
+            "low": np.linspace(23900, 24800, n),
+            "close": np.linspace(24100, 25100, n),
+            "volume": np.full(n, 1000000.0),
+        },
+        index=dates,
+    )
+
+    mock_quote = MagicMock()
+    mock_quote.last_price = 25100.0
+    mock_quote.close = 25050.0
+
+    monkeypatch.setattr("market.history.get_ohlcv", lambda sym, **kwargs: df_daily)
+    monkeypatch.setattr("market.quotes.get_quote", lambda insts: {"NSE:NIFTY": mock_quote})
+
+    store = DailyLevelsStore()
+    dl = store.compute_and_store("NIFTY", session_date="2026-10-26")
+
+    assert dl is not None, "DailyLevels should compute successfully from 60 daily bars"
+    assert dl.pdh > 0, "PDH must be non-zero"
+    assert dl.pdl > 0, "PDL must be non-zero"
+    assert dl.pdc > 0, "PDC must be non-zero"
+
+    # Multi-timeframe Weekly levels
+    assert dl.pwh > 0, f"PWH must be positive, got {dl.pwh}"
+    assert dl.pwl > 0, f"PWL must be positive, got {dl.pwl}"
+    assert dl.pwc > 0, f"PWC must be positive, got {dl.pwc}"
+    assert dl.pwh >= dl.pwl, "PWH must be >= PWL"
+
+    # Multi-timeframe Monthly levels
+    assert dl.pmh > 0, f"PMH must be positive, got {dl.pmh}"
+    assert dl.pml > 0, f"PML must be positive, got {dl.pml}"
+    assert dl.pmc > 0, f"PMC must be positive, got {dl.pmc}"
+    assert dl.pmh >= dl.pml, "PMH must be >= PML"
+
+
+# ── 36. get_ohlcv Resampling Fallback for Weekly & Monthly Intervals ──────────
+def test_rca_get_ohlcv_weekly_monthly_resampling_fallback(monkeypatch):
+    """Verify that get_ohlcv seamlessly resamples daily bars when weekly/monthly interval is requested."""
+    import pandas as pd
+    import numpy as np
+    import market.history
+    from market.history import get_ohlcv
+
+    # Seed 60 synthetic daily bars so zero network calls are required
+    dates = pd.date_range("2026-08-01", "2026-10-23", freq="B")
+    n = len(dates)
+    df_daily = pd.DataFrame(
+        {
+            "open": np.linspace(24000, 25000, n),
+            "high": np.linspace(24200, 25200, n),
+            "low": np.linspace(23900, 24800, n),
+            "close": np.linspace(24100, 25100, n),
+            "volume": np.full(n, 1000000.0),
+        },
+        index=dates,
+    )
+
+    orig_get_ohlcv = get_ohlcv
+
+    def _mock_get_ohlcv(symbol, exchange="NSE", interval="day", **kwargs):
+        if interval == "day":
+            return df_daily.copy()
+        # For non-daily without broker endpoint, invoke real get_ohlcv which will trigger Tier 4.5 fallback
+        return orig_get_ohlcv(symbol, exchange=exchange, interval=interval, **kwargs)
+
+    monkeypatch.setattr(market.history, "_yfinance_fallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(market.history, "get_ohlcv", _mock_get_ohlcv)
+
+    # Call with interval="week" on benchmark NIFTY
+    df_w = _mock_get_ohlcv("NIFTY", interval="week", days=30)
+    assert df_w is not None and not df_w.empty, "Weekly OHLCV must not be empty"
+    for col in ("open", "high", "low", "close", "volume"):
+        assert col in df_w.columns, f"Column {col} missing from resampled weekly bars"
+    assert len(df_w) >= 2, "Must contain at least 2 weekly bars"
+
+    # Call with interval="month" on benchmark NIFTY
+    df_m = _mock_get_ohlcv("NIFTY", interval="month", days=90)
+    assert df_m is not None and not df_m.empty, "Monthly OHLCV must not be empty"
+    for col in ("open", "high", "low", "close", "volume"):
+        assert col in df_m.columns, f"Column {col} missing from resampled monthly bars"
+
+
+# ── 37. RVOL Intraday Mathematical Derivation (Zero Fake 1.5 Defaults) ───────
+def test_rca_rvol_intraday_derivation_without_fake_defaults():
+    """Verify calculate_intraday_rvol computes real volume expansion and returns 1.0 (not 1.5) on flat volume."""
+    import pandas as pd
+    import numpy as np
+    from engine.daily_levels import calculate_intraday_rvol
+
+    dates_5m = pd.date_range("2026-10-26 09:15", "2026-10-26 10:30", freq="5min")
+    n = len(dates_5m)
+
+    # Case A: Massive volume surge on latest bar (5x average)
+    vols_surge = np.full(n, 10000.0)
+    vols_surge[-1] = 50000.0
+    df_surge = pd.DataFrame(
+        {"open": 100.0, "high": 102.0, "low": 99.5, "close": 101.5, "volume": vols_surge},
+        index=dates_5m,
+    )
+    rvol_surge = calculate_intraday_rvol(df_surge)
+    assert rvol_surge >= 4.5, f"RVOL on 5x volume bar should be >= 4.5, got {rvol_surge}"
+
+    # Case B: Flat volume (1.0x baseline)
+    vols_flat = np.full(n, 10000.0)
+    df_flat = pd.DataFrame(
+        {"open": 100.0, "high": 101.0, "low": 99.5, "close": 100.5, "volume": vols_flat},
+        index=dates_5m,
+    )
+    rvol_flat = calculate_intraday_rvol(df_flat)
+    assert rvol_flat == 1.0, f"RVOL on flat volume should be 1.0, got {rvol_flat}"
+
+    # Case C: None or empty DataFrame -> must return 1.0, never hallucinate 1.5
+    assert calculate_intraday_rvol(None) == 1.0
+    assert calculate_intraday_rvol(pd.DataFrame()) == 1.0
+
+
+# ── 38. CVD Intraday Microstructure Derivation and Absorption Divergence ──────
+def test_rca_cvd_intraday_derivation_and_divergence():
+    """Verify calculate_intraday_cvd computes exact volume deltas and flags Bullish Absorption / Bearish Exhaustion."""
+    import pandas as pd
+    import numpy as np
+    from engine.daily_levels import calculate_intraday_cvd
+
+    dates_5m = pd.date_range("2026-10-26 09:15", "2026-10-26 10:30", freq="5min")
+    n = len(dates_5m)
+
+    # Construct Bullish Absorption: Price dips/flats while buyers aggressively absorb at highs of the bar
+    # (High closes relative to bar ranges with heavy volume)
+    highs = np.linspace(25000, 24980, n)  # Price drifted down slightly
+    lows = highs - 20.0
+    closes = highs - 1.0  # Closes near high of every 5m bar = buyer initiated
+    volumes = np.linspace(50000, 100000, n)
+
+    df_abs = pd.DataFrame(
+        {"open": lows + 5.0, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=dates_5m,
+    )
+
+    cvd, slope, div = calculate_intraday_cvd(df_abs)
+    assert cvd > 0, f"Cumulative volume delta should be positive on high-close bars, got {cvd}"
+    assert slope > 0, f"CVD slope should be positive, got {slope}"
+    assert div == "BULLISH_ABSORPTION", f"Expected BULLISH_ABSORPTION, got {div}"
+
+
+# ── 39. ORB Detector Rejects Unverified Volume Expansion Traps ───────────────
+def test_rca_orb_requires_verified_volume_expansion():
+    """Verify ORB breakout rejects moves when volume expansion is unverified or flat, preventing opening traps."""
+    import pandas as pd
+    from engine.detectors.orb import detect_opening_range_breakout
+
+    dates_5m = pd.date_range("2026-10-26 09:15", "2026-10-26 09:40", freq="5min")
+    len(dates_5m)
+
+    # 5m candles with flat unexpanded volume
+    df_flat = pd.DataFrame(
+        {
+            "open": [25000, 25020, 25040, 25050, 25080, 25110],
+            "high": [25030, 25050, 25060, 25070, 25100, 25120],
+            "low": [24980, 25000, 25020, 25030, 25060, 25090],
+            "close": [25020, 25040, 25050, 25065, 25095, 25115],
+            "volume": [1000, 1000, 1000, 1000, 1000, 1000],  # Flat volume (no expansion)
+        },
+        index=dates_5m,
+    )
+
+    # Breakout attempted above ORB High (25060) at 25115, but with flat volume (rvol=1.0)
+    alert = detect_opening_range_breakout(
+        symbol="NIFTY",
+        df=df_flat,
+        ltp=25115.0,
+        vwap=25050.0,
+        rvol=1.0,  # Below min_rvol of 1.30 for index
+        orb_levels=(25060.0, 24980.0, 80.0, 25020.0),
+        ignore_time_gate=True,
+    )
+    assert alert is None, (
+        "ORB breakout without volume expansion (RVOL < 1.30x) must be rejected to prevent trap"
+    )
+
+
+# ── 40. Unified Market Intelligence Packet Provenance & Completeness ─────────
+def test_rca_market_intelligence_packet_provenance():
+    """Verify get_market_intelligence returns complete packet with multi-timeframe levels, RVOL, CVD, and fail-closed."""
+    from engine.intraday_microstructure import get_market_intelligence
+
+    # Query benchmark NIFTY
+    pkt = get_market_intelligence("NIFTY")
+    assert pkt is not None, "Benchmark NIFTY intelligence packet must be resolvable"
+    assert pkt.is_complete, "Packet must be complete (PDH > 0, PDL > 0, PDC > 0, LTP > 0)"
+    assert pkt.pwh > 0, "PWH must be positive"
+    assert pkt.pwl > 0, "PWL must be positive"
+    assert pkt.pmh > 0, "PMH must be positive"
+    assert pkt.pml > 0, "PML must be positive"
+    assert pkt.cpr.get("pivot", 0) > 0, "CPR Pivot must be positive"
+    assert pkt.camarilla.get("h4", 0) > 0, "Camarilla H4 must be positive"
+    assert pkt.camarilla.get("l4", 0) > 0, "Camarilla L4 must be positive"
+
+    # Query unreachable non-existent symbol -> must fail closed (return None)
+    unreachable = get_market_intelligence("NON_EXISTENT_GHOST_TICKER_999")
+    assert unreachable is None, "Unreachable symbol must fail closed and return None (Rule 11)"

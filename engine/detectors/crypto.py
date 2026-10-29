@@ -626,6 +626,18 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                             alert_id = generate_alert_id(
                                 clean_sym, "CRYPTO_MOMENTUM", variant="demand"
                             )
+                            trig_lvl = round(
+                                ob.top
+                                if is_breakout
+                                else (getattr(ob, "ote_price", 0.0) or ob.top),
+                                2,
+                            )
+                            if sl_price >= trig_lvl:
+                                sl_price = round(min(ltp, trig_lvl) * 0.995, 2)
+                            if t1_price <= trig_lvl:
+                                t1_price = round(
+                                    max(ltp, trig_lvl) + max(1.0, trig_lvl - sl_price) * 1.8, 2
+                                )
                             alert = AutoAlert(
                                 alert_id=alert_id,
                                 alert_type="CRYPTO_MOMENTUM",
@@ -639,12 +651,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                                 headline=headline,
                                 summary=summary,
                                 ltp=ltp,
-                                trigger_level=round(
-                                    ob.top
-                                    if is_breakout
-                                    else (getattr(ob, "ote_price", 0.0) or ob.top),
-                                    2,
-                                ),
+                                trigger_level=trig_lvl,
                                 target_level=t1_price,
                                 stop_loss=sl_price,
                                 confidence=smc_confidence,
@@ -875,6 +882,18 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                             alert_id = generate_alert_id(
                                 clean_sym, "CRYPTO_MOMENTUM", variant="supply"
                             )
+                            trig_lvl = round(
+                                ob.bottom
+                                if is_breakdown
+                                else (getattr(ob, "ote_price", 0.0) or ob.bottom),
+                                2,
+                            )
+                            if sl_price <= trig_lvl:
+                                sl_price = round(max(ltp, trig_lvl) * 1.005, 2)
+                            if t1_price >= trig_lvl:
+                                t1_price = round(
+                                    min(ltp, trig_lvl) - max(1.0, sl_price - trig_lvl) * 1.8, 2
+                                )
                             alert = AutoAlert(
                                 alert_id=alert_id,
                                 alert_type="CRYPTO_MOMENTUM",
@@ -888,12 +907,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                                 headline=headline,
                                 summary=summary,
                                 ltp=ltp,
-                                trigger_level=round(
-                                    ob.bottom
-                                    if is_breakdown
-                                    else (getattr(ob, "ote_price", 0.0) or ob.bottom),
-                                    2,
-                                ),
+                                trigger_level=trig_lvl,
                                 target_level=t1_price,
                                 stop_loss=sl_price,
                                 confidence=smc_confidence,

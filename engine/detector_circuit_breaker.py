@@ -29,8 +29,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import json
 import logging
+import os
 from pathlib import Path
 import threading
+import time
 from typing import Any, Literal, Optional
 
 logger = logging.getLogger("engine.detector_circuit_breaker")
@@ -286,20 +288,36 @@ class DetectorCircuitBreaker:
             )
 
     def _save_unlocked(self) -> None:
-        """Persists trade history to JSON file."""
+        """Persists trade history to JSON file atomically."""
+        temp_path = None
         try:
             data = {}
             for k, deq in self._history.items():
                 data[k] = [asdict(r) for r in deq]
-            with open(self.ledger_file, "w", encoding="utf-8") as f:
+            self.ledger_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = self.ledger_file.with_suffix(f".tmp.{os.getpid()}")
+            with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self.ledger_file)
             if self.ledger_file.exists():
                 self._last_mtime = self.ledger_file.stat().st_mtime
         except Exception as e:
             logger.error(f"[DetectorCircuitBreaker] Failed to save ledger: {e}")
+        finally:
+            if temp_path and temp_path.exists():
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception as e_unlink:
+                    logger.debug(
+                        "[DetectorCircuitBreaker] Failed to unlink temp_path %s: %s",
+                        temp_path,
+                        e_unlink,
+                    )
 
     def _load(self) -> None:
-        """Loads trade history from JSON file."""
+        """Loads trade history from JSON file with self-healing recovery on corruption."""
         if not self.ledger_file.exists():
             return
         try:
@@ -310,6 +328,20 @@ class DetectorCircuitBreaker:
                 self._history[k] = deque(
                     [TradeOutcome(**r) for r in records], maxlen=self.rolling_window
                 )
+        except json.JSONDecodeError as jde:
+            # Self-healing: quarantine corrupted file and reinitialize clean ledger
+            corrupted_backup = self.ledger_file.with_suffix(f".corrupted.{int(time.time())}.json")
+            try:
+                os.replace(self.ledger_file, corrupted_backup)
+                logger.warning(
+                    f"[DetectorCircuitBreaker] Self-healed corrupted ledger: quarantined {self.ledger_file} to {corrupted_backup} ({jde})"
+                )
+            except Exception as e_mv:
+                logger.error(
+                    f"[DetectorCircuitBreaker] Failed quarantining corrupted ledger: {e_mv}"
+                )
+            self._history.clear()
+            self._save_unlocked()
         except Exception as e:
             logger.error(f"[DetectorCircuitBreaker] Failed to load ledger: {e}")
 

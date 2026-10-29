@@ -181,6 +181,7 @@ def test_evaluate_target_1_spot_trail_and_lifecycle():
         strike=24900.0,
         option_type="CE",
         contract_symbol="NIFTY26OCT24900CE",
+        expiry_date="2026-11-05",
         underlying_spot=24880.0,
         metrics={
             "spot_invalidation_anchor": 24820.0,
@@ -353,3 +354,167 @@ def test_opening_drive_detector_dual_invalidation(monkeypatch):
         assert alert.tactical_sl > 0
     if alert.disaster_stop_floor is not None:
         assert alert.disaster_stop_floor > 0
+
+
+def test_dual_stop_loss_rca_and_target_consistency():
+    """
+    RCA Regression Test: Verify option alerts never render dual contradictory stop losses
+    or mismatched targets between the bullet lines, reason text, and playbook.
+    """
+    alert = AutoAlert(
+        alert_id="aa-trend-pullback-jswsteel-1210pe-20261026",
+        alert_type="TREND_DAY_PULLBACK",
+        stage="IGNITED",
+        symbol="JSWSTEEL",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="🎯 [TREND PULLBACK] JSWSTEEL 1210 PE Buy: 20-EMA Resistance Reject (Spot ₹1,212.4)",
+        summary=(
+            "Institutional shallow bounce into falling 20-EMA/VWAP on JSWSTEEL. Low-volume retest rejected at resistance. "
+            "Enter JSWSTEEL 1210 PE @ ₹32.15. Stop loss: ₹30.2. (R:R 2.0)"
+        ),
+        ltp=32.15,
+        trigger_level=32.15,
+        target_level=41.8,
+        stop_loss=27.3,
+        tactical_sl=27.3,
+        strike=1210.0,
+        option_type="PE",
+        contract_symbol="JSWSTEEL26OCT1210PE",
+        option_premium=32.15,
+        underlying_spot=1212.4,
+        structural_spot_sl=1216.3,
+        metrics={
+            "underlying_spot": 1212.4,
+            "spot_invalidation_anchor": 1216.3,
+            "target_1": 41.8,
+            "target_2": 49.0,
+            "tactical_sl": 27.3,
+        },
+        actionable_plan={
+            "action": "BUY PE",
+            "contract": "JSWSTEEL 1210 PE",
+            "instrument": "JSWSTEEL 1210 PE",
+            "recommended_entry": "₹32.15",
+            "stop_loss": "₹27.3",
+            "tactical_sl": "₹27.3",
+            "spot_invalidation_anchor": "₹1,216.3",
+            "underlying_sl": "₹1,216.3",
+            "target_1": "₹41.8",
+            "target_2": "₹49.0",
+            "target_3": "₹58.7",
+            "profit_rule": "Scale Blueprint: Book 50% at Target 1 (₹41.8) and trail SL to Cost/Breakeven. Book 25% at Target 2 (₹49.0). Hold 25% runner trailing on EMA.",
+            "option_plan": {
+                "contract_symbol": "JSWSTEEL26OCT1210PE",
+                "strike": 1210.0,
+                "option_type": "PE",
+                "entry_premium": 32.15,
+                "sl_premium": 27.3,
+                "t1_premium": 41.8,
+                "t2_premium": 49.0,
+                "t3_premium": 58.7,
+            },
+        },
+    )
+
+    rendered = render_auto_alert(alert)
+
+    # 1. Safe SL (Tactical) must display ₹27.3
+    assert "Safe SL (Tactical):" in rendered
+    assert "₹27.3" in rendered or "₹27.30" in rendered
+
+    # 2. Contradictory "Stop loss: ₹30.2" MUST NOT appear anywhere in the rendered alert!
+    assert "Stop loss: ₹30.2" not in rendered
+    assert "₹30.2" not in rendered
+
+    # 3. Reason must contain strictly the market/technical thesis
+    assert (
+        "Reason:</b> <i>Institutional shallow bounce into falling 20-EMA/VWAP on JSWSTEEL."
+        in rendered
+    )
+
+    # 4. Target 1 & Target 2 in bullets and Playbook must match exactly
+    assert "T1:</b> <code>₹41.8" in rendered or "T1:</b> <code>₹41.80" in rendered
+    assert "Target 1 (₹41.8" in rendered
+
+
+def test_auto_alert_engine_noise_floor_sl_synchronization(tmp_path, monkeypatch):
+    """
+    Verify AutoAlertEngine noise floor gate synchronizes alert.stop_loss,
+    alert.tactical_sl, actionable_plan, option_plan, and metrics when adjusting tight stops.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    engine = AutoAlertEngine()
+
+    # Create an initial alert with sub-noise-floor SL (6% risk: 32.15 -> 30.2)
+    alert = AutoAlert(
+        alert_id="aa-trend-pullback-jswsteel-test",
+        alert_type="TREND_DAY_PULLBACK",
+        stage="IGNITED",
+        symbol="JSWSTEEL",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="🎯 [TREND PULLBACK] JSWSTEEL 1210 PE Buy",
+        summary="Institutional shallow bounce into falling 20-EMA/VWAP on JSWSTEEL.",
+        ltp=32.15,
+        trigger_level=32.15,
+        target_level=39.22,
+        stop_loss=30.2,  # <10% risk -> triggers noise floor calibration to 15%
+        tactical_sl=30.2,
+        strike=1210.0,
+        option_type="PE",
+        contract_symbol="JSWSTEEL26OCT1210PE",
+        option_premium=32.15,
+        underlying_spot=1212.4,
+        structural_spot_sl=1216.3,
+        metrics={
+            "underlying_spot": 1212.4,
+            "spot_invalidation_anchor": 1216.3,
+            "target_1": 39.22,
+            "target_2": 41.80,
+            "target_3": 44.37,
+        },
+        actionable_plan={
+            "action": "BUY PE",
+            "contract": "JSWSTEEL 1210 PE",
+            "recommended_entry": "₹32.15",
+            "stop_loss": "₹30.2",
+            "tactical_sl": "₹30.2",
+            "target_1": "₹39.22",
+            "target_2": "₹41.80",
+            "target_3": "₹44.37",
+            "option_plan": {
+                "contract_symbol": "JSWSTEEL26OCT1210PE",
+                "strike": 1210.0,
+                "option_type": "PE",
+                "entry_premium": 32.15,
+                "sl_premium": 30.2,
+                "t1_premium": 39.22,
+                "t2_premium": 41.80,
+                "t3_premium": 44.37,
+            },
+        },
+        environment="TEST",
+        is_live=False,
+    )
+
+    engine.record_alert(alert)
+
+    # Verify stop loss was updated to 15% breathing room (27.3)
+    assert alert.stop_loss == 27.3
+    assert alert.tactical_sl == 27.3
+
+    # Verify actionable_plan and option_plan were synchronized
+    assert alert.actionable_plan["stop_loss"] == "₹27.3"
+    assert alert.actionable_plan["tactical_sl"] == "₹27.3"
+    assert alert.actionable_plan["option_sl"] == "₹27.3"
+    assert alert.actionable_plan["option_plan"]["sl_premium"] == 27.3
+
+    # Verify targets were synchronized
+    min_t1 = alert.target_level
+    assert min_t1 > 39.22  # Recalibrated to 2R+ from the new 15% SL
+    assert alert.actionable_plan["option_plan"]["t1_premium"] == min_t1
+    assert alert.metrics["tactical_sl"] == 27.3

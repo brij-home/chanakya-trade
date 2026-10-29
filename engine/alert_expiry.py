@@ -301,6 +301,10 @@ def is_alert_option_premium_level(alert: Any) -> bool:
             return alert.get(key, default)
         return getattr(alert, key, default)
 
+    sym_u = str(_g("symbol", "") or "").upper()
+    if sym_u.endswith(" CE") or sym_u.endswith(" PE") or " CE " in sym_u or " PE " in sym_u:
+        return True
+
     atype = str(_g("alert_type", "") or "")
     if atype in (
         "OPTIONS_MOMENTUM",
@@ -310,7 +314,7 @@ def is_alert_option_premium_level(alert: Any) -> bool:
         "INDEX_MICRO_SCALP",
     ):
         return True
-    if atype == "GAMMA_BLAST" and _g("option_type", None):
+    if atype == "GAMMA_BLAST" and (_g("option_type", None) or " CE" in sym_u or " PE" in sym_u):
         return True
 
     if atype == "COMMODITY_MOMENTUM":
@@ -375,11 +379,18 @@ def is_alert_option_premium_level(alert: Any) -> bool:
         "MULTIBAGGER",
         "STAGE_1_TO_2_EXPANSION",
         "RRG_SECTOR_ROTATION",
-        "DCF_UNDERVALUED",
-        "FORENSIC_GEM",
         "SWING_INFLECTION",
+        "CRYPTO_MOMENTUM",
+        "CRYPTO",
+        "CRYPTO_BREAKOUT",
     ):
         return False
+
+    if _g("exchange", "") == "CRYPTO" or _g("segment", "") == "CRYPTO":
+        deriv = str(_g("derivative_type", "") or "").upper()
+        csym_check = str(_g("contract_symbol", "") or "").upper()
+        if deriv != "OPT" and not csym_check.endswith(("CE", "PE")):
+            return False
 
     csym = str(_g("contract_symbol", "") or "").upper()
     opt_t = str(_g("option_type", "") or "").upper()
@@ -805,3 +816,96 @@ def resolve_recommended_derivative_expiry(
         "margin_risk": "NORMAL",
         "badge": "CURRENT_MONTH",
     }
+
+
+def extract_contract_expiry_date(contract_symbol: str) -> Optional[date]:
+    """
+    Extracts the expiration calendar date from any Indian derivative contract symbol.
+    Supports:
+      - Broker YYYYMMDD format: e.g. M&M202609293050PE, HAL202609294800PE
+      - Standard NSE weekly format: e.g. NIFTY2692425000CE
+      - NSE monthly format: e.g. M&M26OCT2800CE, RELIANCE26OCTFUT
+    """
+    if not contract_symbol:
+        return None
+    csym = canonical_symbol(str(contract_symbol))
+
+    import re
+
+    # 1. Broker YYYYMMDD format: e.g. M&M202609293050PE
+    m_yyyymmdd = re.search(
+        r"([A-Za-z0-9_&]+?)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d*(?:CE|PE)?", csym
+    )
+    if m_yyyymmdd:
+        _, yyyy_str, mm_str, dd_str = m_yyyymmdd.groups()
+        try:
+            return date(int(yyyy_str), int(mm_str), int(dd_str))
+        except ValueError as e_val:
+            logger.debug("Failed parsing yyyymmdd expiry date for %s: %s", csym, e_val)
+
+    # 2. Standard monthly format: e.g. M&M26OCT2800CE, RELIANCE26OCTFUT
+    m_monthly = re.search(r"([A-Za-z0-9_&]+?)(\d{2})([A-Z]{3})(?:\d+)?(?:CE|PE|FUT)?", csym)
+    if m_monthly:
+        yr_str, mon_str = m_monthly.group(2), m_monthly.group(3)
+        month_map = {
+            "JAN": 1,
+            "FEB": 2,
+            "MAR": 3,
+            "APR": 4,
+            "MAY": 5,
+            "JUN": 6,
+            "JUL": 7,
+            "AUG": 8,
+            "SEP": 9,
+            "OCT": 10,
+            "NOV": 11,
+            "DEC": 12,
+        }
+        if mon_str in month_map:
+            try:
+                import calendar
+
+                yr = 2000 + int(yr_str)
+                mo = month_map[mon_str]
+                last_day = calendar.monthrange(yr, mo)[1]
+                d = date(yr, mo, last_day)
+                while d.weekday() != 3 and d.day > 1:
+                    d -= timedelta(days=1)
+                return d
+            except Exception as e_parse:
+                logger.debug("Failed parsing monthly expiry date for %s: %s", csym, e_parse)
+
+    # 3. Weekly NSE Index Option: e.g. NIFTY2692425000CE
+    m_weekly = re.search(r"^([A-Z]+)(\d{2})([1-9OND])(0[1-9]|[12]\d|3[01])", csym)
+    if m_weekly:
+        yr = 2000 + int(m_weekly.group(2))
+        m_code = m_weekly.group(3)
+        m_idx = (
+            10
+            if m_code == "O"
+            else (11 if m_code == "N" else (12 if m_code == "D" else int(m_code)))
+        )
+        day = int(m_weekly.group(4))
+        try:
+            return date(yr, m_idx, day)
+        except ValueError as e_val:
+            logger.debug("Failed parsing weekly expiry date for %s: %s", csym, e_val)
+
+    return None
+
+
+def is_contract_expired(contract_symbol: str, current_date: Optional[date] = None) -> bool:
+    """Return True if contract has an expiry date strictly before current_date (defaults to today IST)."""
+    exp_date = extract_contract_expiry_date(contract_symbol)
+    if not exp_date:
+        return False
+    today = current_date or datetime.now(IST).date()
+    return exp_date < today
+
+
+def purge_expired_option_contracts(
+    symbols: list[str], current_date: Optional[date] = None
+) -> list[str]:
+    """Filter out expired derivative contract symbols from active monitoring universe."""
+    today = current_date or datetime.now(IST).date()
+    return [s for s in symbols if not is_contract_expired(s, today)]

@@ -848,6 +848,11 @@ class TargetTrailingEvaluation:
     is_risk_compression: bool = False
     risk_reduction_pct: float = 0.0
     recommended_spot_stop: Optional[float] = None
+    target_level: Optional[float] = None
+
+    @property
+    def new_stop_loss(self) -> float:
+        return self.recommended_stop
 
     @property
     def is_t0_5_hit(self) -> bool:
@@ -1204,10 +1209,17 @@ def evaluate_alert_targets_and_trailing(
     # Sanity guard against unit-scale corruption (e.g. comparing spot price ₹1,442 against option entry ₹16)
     if entry > 0 and current_ltp > 0:
         ratio = current_ltp / entry
-        if not is_option and (ratio > 2.5 or ratio < 0.4):
+        is_multibagger = (
+            getattr(alert, "alert_type", "") == "MULTIBAGGER"
+            or getattr(alert, "segment", "") == "EQUITY_MULTIBAGGER"
+        )
+        max_ratio = 3.5 if is_multibagger else 1.60
+        min_ratio = 0.30 if is_multibagger else 0.60
+        if not is_option and (ratio > max_ratio or ratio < min_ratio):
             logger.warning(
                 f"[AlertEvaluator] Spot/futures price scale mismatch for {getattr(alert, 'symbol', '')} "
-                f"({getattr(alert, 'alert_id', '')}): current_ltp={current_ltp} vs entry={entry}. Suppressing false evaluation."
+                f"({getattr(alert, 'alert_id', '')}): current_ltp={current_ltp} vs entry={entry} (ratio={ratio:.2f}x). "
+                f"Suppressing false evaluation."
             )
             return None
         elif is_option:
@@ -1273,13 +1285,13 @@ def evaluate_alert_targets_and_trailing(
         pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
         r_multiple = pnl_pts / initial_risk
 
-    # Defensive sanity clamp against wild R-multiple spikes
+    # Defensive sanity guard against wild R-multiple spikes (Invariant 10 & 16)
     if r_multiple > 25.0:
         logger.warning(
             f"[AlertEvaluator] Extreme r_multiple ({r_multiple:.2f}R) detected for {getattr(alert, 'symbol', '')} "
-            f"(entry={entry}, initial_stop={initial_stop}, risk={initial_risk}). Clamping to +25.0R."
+            f"(entry={entry}, initial_stop={initial_stop}, risk={initial_risk}). Suppressing false evaluation."
         )
-        r_multiple = 25.0
+        return None
     elif r_multiple < -5.0:
         r_multiple = -5.0
 
@@ -1356,6 +1368,42 @@ def evaluate_alert_targets_and_trailing(
             plan_t2 = None
         if plan_t3 and plan_t3 > entry * 10:
             plan_t3 = None
+    elif not is_option and entry > 0:
+        # Sanity filter for cash equity / futures: discard option premium pollution
+        # Option premium targets (e.g. ₹20-50 for an ₹1,000 stock) must never contaminate equity targets!
+        def _is_invalid_equity_target(tgt: Optional[float]) -> bool:
+            if tgt is None or tgt <= 0:
+                return True
+            if is_bullish:
+                if tgt <= entry * 0.5 or (initial_stop and tgt < initial_stop):
+                    return True
+            else:
+                if tgt >= entry * 1.5 or (initial_stop and tgt > initial_stop):
+                    return True
+            return False
+
+        if _is_invalid_equity_target(plan_t0_5):
+            plan_t0_5 = None
+        if _is_invalid_equity_target(plan_t1):
+            plan_t1 = None
+        if _is_invalid_equity_target(plan_t2):
+            plan_t2 = None
+        if _is_invalid_equity_target(plan_t3):
+            plan_t3 = None
+
+        if plan and isinstance(plan, dict):
+            underlying_t3 = plan.get("underlying_target_3") or plan.get("underlying_target")
+            if underlying_t3:
+                m_ut3 = re.search(r"[\d,]+(?:\.\d+)?", str(underlying_t3))
+                if m_ut3:
+                    try:
+                        parsed_ut3 = float(m_ut3.group(0).replace(",", ""))
+                        if not _is_invalid_equity_target(parsed_ut3):
+                            plan_t3 = parsed_ut3
+                    except ValueError as e_val:
+                        logger.debug(
+                            "Failed parsing underlying_target_3 (%s): %s", underlying_t3, e_val
+                        )
 
     valid_alert_tgt = None
     if getattr(alert, "target_level", 0) and alert.target_level > 0:
@@ -1366,12 +1414,17 @@ def evaluate_alert_targets_and_trailing(
             elif not is_bullish and 0.05 <= raw_tgt < entry:
                 valid_alert_tgt = raw_tgt
         elif not is_option:
-            valid_alert_tgt = raw_tgt
+            if is_bullish and (entry <= 0 or raw_tgt > entry * 0.8):
+                valid_alert_tgt = raw_tgt
+            elif not is_bullish and (entry <= 0 or raw_tgt < entry * 1.2):
+                valid_alert_tgt = raw_tgt
 
-    if plan_t3:
-        target_final = plan_t3
-    elif valid_alert_tgt and valid_alert_tgt > (plan_t2 or 0):
+    if valid_alert_tgt and is_bullish and valid_alert_tgt > (plan_t2 or 0):
         target_final = valid_alert_tgt
+    elif valid_alert_tgt and not is_bullish and valid_alert_tgt < (plan_t2 or 1e9):
+        target_final = valid_alert_tgt
+    elif plan_t3:
+        target_final = plan_t3
     elif plan_t2:
         target_final = plan_t2
     elif valid_alert_tgt:
@@ -1388,15 +1441,50 @@ def evaluate_alert_targets_and_trailing(
             2,
         )
 
-    # 1. Target 1 (+2R Milestone): Book 50% partial profit & lock SL to Breakeven
-    if plan_t1:
+    # ── Regime-Adaptive Target Calibration (CPR & ADR Exhaustion) ──
+    alert_metrics = getattr(alert, "metrics", {}) or {}
+    session_regime = alert_metrics.get("session_regime")
+    cpr_type = alert_metrics.get("cpr_type")
+    is_chop_regime = bool(
+        alert_metrics.get("is_chop_regime")
+        or session_regime == "CHOP_MEAN_REVERSION"
+        or cpr_type == "WIDE"
+        or (float(alert_metrics.get("adr_exhaustion_pct", 0.0) or 0.0) >= 70.0)
+    )
+
+    # 1. Target 1 (Regime-Adaptive: +1.2R in Chop/Wide-CPR, +2.0R in Trend): Book 50% & lock Breakeven
+    t1_r_mult = 1.2 if is_chop_regime else 2.0
+    if is_chop_regime and entry > 0:
+        # In Chop / Wide CPR regime, compress T1 to +1.2R (+18% options) to harvest profits before mean reversion
+        if is_option:
+            opt_chop_mult = 1.18 if is_bullish else 0.82
+            chop_t1 = round(
+                entry * opt_chop_mult if is_bullish else max(0.05, entry * opt_chop_mult), 2
+            )
+            t1_level = (
+                min(plan_t1, chop_t1)
+                if (plan_t1 and is_bullish)
+                else (max(plan_t1, chop_t1) if plan_t1 else chop_t1)
+            )
+        elif is_bullish:
+            chop_t1 = round(entry + (initial_risk * 1.2), 2)
+            t1_level = min(plan_t1, chop_t1) if plan_t1 else chop_t1
+        else:
+            chop_t1 = round(entry - (initial_risk * 1.2), 2)
+            t1_level = max(plan_t1, chop_t1) if plan_t1 else chop_t1
+    elif plan_t1:
         t1_level = plan_t1
+    elif is_option and entry > 0:
+        opt_t1_pct = 1.35
+        t1_level = round(
+            entry * opt_t1_pct if is_bullish else max(0.05, entry * (2.0 - opt_t1_pct)), 2
+        )
     elif is_bullish:
-        t1_level = round(entry + (initial_risk * 2.0), 2)
+        t1_level = round(entry + (initial_risk * t1_r_mult), 2)
         if target_final > entry and t1_level >= target_final:
             t1_level = round(entry + (target_final - entry) * 0.5, 2)
     else:
-        t1_level = round(entry - (initial_risk * 2.0), 2)
+        t1_level = round(entry - (initial_risk * t1_r_mult), 2)
         if target_final < entry and t1_level <= target_final:
             t1_level = round(entry - (entry - target_final) * 0.5, 2)
 
@@ -1412,15 +1500,19 @@ def evaluate_alert_targets_and_trailing(
             if target_final < t1_level and t2_level <= target_final:
                 t2_level = round(t1_level - (t1_level - target_final) * 0.5, 2)
 
-    # 3. Target 0.5 (Scale 1 / Early De-Risk at +1.0R):
+    # 3. Target 0.5 (Scale 1 / Early De-Risk at +0.75R to +0.8R):
     t0_5_level = plan_t0_5
     if not t0_5_level:
+        t0_5_r = 0.70 if is_chop_regime else 0.80
         if is_option and entry > 0:
-            t0_5_level = round(entry * 1.16 if is_bullish else max(0.05, entry * 0.84), 2)
+            opt_t0_5_pct = 1.10 if is_chop_regime else 1.15
+            t0_5_level = round(
+                entry * opt_t0_5_pct if is_bullish else max(0.05, entry * (2.0 - opt_t0_5_pct)), 2
+            )
         elif is_bullish:
-            t0_5_level = round(entry + (initial_risk * 1.0), 2)
+            t0_5_level = round(entry + (initial_risk * t0_5_r), 2)
         else:
-            t0_5_level = round(entry - (initial_risk * 1.0), 2)
+            t0_5_level = round(entry - (initial_risk * t0_5_r), 2)
 
     # Ensure t0_5_level sits strictly between entry and t1_level
     if is_bullish:
@@ -1510,6 +1602,9 @@ def evaluate_alert_targets_and_trailing(
                     pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
                     r_multiple = pnl_pts / initial_risk
                     is_t1_hit = current_ltp >= t1_level
+                    is_t0_5_hit = bool(
+                        t0_5_level and current_ltp >= t0_5_level and t0_5_level < t1_level
+                    )
                     is_t2_hit = bool(t2_level and current_ltp >= t2_level and t2_level > t1_level)
                     is_final_hit = current_ltp >= target_final
             elif not is_bullish and day_low > 0 and is_coherent:
@@ -1523,6 +1618,9 @@ def evaluate_alert_targets_and_trailing(
                     pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
                     r_multiple = pnl_pts / initial_risk
                     is_t1_hit = current_ltp <= t1_level
+                    is_t0_5_hit = bool(
+                        t0_5_level and current_ltp <= t0_5_level and t0_5_level > t1_level
+                    )
                     is_t2_hit = bool(t2_level and current_ltp <= t2_level and t2_level < t1_level)
                     is_final_hit = current_ltp <= target_final
         except Exception as e:
@@ -1593,6 +1691,7 @@ def evaluate_alert_targets_and_trailing(
                 is_superperforming=False,
                 strike_roll_recommendation=roll_rec,
                 should_roll_strike=bool(roll_rec),
+                target_level=target_final,
             )
 
     # 2. Target 2 (T2) Check - Target 2 at +4R (lock SL to +2R / T1 level)
@@ -1635,6 +1734,7 @@ def evaluate_alert_targets_and_trailing(
             is_superperforming=is_superperforming,
             strike_roll_recommendation=roll_rec,
             should_roll_strike=bool(roll_rec),
+            target_level=t2_level,
         )
 
     # 3. Target 1 (T1) Check - Auto-partial at +2R (close 50%, lock SL to Breakeven)
@@ -1745,13 +1845,14 @@ def evaluate_alert_targets_and_trailing(
             recommended_spot_stop=rec_spot_stop,
             strike_roll_recommendation=roll_rec,
             should_roll_strike=bool(roll_rec),
+            target_level=t1_level,
         )
 
-    # 4. Target 0.5 (T0.5 / Scale 1) Check - De-risks trades early at +1.0R / +16%
+    # 4. Target 0.5 (T0.5 / Scale 1) Check - De-risks trades early at +0.70R to +0.80R
+    min_t0_5_r = 0.65 if is_chop_regime else 0.75
     if (
-        is_t0_5_hit
+        (is_t0_5_hit or r_multiple >= min_t0_5_r)
         and pnl_pts > 0
-        and r_multiple >= 0.4
         and "T0_5_ACHIEVED" not in achieved
         and "T1_ACHIEVED" not in achieved
         and "T2_ACHIEVED" not in achieved
@@ -1762,8 +1863,9 @@ def evaluate_alert_targets_and_trailing(
         locked_pts = abs(rec_stop - entry)
         locked_pct = 0.2
         next_tgt = t1_level or target_final
+        regime_tag = " [CHOP/WIDE-CPR REGIME: Early De-Risk]" if is_chop_regime else ""
         rationale = (
-            f"Target 0.5 (Scale 1) reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
+            f"Target 0.5 (Scale 1) reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R){regime_tag}. "
             f"DECISION: SCALE 35% PARTIAL PROFIT & TRAIL STOP-LOSS TO BREAKEVEN (₹{rec_stop:,.2f}). "
             f"Trade is now de-risked to 100% free trade. Hold remaining 65% runner for Target 1 (₹{next_tgt:,.2f})."
         )
@@ -1781,6 +1883,7 @@ def evaluate_alert_targets_and_trailing(
             is_superperforming=is_superperforming,
             is_risk_compression=True,
             risk_reduction_pct=100.0,
+            target_level=t0_5_level,
         )
 
     # 5. Trailing Stop Ratchet Higher (Dynamic Trail)
@@ -3175,3 +3278,7 @@ def evaluate_alert_in_flight_decay(
                 )
 
     return None
+
+
+# Canonical and backward-compatible alias for alert milestone & trailing progress evaluation
+evaluate_alert_progress = evaluate_alert_targets_and_trailing

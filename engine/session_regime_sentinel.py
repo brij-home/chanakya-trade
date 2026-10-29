@@ -76,9 +76,11 @@ def calculate_cpr(
     low: float,
     close: float,
     is_index: bool = False,
+    symbol: str = "",
 ) -> CPRMetrics:
     """
     Computes Central Pivot Range (Pivot, Bottom Central, Top Central) and classifies width.
+    Uses institutional 90-day empirical calibration percentiles.
     """
     if high <= 0 or low <= 0 or close <= 0:
         return CPRMetrics(0.0, 0.0, 0.0, 0.0, 0.0, "AVERAGE")
@@ -90,9 +92,12 @@ def calculate_cpr(
     width_pts = round(abs(tc - bc), 2)
     width_pct = round((width_pts / pivot) * 100.0, 3) if pivot > 0 else 0.0
 
-    # Index vs Equity calibration
-    narrow_threshold = 0.15 if is_index else 0.35
-    wide_threshold = 0.35 if is_index else 0.65
+    # Institutional Empirical Calibration (p25 Narrow / p75 Wide)
+    from engine.index_calibration import get_calibrated_cpr_thresholds
+
+    narrow_threshold, wide_threshold = get_calibrated_cpr_thresholds(
+        symbol=symbol, is_index=is_index
+    )
 
     # Degenerate CPR Protection: If high == low (missing prior range or flat line),
     # it is an invalid/degenerate CPR, NOT a primed narrow CPR!
@@ -135,11 +140,14 @@ def evaluate_symbol_session_regime(
         for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
     )
 
-    cpr = calculate_cpr(prev_high, prev_low, prev_close, is_index=is_index)
+    cpr = calculate_cpr(prev_high, prev_low, prev_close, is_index=is_index, symbol=clean_sym)
 
     session_range = max(0.0, current_high - current_low)
-    # Default ADR fallback: if not provided, approximate using prior day range
-    adr_pts = float(adr_5d or max(1.0, prev_high - prev_low))
+    # ADR resolution: 1. Passed adr_5d -> 2. Calibrated 90-day empirical ADR -> 3. Prior day range fallback
+    from engine.index_calibration import get_calibrated_adr
+
+    calib_adr = get_calibrated_adr(clean_sym)
+    adr_pts = float(adr_5d or calib_adr or max(1.0, prev_high - prev_low))
     adr_exhaustion_pct = round((session_range / adr_pts) * 100.0, 1) if adr_pts > 0 else 50.0
 
     now_dt = ref_time
@@ -176,13 +184,13 @@ def evaluate_symbol_session_regime(
             f"ample ADR runway remaining ({100.0 - adr_exhaustion_pct:.1f}% headroom). "
             f"Breakout acceleration permitted."
         )
-    # 3. Wide CPR Chop Lull (Midday consolidation):
+    # 3. Wide CPR Chop Lull (Range-bound consolidation):
     elif cpr.cpr_type == "WIDE":
         regime = "CHOP_MEAN_REVERSION"
-        veto_chase = is_post_1130
+        veto_chase = is_post_1130 or adr_exhaustion_pct >= 60.0
         favor_fade = True
         rationale = (
-            f"Wide CPR Range-Bound Day ({cpr.cpr_width_pct:.2f}% width). "
+            f"Wide CPR Range-Bound Day ({cpr.cpr_width_pct:.2f}% width, ADR exhaustion: {adr_exhaustion_pct:.1f}%). "
             f"Sideways containment expected; avoid chasing edges."
         )
     else:
@@ -232,7 +240,12 @@ def check_alert_session_regime(
         or (not getattr(alert, "is_live", True))
         or str(getattr(alert, "alert_id", "")).startswith("test-")
     )
-    if is_test and "session_regime" not in metrics and "cpr" not in metrics:
+    if (
+        is_test
+        and "session_regime" not in metrics
+        and "cpr" not in metrics
+        and os.environ.get("FORCE_REGIME_CHECK") != "1"
+    ):
         return None
 
     sym = str(

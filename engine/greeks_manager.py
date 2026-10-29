@@ -20,6 +20,7 @@ from datetime import date, timedelta
 from typing import Any, Optional
 
 from config.constants import IST
+from market.instruments import format_strike
 
 from rich.console import Console
 from rich.panel import Panel
@@ -565,6 +566,65 @@ def black_76_price_and_greeks(
     }
 
 
+def black_scholes_price_and_greeks(
+    spot: float,
+    strike: float,
+    time_to_expiry_years: float,
+    risk_free_rate: float = 0.065,
+    volatility: float = 0.15,
+    option_type: str = "CE",
+) -> dict[str, float]:
+    """
+    Computes theoretical option price and Greeks using the standard Black-Scholes-Merton model
+    for European cash/index options (NSE NIFTY, BANKNIFTY, BSE SENSEX).
+    """
+    import math
+
+    S = max(0.001, float(spot))
+    K = max(0.001, float(strike))
+    T = max(1e-5, float(time_to_expiry_years))
+    r = float(risk_free_rate)
+    sigma = max(0.01, float(volatility))
+    is_call = option_type.upper() in ("CE", "CALL", "C")
+
+    def norm_cdf(x: float) -> float:
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+    def norm_pdf(x: float) -> float:
+        return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+    sqrt_T = math.sqrt(T)
+    sigma_sqrt_T = sigma * sqrt_T
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / sigma_sqrt_T
+    d2 = d1 - sigma_sqrt_T
+
+    pdf_d1 = norm_pdf(d1)
+    discount = math.exp(-r * T)
+
+    if is_call:
+        price = S * norm_cdf(d1) - K * discount * norm_cdf(d2)
+        delta = norm_cdf(d1)
+        theta_annual = -(S * pdf_d1 * sigma) / (2.0 * sqrt_T) - r * K * discount * norm_cdf(d2)
+    else:
+        price = K * discount * norm_cdf(-d2) - S * norm_cdf(-d1)
+        delta = norm_cdf(d1) - 1.0
+        theta_annual = -(S * pdf_d1 * sigma) / (2.0 * sqrt_T) + r * K * discount * norm_cdf(-d2)
+
+    gamma = pdf_d1 / (S * sigma_sqrt_T)
+    vega = (S * sqrt_T * pdf_d1) / 100.0  # per 1% change in IV
+    theta_daily = theta_annual / 365.0
+
+    return {
+        "price": max(0.05, round(price, 2)),
+        "delta": round(delta, 4),
+        "gamma": round(gamma, 6),
+        "theta": round(theta_daily, 2),
+        "vega": round(vega, 2),
+        "d1": round(d1, 4),
+        "d2": round(d2, 4),
+    }
+
+
 def get_mcx_prompt_expiry_and_dte(sym: str, as_of: Optional[Any] = None) -> tuple[str, int]:
     """
     Resolves the exact prompt calendar expiry date and DTE for MCX commodities:
@@ -680,8 +740,8 @@ def build_commodity_option_chain_synthetic(
     strikes = [atm_strike + i * step for i in range(-10, 11)]
 
     for strike in strikes:
-        strike_val = round(strike, 2 if step < 1.0 else 0)
-        strike_int = int(strike_val)
+        strike_val = round(strike, 2 if step < 1.0 else (1 if step < 10.0 else 0))
+        strike_str = format_strike(strike_val)
 
         for opt_type in ("CE", "PE"):
             greeks = black_76_price_and_greeks(
@@ -706,10 +766,10 @@ def build_commodity_option_chain_synthetic(
 
                 d_obj = datetime.strptime(target_exp, "%Y-%m-%d")
                 exp_tag = d_obj.strftime("%y%b").upper()
-                contract_symbol = f"MCX:{sym}{exp_tag}{strike_int}{opt_type}"
+                contract_symbol = f"MCX:{sym}{exp_tag}{strike_str}{opt_type}"
             except Exception:
                 contract_symbol = (
-                    f"MCX:{sym}{target_exp.replace('-', '')[2:]}{strike_int}{opt_type}"
+                    f"MCX:{sym}{target_exp.replace('-', '')[2:]}{strike_str}{opt_type}"
                 )
 
             contracts.append(

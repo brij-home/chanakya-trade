@@ -47,6 +47,7 @@ import pandas as pd
 logger = logging.getLogger("chanakya.trade_plan")
 from config.constants import IST_ZONE as IST
 from engine.dynamic_risk import resolve_price_tier
+from market.instruments import format_strike
 
 
 @dataclass
@@ -1769,10 +1770,10 @@ def calculate_option_execution_plan(
         "theta_reduction_pct": 75.0,
         "risk_reduction_pct": round(((option_ltp - net_debit) / max(0.01, option_ltp)) * 100, 1),
         "guidance": (
-            f"Trade a {spread_name} (Buy {int(strike)} + Sell {int(short_strike)}): "
+            f"Trade a {spread_name} (Buy {format_strike(strike)} + Sell {format_strike(short_strike)}): "
             f"Cuts risk by {round(((option_ltp - net_debit) / max(0.01, option_ltp)) * 100, 0):.0f}% "
             f"(₹{net_debit:,.1f} vs ₹{option_ltp:,.1f}), flattens theta decay to zero, "
-            f"and monetizes overhead resistance at {int(short_strike)}."
+            f"and monetizes overhead resistance at {format_strike(short_strike)}."
         ),
     }
 
@@ -1797,7 +1798,7 @@ def calculate_option_execution_plan(
         "runner_target_3": t3_prem,
         "runner_trailing_strategy": "1.5x ATR dynamic trail behind swing pivots",
         "synthetic_hedge_option": (
-            f"At T1 (₹{t1_prem:,.1f}), optionally sell {int(short_strike)} {option_type.upper()} "
+            f"At T1 (₹{t1_prem:,.1f}), optionally sell {format_strike(short_strike)} {option_type.upper()} "
             f"to lock in max profit and eliminate all theta on remaining runner."
         ),
         "protocol_summary": (

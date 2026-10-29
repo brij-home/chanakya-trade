@@ -160,19 +160,29 @@ def evaluate_smt_divergence(
 
     # Check TBT OBI-50 on sibling if available (or fallback to L2 5-depth)
     s_obi = 0.0
+    tradable_sibling = ""
     try:
-        from market.fyers_tbt_manager import FyersTbtManager, resolve_tradable_tbt_symbol
+        from market.fyers_tbt_manager import (
+            fyers_tbt_manager,
+            FyersTbtManager,
+            resolve_tradable_tbt_symbol,
+        )
 
-        tbt_mgr = FyersTbtManager()
+        tradable_sibling = resolve_tradable_tbt_symbol(sibling)
+        tbt_mgr = (
+            fyers_tbt_manager
+            if getattr(fyers_tbt_manager, "is_connected", False)
+            else FyersTbtManager()
+        )
         if tbt_mgr.is_connected:
-            tradable_sibling = resolve_tradable_tbt_symbol(sibling)
             for sym_cand in (tradable_sibling, sibling):
                 if sym_cand:
                     depth = tbt_mgr.get_50_depth(sym_cand)
                     if depth and depth.get("status") not in ("UNAVAILABLE", None):
                         s_obi = float(depth.get("obi_50", 0.0) or 0.0)
                         break
-    except Exception:
+    except Exception as e_tbt:
+        logger.debug(f"[SMTDivergence] TBT depth lookup failed for {sibling}: {e_tbt}")
         s_obi = 0.0
 
     if s_obi == 0.0:
@@ -194,17 +204,22 @@ def evaluate_smt_divergence(
         is_primary_at_high = False
         if primary_day_high and primary_day_high > 0:
             dist_to_high_pct = (primary_spot - primary_day_high) / primary_day_high * 100.0
-            is_primary_at_high = dist_to_high_pct >= -0.20  # Testing or breaking day high
+            is_primary_at_high = (
+                dist_to_high_pct >= -0.35
+            )  # Testing or breaking day high (widened to 0.35%)
 
         # Check if sibling is failing to confirm:
         # Sibling is trapped below VWAP OR lagging significantly below its day high OR heavy ask OBI
-        sibling_below_vwap = s_vwap > 0 and s_ltp < s_vwap
+        sibling_below_vwap = s_vwap > 0 and s_ltp < (s_vwap * 0.999)
         sibling_lagging_high = False
         if s_high > 0:
             s_dist_to_high_pct = (s_high - s_ltp) / s_high * 100.0
-            sibling_lagging_high = s_dist_to_high_pct >= 0.50  # Sibling is >0.50% below day high
+            sibling_lagging_high = s_dist_to_high_pct >= 0.40  # Sibling is >=0.40% below day high
 
-        if is_primary_at_high and (sibling_below_vwap or (sibling_lagging_high and s_obi < -0.20)):
+        # Sub-Case A1: Classic SMT Bearish Divergence (Sweep at Extrema)
+        if is_primary_at_high and (
+            sibling_below_vwap or sibling_lagging_high or (s_high > 0 and s_obi < -0.20)
+        ):
             reasons = []
             if sibling_below_vwap:
                 reasons.append(
@@ -236,22 +251,54 @@ def evaluate_smt_divergence(
                 sibling_obi=s_obi,
             )
 
+        # Sub-Case A2: Cross-Benchmark Locomotive Conflict (Polarization across VWAP)
+        # If primary is attempting an upside expansion (above VWAP) while correlated sibling is trapped below VWAP
+        if (
+            primary_vwap
+            and primary_vwap > 0
+            and primary_spot >= (primary_vwap * 1.001)
+            and sibling_below_vwap
+        ):
+            msg = (
+                f"SMT Locomotive Polarization Veto: {clean_primary} is trading above VWAP (₹{primary_spot:,.1f} vs VWAP ₹{primary_vwap:,.1f}), "
+                f"but correlated sibling {sibling} is trapped below VWAP (₹{s_ltp:,.1f} vs VWAP ₹{s_vwap:,.1f}). "
+                f"Lack of inter-market confirmation indicates high fakeout risk."
+            )
+            return SMTDivergenceResult(
+                has_divergence=True,
+                divergence_type="LOCOMOTIVE_POLARIZATION_BULL_TRAP",
+                sibling_symbol=sibling,
+                primary_symbol=clean_primary,
+                is_trap=True,
+                rationale=msg,
+                sibling_spot=s_ltp,
+                sibling_vwap=s_vwap,
+                sibling_high=s_high,
+                sibling_low=s_low,
+                sibling_obi=s_obi,
+            )
+
     # ── CASE B: BEARISH BREAKDOWN CONTEXT (Check for Bullish Divergence Trap) ──
     else:
         is_primary_at_low = False
         if primary_day_low and primary_day_low > 0:
             dist_to_low_pct = (primary_spot - primary_day_low) / primary_day_low * 100.0
-            is_primary_at_low = dist_to_low_pct <= 0.20  # Testing or breaking day low
+            is_primary_at_low = (
+                dist_to_low_pct <= 0.35
+            )  # Testing or breaking day low (widened to 0.35%)
 
         # Check if sibling is failing to confirm:
         # Sibling is holding above VWAP OR holding significantly above its day low OR strong bid OBI
-        sibling_above_vwap = s_vwap > 0 and s_ltp > s_vwap
+        sibling_above_vwap = s_vwap > 0 and s_ltp > (s_vwap * 1.001)
         sibling_holding_low = False
         if s_low > 0:
             s_dist_to_low_pct = (s_ltp - s_low) / s_low * 100.0
-            sibling_holding_low = s_dist_to_low_pct >= 0.50  # Sibling is >0.50% above day low
+            sibling_holding_low = s_dist_to_low_pct >= 0.40  # Sibling is >=0.40% above day low
 
-        if is_primary_at_low and (sibling_above_vwap or (sibling_holding_low and s_obi > +0.20)):
+        # Sub-Case B1: Classic SMT Bullish Divergence (Sweep at Extrema)
+        if is_primary_at_low and (
+            sibling_above_vwap or sibling_holding_low or (s_low > 0 and s_obi > +0.20)
+        ):
             reasons = []
             if sibling_above_vwap:
                 reasons.append(
@@ -272,6 +319,33 @@ def evaluate_smt_divergence(
             return SMTDivergenceResult(
                 has_divergence=True,
                 divergence_type="BULLISH_DIVERGENCE_BEAR_TRAP",
+                sibling_symbol=sibling,
+                primary_symbol=clean_primary,
+                is_trap=True,
+                rationale=msg,
+                sibling_spot=s_ltp,
+                sibling_vwap=s_vwap,
+                sibling_high=s_high,
+                sibling_low=s_low,
+                sibling_obi=s_obi,
+            )
+
+        # Sub-Case B2: Cross-Benchmark Locomotive Conflict (Polarization across VWAP)
+        # If primary is attempting a downside flush (below VWAP) while 34%-weighted sibling is firmly holding above VWAP
+        if (
+            primary_vwap
+            and primary_vwap > 0
+            and primary_spot <= (primary_vwap * 0.999)
+            and sibling_above_vwap
+        ):
+            msg = (
+                f"SMT Locomotive Polarization Veto: {clean_primary} is trading below VWAP (₹{primary_spot:,.1f} vs VWAP ₹{primary_vwap:,.1f}), "
+                f"but 34%-weighted locomotive {sibling} is firmly holding above VWAP (₹{s_ltp:,.1f} vs VWAP ₹{s_vwap:,.1f}). "
+                f"Heavy institutional cross-currents make shorting a severe bear trap risk."
+            )
+            return SMTDivergenceResult(
+                has_divergence=True,
+                divergence_type="LOCOMOTIVE_POLARIZATION_BEAR_TRAP",
                 sibling_symbol=sibling,
                 primary_symbol=clean_primary,
                 is_trap=True,

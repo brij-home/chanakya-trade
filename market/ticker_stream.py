@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -436,13 +437,14 @@ class MarketTickerStream:
 
     def _wire_websocket_listeners(self) -> None:
         """Attach listeners to m.Stock and Fyers WebSocket managers."""
-        # 1. m.Stock WS
-        try:
-            from market.mstock_websocket import mstock_ws
+        # 1. m.Stock WS (only if ENABLE_MSTOCK is explicitly 1)
+        if os.environ.get("ENABLE_MSTOCK", "0") == "1":
+            try:
+                from market.mstock_websocket import mstock_ws
 
-            mstock_ws.on_tick(self._on_mstock_tick)
-        except Exception as exc:
-            logger.warning(f"[TickerStream] Could not wire m.Stock WS listener: {exc}")
+                mstock_ws.on_tick(self._on_mstock_tick)
+            except Exception as exc:
+                logger.warning(f"[TickerStream] Could not wire m.Stock WS listener: {exc}")
 
         # 2. Fyers WS
         try:

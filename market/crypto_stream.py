@@ -49,6 +49,77 @@ logger = logging.getLogger(__name__)
 # Supported core crypto pairs and canonical alias map
 DEFAULT_CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"]
 
+BINANCE_INTERVAL_MAP: dict[str, str] = {
+    # Seconds / 1m fallback
+    "1s": "1s",
+    "5s": "1m",
+    "10s": "1m",
+    "15s": "1m",
+    "30s": "1m",
+    "45s": "1m",
+    # 1 Minute
+    "1m": "1m",
+    "1min": "1m",
+    "minute": "1m",
+    "1minute": "1m",
+    # 3 Minute
+    "3m": "3m",
+    "3min": "3m",
+    "3minute": "3m",
+    # 5 Minute
+    "5m": "5m",
+    "5min": "5m",
+    "5minute": "5m",
+    # 10 / 15 Minute
+    "10m": "15m",
+    "10min": "15m",
+    "10minute": "15m",
+    "15m": "15m",
+    "15min": "15m",
+    "15minute": "15m",
+    # 30 Minute
+    "30m": "30m",
+    "30min": "30m",
+    "30minute": "30m",
+    # 1 Hour
+    "1h": "1h",
+    "60m": "1h",
+    "60min": "1h",
+    "60minute": "1h",
+    "hour": "1h",
+    "1hour": "1h",
+    # Multi-hour
+    "2h": "2h",
+    "2hour": "2h",
+    "4h": "4h",
+    "4hour": "4h",
+    "6h": "6h",
+    "6hour": "6h",
+    "8h": "8h",
+    "8hour": "8h",
+    "12h": "12h",
+    "12hour": "12h",
+    # Daily
+    "1d": "1d",
+    "d": "1d",
+    "day": "1d",
+    "1day": "1d",
+    "daily": "1d",
+    "3d": "3d",
+    "3day": "3d",
+    # Weekly
+    "1w": "1w",
+    "w": "1w",
+    "week": "1w",
+    "1wk": "1w",
+    "weekly": "1w",
+    # Monthly
+    "1mo": "1M",
+    "month": "1M",
+    "1month": "1M",
+    "monthly": "1M",
+}
+
 CRYPTO_ALIAS_MAP = {
     "BTC": "BTCUSDT",
     "BITCOIN": "BTCUSDT",
@@ -205,6 +276,12 @@ class CryptoStreamManager:
         with self._lock:
             if callback not in self._listeners:
                 self._listeners.append(callback)
+
+    def off_tick(self, callback: Callable[[dict[str, Any]], None]) -> None:
+        """Deregister a previously registered tick listener."""
+        with self._lock:
+            if callback in self._listeners:
+                self._listeners.remove(callback)
 
     def _run_event_loop(self) -> None:
         """Background asyncio worker loop."""
@@ -451,17 +528,11 @@ class CryptoStreamManager:
         Intervals: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 1w.
         """
         canon_sym = normalize_crypto_symbol(symbol)
-        binance_interval = interval.lower()
-        if binance_interval in ("minute", "1min"):
-            binance_interval = "1m"
-        elif binance_interval in ("5minute", "5min"):
-            binance_interval = "5m"
-        elif binance_interval in ("15minute", "15min"):
-            binance_interval = "15m"
-        elif binance_interval in ("60minute", "hour", "1hour"):
-            binance_interval = "1h"
-        elif binance_interval in ("day", "1day"):
-            binance_interval = "1d"
+        raw_intv = str(interval).strip()
+        if raw_intv == "1M":
+            binance_interval = "1M"
+        else:
+            binance_interval = BINANCE_INTERVAL_MAP.get(raw_intv.lower(), "15m")
 
         params = {"symbol": canon_sym, "interval": binance_interval, "limit": min(limit, 1000)}
         try:

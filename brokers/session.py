@@ -220,26 +220,29 @@ def _try_auto_restore_sessions() -> None:
     if _brokers:
         return
 
-    # 1. m.Stock (only if configured in environment)
-    try:
-        from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
+    # 1. m.Stock (only if explicitly enabled in environment)
+    if os.environ.get("ENABLE_MSTOCK", "0") == "1":
+        try:
+            from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
 
-        if os.path.exists(_MT) and (
-            os.environ.get("MSTOCK_API_KEY") or os.environ.get("MSTOCK_CLIENT_CODE")
-        ):
-            b = MStockAPI()
-            if b.is_authenticated():
-                register_broker("mstock", b, role="both")
-                if not is_testing:
-                    try:
-                        threading.Thread(target=_start_websocket, args=(b,), daemon=True).start()
-                    except Exception as e_suppressed:
-                        logger.debug(
-                            f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
-                        )
-                return
-    except Exception as e_suppressed:
-        logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
+            if os.path.exists(_MT) and (
+                os.environ.get("MSTOCK_API_KEY") or os.environ.get("MSTOCK_CLIENT_CODE")
+            ):
+                b = MStockAPI()
+                if b.is_authenticated():
+                    register_broker("mstock", b, role="both")
+                    if not is_testing:
+                        try:
+                            threading.Thread(
+                                target=_start_websocket, args=(b,), daemon=True
+                            ).start()
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+                    return
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
     # 2. Shoonya
     try:
@@ -1069,12 +1072,13 @@ def _start_websocket(broker: BrokerAPI) -> None:
             return
 
         if broker_name == "mstock":
-            from market.mstock_websocket import mstock_ws
+            if os.environ.get("ENABLE_MSTOCK", "0") == "1":
+                from market.mstock_websocket import mstock_ws
 
-            api_key = getattr(broker, "_api_key", "")
-            token = getattr(broker, "_token", "")
-            if api_key and token:
-                mstock_ws.start(api_key=api_key, access_token=token)
+                api_key = getattr(broker, "_api_key", "")
+                token = getattr(broker, "_token", "")
+                if api_key and token:
+                    mstock_ws.start(api_key=api_key, access_token=token)
             return
 
         if broker_name == "shoonya" and hasattr(broker, "start_websocket"):

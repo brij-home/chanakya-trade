@@ -115,6 +115,67 @@ def test_apex_confluence_upgrade_does_not_redispatch_primary_card(clean_engine):
         mock_sse.assert_called()
 
 
+def test_apex_confluence_upgrade_suppressed_when_active_trade_in_drawdown(clean_engine):
+    """
+    RCA: When an active trade is in negative drawdown (>= 8% loss), incoming secondary detectors
+    must NOT boost conviction or trigger APEX_CONFLUENCE_UPGRADE (preventing averaging into losers).
+    """
+    now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    # 1. Active initial alert on MIDCPNIFTY entered at 100.0, but currently in drawdown at 88.0 (-12%)
+    alert1 = make_alert(
+        alert_id="aa-gamma-MIDCPNIFTY-20261026",
+        symbol="MIDCPNIFTY",
+        direction="BEARISH",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        created_at=now_str,
+        confidence=85,
+        strike=12825.0,
+        option_type="PE",
+        contract_symbol="MIDCPNIFTY26OCT12825PE",
+        initial_entry_premium=100.0,
+        ltp=88.0,
+        pnl_pct=-12.0,
+        telegram_dispatched=True,
+    )
+    clean_engine._alerts.append(alert1)
+
+    # 2. Incoming second detector alert (INDEX_PUT_SETUP) arrives while active trade is in drawdown
+    alert2 = make_alert(
+        alert_id="aa-index_put_setup-MIDCPNIFTY-20261026",
+        symbol="MIDCPNIFTY",
+        direction="BEARISH",
+        alert_type="INDEX_PUT_SETUP",
+        stage="IGNITED",
+        created_at=now_str,
+        confidence=90,
+        strike=12825.0,
+        option_type="PE",
+        contract_symbol="MIDCPNIFTY26OCT12825PE",
+    )
+
+    with (
+        patch.object(clean_engine, "_dispatch") as mock_dispatch,
+        patch("web.sse.event_bus.publish_sync"),
+        patch(
+            "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+            return_value=(True, "OK", {}),
+        ),
+    ):
+        res = clean_engine.record_alert(alert2)
+
+        # Must return False (suppressed)
+        assert res is False
+
+        # Alert 1 MUST NOT be upgraded to APEX_CONFLUENCE
+        assert alert1.confidence == 85, "Confidence must NOT be boosted on a trade in drawdown"
+        assert (alert1.metrics or {}).get("conviction_tier") != "APEX_CONFLUENCE"
+
+        # No duplicate dispatches or false confluence upgrades
+        mock_dispatch.assert_not_called()
+
+
 def test_in_session_secondary_reentry_15m_reset_buffer(clean_engine):
     """
     RCA 3: Zero-delay in-session re-entry must be suppressed.
@@ -310,3 +371,93 @@ def test_signal_ref_latched_and_immutable():
     # The signal reference on the update MUST match the initial latched reference exactly
     assert data.signal_id == initial_sig_ref
     assert alert.signal_ref == initial_sig_ref
+
+
+def test_held_primary_setup_never_leaks_downstream_milestones_or_updates(clean_engine):
+    """
+    RCA Regression Guard (Invariant 16 & Invariant 19):
+    When a primary trade setup is held by Telegram gates (e.g., directional mutex,
+    stage cooldown, apex bar, or pacing throttle), it MUST NOT mutate telegram_dispatched=True
+    or latch PRIMARY_SETUP. Furthermore, ALL subsequent downstream milestones
+    (IN_FLIGHT_WARNING, T0_5, T1, T2, SPREAD_FREE_ROLL, RUNNER_EXIT, INVALIDATED)
+    MUST fail-closed and strictly suppress Telegram dispatch (Zero-Ghost Invariant).
+    """
+    now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    alert = make_alert(
+        alert_id="aa-index_call_setup-SENSEX-CE-73500-20261029",
+        symbol="SENSEX",
+        exchange="BFO",
+        direction="BULLISH",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        created_at=now_str,
+        confidence=98,
+        strike=73500.0,
+        option_type="CE",
+        contract_symbol="BSE:SENSEX26OCT73500CE",
+        trigger_level=251.05,
+        stop_loss=205.86,
+        target_level=341.4,
+        environment="LIVE",
+        is_live=True,
+    )
+
+    # 1. Simulate directional mutex cooldown active for SENSEX BULLISH calls (900s)
+    clean_engine._dispatch_cooldowns["SENSEX:BULLISH:INDEX_DIR_IGNITED"] = datetime.now(
+        IST
+    ).timestamp()
+
+    with (
+        patch("engine.alerts._telegram_notify") as mock_tg,
+        patch("engine.alerts._is_market_hours", return_value=True),
+        patch.dict(os.environ, {"ALLOW_MANUAL_TELEGRAM_DISPATCH": "1"}),
+    ):
+        # Step 1: Initial primary setup evaluation in IGNITED stage
+        clean_engine._dispatch(alert)
+
+        # Must NOT be dispatched to Telegram
+        assert mock_tg.call_count == 0
+        assert alert.telegram_dispatched is False, "telegram_dispatched MUST be False when held!"
+        assert alert.telegram_delivery_status == "HELD"
+        assert f"{alert.alert_id}:PRIMARY_SETUP" not in clean_engine._dispatched_milestones
+
+        # Step 2: In-Flight Warning (Theta Decay Warning) triggers
+        alert.stage = "IN_FLIGHT_WARNING"
+        clean_engine._dispatch(alert)
+        assert mock_tg.call_count == 0, "IN_FLIGHT_WARNING must NOT dispatch when setup was held!"
+        assert (
+            "zero-ghost" in alert.telegram_suppression_reason.lower()
+            or "held" in alert.telegram_suppression_reason.lower()
+        )
+
+        # Step 3: Target 0.5 milestone
+        alert.stage = "T0_5_ACHIEVED"
+        alert.target_status = "T0_5_ACHIEVED"
+        alert.ltp = 276.5
+        clean_engine._dispatch(alert)
+        assert mock_tg.call_count == 0, "T0_5 must NOT dispatch when setup was held!"
+
+        # Step 4: Spread Free Roll milestone
+        alert.stage = "SPREAD_FREE_ROLL"
+        clean_engine._dispatch(alert)
+        assert mock_tg.call_count == 0, "SPREAD_FREE_ROLL must NOT dispatch when setup was held!"
+
+        # Step 5: Target 1 Hit
+        alert.stage = "T1_ACHIEVED"
+        alert.target_status = "T1_ACHIEVED"
+        alert.ltp = 345.0
+        clean_engine._dispatch(alert)
+        assert mock_tg.call_count == 0, "T1 must NOT dispatch when setup was held!"
+
+        # Step 6: Runner Exit
+        alert.stage = "RUNNER_EXIT"
+        alert.target_status = "RUNNER_EXIT"
+        clean_engine._dispatch(alert)
+        assert mock_tg.call_count == 0, "RUNNER_EXIT must NOT dispatch when setup was held!"
+
+        # Step 7: View Invalidation
+        alert.stage = "INVALIDATED"
+        alert.is_invalidated = True
+        clean_engine._dispatch(alert)
+        assert mock_tg.call_count == 0, "INVALIDATED must NOT dispatch when setup was held!"

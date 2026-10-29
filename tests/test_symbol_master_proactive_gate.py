@@ -68,7 +68,7 @@ def test_websocket_proactively_drops_unlisted_symbols_before_dispatch():
     # Attempt to subscribe to phantom unlisted contracts
     phantom_symbols = [
         "NSE:COMPLETELY_INVALID_TICKER_12345-EQ",
-        "NSE:FINNIFTY26NOV24150CE",
+        "NSE:FINNIFTY99NOV99999CE",
     ]
     client.subscribe(phantom_symbols)
 
@@ -80,3 +80,35 @@ def test_websocket_proactively_drops_unlisted_symbols_before_dispatch():
     client.subscribe(["NSE:RELIANCE-EQ"])
     mock_ws.subscribe.assert_called_once_with(["NSE:RELIANCE-EQ"])
     assert "NSE:RELIANCE-EQ" in client._subscribed
+
+
+def test_resolve_fyers_equity_symbol_icicipruli_and_special_tickers():
+    """Verify ICICIPRULI resolves to ICICILIFE on Fyers, and -B series suffixes on NSE are preserved."""
+    assert resolve_fyers_equity_symbol("ICICIPRULI") == "NSE:ICICILIFE-EQ"
+    assert resolve_fyers_equity_symbol("NSE:ICICIPRULI-EQ") == "NSE:ICICILIFE-EQ"
+    assert resolve_fyers_equity_symbol("HEG") == "NSE:HEGAM-EQ"
+    assert resolve_fyers_equity_symbol("NSE:HEG-EQ") == "NSE:HEGAM-EQ"
+    assert resolve_fyers_equity_symbol("KLBRENG-B") == "NSE:KLBRENG-B-EQ"
+    assert resolve_fyers_equity_symbol("MCCHRLS-B") == "NSE:MCCHRLS-B-EQ"
+
+
+def test_get_symbol_info_alias_fallback():
+    """Verify get_symbol_info transparently resolves aliases (e.g. ICICIPRULI-EQ -> ICICILIFE)."""
+    info = get_symbol_info("NSE:ICICIPRULI-EQ")
+    assert info is not None
+    assert info.get("exSymbol") == "ICICILIFE"
+    assert info.get("symTicker") == "NSE:ICICILIFE-EQ"
+
+
+def test_websocket_subscribes_icicipruli_as_canonical_fyers_symbol():
+    """Verify WebSocket subscribes ICICIPRULI-EQ as canonical NSE:ICICILIFE-EQ without dropping it."""
+    client = WebSocketManager()
+    client._connected = True
+    mock_ws = MagicMock()
+    client._ws = mock_ws
+
+    client.subscribe(["NSE:ICICIPRULI-EQ"])
+
+    # Must have dispatched canonical Fyers symbol NSE:ICICILIFE-EQ to the broker socket
+    mock_ws.subscribe.assert_called_once_with(["NSE:ICICILIFE-EQ"])
+    assert "NSE:ICICILIFE-EQ" in client._subscribed

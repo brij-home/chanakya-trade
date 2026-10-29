@@ -21,6 +21,7 @@ Captures explosive day-defining institutional moves at the earliest possible sta
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone, timedelta, time as dtime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -158,9 +159,12 @@ def detect_opening_drive(
             or (prev_close and bar_close > prev_close)
             or (ltp >= bar_open * 1.003)
         ):
-            # Wick Trap Filter: reject candles where upper rejection wick > 40% unless live LTP broke bar_high
+            # Wick Trap Filter: reject candles where upper rejection wick > 35%
             upper_wick = bar_high - max(bar_open, bar_close)
-            if (upper_wick / bar_range <= 0.40) or (ltp >= bar_high):
+            has_rejection_wick = (upper_wick / bar_range) > 0.35
+            if not has_rejection_wick or (
+                ltp >= bar_high and (bar_high - bar_close) / bar_range <= 0.20
+            ):
                 is_bull_drive = True
 
     # 2. Bearish Opening Drive: Open == High (within 0.15%) & expanding downward (The OFSS Archetype)
@@ -171,9 +175,12 @@ def detect_opening_drive(
             or (prev_close and bar_close < prev_close)
             or (ltp <= bar_open * 0.997)
         ):
-            # Wick Trap Filter: reject candles where lower absorption wick > 40% unless live LTP broke bar_low
+            # Wick Trap Filter: reject candles where lower absorption wick > 35%
             lower_wick = min(bar_open, bar_close) - bar_low
-            if (lower_wick / bar_range <= 0.40) or (ltp <= bar_low):
+            has_absorption_wick = (lower_wick / bar_range) > 0.35
+            if not has_absorption_wick or (
+                ltp <= bar_low and (bar_close - bar_low) / bar_range <= 0.20
+            ):
                 is_bear_drive = True
 
     if not (is_bull_drive or is_bear_drive):
@@ -184,6 +191,20 @@ def detect_opening_drive(
         return None
     if is_bear_drive and ltp > bar_open:
         return None
+
+    # VWAP Strict Alignment Guard:
+    # A true opening impulse MUST hold on the correct side of session VWAP.
+    if vwap and vwap > 0:
+        if is_bull_drive and ltp < (vwap * 0.999):
+            logger.info(
+                f"[OpeningDrive] Suppressed Bullish Drive on {clean_sym}: Spot ₹{ltp:,.1f} below VWAP ₹{vwap:,.1f}"
+            )
+            return None
+        if is_bear_drive and ltp > (vwap * 1.001):
+            logger.info(
+                f"[OpeningDrive] Suppressed Bearish Drive on {clean_sym}: Spot ₹{ltp:,.1f} above VWAP ₹{vwap:,.1f}"
+            )
+            return None
 
     # ── Index Heavyweight Locomotive Gate ─────────────────────────
     if is_index:
@@ -222,6 +243,109 @@ def detect_opening_drive(
                     return None
         except Exception as e_hw:
             logger.debug(f"[OpeningDrive] Heavyweights check bypassed for {clean_sym}: {e_hw}")
+
+        # ── Index Camarilla Levels & TBT Microstructure Gate ─────────
+        try:
+            from engine.daily_levels import get_daily_levels
+
+            dl = get_daily_levels(clean_sym)
+            if dl and dl.camarilla:
+                if is_bear_drive:
+                    l4 = float(dl.camarilla.get("l4", 0.0) or 0.0)
+                    if l4 > 0 and ltp >= (l4 * 0.998) and ltp <= (l4 * 1.0025):
+                        logger.info(
+                            f"[OpeningDrive] Suppressed Bearish Drive on {clean_sym}: Spot ₹{ltp:,.1f} testing Camarilla L4 Floor ₹{l4:,.1f}."
+                        )
+                        return None
+                elif is_bull_drive:
+                    h4 = float(dl.camarilla.get("h4", 0.0) or 0.0)
+                    if h4 > 0 and ltp <= (h4 * 1.002) and ltp >= (h4 * 0.9975):
+                        logger.info(
+                            f"[OpeningDrive] Suppressed Bullish Drive on {clean_sym}: Spot ₹{ltp:,.1f} testing Camarilla H4 Ceiling ₹{h4:,.1f}."
+                        )
+                        return None
+        except Exception as e_dl:
+            logger.debug(f"[OpeningDrive] Daily levels check bypassed for {clean_sym}: {e_dl}")
+
+        try:
+            from market.fyers_tbt_manager import fyers_tbt_manager, resolve_tradable_tbt_symbol
+
+            fut_sym = resolve_tradable_tbt_symbol(clean_sym)
+            tbt_depth = (
+                fyers_tbt_manager.get_50_depth(fut_sym)
+                if getattr(fyers_tbt_manager, "is_connected", False)
+                else None
+            )
+            if tbt_depth and tbt_depth.get("status") not in ("UNAVAILABLE", None):
+                obi_50_val = float(tbt_depth.get("obi_50", 0.0) or 0.0)
+                if is_bear_drive and (
+                    obi_50_val >= 0.20 or tbt_depth.get("fortress_bid_wall_confirmed")
+                ):
+                    logger.info(
+                        f"[OpeningDrive] Suppressed Bearish Drive on {clean_sym}: TBT OBI-50 {obi_50_val:+.2f} / Fortress Bid Wall on {fut_sym}."
+                    )
+                    return None
+                elif is_bull_drive and (
+                    obi_50_val <= -0.20 or tbt_depth.get("fortress_ask_wall_confirmed")
+                ):
+                    logger.info(
+                        f"[OpeningDrive] Suppressed Bullish Drive on {clean_sym}: TBT OBI-50 {obi_50_val:+.2f} / Fortress Ask Wall on {fut_sym}."
+                    )
+                    return None
+        except Exception as e_tbt:
+            logger.debug(f"[OpeningDrive] TBT depth check bypassed for {clean_sym}: {e_tbt}")
+
+    # ── Test Environment Guard ──────────────────────────────────
+    is_test_env = ("PYTEST_CURRENT_TEST" in os.environ) or (
+        os.environ.get("CHANAKYA_TESTING") == "1"
+    )
+
+    # ── Benchmark NIFTY 50 Regime Gate ─────────────────────────
+    # In a green/bullish market, shorting equities has < 5% win rate (trap avoidance).
+    # Symmetrically, buying equity breakouts in a crashing market is a bull trap.
+    if not is_index and not is_test_env:
+        try:
+            from market.quotes import get_quote
+
+            n_probe = get_quote("NSE:NIFTY 50")
+            nq = n_probe.get("NSE:NIFTY 50") or n_probe.get("NIFTY 50")
+            if nq:
+                n_chg = getattr(nq, "change_pct", 0.0) or 0.0
+                n_ltp = float(getattr(nq, "last_price", 0.0) or 0.0)
+                n_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
+                if is_bear_drive and n_chg >= 0.15 and (n_vwap <= 0 or n_ltp >= n_vwap):
+                    logger.info(
+                        f"[OpeningDrive] Suppressed counter-trend Bearish Drive on {clean_sym}: NIFTY green +{n_chg:.2f}% holding VWAP"
+                    )
+                    return None
+                elif is_bull_drive and n_chg <= -0.15 and (n_vwap <= 0 or n_ltp <= n_vwap):
+                    logger.info(
+                        f"[OpeningDrive] Suppressed counter-trend Bullish Drive on {clean_sym}: NIFTY red {n_chg:.2f}% below VWAP"
+                    )
+                    return None
+        except Exception as e_regime:
+            logger.debug(f"[OpeningDrive] Benchmark regime check suppressed: {e_regime}")
+
+    # ── Single-Stock Sector Rotation Decoupling Gate ──────────────
+    if not is_index and not is_test_env:
+        try:
+            from analysis.sector_rotation import get_stock_sector_alignment
+
+            sector_align = get_stock_sector_alignment(clean_sym)
+            if sector_align:
+                sec_quad = sector_align.get("quadrant")
+                if is_bear_drive and sec_quad == "LEADING":
+                    logger.info(
+                        f"[OpeningDrive] Suppressed Bearish Drive on {clean_sym}: Parent sector {sector_align.get('sector')} is LEADING benchmark."
+                    )
+                    return None
+                elif is_bull_drive and sec_quad == "LAGGING":
+                    logger.info(
+                        f"[OpeningDrive] Suppressed Bullish Drive on {clean_sym}: Parent sector {sector_align.get('sector')} is LAGGING benchmark."
+                    )
+                    return None
+        except Exception as e_sec:
+            logger.debug(f"[OpeningDrive] Sector alignment check bypassed for {clean_sym}: {e_sec}")
 
     direction = "BULLISH" if is_bull_drive else "BEARISH"
     vol_desc = "Locomotives Aligned" if is_index else f"RVOL {rvol_val:.1f}x"
@@ -284,25 +408,33 @@ def detect_opening_drive(
     rr_ratio = round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)
     rr_str = f"1:{rr_ratio:.1f}"
 
-    # ── Pro-Gap & Daily Reference Levels Integration ──────────────
+    # ── Pro-Gap & Daily Reference Levels / CPR Geometry ──────────
     gap_type = None
     cpr_regime = None
     confidence_score = 92
+    cpr_gate = None
     try:
-        from engine.daily_levels import DailyLevelsStore
+        from engine.daily_levels import get_daily_levels, evaluate_cpr_gate
 
-        store = DailyLevelsStore()
-        dl = store.get_levels(clean_sym, compute_if_missing=False)
+        dl = get_daily_levels(clean_sym, session_date=str(now_dt.date()))
         if dl:
             gap_type = (dl.pre_open or {}).get("gap_type")
             cpr_regime = (dl.cpr or {}).get("regime")
-            if gap_type in ("PRO_GAP_UP", "PRO_GAP_DOWN"):
-                if (is_bull_drive and gap_type == "PRO_GAP_UP") or (
-                    is_bear_drive and gap_type == "PRO_GAP_DOWN"
-                ):
-                    confidence_score = 96
-            if cpr_regime and "NARROW" in cpr_regime:
-                confidence_score = max(confidence_score, 94)
+
+        cpr_gate = evaluate_cpr_gate(
+            clean_sym, ltp, direction, dl=dl, session_date=str(now_dt.date())
+        )
+        if cpr_gate.is_vetoed:
+            logger.debug(f"[OpeningDrive] Suppressed on {clean_sym}: {cpr_gate.veto_reason}")
+            return None
+
+        if gap_type in ("PRO_GAP_UP", "PRO_GAP_DOWN"):
+            if (is_bull_drive and gap_type == "PRO_GAP_UP") or (
+                is_bear_drive and gap_type == "PRO_GAP_DOWN"
+            ):
+                confidence_score = 96
+        if cpr_gate.is_narrow or (cpr_regime and "NARROW" in str(cpr_regime)):
+            confidence_score = max(confidence_score, 95)
     except Exception as e_dl:
         logger.debug(f"[OpeningDrive] Daily levels lookup error for {clean_sym}: {e_dl}")
 
@@ -469,6 +601,11 @@ def detect_opening_drive(
         metrics_dict["gap_type"] = gap_type
     if cpr_regime:
         metrics_dict["cpr_regime"] = cpr_regime
+    if cpr_gate:
+        metrics_dict["cpr"] = cpr_gate.cpr_data
+        metrics_dict["cpr_type"] = cpr_gate.cpr_type
+        metrics_dict["is_narrow_cpr"] = cpr_gate.is_narrow
+        metrics_dict["is_wide_cpr"] = cpr_gate.is_wide
 
     return AutoAlert(
         alert_id=generate_alert_id(

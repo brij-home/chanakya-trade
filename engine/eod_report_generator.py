@@ -40,6 +40,7 @@ fix_windows_console()
 logger = logging.getLogger("chanakya.eod_report")
 from config.constants import IST_ZONE as IST
 from config.paths import app_data_path
+from market.instruments import format_strike
 
 
 def get_reports_dir() -> Path:
@@ -1956,6 +1957,15 @@ class EODReportGenerator:
         """
         now_ist = datetime.now(IST)
         date_str = target_date or now_ist.strftime("%Y-%m-%d")
+        # Trigger EOD sweep for current session to ensure zero zombie intraday setups
+        if not target_date or target_date == now_ist.strftime("%Y-%m-%d"):
+            try:
+                from engine.auto_alert_engine import auto_alert_engine
+
+                auto_alert_engine.sweep_intraday_eod_squareoffs()
+            except Exception as e_swp:
+                logger.debug(f"[EODReportGenerator] Pre-report EOD sweep note: {e_swp}")
+
         alerts = self._load_alerts(date_str)
         mkt = self._get_market_context()
 
@@ -2081,12 +2091,19 @@ class EODReportGenerator:
             symbol = a.get("symbol") or "UNKNOWN"
 
             # Contract symbol disambiguation for F&O instruments (prevents duplicate NIFTY rows)
+            from engine.alert_expiry import is_alert_option_premium_level
+
+            is_pure_option = is_alert_option_premium_level(a)
             contract_sym = a.get("contract_symbol") or ""
             if not contract_sym and (a.get("strike") or a.get("option_type")):
-                stk_str = f"{int(float(a['strike']))}" if a.get("strike") else ""
+                stk_str = format_strike(a.get("strike"))
                 opt_str = a.get("option_type") or ""
                 contract_sym = f"{symbol} {stk_str} {opt_str}".strip()
-            display_symbol = contract_sym if contract_sym else symbol
+
+            if is_pure_option:
+                display_symbol = contract_sym if contract_sym else symbol
+            else:
+                display_symbol = symbol
 
             inv_reason = a.get("invalidation_reason") or ""
             archive_reason = a.get("archive_reason") or ""
@@ -2111,15 +2128,19 @@ class EODReportGenerator:
                 continue
 
             # 2. Check if setup was untriggered / expired before crossing entry, superseded, or disqualified
-            is_superseded = is_inv and any(
-                k in lower_inv
-                for k in (
-                    "superseded",
-                    "premier winnable",
-                    "unseated",
-                    "retiring weaker",
-                    "retired to maintain",
+            is_superseded = (
+                any(
+                    k in lower_inv
+                    for k in (
+                        "superseded",
+                        "premier winnable",
+                        "unseated",
+                        "retiring weaker",
+                        "retired to maintain",
+                    )
                 )
+                or target_status == "SUPERSEDED"
+                or (stage == "CANCELLED" and "superseded" in lower_inv)
             )
             is_disqualified = (
                 target_status == "SETUP_DISQUALIFIED"
@@ -2157,15 +2178,7 @@ class EODReportGenerator:
             )
 
             # Determine if this alert is an option contract
-            is_option = bool(
-                a.get("option_type")
-                or " CE" in symbol
-                or " PE" in symbol
-                or " CE" in display_symbol
-                or " PE" in display_symbol
-                or a.get("strike")
-                or (seg == "FNO" and any(w in symbol for w in ("CALL", "PUT", " CE", " PE")))
-            )
+            is_option = is_pure_option
             # Long bias: options (both CE & PE long) and bullish equity are long. Only non-option bearish is short.
             is_long = is_option or (direction == "BULLISH")
 

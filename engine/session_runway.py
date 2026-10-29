@@ -98,6 +98,7 @@ def evaluate_session_runway(
     now_dt: Optional[datetime] = None,
     fii_net_cr: Optional[float] = None,
     is_hedged_spread: bool = False,
+    is_apex: bool = False,
 ) -> RunwayEvaluation:
     """
     Evaluates whether an alert setup has viable market runway and dynamic regime alignment.
@@ -136,7 +137,7 @@ def evaluate_session_runway(
             is_allowed=True,
             phase=phase,
             runway_minutes=runway_mins,
-            elevated_rvol_required=1.30,
+            elevated_rvol_required=1.75,
         )
 
     # 0. Asset-Class Specific Market Hours Check (MCX, Currency, Crypto)
@@ -233,46 +234,57 @@ def evaluate_session_runway(
                 veto_reason="Opening Auction Discovery (09:15-09:25 IST): Price discovery freeze active.",
             )
 
+    is_pullback_setup = alert_type.upper() in (
+        "TREND_DAY_PULLBACK",
+        "SMC_ORDERBLOCK_RETEST",
+        "TURTLE_SOUP_RETEST",
+        "PULLBACK_RETEST",
+        "VWAP_BOUNCE",
+        "TREND_PULLBACK_BOUNCE",
+        "SMC_SPRING_SWEEP",
+        "PREDATOR_SWEEP",
+    )
+
     # 4. Morning Reversal Trap Gate (10:15 - 11:00 IST)
-    # Institutional counter-trend absorption zone: require institutional RVOL (>= 2.2x) for single stocks.
-    # Exemption: Benchmark index setups (FNO_INDEX) driven by structural SMC/SMT models are allowed when rvol >= 1.0.
+    # Institutional counter-trend absorption zone: require institutional RVOL (>= 2.2x) for single-stock breakout chases.
+    # Exemptions:
+    #   a) Benchmark index setups (FNO_INDEX) driven by structural SMC/SMT models are allowed when rvol >= 1.0.
+    #   b) Pullback & Retest setups (is_pullback_setup=True) where price is retracing into 20-EMA/VWAP support/resistance
+    #      with volume dry-up, exploiting the reversal zone rather than chasing highs/lows.
     if phase == "MORNING_REVERSAL_ZONE":
-        min_rvol_mrz = 1.0 if is_fno_index else 2.2
-        if rvol < min_rvol_mrz:
-            return RunwayEvaluation(
-                is_allowed=False,
-                phase=phase,
-                runway_minutes=runway_mins,
-                veto_reason=f"Morning Reversal Trap (10:15-11:00 IST): RVOL {rvol:.2f}x < {min_rvol_mrz:.2f}x institutional confirmation floor.",
-                elevated_rvol_required=min_rvol_mrz,
-            )
+        if is_pullback_setup:
+            pass  # Pullback retests exploit the morning absorption window with defined risk
+        else:
+            min_rvol_mrz = 1.0 if is_fno_index else 2.2
+            if rvol < min_rvol_mrz:
+                return RunwayEvaluation(
+                    is_allowed=False,
+                    phase=phase,
+                    runway_minutes=runway_mins,
+                    veto_reason=f"Morning Reversal Trap (10:15-11:00 IST): RVOL {rvol:.2f}x < {min_rvol_mrz:.2f}x institutional confirmation floor.",
+                    elevated_rvol_required=min_rvol_mrz,
+                )
 
     # 5. Midday Compression Lull (11:00 - 13:15 IST)
-    # Lunchtime chop: require institutional momentum (TOD-RVOL >= 1.30x) for single-stock equity breakouts.
+    # Lunchtime chop: require institutional momentum (TOD-RVOL >= 1.75x for non-Apex) for single-stock equity breakouts.
     # Exemptions:
     #   a) Benchmark index setups (FNO_INDEX) with structural alignment
     #   b) Defined-risk vertical spreads (is_hedged_spread=True) which neutralize midday theta decay
-    #   c) Trend Day Pullback, SMC Orderblock, & Liquidity Sweep setups where volume dry-up is healthy & expected
+    #   c) Apex Confluence setups (is_apex=True)
+    #   d) Trend Day Pullback, SMC Orderblock, & Liquidity Sweep setups where volume dry-up is healthy & expected
     if phase == "MIDDAY_COMPRESSION":
-        is_pullback_setup = alert_type.upper() in (
-            "TREND_DAY_PULLBACK",
-            "SMC_ORDERBLOCK_RETEST",
-            "TURTLE_SOUP_RETEST",
-            "PULLBACK_RETEST",
-            "VWAP_BOUNCE",
-            "TREND_PULLBACK_BOUNCE",
-            "SMC_SPRING_SWEEP",
-            "PREDATOR_SWEEP",
-        )
-        min_rvol_mc = 1.0 if (is_fno_index or is_pullback_setup or is_hedged_spread) else 1.30
-        if rvol < min_rvol_mc and not is_swing:
-            return RunwayEvaluation(
-                is_allowed=False,
-                phase=phase,
-                runway_minutes=runway_mins,
-                veto_reason=f"Midday Compression Lull (11:00-13:15 IST): RVOL {rvol:.2f}x < {min_rvol_mc:.2f}x floor to prevent theta/whipsaw decay.",
-                elevated_rvol_required=min_rvol_mc,
-            )
+        if is_pullback_setup:
+            pass  # Retest & volume dry-up setups permitted during compression
+        else:
+            min_rvol_mc = 1.0 if (is_fno_index or is_hedged_spread or is_apex) else 1.75
+            if rvol < min_rvol_mc and not is_swing:
+                return RunwayEvaluation(
+                    is_allowed=False,
+                    phase=phase,
+                    runway_minutes=runway_mins,
+                    veto_reason=f"Midday Compression Lull (11:00-13:15 IST): RVOL {rvol:.2f}x < {min_rvol_mc:.2f}x floor to prevent theta/whipsaw decay.",
+                    elevated_rvol_required=min_rvol_mc,
+                )
 
     # 6. Hard Runway Gate:
     # a) Intraday Cash Equities initiated after 14:00 have < 75m before mandatory 15:15 broker square-off.

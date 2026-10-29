@@ -231,16 +231,32 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
             if ws_manager.connected:
                 missing = []
                 for inst in instruments:
-                    tick = ws_manager.get_tick(inst)
+                    exch = inst.split(":")[0] if ":" in inst else "NSE"
+                    try:
+                        from market.calendar import is_market_open
+
+                        market_active = is_market_open(exch)
+                    except Exception:
+                        market_active = True
+                    max_age = 30.0 if market_active else None
+                    try:
+                        tick = ws_manager.get_tick(inst, max_age_seconds=max_age)
+                    except TypeError:
+                        tick = ws_manager.get_tick(inst)
                     if not tick or getattr(tick, "ltp", 0.0) <= 0:
                         from market.instruments import resolve_corporate_alias
 
                         clean = inst.split(":")[-1].split("-")[0].strip().upper()
                         canon = resolve_corporate_alias(clean)
                         if not inst.startswith(("BSE:SENSEX", "BSE:BANKEX")):
-                            alt_tick = ws_manager.get_tick(
-                                f"NSE:{canon}-BE"
-                            ) or ws_manager.get_tick(f"NSE:{canon}-EQ")
+                            try:
+                                alt_tick = ws_manager.get_tick(
+                                    f"NSE:{canon}-BE", max_age_seconds=max_age
+                                ) or ws_manager.get_tick(f"NSE:{canon}-EQ", max_age_seconds=max_age)
+                            except TypeError:
+                                alt_tick = ws_manager.get_tick(
+                                    f"NSE:{canon}-BE"
+                                ) or ws_manager.get_tick(f"NSE:{canon}-EQ")
                             if alt_tick and getattr(alt_tick, "ltp", 0.0) > 0:
                                 tick = alt_tick
                     if tick and tick.ltp > 0:
@@ -296,10 +312,25 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
 
                 missing = []
                 for inst in instruments:
+                    exch = inst.split(":")[0] if ":" in inst else "NSE"
+                    try:
+                        from market.calendar import is_market_open
+
+                        market_active = is_market_open(exch)
+                    except Exception:
+                        market_active = True
+                    max_age = 30.0 if market_active else None
                     clean = inst.split(":")[-1].strip().upper()
                     tick = mstock_ws.get_tick(inst) or mstock_ws.get_tick(clean)
+                    if tick and market_active and getattr(tick, "timestamp", 0) > 0:
+                        import time
+
+                        if (time.time() - tick.timestamp) > 30.0:
+                            tick = None
                     if not tick or getattr(tick, "ltp", 0.0) <= 0:
-                        c_tick = ws_manager.get_tick(inst) or ws_manager.get_tick(clean)
+                        c_tick = ws_manager.get_tick(
+                            inst, max_age_seconds=max_age
+                        ) or ws_manager.get_tick(clean, max_age_seconds=max_age)
                         if c_tick and getattr(c_tick, "ltp", 0.0) > 0:
                             tick = c_tick
                     if tick and getattr(tick, "ltp", 0.0) > 0:
@@ -365,10 +396,25 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
 
                 missing = []
                 for inst in instruments:
+                    exch = inst.split(":")[0] if ":" in inst else "NSE"
+                    try:
+                        from market.calendar import is_market_open
+
+                        market_active = is_market_open(exch)
+                    except Exception:
+                        market_active = True
+                    max_age = 30.0 if market_active else None
                     clean = inst.split(":")[-1].strip().upper()
                     tick = kotak_ws.get_tick(inst) or kotak_ws.get_tick(clean)
+                    if tick and market_active and getattr(tick, "timestamp", 0) > 0:
+                        import time
+
+                        if (time.time() - tick.timestamp) > 30.0:
+                            tick = None
                     if not tick or getattr(tick, "ltp", 0.0) <= 0:
-                        c_tick = ws_manager.get_tick(inst) or ws_manager.get_tick(clean)
+                        c_tick = ws_manager.get_tick(
+                            inst, max_age_seconds=max_age
+                        ) or ws_manager.get_tick(clean, max_age_seconds=max_age)
                         if c_tick and getattr(c_tick, "ltp", 0.0) > 0:
                             tick = c_tick
                     if tick and getattr(tick, "ltp", 0.0) > 0:
@@ -875,10 +921,55 @@ def get_quote(
                     }
                     fetched_external.update(valid_broker_quotes)
                     get_registry().record_provider_success(provider)
-                except Exception:
+                except Exception as e_broker:
+                    logger.debug(f"[Quotes] Primary broker quote fetch failed: {e_broker}")
                     get_registry().record_provider_error(get_data_broker_key() or "broker")
 
                 rem_leaders = [i for i in leaders if i not in fetched_external]
+
+                # 3a-ii. Multi-Broker Failover: Try secondary connected brokers for remaining missing quotes
+                if rem_leaders:
+                    try:
+                        from brokers.session import get_all_brokers
+
+                        all_connected = get_all_brokers()
+                        for sec_key, sec_broker in all_connected.items():
+                            if sec_key == provider:
+                                continue
+                            if not hasattr(sec_broker, "get_quote"):
+                                continue
+                            try:
+                                sec_quotes = sec_broker.get_quote(rem_leaders)
+                                if sec_quotes:
+                                    valid_sec_quotes = {
+                                        instrument: _enrich_quote(
+                                            quote,
+                                            instrument=instrument,
+                                            provider=sec_key,
+                                            source="REST",
+                                            correlation_id=correlation_id,
+                                        )
+                                        for instrument, quote in sec_quotes.items()
+                                        if quote and getattr(quote, "last_price", 0.0) > 0
+                                    }
+                                    if valid_sec_quotes:
+                                        fetched_external.update(valid_sec_quotes)
+                                        get_registry().record_provider_success(sec_key)
+                                        logger.info(
+                                            f"[Quotes] 🔄 Secondary broker failover succeeded ({sec_key}) for {list(valid_sec_quotes.keys())}"
+                                        )
+                                        rem_leaders = [
+                                            i for i in leaders if i not in fetched_external
+                                        ]
+                                        if not rem_leaders:
+                                            break
+                            except Exception as e_sec:
+                                logger.debug(
+                                    f"[Quotes] Secondary broker failover failed for {sec_key}: {e_sec}"
+                                )
+                                get_registry().record_provider_error(sec_key)
+                    except Exception as e_all:
+                        logger.debug(f"[Quotes] Secondary broker discovery error: {e_all}")
 
                 # 3b. Try derivative options snapshot
                 if rem_leaders:

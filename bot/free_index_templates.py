@@ -28,6 +28,8 @@ import re
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
+from market.instruments import format_strike
+
 from bot.alert_templates import (
     format_contract_display,
     build_signal_ref,
@@ -737,7 +739,7 @@ def render_free_index_alert(alert: Any, in_market: bool = True) -> str:
     if raw_contract:
         display_contract = format_contract_display(raw_contract)
     elif strike_val:
-        display_contract = f"{symbol} {int(strike_val)} {opt_type_str}"
+        display_contract = f"{symbol} {format_strike(strike_val)} {opt_type_str}"
     else:
         display_contract = f"{symbol} {opt_type_str}"
 

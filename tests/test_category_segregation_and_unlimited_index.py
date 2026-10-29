@@ -134,7 +134,7 @@ def test_weak_or_incomplete_index_signal_still_throttled_by_pacing():
 
     passed, reason = engine._eval_telegram_apex_gate(alert_weak, in_market=True, now_ts=now_t)
     assert passed is False
-    assert "pacing limit reached" in reason or "confidence" in reason
+    assert "pacing limit reached" in reason.lower() or "confidence" in reason.lower()
 
 
 def test_category_segregation_scalp():

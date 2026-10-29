@@ -146,7 +146,7 @@ class PrecursorRadarScanner:
         self._min_conviction_alert = min_conviction
         self._cache: dict[Any, list[PrecursorCandidate]] = {}
         self._cache_ts: dict[Any, float] = {}
-        self._cache_ttl: float = 30.0
+        self._cache_ttl: float = 300.0  # 5-minute cache for daily multi-day coiling analysis
         import threading
 
         self._cache_lock = threading.Lock()

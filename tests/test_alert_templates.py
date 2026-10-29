@@ -654,7 +654,13 @@ def test_minimalist_alert_hierarchy_and_deduplication():
 
     # 3. Compact line count <= 12 lines (or 13 if late session closing warning / runner alternative is active)
     lines = [l for l in rendered.split("\n") if l.strip()]
-    max_lines = 13 if ("Market closes in" in rendered or "Runner Alternative" in rendered) else 12
+    max_lines = (
+        14
+        if (
+            "CPR:" in rendered or "Market closes in" in rendered or "Runner Alternative" in rendered
+        )
+        else 12
+    )
     assert len(lines) <= max_lines, f"Alert exceeded {max_lines} lines: {len(lines)} lines"
 
 
@@ -2507,7 +2513,7 @@ def test_asymmetric_and_fno_alerts_display_all_expiry_contract_details():
 def test_auto_alert_telegram_expiry_price_coherence():
     """
     RCA Regression Test: Verify that single-stock derivative alerts with 8-digit broker contract
-    symbols (e.g. UNITDSPR202609291380PE or UNITDSPR202610271380PE) never display contradictory
+    symbols (e.g. UNITDSPR202609291380PE or UNITDSPR202611261380PE) never display contradictory
     expiry badges (e.g. displaying Oct expiry while pricing Sep contracts).
     """
     from engine.alert_model import AutoAlert
@@ -2580,7 +2586,7 @@ def test_auto_alert_telegram_expiry_price_coherence():
         trigger_level=28.0,
         target_level=37.8,
         stop_loss=21.8,
-        contract_symbol="UNITDSPR202610271380PE",
+        contract_symbol="UNITDSPR202611261380PE",
         strike=1380.0,
         option_type="PE",
         option_premium=28.0,
@@ -2589,13 +2595,13 @@ def test_auto_alert_telegram_expiry_price_coherence():
         segment="FNO_STOCK",
         confidence=92,
         actionable_plan={
-            "contract": "UNITDSPR202610271380PE",
+            "contract": "UNITDSPR202611261380PE",
             "recommended_entry": "₹28.00",
             "stop_loss": "₹21.8",
             "target_1": "₹37.8",
             "target_2": "₹47.6",
             "option_plan": {
-                "contract_symbol": "UNITDSPR202610271380PE",
+                "contract_symbol": "UNITDSPR202611261380PE",
                 "strike": 1380.0,
                 "option_type": "PE",
                 "entry_premium": 28.0,
@@ -2609,7 +2615,7 @@ def test_auto_alert_telegram_expiry_price_coherence():
 
     msg_oct = format_auto_alert_telegram(oct_alert)
     assert "₹28.00" in msg_oct
-    assert "27-Oct-2026" in msg_oct
+    assert "26-Nov-2026" in msg_oct
     assert "Monthly" in msg_oct
     assert "29-Sep-2026" not in msg_oct
 

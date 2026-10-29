@@ -28,6 +28,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from typing import Any, Optional
 
+from market.instruments import format_strike
+
 from config.constants import IST
 from market.instruments import canonical_symbol
 
@@ -95,26 +97,26 @@ def derive_new_contract_symbol(
     Deterministically transforms an existing contract symbol into a newly revolved contract symbol,
     supporting spaced format, standard exchange format, and expiry substitution.
     """
-    cur_k_int = int(cur_strike)
-    new_k_int = int(new_strike)
+    cur_k_str = format_strike(cur_strike)
+    new_k_str = format_strike(new_strike)
 
     if not cur_contract:
-        return f"{sym} {new_k_int} {opt_type}"
+        return f"{sym} {new_k_str} {opt_type}"
 
-    # 1. Spaced format: e.g. "NIFTY 24800 CE"
-    pattern_spaced = re.compile(r"\b" + re.escape(str(cur_k_int)) + r"\s+(CE|PE)\b", re.IGNORECASE)
+    # 1. Spaced format: e.g. "NIFTY 24800 CE", "ASHOKLEY 142.5 PE"
+    pattern_spaced = re.compile(r"\b" + re.escape(cur_k_str) + r"\s+(CE|PE)\b", re.IGNORECASE)
     if pattern_spaced.search(cur_contract):
-        res = pattern_spaced.sub(f"{new_k_int} \\1", cur_contract)
+        res = pattern_spaced.sub(f"{new_k_str} \\1", cur_contract)
         return res
 
-    # 2. Compact exchange format: e.g. "NIFTY26OCT24800CE" or "BANKNIFTY2692455500PE"
-    pattern_compact = re.compile(re.escape(str(cur_k_int)) + r"(CE|PE)$", re.IGNORECASE)
+    # 2. Compact exchange format: e.g. "NIFTY26OCT24800CE" or "ASHOKLEY26NOV142.5PE"
+    pattern_compact = re.compile(re.escape(cur_k_str) + r"(CE|PE)$", re.IGNORECASE)
     if pattern_compact.search(cur_contract):
-        res = pattern_compact.sub(f"{new_k_int}\\1", cur_contract)
+        res = pattern_compact.sub(f"{new_k_str}\\1", cur_contract)
         return res
 
     # 3. Direct substring replacement fallback
-    return cur_contract.replace(str(cur_k_int), str(new_k_int))
+    return cur_contract.replace(cur_k_str, new_k_str)
 
 
 def evaluate_strike_revolving(
@@ -275,9 +277,9 @@ def evaluate_strike_revolving(
             "Roll up" if "UP" in action_type else "Roll down" if "DOWN" in action_type else "Roll"
         )
         reason = (
-            f"Convexity Reset: Current {int(cur_strike)} {opt_type} is Deep-ITM "
+            f"Convexity Reset: Current {format_strike(cur_strike)} {opt_type} is Deep-ITM "
             f"({itm_steps:.1f} steps ITM, Delta ~{delta_str}, +{pnl_pct:.1f}% gain). "
-            f"Gamma has collapsed toward zero. {action_verb} to liquid ATM {int(atm_strike)} {opt_type} "
+            f"Gamma has collapsed toward zero. {action_verb} to liquid ATM {format_strike(atm_strike)} {opt_type} "
             f"to restore explosive gamma leverage and bank ₹{locked_gain_pts:,.1f}/share risk-free profit."
         )
     else:
@@ -380,7 +382,7 @@ def evaluate_strike_revolving(
         action=action_type,
         reason=reason,
         current_contract=getattr(alert, "contract_symbol", "")
-        or f"{sym} {int(cur_strike)} {opt_type}",
+        or f"{sym} {format_strike(cur_strike)} {opt_type}",
         current_strike=float(cur_strike),
         current_premium=round(current_ltp, 2),
         current_delta=round(cur_delta, 2) if cur_delta is not None else None,

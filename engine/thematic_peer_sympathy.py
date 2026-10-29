@@ -99,10 +99,20 @@ class ThematicPeerSympathyEngine:
         if not sec_id:
             return
 
+        # Reject sympathy recursion (a sympathy follower cannot trigger further sympathy alerts)
+        if getattr(alert, "alert_type", "") == "THEMATIC_SYMPATHY_IGNITION":
+            return
+
         conf = int(alert.confidence or 0)
         stage = getattr(alert, "stage", "")
-        # Qualify as a leader if confidence >= 82 and actively ignited
-        if conf < 82 or stage in ("INVALIDATED", "COMPLETED", "EXPIRED"):
+        # Institutional Leader Gate: Leader must have high conviction (>= 86) and be active
+        if conf < 86 or stage in (
+            "INVALIDATED",
+            "COMPLETED",
+            "EXPIRED",
+            "CANCELLED",
+            "SETUP_DISQUALIFIED",
+        ):
             return
 
         direction = (alert.direction or "BULLISH").upper()
@@ -270,9 +280,9 @@ class ThematicPeerSympathyEngine:
                         }
                     )
 
-            # Anti-Shotgunning: Pick top 2 strongest peers by absolute momentum
+            # Anti-Shotgunning: Pick ONLY the single strongest peer by absolute momentum
             qualified_candidates.sort(key=lambda c: abs(c["chg_pct"]), reverse=True)
-            top_peers = qualified_candidates[:2]
+            top_peers = qualified_candidates[:1]
 
             for cand in top_peers:
                 peer = cand["peer"]
@@ -284,6 +294,39 @@ class ThematicPeerSympathyEngine:
                 vwap_val = cand["vwap_val"]
                 chg_pct = cand["chg_pct"]
                 dyn_rvol = cand.get("rvol", 1.0)
+
+                # ─── CPR & Daily Levels Overhead Audit ───
+                cpr_veto_reason = None
+                try:
+                    from engine.daily_levels import get_daily_levels
+
+                    dl_peer = get_daily_levels(peer)
+                    if dl_peer and dl_peer.cpr:
+                        cpr_top = float(dl_peer.cpr.get("top", 0.0) or 0.0)
+                        cpr_bottom = float(dl_peer.cpr.get("bottom", 0.0) or 0.0)
+                        cpr_type = str(dl_peer.cpr.get("cpr_type", "") or "")
+                        if (
+                            is_bull
+                            and cpr_top > 0
+                            and ltp < cpr_top <= (ltp * 1.004)
+                            and cpr_type == "WIDE"
+                        ):
+                            cpr_veto_reason = f"Resting Wide CPR Top resistance at ₹{cpr_top:,.2f} within 0.4% of LTP"
+                        elif (
+                            not is_bull
+                            and cpr_bottom > 0
+                            and (ltp * 0.996) <= cpr_bottom < ltp
+                            and cpr_type == "WIDE"
+                        ):
+                            cpr_veto_reason = f"Resting Wide CPR Bottom support at ₹{cpr_bottom:,.2f} within 0.4% of LTP"
+                except Exception as e_cpr:
+                    logger.debug(f"[ThematicPeerSympathy] CPR check error for {peer}: {e_cpr}")
+
+                if cpr_veto_reason:
+                    logger.info(
+                        f"[ThematicPeerSympathy] Suppressed {peer} sympathy ignition: {cpr_veto_reason}"
+                    )
+                    continue
 
                 # ─── JIT TBT 50-Depth Scout Pre-Evaluation ──────────────────
                 # Pull 50-depth TBT for 60s on top peer candidate to audit order book

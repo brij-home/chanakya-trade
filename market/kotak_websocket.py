@@ -282,14 +282,22 @@ class KotakWebSocketManager:
                         sub_msg = json.dumps({"action": "subscribe", "params": {"tokens": toks}})
                         ws.send(sub_msg)
 
+                    last_packet_time = time.time()
                     while self._running:
                         try:
                             msg = ws.recv(timeout=1.0)
+                            last_packet_time = time.time()
                             self._parse_packet(msg)
                         except TimeoutError:
-                            # Heartbeat check
+                            # Heartbeat check: force proactive reconnect if connection has been silent > 60s
+                            if (time.time() - last_packet_time) > 60.0:
+                                logger.warning(
+                                    "[KotakWebSocket] ⚠️ Packet silence > 60s detected. Forcing proactive reconnect."
+                                )
+                                break
                             continue
-                        except Exception:
+                        except Exception as e_recv:
+                            logger.debug(f"[KotakWebSocket] Read error: {e_recv}")
                             break
             except Exception as e:
                 logger.debug(f"Kotak WebSocket connection error: {e}")

@@ -312,3 +312,102 @@ def test_analysis_cache_and_instrument_master_pool_close(tmp_path):
     # Test instrument master close_db
     instrument_master.close_db()
     assert instrument_master._POOL is None
+
+
+def test_options_cache_bounded_and_memory_guard_registered():
+    """Verify options caches are bounded, support clearing, and are hooked into memory_guard."""
+    from market import options
+    from engine import memory_guard
+
+    # Verify registration with memory_guard
+    assert options.clear_options_caches in memory_guard._trim_callbacks
+
+    # Add items to _CHAIN_CACHE
+    options._store_in_chain_cache("TEST_KEY_1", [])
+    options._store_in_chain_cache("TEST_KEY_2", [])
+    assert len(options._CHAIN_CACHE) >= 2
+
+    # Clear via memory guard callback
+    cleared = options.clear_options_caches()
+    assert cleared >= 2
+    assert len(options._CHAIN_CACHE) == 0
+
+
+def test_daily_levels_cache_bounded_and_memory_guard_registered():
+    """Verify daily levels store memory cache is bounded and registered with memory_guard."""
+    from engine.daily_levels import get_daily_levels_store, clear_daily_levels_cache, DailyLevels
+    from engine import memory_guard
+
+    assert clear_daily_levels_cache in memory_guard._trim_callbacks
+
+    store = get_daily_levels_store()
+    dl = DailyLevels(
+        symbol="TEST_SYM",
+        canonical_symbol="TEST_SYM",
+        exchange="NSE",
+        session_date="2026-10-29",
+        pdh=105.0,
+        pdl=95.0,
+        pdc=100.0,
+    )
+    store._store_in_memory_cache("2026-10-29:TEST_SYM", dl)
+    assert "2026-10-29:TEST_SYM" in store._memory_cache
+
+    cleared = clear_daily_levels_cache()
+    assert cleared >= 1
+    assert len(store._memory_cache) == 0
+
+
+def test_ws_and_crypto_stream_off_tick_lifecycle():
+    """Verify ws_manager and crypto_stream off_tick deregisters callbacks cleanly."""
+    from market.websocket import ws_manager
+    from market.crypto_stream import crypto_stream
+
+    def dummy_cb(tick):
+        return None
+
+    ws_manager.on_tick(dummy_cb)
+    assert dummy_cb in ws_manager._callbacks
+    ws_manager.off_tick(dummy_cb)
+    assert dummy_cb not in ws_manager._callbacks
+
+    def dummy_crypto_cb(tick):
+        return None
+
+    crypto_stream.on_tick(dummy_crypto_cb)
+    assert dummy_crypto_cb in crypto_stream._listeners
+    crypto_stream.off_tick(dummy_crypto_cb)
+    assert dummy_crypto_cb not in crypto_stream._listeners
+
+
+def test_orders_db_pool_close():
+    """Verify order_lifecycle close_orders_db cleanly shuts down pooled connections."""
+    from engine.order_lifecycle import _get_orders_pool, close_orders_db
+    import engine.order_lifecycle as ol
+
+    pool = _get_orders_pool()
+    assert pool is not None
+    assert not pool._closed
+
+    close_orders_db()
+    assert ol._ORDERS_POOL is None
+
+
+def test_auto_alert_engine_stop_polling_cleans_listeners():
+    """Verify AutoAlertEngine.stop_polling() unhooks domestic and crypto WebSocket listeners."""
+    from engine.auto_alert_engine import get_auto_alert_engine
+    from market.websocket import ws_manager
+    from market.crypto_stream import crypto_stream
+
+    engine = get_auto_alert_engine()
+    engine._domestic_listener_initialized = True
+    ws_manager.on_tick(engine._on_domestic_tick)
+    engine._crypto_listener_initialized = True
+    crypto_stream.on_tick(engine._on_crypto_tick)
+
+    # Stop polling should deregister listeners and clear initialization flags
+    engine.stop_polling()
+    assert engine._domestic_listener_initialized is False
+    assert engine._crypto_listener_initialized is False
+    assert engine._on_domestic_tick not in ws_manager._callbacks
+    assert engine._on_crypto_tick not in crypto_stream._listeners

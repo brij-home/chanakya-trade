@@ -47,6 +47,10 @@ def test_corporate_alias_resolution():
     assert resolve_corporate_alias("BAJAJAUTO") == "BAJAJ-AUTO"
     assert resolve_corporate_alias("TATASTEELBSL") == "TATASTEEL"
     assert resolve_corporate_alias("NSLNISP") == "NMDCSTEEL"
+    assert resolve_corporate_alias("ICICIPRULI") == "ICICILIFE"
+    assert resolve_corporate_alias("NSE:ICICIPRULI-EQ") == "NSE:ICICILIFE-EQ"
+    assert resolve_corporate_alias("NSE:ZOMATO-EQ") == "NSE:ETERNAL-EQ"
+    assert resolve_corporate_alias("HEG") == "HEGAM"
 
 
 def test_fyers_symbol_conversion_with_aliases_and_series():
@@ -54,6 +58,9 @@ def test_fyers_symbol_conversion_with_aliases_and_series():
     # Aliased equities resolve to current active ticker
     assert _to_fyers_symbol("ZOMATO") == "NSE:ETERNAL-EQ"
     assert _to_fyers_symbol("TATAMOTORS") == "NSE:TMPV-EQ"
+    assert _to_fyers_symbol("ICICIPRULI") == "NSE:ICICILIFE-EQ"
+    assert _to_fyers_symbol("NSE:ICICIPRULI-EQ") == "NSE:ICICILIFE-EQ"
+    assert _to_fyers_symbol("NSE:ZOMATO-EQ") == "NSE:ETERNAL-EQ"
     assert _to_fyers_symbol("CENTURYTEX") == "NSE:ABREL-EQ"
     assert _to_fyers_symbol("UNOINDA") == "NSE:UNOMINDA-EQ"
     assert _to_fyers_symbol("REC") == "NSE:RECLTD-EQ"
@@ -89,6 +96,12 @@ def test_websocket_symbol_resolution():
 
 def test_fno_lot_size_and_derivative_eligibility():
     """Verify lot sizes and derivative eligibility work for both modern and legacy tickers."""
+    # ICICI Prudential Life / ICICILIFE
+    assert is_derivative_eligible("ICICIPRULI") is True
+    assert is_derivative_eligible("ICICILIFE") is True
+    assert get_fno_lot_size("ICICIPRULI") == 925
+    assert get_fno_lot_size("ICICILIFE") == 925
+
     # Zomato / Eternal
     assert is_derivative_eligible("ZOMATO") is True
     assert is_derivative_eligible("ETERNAL") is True

@@ -185,6 +185,7 @@ def classify_market_regime(
 
     # Regime 2b: Institutional Distribution (Bearish Trend Day)
     nifty_dir_chg = 0.0
+    is_intraday_recovering = False
     if not is_test_env:
         try:
             from market.quotes import _QUOTE_CACHE, _quote_cache_lock
@@ -194,11 +195,29 @@ def classify_market_regime(
                     if k in _QUOTE_CACHE:
                         _, nq = _QUOTE_CACHE[k]
                         nifty_dir_chg = float(getattr(nq, "change_pct", 0.0) or 0.0)
+                        nq_ltp = float(
+                            getattr(nq, "last_price", 0.0) or getattr(nq, "ltp", 0.0) or 0.0
+                        )
+                        nq_open = float(getattr(nq, "open", 0.0) or 0.0)
+                        nq_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
+                        # Intraday recovery: Spot has reclaimed VWAP or is trading above session open
+                        if nq_ltp > 0 and (
+                            (nq_vwap > 0 and nq_ltp > nq_vwap) or (nq_open > 0 and nq_ltp > nq_open)
+                        ):
+                            is_intraday_recovering = True
                         break
         except Exception as e_suppressed:
             logger.debug(f"[analysis.regime_governor] Benchmark quote error: {e_suppressed}")
 
-    if (nifty_dir_chg <= -0.40 or macro_score <= -30.0) and not is_orb_trapped:
+    # If spot has broken out above ORB high, benchmark is exhibiting bullish expansion, not distribution
+    is_orb_breakout_bull = bool(nifty_spot and orb_high and orb_high > 0 and nifty_spot > orb_high)
+
+    if (
+        (nifty_dir_chg <= -0.40 or macro_score <= -30.0)
+        and not is_orb_trapped
+        and not is_orb_breakout_bull
+        and not is_intraday_recovering
+    ):
         return MarketRegimeClassification(
             regime="INSTITUTIONAL_DISTRIBUTION",
             vix=vix_val,
@@ -336,11 +355,11 @@ def is_detector_eligible_for_regime(
     if regime.regime == "INSTITUTIONAL_DISTRIBUTION":
         if is_bull:
             if atype == "INDEX_CALL_SETUP":
-                if rvol < 2.5:
+                if not has_structural_sweep and rvol < 2.50:
                     return (
                         False,
                         f"Suppressed by Regime Governor: INSTITUTIONAL_DISTRIBUTION active (Benchmark down >= 0.40%). "
-                        f"Index Call continuation requires extreme institutional decoupling (RVOL >= 2.50x, got {rvol:.2f}x). "
+                        f"Index Call setup requires verified structural sweep (PDL/Day Low bounce/SMT) or RVOL >= 2.50x (got {rvol:.2f}x). "
                         f"Terminal dynamically pivots to Index Put setups & breakdown sparks.",
                     )
             elif atype in ("OPENING_DRIVE", "AFTERNOON_THRUST", "SQUEEZE_BREAKOUT"):

@@ -86,8 +86,14 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
         k in rsn
         for k in (
             "VETO",
+            "MILESTONE",
+            "INTEGRITY GATE",
             "CODE -300",
+            "-300",
+            "CODE: -300",
             "INVALID_SYMBOLS",
+            "INVALID SYMBOL",
+            "INVALID SYMBOL PROVIDED",
             "PLEASE PROVIDE A VALID SYMBOL",
             "DELISTED",
             "EXPIRED",
@@ -107,6 +113,10 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
             "CONNECTION TO REMOTE HOST WAS LOST",
             "REMOTE HOST WAS LOST",
             "GOODBYE",
+            "JSONDECODEERROR",
+            "OPTIONS-CHAIN-V3",
+            "PROTOCOLERROR",
+            "REMOTE DISCONNECTED",
         )
     ):
         return "P3"
@@ -713,7 +723,15 @@ class TelemetryLogHandler(logging.Handler):
                 # Fyers broker socket invalid_symbols feedback is P3 informational audit
                 if any(
                     k in msg.upper()
-                    for k in ("CODE -300", "INVALID_SYMBOLS", "PLEASE PROVIDE A VALID SYMBOL")
+                    for k in (
+                        "CODE -300",
+                        "-300",
+                        "CODE: -300",
+                        "INVALID_SYMBOLS",
+                        "INVALID SYMBOL",
+                        "INVALID SYMBOL PROVIDED",
+                        "PLEASE PROVIDE A VALID SYMBOL",
+                    )
                 ):
                     severity = "INFO"
                     priority = "P3"
@@ -730,8 +748,14 @@ class TelemetryLogHandler(logging.Handler):
                     k in msg.upper()
                     for k in (
                         "VETO",
+                        "MILESTONE",
+                        "INTEGRITY GATE",
                         "CODE -300",
+                        "-300",
+                        "CODE: -300",
                         "INVALID_SYMBOLS",
+                        "INVALID SYMBOL",
+                        "INVALID SYMBOL PROVIDED",
                         "PLEASE PROVIDE A VALID SYMBOL",
                         "DELISTED",
                         "EXPIRED",
@@ -740,6 +764,13 @@ class TelemetryLogHandler(logging.Handler):
                         "REWRITING",
                         "IN-FLIGHT WARNING",
                         "THROTTLED OR HIGH DEMAND",
+                        "CONNECTION TO REMOTE HOST WAS LOST",
+                        "REMOTE HOST WAS LOST",
+                        "GOODBYE",
+                        "JSONDECODEERROR",
+                        "OPTIONS-CHAIN-V3",
+                        "PROTOCOLERROR",
+                        "REMOTE DISCONNECTED",
                     )
                 ):
                     severity = "INFO"

@@ -26,6 +26,7 @@ from typing import Optional
 
 from brokers.base import OptionsContract
 from engine.greeks_manager import LOT_SIZES
+from market.instruments import format_strike
 
 log = logging.getLogger(__name__)
 
@@ -260,7 +261,7 @@ def _parse_v3_chain(
             pchange = float(leg.get("pChange", 0) or 0)
             pchange_oi = float(leg.get("pchangeinOpenInterest", 0) or 0)
 
-            sym = f"{underlying.upper()}{int(strike)}{opt_type}"
+            sym = f"{underlying.upper()}{format_strike(strike)}{opt_type}"
 
             contracts.append(
                 OptionsContract(

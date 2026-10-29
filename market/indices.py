@@ -633,7 +633,7 @@ def get_premarket_battle_plan(
     from engine.daily_levels import get_daily_levels
     from market.quotes import get_quote
 
-    target_indices = indices or ["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"]
+    target_indices = indices or ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
     results: dict[str, Any] = {}
 
     for name in target_indices:
@@ -769,7 +769,7 @@ def format_premarket_strike_radar(plan: Optional[dict[str, Any]] = None) -> str:
     Provides the exact CE and PE strikes to pre-populate in watchlists BEFORE 09:15.
     """
     if plan is None:
-        plan = get_premarket_battle_plan(["NIFTY", "BANKNIFTY", "SENSEX"])
+        plan = get_premarket_battle_plan(["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"])
 
     now_str = datetime.now(IST).strftime("%d-%b-%Y %H:%M IST")
     lines = [
@@ -780,7 +780,7 @@ def format_premarket_strike_radar(plan: Optional[dict[str, Any]] = None) -> str:
         "",
     ]
 
-    for sym in ("NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"):
+    for sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"):
         data = plan.get(sym)
         if not data:
             continue
@@ -834,7 +834,7 @@ def get_opening_range_battle_plan(symbols: Optional[list[str]] = None) -> dict[s
       - Invalidation stops anchored to opposite side of ORB or midpoint
     """
     if symbols is None:
-        symbols = ["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"]
+        symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
 
     try:
         from market.quotes import get_quote
@@ -916,7 +916,9 @@ def format_opening_range_radar(plan: Optional[dict[str, Any]] = None) -> str:
     two-sided battle plan for Telegram and Terminal display.
     """
     if plan is None:
-        plan = get_opening_range_battle_plan(["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"])
+        plan = get_opening_range_battle_plan(
+            ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        )
 
     now_str = datetime.now(IST).strftime("%d-%b-%Y %H:%M IST")
     lines = [
@@ -927,7 +929,7 @@ def format_opening_range_radar(plan: Optional[dict[str, Any]] = None) -> str:
         "",
     ]
 
-    for sym in ("NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"):
+    for sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"):
         data = plan.get(sym)
         if not data:
             continue

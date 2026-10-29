@@ -78,11 +78,28 @@ def generate_session_scorecard(
         )
 
         has_triggered = getattr(alert, "has_triggered", True)
-        if hasattr(alert, "stage") and alert.stage in ("STALK", "EARLY_WARNING", "PRIMED"):
+        is_disqualified = (
+            getattr(alert, "target_status", "")
+            in ("SETUP_DISQUALIFIED", "DISQUALIFIED", "SUPERSEDED")
+            or getattr(alert, "stage", "") in ("CANCELLED", "SETUP_DISQUALIFIED", "SUPERSEDED")
+            or getattr(alert, "is_disqualified", False)
+        )
+        if (
+            hasattr(alert, "stage")
+            and alert.stage
+            in (
+                "STALK",
+                "EARLY_WARNING",
+                "PRIMED",
+                "CANCELLED",
+                "SETUP_DISQUALIFIED",
+                "SUPERSEDED",
+            )
+        ) or is_disqualified:
             has_triggered = False
 
         r_mult = getattr(alert, "r_multiple", None)
-        if not has_triggered or getattr(alert, "target_status", "") == "SETUP_DISQUALIFIED":
+        if not has_triggered or is_disqualified:
             r_val = 0.0
         elif r_mult is not None:
             r_val = float(r_mult)
@@ -103,6 +120,16 @@ def generate_session_scorecard(
             if is_inv and sl > 0:
                 cur = sl
             r_val = round(((cur - entry) if is_bull else (entry - cur)) / max(0.01, risk), 2)
+
+        # Scorecard Calibration Invariant:
+        # If an alert has no achieved milestones and is not invalidated, any report of R > 0.5
+        # is a phantom/unreached target projection. Clamp R to 0.0 so it is properly categorized as unfulfilled/flat.
+        if not t1_reached and not is_inv and r_val > 0.5:
+            logger.warning(
+                f"[Scorecard] Integrity Invariant Clamping: Alert {sym} ({getattr(alert, 'alert_id', '')}) "
+                f"has 0 achieved milestones and is not invalidated, but reports R={r_val:.2f}R. Clamping R to 0.0."
+            )
+            r_val = 0.0
 
         th = (getattr(alert, "time_horizon", "") or "").upper()
         is_multi_session = th in (
@@ -450,9 +477,26 @@ def run_eod_alert_postmortems(
 
         # Untriggered radar setups (never entered into market) do not conduct invalidation post-mortems
         has_triggered = getattr(alert, "has_triggered", True)
-        if hasattr(alert, "stage") and alert.stage in ("STALK", "EARLY_WARNING", "PRIMED"):
+        is_disqualified = (
+            getattr(alert, "target_status", "")
+            in ("SETUP_DISQUALIFIED", "DISQUALIFIED", "SUPERSEDED")
+            or getattr(alert, "stage", "") in ("CANCELLED", "SETUP_DISQUALIFIED", "SUPERSEDED")
+            or getattr(alert, "is_disqualified", False)
+        )
+        if (
+            hasattr(alert, "stage")
+            and alert.stage
+            in (
+                "STALK",
+                "EARLY_WARNING",
+                "PRIMED",
+                "CANCELLED",
+                "SETUP_DISQUALIFIED",
+                "SUPERSEDED",
+            )
+        ) or is_disqualified:
             has_triggered = False
-        if not has_triggered or getattr(alert, "target_status", "") == "SETUP_DISQUALIFIED":
+        if not has_triggered or is_disqualified:
             continue
 
         # We conduct post-mortem if the alert was invalidated, or if it expired/closed without hitting T1

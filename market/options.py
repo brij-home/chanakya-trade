@@ -10,9 +10,11 @@ Fallback chain:
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
 import logging
+import os
 import threading
 import time
 
@@ -23,25 +25,93 @@ from brokers.session import get_data_broker
 from engine import alert_expiry
 from market.nse_scraper import nse_get_options_chain
 from market.source_tracker import record_source, warn_fallback
+from market.instruments import format_strike
 
 logger = logging.getLogger("chanakya.market.options")
 
+_MAX_CHAIN_CACHE_ITEMS = 300
+_MAX_SNAPSHOT_CACHE_ITEMS = 300
+_MAX_EXPIRIES_CACHE_ITEMS = 300
+_MAX_BASELINE_OI_ITEMS = 10000
+
 _CHAIN_CACHE: dict[str, tuple[float, list[OptionsContract]]] = {}
-_CHAIN_CACHE_LOCK = threading.Lock()
-_IN_FLIGHT_CHAIN_LOCK = threading.Lock()
+_CHAIN_CACHE_LOCK = threading.RLock()
+_IN_FLIGHT_CHAIN_LOCK = threading.RLock()
 _IN_FLIGHT_CHAIN_EVENTS: dict[str, tuple[threading.Event, list[Any]]] = {}
+
+_SNAPSHOT_CACHE: dict[
+    str, tuple[float, tuple[list[OptionsContract], Optional[float], list[str], dict[str, Any]]]
+] = {}
+_SNAPSHOT_LOCK = threading.RLock()
+_SNAPSHOT_TTL = 15.0  # 15.0-second coalescing cache
+
+_STRIKE_BASELINE_OI: dict[str, int] = {}
+_BASELINE_DATE: Optional[str] = None
+_BASELINE_LOCK = threading.RLock()
+
+
+def _store_in_chain_cache(cache_key: str, chain: list[OptionsContract]) -> None:
+    """Store chain in _CHAIN_CACHE with bounded FIFO/LRU eviction."""
+    with _CHAIN_CACHE_LOCK:
+        if len(_CHAIN_CACHE) >= _MAX_CHAIN_CACHE_ITEMS:
+            # Evict oldest 20%
+            keys_to_drop = list(_CHAIN_CACHE.keys())[: max(1, _MAX_CHAIN_CACHE_ITEMS // 5)]
+            for k in keys_to_drop:
+                _CHAIN_CACHE.pop(k, None)
+        _CHAIN_CACHE[cache_key] = (time.time(), chain)
+
+
+def _store_in_snapshot_cache(
+    cache_key: str,
+    res: tuple[list[OptionsContract], Optional[float], list[str], dict[str, Any]],
+    now_ts: float,
+) -> None:
+    """Store snapshot in _SNAPSHOT_CACHE with bounded eviction."""
+    with _SNAPSHOT_LOCK:
+        if len(_SNAPSHOT_CACHE) >= _MAX_SNAPSHOT_CACHE_ITEMS:
+            keys_to_drop = list(_SNAPSHOT_CACHE.keys())[: max(1, _MAX_SNAPSHOT_CACHE_ITEMS // 5)]
+            for k in keys_to_drop:
+                _SNAPSHOT_CACHE.pop(k, None)
+        _SNAPSHOT_CACHE[cache_key] = (now_ts, res)
+
+
+def clear_options_caches() -> int:
+    """Evicts all cached option chains, snapshots, and baseline OI from RAM. Used by memory_guard."""
+    cleared = 0
+    with _CHAIN_CACHE_LOCK:
+        cleared += len(_CHAIN_CACHE)
+        _CHAIN_CACHE.clear()
+    with _SNAPSHOT_LOCK:
+        cleared += len(_SNAPSHOT_CACHE)
+        _SNAPSHOT_CACHE.clear()
+    with _IN_FLIGHT_CHAIN_LOCK:
+        _IN_FLIGHT_CHAIN_EVENTS.clear()
+    with _BASELINE_LOCK:
+        cleared += len(_STRIKE_BASELINE_OI)
+        _STRIKE_BASELINE_OI.clear()
+    return cleared
+
+
+try:
+    from engine.memory_guard import register_trim_callback
+
+    register_trim_callback(clear_options_caches)
+except Exception as e_suppressed:
+    logger.debug(f"[market.options] Memory guard registration suppressed: {e_suppressed}")
 _CHAIN_CACHE_TTL_DEFAULT = 180.0  # Off-market hours fallback
+_CHAIN_CACHE_TTL_LIVE_INDEX = 60.0  # 60s during live market hours for major index options
+_CHAIN_CACHE_TTL_LIVE_STOCK = 120.0  # 120s for stock options
 _CHAIN_CACHE_TTL_LIVE = (
-    30.0  # 30s during live market hours (balances gamma/OI precision with broker rate limits)
+    60.0  # 60s during live market hours (balances gamma/OI precision with broker rate limits)
 )
-_CHAIN_CACHE_TTL_SCRAPER = 30.0  # 30s for scraper fallback
+_CHAIN_CACHE_TTL_SCRAPER = 45.0  # 45s for scraper fallback
 _CHAIN_CACHE_TTL_EMPTY = 60.0  # 60s negative cache when options chain is empty or broker is tripped
 _EXPIRIES_CACHE: dict[str, tuple[float, list[str]]] = {}
 _EXPIRIES_CACHE_TTL = 43200.0  # 12 hours cache for expiry dates (immutable exchange schedules)
 
 
 def get_chain_cache_ttl(is_broker: bool = True, is_empty: bool = False, symbol: str = "") -> float:
-    """Returns dynamic cache TTL: 30s live index, 90s stock options, 60s negative cache, 180s when closed."""
+    """Returns dynamic cache TTL: 60s live index, 120s stock options, 60s negative cache, 180s when closed."""
     if is_empty:
         try:
             from market.fyers_circuit_breaker import get_fyers_circuit_breaker
@@ -68,22 +138,14 @@ def get_chain_cache_ttl(is_broker: bool = True, is_empty: bool = False, symbol: 
                 "BANKEX",
             )
             if not is_index and clean:
-                return 90.0 if is_broker else 120.0
-            return _CHAIN_CACHE_TTL_LIVE if is_broker else _CHAIN_CACHE_TTL_SCRAPER
+                return _CHAIN_CACHE_TTL_LIVE_STOCK if is_broker else 120.0
+            return _CHAIN_CACHE_TTL_LIVE_INDEX if is_broker else _CHAIN_CACHE_TTL_SCRAPER
     except Exception as e_suppressed:
         logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
     return _CHAIN_CACHE_TTL_DEFAULT
 
 
-_SNAPSHOT_CACHE: dict[
-    str, tuple[float, tuple[list[OptionsContract], Optional[float], list[str], dict[str, Any]]]
-] = {}
-_SNAPSHOT_LOCK = threading.Lock()
-_SNAPSHOT_TTL = 15.0  # 15.0-second coalescing cache to protect broker rate limit and API quota
-
-_STRIKE_BASELINE_OI: dict[str, int] = {}
-_BASELINE_DATE: Optional[str] = None
-_BASELINE_LOCK = threading.Lock()
+# (Moved to module header with other cache locks)
 
 
 def enrich_options_chain_deltas(
@@ -138,9 +200,9 @@ def enrich_options_chain_deltas(
 
             nse_chain = nse_get_options_chain(clean_und, expiry)
             if nse_chain:
-                nse_map = {(int(c.strike), c.option_type): c for c in nse_chain}
+                nse_map = {(float(c.strike), c.option_type): c for c in nse_chain}
                 for c in chain:
-                    k = (int(c.strike), c.option_type)
+                    k = (float(c.strike), c.option_type)
                     if k in nse_map:
                         nse_c = nse_map[k]
                         if nse_c.oi_change != 0:
@@ -156,7 +218,7 @@ def enrich_options_chain_deltas(
     with _BASELINE_LOCK:
         for c in chain:
             c_exp = getattr(c, "expiry", None) or expiry or "NA"
-            b_key = f"{clean_und}_{c_exp}_{int(c.strike)}_{c.option_type}"
+            b_key = f"{clean_und}_{c_exp}_{format_strike(c.strike)}_{c.option_type}"
             c_oi = int(getattr(c, "oi", 0) or 0)
             if c_oi > 0:
                 if b_key not in _STRIKE_BASELINE_OI:
@@ -174,6 +236,8 @@ def enrich_options_chain_deltas(
 def get_options_chain(
     underlying: str,
     expiry: Optional[str] = None,
+    *,
+    bypass_cache: bool = False,
 ) -> list[OptionsContract]:
     """
     Full options chain for an underlying index, stock, or MCX commodity.
@@ -187,6 +251,7 @@ def get_options_chain(
     Args:
         underlying: e.g. "NIFTY", "BANKNIFTY", "RELIANCE", "CRUDEOIL", "GOLD"
         expiry:     "YYYY-MM-DD" — nearest expiry if None
+        bypass_cache: If True, bypasses in-memory cache to fetch fresh data from broker (used by OCM refresher)
 
     Returns:
         List of OptionsContract sorted by strike then type (CE/PE).
@@ -218,30 +283,31 @@ def get_options_chain(
     # If the default/nearest chain is already cached and valid, return it instantly with zero REST calls
     cache_key = f"{clean_sym}:{expiry or 'nearest'}"
     now = time.time()
-    with _CHAIN_CACHE_LOCK:
-        if cache_key in _CHAIN_CACHE:
-            cached_at, cached_chain = _CHAIN_CACHE[cache_key]
-            ttl = get_chain_cache_ttl(
-                is_broker=True, is_empty=not bool(cached_chain), symbol=clean_sym
-            )
-            if (now - cached_at) < ttl:
-                try:
-                    from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+    if not bypass_cache:
+        with _CHAIN_CACHE_LOCK:
+            if cache_key in _CHAIN_CACHE:
+                cached_at, cached_chain = _CHAIN_CACHE[cache_key]
+                ttl = get_chain_cache_ttl(
+                    is_broker=True, is_empty=not bool(cached_chain), symbol=clean_sym
+                )
+                if (now - cached_at) < ttl:
+                    try:
+                        from market.quotes import _QUOTE_CACHE, _quote_cache_lock
 
-                    with _quote_cache_lock:
-                        for c in cached_chain:
-                            q_rec = _QUOTE_CACHE.get(c.symbol)
-                            if q_rec:
-                                q_obj = q_rec[1]
-                                lp = getattr(q_obj, "last_price", 0.0)
-                                if lp > 0:
-                                    c.ltp = lp
-                                v = getattr(q_obj, "volume", 0)
-                                if v > 0:
-                                    c.volume = v
-                except Exception as e_tick:
-                    logger.debug(f"[market.options] Quote overlay suppressed: {e_tick}")
-                return cached_chain
+                        with _quote_cache_lock:
+                            for c in cached_chain:
+                                q_rec = _QUOTE_CACHE.get(c.symbol)
+                                if q_rec:
+                                    q_obj = q_rec[1]
+                                    lp = getattr(q_obj, "last_price", 0.0)
+                                    if lp > 0:
+                                        c.ltp = lp
+                                    v = getattr(q_obj, "volume", 0)
+                                    if v > 0:
+                                        c.volume = v
+                    except Exception as e_tick:
+                        logger.debug(f"[market.options] Quote overlay suppressed: {e_tick}")
+                    return cached_chain
 
     # Institutional Single-Stock Physical Expiry Rollover:
     # Under SEBI regulations, single-stock options are physically settled. In the final 4 trading
@@ -277,6 +343,7 @@ def get_options_chain(
                                     symbol=clean_sym,
                                 )
                                 if (now - cached_at) < ttl:
+                                    _store_in_chain_cache(f"{clean_sym}:nearest", cached_chain)
                                     return cached_chain
         except Exception as e_exp:
             logger.debug(f"[Options] Physical expiry check error for {clean_sym}: {e_exp}")
@@ -320,8 +387,9 @@ def get_options_chain(
                 record_source("options", "broker")
                 if chain and any(float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in chain):
                     chain = enrich_options_chain_deltas(chain, underlying, expiry)
-                    with _CHAIN_CACHE_LOCK:
-                        _CHAIN_CACHE[cache_key] = (time.time(), chain)
+                    _store_in_chain_cache(cache_key, chain)
+                    if not is_commodity and not is_index:
+                        _store_in_chain_cache(f"{clean_sym}:nearest", chain)
                     chain_result = chain
                     return chain
             except Exception as e:
@@ -342,30 +410,40 @@ def get_options_chain(
                     )
                     if chain:
                         record_source("options", "black_76_synthetic")
-                        with _CHAIN_CACHE_LOCK:
-                            _CHAIN_CACHE[cache_key] = (time.time(), chain)
+                        _store_in_chain_cache(cache_key, chain)
                         chain_result = chain
                         return chain
             except Exception as e:
                 warn_fallback("options", str(e), "none")
 
-            with _CHAIN_CACHE_LOCK:
-                _CHAIN_CACHE[cache_key] = (time.time(), [])
+            _store_in_chain_cache(cache_key, [])
             chain_result = []
             return []
 
-        # Tier 3: NSE public scraper for equities and indices
+        # Tier 3: NSE public scraper for equities and indices (skip in test envs unless explicitly mocked)
+        is_test_env = (
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or os.environ.get("DEPLOY_MODE") == "test"
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+        is_mocked = (
+            getattr(nse_get_options_chain, "__module__", "") != "market.nse_scraper"
+            or hasattr(nse_get_options_chain, "mock")
+            or hasattr(nse_get_options_chain, "assert_called")
+        )
+        if is_test_env and not is_mocked:
+            _store_in_chain_cache(cache_key, [])
+            return []
+
         chain = nse_get_options_chain(underlying, expiry)
         if chain:
             chain = enrich_options_chain_deltas(chain, underlying, expiry)
             record_source("options", "nse_scraper")
-            with _CHAIN_CACHE_LOCK:
-                _CHAIN_CACHE[cache_key] = (time.time(), chain)
+            _store_in_chain_cache(cache_key, chain)
             chain_result = chain
             return chain
 
         # Tier 4: Synthetic chain ONLY in explicit Mock/Demo mode (never during LIVE/PAPER trading with real brokers)
-        import os
 
         try:
             from brokers.session import get_data_broker_key
@@ -411,16 +489,14 @@ def get_options_chain(
                                 if clean_sym in ("SENSEX", "BANKEX")
                                 else "index_synthetic_nfo",
                             )
-                            with _CHAIN_CACHE_LOCK:
-                                _CHAIN_CACHE[cache_key] = (time.time(), chain)
+                            _store_in_chain_cache(cache_key, chain)
                             chain_result = chain
                             return chain
                 except Exception as e_suppressed:
                     logger.debug(f"[market.options] Non-fatal exception suppressed: {e_suppressed}")
 
         record_source("options", "none")
-        with _CHAIN_CACHE_LOCK:
-            _CHAIN_CACHE[cache_key] = (time.time(), [])
+        _store_in_chain_cache(cache_key, [])
         chain_result = []
         return []
     finally:
@@ -516,7 +592,7 @@ def build_index_synthetic_option_chain(
         # CE
         ce_intrinsic = max(0.0, spot - strike)
         ce_ltp = round(ce_intrinsic + max(2.0, base_extrinsic - max(0.0, dist_from_spot * 0.4)), 1)
-        ce_sym = f"{clean_sym}{int(strike)}CE"
+        ce_sym = f"{clean_sym}{format_strike(strike)}CE"
         contracts.append(
             OptionsContract(
                 symbol=ce_sym,
@@ -537,7 +613,7 @@ def build_index_synthetic_option_chain(
         # PE
         pe_intrinsic = max(0.0, strike - spot)
         pe_ltp = round(pe_intrinsic + max(2.0, base_extrinsic - max(0.0, -dist_from_spot * 0.4)), 1)
-        pe_sym = f"{clean_sym}{int(strike)}PE"
+        pe_sym = f"{clean_sym}{format_strike(strike)}PE"
         contracts.append(
             OptionsContract(
                 symbol=pe_sym,
@@ -714,7 +790,7 @@ def get_options_snapshot(
                 }
                 res = (chain, spot, expiries, source_info)
                 with _SNAPSHOT_LOCK:
-                    _SNAPSHOT_CACHE[cache_key] = (now_ts, res)
+                    _store_in_snapshot_cache(cache_key, res, now_ts)
                 return res
     except Exception as exc:
         import logging
@@ -808,6 +884,128 @@ def chain_to_dataframe(contracts: list[OptionsContract]) -> pd.DataFrame:
         "PE_iv",
     ]
     return df[[c for c in col_order if c in df.columns]]
+
+
+@dataclass
+class ATMStraddleMetrics:
+    """Institutional At-The-Money (ATM) Straddle Pricing & Expected Move Bounds."""
+
+    underlying: str
+    spot: float
+    atm_strike: float
+    ce_symbol: str
+    pe_symbol: str
+    ce_ltp: float
+    pe_ltp: float
+    straddle_price: float
+    expected_move_pts: float
+    expected_high: float
+    expected_low: float
+    expansion_threshold: float
+    noise_corridor_high: float
+    noise_corridor_low: float
+    is_realtime: bool = True
+    expiry: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def get_atm_straddle_metrics(
+    underlying: str,
+    spot: Optional[float] = None,
+    expiry: Optional[str] = None,
+) -> Optional[ATMStraddleMetrics]:
+    """
+    Computes institutional ATM Straddle Price and Expected Move boundaries.
+    The ATM Straddle (CE LTP + PE LTP at closest strike) represents the options market's
+    priced session move. Moves within +/- 0.4x Straddle are theta chop;
+    moves exceeding 1.0x Straddle break market maker gamma walls.
+    """
+    clean_u = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()
+    if spot is None or spot <= 0:
+        try:
+            from market.quotes import get_ltp
+
+            spot = float(get_ltp(clean_u) or 0.0)
+        except Exception:
+            spot = 0.0
+
+    if not spot or spot <= 0:
+        return None
+
+    chain = get_options_chain(clean_u, expiry=expiry)
+    if not chain:
+        return None
+
+    valid_contracts = [c for c in chain if float(getattr(c, "last_price", 0.0) or 0.0) > 0]
+    if not valid_contracts:
+        return None
+
+    atm_k = get_atm_strike(clean_u, spot)
+    atm_ce = next(
+        (
+            c
+            for c in valid_contracts
+            if float(getattr(c, "strike", 0.0)) == atm_k
+            and getattr(c, "option_type", "").upper() == "CE"
+        ),
+        None,
+    )
+    atm_pe = next(
+        (
+            c
+            for c in valid_contracts
+            if float(getattr(c, "strike", 0.0)) == atm_k
+            and getattr(c, "option_type", "").upper() == "PE"
+        ),
+        None,
+    )
+
+    if not atm_ce or not atm_pe:
+        ce_candidates = [
+            c for c in valid_contracts if getattr(c, "option_type", "").upper() == "CE"
+        ]
+        pe_candidates = [
+            c for c in valid_contracts if getattr(c, "option_type", "").upper() == "PE"
+        ]
+        if not ce_candidates or not pe_candidates:
+            return None
+        atm_ce = min(ce_candidates, key=lambda c: abs(float(c.strike) - spot))
+        atm_pe = min(pe_candidates, key=lambda c: abs(float(c.strike) - spot))
+
+    ce_ltp = float(getattr(atm_ce, "last_price", 0.0) or 0.0)
+    pe_ltp = float(getattr(atm_pe, "last_price", 0.0) or 0.0)
+    if ce_ltp <= 0 or pe_ltp <= 0:
+        return None
+
+    straddle_p = round(ce_ltp + pe_ltp, 2)
+    expected_move = round(straddle_p * 0.85, 2)
+    exp_high = round(atm_k + straddle_p, 2)
+    exp_low = round(atm_k - straddle_p, 2)
+    exp_thresh = round(straddle_p * 1.15, 2)
+    noise_h = round(atm_k + (0.40 * straddle_p), 2)
+    noise_l = round(atm_k - (0.40 * straddle_p), 2)
+    exp_date = getattr(atm_ce, "expiry", None) or expiry
+
+    return ATMStraddleMetrics(
+        underlying=clean_u,
+        spot=spot,
+        atm_strike=atm_k,
+        ce_symbol=getattr(atm_ce, "symbol", f"{clean_u} {atm_k} CE"),
+        pe_symbol=getattr(atm_pe, "symbol", f"{clean_u} {atm_k} PE"),
+        ce_ltp=ce_ltp,
+        pe_ltp=pe_ltp,
+        straddle_price=straddle_p,
+        expected_move_pts=expected_move,
+        expected_high=exp_high,
+        expected_low=exp_low,
+        expansion_threshold=exp_thresh,
+        noise_corridor_high=noise_h,
+        noise_corridor_low=noise_l,
+        is_realtime=True,
+        expiry=exp_date,
+    )
 
 
 def get_atm_strike(underlying: str, spot: float) -> float:

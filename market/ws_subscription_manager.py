@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+from market.instruments import format_strike
 
 MAX_WS_SUBSCRIPTIONS = 5000  # FYERS API v3 Data Socket supports up to 5,000 symbols concurrently
 
@@ -215,10 +216,12 @@ def is_contract_expired(symbol: str, ref_dt: Optional[datetime] = None) -> bool:
     return _inst_is_contract_expired(symbol, ref_dt=ref_dt)
 
 
-# Known blacklisted/delisted symbols that Fyers socket rejects with -300
+# Known structurally blacklisted symbols: instruments rejected by Fyers Data Socket
+# with error -300 that are NOT handled by the CORPORATE_ALIASES rename map.
+# Do NOT add renamed/rebranded tickers here — use CORPORATE_ALIASES in market/instruments.py
+# (e.g. ZOMATO→ETERNAL is already in CORPORATE_ALIASES so NSE:ZOMATO-EQ never reaches this gate).
 _WS_SYMBOL_BLACKLIST = {
-    "NSE:NIFTYFPI-INDEX",
-    "NSE:ZOMATO-EQ",
+    "NSE:NIFTYFPI-INDEX",  # SEBI-suspended index; not available on Fyers Data Socket
 }
 
 
@@ -244,6 +247,8 @@ def is_valid_ws_symbol(symbol: str) -> bool:
             return False
 
     # 2. Reject unnormalized NSE/BSE equities that have hyphens without valid segment suffix
+    if "-EQ-INDEX" in clean_name or "-INDEX-INDEX" in clean_name or "-BE-INDEX" in clean_name:
+        return False
     if (s.startswith("NSE:") or s.startswith("BSE:")) and "-" in clean_name:
         if not clean_name.endswith(("-EQ", "-INDEX", "-BE", "-SM", "-BZ", "-GB")):
             return False
@@ -256,11 +261,11 @@ def get_active_index_options_grid(num_strikes_per_side: int = 8) -> list[str]:
     Generate active Index Options contracts for NIFTY, BANKNIFTY, MIDCPNIFTY, SENSEX, and FINNIFTY.
     Generates ATM ± num_strikes_per_side strikes for each index (~170 contracts).
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime
 
     now = datetime.now()
-    target_dt = now if now.day <= 24 else now + timedelta(days=10)
-    month_suffix = target_dt.strftime("%y%b").upper()
+    today = now.date()
+    from market.instruments import _calc_monthly_expiry_date
 
     estimated_spots = {
         "NIFTY": ("NSE", 25000.0, 50, num_strikes_per_side),
@@ -297,12 +302,30 @@ def get_active_index_options_grid(num_strikes_per_side: int = 8) -> list[str]:
 
     grid: list[str] = []
     for idx_name, (exch, spot, default_step, n_stk) in estimated_spots.items():
+        # Institutional expiry resolution: never prematurely roll to next month before actual monthly expiry
+        try:
+            exp_date = _calc_monthly_expiry_date(exch, idx_name, now.year, now.month)
+            if today <= exp_date:
+                active_suffixes = [now.strftime("%y%b").upper()]
+                # If within 3 calendar days of expiry, also pre-seed next month for seamless rollover
+                if (exp_date - today).days <= 3:
+                    nm = now.month + 1 if now.month < 12 else 1
+                    ny = now.year if now.month < 12 else now.year + 1
+                    active_suffixes.append(datetime(ny, nm, 1).strftime("%y%b").upper())
+            else:
+                nm = now.month + 1 if now.month < 12 else 1
+                ny = now.year if now.month < 12 else now.year + 1
+                active_suffixes = [datetime(ny, nm, 1).strftime("%y%b").upper()]
+        except Exception:
+            active_suffixes = [now.strftime("%y%b").upper()]
+
         step = get_strike_step(idx_name, spot=spot) or default_step
-        atm_strike = int(round(spot / float(step)) * step)
-        for offset in range(-n_stk, n_stk + 1):
-            strike = int(round(atm_strike + (offset * step)))
-            grid.append(f"{exch}:{idx_name}{month_suffix}{strike}CE")
-            grid.append(f"{exch}:{idx_name}{month_suffix}{strike}PE")
+        atm_strike = round(spot / float(step)) * step
+        for m_suf in active_suffixes:
+            for offset in range(-n_stk, n_stk + 1):
+                strike = round(atm_strike + (offset * step), 2)
+                grid.append(f"{exch}:{idx_name}{m_suf}{format_strike(strike)}CE")
+                grid.append(f"{exch}:{idx_name}{m_suf}{format_strike(strike)}PE")
 
     # On Thursday (NIFTY 0DTE) and Friday (SENSEX 0DTE), pre-seed active weekly options
     try:

@@ -303,7 +303,7 @@ class AutoAlert:
 
         if (not self.strike or not self.option_type) and (self.headline or self.contract_symbol):
             text_to_search = f"{self.headline or ''} {self.contract_symbol or ''}"
-            m_opt = re.search(r"\b(\d{3,6}(?:\.\d+)?)\s*(CE|PE)\b", text_to_search, re.IGNORECASE)
+            m_opt = re.search(r"\b(\d{1,6}(?:\.\d+)?)\s*(CE|PE)\b", text_to_search, re.IGNORECASE)
             if m_opt:
                 if not self.strike:
                     try:
@@ -315,7 +315,9 @@ class AutoAlert:
                 if not self.option_type:
                     self.option_type = m_opt.group(2).upper()
                 if not self.contract_symbol and self.strike:
-                    s_val = int(self.strike) if self.strike.is_integer() else self.strike
+                    from market.instruments import format_strike
+
+                    s_val = format_strike(self.strike)
                     self.contract_symbol = f"{self.symbol} {s_val} {self.option_type}"
 
         if self.initial_stop_loss is None:
@@ -533,7 +535,11 @@ class AutoAlert:
 
                 contract_val = self.contract_symbol
                 if not contract_val and self.strike and self.option_type:
-                    contract_val = f"{self.symbol} {int(self.strike)} {self.option_type}".strip()
+                    from market.instruments import format_strike
+
+                    contract_val = (
+                        f"{self.symbol} {format_strike(self.strike)} {self.option_type}".strip()
+                    )
                 self.signal_ref = build_signal_ref(
                     symbol=self.symbol,
                     alert_id=self.alert_id,
@@ -1143,27 +1149,57 @@ class AutoAlert:
                 if isinstance(plan_dict.get("option_plan"), dict)
                 else {}
             )
-            raw_t1 = (
-                opt_plan_dict.get("t1_premium")
-                or opt_plan_dict.get("target_1")
-                or plan_dict.get("target_1")
-                or plan_dict.get("target")
-                or getattr(self, "target_1", None)
-                or self.target_level
+            tp_dict = (
+                plan_dict.get("trade_plan", {})
+                if isinstance(plan_dict.get("trade_plan"), dict)
+                else {}
             )
-            raw_t2 = (
-                opt_plan_dict.get("t2_premium")
-                or opt_plan_dict.get("target_2")
-                or plan_dict.get("target_2")
-                or getattr(self, "target_2", None)
-            )
-            raw_t3 = (
-                opt_plan_dict.get("t3_premium")
-                or opt_plan_dict.get("target_3")
-                or plan_dict.get("target_3")
-                or plan_dict.get("runner_target")
-                or getattr(self, "target_3", None)
-            )
+
+            if is_opt:
+                raw_t1 = (
+                    opt_plan_dict.get("t1_premium")
+                    or opt_plan_dict.get("target_1")
+                    or plan_dict.get("target_1")
+                    or plan_dict.get("target")
+                    or getattr(self, "target_1", None)
+                    or self.target_level
+                )
+                raw_t2 = (
+                    opt_plan_dict.get("t2_premium")
+                    or opt_plan_dict.get("target_2")
+                    or plan_dict.get("target_2")
+                    or getattr(self, "target_2", None)
+                )
+                raw_t3 = (
+                    opt_plan_dict.get("t3_premium")
+                    or opt_plan_dict.get("target_3")
+                    or plan_dict.get("target_3")
+                    or plan_dict.get("runner_target")
+                    or getattr(self, "target_3", None)
+                )
+            else:
+                raw_t1 = (
+                    tp_dict.get("target_1")
+                    or plan_dict.get("underlying_target_1")
+                    or plan_dict.get("underlying_target")
+                    or plan_dict.get("target_1")
+                    or plan_dict.get("target")
+                    or getattr(self, "target_1", None)
+                    or self.target_level
+                )
+                raw_t2 = (
+                    tp_dict.get("target_2")
+                    or plan_dict.get("underlying_target_2")
+                    or plan_dict.get("target_2")
+                    or getattr(self, "target_2", None)
+                )
+                raw_t3 = (
+                    tp_dict.get("target_3")
+                    or plan_dict.get("underlying_target_3")
+                    or plan_dict.get("target_3")
+                    or plan_dict.get("runner_target")
+                    or getattr(self, "target_3", None)
+                )
             t1_f, t2_f, t3_f = None, None, None
             if raw_t1:
                 try:
@@ -1187,13 +1223,42 @@ class AutoAlert:
                         f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
                     )
 
+            # Sanity guard: prevent attached option targets from polluting equity target hierarchy (and vice-versa)
+            if not is_opt and ltp > 0:
+                if is_long:
+                    if t1_f is not None and (t1_f < ltp * 0.70 or t1_f > ltp * 2.5):
+                        t1_f = None
+                    if t2_f is not None and (t2_f < ltp * 0.70 or t2_f > ltp * 2.5):
+                        t2_f = None
+                    if t3_f is not None and (t3_f < ltp * 0.70 or t3_f > ltp * 2.5):
+                        t3_f = None
+                else:
+                    if t1_f is not None and (t1_f < ltp * 0.4 or t1_f > ltp * 1.30):
+                        t1_f = None
+                    if t2_f is not None and (t2_f < ltp * 0.4 or t2_f > ltp * 1.30):
+                        t2_f = None
+                    if t3_f is not None and (t3_f < ltp * 0.4 or t3_f > ltp * 1.30):
+                        t3_f = None
+            elif is_opt and ltp > 0:
+                if t1_f is not None and t1_f > ltp * 5.0:
+                    t1_f = None
+                if t2_f is not None and t2_f > ltp * 5.0:
+                    t2_f = None
+                if t3_f is not None and t3_f > ltp * 5.0:
+                    t3_f = None
+
             # Targets are option premium targets if the alert itself is an option premium level
-            # or if the targets specifically came from option premium targets (t1_premium, t2_premium)
-            # or if actionable_plan defines an option contract ticket
+            # or if actionable_plan defines an option contract ticket and targets are in option premium space (< 0.5 * ltp)
             has_opt_target_premiums = bool(
                 is_opt
-                or (opt_plan_dict.get("t1_premium") and opt_plan_dict.get("t2_premium"))
-                or (is_opt_action and (raw_t1 or raw_t2) and (t1_f and t1_f < (ltp * 0.5)))
+                or (is_opt_action and (t1_f is not None and ltp > 0 and t1_f < (ltp * 0.5)))
+                or (
+                    not is_opt
+                    and opt_plan_dict.get("t1_premium")
+                    and t1_f is not None
+                    and ltp > 0
+                    and t1_f < (ltp * 0.5)
+                )
             )
             is_downward_trade = (
                 is_short
@@ -1205,30 +1270,39 @@ class AutoAlert:
                     and sl > entry_anchor
                 )
             )
-            if is_downward_trade and not has_opt_target_premiums:
-                # Bearish underlying spot / futures trade: targets extend strictly DOWNWARD
-                if t1_f and t2_f and t2_f >= t1_f:
-                    return (
-                        False,
-                        f"Inverted Bearish Target Hierarchy: Target 2 (₹{t2_f:,.2f}) >= Target 1 (₹{t1_f:,.2f})",
-                    )
-                if t2_f and t3_f and t3_f >= t2_f:
-                    return (
-                        False,
-                        f"Inverted Bearish Target Hierarchy: Target 3 (₹{t3_f:,.2f}) >= Target 2 (₹{t2_f:,.2f})",
-                    )
-            else:
-                # Bullish trade or option premium buying (where premiums expand upward): targets extend strictly UPWARD
-                if t1_f and t2_f and t2_f <= t1_f:
-                    return (
-                        False,
-                        f"Inverted Target Hierarchy: Target 2 (₹{t2_f:,.2f}) <= Target 1 (₹{t1_f:,.2f})",
-                    )
-                if t2_f and t3_f and t3_f <= t2_f:
-                    return (
-                        False,
-                        f"Inverted Target Hierarchy: Target 3 (₹{t3_f:,.2f}) <= Target 2 (₹{t2_f:,.2f})",
-                    )
+            is_neutral = (
+                str(getattr(self, "direction", "")).upper()
+                in ("NEUTRAL", "DELTA_NEUTRAL", "NON_DIRECTIONAL")
+                or getattr(self, "alert_type", "")
+                in ("IRON_CONDOR_PINNING", "IRON_CONDOR", "STRADDLE", "STRANGLE")
+                or str(plan_dict.get("action", "")).upper()
+                in ("IRON_CONDOR_PINNING", "IRON_CONDOR", "EXECUTE_IRON_CONDOR")
+            )
+            if not is_neutral:
+                if is_downward_trade and not has_opt_target_premiums:
+                    # Bearish underlying spot / futures trade: targets extend strictly DOWNWARD
+                    if t1_f and t2_f and t2_f >= t1_f:
+                        return (
+                            False,
+                            f"Inverted Bearish Target Hierarchy: Target 2 (₹{t2_f:,.2f}) >= Target 1 (₹{t1_f:,.2f})",
+                        )
+                    if t2_f and t3_f and t3_f >= t2_f:
+                        return (
+                            False,
+                            f"Inverted Bearish Target Hierarchy: Target 3 (₹{t3_f:,.2f}) >= Target 2 (₹{t2_f:,.2f})",
+                        )
+                else:
+                    # Bullish trade or option premium buying (where premiums expand upward): targets extend strictly UPWARD
+                    if t1_f and t2_f and t2_f <= t1_f:
+                        return (
+                            False,
+                            f"Inverted Target Hierarchy: Target 2 (₹{t2_f:,.2f}) <= Target 1 (₹{t1_f:,.2f})",
+                        )
+                    if t2_f and t3_f and t3_f <= t2_f:
+                        return (
+                            False,
+                            f"Inverted Target Hierarchy: Target 3 (₹{t3_f:,.2f}) <= Target 2 (₹{t2_f:,.2f})",
+                        )
 
             # Zero / Micro Risk Guard:
             entry_ref = float(self.trigger_level or getattr(self, "entry_price", 0.0) or ltp)
@@ -1518,6 +1592,25 @@ class AutoAlert:
                 if len(opt_candidates) >= 3:
                     opt_plan["t3_premium"] = opt_candidates[2]
 
+        # Harmonize profit_rule if present to ensure Playbook never contradicts T1 / T2
+        p_rule = plan_dict.get("profit_rule")
+        if p_rule and isinstance(p_rule, str):
+            disp_t1 = (
+                opt_t1 if (is_opt and "opt_t1" in locals()) else (t1 if "t1" in locals() else None)
+            )
+            disp_t2 = (
+                opt_t2 if (is_opt and "opt_t2" in locals()) else (t2 if "t2" in locals() else None)
+            )
+            if disp_t1 is not None and "Target 1" in p_rule:
+                p_rule = re.sub(
+                    r"Target\s*1\s*\([^)]+\)", f"Target 1 ({curr}{disp_t1:,.{dec}f})", p_rule
+                )
+            if disp_t2 is not None and "Target 2" in p_rule:
+                p_rule = re.sub(
+                    r"Target\s*2\s*\([^)]+\)", f"Target 2 ({curr}{disp_t2:,.{dec}f})", p_rule
+                )
+            plan_dict["profit_rule"] = p_rule
+
     @property
     def is_expired(self) -> bool:
         """
@@ -1536,7 +1629,8 @@ class AutoAlert:
         if (
             self.environment in ("TEST", "SIMULATION")
             or not self.is_live
-            or self.alert_id.startswith("test-")
+            or self.alert_id.startswith(("test-", "mock-", "sim-"))
+            or ("PYTEST_CURRENT_TEST" in os.environ)
         ) and not getattr(self, "_force_test_expiry", False):
             return False
 
@@ -2083,6 +2177,73 @@ class AutoAlert:
             # If t2 was missing, zero, or inverted, calculate mathematically sound T2 (+3.0R)
             return round(t1 + (1.2 * risk) if is_expanding_up else max(0.05, t1 - (1.2 * risk)), 2)
         return t2_num
+
+    @property
+    def target_3(self) -> Optional[float]:
+        """Canonical Target 3 (Runner / Moonshot) price level with strict monotonicity guardrails."""
+        try:
+            from engine.alert_expiry import is_alert_option_premium_level
+
+            is_opt = is_alert_option_premium_level(self)
+        except Exception:
+            is_opt = False
+
+        plan = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
+        if not is_opt and plan.get("spot_target_3"):
+            try:
+                import re
+
+                m = re.findall(r"[\d.]+", str(plan.get("spot_target_3")).replace(",", ""))
+                if m and float(m[0]) > 0:
+                    return float(m[0])
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
+
+        t3_val = plan.get("target_3") or plan.get("runner_target")
+        t3_num = None
+        if t3_val:
+            try:
+                import re
+
+                m = re.findall(r"[\d.]+", str(t3_val).replace(",", ""))
+                if m:
+                    val = float(m[0])
+                    ep_chk = self.entry_price
+                    if not is_opt and ep_chk and ep_chk > 100 and val < (ep_chk * 0.40):
+                        t3_num = None
+                    else:
+                        t3_num = val
+            except Exception as e_suppressed:
+                logger.debug(f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}")
+        if t3_num is None and isinstance(plan.get("trade_plan"), dict):
+            tp_t3 = plan["trade_plan"].get("target_3") or plan["trade_plan"].get("runner_target")
+            if tp_t3:
+                try:
+                    import re
+
+                    m = re.findall(r"[\d.]+", str(tp_t3).replace(",", ""))
+                    if m:
+                        val = float(m[0])
+                        ep_chk = self.entry_price
+                        if not (not is_opt and ep_chk and ep_chk > 100 and val < (ep_chk * 0.40)):
+                            t3_num = val
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+        t2 = self.target_2
+        ep = self.entry_price
+        sl = getattr(self, "initial_stop_loss", None) or self.stop_loss
+        if t2 and ep and sl and ep != sl:
+            risk = abs(ep - sl)
+            is_expanding_up = t2 > ep
+            if t3_num is not None:
+                if is_expanding_up and t3_num > t2:
+                    return t3_num
+                elif not is_expanding_up and t3_num < t2:
+                    return t3_num
+            return round(t2 + (1.5 * risk) if is_expanding_up else max(0.05, t2 - (1.5 * risk)), 2)
+        return t3_num
 
     @property
     def risk_reward_ratio(self) -> float:

@@ -20,8 +20,9 @@ param (
     [string]$ApiHost = "127.0.0.1",
     [int]$ApiPort = 8765,
     [int]$VitePort = 5173,
-    [int]$TimeoutSeconds = 45,
-    [switch]$Reload
+    [int]$TimeoutSeconds = 90,
+    [switch]$Reload,
+    [switch]$Calibrate
 )
 
 $ErrorActionPreference = "Stop"
@@ -128,6 +129,13 @@ if ($Action -eq "status") {
 
 Stop-ChanakyaServices
 
+# 0. Optional 90-day Fyers Historical Model Calibration
+if ($Calibrate) {
+    Write-Host "[*] Executing 90-day institutional Fyers model calibration..." -ForegroundColor Cyan
+    & $PythonExe (Join-Path $ScriptDir "calibrate_fyers_historical_models.py")
+    Write-Host " [+] Model calibration complete." -ForegroundColor Green
+}
+
 # 1. Smart Web static bundle sync: guarantees any UI source changes reflect
 if (-not $NoFrontend -and -not $SkipBuildWeb -and (Test-Path "$FrontendDir\package.json")) {
     $staticIndex = Join-Path $RootDir "web\static\index.html"
@@ -206,6 +214,12 @@ if (-not $backendReady) {
 }
 
 Write-Host " [+] FastAPI Sidecar is healthy and listening on http://${ApiHost}:${ApiPort} (PID: $backendPid)" -ForegroundColor Green
+
+# Foreground user protection: set process priority to BelowNormal so Office/Browser/Calls stay 100% fluid
+try {
+    (Get-Process -Id $backendPid).PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+    Write-Host " [+] Process priority calibrated to BelowNormal (Foreground office & browser protected)" -ForegroundColor DarkGray
+} catch {}
 
 # 4. Launch Frontend (if requested)
 $frontendPid = $null

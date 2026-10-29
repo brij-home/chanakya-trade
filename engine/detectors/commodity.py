@@ -419,6 +419,18 @@ def detect_commodity_breakouts(
             except Exception as e:
                 logger.debug(f"[CommodityDetector] SMC analysis error: {e}")
 
+        is_donchian_bull = False
+        is_donchian_bear = False
+        is_donchian_breakout = False
+        is_vwap_trend_bull = False
+        is_vwap_trend_bear = False
+        is_smc_bull = False
+        is_smc_bear = False
+        is_thrust_bull = False
+        is_thrust_bear = False
+        is_utad_bear = False
+        is_spring_bull = False
+
         if df_5m is not None and len(df_5m) >= 20:
             recent_20 = df_5m.iloc[-21:-1]
             prior_high = float(recent_20["high"].max())

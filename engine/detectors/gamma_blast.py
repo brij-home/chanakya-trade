@@ -16,6 +16,7 @@ from engine.alert_identity import (
     get_session_phase_slot,
 )
 from engine.alert_model import AutoAlert
+from market.instruments import format_strike
 
 import time
 
@@ -44,6 +45,7 @@ def compute_gamma_conviction(
     is_physical_week: bool = False,
     gamma_regime: str = "NEUTRAL",
     is_acceleration_zone: bool = False,
+    is_narrow_cpr: bool = False,
 ) -> int:
     """
     Computes institutional conviction score (60 - 98) for Gamma Blast setups.
@@ -121,6 +123,10 @@ def compute_gamma_conviction(
         score += 4.0
     elif gamma_regime == "POSITIVE_GAMMA_PIN" and not sweep_active and vol_oi_ratio < 2.0:
         score -= 2.0
+
+    # 12. Narrow CPR Trend Expansion Boost
+    if is_narrow_cpr:
+        score += 5.0
 
     return min(98, max(60, int(round(score))))
 
@@ -301,6 +307,28 @@ def detect_gamma_blast(
             f"PE conviction boosted +6."
         )
 
+    # ── Central Pivot Range (CPR) Geometry & Daily Levels Overhead Gate (SSOT) ─
+    cpr_data: dict[str, Any] = {}
+    is_narrow_cpr = False
+    is_wide_cpr = False
+    cpr_ce = None
+    cpr_pe = None
+    try:
+        from engine.daily_levels import evaluate_cpr_gate, get_daily_levels
+
+        dl = get_daily_levels(underlying)
+        cpr_ce = evaluate_cpr_gate(
+            underlying, spot, "BULLISH", dl=dl, boundary_proximity_pct=0.0035
+        )
+        cpr_pe = evaluate_cpr_gate(
+            underlying, spot, "BEARISH", dl=dl, boundary_proximity_pct=0.0035
+        )
+        cpr_data = cpr_ce.cpr_data
+        is_narrow_cpr = cpr_ce.is_narrow
+        is_wide_cpr = cpr_ce.is_wide
+    except Exception as e_cpr:
+        logger.debug(f"[GammaBlast] CPR lookup error for {clean_sym}: {e_cpr}")
+
     # ── Major Open Interest Concentration Walls ─────────────────────────────────
     # The strike with maximum Call OI acts as an institutional resistance ceiling.
     # The strike with maximum Put OI acts as an institutional support floor.
@@ -338,7 +366,7 @@ def detect_gamma_blast(
         oi_change = getattr(c, "oi_change", 0)
         volume = getattr(c, "volume", 0)
         opt_ltp = getattr(c, "last_price", 0.0)
-        contract_sym = getattr(c, "symbol", f"{underlying}{int(strike)}CE")
+        contract_sym = getattr(c, "symbol", f"{underlying}{format_strike(strike)}CE")
 
         if not is_index and lot_sz > 1:
             c_oi = (oi / lot_sz) if oi > lot_sz * 2.5 else oi
@@ -437,6 +465,18 @@ def detect_gamma_blast(
                             is_hero_unwind and strike_diff_pct <= 0.35
                         ):
                             continue
+                    # <= 2 DTE Terminal Decay & Delta Decay Invariant (Universal Options Symmetry):
+                    # Near-expiry (<= 2 DTE) index options with strike > 0.25% OTM suffer severe delta decay
+                    # (delta ~0.30) and brutal theta decay (-100 pts/day). A minor 60-pt spot wiggle triggers immediate SL.
+                    # Restrict naked index gamma blasts on <= 2 DTE strictly to ATM/Near-ATM (<= 0.25% OTM).
+                    if not is_test_env and is_index and dte_days is not None and dte_days <= 2:
+                        max_near_exp_otm = 0.25
+                        if strike_diff_pct > max_near_exp_otm:
+                            logger.debug(
+                                f"[GammaBlast CE] Rejected {contract_sym}: Far OTM ({strike_diff_pct:.2f}% > {max_near_exp_otm}%) "
+                                f"on near-expiry contract ({dte_days} DTE) — delta/theta decay trap."
+                            )
+                            continue
             except Exception as e_suppressed:
                 logger.debug(
                     f"[engine.detectors.gamma_blast] Non-fatal exception suppressed: {e_suppressed}"
@@ -463,7 +503,7 @@ def detect_gamma_blast(
             continue
 
         now_ts = time.time()
-        c_key = f"{underlying}_{int(strike)}_CE"
+        c_key = f"{underlying}_{format_strike(strike)}_CE"
         prior_snap = _STRIKE_OI_SNAPSHOTS.get(c_key)
         _STRIKE_OI_SNAPSHOTS[c_key] = (now_ts, oi, volume)
 
@@ -494,6 +534,18 @@ def detect_gamma_blast(
             and not has_gamma_pchange
             and not is_high_volume_expansion
         ):
+            continue
+
+        # Index Call Writer Defense Guard:
+        # If strike is OTM (strike_diff_pct > 0.15%), positive ΔOI represents institutional Call WRITING
+        # (building an overhead resistance ceiling to cap the rally). A true long CE gamma blast requires either:
+        # 1. Writer capitulation (oi_change < 0), OR
+        # 2. Strike is already ATM/ITM (strike_diff_pct <= 0.15%), where buyers absorb writers.
+        if is_index and strike_diff_pct > 0.15 and oi_change > 0:
+            logger.debug(
+                f"[GammaBlast CE] Rejected {contract_sym}: OTM Call (+{strike_diff_pct:.2f}%) with expanding OI "
+                f"(ΔOI: +{oi_change:,}) represents institutional resistance writing, not buyer gamma blast."
+            )
             continue
 
         is_oi_shedding = (
@@ -555,6 +607,11 @@ def detect_gamma_blast(
                 f"0.25% of PDH ₹{prev_day_high:,.1f} (Opposing Supply Collision — prior session wall)"
             )
             continue
+
+        # Central Pivot Range (CPR) Trap Veto for CE on Wide CPR Days (SSOT):
+        if not is_test_env and cpr_ce and cpr_ce.is_vetoed:
+            logger.debug(f"[GammaBlast CE] Suppressed {contract_sym}: {cpr_ce.veto_reason}.")
+            continue
         if (
             day_high
             and spot < day_high
@@ -576,6 +633,43 @@ def detect_gamma_blast(
                     or _is_pm_breakout_press
                 ):
                     continue  # Spot is colliding into day high resistance (< 0.15% headroom without breakout momentum)
+
+        if is_index:
+            try:
+                from engine.daily_levels import get_daily_levels
+
+                dl = get_daily_levels(clean_sym)
+                if dl and dl.camarilla:
+                    h4 = float(dl.camarilla.get("h4", 0.0) or 0.0)
+                    if h4 > 0 and spot <= (h4 * 1.002) and spot >= (h4 * 0.9975):
+                        logger.debug(
+                            f"[GammaBlast CE] Suppressed {contract_sym}: Spot ₹{spot:,.1f} testing Camarilla H4 Ceiling ₹{h4:,.1f}"
+                        )
+                        continue
+            except Exception as e_dl:
+                logger.debug(
+                    "[GammaBlast CE] Camarilla check skipped for %s: %s", contract_sym, e_dl
+                )
+            try:
+                from market.fyers_tbt_manager import fyers_tbt_manager, resolve_tradable_tbt_symbol
+
+                fut_sym = resolve_tradable_tbt_symbol(clean_sym)
+                tbt_depth = (
+                    fyers_tbt_manager.get_50_depth(fut_sym)
+                    if getattr(fyers_tbt_manager, "is_connected", False)
+                    else None
+                )
+                if tbt_depth and tbt_depth.get("status") not in ("UNAVAILABLE", None):
+                    obi_50 = float(tbt_depth.get("obi_50", 0.0) or 0.0)
+                    if obi_50 <= -0.20 or tbt_depth.get("fortress_ask_wall_confirmed"):
+                        logger.debug(
+                            f"[GammaBlast CE] Suppressed {contract_sym}: TBT OBI-50 {obi_50:+.2f} / Fortress Ask Wall on {fut_sym}"
+                        )
+                        continue
+            except Exception as e_tbt:
+                logger.debug(
+                    "[GammaBlast CE] TBT depth check skipped for %s: %s", contract_sym, e_tbt
+                )
 
         # Major Call OI Wall interaction:
         is_ce_wall_breakout = False
@@ -683,6 +777,7 @@ def detect_gamma_blast(
                     is_physical_week=is_phys_week,
                     gamma_regime=gamma_regime,
                     is_acceleration_zone=is_acceleration_zone,
+                    is_narrow_cpr=is_narrow_cpr,
                 )
 
                 # PDL Proximity Boost: CE at PDL is a structural demand bounce — extra conviction
@@ -762,7 +857,7 @@ def detect_gamma_blast(
             max_loss_ce_inr = round(risk_nom_ce * lot_sz, 0)
 
             headline = (
-                f"⚡ CALL GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} CE"
+                f"⚡ CALL GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {format_strike(strike)} CE"
                 + (" [SEBI PHYSICAL SETTLEMENT WEEK]" if is_phys_week else "")
             )
             if oi_change < 0 and abs(oi_chg_pct) > 0.05:
@@ -808,7 +903,7 @@ def detect_gamma_blast(
                 runner_c = higher_ce_candidates[0]
                 r_strike = getattr(runner_c, "strike", 0.0)
                 r_ltp = getattr(runner_c, "last_price", 0.0)
-                r_sym = getattr(runner_c, "symbol", f"{underlying}{int(r_strike)}CE")
+                r_sym = getattr(runner_c, "symbol", f"{underlying}{format_strike(r_strike)}CE")
                 runner_strike_info = {
                     "strike": r_strike,
                     "option_type": "CE",
@@ -834,7 +929,7 @@ def detect_gamma_blast(
                     alert_id=generate_alert_id(
                         underlying,
                         "GAMMA_BLAST",
-                        variant=f"ce-{int(strike)}-{phase_slot}",
+                        variant=f"ce-{format_strike(strike).replace('.', 'p')}-{phase_slot}",
                     ),
                     alert_type="GAMMA_BLAST",
                     stage=stage,
@@ -911,6 +1006,12 @@ def detect_gamma_blast(
                         "gamma_regime": gamma_regime,
                         "gex_flip_strike": gex_flip_strike,
                         "is_acceleration_zone": is_acceleration_zone,
+                        "cpr": cpr_data,
+                        "cpr_type": "NARROW"
+                        if is_narrow_cpr
+                        else ("WIDE" if is_wide_cpr else "AVERAGE"),
+                        "is_narrow_cpr": is_narrow_cpr,
+                        "is_wide_cpr": is_wide_cpr,
                     },
                     actionable_plan={
                         "action": "BUY CE",
@@ -1006,7 +1107,7 @@ def detect_gamma_blast(
         oi_change = getattr(c, "oi_change", 0)
         volume = getattr(c, "volume", 0)
         opt_ltp = getattr(c, "last_price", 0.0)
-        contract_sym = getattr(c, "symbol", f"{underlying}{int(strike)}PE")
+        contract_sym = getattr(c, "symbol", f"{underlying}{format_strike(strike)}PE")
 
         if not is_index and lot_sz > 1:
             c_oi = (oi / lot_sz) if oi > lot_sz * 2.5 else oi
@@ -1105,6 +1206,18 @@ def detect_gamma_blast(
                             is_hero_unwind and strike_diff_pct >= -0.35
                         ):
                             continue
+                    # <= 2 DTE Terminal Decay & Delta Decay Invariant (Universal Options Symmetry):
+                    # Near-expiry (<= 2 DTE) index options with strike > 0.25% OTM suffer severe delta decay
+                    # (delta ~0.30) and brutal theta decay (-100 pts/day). A minor 60-pt spot wiggle triggers immediate SL.
+                    # Restrict naked index gamma blasts on <= 2 DTE strictly to ATM/Near-ATM (<= 0.25% OTM).
+                    if not is_test_env and is_index and dte_days is not None and dte_days <= 2:
+                        max_near_exp_otm = 0.25
+                        if strike_diff_pct < -max_near_exp_otm:
+                            logger.debug(
+                                f"[GammaBlast PE] Rejected {contract_sym}: Far OTM ({strike_diff_pct:.2f}% < -{max_near_exp_otm}%) "
+                                f"on near-expiry contract ({dte_days} DTE) — delta/theta decay trap."
+                            )
+                            continue
             except Exception as e_suppressed:
                 logger.debug(
                     f"[engine.detectors.gamma_blast] Non-fatal exception suppressed: {e_suppressed}"
@@ -1131,7 +1244,7 @@ def detect_gamma_blast(
             continue
 
         now_ts = time.time()
-        c_key = f"{underlying}_{int(strike)}_PE"
+        c_key = f"{underlying}_{format_strike(strike)}_PE"
         prior_snap = _STRIKE_OI_SNAPSHOTS.get(c_key)
         _STRIKE_OI_SNAPSHOTS[c_key] = (now_ts, oi, volume)
 
@@ -1164,6 +1277,18 @@ def detect_gamma_blast(
         ):
             continue
 
+        # Index Put Writer Defense Guard:
+        # If strike is OTM (strike_diff_pct < -0.15%), positive ΔOI represents institutional Put WRITING
+        # (building a support floor to absorb selling). A true long PE gamma blast requires either:
+        # 1. Writer capitulation (oi_change < 0), OR
+        # 2. Strike is already ATM/ITM (strike_diff_pct >= -0.15%), where buyers absorb writers.
+        if is_index and strike_diff_pct < -0.15 and oi_change > 0:
+            logger.debug(
+                f"[GammaBlast PE] Rejected {contract_sym}: OTM Put ({strike_diff_pct:.2f}%) with expanding OI "
+                f"(ΔOI: +{oi_change:,}) represents institutional support writing, not buyer gamma blast."
+            )
+            continue
+
         is_oi_shedding = (
             oi_change < 0
             and (oi_chg_pct <= -6.0 or abs(oi_change) >= (8000 if is_opening_drive else 15000))
@@ -1185,12 +1310,15 @@ def detect_gamma_blast(
         _pe_vwap_multiplier = 1.000 if is_index else 1.002
         spot_below_vwap = spot <= (effective_vwap * _pe_vwap_multiplier)
         # PDH sweep bypass: if spot swept the day_high and wicked back, lift the VWAP gate
+        # For index options, require spot <= effective_vwap on opening drives (prior to 09:45 IST)
+        # so morning gap-fill pullbacks holding above VWAP do not fire false breakdown PEs.
         if _pdh_sweep_active and not spot_below_vwap:
-            spot_below_vwap = True
-            logger.debug(
-                f"[GammaBlast PE] PDH sweep bypass activated for {underlying}: "
-                f"spot={spot:.1f} within 0.3% of day_high={day_high:.1f} — VWAP gate lifted"
-            )
+            if not is_index or (now_dt.hour > 9 or now_dt.minute >= 45):
+                spot_below_vwap = True
+                logger.debug(
+                    f"[GammaBlast PE] PDH sweep bypass activated for {underlying}: "
+                    f"spot={spot:.1f} within 0.3% of day_high={day_high:.1f} — VWAP gate lifted"
+                )
 
         # Opposing Day Low collision & VWAP overextension filter for PE:
         # Default: Extended > 0.65% below VWAP = capitulation exhaustion, skip.
@@ -1224,6 +1352,48 @@ def detect_gamma_blast(
                 f"0.25% of PDL ₹{prev_day_low:,.1f} (Opposing Demand Collision — prior session floor)"
             )
             continue
+
+        # Central Pivot Range (CPR) Trap Veto for PE on Wide CPR Days (SSOT):
+        if not is_test_env and cpr_pe and cpr_pe.is_vetoed:
+            logger.debug(f"[GammaBlast PE] Suppressed {contract_sym}: {cpr_pe.veto_reason}.")
+            continue
+
+        if is_index:
+            try:
+                from engine.daily_levels import get_daily_levels
+
+                dl = get_daily_levels(clean_sym)
+                if dl and dl.camarilla:
+                    l4 = float(dl.camarilla.get("l4", 0.0) or 0.0)
+                    if l4 > 0 and spot >= (l4 * 0.998) and spot <= (l4 * 1.0025):
+                        logger.debug(
+                            f"[GammaBlast PE] Suppressed {contract_sym}: Spot ₹{spot:,.1f} testing Camarilla L4 Floor ₹{l4:,.1f}"
+                        )
+                        continue
+            except Exception as e_dl:
+                logger.debug(
+                    "[GammaBlast PE] Camarilla check skipped for %s: %s", contract_sym, e_dl
+                )
+            try:
+                from market.fyers_tbt_manager import fyers_tbt_manager, resolve_tradable_tbt_symbol
+
+                fut_sym = resolve_tradable_tbt_symbol(clean_sym)
+                tbt_depth = (
+                    fyers_tbt_manager.get_50_depth(fut_sym)
+                    if getattr(fyers_tbt_manager, "is_connected", False)
+                    else None
+                )
+                if tbt_depth and tbt_depth.get("status") not in ("UNAVAILABLE", None):
+                    obi_50 = float(tbt_depth.get("obi_50", 0.0) or 0.0)
+                    if obi_50 >= 0.20 or tbt_depth.get("fortress_bid_wall_confirmed"):
+                        logger.debug(
+                            f"[GammaBlast PE] Suppressed {contract_sym}: TBT OBI-50 {obi_50:+.2f} / Fortress Bid Wall on {fut_sym}"
+                        )
+                        continue
+            except Exception as e_tbt:
+                logger.debug(
+                    "[GammaBlast PE] TBT depth check skipped for %s: %s", contract_sym, e_tbt
+                )
         if (
             day_low
             and spot > day_low
@@ -1352,6 +1522,7 @@ def detect_gamma_blast(
                     is_physical_week=is_phys_week,
                     gamma_regime=gamma_regime,
                     is_acceleration_zone=is_acceleration_zone,
+                    is_narrow_cpr=is_narrow_cpr,
                 )
 
                 # PDH Proximity Boost: PE at PDH is a structural supply rejection — extra conviction
@@ -1431,7 +1602,7 @@ def detect_gamma_blast(
             max_loss_pe_inr = round(risk_nom_pe * lot_sz, 0)
 
             headline = (
-                f"⚡ PUT GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} PE"
+                f"⚡ PUT GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {format_strike(strike)} PE"
                 + (" [SEBI PHYSICAL SETTLEMENT WEEK]" if is_phys_week else "")
             )
             if oi_change < 0 and abs(oi_chg_pct) > 0.05:
@@ -1479,7 +1650,7 @@ def detect_gamma_blast(
                 runner_c = lower_pe_candidates[0]
                 r_strike = getattr(runner_c, "strike", 0.0)
                 r_ltp = getattr(runner_c, "last_price", 0.0)
-                r_sym = getattr(runner_c, "symbol", f"{underlying}{int(r_strike)}PE")
+                r_sym = getattr(runner_c, "symbol", f"{underlying}{format_strike(r_strike)}PE")
                 runner_strike_info = {
                     "strike": r_strike,
                     "option_type": "PE",
@@ -1505,7 +1676,7 @@ def detect_gamma_blast(
                     alert_id=generate_alert_id(
                         underlying,
                         "GAMMA_BLAST",
-                        variant=f"pe-{int(strike)}-{phase_slot}",
+                        variant=f"pe-{format_strike(strike).replace('.', 'p')}-{phase_slot}",
                     ),
                     alert_type="GAMMA_BLAST",
                     stage=stage,
@@ -1584,6 +1755,12 @@ def detect_gamma_blast(
                         "gamma_regime": gamma_regime,
                         "gex_flip_strike": gex_flip_strike,
                         "is_acceleration_zone": is_acceleration_zone,
+                        "cpr": cpr_data,
+                        "cpr_type": "NARROW"
+                        if is_narrow_cpr
+                        else ("WIDE" if is_wide_cpr else "AVERAGE"),
+                        "is_narrow_cpr": is_narrow_cpr,
+                        "is_wide_cpr": is_wide_cpr,
                     },
                     actionable_plan={
                         "action": "BUY PE",

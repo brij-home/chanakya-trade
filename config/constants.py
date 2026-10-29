@@ -10,7 +10,7 @@ across the codebase (historically defined in 8+ separate files).
 
 from __future__ import annotations
 
-from datetime import timezone, timedelta
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 # ── Timezone ─────────────────────────────────────────────────────────────────
@@ -20,6 +20,12 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 #: Indian Standard Time IANA ZoneInfo instance
 IST_ZONE = ZoneInfo("Asia/Kolkata")
+
+
+def now_ist() -> datetime:
+    """Canonical truth timestamp in Indian Standard Time (IST, UTC+05:30)."""
+    return datetime.now(IST)
+
 
 # ── NSE/BSE Market Hours (HHMM integers for fast comparison) ──────────────────
 
@@ -130,5 +136,5 @@ MIN_OPTION_PREMIUM_SL_PCT: float = 0.10
 #: Maximum adverse excursion drawdown percentage for statistical arbitrage / pair trading
 DEFAULT_PAIR_MAX_ADVERSE_PCT: float = 5.0
 
-#: Minimum relative volume for thematic sympathy follower qualification
-MIN_SYMPATHY_FOLLOWER_RVOL: float = 0.80
+#: Minimum relative volume for thematic sympathy follower qualification (institutional participation floor)
+MIN_SYMPATHY_FOLLOWER_RVOL: float = 1.80

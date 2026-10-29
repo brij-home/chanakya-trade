@@ -16,14 +16,14 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def test_mstock_websocket_does_not_start_without_credentials(monkeypatch):
-    """mStock WebSocket must NOT start background threads or connection loops if credentials are empty."""
+    """mStock WebSocket must NOT start background threads or connection loops if disabled or credentials empty."""
     from market.mstock_websocket import MStockWebSocket
 
     ws = MStockWebSocket()
-    ws.api_key = ""
-    ws.access_token = ""
-    monkeypatch.delenv("MSTOCK_API_KEY", raising=False)
-    monkeypatch.delenv("MSTOCK_TOKEN", raising=False)
+    ws.api_key = "dummy_key"
+    ws.access_token = "dummy_token"
+    # By default or with ENABLE_MSTOCK=0, mStock WebSocket never starts
+    monkeypatch.setenv("ENABLE_MSTOCK", "0")
 
     ws.start()
     assert not ws._running
