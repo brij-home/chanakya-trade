@@ -20,6 +20,7 @@ import pandas as pd
 from engine.alert_model import AutoAlert
 from engine.alert_scrutiny import alert_scrutiny_auditor
 from engine.auto_alert_engine import AutoAlertEngine
+from engine.daily_levels import DailyLevels
 from engine.detectors.index_call_setup import detect_index_call_setup
 from engine.detectors.index_put_setup import detect_index_put_setup
 from engine.market_regime_gate import RegimeSnapshot
@@ -233,6 +234,16 @@ def test_edgeless_chop_gate_filters_routine_setups_but_permits_thrust():
 
     q_dict = {"ltp": spot, "vwap": 25010.0, "high": 25050.0, "low": 24980.0, "change_pct": 0.35}
     q_map = {"NSE:NIFTY": q_dict, "NIFTY": q_dict}
+    mock_dl = DailyLevels(
+        symbol="NIFTY",
+        canonical_symbol="NIFTY",
+        exchange="NSE",
+        session_date="2026-09-25",
+        pdh=25100.0,
+        pdl=24900.0,
+        pdc=25000.0,
+        pdo=24950.0,
+    )
 
     with (
         patch.dict(os.environ, {"ENFORCE_TEST_REGIME": "1"}),
@@ -241,6 +252,7 @@ def test_edgeless_chop_gate_filters_routine_setups_but_permits_thrust():
         patch.object(engine, "_get_prioritized_targets", return_value=["NIFTY"]),
         patch.object(engine, "record_alert", return_value=True),
         patch("market.history.get_ohlcv", return_value=None),
+        patch("engine.daily_levels.get_daily_levels", return_value=mock_dl),
         patch("market.options.get_options_chain", return_value=chain),
     ):
         # Case A: detector returns only routine alert -> must be filtered out completely under chop
@@ -321,7 +333,6 @@ def test_secondary_index_call_suppressed_under_bearish_benchmark_without_reversa
       - Still below their own VWAP AND bounce from low is weak (< 2.5x base threshold).
     Prevents dead-cat bounce call traps during institutional markdown sessions.
     """
-    from engine.auto_alert_engine import AutoAlertEngine
 
     engine = AutoAlertEngine()
 
@@ -348,11 +359,22 @@ def test_secondary_index_call_suppressed_under_bearish_benchmark_without_reversa
     }
 
     dummy_chain = [{"strike": 13100, "option_type": "CE", "last_price": 45.0}]
+    mock_dl = DailyLevels(
+        symbol="MIDCPNIFTY",
+        canonical_symbol="MIDCPNIFTY",
+        exchange="NSE",
+        session_date="2026-09-25",
+        pdh=13250.0,
+        pdl=13000.0,
+        pdc=13100.0,
+        pdo=13050.0,
+    )
 
     with (
         patch.object(engine, "_watched_indices", {"MIDCPNIFTY"}),
         patch.object(engine, "_get_prioritized_targets", return_value=["MIDCPNIFTY"]),
         patch("market.history.get_ohlcv", return_value=None),
+        patch("engine.daily_levels.get_daily_levels", return_value=mock_dl),
         patch("market.options.get_options_chain", return_value=dummy_chain),
         patch("engine.auto_alert_engine.detect_index_call_setup", return_value=[]),
     ):
@@ -373,6 +395,7 @@ def test_secondary_index_call_suppressed_under_bearish_benchmark_without_reversa
         patch.object(engine, "_watched_indices", {"MIDCPNIFTY"}),
         patch.object(engine, "_get_prioritized_targets", return_value=["MIDCPNIFTY"]),
         patch("market.history.get_ohlcv", return_value=None),
+        patch("engine.daily_levels.get_daily_levels", return_value=mock_dl),
         patch("market.options.get_options_chain", return_value=dummy_chain),
         patch("engine.auto_alert_engine.detect_index_call_setup", return_value=[]) as mock_detect,
     ):

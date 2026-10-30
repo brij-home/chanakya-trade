@@ -122,6 +122,10 @@ def test_opening_drive_enforces_minimum_sl_floor_nifty(monkeypatch):
         "market.indices.get_heavyweights_posture",
         lambda *args, **kwargs: {"bull_count": 4, "bear_count": 0, "all_bearish": False},
     )
+    monkeypatch.setattr(
+        "engine.daily_levels.get_daily_levels",
+        lambda *args, **kwargs: None,
+    )
 
     # LTP is 25,064. If raw structural SL were low * 0.998, that's ~24,959 (distance 105 pts).
     # But what if bar_low was 25,055? (low is very close to ltp 25,064, raw dist ~14 pts)

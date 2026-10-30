@@ -245,7 +245,8 @@ class TestMultiTimeframeSqueeze:
 class TestOptionsOiVelocity:
     """Validates high-velocity short-term unwinding detection in options."""
 
-    def test_call_writer_panic_unwind_velocity(self):
+    @patch("engine.daily_levels.get_daily_levels", return_value=None)
+    def test_call_writer_panic_unwind_velocity(self, mock_dl):
         underlying = "NIFTY"
         spot = 25000.0
         _STRIKE_OI_SNAPSHOTS.clear()
