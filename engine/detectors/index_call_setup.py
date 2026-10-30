@@ -2900,8 +2900,14 @@ def detect_index_call_setup(
         min_spread_width = 100.0 if is_chop_regime else (200.0 if is_explosive_momentum else 150.0)
         regime_note = "ADAPTIVE SPREAD"
 
-    # DTE and Volatility for Delta / Greeks evaluation
-    dte = 7
+    # DTE, 0DTE Phase and Options IV Skew evaluation
+    from engine.options_hedging import get_0dte_intraday_phase
+    from market.options import compute_options_iv_skew
+
+    zero_dte_phase = get_0dte_intraday_phase(clean_sym, now_dt)
+    iv_skew = compute_options_iv_skew(chain, spot, clean_sym)
+
+    dte = 0 if zero_dte_phase.get("is_0dte") else 7
     try:
         from engine.alert_expiry import get_expiry_metadata
 
@@ -3437,6 +3443,8 @@ def detect_index_call_setup(
             "regime_verdict": regime_verdict,
             "route_a_naked": route_a_naked,
             "route_b_spread": route_b_spread,
+            "zero_dte_phase": zero_dte_phase,
+            "iv_skew": iv_skew,
         },
         actionable_plan={
             "action": act_verb,
@@ -3547,6 +3555,8 @@ def detect_index_call_setup(
             "regime_verdict": regime_verdict,
             "route_a_naked": route_a_naked,
             "route_b_spread": route_b_spread,
+            "zero_dte_phase": zero_dte_phase,
+            "iv_skew": iv_skew,
         },
     )
     alert.structural_spot_sl = underlying_spot_sl

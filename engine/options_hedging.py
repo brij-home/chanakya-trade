@@ -21,6 +21,7 @@ Provides:
 
 from __future__ import annotations
 import logging
+import re
 
 logger = logging.getLogger("engine.options_hedging")
 
@@ -48,6 +49,7 @@ class SpreadEvaluationResult:
     pnl_pct: float
     spot_price: float
     short_strike: float
+    roll_plan: Optional[dict[str, Any]] = None
 
 
 def get_optimal_expiry_recommendation(
@@ -96,6 +98,139 @@ def get_optimal_expiry_recommendation(
         "preferred_expiry": "CURRENT_WEEKLY",
         "warning": None,
         "reason": "NORMAL_SESSION",
+    }
+
+
+def get_0dte_intraday_phase(
+    symbol: str,
+    now_dt: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """
+    Evaluates the 0DTE Intraday Phase for Indian Index / Stock Options:
+    Calendar Expiry Map (NSE/BSE):
+      - Monday (weekday 0): MIDCPNIFTY
+      - Tuesday (weekday 1): FINNIFTY
+      - Wednesday (weekday 2): BANKNIFTY weekly
+      - Thursday (weekday 3): NIFTY / BANKNIFTY monthly
+      - Friday (weekday 4): SENSEX / BANKEX
+
+    Intraday Clock Phases (IST):
+      1. MORNING_EXPANSION (09:15 - 11:00):
+         High velocity opening momentum. Vega and delta expansion dominate. Favor Route A (Naked Convexity)
+         on high-conviction breakout levels. Avoid premature OTM short sells.
+      2. MIDDAY_THETA_GRIND (11:00 - 13:30):
+         Consolidation and aggressive intraday theta decay. Pure naked buying risks rapid decay in chop.
+         Favor Route B (Dynamic Spread) to harvest short premium or sit out.
+      3. AFTERNOON_GAMMA_SQUEEZE (13:30 - 15:00):
+         0DTE Gamma Squeeze window. Unwinding of dealer gamma walls. Asymmetric R:R (1:5+) for close ATM/OTM options
+         on high-velocity breaks. Extreme blowout risk for naked option sellers.
+      4. TERMINAL_CLOSING (15:00 - 15:30):
+         Expiry final auction window. Delta and gamma collapse into intrinsic cash value.
+         Square off winning spreads and harvest remaining residual gains. No new naked entries.
+      5. OFF_MARKET:
+         Outside 09:15-15:30 IST.
+    """
+    now = now_dt or datetime.now(IST)
+    weekday = now.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
+    now_time = now.time()
+
+    clean_sym = (
+        (symbol or "")
+        .replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("NIFTY 50", "NIFTY")
+        .replace("NIFTY BANK", "BANKNIFTY")
+        .strip()
+        .upper()
+    )
+
+    expiry_map = {
+        0: {"MIDCPNIFTY"},
+        1: {"FINNIFTY"},
+        2: {"BANKNIFTY"},
+        3: {"NIFTY", "BANKNIFTY"},
+        4: {"SENSEX", "BANKEX"},
+    }
+
+    is_0dte = clean_sym in expiry_map.get(weekday, set())
+
+    if not is_0dte:
+        return {
+            "symbol": clean_sym,
+            "is_0dte": False,
+            "phase": "NON_0DTE_NORMAL",
+            "tactical_bias": "REGIME_DEPENDENT",
+            "guidance": "Standard multi-day expiry cycle. Normal Greeks evolution.",
+            "volatility_multiplier": 1.0,
+            "time_in_phase_pct": 0.0,
+        }
+
+    # Market hours check
+    if now_time < dtime(9, 15) or now_time >= dtime(15, 30):
+        return {
+            "symbol": clean_sym,
+            "is_0dte": True,
+            "phase": "OFF_MARKET",
+            "tactical_bias": "PREMARKET_POSTMARKET",
+            "guidance": "Market is closed. Prep levels for next session.",
+            "volatility_multiplier": 1.0,
+            "time_in_phase_pct": 0.0,
+        }
+
+    if now_time < dtime(11, 0):
+        # 09:15 - 11:00 (105 mins)
+        elapsed = (now_time.hour * 60 + now_time.minute) - (9 * 60 + 15)
+        pct = round(min(100.0, max(0.0, (elapsed / 105.0) * 100.0)), 1)
+        return {
+            "symbol": clean_sym,
+            "is_0dte": True,
+            "phase": "MORNING_EXPANSION",
+            "tactical_bias": "NAKED_FAVORED",
+            "guidance": "High velocity opening momentum. Vega and delta expansion dominate. Favor Route A (Naked Convexity) on high-conviction breakout levels. Avoid premature OTM short sells.",
+            "volatility_multiplier": 1.35,
+            "time_in_phase_pct": pct,
+        }
+
+    if now_time < dtime(13, 30):
+        # 11:00 - 13:30 (150 mins)
+        elapsed = (now_time.hour * 60 + now_time.minute) - (11 * 60)
+        pct = round(min(100.0, max(0.0, (elapsed / 150.0) * 100.0)), 1)
+        return {
+            "symbol": clean_sym,
+            "is_0dte": True,
+            "phase": "MIDDAY_THETA_GRIND",
+            "tactical_bias": "SPREAD_FAVORED",
+            "guidance": "Consolidation and aggressive intraday theta decay. Pure naked buying risks rapid decay in chop. Favor Route B (Dynamic Spread) to harvest short premium or sit out.",
+            "volatility_multiplier": 0.85,
+            "time_in_phase_pct": pct,
+        }
+
+    if now_time < dtime(15, 0):
+        # 13:30 - 15:00 (90 mins)
+        elapsed = (now_time.hour * 60 + now_time.minute) - (13 * 60 + 30)
+        pct = round(min(100.0, max(0.0, (elapsed / 90.0) * 100.0)), 1)
+        return {
+            "symbol": clean_sym,
+            "is_0dte": True,
+            "phase": "AFTERNOON_GAMMA_SQUEEZE",
+            "tactical_bias": "GAMMA_SNIPER",
+            "guidance": "0DTE Gamma Squeeze window. Unwinding of dealer gamma walls. Asymmetric R:R (1:5+) for close ATM/OTM options on high-velocity breaks. Extreme blowout risk for naked option sellers.",
+            "volatility_multiplier": 1.80,
+            "time_in_phase_pct": pct,
+        }
+
+    # 15:00 - 15:30 (30 mins)
+    elapsed = (now_time.hour * 60 + now_time.minute) - (15 * 60)
+    pct = round(min(100.0, max(0.0, (elapsed / 30.0) * 100.0)), 1)
+    return {
+        "symbol": clean_sym,
+        "is_0dte": True,
+        "phase": "TERMINAL_CLOSING",
+        "tactical_bias": "SQUARE_OFF",
+        "guidance": "Expiry final auction window. Delta and gamma collapse into intrinsic cash value. Square off winning spreads and harvest remaining residual gains. No new naked entries.",
+        "volatility_multiplier": 0.50,
+        "time_in_phase_pct": pct,
     }
 
 
@@ -760,6 +895,288 @@ def build_defined_risk_hedge_plan(
     }
 
 
+def evaluate_naked_option_free_roll(
+    alert: Any,
+    current_ltp: float,
+    chain: Optional[list[Any]] = None,
+    spot_price: float = 0.0,
+) -> dict[str, Any]:
+    """
+    Evaluates whether an active naked long option trade can be dynamically converted
+    into a 100% Capital Risk-Free (Free-Roll) Bull Call / Bear Put Spread.
+
+    Trigger Criteria:
+      1. Naked option has appreciated >= 40% from entry premium (or Target 1 achieved).
+      2. An OTM strike candidate exists where selling 1 lot generates credit >= initial debit paid
+         (locking guaranteed profit + unlimited upside up to short strike!), OR
+         selling higher OTM leg locks in zero downside capital risk while allowing runners.
+    """
+    if not alert or current_ltp <= 0:
+        return {"eligible": False, "action": "HOLD_NAKED", "reason": "Invalid alert or quote"}
+
+    # Resolve entry premium
+    entry_p = float(
+        getattr(alert, "entry_price", None)
+        or (getattr(alert, "metrics", {}) or {}).get("entry_premium")
+        or (getattr(alert, "actionable_plan", {}) or {}).get("entry_premium")
+        or 0.0
+    )
+    if entry_p <= 0:
+        entry_p = (
+            float(getattr(alert, "stop_loss", 0.0) or 0.0) / 0.7
+            if getattr(alert, "stop_loss", 0.0)
+            else 0.0
+        )
+
+    if entry_p <= 0:
+        return {"eligible": False, "action": "HOLD_NAKED", "reason": "No entry premium baseline"}
+
+    pnl_pts = round(current_ltp - entry_p, 2)
+    pnl_pct = round((pnl_pts / entry_p) * 100.0, 1)
+
+    is_t1 = bool(
+        getattr(alert, "is_t1_achieved", False)
+        or "TARGET_1" in (getattr(alert, "achieved_milestones", None) or [])
+    )
+
+    if pnl_pct < 40.0 and not is_t1:
+        return {
+            "eligible": False,
+            "action": "HOLD_NAKED",
+            "reason": f"P&L (+{pnl_pct:.1f}%) below 40% free-roll conversion threshold.",
+            "pnl_pct": pnl_pct,
+            "entry_premium": entry_p,
+            "current_premium": current_ltp,
+        }
+
+    # Resolve option details: strike & type
+    c_sym = str(getattr(alert, "contract_symbol", "") or getattr(alert, "contract", "") or "")
+    m_strike = re.search(r"(\d{4,6})(CE|PE)", c_sym.upper())
+    if m_strike:
+        long_strike = float(m_strike.group(1))
+        opt_type = m_strike.group(2)
+    else:
+        long_strike = float(getattr(alert, "strike", 0.0) or 0.0)
+        opt_type = "CE" if (getattr(alert, "direction", "BULLISH") == "BULLISH") else "PE"
+
+    raw_sym = str(getattr(alert, "symbol", "") or "NIFTY")
+    clean_und = (
+        raw_sym.replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("NIFTY 50", "NIFTY")
+        .replace("NIFTY BANK", "BANKNIFTY")
+        .strip()
+        .upper()
+    )
+
+    if clean_und in ("BANKNIFTY", "SENSEX", "BANKEX"):
+        step = 100.0
+    elif clean_und in ("NIFTY", "FINNIFTY"):
+        step = 50.0
+    elif clean_und == "MIDCPNIFTY":
+        step = 25.0
+    else:
+        step = 50.0 if spot_price >= 2500 else (20.0 if spot_price >= 1000 else 10.0)
+
+    if long_strike <= 0:
+        long_strike = round((spot_price if spot_price > 0 else 24000.0) / step) * step
+
+    # Target candidate short strike
+    if opt_type == "CE":
+        min_short_strike = long_strike + (step * 2)
+        if spot_price > 0 and spot_price > min_short_strike:
+            candidate_strike = round((spot_price + step) / step) * step
+        else:
+            candidate_strike = min_short_strike
+    else:
+        min_short_strike = max(step, long_strike - (step * 2))
+        if spot_price > 0 and spot_price < min_short_strike:
+            candidate_strike = max(step, round((spot_price - step) / step) * step)
+        else:
+            candidate_strike = min_short_strike
+
+    # Estimate or look up short credit
+    credit_prem = 0.0
+    if chain:
+        matched = [
+            c
+            for c in chain
+            if getattr(c, "strike", None) == candidate_strike
+            and getattr(c, "option_type", None) == opt_type
+        ]
+        if matched:
+            credit_prem = float(
+                getattr(matched[0], "last_price", 0.0) or getattr(matched[0], "ltp", 0.0) or 0.0
+            )
+
+    if credit_prem <= 0:
+        credit_prem = round(max(entry_p * 0.70, current_ltp * 0.45), 2)
+
+    net_locked_profit_pts = round(credit_prem - entry_p, 2)
+    spread_width = abs(candidate_strike - long_strike)
+    max_upside_profit_pts = round(spread_width + net_locked_profit_pts, 2)
+
+    risk_free = net_locked_profit_pts >= 0.0
+    risk_desc = "100% CAPITAL RISK-FREE (FREE-ROLL)" if risk_free else "DE-RISKED SPREAD"
+
+    rec = (
+        f"Sell {clean_und} {candidate_strike:,.0f} {opt_type} @ ~₹{credit_prem:,.1f}. "
+        f"Net cash flow: {'+' if net_locked_profit_pts >= 0 else ''}₹{net_locked_profit_pts:,.1f}/sh locked. "
+        f"Max payoff: ₹{max_upside_profit_pts:,.1f}/sh. Zero downside risk."
+    )
+
+    return {
+        "eligible": True,
+        "action": "CONVERT_TO_FREE_ROLL",
+        "reason": f"Naked option is up +{pnl_pct:.1f}% (+₹{pnl_pts:,.1f}/sh). Convert into Free-Roll Spread.",
+        "pnl_pct": pnl_pct,
+        "entry_premium": entry_p,
+        "current_premium": current_ltp,
+        "long_strike": long_strike,
+        "short_strike_candidate": candidate_strike,
+        "option_type": opt_type,
+        "estimated_credit_collected": credit_prem,
+        "net_locked_profit_pts": net_locked_profit_pts,
+        "spread_width": spread_width,
+        "max_upside_profit_pts": max_upside_profit_pts,
+        "risk_profile": risk_desc,
+        "is_guaranteed_profit": risk_free,
+        "recommendation": rec,
+    }
+
+
+def evaluate_short_strike_roll_plan(
+    alert: Any,
+    current_spot: float,
+    chain: Optional[list[Any]] = None,
+) -> dict[str, Any]:
+    """
+    Evaluates whether the short strike leg in an active defined-risk spread should be:
+      1. BOUGHT BACK (80% Take-Profit): Short leg premium has decayed >= 80% (gamma/theta risk no longer worth keeping).
+         Action: Buy back short leg to unlock unhedged, unlimited upside on the runner long leg!
+      2. ROLLED OTM (Delta Wall Defense): Spot has approached or breached the short strike ceiling.
+         Action: Roll short strike further OTM to prevent profit capping during strong trend days.
+      3. MAINTAINED: Spread is operating within normal boundaries.
+    """
+    plan = getattr(alert, "actionable_plan", None) or {}
+    hedge_plan = plan.get("hedge_plan") or (
+        alert.metrics.get("hedge_plan")
+        if isinstance(getattr(alert, "metrics", None), dict)
+        else None
+    )
+    if not hedge_plan or not isinstance(hedge_plan, dict):
+        return {
+            "action": "MAINTAIN_CURRENT_SPREAD",
+            "reason": "No hedge plan present in alert.",
+            "recommendation": "Hold current position.",
+        }
+
+    buy_strike = float(hedge_plan.get("buy_strike", 0.0) or 0.0)
+    sell_strike = float(hedge_plan.get("sell_strike", 0.0) or 0.0)
+    width = float(hedge_plan.get("strike_width", 0.0) or abs(sell_strike - buy_strike))
+    is_bullish = hedge_plan.get("sentiment") == "BULLISH"
+    legs = hedge_plan.get("legs", [])
+    short_entry_prem = float(legs[1].get("premium", 0.0) or 0.0) if len(legs) >= 2 else 0.0
+
+    raw_sym = str(getattr(alert, "symbol", "") or "NIFTY")
+    clean_und = (
+        raw_sym.replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("NIFTY 50", "NIFTY")
+        .replace("NIFTY BANK", "BANKNIFTY")
+        .strip()
+        .upper()
+    )
+
+    if clean_und in ("BANKNIFTY", "SENSEX", "BANKEX"):
+        step = 100.0
+    elif clean_und in ("NIFTY", "FINNIFTY"):
+        step = 50.0
+    elif clean_und == "MIDCPNIFTY":
+        step = 25.0
+    else:
+        step = 50.0 if current_spot >= 2500 else (20.0 if current_spot >= 1000 else 10.0)
+
+    # 1. Check Short Leg Theta Decay (80% Take-Profit Rule)
+    short_current_prem = None
+    if chain and sell_strike > 0:
+        opt_type = "CE" if is_bullish else "PE"
+        matched = [
+            c
+            for c in chain
+            if getattr(c, "strike", None) == sell_strike
+            and getattr(c, "option_type", None) == opt_type
+        ]
+        if matched:
+            short_current_prem = float(
+                getattr(matched[0], "last_price", 0.0) or getattr(matched[0], "ltp", 0.0) or 0.0
+            )
+
+    if short_current_prem is None and short_entry_prem > 0 and current_spot > 0:
+        if is_bullish and current_spot < buy_strike:
+            short_current_prem = max(0.5, round(short_entry_prem * 0.15, 2))
+        elif not is_bullish and current_spot > buy_strike:
+            short_current_prem = max(0.5, round(short_entry_prem * 0.15, 2))
+
+    if short_current_prem is not None and short_entry_prem > 0:
+        decay_pct = round(((short_entry_prem - short_current_prem) / short_entry_prem) * 100.0, 1)
+        if decay_pct >= 80.0:
+            return {
+                "action": "BUY_BACK_SHORT_LEG_80_PCT_DECAY",
+                "short_strike": sell_strike,
+                "short_entry_premium": short_entry_prem,
+                "short_current_premium": short_current_prem,
+                "decay_pct": decay_pct,
+                "reason": (
+                    f"Short strike ₹{sell_strike:,.0f} has decayed {decay_pct:.1f}% (trading @ ₹{short_current_prem:,.1f} vs entry ₹{short_entry_prem:,.1f}). "
+                    f"Negligible premium remaining; gamma/tail risk exceeds reward."
+                ),
+                "recommendation": (
+                    f"BUY TO CLOSE short {clean_und} ₹{sell_strike:,.0f} @ ~₹{short_current_prem:,.1f}. "
+                    f"Leave long {buy_strike:,.0f} leg running unhedged with zero risk of capped gains!"
+                ),
+            }
+
+    # 2. Check Short Strike Wall Approach (Delta Cap Roll)
+    is_approaching_wall = False
+    if sell_strike > 0 and current_spot > 0 and width > 0:
+        if is_bullish:
+            is_approaching_wall = current_spot >= (sell_strike - (0.25 * width))
+        else:
+            is_approaching_wall = current_spot <= (sell_strike + (0.25 * width))
+
+    if is_approaching_wall and sell_strike > 0:
+        candidate_roll_strike = sell_strike + step if is_bullish else max(step, sell_strike - step)
+        extra_runway = abs(candidate_roll_strike - sell_strike)
+        opt_type = "CE" if is_bullish else "PE"
+
+        return {
+            "action": "ROLL_SHORT_STRIKE_OTM",
+            "current_short_strike": sell_strike,
+            "candidate_roll_strike": candidate_roll_strike,
+            "additional_runway_pts": extra_runway,
+            "spot_price": current_spot,
+            "reason": (
+                f"Spot ₹{current_spot:,.1f} is pressing within 25% of Short Strike Wall (₹{sell_strike:,.0f}). "
+                f"Current spread delta is flattening near ~0."
+            ),
+            "recommendation": (
+                f"ROLL SHORT LEG: Buy to close ₹{sell_strike:,.0f} {opt_type} and sell ₹{candidate_roll_strike:,.0f} {opt_type} "
+                f"to unlock +{extra_runway:,.0f} pts of additional upside runway."
+            ),
+        }
+
+    return {
+        "action": "MAINTAIN_CURRENT_SPREAD",
+        "short_strike": sell_strike,
+        "spot_price": current_spot,
+        "reason": "Spread delta and theta decay progressing within normal bounds.",
+        "recommendation": "Hold position according to defined-risk parameters.",
+    }
+
+
 def evaluate_spread_in_flight(
     alert: Any,
     current_ltp: Optional[float] = None,
@@ -826,6 +1243,8 @@ def evaluate_spread_in_flight(
 
     if spot <= 0:
         return None
+
+    roll_plan = evaluate_short_strike_roll_plan(alert, current_spot=spot)
 
     # Entry spot baseline: prefer explicit entry_spot, fallback to buy_strike if synthetic test mock
     has_explicit_entry = bool(hedge_plan.get("entry_spot") or getattr(alert, "entry_spot", None))
@@ -918,6 +1337,7 @@ def evaluate_spread_in_flight(
             pnl_pct=pnl_pct,
             spot_price=spot,
             short_strike=sell_strike,
+            roll_plan=roll_plan,
         )
 
     # Trigger B: 70% Max Profit Target Captured
@@ -940,6 +1360,7 @@ def evaluate_spread_in_flight(
             pnl_pct=pnl_pct,
             spot_price=spot,
             short_strike=sell_strike,
+            roll_plan=roll_plan,
         )
 
     # Trigger C: Spread Free-Roll Unlocked (+40% to +50% progress towards max profit)
@@ -962,6 +1383,7 @@ def evaluate_spread_in_flight(
             pnl_pct=pnl_pct,
             spot_price=spot,
             short_strike=sell_strike,
+            roll_plan=roll_plan,
         )
 
     # Trigger D: 50% Debit Erosion Stop Loss
@@ -984,6 +1406,7 @@ def evaluate_spread_in_flight(
             pnl_pct=pnl_pct,
             spot_price=spot,
             short_strike=sell_strike,
+            roll_plan=roll_plan,
         )
 
     return None

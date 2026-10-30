@@ -1804,6 +1804,8 @@ class MilestoneAlertData:
     exchange: Optional[str] = None
     lot_size: Optional[int] = None
     strike_roll_recommendation: Optional[dict[str, Any]] = None
+    free_roll_plan: Optional[dict[str, Any]] = None
+    roll_plan: Optional[dict[str, Any]] = None
     update_number: Optional[int] = None
     is_t1_achieved: bool = False
     hedge_plan: Optional[dict[str, Any]] = None
@@ -2344,6 +2346,29 @@ class MilestoneAlertData:
             except Exception:
                 strike_roll_rec = None
 
+        # Free-roll conversion evaluation for profitable naked option campaigns
+        free_roll_rec = None
+        if (
+            is_opt_contract
+            and pnl_pct is not None
+            and (pnl_pct >= 40.0 or milestone_type in ("TARGET_1", "TARGET_2"))
+        ):
+            try:
+                from engine.options_hedging import evaluate_naked_option_free_roll
+
+                spot_val = float(
+                    getattr(alert, "underlying_spot", 0.0)
+                    or (getattr(alert, "metrics", {}) or {}).get("spot", 0.0)
+                    or 0.0
+                )
+                free_roll_rec = evaluate_naked_option_free_roll(
+                    alert,
+                    current_ltp=ltp,
+                    spot_price=spot_val,
+                )
+            except Exception:
+                free_roll_rec = None
+
         # R-multiple calculation against initial risk
         r_multiple = getattr(alert, "r_multiple", None)
         if entry_price and initial_sl:
@@ -2658,6 +2683,9 @@ class MilestoneAlertData:
             segment=getattr(alert, "segment", None),
             lot_size=lot_sz,
             strike_roll_recommendation=strike_roll_rec,
+            free_roll_plan=free_roll_rec,
+            roll_plan=getattr(alert, "roll_plan", None)
+            or (getattr(alert, "metrics", {}) or {}).get("roll_plan"),
             update_number=update_num,
             is_t1_achieved=is_t1_achieved,
             hedge_plan=(
@@ -3653,6 +3681,8 @@ def render_milestone_alert(
             exchange=data.get("exchange"),
             lot_size=data.get("lot_size"),
             strike_roll_recommendation=data.get("strike_roll_recommendation"),
+            free_roll_plan=data.get("free_roll_plan"),
+            roll_plan=data.get("roll_plan"),
             update_number=data.get("update_number"),
             is_t1_achieved=bool(data.get("is_t1_achieved", False)),
         )
@@ -3837,6 +3867,31 @@ def render_milestone_alert(
         if details:
             base_line += f"\n   ↳ {' · '.join(details)}"
         return base_line
+
+    def _build_free_roll_line(rec: Optional[dict[str, Any]]) -> str:
+        if not rec or not isinstance(rec, dict) or not rec.get("eligible"):
+            return ""
+        short_strike = rec.get("short_strike_candidate")
+        short_prem = float(rec.get("estimated_credit_collected", 0.0) or 0.0)
+        locked_pts = float(rec.get("net_locked_profit_pts", 0.0) or 0.0)
+        rec_text = rec.get("recommendation", "")
+        sign = "+" if locked_pts >= 0 else ""
+        return (
+            f"\n⚡ <b>FREE-ROLL CONVERSION ADVISORY:</b>\n"
+            f"   ↳ Sell <code>{short_strike}</code> @ ~₹{short_prem:,.1f} | Net Cash: <b>{sign}₹{locked_pts:,.1f}/sh locked</b> (100% Risk-Free Runner)\n"
+            f"   ↳ <i>{rec_text}</i>"
+        )
+
+    def _build_spread_roll_line(rec: Optional[dict[str, Any]]) -> str:
+        if not rec or not isinstance(rec, dict) or rec.get("action") == "MAINTAIN_CURRENT_SPREAD":
+            return ""
+        act = rec.get("action", "")
+        rec_text = rec.get("recommendation", "")
+        if act == "BUY_BACK_SHORT_LEG_80_PCT_DECAY":
+            return f"\n🛡️ <b>SHORT LEG 80% PROFIT HARVESTED:</b>\n   ↳ <i>{rec_text}</i>"
+        elif act == "ROLL_SHORT_STRIKE_OTM":
+            return f"\n🔄 <b>SHORT STRIKE CEILING ROLL ADVISORY:</b>\n   ↳ <i>{rec_text}</i>"
+        return ""
 
     if d.milestone_type in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH", "EXPIRED", "TIME_EXPIRED"):
         orig_plan_line = _build_orig_plan(
@@ -4260,6 +4315,8 @@ def render_milestone_alert(
             spot_trail_note = f" | 🏛️ <b>Spot Trail:</b> <code>{tr_spot}</code>"
 
         roll_line = _build_strike_roll_line(getattr(d, "strike_roll_recommendation", None))
+        free_roll_line = _build_free_roll_line(getattr(d, "free_roll_plan", None))
+        spread_roll_line = _build_spread_roll_line(getattr(d, "roll_plan", None))
 
         return (
             f"🎯 <b>{env_tag} {update_prefix}TARGET 1 HIT</b>\n"
@@ -4270,7 +4327,7 @@ def render_milestone_alert(
             f"🛡️ <b>Trail Stop:</b> <code>{cs}{ts_val:,.2f}</code>{lock_pct} (100% risk-free){spot_trail_note}\n"
             f"🐆 <b>CHEETAH EXECUTION:</b> <code>FREE-ROLL ACTIVE · STOP RATCHETED TO {cs}{ts_val:,.2f} · ZERO DOWNSIDE RISK</code>\n"
             f"⚡ <b>DECISIVE ACTION:</b> <code>BOOK 50% PROFIT NOW & HOLD RUNNER{t2_runner_note}</code> <i>(If 1 lot: Trail SL to Cost)</i>\n"
-            f"{roll_line}"
+            f"{roll_line}{free_roll_line}{spread_roll_line}"
             f"{orig_plan_line}"
             f"{footer_line}"
         )
@@ -6353,6 +6410,30 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             else "🛡️ <b>EXECUTION REGIME:</b> <code>DYNAMIC SPREAD RECOMMENDED</code> <i>(Defined Risk / Zero Theta Bleed)</i>\n"
         )
         plan_str = (verdict_line + plan_str) if plan_str else verdict_line.strip()
+
+    # 0DTE Intraday Phase Tag
+    z_phase = actionable_plan.get("zero_dte_phase") or (
+        alert.metrics.get("zero_dte_phase")
+        if isinstance(getattr(alert, "metrics", None), dict)
+        else None
+    )
+    if isinstance(z_phase, dict) and z_phase.get("is_0dte"):
+        phase_name = str(z_phase.get("phase", "")).replace("_", " ")
+        t_bias = str(z_phase.get("tactical_bias", ""))
+        phase_line = f"⏱️ <b>0DTE PHASE:</b> <code>{phase_name}</code> <i>({t_bias})</i>\n"
+        plan_str = (phase_line + plan_str) if plan_str else phase_line.strip()
+
+    # Real-Time Options IV Skew Tag
+    iv_sk = actionable_plan.get("iv_skew") or (
+        alert.metrics.get("iv_skew") if isinstance(getattr(alert, "metrics", None), dict) else None
+    )
+    if isinstance(iv_sk, dict) and iv_sk.get("status") == "ACTIVE":
+        sk_regime = str(iv_sk.get("regime", "")).replace("_", " ")
+        atm_sk = float(iv_sk.get("atm_skew", 0.0) or 0.0)
+        skew_line = (
+            f"📊 <b>IV SKEW:</b> <code>{sk_regime}</code> <i>(Call-Put Skew: {atm_sk:+.1f}%)</i>\n"
+        )
+        plan_str = (skew_line + plan_str) if plan_str else skew_line.strip()
 
     hedge_plan = actionable_plan.get("hedge_plan") or (
         alert.metrics.get("hedge_plan")
