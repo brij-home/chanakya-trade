@@ -602,10 +602,13 @@ def reset_auto_alert_engine_pacing():
             pass
         try:
             from engine.daily_levels import get_daily_levels_store
+            from config.paths import app_data_path
 
             store = get_daily_levels_store()
             with store._lock:
                 store._memory_cache.clear()
+                store._persist_dir = app_data_path("daily_levels")
+                store._persist_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
 

@@ -207,14 +207,23 @@ class DailyLevelsStore:
         self._memory_cache: dict[str, DailyLevels] = {}  # key: f"{session_date}:{canonical_symbol}"
         if persist_dir:
             self._persist_dir = Path(persist_dir)
+        elif os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ:
+            self._persist_dir = app_data_path("daily_levels")
+            self._persist_dir.mkdir(parents=True, exist_ok=True)
         else:
-            local_data = Path("data/daily_levels")
-            try:
-                local_data.mkdir(parents=True, exist_ok=True)
-                self._persist_dir = local_data
-            except Exception:
+            override = os.environ.get("TRADING_PLATFORM_DATA") or os.environ.get(
+                "TRADING_PLATFORM_HOME"
+            )
+            if override:
                 self._persist_dir = app_data_path("daily_levels")
-                self._persist_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                local_data = Path("data/daily_levels")
+                try:
+                    local_data.mkdir(parents=True, exist_ok=True)
+                    self._persist_dir = local_data
+                except Exception:
+                    self._persist_dir = app_data_path("daily_levels")
+            self._persist_dir.mkdir(parents=True, exist_ok=True)
 
         # Automatically load today's persisted levels if present
         today_str = self._get_today_session_date()
