@@ -5704,9 +5704,28 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
             )
             or "REVERSAL" in alert_type
             or "FADE" in alert_type
+            or any(
+                any(
+                    kw in str(sig).upper()
+                    for kw in (
+                        "REVERSAL",
+                        "SUPPLY_REJECTION",
+                        "DEMAND_REJECTION",
+                        "FADE",
+                        "BOUNCE",
+                    )
+                )
+                for sig in (
+                    metrics.get("signals")
+                    if isinstance(metrics, dict) and isinstance(metrics.get("signals"), list)
+                    else []
+                )
+            )
+            or "REVERSAL" in str(getattr(alert, "headline", "")).upper()
+            or "REVERSAL" in str(getattr(alert, "summary", "")).upper()
         )
         if reg_dict:
-            if is_breakout and reg_dict.get("veto_breakout_chase"):
+            if is_breakout and not is_fade and reg_dict.get("veto_breakout_chase"):
                 return ScrutinyResult(
                     status="REJECTED",
                     score=35,

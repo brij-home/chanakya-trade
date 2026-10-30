@@ -274,18 +274,7 @@ def format_fyers_option_symbol(
     if not is_weekly_allowed:
         return monthly_cand
 
-    # For NIFTY/SENSEX: check if weekly or monthly contract exists in SymbolMaster
-    try:
-        from market.symbol_master import get_symbol_info
-
-        if get_symbol_info(weekly_cand) is not None:
-            return weekly_cand
-        if get_symbol_info(monthly_cand) is not None:
-            return monthly_cand
-    except Exception as e_sym:
-        logger.debug("[FyersBroker] Symbol master lookup failed: %s", e_sym)
-
-    # Fallback algorithmic check
+    # Check if monthly expiry: last Thursday (NSE) or last Friday (BSE) of the month
     is_bse = prefix == "BSE"
     days_in_month = monthrange(exp_d.year, exp_d.month)[1]
     last_day = dt_mod.date(exp_d.year, exp_d.month, days_in_month)
@@ -293,7 +282,7 @@ def format_fyers_option_symbol(
     while last_day.weekday() != target_weekday:
         last_day -= dt_mod.timedelta(days=1)
 
-    if exp_d == last_day or exp_d.day > days_in_month - 7:
+    if exp_d == last_day:
         return monthly_cand
     return weekly_cand
 

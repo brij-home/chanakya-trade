@@ -280,9 +280,10 @@ class ThematicPeerSympathyEngine:
                         }
                     )
 
-            # Anti-Shotgunning: Pick ONLY the single strongest peer by absolute momentum
+            # Anti-Shotgunning: Pick top 2 strongest peers by absolute momentum
+            max_peers = int(os.environ.get("MAX_SYMPATHY_PEERS", "2"))
             qualified_candidates.sort(key=lambda c: abs(c["chg_pct"]), reverse=True)
-            top_peers = qualified_candidates[:1]
+            top_peers = qualified_candidates[:max_peers]
 
             for cand in top_peers:
                 peer = cand["peer"]

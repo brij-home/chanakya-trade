@@ -118,10 +118,10 @@ def test_index_directional_hysteresis_suppresses_rapid_flip():
             direction="BULLISH",
             headline="BANKNIFTY 54800 CE",
             summary="Bullish setup",
-            ltp=54800.0,
-            trigger_level=54800.0,
-            target_level=55200.0,
-            stop_loss=54600.0,
+            ltp=350.0,
+            trigger_level=350.0,
+            target_level=550.0,
+            stop_loss=290.0,
             confidence=85,
             created_at=now_str,
             is_live=True,
@@ -140,10 +140,10 @@ def test_index_directional_hysteresis_suppresses_rapid_flip():
             direction="BEARISH",
             headline="BANKNIFTY 54800 PE",
             summary="Bearish flip without CHoCH",
-            ltp=54790.0,
-            trigger_level=54790.0,
-            target_level=54400.0,
-            stop_loss=55000.0,
+            ltp=340.0,
+            trigger_level=340.0,
+            target_level=540.0,
+            stop_loss=280.0,
             confidence=88,  # Higher score alone must not cause a flip
             created_at=five_mins_later,
             metrics={"rvol": 1.2},
@@ -656,13 +656,13 @@ def test_midday_compression_rvol_floor_allows_130_breakout():
     midday_dt = datetime.combine(datetime.now(IST).date(), dtime(12, 15, 0), tzinfo=IST)
 
     with patch.dict(os.environ, {"FORCE_RUNWAY_CHECK": "1"}):
-        # 1.35x RVOL breakout (e.g. Squeeze Breakout or Predator Sweep) should pass with 1.30x floor
+        # 1.85x RVOL breakout (e.g. Squeeze Breakout or Predator Sweep) passes midday 1.75x floor
         res = evaluate_session_runway(
             symbol="ASIANPAINT",
             alert_type="SQUEEZE_BREAKOUT",
             time_horizon="INTRADAY",
             segment="FNO_STOCK",
-            rvol=1.35,
+            rvol=1.85,
             now_dt=midday_dt,
         )
         assert res.is_allowed is True, f"Midday breakout was unexpectedly vetoed: {res.veto_reason}"

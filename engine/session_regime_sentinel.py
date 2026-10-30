@@ -295,9 +295,13 @@ def check_alert_session_regime(
 
             dl = get_daily_levels(underlying_sym)
             if dl:
-                prev_h = float(dl.pdh or 0.0)
-                prev_l = float(dl.pdl or 0.0)
-                prev_c = float(dl.pdc or 0.0)
+                scale_ok = True
+                if ltp > 0 and getattr(dl, "pdc", 0.0) > 0:
+                    scale_ok = (abs(dl.pdc - ltp) / ltp) <= 0.25
+                if scale_ok:
+                    prev_h = float(dl.pdh or 0.0)
+                    prev_l = float(dl.pdl or 0.0)
+                    prev_c = float(dl.pdc or 0.0)
         except Exception as e_dl:
             logger.debug(f"[session_regime_sentinel] Daily levels lookup suppressed: {e_dl}")
 

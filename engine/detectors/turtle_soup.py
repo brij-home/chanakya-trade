@@ -149,7 +149,12 @@ def detect_turtle_soup_sweep(
     if not sweep_type:
         return None
 
-    sess_date = session_date or datetime.now(IST).date()
+    data_date = (
+        df.index[-1].date()
+        if (df is not None and hasattr(df.index, "date") and len(df.index) > 0)
+        else None
+    )
+    sess_date = session_date or data_date or datetime.now(IST).date()
     is_bullish = sweep_type == "BULLISH_SPRING"
     direction = "BULLISH" if is_bullish else "BEARISH"
 
@@ -214,31 +219,33 @@ def detect_turtle_soup_sweep(
             cam_l4 = float(cam.get("l4", 0.0) or 0.0)
             cam_h4 = float(cam.get("h4", 0.0) or 0.0)
 
-            # If bullish spring: verify we aren't trapped below Camarilla L4 breakdown floor
-            if (
-                is_bullish
-                and cam_l4 > 0
-                and curr_ltp < cam_l4
-                and abs(curr_ltp - cam_l4) / cam_l4 <= 0.10
-            ):
-                logger.debug(
-                    f"[TurtleSoup] Suppressed bullish spring on {clean_sym}: "
-                    f"Spot ₹{curr_ltp:,.1f} trapped below Camarilla L4 floor ₹{cam_l4:,.1f}"
-                )
-                return None
+            # Sanity check: Ensure Camarilla levels are in the same price regime (< 5% divergence from LTP)
+            if cam_h4 > 0 and abs(curr_ltp - cam_h4) / max(1.0, curr_ltp) <= 0.05:
+                # If bullish spring: verify we aren't trapped below Camarilla L4 breakdown floor
+                if (
+                    is_bullish
+                    and cam_l4 > 0
+                    and curr_ltp < cam_l4
+                    and abs(curr_ltp - cam_l4) / cam_l4 <= 0.02
+                ):
+                    logger.debug(
+                        f"[TurtleSoup] Suppressed bullish spring on {clean_sym}: "
+                        f"Spot ₹{curr_ltp:,.1f} trapped below Camarilla L4 floor ₹{cam_l4:,.1f}"
+                    )
+                    return None
 
-            # If bearish upthrust: verify we aren't shorting an active Camarilla H4 breakout
-            if (
-                not is_bullish
-                and cam_h4 > 0
-                and curr_ltp > cam_h4
-                and abs(curr_ltp - cam_h4) / cam_h4 <= 0.10
-            ):
-                logger.debug(
-                    f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: "
-                    f"Spot ₹{curr_ltp:,.1f} above Camarilla H4 breakout ceiling ₹{cam_h4:,.1f}"
-                )
-                return None
+                # If bearish upthrust: verify we aren't shorting an active Camarilla H4 breakout
+                if (
+                    not is_bullish
+                    and cam_h4 > 0
+                    and curr_ltp > cam_h4
+                    and abs(curr_ltp - cam_h4) / cam_h4 <= 0.02
+                ):
+                    logger.debug(
+                        f"[TurtleSoup] Suppressed bearish upthrust on {clean_sym}: "
+                        f"Spot ₹{curr_ltp:,.1f} above Camarilla H4 breakout ceiling ₹{cam_h4:,.1f}"
+                    )
+                    return None
     except Exception as e_cam:
         logger.debug(f"[TurtleSoup] Camarilla check non-fatal exception: {e_cam}")
 

@@ -220,6 +220,18 @@ class UnifiedFyersRateGate:
                 f"{self._quotes_chunk_size} symbols/batch"
             )
 
+    def reset_state(self) -> None:
+        """Reset all in-memory sliding windows, waiters, and timestamps (e.g. for test isolation)."""
+        with self._lock:
+            self._sliding_window.clear()
+            for _, _, _, event in self._waiters:
+                event.set()
+            self._waiters.clear()
+            self._last_dispatch_ts = 0.0
+            self._last_depth_dispatch_ts = 0.0
+            self._last_hist_dispatch_ts = 0.0
+            self._counter = itertools.count()
+
     def reset_daily_quota(self, requests: int = 0) -> None:
         """Reset the persisted daily quota counter (e.g. after purchasing Prime)."""
         with self._lock:
@@ -321,7 +333,10 @@ class UnifiedFyersRateGate:
         else:
             min_interval = 1.0 / max(self._max_per_sec, 1.0)
 
-        time_since_last = now - self._last_dispatch_ts
+        # Guard against backwards clock skew or future mocked timestamps
+        if self._last_dispatch_ts > now:
+            self._last_dispatch_ts = now
+        time_since_last = max(0.0, now - self._last_dispatch_ts)
         sleep_sec = max(0.0, min_interval - time_since_last)
 
         # 1b. Dedicated rate pacing for DEPTH_CHAIN calls to eliminate Fyers /depth burst throttling (-360/429)
@@ -329,7 +344,11 @@ class UnifiedFyersRateGate:
             depth_spacing = (
                 0.40  # Max ~2.5 depth requests/sec (strictly protects Fyers /depth limit)
             )
-            time_since_depth = now - self._last_depth_dispatch_ts
+            last_depth = getattr(self, "_last_depth_dispatch_ts", 0.0)
+            if last_depth > now:
+                self._last_depth_dispatch_ts = now
+                last_depth = now
+            time_since_depth = max(0.0, now - last_depth)
             sleep_sec = max(sleep_sec, depth_spacing - time_since_depth)
 
             # Dedicated 1-second rolling cap for DEPTH_CHAIN (max 2 per second)
@@ -340,7 +359,7 @@ class UnifiedFyersRateGate:
                 if c == FyersCallCategory.DEPTH_CHAIN and t >= depth_sec_cutoff
             ]
             if len(recent_depth) >= 2:
-                oldest_depth = recent_depth[0]
+                oldest_depth = min(now, recent_depth[0])
                 sleep_sec = max(sleep_sec, 1.0 - (now - oldest_depth) + 0.01)
 
         # 1c. Dedicated rate pacing for HISTORICAL calls to pace multi-bar history fetches
@@ -348,7 +367,11 @@ class UnifiedFyersRateGate:
             hist_spacing = (
                 0.35  # Max ~2.85 historical requests/sec (strictly protects Fyers /history limit)
             )
-            time_since_hist = now - getattr(self, "_last_hist_dispatch_ts", 0.0)
+            last_hist = getattr(self, "_last_hist_dispatch_ts", 0.0)
+            if last_hist > now:
+                self._last_hist_dispatch_ts = now
+                last_hist = now
+            time_since_hist = max(0.0, now - last_hist)
             sleep_sec = max(sleep_sec, hist_spacing - time_since_hist)
 
             # Dedicated 1-second rolling cap for HISTORICAL (max 3 per second)
@@ -359,7 +382,7 @@ class UnifiedFyersRateGate:
                 if c == FyersCallCategory.HISTORICAL and t >= hist_sec_cutoff
             ]
             if len(recent_hist) >= 3:
-                oldest_hist = recent_hist[0]
+                oldest_hist = min(now, recent_hist[0])
                 sleep_sec = max(sleep_sec, 1.0 - (now - oldest_hist) + 0.01)
 
         # 2. Check 1-second rolling window
@@ -367,14 +390,18 @@ class UnifiedFyersRateGate:
         recent_sec = [t for t, _ in self._sliding_window if t >= sec_cutoff]
         if len(recent_sec) >= self._max_per_sec:
             # Must wait until oldest entry in current 1s window ages out
-            oldest_in_sec = recent_sec[0]
+            oldest_in_sec = min(now, recent_sec[0])
             sleep_sec = max(sleep_sec, 1.0 - (now - oldest_in_sec) + 0.005)
 
         # 3. Check 60-second rolling window including pending waiter load
         effective_min_load = len(self._sliding_window) + len(self._waiters)
         if effective_min_load >= self._max_per_min:
-            oldest_in_min = self._sliding_window[0][0] if self._sliding_window else now
+            oldest_in_min = min(now, self._sliding_window[0][0]) if self._sliding_window else now
             sleep_sec = max(sleep_sec, 60.0 - (now - oldest_in_min) + 0.02)
+
+        # Rate gate operates on 1-sec and 60-sec rolling windows; sleep can never legitimately exceed 60s.
+        # Clamping sleep_sec protects against clock skew and Windows DWORD/TIMEOUT_MAX overflow errors.
+        sleep_sec = max(0.0, min(sleep_sec, 60.0))
 
         # Apply slight micro-jitter (2-6ms) when sleep is needed to desynchronize thread releases
         if sleep_sec > 0.0:
@@ -531,7 +558,8 @@ class UnifiedFyersRateGate:
 
             # Wait on event or sleep
             event.clear()
-            event.wait(timeout=sleep_to_use)
+            safe_sleep = max(0.0, min(sleep_to_use, 60.0))
+            event.wait(timeout=safe_sleep)
 
     def get_diagnostics(self) -> dict[str, Any]:
         """Return real-time usage telemetry, remaining capacity, and diagnostic stats."""

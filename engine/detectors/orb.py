@@ -406,8 +406,9 @@ def detect_opening_range_breakout(
     from engine.alert_identity import generate_alert_id
 
     # 4.3 Volatility Noise Floor Calculation
-    atr_val = round(ltp * 0.015, 2)
-    if df is not None and len(df) >= 14:
+    is_idx_sym = is_index_symbol(symbol)
+    atr_val = round(ltp * (0.002 if is_idx_sym else 0.015), 2)
+    if df is not None and len(df) >= 2:
         try:
             import numpy as np
 
@@ -417,7 +418,7 @@ def detect_opening_range_breakout(
             tr = np.maximum(
                 highs - lows, np.maximum(abs(highs - closes.shift(1)), abs(lows - closes.shift(1)))
             )
-            calc_atr = float(tr.rolling(14).mean().iloc[-1])
+            calc_atr = float(tr.rolling(min(14, len(tr)), min_periods=1).mean().iloc[-1])
             if calc_atr > 0 and not np.isnan(calc_atr):
                 atr_val = round(calc_atr, 2)
         except Exception as e_suppressed:
@@ -432,7 +433,6 @@ def detect_opening_range_breakout(
 
     # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance).
     # Symmetrically, buying equity breakouts in a crashing market is a bull trap.
-    is_idx_sym = is_index_symbol(symbol)
     planned_dir = (
         (primed_direction or "BULLISH") if is_primed else ("BULLISH" if is_bullish else "BEARISH")
     )

@@ -65,32 +65,37 @@ threading.Thread.__init__ = _test_safe_thread_init
 
 @pytest.fixture(autouse=True)
 def _isolate_fyers_rate_gate_and_circuit_breaker():
-    """Defensively reset rate gate and circuit breaker before and after each test."""
-    try:
-        from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+    """Defensively reset rate gate, circuit breaker, and regime cache before and after each test."""
 
-        get_fyers_circuit_breaker().record_success()
-    except Exception:
-        pass
-    try:
-        from market.fyers_rate_gate import get_fyers_rate_gate
+    def _do_reset():
+        try:
+            from market.fyers_circuit_breaker import get_fyers_circuit_breaker
 
-        get_fyers_rate_gate().reset_daily_quota(requests=0)
-    except Exception:
-        pass
+            get_fyers_circuit_breaker().reset()
+        except Exception:
+            pass
+        try:
+            from market.fyers_rate_gate import get_fyers_rate_gate
+
+            gate = get_fyers_rate_gate()
+            gate.reset_state()
+            gate.reset_daily_quota(requests=0)
+        except Exception:
+            pass
+        try:
+            from engine.equity_adaptive_regime import (
+                _EQUITY_REGIME_CACHE,
+                _EQUITY_REGIME_CACHE_LOCK,
+            )
+
+            with _EQUITY_REGIME_CACHE_LOCK:
+                _EQUITY_REGIME_CACHE.clear()
+        except Exception:
+            pass
+
+    _do_reset()
     yield
-    try:
-        from market.fyers_circuit_breaker import get_fyers_circuit_breaker
-
-        get_fyers_circuit_breaker().record_success()
-    except Exception:
-        pass
-    try:
-        from market.fyers_rate_gate import get_fyers_rate_gate
-
-        get_fyers_rate_gate().reset_daily_quota(requests=0)
-    except Exception:
-        pass
+    _do_reset()
 
 
 # 3. Institutional zero-network quarantine:

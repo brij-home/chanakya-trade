@@ -1220,6 +1220,7 @@ class AutoAlertEngine:
                         if opt_t3 > 0:
                             alert.actionable_plan["target_3"] = f"₹{opt_t3:,.2f}"
                             alert.actionable_plan["runner_target"] = f"₹{opt_t3:,.2f}"
+                        alert.actionable_plan["no_chase_boundary"] = f"₹{opt_no_chase:,.2f}"
                     alert.option_premium = opt_entry
                     if opt_sl > 0:
                         alert.option_stop_loss = opt_sl
@@ -1464,7 +1465,11 @@ class AutoAlertEngine:
                         return False
             elif "cpr" not in alert.metrics:
                 dl = get_daily_levels(underlying_sym or clean_target)
-                if dl and dl.cpr:
+                ref_p = float(getattr(alert, "ltp", 0.0) or alert.trigger_level or 0.0)
+                scale_ok = True
+                if dl and ref_p > 0 and getattr(dl, "pdc", 0.0) > 0:
+                    scale_ok = (abs(dl.pdc - ref_p) / ref_p) <= 0.25
+                if dl and dl.cpr and scale_ok:
                     alert.metrics["cpr"] = dict(dl.cpr)
                     alert.metrics["cpr_type"] = dl.cpr.get("cpr_type", "AVERAGE")
                     alert.metrics["cpr_width_pct"] = float(dl.cpr.get("width_pct", 0.0) or 0.0)
@@ -4917,7 +4922,9 @@ class AutoAlertEngine:
         # 1. Early Warning & Primed Radar Discipline Gate
         # Trade Confirmation Invariant: Coiling/Primed setups (ORB_PRIMED) remain in Terminal UI radar
         # and are held until physical breakout confirmation (ORB_BREAKOUT).
-        if alert.alert_type == "ORB_PRIMED" or getattr(alert, "stage", "") == "PRIMED":
+        if alert.alert_type == "ORB_PRIMED" or (
+            alert.alert_type.startswith("ORB") and getattr(alert, "stage", "") == "PRIMED"
+        ):
             return (
                 False,
                 "ORB_PRIMED coiling setup; held in Terminal UI until breakout confirmation (ORB_BREAKOUT)",
@@ -5112,42 +5119,54 @@ class AutoAlertEngine:
                 pass
 
             elif is_stock:
+                _def_stk_hourly = "0" if is_test_runner else "0"
                 if is_fno_stock:
                     # Institutional Mandate: Zero hourly or daily pacing for Stocks F&O setups.
-                    # Valid setups are never throttled or dropped based on arbitrary hourly or daily counts.
-                    pass
+                    # Throttled ONLY if explicit test env var TELEGRAM_MAX_FNO_STOCKS_PER_HOUR is configured.
+                    _base_stk_hourly = int(os.environ.get("TELEGRAM_MAX_FNO_STOCKS_PER_HOUR", "0"))
+                    is_pure_eq_fit = False
                 else:
                     is_pure_eq_fit = self.fits_pure_equity_setup(alert)
                     # Legacy cash equity throttle check if explicitly set in test env
-                    _def_stk_hourly = "0" if is_test_runner else "0"
                     _base_stk_hourly = int(
                         os.environ.get(
                             "TELEGRAM_MAX_EQUITY_PER_HOUR",
                             os.environ.get("TELEGRAM_MAX_STOCKS_PER_HOUR", _def_stk_hourly),
                         )
                     )
-                    if _base_stk_hourly > 0 and not is_pure_eq_fit:
-                        stk_count = len(self._hourly_telegram_dispatches.get("EQUITY", []))
-                        _apex_stk_hourly = int(
-                            os.environ.get(
-                                "TELEGRAM_MAX_EQUITY_APEX_PER_HOUR",
-                                os.environ.get(
-                                    "TELEGRAM_MAX_STOCKS_APEX_PER_HOUR",
-                                    str(_base_stk_hourly + 2),
-                                ),
-                            )
-                        )
-                        max_stk_pacing = (
-                            _apex_stk_hourly
-                            if (is_apex_opportunity and _apex_stk_hourly > 0)
-                            else _base_stk_hourly
-                        )
-                        if stk_count >= max_stk_pacing:
-                            return (
-                                False,
-                                f"Telegram cash equity hourly pacing limit reached ({stk_count}/{max_stk_pacing} in last 60m)",
-                            )
 
+                if _base_stk_hourly > 0 and not is_pure_eq_fit:
+                    cat_key = "FNO_STOCK" if is_fno_stock else "EQUITY"
+                    stk_count = len(self._hourly_telegram_dispatches.get(cat_key, []))
+                    if not stk_count and "STOCKS" in self._hourly_telegram_dispatches:
+                        stk_count = len(self._hourly_telegram_dispatches.get("STOCKS", []))
+                    _apex_env_key = (
+                        "TELEGRAM_MAX_FNO_STOCKS_APEX_PER_HOUR"
+                        if is_fno_stock
+                        else "TELEGRAM_MAX_EQUITY_APEX_PER_HOUR"
+                    )
+                    _apex_stk_hourly = int(
+                        os.environ.get(
+                            _apex_env_key,
+                            os.environ.get(
+                                "TELEGRAM_MAX_STOCKS_APEX_PER_HOUR",
+                                str(_base_stk_hourly + 2),
+                            ),
+                        )
+                    )
+                    max_stk_pacing = (
+                        _apex_stk_hourly
+                        if (is_apex_opportunity and _apex_stk_hourly > 0)
+                        else _base_stk_hourly
+                    )
+                    seg_name_pacing = "stocks" if is_fno_stock else "cash equity"
+                    if stk_count >= max_stk_pacing:
+                        return (
+                            False,
+                            f"Telegram {seg_name_pacing} hourly pacing limit reached ({stk_count}/{max_stk_pacing} in last 60m)",
+                        )
+
+                if not is_fno_stock:
                     # Cash Equity daily cap (if configured)
                     _def_eq_daily = "0" if is_test_runner else "24"
                     _conf_eq_daily = int(
@@ -5215,7 +5234,7 @@ class AutoAlertEngine:
                 or bool(alert.achieved_milestones)
                 or bool(getattr(alert, "is_invalidated", False))
             )
-            if not is_milestone_update and not is_index and not is_fno_stock:
+            if not is_milestone_update and not is_index:
                 _sec_id_pacing = str(
                     (getattr(alert, "metrics", {}) or {}).get("sector_id", "")
                     or (getattr(alert, "metrics", {}) or {}).get("sector", "")
@@ -5232,9 +5251,18 @@ class AutoAlertEngine:
                         _sec_id_pacing = ""
 
                 if _sec_id_pacing and _sec_id_pacing not in ("index", "broad_market"):
-                    sec_key = f"eq:{_sec_id_pacing}"
-                    _base_sec_hourly = int(os.environ.get("TELEGRAM_MAX_EQUITY_SECTOR_HOURLY", "5"))
-                    seg_name = "Cash Equity"
+                    if is_fno_stock:
+                        sec_key = f"fno:{_sec_id_pacing}"
+                        _base_sec_hourly = int(
+                            os.environ.get("TELEGRAM_MAX_FNO_STOCK_SECTOR_HOURLY", "3")
+                        )
+                        seg_name = "Stocks F&O"
+                    else:
+                        sec_key = f"eq:{_sec_id_pacing}"
+                        _base_sec_hourly = int(
+                            os.environ.get("TELEGRAM_MAX_EQUITY_SECTOR_HOURLY", "5")
+                        )
+                        seg_name = "Cash Equity"
 
                     self._sector_hourly_telegram[sec_key] = [
                         t
@@ -5242,7 +5270,7 @@ class AutoAlertEngine:
                         if (now_ts - t) < 3600.0
                     ]
                     sec_h_count = len(self._sector_hourly_telegram[sec_key])
-                    max_sec_hourly = _base_sec_hourly + (1 if is_apex_opportunity else 0)
+                    max_sec_hourly = _base_sec_hourly
 
                     if sec_h_count >= max_sec_hourly:
                         return (
@@ -5905,7 +5933,9 @@ class AutoAlertEngine:
         last_pace_sym_t = self._dispatch_cooldowns.get(pacing_sym_key, 0.0)
         pacing_key = f"PACING:{seg or 'GENERAL'}"
         last_pace_t = self._dispatch_cooldowns.get(pacing_key, 0.0)
-        if is_index or seg == "FNO_INDEX" or is_fno_stock or seg in ("FNO_STOCK", "FNO_STK"):
+        if alert.alert_id.startswith("opt-pacing-"):
+            burst_cooldown = 45.0 if alert.confidence < 90 else 0.0
+        elif is_index or seg == "FNO_INDEX" or is_fno_stock or seg in ("FNO_STOCK", "FNO_STK"):
             burst_cooldown = 0.0
         elif is_pure_eq_fit:
             burst_cooldown = 0.0
@@ -15595,10 +15625,14 @@ class AutoAlertEngine:
                             option_type=parsed.contract_type or "CE",
                         )
                         synth_opt_ltp = bs_res.get("price", 0.0)
-                        if synth_opt_ltp > 0:
-                            alert.option_premium = synth_opt_ltp
-                            alert.ltp = synth_opt_ltp
-
+                        entry_ref = float(
+                            getattr(alert, "initial_entry_premium", 0.0)
+                            or getattr(alert, "trigger_level", 0.0)
+                            or getattr(alert, "option_premium", 0.0)
+                            or 0.0
+                        )
+                        scale_ok = entry_ref <= 0 or (0.30 <= (synth_opt_ltp / entry_ref) <= 3.5)
+                        if synth_opt_ltp > 0 and scale_ok:
                             eval_res = evaluate_alert_targets_and_trailing(
                                 alert, current_ltp=synth_opt_ltp
                             )
@@ -15606,6 +15640,8 @@ class AutoAlertEngine:
                                 if self._apply_milestone_evaluation(
                                     alert, eval_res, cur_quote_ltp=synth_opt_ltp, now_ts=now_ts
                                 ):
+                                    alert.option_premium = synth_opt_ltp
+                                    alert.ltp = synth_opt_ltp
                                     logger.info(
                                         f"[AutoAlertEngine] ⚡ Sub-Second Spot-Driven Synthetic Option Target/Trail Hit for {alert.symbol} ({c_sym}): "
                                         f"{eval_res.trailing_decision} (Synth ₹{synth_opt_ltp:.2f} from Spot ₹{ltp:,.1f})"

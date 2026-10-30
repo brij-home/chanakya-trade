@@ -316,7 +316,7 @@ def detect_index_call_setup(
     try:
         from engine.detectors.order_flow import compute_order_flow_cvd_divergence
 
-        if active_ohlcv is not None and len(active_ohlcv) >= 6:
+        if active_ohlcv is not None and len(active_ohlcv) >= 6 and not _is_v_reversal_escape:
             of_div = compute_order_flow_cvd_divergence(active_ohlcv, spot)
             if of_div.get("is_bearish_exhaustion"):
                 logger.info(

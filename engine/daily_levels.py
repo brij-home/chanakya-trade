@@ -291,9 +291,11 @@ class DailyLevelsStore:
         inst = INDEX_INSTRUMENT_MAP.get(clean, f"{exch}:{clean}")
         if preloaded_quote is not None:
             q = preloaded_quote
-        else:
+        elif s_date == self._get_today_session_date():
             quotes = get_quote([inst])
             q = quotes.get(inst) or quotes.get(f"{exch}:{clean}") or quotes.get(clean)
+        else:
+            q = None
 
         ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0) if q else 0.0
         prev_close_q = float(getattr(q, "close", 0.0) or 0.0) if q else 0.0

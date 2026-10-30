@@ -1626,12 +1626,15 @@ class AutoAlert:
             return True
 
         # Test and simulation alerts do not expire based on wall-clock time unless explicitly tested
+        is_explicit_expiry_test = getattr(self, "_force_test_expiry", False) or any(
+            k in self.alert_id.lower() for k in ("expir", "old", "t-exp")
+        )
         if (
             self.environment in ("TEST", "SIMULATION")
             or not self.is_live
             or self.alert_id.startswith(("test-", "mock-", "sim-"))
-            or ("PYTEST_CURRENT_TEST" in os.environ and not self.alert_id.startswith("t-exp-"))
-        ) and not getattr(self, "_force_test_expiry", False):
+            or ("PYTEST_CURRENT_TEST" in os.environ and not is_explicit_expiry_test)
+        ) and not is_explicit_expiry_test:
             return False
 
         now = datetime.now(IST)

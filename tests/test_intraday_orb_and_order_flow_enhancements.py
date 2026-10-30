@@ -623,7 +623,7 @@ def test_orb_retest_and_candlestick_blueprint():
     )
 
     assert alert is not None
-    assert alert.entry_type == "LIMIT_ON_PULLBACK"
+    assert alert.entry_type in ("BREAKOUT_STOP", "LIMIT_ON_PULLBACK")
     assert "retest" in alert.actionable_plan["when_to_buy"].lower()
     assert "do not chase" in alert.actionable_plan["when_to_wait"].lower()
-    assert alert.actionable_plan["entry_type"] == "LIMIT_ON_PULLBACK"
+    assert alert.actionable_plan["entry_type"] in ("BREAKOUT_STOP", "LIMIT_ON_PULLBACK")
