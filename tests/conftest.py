@@ -215,6 +215,13 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         pass
 
     try:
+        from market.order_book import clear_depth_books
+
+        clear_depth_books()
+    except Exception:
+        pass
+
+    try:
         from market.universe_depth_radar import clear_radar_cache
 
         clear_radar_cache()
@@ -296,6 +303,12 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
             from market.fyers_tbt_manager import FyersTbtManager
 
             FyersTbtManager().reset_for_testing()
+        except Exception:
+            pass
+        try:
+            from market.order_book import clear_depth_books
+
+            clear_depth_books()
         except Exception:
             pass
         try:
