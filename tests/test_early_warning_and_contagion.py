@@ -358,7 +358,8 @@ class TestContagionHolisticSanity:
         # Index spot is at 25243 with vwap 25243 and change 0.0 -> must be suppressed!
         assert res.alert is None
 
-    def test_contagion_rejects_far_otm_strike(self):
+    @patch("engine.daily_levels.get_daily_levels", return_value=None)
+    def test_contagion_rejects_far_otm_strike(self, mock_dl):
         """Options chain with strikes > 2.0% away from spot (e.g. 27250 on 25250 spot) must be rejected."""
         from engine.index_contagion import IndexContagionEngine
 
