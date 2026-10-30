@@ -24,6 +24,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from market.instruments import format_strike
+
 logger = logging.getLogger("chanakya.engine.option_resolver")
 
 INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"}
@@ -111,13 +113,10 @@ def is_index_symbol(symbol: str) -> bool:
     return clean in INDEX_SYMBOLS
 
 
-def get_strike_step(symbol: str) -> int:
-    clean = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
-    if clean in ("BANKNIFTY", "SENSEX", "BANKEX"):
-        return 100
-    if clean == "MIDCPNIFTY":
-        return 25
-    return 50
+def get_strike_step(symbol: str, spot: float = 0.0) -> float:
+    from market.symbol_master import get_strike_step as _get_master_step
+
+    return _get_master_step(symbol, spot=spot)
 
 
 def resolve_option_contract(
@@ -201,7 +200,7 @@ def resolve_option_contract(
     opt_sym = ""
     spread_pct_val: Optional[float] = None
     contracts: list[Any] = []
-    step = get_strike_step(clean_sym)
+    step = get_strike_step(clean_sym, spot=spot)
 
     try:
         from market.options import get_options_chain
@@ -221,15 +220,16 @@ def resolve_option_contract(
                 and (abs(float(getattr(c, "strike", 0.0)) - spot) / max(1.0, spot)) <= 0.025
             ]
             # Liquidity & Bid-Ask Spread Guard:
-            # If live top-of-book bid/ask are present, enforce spread <= 3.5%
+            # If live top-of-book bid/ask are present, enforce spread <= 3.5% (index) or <= 6.0% (stock)
             liquid_matching = []
+            max_spr_matching = 0.035 if is_idx else 0.06
             for c in matching:
                 b = float(getattr(c, "bid", 0.0) or 0.0)
                 a = float(getattr(c, "ask", 0.0) or 0.0)
                 lp = float(getattr(c, "last_price", 0.0) or 0.0)
                 if b > 0 and a > 0 and lp > 0:
                     spr = (a - b) / lp
-                    if spr <= 0.035:
+                    if spr <= max_spr_matching:
                         liquid_matching.append(c)
                 else:
                     liquid_matching.append(c)
@@ -302,10 +302,51 @@ def resolve_option_contract(
                 opt_ltp = float(chosen.last_price)
                 opt_strike = float(chosen.strike)
                 chosen_contract = chosen
+
+                # Step 2.5: Implied Volatility (IV) vs Realized Volatility (RV) Vega Trap Shield
+                contract_iv = float(
+                    getattr(chosen, "iv", 0.0) or getattr(chosen, "implied_volatility", 0.0) or 0.0
+                )
+                if contract_iv > 0:
+                    from engine.index_calibration import get_calibrated_adr
+
+                    calib_adr = get_calibrated_adr(clean_sym)
+                    if calib_adr and calib_adr > 0 and spot > 0:
+                        realized_vol = (calib_adr / spot) * 15.8745 * 100.0
+                        iv_rv_ratio = contract_iv / max(1.0, realized_vol)
+                    else:
+                        iv_rv_ratio = contract_iv / (13.5 if is_idx else 30.0)
+
+                    # When IV is bloated (IV/RV >= 1.40 or raw IV elevated), mandate defined-risk spread
+                    if (
+                        (iv_rv_ratio >= 1.40)
+                        or (is_idx and contract_iv >= 24.0)
+                        or (not is_idx and contract_iv >= 50.0)
+                    ):
+                        is_elevated_vix = True
+                        vix_regime = "ELEVATED_VOL_SPREAD"
+                        strategy_type = "BULL_CALL_SPREAD" if is_bull else "BEAR_PUT_SPREAD"
+                        exec_mandate = "HEDGED_SPREAD_MANDATORY"
+                        logger.info(
+                            f"[OptionResolver] High IV Vega Trap detected for {clean_sym}: "
+                            f"IV={contract_iv:.1f}%, IV/RV ratio={iv_rv_ratio:.2f}x. "
+                            f"Mandating {strategy_type} to eliminate Vega crush risk."
+                        )
                 b = float(getattr(chosen, "bid", 0.0) or 0.0)
                 a = float(getattr(chosen, "ask", 0.0) or 0.0)
                 if b > 0 and a > 0 and opt_ltp > 0:
                     spread_pct_val = round((a - b) / opt_ltp, 4)
+                    max_viable_spr = 0.04 if is_idx else 0.08
+                    if spread_pct_val > max_viable_spr:
+                        if not prefer_options:
+                            logger.info(
+                                f"[OptionResolver] Discarding illiquid option contract for {clean_sym}: "
+                                f"bid={b}, ask={a}, ltp={opt_ltp}, spread={spread_pct_val * 100:.1f}% > {max_viable_spr * 100:.1f}%. "
+                                f"Defaulting to clean underlying spot execution."
+                            )
+                            return None
+                        else:
+                            is_est = True
     except Exception as e:
         logger.debug(f"[OptionResolver] Options chain query error for {clean_sym}: {e}")
 
@@ -330,7 +371,7 @@ def resolve_option_contract(
             base_prem = spot * 0.007 if is_idx else max(15.0, spot * 0.015)
             opt_ltp = round(max(20.0 if is_idx else 5.0, base_prem), 1)
 
-        opt_sym = f"{clean_sym} {int(opt_strike)} {opt_type}"
+        opt_sym = f"{clean_sym} {format_strike(opt_strike)} {opt_type}"
         is_est = True
 
     # Step 4: Compute Premium-Space Invalidation Stop and Targets with Tiered Feasibility
@@ -444,7 +485,7 @@ def resolve_option_contract(
                 hedge_prem = float(chosen_hedge.last_price)
 
         if not chosen_hedge or not hedge_prem:
-            hedge_contract_sym = f"{clean_sym} {int(hedge_strike)} {opt_type}"
+            hedge_contract_sym = f"{clean_sym} {format_strike(hedge_strike)} {opt_type}"
             hedge_prem = round(max(2.0, opt_ltp * 0.42), 1)
 
         net_debit = round(max(1.0, opt_ltp - hedge_prem), 2)

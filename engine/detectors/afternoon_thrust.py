@@ -228,6 +228,103 @@ def detect_afternoon_thrust(
 
     direction = "BULLISH" if is_bull_thrust else "BEARISH"
 
+    # ── Institutional Daily Levels: CPR Overhead & Camarilla Guard ──
+    cpr_gate = None
+    try:
+        from engine.daily_levels import get_daily_levels, evaluate_cpr_gate
+
+        dl = get_daily_levels(clean_sym, session_date=str(now_dt.date()))
+        cpr_gate = evaluate_cpr_gate(
+            clean_sym, ltp, direction, dl=dl, session_date=str(now_dt.date())
+        )
+        if cpr_gate.is_vetoed:
+            logger.debug(
+                f"[AfternoonThrust] Suppressed {'bullish thrust' if direction == 'BULLISH' else 'bearish flush'} on {clean_sym}: {cpr_gate.veto_reason}"
+            )
+            return None
+
+        if is_index and dl and dl.camarilla:
+            cam = dl.camarilla
+            h5 = float(cam.get("h5", 0.0) or 0.0)
+            l5 = float(cam.get("l5", 0.0) or 0.0)
+            float(cam.get("h4", 0.0) or 0.0)
+            l4 = float(cam.get("l4", 0.0) or 0.0)
+
+            # Camarilla levels must be within reasonable proximity (10%) of spot to be valid for intraday gate
+            # Bullish afternoon breakout reaching Camarilla H5 terminal exhaustion
+            if (
+                direction == "BULLISH"
+                and h5 > 0
+                and abs(ltp - h5) / ltp <= 0.03
+                and ltp >= h5 * 0.999
+            ):
+                logger.debug(
+                    f"[AfternoonThrust] Suppressed bullish thrust on {clean_sym}: "
+                    f"Spot ₹{ltp:,.1f} reached Camarilla H5 ceiling ₹{h5:,.1f} (Terminal Exhaustion)"
+                )
+                return None
+
+            # Bearish afternoon flush reaching Camarilla L5 terminal exhaustion
+            if (
+                direction == "BEARISH"
+                and l5 > 0
+                and abs(ltp - l5) / ltp <= 0.03
+                and ltp <= l5 * 1.001
+            ):
+                logger.debug(
+                    f"[AfternoonThrust] Suppressed bearish flush on {clean_sym}: "
+                    f"Spot ₹{ltp:,.1f} reached Camarilla L5 floor ₹{l5:,.1f} (Terminal Exhaustion)"
+                )
+                return None
+
+            # Bearish flush colliding with un-breached Camarilla L4 floor
+            if direction == "BEARISH" and l4 > 0 and abs(ltp - l4) / ltp <= 0.03 and ltp >= l4:
+                if col_c in df_today.columns:
+                    last_c_val = float(df_today[col_c].iloc[-1])
+                    if last_c_val >= l4:
+                        logger.debug(
+                            f"[AfternoonThrust] Suppressed bearish flush on {clean_sym}: "
+                            f"Spot ₹{ltp:,.1f} / Close ₹{last_c_val:,.1f} has not closed below Camarilla L4 floor ₹{l4:,.1f}"
+                        )
+                        return None
+    except Exception as e_dl:
+        logger.debug(f"[AfternoonThrust] Daily levels check non-fatal exception: {e_dl}")
+
+    # ── Microstructure / TBT 50-Depth Order Book Confirmation ──
+    try:
+        from market.fyers_tbt_manager import (
+            fyers_tbt_manager,
+            FyersTbtManager,
+            resolve_tradable_tbt_symbol,
+        )
+
+        mgr = (
+            fyers_tbt_manager
+            if getattr(fyers_tbt_manager, "is_connected", False)
+            else FyersTbtManager()
+        )
+        tradable = resolve_tradable_tbt_symbol(clean_sym)
+        depth = mgr.get_50_depth(tradable or clean_sym)
+        if depth and depth.get("status") not in ("UNAVAILABLE", None):
+            obi_val = float(depth.get("obi_50", 0.0) or 0.0)
+            fortress_bid = bool(depth.get("fortress_bid_wall_confirmed", False))
+            fortress_ask = bool(depth.get("fortress_ask_wall_confirmed", False))
+
+            if direction == "BULLISH" and (obi_val <= -0.25 or fortress_ask):
+                logger.debug(
+                    f"[AfternoonThrust] Suppressed bullish thrust on {clean_sym}: "
+                    f"Overhead Fortress Ask Wall / heavy ask dominance (OBI={obi_val:.2f})"
+                )
+                return None
+            if direction == "BEARISH" and (obi_val >= +0.25 or fortress_bid):
+                logger.debug(
+                    f"[AfternoonThrust] Suppressed bearish flush on {clean_sym}: "
+                    f"Underlying Fortress Bid Wall / heavy bid dominance (OBI={obi_val:.2f})"
+                )
+                return None
+    except Exception as e_tbt:
+        logger.debug(f"[AfternoonThrust] TBT check non-fatal exception: {e_tbt}")
+
     # Stage determination:
     # IGNITED if spot has breached session extreme or surging with RVOL >= 1.35
     # PRIMED if coiled within 0.25% of extreme
@@ -427,6 +524,10 @@ def detect_afternoon_thrust(
         "setup": "AFTERNOON_THRUST",
         "thrust_direction": direction,
         "session_phase": phase_slot,
+        "cpr": cpr_gate.cpr_data if cpr_gate else {},
+        "cpr_type": cpr_gate.cpr_type if cpr_gate else "NORMAL",
+        "is_narrow_cpr": cpr_gate.is_narrow if cpr_gate else False,
+        "is_wide_cpr": cpr_gate.is_wide if cpr_gate else False,
         "is_tight_midday_coil": is_tight_coil,
         "rvol": rvol_val,
         "session_high": session_high,

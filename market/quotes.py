@@ -224,7 +224,87 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
         broker_key = get_data_broker_key()
         result: dict[str, Quote] = {}
 
-        # 1. m.Stock WebSocket
+        # 1. Fyers WebSocket (Primary institutional feed)
+        if broker_key == "fyers" or broker_key is None:
+            from market.websocket import ws_manager
+
+            if ws_manager.connected:
+                missing = []
+                for inst in instruments:
+                    exch = inst.split(":")[0] if ":" in inst else "NSE"
+                    try:
+                        from market.calendar import is_market_open
+
+                        market_active = is_market_open(exch)
+                    except Exception:
+                        market_active = True
+                    max_age = 30.0 if market_active else None
+                    try:
+                        tick = ws_manager.get_tick(inst, max_age_seconds=max_age)
+                    except TypeError:
+                        tick = ws_manager.get_tick(inst)
+                    if not tick or getattr(tick, "ltp", 0.0) <= 0:
+                        from market.instruments import resolve_corporate_alias
+
+                        clean = inst.split(":")[-1].split("-")[0].strip().upper()
+                        canon = resolve_corporate_alias(clean)
+                        if not inst.startswith(("BSE:SENSEX", "BSE:BANKEX")):
+                            try:
+                                alt_tick = ws_manager.get_tick(
+                                    f"NSE:{canon}-BE", max_age_seconds=max_age
+                                ) or ws_manager.get_tick(f"NSE:{canon}-EQ", max_age_seconds=max_age)
+                            except TypeError:
+                                alt_tick = ws_manager.get_tick(
+                                    f"NSE:{canon}-BE"
+                                ) or ws_manager.get_tick(f"NSE:{canon}-EQ")
+                            if alt_tick and getattr(alt_tick, "ltp", 0.0) > 0:
+                                tick = alt_tick
+                    if tick and tick.ltp > 0:
+                        ws_vwap = (
+                            float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0)
+                            or None
+                        )
+                        ws_bid = float(getattr(tick, "bid", 0.0) or 0.0) or None
+                        ws_ask = float(getattr(tick, "ask", 0.0) or 0.0) or None
+                        result[inst] = _enrich_quote(
+                            Quote(
+                                symbol=tick.symbol.split(":")[-1].split("-")[0]
+                                if ":" in tick.symbol
+                                else tick.symbol,
+                                last_price=tick.ltp,
+                                open=tick.open,
+                                high=tick.high,
+                                low=tick.low,
+                                close=tick.close,
+                                volume=tick.volume,
+                                bid=ws_bid,
+                                ask=ws_ask,
+                                change=tick.change,
+                                change_pct=tick.change_pct,
+                                vwap=ws_vwap,
+                                exchange_timestamp=(
+                                    datetime.fromtimestamp(
+                                        tick.timestamp, tz=timezone.utc
+                                    ).isoformat()
+                                    if tick.timestamp and tick.timestamp > 0
+                                    else None
+                                ),
+                            ),
+                            instrument=inst,
+                            provider="fyers",
+                            source="STREAM",
+                            correlation_id=correlation_id,
+                        )
+                    else:
+                        missing.append(inst)
+
+                # Subscribe to missing symbols for next time
+                if missing:
+                    ws_manager.subscribe(missing)
+
+                return result
+
+        # 2. m.Stock WebSocket
         if broker_key == "mstock":
             try:
                 from market.mstock_websocket import mstock_ws
@@ -232,10 +312,25 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
 
                 missing = []
                 for inst in instruments:
+                    exch = inst.split(":")[0] if ":" in inst else "NSE"
+                    try:
+                        from market.calendar import is_market_open
+
+                        market_active = is_market_open(exch)
+                    except Exception:
+                        market_active = True
+                    max_age = 30.0 if market_active else None
                     clean = inst.split(":")[-1].strip().upper()
                     tick = mstock_ws.get_tick(inst) or mstock_ws.get_tick(clean)
+                    if tick and market_active and getattr(tick, "timestamp", 0) > 0:
+                        import time
+
+                        if (time.time() - tick.timestamp) > 30.0:
+                            tick = None
                     if not tick or getattr(tick, "ltp", 0.0) <= 0:
-                        c_tick = ws_manager.get_tick(inst) or ws_manager.get_tick(clean)
+                        c_tick = ws_manager.get_tick(
+                            inst, max_age_seconds=max_age
+                        ) or ws_manager.get_tick(clean, max_age_seconds=max_age)
                         if c_tick and getattr(c_tick, "ltp", 0.0) > 0:
                             tick = c_tick
                     if tick and getattr(tick, "ltp", 0.0) > 0:
@@ -293,7 +388,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
             except Exception:
                 return {}
 
-        # 2. Kotak Neo WebSocket
+        # 3. Kotak Neo WebSocket
         if broker_key == "kotak":
             try:
                 from market.kotak_websocket import kotak_ws
@@ -301,10 +396,25 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
 
                 missing = []
                 for inst in instruments:
+                    exch = inst.split(":")[0] if ":" in inst else "NSE"
+                    try:
+                        from market.calendar import is_market_open
+
+                        market_active = is_market_open(exch)
+                    except Exception:
+                        market_active = True
+                    max_age = 30.0 if market_active else None
                     clean = inst.split(":")[-1].strip().upper()
                     tick = kotak_ws.get_tick(inst) or kotak_ws.get_tick(clean)
+                    if tick and market_active and getattr(tick, "timestamp", 0) > 0:
+                        import time
+
+                        if (time.time() - tick.timestamp) > 30.0:
+                            tick = None
                     if not tick or getattr(tick, "ltp", 0.0) <= 0:
-                        c_tick = ws_manager.get_tick(inst) or ws_manager.get_tick(clean)
+                        c_tick = ws_manager.get_tick(
+                            inst, max_age_seconds=max_age
+                        ) or ws_manager.get_tick(clean, max_age_seconds=max_age)
                         if c_tick and getattr(c_tick, "ltp", 0.0) > 0:
                             tick = c_tick
                     if tick and getattr(tick, "ltp", 0.0) > 0:
@@ -361,65 +471,13 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
             except Exception:
                 return {}
 
-        # 3. Fyers WebSocket
-        if broker_key != "fyers":
-            return {}
-
-        from market.websocket import ws_manager
-
-        if not ws_manager.connected:
-            return {}
-
-        missing = []
-        for inst in instruments:
-            tick = ws_manager.get_tick(inst)
-            if tick and tick.ltp > 0:
-                ws_vwap = (
-                    float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0) or None
-                )
-                ws_bid = float(getattr(tick, "bid", 0.0) or 0.0) or None
-                ws_ask = float(getattr(tick, "ask", 0.0) or 0.0) or None
-                result[inst] = _enrich_quote(
-                    Quote(
-                        symbol=tick.symbol.split(":")[-1].split("-")[0]
-                        if ":" in tick.symbol
-                        else tick.symbol,
-                        last_price=tick.ltp,
-                        open=tick.open,
-                        high=tick.high,
-                        low=tick.low,
-                        close=tick.close,
-                        volume=tick.volume,
-                        bid=ws_bid,
-                        ask=ws_ask,
-                        change=tick.change,
-                        change_pct=tick.change_pct,
-                        vwap=ws_vwap,
-                        exchange_timestamp=(
-                            datetime.fromtimestamp(tick.timestamp, tz=timezone.utc).isoformat()
-                            if tick.timestamp and tick.timestamp > 0
-                            else None
-                        ),
-                    ),
-                    instrument=inst,
-                    provider="fyers",
-                    source="STREAM",
-                    correlation_id=correlation_id,
-                )
-            else:
-                missing.append(inst)
-
-        # Subscribe to missing symbols for next time
-        if missing:
-            ws_manager.subscribe(missing)
-
         return result
     except Exception:
         return {}
 
 
 def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quote]:
-    """Resolve derivative option contract quotes directly from options snapshot (mStock / NSE scraper) without hitting yfinance."""
+    """Resolve derivative option contract quotes directly from options snapshot (Fyers / broker / NSE scraper) without hitting yfinance."""
     try:
         from market.options import get_options_snapshot
 
@@ -432,7 +490,9 @@ def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
             m = _OPTION_PATTERN.match(clean)
             if not m:
                 continue
-            und = m.group("underlying")
+            from market.instruments import resolve_corporate_alias
+
+            und = resolve_corporate_alias(m.group("underlying"))
             exp_iso = m.group("exp_iso")
             exp_weekly = m.group("exp_weekly")
             exp_num = m.group("exp_num")
@@ -515,20 +575,19 @@ def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
         return {}
 
 
-def _calculate_cost_of_carry_factor(ref_date: Optional[datetime] = None) -> float:
+def _calculate_cost_of_carry_factor(
+    ref_date: Optional[datetime] = None, underlying: str = "NIFTY"
+) -> float:
     """Calculate institutional cost-of-carry factor F = S * (1 + r * (days / 365.0))."""
-    import calendar
-    from datetime import date
+    from market.instruments import _calc_monthly_expiry_date
 
     now = ref_date or datetime.now(timezone.utc)
-    year, month = now.year, now.month
-    last_day = calendar.monthrange(year, month)[1]
-    thursdays = [
-        day for day in range(last_day - 6, last_day + 1) if calendar.weekday(year, month, day) == 3
-    ]
-    exp_day = thursdays[-1] if thursdays else last_day
-    exp_date = date(year, month, exp_day)
     curr_date = now.date()
+    exp_date = _calc_monthly_expiry_date("NSE", underlying, now.year, now.month)
+    if exp_date < curr_date:
+        nm = now.month + 1 if now.month < 12 else 1
+        ny = now.year if now.month < 12 else now.year + 1
+        exp_date = _calc_monthly_expiry_date("NSE", underlying, ny, nm)
     days_to_expiry = max(1, (exp_date - curr_date).days)
     repo_rate = 0.065  # RBI base repo rate (6.50%)
     return 1.0 + (repo_rate * (days_to_expiry / 365.0))
@@ -862,10 +921,55 @@ def get_quote(
                     }
                     fetched_external.update(valid_broker_quotes)
                     get_registry().record_provider_success(provider)
-                except Exception:
+                except Exception as e_broker:
+                    logger.debug(f"[Quotes] Primary broker quote fetch failed: {e_broker}")
                     get_registry().record_provider_error(get_data_broker_key() or "broker")
 
                 rem_leaders = [i for i in leaders if i not in fetched_external]
+
+                # 3a-ii. Multi-Broker Failover: Try secondary connected brokers for remaining missing quotes
+                if rem_leaders:
+                    try:
+                        from brokers.session import get_all_brokers
+
+                        all_connected = get_all_brokers()
+                        for sec_key, sec_broker in all_connected.items():
+                            if sec_key == provider:
+                                continue
+                            if not hasattr(sec_broker, "get_quote"):
+                                continue
+                            try:
+                                sec_quotes = sec_broker.get_quote(rem_leaders)
+                                if sec_quotes:
+                                    valid_sec_quotes = {
+                                        instrument: _enrich_quote(
+                                            quote,
+                                            instrument=instrument,
+                                            provider=sec_key,
+                                            source="REST",
+                                            correlation_id=correlation_id,
+                                        )
+                                        for instrument, quote in sec_quotes.items()
+                                        if quote and getattr(quote, "last_price", 0.0) > 0
+                                    }
+                                    if valid_sec_quotes:
+                                        fetched_external.update(valid_sec_quotes)
+                                        get_registry().record_provider_success(sec_key)
+                                        logger.info(
+                                            f"[Quotes] 🔄 Secondary broker failover succeeded ({sec_key}) for {list(valid_sec_quotes.keys())}"
+                                        )
+                                        rem_leaders = [
+                                            i for i in leaders if i not in fetched_external
+                                        ]
+                                        if not rem_leaders:
+                                            break
+                            except Exception as e_sec:
+                                logger.debug(
+                                    f"[Quotes] Secondary broker failover failed for {sec_key}: {e_sec}"
+                                )
+                                get_registry().record_provider_error(sec_key)
+                    except Exception as e_all:
+                        logger.debug(f"[Quotes] Secondary broker discovery error: {e_all}")
 
                 # 3b. Try derivative options snapshot
                 if rem_leaders:

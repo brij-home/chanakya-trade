@@ -121,13 +121,28 @@ def compute_order_flow_cvd_divergence(
 
     # Bullish Absorption: price test/sweep swing low, but CVD forms higher low
     if curr_p <= prior_low_p * 1.002 and curr_cvd > prior_low_cvd:
-        cvd_ratio = round(curr_cvd / max(1.0, abs(prior_low_cvd)), 2)
-        if cvd_ratio >= 1.25 or (has_real_delta and curr_cvd > 0):
-            is_bull = True
+        if prior_low_cvd < 0:
+            # Absorption in negative delta regime (selling pressure dried up / absorbed)
+            delta_improvement = curr_cvd - prior_low_cvd
+            absorption_pct = delta_improvement / max(1.0, abs(prior_low_cvd))
+            cvd_ratio = round(1.0 + absorption_pct, 2)
+            if absorption_pct >= 0.20 or curr_cvd > 0 or has_real_delta:
+                is_bull = True
+        else:
+            cvd_ratio = round(curr_cvd / max(1.0, prior_low_cvd), 2)
+            if cvd_ratio >= 1.20 or (has_real_delta and curr_cvd > 0):
+                is_bull = True
 
     # Bearish Exhaustion: price test/sweep swing high, but CVD forms lower high
     if curr_p >= prior_high_p * 0.998 and curr_cvd < prior_high_cvd:
-        is_bear = True
+        if prior_high_cvd > 0:
+            delta_decay = prior_high_cvd - curr_cvd
+            exhaustion_pct = delta_decay / max(1.0, abs(prior_high_cvd))
+            if exhaustion_pct >= 0.15 or curr_cvd < 0 or has_real_delta:
+                is_bear = True
+        else:
+            # Already negative delta at the high (aggressive selling into highs)
+            is_bear = True
 
     return {
         "is_bullish_absorption": is_bull,

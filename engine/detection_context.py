@@ -461,7 +461,7 @@ def register_default_detectors() -> None:
                 ltp=ctx.ltp,
                 vwap=ctx.vwap,
                 exchange=ctx.exchange,
-                rvol=ctx.rvol or 1.5,
+                rvol=ctx.rvol,
                 ref_time=ctx.timestamp,
             )
         return None
@@ -636,7 +636,7 @@ def register_default_detectors() -> None:
                 ltp=ctx.ltp,
                 vwap=ctx.vwap,
                 exchange=ctx.exchange,
-                rvol=ctx.rvol or 1.0,
+                rvol=ctx.rvol,
                 session_date=ctx.timestamp.date() if ctx.timestamp else None,
             )
         return None
@@ -652,7 +652,7 @@ def register_default_detectors() -> None:
                 ltp=ctx.ltp,
                 vwap=ctx.vwap,
                 exchange=ctx.exchange,
-                rvol=ctx.rvol or 1.0,
+                rvol=ctx.rvol,
                 session_date=ctx.timestamp.date() if ctx.timestamp else None,
             )
         return None

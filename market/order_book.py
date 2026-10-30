@@ -31,6 +31,7 @@ from engine.ring_buffer import RollingTickBuffer
 logger = logging.getLogger("market.order_book")
 
 from config.constants import IST
+from market.instruments import canonical_symbol
 
 _DEPTH_BOOKS: dict[str, BisectDepthBook] = {}
 _DEPTH_LOCK = threading.Lock()
@@ -41,16 +42,7 @@ def get_depth_book(symbol: str, max_depth: int = 50) -> BisectDepthBook:
     Retrieve or initialize the high-frequency in-memory BisectDepthBook for a symbol.
     Maintains L2/L3 order book state streamed directly via WebSocket feeds.
     """
-    canonical = (
-        str(symbol)
-        .upper()
-        .replace(".NS", "")
-        .replace("NSE:", "")
-        .replace("BSE:", "")
-        .replace("NFO:", "")
-        .replace("MCX:", "")
-        .strip()
-    )
+    canonical = canonical_symbol(str(symbol))
     with _DEPTH_LOCK:
         if canonical not in _DEPTH_BOOKS:
             _DEPTH_BOOKS[canonical] = BisectDepthBook(max_depth=max_depth)
@@ -70,9 +62,7 @@ def get_depth_book(symbol: str, max_depth: int = 50) -> BisectDepthBook:
                     from market.fyers_tbt_manager import resolve_tradable_tbt_symbol
 
                     fut_name = resolve_tradable_tbt_symbol(canonical)
-                    fut_clean = (
-                        str(fut_name).upper().replace("NSE:", "").replace("BSE:", "").strip()
-                    )
+                    fut_clean = canonical_symbol(str(fut_name))
                     if fut_clean and fut_clean != canonical and fut_clean in _DEPTH_BOOKS:
                         fut_book = _DEPTH_BOOKS[fut_clean]
                         if fut_book.total_bid_qty > 0 or fut_book.total_ask_qty > 0:
@@ -440,14 +430,7 @@ def resolve_option_greeks(symbol: str, ltp: float = 0.0) -> Optional[dict[str, A
     """
     import re
 
-    clean = (
-        symbol.replace("NSE:", "")
-        .replace("BSE:", "")
-        .replace("NFO:", "")
-        .replace("MCX:", "")
-        .strip()
-        .upper()
-    )
+    clean = canonical_symbol(symbol)
     match = re.search(r"(\d+(?:\.\d+)?)\s*(CE|PE)$", clean)
     if not match:
         return None
@@ -720,15 +703,7 @@ def analyze_symbol_order_book(
     is_mcx = symbol.upper().startswith("MCX:")
     is_bse = symbol.upper().startswith("BSE:")
     is_cds = symbol.upper().startswith("CDS:")
-    clean_sym = (
-        symbol.replace("NSE:", "")
-        .replace("BSE:", "")
-        .replace("NFO:", "")
-        .replace("MCX:", "")
-        .replace("CDS:", "")
-        .strip()
-        .upper()
-    )
+    clean_sym = canonical_symbol(symbol)
     if is_mcx or clean_sym.startswith(
         ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "ZINC", "ALUMINIUM")
     ):

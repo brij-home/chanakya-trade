@@ -42,11 +42,28 @@ class _ThreadingProxy:
 
 
 def patch_fyers_websocket_daemon_threads() -> None:
-    """Ensure all threads spawned by fyers_apiv3 are daemon threads."""
+    """Ensure all threads spawned by fyers_apiv3 are daemon threads and shim pkg_resources with modern importlib."""
     global _PATCHED
     if _PATCHED:
         return
     try:
+        import sys
+
+        # Institutional shim: fyers_apiv3 only uses pkg_resources to locate map.json:
+        # resource_filename('fyers_apiv3.FyersWebsocket', 'map.json')
+        # Providing a modern importlib.resources shim prevents setuptools.pkg_resources
+        # from loading, scanning site-packages, and emitting deprecation warnings.
+        if "pkg_resources" not in sys.modules:
+            import importlib.resources
+            import types
+
+            shim = types.ModuleType("pkg_resources")
+            shim.resource_filename = lambda pkg, res: str(
+                importlib.resources.files(pkg).joinpath(res)
+            )
+            shim.declare_namespace = lambda ns: None
+            sys.modules["pkg_resources"] = shim
+
         from fyers_apiv3.FyersWebsocket import data_ws, order_ws, tbt_ws
 
         proxy = _ThreadingProxy()
@@ -94,22 +111,80 @@ def patch_fyers_websocket_daemon_threads() -> None:
         tbt_ws.FyersTbtSocket.__init__ = _patched_tbt_init
         tbt_ws.FyersTbtSocket.close_connection = _patched_tbt_close
 
-        # 5. SDK crashes with KeyError in __init_wait if a channel is in _activeChannels but not yet in _symbols
-        if hasattr(tbt_ws, "Subscription_info"):
+        # 5. SDK crashes with KeyError in on_open/switchChannel if a channel is in _activeChannels but not yet in _symbols
+        subs_cls = getattr(tbt_ws, "SubscriptionInfo", getattr(tbt_ws, "Subscription_info", None))
+        if subs_cls is not None:
 
-            def _safe_get_symbols(self, chanNo: str):
-                return getattr(self, "_symbols", {}).get(chanNo, set())
+            def _safe_get_symbols(self, chanNo: Any):
+                symbols = getattr(self, "_symbols", {})
+                if chanNo in symbols:
+                    return symbols[chanNo]
+                if str(chanNo) in symbols:
+                    return symbols[str(chanNo)]
+                try:
+                    int_k = int(chanNo)
+                    if int_k in symbols:
+                        return symbols[int_k]
+                except (ValueError, TypeError) as e_cast:
+                    logger.debug(
+                        "[FyersSocketPatch] Failed casting chanNo to int for symbols: %s", e_cast
+                    )
+                return set()
 
-            def _safe_get_mode(self, chanNo: str):
+            def _safe_get_mode(self, chanNo: Any):
                 default_mode = getattr(tbt_ws.SubscriptionModes, "DEPTH", None)
-                return getattr(self, "_modeInfo", {}).get(chanNo, default_mode)
+                mode_info = getattr(self, "_modeInfo", {})
+                if chanNo in mode_info:
+                    return mode_info[chanNo]
+                if str(chanNo) in mode_info:
+                    return mode_info[str(chanNo)]
+                try:
+                    int_k = int(chanNo)
+                    if int_k in mode_info:
+                        return mode_info[int_k]
+                except (ValueError, TypeError) as e_cast:
+                    logger.debug(
+                        "[FyersSocketPatch] Failed casting chanNo to int for mode_info: %s", e_cast
+                    )
+                return default_mode
 
-            tbt_ws.Subscription_info.getSymbolsInfo = _safe_get_symbols
-            tbt_ws.Subscription_info.getModeInfo = _safe_get_mode
+            subs_cls.getSymbolsInfo = _safe_get_symbols
+            subs_cls.getModeInfo = _safe_get_mode
+
+        # 6. Stop infinite reconnect loops when SDK receives 403 Forbidden handshake rejections
+        if hasattr(order_ws, "FyersOrderSocket") and hasattr(order_ws.FyersOrderSocket, "On_error"):
+            _orig_order_error = order_ws.FyersOrderSocket.On_error
+
+            def _patched_order_error(self, message: str) -> None:
+                if "403" in str(message) or "forbidden" in str(message).lower():
+                    self.restart_flag = False
+                _orig_order_error(self, message)
+
+            order_ws.FyersOrderSocket.On_error = _patched_order_error
+
+        if hasattr(data_ws, "FyersDataSocket") and hasattr(data_ws.FyersDataSocket, "On_error"):
+            _orig_data_error = data_ws.FyersDataSocket.On_error
+
+            def _patched_data_error(self, message: str) -> None:
+                if "403" in str(message) or "forbidden" in str(message).lower():
+                    self.restart_flag = False
+                _orig_data_error(self, message)
+
+            data_ws.FyersDataSocket.On_error = _patched_data_error
+
+        if hasattr(tbt_ws, "FyersTbtSocket") and hasattr(tbt_ws.FyersTbtSocket, "On_error"):
+            _orig_tbt_error = tbt_ws.FyersTbtSocket.On_error
+
+            def _patched_tbt_error(self, message: str) -> None:
+                if "403" in str(message) or "forbidden" in str(message).lower():
+                    self.restart_flag = False
+                _orig_tbt_error(self, message)
+
+            tbt_ws.FyersTbtSocket.On_error = _patched_tbt_error
 
         _PATCHED = True
         logger.debug(
-            "[FyersSocketPatch] Patched fyers_apiv3 WebSocket SDK threads to daemon=True and fixed TbtSocket onopen."
+            "[FyersSocketPatch] Patched fyers_apiv3 WebSocket SDK threads to daemon=True, fixed TbtSocket onopen, and added 403 halt."
         )
     except ImportError as e_suppressed:
         logger.debug(f"[market.fyers_socket_patch] Non-fatal exception suppressed: {e_suppressed}")

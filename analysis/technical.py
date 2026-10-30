@@ -56,6 +56,8 @@ class TechnicalSnapshot:
     bb_mid: Optional[float] = None
     atr: Optional[float] = None
     volume_ratio: Optional[float] = None  # today's vol / 20-day avg vol
+    roc: Optional[float] = None  # Rate of Change (12-period %)
+    chop_index: Optional[float] = None  # Choppiness Index (0-100)
 
     # Timeframe & Provenance
     timeframe: str = "1D (Daily)"
@@ -175,6 +177,57 @@ def pivot_points(df: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def roc(series: pd.Series, period: int = 12) -> pd.Series:
+    """
+    Rate of Change (ROC): Percentage price change over N periods.
+    Formula: ((Price_t - Price_{t-n}) / Price_{t-n}) * 100
+    """
+    shifted = series.shift(period)
+    return ((series - shifted) / shifted.replace(0, np.nan)) * 100.0
+
+
+def choppiness_index(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    Dreiss Choppiness Index (0 to 100).
+    Values > 61.8 indicate a choppy, sideways, consolidative market (breakout risk).
+    Values < 38.2 indicate a strong directional trend (trending market).
+    Formula: 100 * LOG10( SUM(TrueRange, n) / (MaxHigh_n - MinLow_n) ) / LOG10(n)
+    """
+    h = (
+        df["high"]
+        if "high" in df.columns
+        else (df["High"] if "High" in df.columns else df.iloc[:, 1])
+    )
+    l = df["low"] if "low" in df.columns else (df["Low"] if "Low" in df.columns else df.iloc[:, 2])
+    c = (
+        df["close"]
+        if "close" in df.columns
+        else (df["Close"] if "Close" in df.columns else df.iloc[:, 3])
+    )
+    high_low = h - l
+    high_close = (h - c.shift()).abs()
+    low_close = (l - c.shift()).abs()
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+
+    atr_sum = true_range.rolling(window=period).sum()
+    highest_h = h.rolling(window=period).max()
+    lowest_l = l.rolling(window=period).min()
+    price_range = (highest_h - lowest_l).replace(0, np.nan)
+
+    ratio = (atr_sum / price_range).replace(0, np.nan)
+    chop = 100.0 * (np.log10(ratio) / np.log10(period))
+    return chop.clip(lower=0.0, upper=100.0)
+
+
+def relative_strength(stock_close: pd.Series, benchmark_close: pd.Series) -> pd.Series:
+    """
+    Relative Strength (RS) ratio of stock vs benchmark index (e.g. NIFTY 50).
+    Rising RS indicates stock outperforming the benchmark.
+    """
+    aligned_stock, aligned_bench = stock_close.align(benchmark_close, join="inner")
+    return (aligned_stock / aligned_bench.replace(0, np.nan)) * 100.0
+
+
 # ── Main analyser ────────────────────────────────────────────
 
 
@@ -249,6 +302,12 @@ def analyse(
 
     atr_val = float(atr(df).iloc[-1])
 
+    roc_series = roc(close, 12)
+    roc_val = float(roc_series.iloc[-1]) if not pd.isna(roc_series.iloc[-1]) else 0.0
+
+    chop_series = choppiness_index(df, 14)
+    chop_val = float(chop_series.iloc[-1]) if not pd.isna(chop_series.iloc[-1]) else 50.0
+
     vol_avg = float(df["volume"].rolling(20).mean().iloc[-1])
     vol_today = float(df["volume"].iloc[-1])
     vol_ratio = round(vol_today / vol_avg, 2) if vol_avg else 1.0
@@ -258,6 +317,51 @@ def analyse(
     # ── Build signals ─────────────────────────────────────────
     signals: list[Signal] = []
     score = 0
+
+    # Rate of Change (ROC-12) Momentum Velocity
+    if roc_val > 4.0:
+        signals.append(
+            Signal("ROC", f"{roc_val:+.1f}%", "BULLISH", "Strong upward momentum velocity (>+4%)")
+        )
+        score += 8
+    elif roc_val < -4.0:
+        signals.append(
+            Signal("ROC", f"{roc_val:+.1f}%", "BEARISH", "Strong downward momentum velocity (<-4%)")
+        )
+        score -= 8
+    else:
+        signals.append(Signal("ROC", f"{roc_val:+.1f}%", "NEUTRAL", "Moderate momentum velocity"))
+
+    # Choppiness Index (Regime: Trending vs Choppy)
+    if chop_val > 61.8:
+        signals.append(
+            Signal(
+                "ChoppinessIndex",
+                round(chop_val, 1),
+                "NEUTRAL",
+                "High chop / rangebound consolidation (>61.8) — avoid breakout chasing",
+            )
+        )
+    elif chop_val < 38.2:
+        chop_dir = "BULLISH" if ltp > ema20_val else "BEARISH"
+        signals.append(
+            Signal(
+                "ChoppinessIndex",
+                round(chop_val, 1),
+                chop_dir,
+                f"Strong directional expansion trend (<38.2) aligned with {chop_dir}",
+            )
+        )
+        score += 5 if chop_dir == "BULLISH" else -5
+    else:
+        signals.append(
+            Signal(
+                "ChoppinessIndex",
+                round(chop_val, 1),
+                "NEUTRAL",
+                "Transitional volatility regime (38.2–61.8)",
+            )
+        )
 
     # RSI
     if rsi_val < 30:
@@ -408,6 +512,8 @@ def analyse(
         bb_mid=round(bb_m, 2),
         atr=round(atr_val, 2),
         volume_ratio=vol_ratio,
+        roc=round(roc_val, 2),
+        chop_index=round(chop_val, 2),
         timeframe="1D (Daily)",
         as_of=as_of_str,
         data_source=data_source_str,

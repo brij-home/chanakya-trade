@@ -426,8 +426,8 @@ export default function App() {
     }
     lastToastTimeRef.current = now
 
-    // Chime rate limiter: max 1 sound chime every 8 seconds
-    if (now - lastChimeTimeRef.current > 8000) {
+    // Chime rate limiter: max 1 sound chime every 8 seconds, ONLY if sound channel is explicitly enabled
+    if (payload.sound_allowed === true && now - lastChimeTimeRef.current > 8000) {
       playAlertChime()
       lastChimeTimeRef.current = now
     }

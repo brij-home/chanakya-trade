@@ -101,12 +101,13 @@ def test_unverified_rvol_does_not_supersede_sector_leader():
 def test_index_directional_hysteresis_suppresses_rapid_flip():
     """Flaw 1: Index directional hysteresis blocks opposing flip within 20m without confirmed CHoCH."""
     from unittest.mock import patch
+    from config.constants import IST
 
     with patch("engine.alerts._is_market_hours", return_value=True):
         engine = AutoAlertEngine()
         engine._alerts.clear()
 
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
         # 1. First alert: BANKNIFTY BULLISH CE
         alert_ce = AutoAlert(
@@ -118,10 +119,10 @@ def test_index_directional_hysteresis_suppresses_rapid_flip():
             direction="BULLISH",
             headline="BANKNIFTY 54800 CE",
             summary="Bullish setup",
-            ltp=54800.0,
-            trigger_level=54800.0,
-            target_level=55200.0,
-            stop_loss=54600.0,
+            ltp=350.0,
+            trigger_level=350.0,
+            target_level=550.0,
+            stop_loss=290.0,
             confidence=85,
             created_at=now_str,
             is_live=True,
@@ -130,7 +131,9 @@ def test_index_directional_hysteresis_suppresses_rapid_flip():
         assert res_ce is True
 
         # 2. Opposing alert: BANKNIFTY BEARISH PE arrives 5 minutes later without CHoCH
-        five_mins_later = (datetime.now() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S IST")
+        five_mins_later = (datetime.now(IST) + timedelta(minutes=5)).strftime(
+            "%Y-%m-%d %H:%M:%S IST"
+        )
         alert_pe = AutoAlert(
             alert_id="aa-bn-pe-02",
             alert_type="GAMMA_BLAST",
@@ -140,10 +143,10 @@ def test_index_directional_hysteresis_suppresses_rapid_flip():
             direction="BEARISH",
             headline="BANKNIFTY 54800 PE",
             summary="Bearish flip without CHoCH",
-            ltp=54790.0,
-            trigger_level=54790.0,
-            target_level=54400.0,
-            stop_loss=55000.0,
+            ltp=340.0,
+            trigger_level=340.0,
+            target_level=540.0,
+            stop_loss=280.0,
             confidence=88,  # Higher score alone must not cause a flip
             created_at=five_mins_later,
             metrics={"rvol": 1.2},
@@ -656,13 +659,13 @@ def test_midday_compression_rvol_floor_allows_130_breakout():
     midday_dt = datetime.combine(datetime.now(IST).date(), dtime(12, 15, 0), tzinfo=IST)
 
     with patch.dict(os.environ, {"FORCE_RUNWAY_CHECK": "1"}):
-        # 1.35x RVOL breakout (e.g. Squeeze Breakout or Predator Sweep) should pass with 1.30x floor
+        # 1.85x RVOL breakout (e.g. Squeeze Breakout or Predator Sweep) passes midday 1.75x floor
         res = evaluate_session_runway(
             symbol="ASIANPAINT",
             alert_type="SQUEEZE_BREAKOUT",
             time_horizon="INTRADAY",
             segment="FNO_STOCK",
-            rvol=1.35,
+            rvol=1.85,
             now_dt=midday_dt,
         )
         assert res.is_allowed is True, f"Midday breakout was unexpectedly vetoed: {res.veto_reason}"

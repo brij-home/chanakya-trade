@@ -38,6 +38,7 @@ import pandas as pd
 
 from engine.alert_identity import canonical_alert_symbol
 from engine.precursor_radar import classify_symbol_segment, get_scan_universe
+from market.instruments import format_strike
 from engine.dynamic_risk import resolve_price_tier
 
 
@@ -332,7 +333,9 @@ def resolve_recommended_option_contract(
         opt_ltp = float(
             getattr(best_contract, "last_price", 0.0) or getattr(best_contract, "ltp", 0.0) or 0.0
         )
-        contract_sym = getattr(best_contract, "symbol", f"{clean_sym}{int(strike)}{opt_type}")
+        contract_sym = getattr(
+            best_contract, "symbol", f"{clean_sym}{format_strike(strike)}{opt_type}"
+        )
         expiry_date = getattr(best_contract, "expiry", nearest_exp)
 
         # Fallback 1: Query live quote for contract_sym if last_price was 0.0
@@ -367,7 +370,7 @@ def resolve_recommended_option_contract(
         step = 100 if "BANK" in clean_sym else 50
         strike = float(round(spot / step) * step)
         opt_ltp = round(spot * 0.015, 1)  # ~1.5% ATM premium proxy
-        contract_sym = f"{clean_sym}{int(strike)}{opt_type}"
+        contract_sym = f"{clean_sym}{format_strike(strike)}{opt_type}"
         expiry_date = target_expiry
 
     # Estimate option targets based on delta (~0.5 ATM delta)
@@ -471,10 +474,10 @@ def resolve_recommended_option_contract(
             futures_hedge = {
                 "strategy": "COLLARED_FUTURE",
                 "protective_strike": put_strike,
-                "protective_symbol": f"{clean_sym} {int(put_strike)} PE",
+                "protective_symbol": f"{clean_sym} {format_strike(put_strike)} PE",
                 "ceiling_strike": call_strike,
-                "ceiling_symbol": f"{clean_sym} {int(call_strike)} CE",
-                "description": f"Long Future + Buy {int(put_strike)} PE (Hard Floor at ₹{put_strike:,.0f} · Eliminates Overnight Gap Risk)",
+                "ceiling_symbol": f"{clean_sym} {format_strike(call_strike)} CE",
+                "description": f"Long Future + Buy {format_strike(put_strike)} PE (Hard Floor at ₹{put_strike:,.1f} · Eliminates Overnight Gap Risk)",
             }
         else:
             call_strike = float(round((stop_loss if stop_loss > 0 else spot * 1.02) / step) * step)
@@ -482,10 +485,10 @@ def resolve_recommended_option_contract(
             futures_hedge = {
                 "strategy": "COLLARED_FUTURE",
                 "protective_strike": call_strike,
-                "protective_symbol": f"{clean_sym} {int(call_strike)} CE",
+                "protective_symbol": f"{clean_sym} {format_strike(call_strike)} CE",
                 "ceiling_strike": put_strike,
-                "ceiling_symbol": f"{clean_sym} {int(put_strike)} PE",
-                "description": f"Short Future + Buy {int(call_strike)} CE (Hard Ceiling at ₹{call_strike:,.0f} · Eliminates Overnight Gap Risk)",
+                "ceiling_symbol": f"{clean_sym} {format_strike(put_strike)} PE",
+                "description": f"Short Future + Buy {format_strike(call_strike)} CE (Hard Ceiling at ₹{call_strike:,.1f} · Eliminates Overnight Gap Risk)",
             }
 
     return {
@@ -662,7 +665,7 @@ class AsymmetricOpportunityRadar:
         self.min_conviction = min_conviction
         self._cache: dict[Any, list[AsymmetricOpportunity]] = {}
         self._cache_ts: dict[Any, float] = {}
-        self._cache_ttl: float = 30.0
+        self._cache_ttl: float = 180.0  # 3-minute cache for high-asymmetry multi-day setups
         import threading
 
         self._cache_lock = threading.Lock()
@@ -1468,7 +1471,7 @@ class AsymmetricOpportunityRadar:
         opt_sym = getattr(
             chosen_contract,
             "symbol",
-            f"{clean_sym}{int(atm_strike)}{'CE' if direction == 'BULLISH' else 'PE'}",
+            f"{clean_sym}{format_strike(atm_strike)}{'CE' if direction == 'BULLISH' else 'PE'}",
         )
         opt_exp = getattr(chosen_contract, "expiry", None)
 
@@ -1970,9 +1973,9 @@ class AsymmetricOpportunityRadar:
             entry_price=ltp,
             entry_range=entry_range_str,
             stop_loss=round(short_ce + credit_per_unit, 2),
-            target_1=round(ltp, 2),
-            target_2=round(ltp, 2),
-            target_moonshot=round(ltp, 2),
+            target_1=round(credit_per_unit * 0.50, 2),
+            target_2=round(credit_per_unit * 0.25, 2),
+            target_moonshot=round(max(0.05, credit_per_unit * 0.10), 2),
             risk_reward="1:3.0",
             risk_reward_ratio=3.0,
             risk_pts=round(risk_per_unit, 2),

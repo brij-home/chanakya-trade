@@ -323,10 +323,17 @@ def test_defined_risk_spread_exempt_from_velocity_time_stop():
     assert res.target_status != "TIME_STOP_EXIT"
 
 
-def test_structure_holding_above_vwap_compresses_risk_instead_of_scratch():
+def test_structure_holding_above_vwap_compresses_risk_instead_of_scratch(monkeypatch):
     """At 22m, if spot is holding above VWAP, compress risk and extend runway rather than scratching."""
-    now_ist = datetime.now(IST)
-    created_time = (now_ist - timedelta(minutes=22)).strftime("%Y-%m-%d %H:%M:%S IST")
+    eval_dt = datetime(2026, 10, 15, 11, 22, 0, tzinfo=IST)
+
+    class MockDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return eval_dt
+
+    monkeypatch.setattr("engine.alert_evaluator.datetime", MockDateTime)
+    created_time = (eval_dt - timedelta(minutes=22)).strftime("%Y-%m-%d %H:%M:%S IST")
 
     alert = AutoAlert(
         alert_id="test-coiling-compress",

@@ -133,3 +133,44 @@ def test_circuit_breaker_trips_on_daily_quota_limit():
     cb.reset()
     assert cb.state == CircuitState.CLOSED
     assert cb.is_daily_quota_exhausted is False
+
+
+def test_circuit_breaker_trips_on_token_expiry_minus_16():
+    """Verify circuit breaker trips on Fyers session error code -16 with 300s cooldown."""
+    cb = FyersCircuitBreaker(cooldown_sec=60.0)
+    cb.record_failure(
+        status_code=-16,
+        error_message="Token is Invalid or Expired",
+    )
+    assert cb.state == CircuitState.OPEN
+    assert cb.is_tripped() is True
+    diag = cb.get_diagnostics()
+    assert diag["cooldown_seconds"] == 300.0
+    assert "Fyers Token Invalid or Expired" in diag["last_trip_reason"]
+
+    # When fresh token is authenticated, record_auth_success immediately closes breaker
+    cb.record_auth_success()
+    assert cb.state == CircuitState.CLOSED
+    assert cb.is_tripped() is False
+
+
+def test_circuit_breaker_guards_get_profile(monkeypatch):
+    """Verify get_profile raises PermissionError and blocks outbound call when breaker is open."""
+    import pytest
+    from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+
+    api = FyersAPI(app_id="TEST-100", secret_key="test_secret")
+    api._access_token = "mock_token"
+    api._token_ts = time.time()
+    mock_fyers_client = MagicMock()
+    monkeypatch.setattr(api, "_get_fyers", lambda: mock_fyers_client)
+
+    cb = get_fyers_circuit_breaker()
+    cb.record_failure(status_code=-16, error_message="Token is Invalid or Expired")
+
+    try:
+        with pytest.raises(PermissionError, match="Fyers circuit breaker is OPEN"):
+            api.get_profile()
+        assert mock_fyers_client.get_profile.call_count == 0
+    finally:
+        cb.record_auth_success()

@@ -24,6 +24,7 @@ from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("engine.index_contagion")
 from config.constants import IST_ZONE as IST
+from market.instruments import format_strike
 
 # ── Institutional Constituent Weightings (Active 2026) ───────────────────────
 
@@ -170,6 +171,22 @@ class IndexContagionEngine:
             except Exception as e:
                 logger.debug(f"[IndexContagion] Failed to fetch quotes: {e}")
                 return None
+        else:
+            missing = [
+                s
+                for s in symbols_to_fetch
+                if s not in quotes_map
+                and s.replace("NSE:", "").replace("BSE:", "") not in quotes_map
+            ]
+            if missing:
+                try:
+                    fetched = get_quote(missing)
+                    if fetched:
+                        quotes_map = {**quotes_map, **fetched}
+                except Exception as e:
+                    logger.debug(
+                        f"[IndexContagion] Failed to fetch missing constituent quotes: {e}"
+                    )
 
         idx_q = (
             quotes_map.get(idx_sym)
@@ -553,7 +570,7 @@ class IndexContagionEngine:
             est_t1 = round(est_premium * 1.35, 1)
             est_t2 = round(est_premium * 1.70, 1)
             est_t3 = round(est_premium * 2.10, 1)
-            opt_contract_sym = f"{index_name} {int(est_strike)} {opt_type}"
+            opt_contract_sym = f"{index_name} {format_strike(est_strike)} {opt_type}"
             opt_ltp = est_premium
             opt_sl = est_sl
             opt_t1 = est_t1

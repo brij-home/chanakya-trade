@@ -389,6 +389,30 @@ def get_service_status(api_port: int = 8765, vite_port: int = 5173) -> bool:
             print(
                 f" [+] Backend (FastAPI):  RUNNING on http://127.0.0.1:{api_port} ({b_pid_str}, {mode_str})"
             )
+            # Check runtime in-memory code provenance & staleness
+            prov_ok, prov_json = probe_http_health(
+                f"http://127.0.0.1:{api_port}/api/system/code-provenance"
+            )
+            if prov_ok:
+                try:
+                    pdata = json.loads(prov_json)
+                    if pdata.get("is_stale_in_memory"):
+                        stale_count = pdata.get("stale_files_count", 0)
+                        sample = pdata.get("stale_files", [{}])[0].get("path", "")
+                        print(
+                            f" [!] STALE BYTECODE:     In-memory bytecode lags disk! {stale_count} file(s) modified after boot (latest: {sample})."
+                        )
+                        print(
+                            "     Action Needed:      Run 'python scripts/service.py restart' to reload fresh bytecode."
+                        )
+                    else:
+                        commit = pdata.get("git_commit", "UNKNOWN")
+                        uptime = pdata.get("uptime_seconds", 0.0)
+                        print(
+                            f"     Code Provenance:    FRESH (Commit: {commit}, Uptime: {uptime}s, Zero staleness)"
+                        )
+                except Exception:
+                    pass
         else:
             print(
                 f" [*] Backend (FastAPI):  PORT BOUND ({b_pid_str}), but HTTP probe unready ({mode_json})"
@@ -421,6 +445,7 @@ def start_services(
     api_port: int = 8765,
     vite_port: int = 5173,
     timeout: float = 45.0,
+    reload: bool = False,
 ) -> int:
     """Start or restart ChanakyaTrade services dynamically based on OS."""
     if IS_WINDOWS:
@@ -449,6 +474,8 @@ def start_services(
                 cmd.append("-SkipBuildWeb")
             if force_build_web:
                 cmd.append("-ForceBuildWeb")
+            if reload:
+                cmd.append("-Reload")
             res = subprocess.run(cmd)
             return res.returncode
 
@@ -477,6 +504,8 @@ def start_services(
         "--port",
         str(api_port),
     ]
+    if reload:
+        backend_cmd.append("--reload")
 
     launch_detached_process(backend_cmd, ROOT_DIR, backend_out, backend_err)
 
@@ -556,6 +585,11 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765, help="API Port (default: 8765)")
     parser.add_argument("--vite-port", type=int, default=5173, help="Vite UI Port (default: 5173)")
     parser.add_argument("--timeout", type=float, default=45.0, help="Startup timeout in seconds")
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable uvicorn auto-reload watcher on file changes (prevents stale in-memory bytecode in dev)",
+    )
 
     args = parser.parse_args()
 
@@ -591,6 +625,7 @@ def main() -> None:
             api_port=args.port,
             vite_port=args.vite_port,
             timeout=args.timeout,
+            reload=args.reload,
         )
         sys.exit(code)
 

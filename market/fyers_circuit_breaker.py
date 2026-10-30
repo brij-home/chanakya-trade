@@ -90,7 +90,22 @@ class FyersCircuitBreaker:
                 logger.info("[CircuitBreaker] Probe succeeded; resetting HALF_OPEN -> CLOSED")
                 self._notify_recovery()
             self._state = CircuitState.CLOSED
+            self._active_cooldown_sec = self._cooldown_sec
             self._failure_timestamps.clear()
+
+    def record_auth_success(self) -> None:
+        """Called when Fyers re-authentication succeeds. Immediately closes circuit breaker if open due to token expiry."""
+        with self._lock:
+            if self._state != CircuitState.CLOSED and not self._daily_quota_exhausted:
+                logger.info(
+                    "[CircuitBreaker] Fresh token authenticated; clearing trip and resetting to CLOSED"
+                )
+                self._state = CircuitState.CLOSED
+                self._active_cooldown_sec = self._cooldown_sec
+                self._failure_timestamps.clear()
+                self._tripped_at = 0.0
+                self._trip_reason = ""
+                self._notify_recovery()
 
     def record_failure(
         self,
@@ -100,7 +115,7 @@ class FyersCircuitBreaker:
     ) -> None:
         """
         Record failed Fyers call.
-        Trips immediately on HTTP 429 or when failure threshold is reached.
+        Trips immediately on HTTP 429, -360 rate limits, or token expiry (-16), or when failure threshold is reached.
         """
         now = time.time()
         trip_needed = False
@@ -114,6 +129,17 @@ class FyersCircuitBreaker:
                 or "requests/day" in err_lower
                 or "daily limit" in err_lower
                 or "per day" in err_lower
+            )
+
+            # Check token expiration / invalid token errors (e.g. daily session reset at 06:00 IST)
+            is_token_expired = (
+                status_code in (-14, -15, -16, -17, 401, 403)
+                or "token is invalid" in err_lower
+                or "token expired" in err_lower
+                or "invalid token" in err_lower
+                or "invalid or expired" in err_lower
+                or "could not authenticate" in err_lower
+                or "authentication failed" in err_lower
             )
 
             # Check 429 Too Many Requests or -360 Rate Limit (10 req/s or 500 req/min rolling window on Prime)
@@ -143,6 +169,10 @@ class FyersCircuitBreaker:
                     logger.debug(
                         f"[market.fyers_circuit_breaker] Non-fatal exception suppressed: {e_suppressed}"
                     )
+            elif is_token_expired:
+                trip_needed = True
+                self._active_cooldown_sec = 300.0  # 5-min suppression until reauth or next probe
+                reason = f"Fyers Token Invalid or Expired (code {status_code}): {error_message}"
             elif is_rate_limit:
                 trip_needed = True
                 self._active_cooldown_sec = (

@@ -125,3 +125,180 @@ def test_bullish_trend_pullback_ce_buy_clarity(monkeypatch):
     # Strict invariant: Option targets must be ascending in premium space
     assert alert.stop_loss < alert.trigger_level
     assert alert.target_level > alert.trigger_level
+
+
+def test_single_stock_equity_trend_pullback_asymmetry(monkeypatch):
+    """Verify single-stock equity pullback captures clean structural pivot SL and asymmetric R:R >= 1:3.5."""
+    monkeypatch.setenv("CHANAKYA_TESTING", "1")
+    np.random.seed(42)
+    n = 25
+    timestamps = [
+        datetime(2026, 10, 26, 10, 15, tzinfo=IST) + timedelta(minutes=5 * i) for i in range(n)
+    ]
+    # Synthetic LAURUSLABS trend day: Open 1960 -> 2010 -> shallow dip to 2000 -> bounce to 2005
+    prices = np.linspace(1960, 2015, n - 3).tolist()
+    prices.append(2003.0)
+    prices.append(2001.0)
+    prices.append(2006.0)
+
+    df = pd.DataFrame(index=timestamps)
+    df["close"] = prices
+    df["open"] = [p - 3.0 for p in prices]
+    df["high"] = [p + 4.0 for p in prices]
+    df["low"] = [p - 4.0 for p in prices]
+    # Set the dip candle at index -2 and rejection candle at index -1
+    df.loc[df.index[-2], "low"] = 1999.0
+    df.loc[df.index[-1], "open"] = 2002.0
+    df.loc[df.index[-1], "close"] = 2006.0
+    df.loc[df.index[-1], "high"] = 2008.0
+    df.loc[df.index[-1], "low"] = 2000.5  # Lower wick rejection
+
+    df["volume"] = [25000 for _ in range(n)]
+    df.loc[df.index[-1], "volume"] = 6000  # Dry-up volume on pullback
+
+    alert = detect_trend_day_pullback(
+        symbol="LAURUSLABS",
+        df_5m=df,
+        ltp=2006.0,
+        now_dt=datetime(2026, 10, 26, 12, 15, tzinfo=IST),
+        exchange="NSE",
+        segment="FNO_STOCK",
+    )
+
+    assert alert is not None
+    assert alert.symbol == "LAURUSLABS"
+    assert alert.direction == "BULLISH"
+    assert alert.alert_type == "TREND_DAY_PULLBACK"
+
+    # Invariant: Structural Stop-Loss must be below the pullback pivot floor (2000)
+    assert alert.stop_loss < alert.trigger_level
+    assert alert.stop_loss <= 2000.5
+    # Risk should be structural (~6-8 pts), not bloated
+    risk = alert.trigger_level - alert.stop_loss
+    assert 2.0 <= risk <= 12.0
+
+    # Invariant: Asymmetric R:R must be >= 1:3.5 (Target 3 is 6.0R)
+    assert alert.metrics.get("asymmetric_rr", 0.0) >= 3.5
+    assert alert.r_multiple is None
+
+    # Invariant: Alpha Quality Score must be present, quantified, and high
+    aqs = alert.metrics.get("alpha_quality_score", 0.0)
+    assert aqs >= 70.0
+    assert alert.confidence >= 80
+
+
+def test_bearish_single_stock_equity_trend_pullback_symmetry(monkeypatch):
+    """Verify symmetrical bearish single-stock equity pullback captures clean structural ceiling SL and asymmetric R:R."""
+    monkeypatch.setenv("CHANAKYA_TESTING", "1")
+    np.random.seed(42)
+    n = 25
+    timestamps = [
+        datetime(2026, 10, 26, 10, 15, tzinfo=IST) + timedelta(minutes=5 * i) for i in range(n)
+    ]
+    # Downward trending equity: Open 2050 -> 2000 -> shallow bounce to 2015 -> reject to 2010
+    prices = np.linspace(2050, 1995, n - 3).tolist()
+    prices.append(2010.0)
+    prices.append(2015.0)
+    prices.append(2008.0)
+
+    df = pd.DataFrame(index=timestamps)
+    df["close"] = prices
+    df["open"] = [p + 3.0 for p in prices]
+    df["high"] = [p + 4.0 for p in prices]
+    df["low"] = [p - 4.0 for p in prices]
+    # Set the bounce peak at index -2 and rejection candle at index -1
+    df.loc[df.index[-2], "high"] = 2016.0
+    df.loc[df.index[-1], "open"] = 2014.0
+    df.loc[df.index[-1], "close"] = 2008.0
+    df.loc[df.index[-1], "high"] = 2015.5  # Upper wick rejection
+    df.loc[df.index[-1], "low"] = 2006.0
+
+    df["volume"] = [25000 for _ in range(n)]
+    df.loc[df.index[-1], "volume"] = 5500  # Dry-up volume on retracement
+
+    alert = detect_trend_day_pullback(
+        symbol="HINDALCO",
+        df_5m=df,
+        ltp=2008.0,
+        now_dt=datetime(2026, 10, 26, 12, 15, tzinfo=IST),
+        exchange="NSE",
+        segment="FNO_STOCK",
+    )
+
+    assert alert is not None
+    assert alert.symbol == "HINDALCO"
+    assert alert.direction == "BEARISH"
+    assert alert.alert_type == "TREND_DAY_PULLBACK"
+
+    # Invariant: If option contract resolved (PE Buy), option premium targets ascend while underlying spot SL is above spot
+    if alert.contract_symbol:
+        assert alert.stop_loss < alert.trigger_level
+        assert alert.target_level > alert.trigger_level
+        assert alert.structural_spot_sl >= 2015.0
+        assert alert.structural_spot_sl > alert.underlying_spot
+    else:
+        assert alert.stop_loss > alert.trigger_level
+        assert alert.target_level < alert.trigger_level
+        assert alert.stop_loss >= 2015.0
+
+    # Invariant: Asymmetric R:R must be >= 1:3.5
+    assert alert.metrics.get("asymmetric_rr", 0.0) >= 3.5
+    assert alert.r_multiple is None
+
+    # Invariant: Alpha Quality Score must be present and quantified
+    aqs = alert.metrics.get("alpha_quality_score", 0.0)
+    assert aqs >= 70.0
+
+
+def test_morning_reversal_zone_and_midday_pullback_runway_exemption():
+    """Verify that Trend Day Pullbacks are exempt from the breakout trap gates in 10:15-11:00 and 11:00-13:15."""
+    import os
+    from engine.session_runway import evaluate_session_runway
+
+    orig_force = os.environ.get("FORCE_RUNWAY_CHECK")
+    os.environ["FORCE_RUNWAY_CHECK"] = "1"
+    try:
+        # 1. 10:30 IST (Morning Reversal Zone): Breakout chase should be vetoed (< 2.2x floor)
+        mrz_dt = datetime(2026, 10, 27, 10, 30, tzinfo=IST)
+        res_breakout_mrz = evaluate_session_runway(
+            symbol="NAUKRI",
+            alert_type="MOMENTUM_BREAKOUT",
+            time_horizon="INTRADAY",
+            segment="FNO_STOCK",
+            rvol=1.30,
+            now_dt=mrz_dt,
+        )
+        assert res_breakout_mrz.is_allowed is False
+        assert "Morning Reversal Trap" in (res_breakout_mrz.veto_reason or "")
+
+        # 2. 10:30 IST (Morning Reversal Zone): TREND_DAY_PULLBACK must PASS even with dry-up volume (e.g. 0.15x)
+        res_pullback_mrz = evaluate_session_runway(
+            symbol="NAUKRI",
+            alert_type="TREND_DAY_PULLBACK",
+            time_horizon="INTRADAY",
+            segment="FNO_STOCK",
+            rvol=0.15,
+            now_dt=mrz_dt,
+        )
+        assert res_pullback_mrz.is_allowed is True, (
+            f"TREND_DAY_PULLBACK in Morning Reversal Zone unexpectedly vetoed: {res_pullback_mrz.veto_reason}"
+        )
+
+        # 3. 11:48 IST (Midday Compression): SENSEX index pullback must PASS even with 0.20x dry-up volume
+        midday_dt = datetime(2026, 10, 27, 11, 48, tzinfo=IST)
+        res_sensex_midday = evaluate_session_runway(
+            symbol="SENSEX",
+            alert_type="TREND_DAY_PULLBACK",
+            time_horizon="INTRADAY",
+            segment="FNO_INDEX",
+            rvol=0.20,
+            now_dt=midday_dt,
+        )
+        assert res_sensex_midday.is_allowed is True, (
+            f"SENSEX index pullback in Midday Compression unexpectedly vetoed: {res_sensex_midday.veto_reason}"
+        )
+    finally:
+        if orig_force is not None:
+            os.environ["FORCE_RUNWAY_CHECK"] = orig_force
+        else:
+            del os.environ["FORCE_RUNWAY_CHECK"]

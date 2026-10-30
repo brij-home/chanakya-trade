@@ -106,6 +106,28 @@ def detect_pre_inflection_dryup(
         elif avg_range_pct <= 1.5:
             score += 8
 
+        # Coiling Choppiness & ROC Accumulation Check
+        chop_val = None
+        roc_val = None
+        try:
+            import pandas as pd
+            from analysis.technical import choppiness_index, roc
+
+            chop_s = choppiness_index(df, 14)
+            if not chop_s.empty and not pd.isna(chop_s.iloc[-1]):
+                chop_val = float(chop_s.iloc[-1])
+                if chop_val >= 58.0:
+                    score += 5  # High compression coiling bonus
+            roc_s = roc(pd.Series(closes), 12)
+            if not roc_s.empty and not pd.isna(roc_s.iloc[-1]):
+                roc_val = float(roc_s.iloc[-1])
+                if -2.0 <= roc_val <= 2.5:
+                    score += 5  # Stationary accumulation base bonus
+        except Exception as e_ind:
+            logger.debug(f"[pre_inflection_dryup] Coiling indicator note for {symbol}: {e_ind}")
+
+        score = min(98, score)
+
         # 5. Anti-FOMO Execution Ticket Generation
         pivot_high = round(float(np.max(highs[-15:])), 2)
         accum_low = round(fair_value * 0.985, 2)
@@ -175,6 +197,8 @@ def detect_pre_inflection_dryup(
                 "pivot_high": pivot_high,
                 "no_chase_limit": no_chase_limit,
                 "no_chase_boundary": no_chase_limit,
+                "chop_index": round(chop_val, 1) if chop_val else None,
+                "roc_12": round(roc_val, 2) if roc_val else None,
             },
             actionable_plan=actionable_plan,
             confidence=score,

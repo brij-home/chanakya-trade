@@ -27,6 +27,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from typing import Any, Literal, Optional
 
+from market.instruments import format_strike
+
 logger = logging.getLogger("analysis.event_volatility")
 from config.constants import IST_ZONE as IST
 from market.earnings import _AVG_EARNINGS_MOVE, _NIFTY50_EARNINGS_MONTHS, get_pre_earnings_iv
@@ -121,8 +123,10 @@ def evaluate_event_volatility_strategy(
     )
     avg_move = float(iv_data.get("avg_earnings_move") or _AVG_EARNINGS_MOVE.get(clean_sym, 3.5))
 
-    # Standard strike step: approximate ~1% of spot for equities
-    strike_step = max(5.0, round((spot * 0.01) / 5.0) * 5.0)
+    # Authoritative strike step from SSOT
+    from market.symbol_master import get_strike_step
+
+    strike_step = get_strike_step(clean_sym, spot=spot)
     atm_strike = round(spot / strike_step) * strike_step
 
     legs: list[OptionLeg] = []
@@ -133,19 +137,19 @@ def evaluate_event_volatility_strategy(
         vol_regime = "OVERPRICED_IV"
         if is_bullish:
             strategy = "BULL_CALL_SPREAD"
-            preferred_veh = f"{clean_sym} {int(atm_strike)} CE / {int(atm_strike + strike_step)} CE Bull Call Spread"
+            preferred_veh = f"{clean_sym} {format_strike(atm_strike)} CE / {format_strike(atm_strike + strike_step)} CE Bull Call Spread"
             legs = [
                 OptionLeg(
                     action="BUY",
                     option_type="CE",
                     strike=atm_strike,
-                    description=f"Long ATM {int(atm_strike)} CE",
+                    description=f"Long ATM {format_strike(atm_strike)} CE",
                 ),
                 OptionLeg(
                     action="SELL",
                     option_type="CE",
                     strike=atm_strike + strike_step,
-                    description=f"Short OTM {int(atm_strike + strike_step)} CE (Harvester)",
+                    description=f"Short OTM {format_strike(atm_strike + strike_step)} CE (Harvester)",
                 ),
             ]
             max_risk = round(strike_step * 0.38, 2)
@@ -154,23 +158,23 @@ def evaluate_event_volatility_strategy(
             rationale = (
                 f"⚡ IV CRUSH HARVESTER: {clean_sym} IV Rank is elevated at {iv_rank:.1f}%. "
                 f"Naked calls are vulnerable to volatility collapse; deploying Bull Call Spread. "
-                f"Short {int(atm_strike + strike_step)} CE captures IV crush as pure profit."
+                f"Short {format_strike(atm_strike + strike_step)} CE captures IV crush as pure profit."
             )
         else:
             strategy = "BEAR_PUT_SPREAD"
-            preferred_veh = f"{clean_sym} {int(atm_strike)} PE / {int(atm_strike - strike_step)} PE Bear Put Spread"
+            preferred_veh = f"{clean_sym} {format_strike(atm_strike)} PE / {format_strike(atm_strike - strike_step)} PE Bear Put Spread"
             legs = [
                 OptionLeg(
                     action="BUY",
                     option_type="PE",
                     strike=atm_strike,
-                    description=f"Long ATM {int(atm_strike)} PE",
+                    description=f"Long ATM {format_strike(atm_strike)} PE",
                 ),
                 OptionLeg(
                     action="SELL",
                     option_type="PE",
                     strike=atm_strike - strike_step,
-                    description=f"Short OTM {int(atm_strike - strike_step)} PE (Harvester)",
+                    description=f"Short OTM {format_strike(atm_strike - strike_step)} PE (Harvester)",
                 ),
             ]
             max_risk = round(strike_step * 0.38, 2)
@@ -178,7 +182,7 @@ def evaluate_event_volatility_strategy(
             rr = round(max_reward / max_risk, 2) if max_risk > 0 else 2.5
             rationale = (
                 f"⚡ IV CRUSH HARVESTER: {clean_sym} IV Rank is elevated at {iv_rank:.1f}%. "
-                f"Deploying Bear Put Spread to cap tail risk; short {int(atm_strike - strike_step)} PE "
+                f"Deploying Bear Put Spread to cap tail risk; short {format_strike(atm_strike - strike_step)} PE "
                 f"monetizes post-earnings volatility collapse."
             )
 
@@ -186,19 +190,19 @@ def evaluate_event_volatility_strategy(
     elif iv_rank < 40.0:
         vol_regime = "UNDERPRICED_IV"
         strategy = "LONG_STRADDLE"
-        preferred_veh = f"{clean_sym} {int(atm_strike)} ATM Long Straddle (CE + PE)"
+        preferred_veh = f"{clean_sym} {format_strike(atm_strike)} ATM Long Straddle (CE + PE)"
         legs = [
             OptionLeg(
                 action="BUY",
                 option_type="CE",
                 strike=atm_strike,
-                description=f"Long ATM {int(atm_strike)} CE",
+                description=f"Long ATM {format_strike(atm_strike)} CE",
             ),
             OptionLeg(
                 action="BUY",
                 option_type="PE",
                 strike=atm_strike,
-                description=f"Long ATM {int(atm_strike)} PE",
+                description=f"Long ATM {format_strike(atm_strike)} PE",
             ),
         ]
         max_risk = round(strike_step * 0.70, 2)
@@ -216,19 +220,19 @@ def evaluate_event_volatility_strategy(
         strategy = "BULL_CALL_SPREAD" if is_bullish else "BEAR_PUT_SPREAD"
         otm_strike = atm_strike + strike_step if is_bullish else atm_strike - strike_step
         opt_t = "CE" if is_bullish else "PE"
-        preferred_veh = f"{clean_sym} {int(atm_strike)}/{int(otm_strike)} {opt_t} Vertical Spread"
+        preferred_veh = f"{clean_sym} {format_strike(atm_strike)}/{format_strike(otm_strike)} {opt_t} Vertical Spread"
         legs = [
             OptionLeg(
                 action="BUY",
                 option_type=opt_t,
                 strike=atm_strike,
-                description=f"Long {int(atm_strike)} {opt_t}",
+                description=f"Long {format_strike(atm_strike)} {opt_t}",
             ),
             OptionLeg(
                 action="SELL",
                 option_type=opt_t,
                 strike=otm_strike,
-                description=f"Short {int(otm_strike)} {opt_t}",
+                description=f"Short {format_strike(otm_strike)} {opt_t}",
             ),
         ]
         max_risk = round(strike_step * 0.40, 2)

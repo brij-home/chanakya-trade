@@ -38,6 +38,9 @@ def detect_pairs_arbitrage(
     if ctx.segment not in ("EQUITY", "FNO_STOCK"):
         return None
 
+    if not ctx.ltp or ctx.ltp <= 0:
+        return None
+
     symbol = canonical_alert_symbol(ctx.canonical_symbol)
 
     analysis: Optional[PairAnalysis] = pair_override

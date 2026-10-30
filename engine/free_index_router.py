@@ -161,21 +161,8 @@ class FreeIndexRouter:
                 )
                 return False
 
-            # Intraday Stop Loss Sanity Ceilings (Max allowed risk points)
-            max_opt_sl_pts = {
-                "NIFTY": 35.0,
-                "BANKNIFTY": 75.0,
-                "MIDCPNIFTY": 20.0,
-                "SENSEX": 110.0,
-            }.get(clean_sym, 40.0)
-
-            max_spot_sl_pts = {
-                "NIFTY": 55.0,
-                "BANKNIFTY": 140.0,
-                "MIDCPNIFTY": 35.0,
-                "SENSEX": 200.0,
-            }.get(clean_sym, 60.0)
-
+            # ── Coordinate Sanctity: Evaluate Stop Loss in Matching Coordinate Frame ──
+            # (Quality Gate Invariant: Never mix spot prices with option premiums!)
             plan = getattr(alert, "actionable_plan", {}) or {}
             opt_p = plan.get("option_plan") or {}
             is_opt = bool(
@@ -194,64 +181,74 @@ class FreeIndexRouter:
                 or "-pe-" in getattr(alert, "alert_id", "").lower()
             )
 
-            # 1. Option Stop Loss distance check
-            prem_e = (
-                opt_p.get("entry_premium")
-                or getattr(alert, "option_premium", None)
-                or (getattr(alert, "trigger_level", None) if is_opt else None)
-            )
-            prem_sl = (
-                opt_p.get("sl_premium")
-                or opt_p.get("stop_loss")
-                or getattr(alert, "option_stop_loss", None)
-                or getattr(alert, "tactical_sl", None)
-                or (getattr(alert, "stop_loss", None) if is_opt else None)
-            )
-            if is_opt and prem_e is not None and prem_sl is not None:
-                try:
-                    p_e = float(str(prem_e).replace("₹", "").replace(",", "").strip())
-                    p_sl = float(str(prem_sl).replace("₹", "").replace(",", "").strip())
-                    if p_e > 0 and p_sl > 0:
-                        opt_risk = abs(p_e - p_sl)
-                        if opt_risk > max_opt_sl_pts:
-                            logger.warning(
-                                f"[FreeIndexRouter] Suppressed {getattr(alert, 'alert_id', '')} for {symbol}: "
-                                f"Option SL distance ({opt_risk:.1f} pts) exceeds intraday ceiling ({max_opt_sl_pts:.1f} pts)"
-                            )
-                            return False
-                except (ValueError, TypeError) as e_suppressed:
-                    logger.debug(
-                        f"[engine.free_index_router] Non-fatal exception suppressed: {e_suppressed}"
-                    )
+            # Option Stop Loss Sanity Ceilings (Max allowed premium risk points for intraday scalps)
+            max_opt_sl_pts = {
+                "NIFTY": 35.0,
+                "BANKNIFTY": 75.0,
+                "MIDCPNIFTY": 25.0,
+                "SENSEX": 120.0,
+            }.get(clean_sym, 40.0)
 
-            # 2. Spot Stop Loss distance check
-            spot_p = float(
-                getattr(alert, "underlying_spot", 0.0) or getattr(alert, "ltp", 0.0) or 0.0
-            )
-            spot_sl_val = (
-                plan.get("spot_stop_loss")
-                or plan.get("underlying_sl")
-                or getattr(alert, "structural_spot_sl", None)
-                or getattr(alert, "underlying_sl", None)
-                or getattr(alert, "spot_invalidation_anchor", None)
-                or (getattr(alert, "metrics", {}) or {}).get("spot_invalidation_anchor")
-                or (getattr(alert, "stop_loss", None) if not is_opt else None)
-            )
-            if spot_p > 0 and spot_sl_val is not None:
-                try:
-                    s_sl = float(str(spot_sl_val).replace("₹", "").replace(",", "").strip())
-                    if s_sl > 0:
-                        spot_risk = abs(spot_p - s_sl)
-                        if spot_risk > max_spot_sl_pts:
-                            logger.warning(
-                                f"[FreeIndexRouter] Suppressed {getattr(alert, 'alert_id', '')} for {symbol}: "
-                                f"Spot SL distance ({spot_risk:.1f} pts) exceeds intraday ceiling ({max_spot_sl_pts:.1f} pts)"
-                            )
-                            return False
-                except (ValueError, TypeError) as e_suppressed:
-                    logger.debug(
-                        f"[engine.free_index_router] Non-fatal exception suppressed: {e_suppressed}"
-                    )
+            if is_opt:
+                # 1. Option coordinate frame: validate derivative premium risk
+                prem_e = (
+                    opt_p.get("entry_premium")
+                    or getattr(alert, "option_premium", None)
+                    or (getattr(alert, "trigger_level", None) if is_opt else None)
+                )
+                prem_sl = (
+                    opt_p.get("sl_premium")
+                    or opt_p.get("stop_loss")
+                    or getattr(alert, "option_stop_loss", None)
+                    or getattr(alert, "tactical_sl", None)
+                    or (getattr(alert, "stop_loss", None) if is_opt else None)
+                )
+                if prem_e is not None and prem_sl is not None:
+                    try:
+                        p_e = float(str(prem_e).replace("₹", "").replace(",", "").strip())
+                        p_sl = float(str(prem_sl).replace("₹", "").replace(",", "").strip())
+                        if p_e > 0 and p_sl > 0:
+                            opt_risk = abs(p_e - p_sl)
+                            if opt_risk > max_opt_sl_pts:
+                                logger.warning(
+                                    f"[FreeIndexRouter] Suppressed {getattr(alert, 'alert_id', '')} for {symbol}: "
+                                    f"Option SL distance ({opt_risk:.1f} pts) exceeds intraday ceiling ({max_opt_sl_pts:.1f} pts)"
+                                )
+                                return False
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.free_index_router] Non-fatal exception suppressed: {e_suppressed}"
+                        )
+            else:
+                # 2. Spot coordinate frame: validate underlying spot/futures risk dynamically (<= 0.60% of spot)
+                spot_p = float(
+                    getattr(alert, "underlying_spot", 0.0) or getattr(alert, "ltp", 0.0) or 0.0
+                )
+                spot_sl_val = (
+                    plan.get("spot_stop_loss")
+                    or plan.get("underlying_sl")
+                    or getattr(alert, "structural_spot_sl", None)
+                    or getattr(alert, "underlying_sl", None)
+                    or getattr(alert, "spot_invalidation_anchor", None)
+                    or (getattr(alert, "metrics", {}) or {}).get("spot_invalidation_anchor")
+                    or getattr(alert, "stop_loss", None)
+                )
+                if spot_p > 0 and spot_sl_val is not None:
+                    try:
+                        s_sl = float(str(spot_sl_val).replace("₹", "").replace(",", "").strip())
+                        if s_sl > 0:
+                            spot_risk = abs(spot_p - s_sl)
+                            spot_risk_pct = (spot_risk / spot_p) * 100.0
+                            if spot_risk_pct > 0.60:
+                                logger.warning(
+                                    f"[FreeIndexRouter] Suppressed {getattr(alert, 'alert_id', '')} for {symbol}: "
+                                    f"Spot SL distance ({spot_risk:.1f} pts / {spot_risk_pct:.2f}%) exceeds intraday 0.60% ceiling"
+                                )
+                                return False
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.free_index_router] Non-fatal exception suppressed: {e_suppressed}"
+                        )
 
             return True
         except Exception as e:

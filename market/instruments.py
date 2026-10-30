@@ -11,8 +11,9 @@ Provides:
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
-from datetime import datetime, time as dtime, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from functools import lru_cache
 from typing import Any, Literal, Optional
 
@@ -72,6 +73,8 @@ STANDARD_LOT_SIZES: dict[str, int] = {
     "360ONE": 500,
     "ABB": 125,
     "ABCAPITAL": 3100,
+    "ABREL": 450,
+    "CENTURYTEX": 450,
     "ADANIENSOL": 675,
     "ADANIENT": 309,
     "ADANIGREEN": 600,
@@ -158,6 +161,7 @@ STANDARD_LOT_SIZES: dict[str, int] = {
     "ICICIBANK": 700,
     "ICICIGI": 325,
     "ICICIPRULI": 925,
+    "ICICILIFE": 925,
     "IDEA": 71475,
     "IDFCFIRSTB": 9275,
     "IEX": 4350,
@@ -285,6 +289,497 @@ STANDARD_LOT_SIZES: dict[str, int] = {
     "ZYDUSLIFE": 900,
 }
 
+# Canonical Corporate Restructuring, Demerger, and Renaming Aliases (October 2026 Master)
+CORPORATE_ALIASES: dict[str, str] = {
+    "TATAMOTORS": "TMPV",  # Demerged into TMPV (PV) & TMCV (CV)
+    "ZOMATO": "ETERNAL",  # Rebranded to Eternal Ltd
+    "CENTURYTEX": "ABREL",  # Aditya Birla Real Estate
+    "UNOINDA": "UNOMINDA",  # Uno Minda Ltd
+    "REC": "RECLTD",  # REC Ltd
+    "CEINFO": "MAPMYINDIA",  # C.E. Info Systems (MapMyIndia)
+    "ASTRA": "ASTRAMICRO",  # Astra Microwave Products
+    "SWANENERGY": "SWANCORP",  # Swan Energy / Swan Corp
+    "CAPLIPHARM": "CAPLIPOINT",  # Caplin Point Laboratories
+    "RPGPHILIFE": "RPGLIFE",  # RPG Life Sciences
+    "METRO": "METROBRAND",  # Metro Brands
+    "HITACHI": "POWERINDIA",  # Hitachi Energy India (Power India)
+    "KALPATPOWR": "KPIL",  # Kalpataru Projects International
+    "KBL": "KIRLOSBROS",  # Kirloskar Brothers Ltd
+    "GSHIP": "GESHIP",  # Great Eastern Shipping
+    "JUPITERWAG": "JWL",  # Jupiter Wagons Ltd
+    "L&TFH": "LTF",  # L&T Finance Ltd (formerly L&T Finance Holdings)
+    "LTFH": "LTF",
+    "IBULHSGFIN": "SAMMAANCAP",  # Sammaan Capital (formerly Indiabulls Housing Finance)
+    "MOTHERSUMI": "MOTHERSON",  # Samvardhana Motherson International
+    "CADILAHC": "ZYDUSLIFE",  # Zydus Lifesciences
+    "LTI": "LTIM",  # LTIMindtree
+    "MINDTREE": "LTIM",
+    "LTM": "LTIM",
+    "PVR": "PVRINOX",  # PVR INOX Ltd
+    "INOXLEISUR": "PVRINOX",
+    "SRTRANSFIN": "SHRIRAMFIN",  # Shriram Finance (merged with Shriram Transport)
+    "WELSPUNIND": "WELSPUNLIV",  # Welspun Living
+    "IDFC": "IDFCFIRSTB",  # Merged into IDFC First Bank
+    "HDFC": "HDFCBANK",  # Merged into HDFC Bank
+    "ADANITRANS": "ADANIENSOL",  # Adani Transmission renamed to Adani Energy Solutions
+    "MCDOWELL-N": "UNITDSPR",  # United Spirits (McDowell)
+    "L&T": "LT",  # Larsen & Toubro
+    "NAMINDIA": "NAM-INDIA",  # Nippon Life India Asset Management
+    "BAJAJAUTO": "BAJAJ-AUTO",  # Bajaj Auto
+    "BAJAJ_AUTO": "BAJAJ-AUTO",
+    "TATASTEELBSL": "TATASTEEL",  # Tata Steel BSL merged into Tata Steel
+    "NSLNISP": "NMDCSTEEL",  # NMDC Steel
+    "NMDCSTEEL": "NSLNISP",  # NMDC Steel listed on NSE/Fyers as NSLNISP
+    "ICICIPRULI": "ICICILIFE",  # ICICI Prudential Life Insurance -> ICICILIFE on Fyers / derivatives
+    "HEG": "HEGAM",  # HEG Ltd demerger into HEGAM
+    "SILLYMONKS": "CRESTO",  # Silly Monks Entertainment renamed to Cresto
+}
+
+# Known Active NSE Trade-for-Trade (BE Series) Stocks in Top Benchmarks (Advisory fallback; prefer market.symbol_master)
+BE_SERIES_STOCKS: frozenset[str] = frozenset(
+    {
+        "DIACABS",
+        "HFCL",
+        "LOTUSDEV",
+        "RAMASTEEL",
+        "STLTECH",
+    }
+)
+
+_KNOWN_VENUE_PREFIXES: tuple[str, ...] = (
+    "NSE:",
+    "BSE:",
+    "MCX:",
+    "NFO:",
+    "BFO:",
+    "CDS:",
+    "CRYPTO:",
+    "BINANCE:",
+    "DERIBIT:",
+    "FX:",
+    "FOREX:",
+)
+
+
+@lru_cache(maxsize=4096)
+def resolve_corporate_alias(symbol: str) -> str:
+    """Resolve symbol through canonical corporate action / renaming alias master.
+
+    Handles:
+      - Bare symbols: 'ZOMATO' -> 'ETERNAL', 'ICICIPRULI' -> 'ICICILIFE'
+      - Qualified symbols: 'NSE:ZOMATO-EQ' -> 'NSE:ETERNAL-EQ'
+      - Suffix-only symbols: 'ZOMATO-EQ' -> 'ETERNAL-EQ'
+      - Prefix-only symbols: 'NSE:ZOMATO' -> 'NSE:ETERNAL'
+    """
+    clean = (symbol or "").strip().upper()
+    if not clean:
+        return ""
+    if clean in CORPORATE_ALIASES:
+        return CORPORATE_ALIASES[clean]
+
+    prefix = ""
+    for pfx in _KNOWN_VENUE_PREFIXES:
+        if clean.startswith(pfx):
+            prefix = pfx
+            clean = clean[len(pfx) :]
+            break
+
+    suffix = ""
+    for sfx in ("-EQ", "-BE", "-SM", "-BZ", "-GB", "-INDEX"):
+        if clean.endswith(sfx):
+            suffix = sfx
+            clean = clean[: -len(sfx)]
+            break
+
+    resolved = CORPORATE_ALIASES.get(clean, clean)
+    return f"{prefix}{resolved}{suffix}"
+
+
+_INDEX_CANONICAL_MAP: dict[str, str] = {
+    "NIFTY 50": "NIFTY",
+    "NIFTY50": "NIFTY",
+    "CNX NIFTY": "NIFTY",
+    "BANK NIFTY": "BANKNIFTY",
+    "BANKNIFTY": "BANKNIFTY",
+    "NIFTY BANK": "BANKNIFTY",
+    "NIFTYBANK": "BANKNIFTY",
+    "FIN NIFTY": "FINNIFTY",
+    "FINNIFTY": "FINNIFTY",
+    "NIFTY FINANCIAL SERVICES": "FINNIFTY",
+    "MIDCAP NIFTY": "MIDCPNIFTY",
+    "MIDCP NIFTY": "MIDCPNIFTY",
+    "MIDCPNIFTY": "MIDCPNIFTY",
+    "NIFTY MID SELECT": "MIDCPNIFTY",
+    "NIFTY IT": "NIFTYIT",
+    "NIFTYIT": "NIFTYIT",
+    "CNXIT": "NIFTYIT",
+    "INDIA VIX": "INDIAVIX",
+    "INDIAVIX": "INDIAVIX",
+    "BSE SENSEX": "SENSEX",
+    "BSE BANKEX": "BANKEX",
+}
+
+
+@lru_cache(maxsize=4096)
+def canonical_symbol(raw_symbol: str) -> str:
+    """
+    Universal Institutional Symbol Normalizer (SSOT).
+    Normalizes any asset symbol into its canonical clean uppercase identifier:
+      1. Strips broker/exchange prefixes (NSE:, BSE:, MCX:, NFO:, BFO:, CDS:, CRYPTO:, BINANCE:, DERIBIT:).
+      2. Strips data vendor suffixes (.NS, .BO).
+      3. Strips broker series suffixes (-EQ, -BE, -INDEX, -SM, -BZ, -GB, -A, -B).
+      4. Strips index markers (^).
+      5. Resolves corporate actions via CORPORATE_ALIASES (e.g. TATAMOTORS -> TMPV, ZOMATO -> ETERNAL).
+      6. Maps standard index aliases to canonical identifiers (e.g. NIFTY 50 -> NIFTY).
+    """
+    if not raw_symbol:
+        return ""
+    s = str(raw_symbol).strip().upper()
+    for pfx in _KNOWN_VENUE_PREFIXES:
+        if s.startswith(pfx):
+            s = s[len(pfx) :]
+            break
+    if s.endswith(".NS"):
+        s = s[:-3]
+    elif s.endswith(".BO"):
+        s = s[:-3]
+    for sfx in ("-INDEX", "-EQ", "-BE", "-SM", "-BZ", "-GB", "-A", "-B"):
+        if s.endswith(sfx):
+            s = s[: -len(sfx)]
+            break
+    if s.startswith("^"):
+        s = s[1:]
+    s = s.strip()
+    s = resolve_corporate_alias(s)
+    return _INDEX_CANONICAL_MAP.get(s, s)
+
+
+WEEKLY_MONTH_CODES: dict[str, int] = {
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
+    "6": 6,
+    "7": 7,
+    "8": 8,
+    "9": 9,
+    "O": 10,
+    "N": 11,
+    "D": 12,
+}
+
+MONTH_NAME_TO_INT: dict[str, int] = {
+    "JAN": 1,
+    "FEB": 2,
+    "MAR": 3,
+    "APR": 4,
+    "MAY": 5,
+    "JUN": 6,
+    "JUL": 7,
+    "AUG": 8,
+    "SEP": 9,
+    "OCT": 10,
+    "NOV": 11,
+    "DEC": 12,
+}
+
+_ISO_OPT_RE = re.compile(
+    r"^([A-Za-z0-9_&]+?)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(\d+(?:\.\d+)?)(CE|PE)$"
+)
+_WEEKLY_OPT_RE = re.compile(
+    r"^([A-Za-z0-9_&]+?)(\d{2})([1-9ONDond])(0[1-9]|[12]\d|3[01])(\d+(?:\.\d+)?)(CE|PE)$"
+)
+_MONTHLY_OPT_RE = re.compile(r"^([A-Za-z0-9_&]+?)(\d{2})([A-Za-z]{3})(\d+(?:\.\d+)?)(CE|PE)$")
+_FUT_RE = re.compile(r"^([A-Za-z0-9_&]+?)(\d{2})([A-Za-z]{3})FUT$")
+_SPACED_OPT_RE = re.compile(
+    r"^([A-Za-z0-9_&]+)\s+(?:(\d{1,2}[A-Za-z]{3}|\d{2}[A-Za-z]{3})\s+)?(\d+(?:\.\d+)?)\s*(CE|PE|FUT)$"
+)
+
+
+@dataclass(frozen=True)
+class ParsedDerivativeContract:
+    raw_symbol: str
+    exchange: str
+    underlying: str
+    contract_type: str  # "CE" | "PE" | "FUT"
+    strike: Optional[float]
+    expiry_date: Optional[date]
+    expiry_tag: str
+    is_option: bool
+    is_future: bool
+    is_weekly: bool
+    lot_size: int
+    tick_size: float
+    strike_step: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "raw_symbol": self.raw_symbol,
+            "exchange": self.exchange,
+            "underlying": self.underlying,
+            "contract_type": self.contract_type,
+            "strike": self.strike,
+            "expiry_date": self.expiry_date.isoformat() if self.expiry_date else None,
+            "expiry_tag": self.expiry_tag,
+            "is_option": self.is_option,
+            "is_future": self.is_future,
+            "is_weekly": self.is_weekly,
+            "lot_size": self.lot_size,
+            "tick_size": self.tick_size,
+            "strike_step": self.strike_step,
+        }
+
+
+def _calc_monthly_expiry_date(exch: str, underlying: str, yr: int, mo: int) -> date:
+    """Calculate the precise monthly expiry date for NSE, BSE, MCX, or CDS with calendar adjustment."""
+    from calendar import monthrange
+
+    _, num_days = monthrange(yr, mo)
+    exch_up = (exch or "NSE").upper()
+    und_up = underlying.upper()
+    if exch_up == "BSE" or und_up in ("SENSEX", "BANKEX"):
+        d = date(yr, mo, num_days)
+        while d.weekday() != 4:  # Last Friday
+            d -= timedelta(days=1)
+    elif exch_up == "MCX" or und_up in COMMODITY_SYMBOLS:
+        if "CRUDE" in und_up:
+            exp_day = min(19, num_days)
+            d = date(yr, mo, exp_day)
+        else:
+            d = date(yr, mo, num_days)
+    else:
+        d = date(yr, mo, num_days)
+        while d.weekday() != 3:  # Last Thursday
+            d -= timedelta(days=1)
+    try:
+        from market.calendar import get_adjusted_expiry_date
+
+        venue = (
+            "BSE"
+            if (exch_up == "BSE" or und_up in ("SENSEX", "BANKEX"))
+            else ("MCX" if (exch_up == "MCX" or und_up in COMMODITY_SYMBOLS) else "NFO")
+        )
+        return get_adjusted_expiry_date(d, venue)
+    except Exception:
+        return d
+
+
+@lru_cache(maxsize=4096)
+def parse_derivative_contract(symbol: str) -> Optional[ParsedDerivativeContract]:
+    """
+    Authoritative Derivative Contract Parser (SSOT).
+    Parses any Indian equity, index, commodity, or currency derivative symbol (NSE, BSE, MCX, CDS).
+    """
+    if not symbol or not isinstance(symbol, str):
+        return None
+    s = symbol.strip()
+    exch = "NSE"
+    if ":" in s:
+        parts = s.split(":", 1)
+        exch = parts[0].upper().strip()
+        clean = parts[1].strip()
+    else:
+        clean = s
+
+    # 1. Broker YYYYMMDD Option (e.g. HAL202609294800PE, ASHOKLEY20261126142.5PE)
+    m_iso = _ISO_OPT_RE.match(clean)
+    if m_iso:
+        und_raw, yyyy, mm, dd, stk_str, opt_type = m_iso.groups()
+        und = canonical_symbol(und_raw)
+        stk = float(stk_str)
+        try:
+            exp_d = date(int(yyyy), int(mm), int(dd))
+        except ValueError:
+            exp_d = None
+        exp_tag = f"{yyyy[2:]}{mm}{dd}"
+        lot = get_fno_lot_size(und)
+        tick = STANDARD_TICK_SIZES.get("FNO", 0.05)
+        from market.symbol_master import get_strike_step
+
+        step = get_strike_step(und, spot=stk)
+        return ParsedDerivativeContract(
+            raw_symbol=symbol,
+            exchange=exch,
+            underlying=und,
+            contract_type=opt_type.upper(),
+            strike=stk,
+            expiry_date=exp_d,
+            expiry_tag=exp_tag,
+            is_option=True,
+            is_future=False,
+            is_weekly=False,
+            lot_size=lot,
+            tick_size=tick,
+            strike_step=step,
+        )
+
+    # 2. Weekly Option (e.g. NIFTY26O1922900CE or SENSEX26O0872000PE)
+    m_w = _WEEKLY_OPT_RE.match(clean)
+    if m_w:
+        und_raw, yy, mo_code, dd, stk_str, opt_type = m_w.groups()
+        und = canonical_symbol(und_raw)
+        yr = 2000 + int(yy)
+        mo = WEEKLY_MONTH_CODES.get(mo_code.upper(), 1)
+        stk = float(stk_str)
+        try:
+            exp_d = date(yr, mo, int(dd))
+        except ValueError:
+            exp_d = None
+        exp_tag = f"{yy}{mo_code}{dd}"
+        lot = get_fno_lot_size(und)
+        tick = STANDARD_TICK_SIZES.get("FNO", 0.05)
+        from market.symbol_master import get_strike_step
+
+        step = get_strike_step(und, spot=stk)
+        return ParsedDerivativeContract(
+            raw_symbol=symbol,
+            exchange=exch,
+            underlying=und,
+            contract_type=opt_type.upper(),
+            strike=stk,
+            expiry_date=exp_d,
+            expiry_tag=exp_tag,
+            is_option=True,
+            is_future=False,
+            is_weekly=True,
+            lot_size=lot,
+            tick_size=tick,
+            strike_step=step,
+        )
+
+    # 2. Monthly Option (e.g. NIFTY26OCT23000CE, CRUDEOIL26NOV6500CE)
+    m_m = _MONTHLY_OPT_RE.match(clean)
+    if m_m:
+        und_raw, yy, mo_str, stk_str, opt_type = m_m.groups()
+        und = canonical_symbol(und_raw)
+        yr = 2000 + int(yy)
+        mo = MONTH_NAME_TO_INT.get(mo_str.upper(), 1)
+        stk = float(stk_str)
+        exp_d = _calc_monthly_expiry_date(exch, und, yr, mo)
+        exp_tag = f"{yy}{mo_str.upper()}"
+        lot = get_fno_lot_size(und)
+        tick = STANDARD_TICK_SIZES.get("FNO", 0.05)
+        from market.symbol_master import get_strike_step
+
+        step = get_strike_step(und, spot=stk)
+        return ParsedDerivativeContract(
+            raw_symbol=symbol,
+            exchange=exch,
+            underlying=und,
+            contract_type=opt_type.upper(),
+            strike=stk,
+            expiry_date=exp_d,
+            expiry_tag=exp_tag,
+            is_option=True,
+            is_future=False,
+            is_weekly=False,
+            lot_size=lot,
+            tick_size=tick,
+            strike_step=step,
+        )
+
+    # 3. Monthly Future (e.g. NIFTY26OCTFUT, GOLD26OCTFUT)
+    m_f = _FUT_RE.match(clean)
+    if m_f:
+        und_raw, yy, mo_str = m_f.groups()
+        und = canonical_symbol(und_raw)
+        yr = 2000 + int(yy)
+        mo = MONTH_NAME_TO_INT.get(mo_str.upper(), 1)
+        exp_d = _calc_monthly_expiry_date(exch, und, yr, mo)
+        exp_tag = f"{yy}{mo_str.upper()}"
+        lot = get_fno_lot_size(und)
+        tick = STANDARD_TICK_SIZES.get("FNO", 0.05)
+        from market.symbol_master import get_strike_step
+
+        step = get_strike_step(und, spot=0.0)
+        return ParsedDerivativeContract(
+            raw_symbol=symbol,
+            exchange=exch,
+            underlying=und,
+            contract_type="FUT",
+            strike=None,
+            expiry_date=exp_d,
+            expiry_tag=exp_tag,
+            is_option=False,
+            is_future=True,
+            is_weekly=False,
+            lot_size=lot,
+            tick_size=tick,
+            strike_step=step,
+        )
+
+    # 4. Spaced format (e.g. "NIFTY 24800 CE", "MIDCPNIFTY 14250 PE")
+    m_s = _SPACED_OPT_RE.match(clean)
+    if m_s:
+        und_raw, exp_raw, stk_str, opt_type = m_s.groups()
+        und = canonical_symbol(und_raw)
+        stk = float(stk_str) if stk_str else None
+        opt_up = opt_type.upper()
+        is_opt = opt_up in ("CE", "PE")
+        lot = get_fno_lot_size(und)
+        tick = STANDARD_TICK_SIZES.get("FNO", 0.05)
+        from market.symbol_master import get_strike_step
+
+        step = get_strike_step(und, spot=stk or 0.0)
+        return ParsedDerivativeContract(
+            raw_symbol=symbol,
+            exchange=exch,
+            underlying=und,
+            contract_type=opt_up,
+            strike=stk,
+            expiry_date=None,
+            expiry_tag=exp_raw or "",
+            is_option=is_opt,
+            is_future=opt_up == "FUT",
+            is_weekly=False,
+            lot_size=lot,
+            tick_size=tick,
+            strike_step=step,
+        )
+
+    return None
+
+
+def is_contract_expired(symbol: str, ref_dt: Optional[datetime] = None) -> bool:
+    """
+    Determine if a derivative contract is expired relative to current IST market time.
+    Equities, benchmark indices, and cash symbols return False (never expire).
+    """
+    parsed = parse_derivative_contract(symbol)
+    if not parsed or not parsed.expiry_date:
+        return False
+    from config.constants import IST_ZONE as IST
+
+    now = ref_dt or datetime.now(IST)
+    if isinstance(now, datetime):
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=IST)
+        else:
+            now = now.astimezone(IST)
+        today = now.date()
+        current_time = now.time()
+    else:
+        today = now
+        current_time = dtime(16, 0)
+
+    if today > parsed.expiry_date:
+        return True
+    if today < parsed.expiry_date:
+        return False
+
+    # Today is expiry date: verify session close cutoff
+    exch = parsed.exchange
+    if exch == "MCX":
+        close_cutoff = dtime(23, 30)
+    elif exch in ("CDS", "CURRENCY"):
+        close_cutoff = dtime(17, 0)
+    else:
+        close_cutoff = dtime(15, 30)
+
+    return current_time >= close_cutoff
+
+
 # Standard Tick Sizes
 STANDARD_TICK_SIZES: dict[str, float] = {
     "EQUITY": 0.05,
@@ -294,27 +789,14 @@ STANDARD_TICK_SIZES: dict[str, float] = {
     "CURRENCY": 0.0025,
 }
 
-COMMODITY_SYMBOLS = {
-    "GOLD",
-    "GOLDM",
-    "SILVER",
-    "SILVERM",
-    "CRUDEOIL",
-    "NATURALGAS",
-    "COPPER",
-    "ZINC",
-    "ALUMINIUM",
-    "LEAD",
-    "NICKEL",
-    "COTTON",
-    "MCXBULLDEX",
-}
+from config.market_universes import (
+    MCX_COMMODITY_SYMBOLS,
+    CDS_CURRENCY_SYMBOLS,
+)
 
-CURRENCY_SYMBOLS = {
-    "USDINR",
-    "EURINR",
-    "GBPINR",
-    "JPYINR",
+COMMODITY_SYMBOLS = set(MCX_COMMODITY_SYMBOLS) | {"MCXBULLDEX"}
+
+CURRENCY_SYMBOLS = set(CDS_CURRENCY_SYMBOLS) | {
     "EURUSD",
     "GBPUSD",
     "USDJPY",
@@ -428,6 +910,8 @@ def resolve_canonical_instrument(query: str, price: Optional[float] = None) -> C
         clean_sym = parts[1].strip()
         if prefix in ("BSE", "MCX", "CDS", "NSE_IFSC", "NSE"):
             venue = prefix  # type: ignore
+
+    clean_sym = resolve_corporate_alias(clean_sym)
 
     # Detect Indices
     if clean_sym in INDEX_SYMBOLS or clean_sym.startswith("^"):
@@ -695,20 +1179,8 @@ def get_fno_lot_size(symbol: str) -> int:
     Queries the centralized STANDARD_LOT_SIZES exchange master (SSOT).
     Falls back to 1 for equities without F&O contracts.
     """
-    clean = (symbol or "").upper().split(":")[-1].strip()
-    # Normalize index aliases if present
-    alias_map = {
-        "NIFTY 50": "NIFTY",
-        "NIFTY50": "NIFTY",
-        "NSEI": "NIFTY",
-        "CNX NIFTY": "NIFTY",
-        "NIFTY BANK": "BANKNIFTY",
-        "NSEBANK": "BANKNIFTY",
-        "NIFTY FINANCIAL SERVICES": "FINNIFTY",
-        "NIFTY MID SELECT": "MIDCPNIFTY",
-    }
-    canonical = alias_map.get(clean, clean)
-    return STANDARD_LOT_SIZES.get(canonical, STANDARD_LOT_SIZES.get(clean, 1))
+    clean = canonical_symbol(symbol)
+    return STANDARD_LOT_SIZES.get(clean, 1)
 
 
 @lru_cache(maxsize=2048)
@@ -718,16 +1190,7 @@ def is_derivative_eligible(symbol: str) -> bool:
     Queries the centralized STANDARD_LOT_SIZES and COMMODITY_SYMBOLS exchange masters (SSOT).
     Cash-only equities without derivative contracts return False.
     """
-    clean = (
-        (symbol or "")
-        .upper()
-        .replace("MCX:", "")
-        .replace("CDS:", "")
-        .replace("NFO:", "")
-        .replace("NSE:", "")
-        .replace("BSE:", "")
-        .strip()
-    )
+    clean = canonical_symbol(symbol)
     if not clean:
         return False
 
@@ -736,17 +1199,23 @@ def is_derivative_eligible(symbol: str) -> bool:
     if clean in COMMODITY_SYMBOLS or (symbol or "").upper().startswith("MCX:"):
         return True
 
-    alias_map = {
-        "NIFTY 50": "NIFTY",
-        "NIFTY50": "NIFTY",
-        "NSEI": "NIFTY",
-        "^NSEI": "NIFTY",
-        "CNX NIFTY": "NIFTY",
-        "NIFTY BANK": "BANKNIFTY",
-        "NSEBANK": "BANKNIFTY",
-        "^NSEBANK": "BANKNIFTY",
-        "NIFTY FINANCIAL SERVICES": "FINNIFTY",
-        "NIFTY MID SELECT": "MIDCPNIFTY",
-    }
-    canonical = alias_map.get(clean, clean)
-    return canonical in STANDARD_LOT_SIZES or clean in STANDARD_LOT_SIZES
+    return clean in STANDARD_LOT_SIZES
+
+
+def format_strike(strike: float | int | str | None) -> str:
+    """
+    Canonical Institutional Strike Formatter (SSOT).
+    Preserves exact fractional strikes (e.g., 142.5 in ASHOKLEY, 7.5 in IDEA, 83.25 in USDINR)
+    while cleanly stripping decimal points for integer strikes (e.g., 140.0 -> "140", 24500 -> "24500").
+    """
+    if strike is None:
+        return ""
+    if isinstance(strike, str) and not strike.strip():
+        return ""
+    try:
+        val = float(str(strike).replace(",", "").strip())
+        if val == int(val):
+            return str(int(val))
+        return f"{val:.4f}".rstrip("0").rstrip(".")
+    except (ValueError, TypeError):
+        return str(strike).strip()

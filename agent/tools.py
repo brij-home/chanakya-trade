@@ -367,6 +367,51 @@ def build_registry() -> ToolRegistry:
         fn=lambda: get_sector_snapshot(),
     )
 
+    # ── Daily Reference Levels & CPR ───────────────────────────
+    def _get_daily_levels_tool(symbol: str) -> dict[str, Any]:
+        """Fetch daily institutional reference levels: CPR, Camarilla, Classical Pivots, Previous Day H/L/C."""
+        from engine.daily_levels import get_daily_levels
+
+        dl = get_daily_levels(symbol)
+        if not dl:
+            return {"symbol": symbol, "status": "UNAVAILABLE", "error": "Daily levels unavailable"}
+        return {
+            "symbol": dl.canonical_symbol,
+            "session_date": dl.session_date,
+            "spot": dl.spot,
+            "pdh": dl.pdh,
+            "pdl": dl.pdl,
+            "pdc": dl.pdc,
+            "pdo": dl.pdo,
+            "atr_14": dl.atr_14,
+            "cpr": dl.cpr,
+            "camarilla": dl.camarilla,
+            "classic_pivots": dl.classic_pivots,
+            "weekly": dl.weekly,
+            "pre_open": dl.pre_open,
+            "blueprint": dl.blueprint,
+        }
+
+    reg.register(
+        name="get_daily_reference_levels",
+        description=(
+            "Get pre-computed daily institutional reference levels including Central Pivot Range (CPR: Pivot, BC, TC, width %, regime), "
+            "Camarilla Pivots (H3, H4, H5, L3, L4, L5), Classical Pivots, Previous Day High/Low/Close, and actionable execution blueprint for any Indian stock or index."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "NSE/BSE symbol or index name (e.g. 'NIFTY', 'BANKNIFTY', 'RELIANCE', 'TCS').",
+                }
+            },
+            "required": ["symbol"],
+        },
+        fn=_get_daily_levels_tool,
+        is_read_only=True,
+    )
+
     reg.register(
         name="get_options_chain",
         description=(

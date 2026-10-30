@@ -15,6 +15,7 @@ try {
         $portProcs = Get-NetTCPConnection -LocalPort $targetPort -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
         foreach ($p in $portProcs) {
             if ($p -and $p -ne 0 -and $p -ne $currentPid) {
+                & taskkill.exe /PID $p /T /F 2>$null | Out-Null
                 Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
                 Write-Host " [+] Released stuck port $targetPort listener (PID $p)" -ForegroundColor Yellow
             }
@@ -30,7 +31,7 @@ try {
     $zombieProcs = Get-CimInstance Win32_Process -Filter $wqlFilter -ErrorAction SilentlyContinue | 
         Where-Object { 
             $_.ProcessId -ne $currentPid -and 
-            ($_.CommandLine -notmatch "jedi|pylance|language-server|pylsp|debugpy|ms-python|antigravity-ide") -and (
+            ($_.CommandLine -notmatch "jedi|pylance|language-server|pylsp|debugpy|ms-python|antigravity-ide|service\.py|service\.ps1") -and (
                 (($_.Name -match "python|pytest|uvicorn|electron") -and
                  ($_.CommandLine -match "chanakya-trade" -or $_.CommandLine -match "pytest" -or $_.CommandLine -match "uvicorn" -or $_.CommandLine -match "validate_all" -or $_.CommandLine -match "exec\(eval")) -or
                 (($_.Name -match "node|electron") -and ($_.CommandLine -match "electron-vite|macos-app")) -or
@@ -40,12 +41,29 @@ try {
 
     foreach ($proc in $zombieProcs) {
         try {
+            & taskkill.exe /PID $proc.ProcessId /T /F 2>$null | Out-Null
             Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
             Write-Host " [+] Terminated orphaned background process: $($proc.Name) (PID $($proc.ProcessId))" -ForegroundColor Yellow
             $killedCount++
         } catch {
             # Silently ignore protected processes
         }
+    }
+
+    # 2b. Terminate runaway language-server/jedi processes exceeding 300 CPU seconds (locked CPU core)
+    $stuckLsProcs = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ProcessId -ne $currentPid -and
+            ($_.CommandLine -match "jedi|language-server") -and
+            (($_.KernelModeTime + $_.UserModeTime) / 10000000 -gt 300)
+        }
+    foreach ($proc in $stuckLsProcs) {
+        try {
+            & taskkill.exe /PID $proc.ProcessId /T /F 2>$null | Out-Null
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+            Write-Host " [+] Purged runaway language-server process: PID $($proc.ProcessId) (CPU > 300s)" -ForegroundColor Yellow
+            $killedCount++
+        } catch {}
     }
 } catch {
     # Fallback to Get-Process if CIM unavailable

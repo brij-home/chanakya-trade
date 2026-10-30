@@ -94,6 +94,7 @@ class TestHedgedSpreadPlanning:
         assert eval_res.triggered is True
         assert eval_res.warning_type in (
             "THETA_STAGNATION",
+            "THETA_STAGNATION_SCRATCH",
             "0DTE_INTRADAY_DECAY",
             "0DTE_AFTERNOON_THETA_CLIFF",
         )
@@ -191,8 +192,8 @@ class TestSectorConcurrencyAndTelegramCard:
             ltp=1810.0,
             confidence=85,
             metrics={"sector_id": "it"},
-            is_live=True,
-            environment="LIVE",
+            is_live=False,
+            environment="TEST",
         )
         a2 = AutoAlert(
             alert_id="it-act-2",
@@ -209,8 +210,8 @@ class TestSectorConcurrencyAndTelegramCard:
             ltp=4220.0,
             confidence=86,
             metrics={"sector_id": "it"},
-            is_live=True,
-            environment="LIVE",
+            is_live=False,
+            environment="TEST",
         )
         engine._alerts = [a1, a2]
 
@@ -234,7 +235,25 @@ class TestSectorConcurrencyAndTelegramCard:
             is_live=True,
             environment="LIVE",
         )
-        recorded = engine.record_alert(a3)
+        # Restore a1, a2 is_live=True for live sector tracking
+        a1.is_live = True
+        a1.environment = "LIVE"
+        a2.is_live = True
+        a2.environment = "LIVE"
+
+        from unittest.mock import patch
+        from engine.alert_scrutiny import alert_scrutiny_auditor
+        from types import SimpleNamespace
+
+        mock_scrutiny = SimpleNamespace(
+            status="PASSED",
+            score=85,
+            trap_risk_warning=None,
+            rejection_reason=None,
+            to_dict=lambda: {"status": "PASSED", "score": 85},
+        )
+        with patch.object(alert_scrutiny_auditor, "scrutinize_alert", return_value=mock_scrutiny):
+            recorded = engine.record_alert(a3)
         assert recorded is True
         assert a3.metrics.get("sector_cluster_cap_reached") is True
         assert a3.actionable_plan.get("execution_style_mandate") == "HEDGED_SPREAD_MANDATORY"

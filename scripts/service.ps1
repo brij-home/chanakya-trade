@@ -20,7 +20,9 @@ param (
     [string]$ApiHost = "127.0.0.1",
     [int]$ApiPort = 8765,
     [int]$VitePort = 5173,
-    [int]$TimeoutSeconds = 45
+    [int]$TimeoutSeconds = 90,
+    [switch]$Reload,
+    [switch]$Calibrate
 )
 
 $ErrorActionPreference = "Stop"
@@ -80,6 +82,15 @@ function Get-ServiceStatus {
         if ($bPort) {
             $backendLive = $true
             Write-Host " [+] Backend (FastAPI):  RUNNING on http://${ApiHost}:${ApiPort} (PID: $($bPort.OwningProcess))" -ForegroundColor Green
+            try {
+                $prov = Invoke-RestMethod -Uri "http://${ApiHost}:${ApiPort}/api/system/code-provenance" -TimeoutSec 2 -ErrorAction SilentlyContinue
+                if ($prov -and $prov.is_stale_in_memory) {
+                    Write-Host " [!] STALE BYTECODE:     In-memory code lags disk! $($prov.stale_files_count) file(s) modified after boot." -ForegroundColor Yellow
+                    Write-Host "     Action Needed:      Run .\scripts\service.ps1 -Action restart to reload fresh bytecode." -ForegroundColor Yellow
+                } elseif ($prov) {
+                    Write-Host "     Code Provenance:    FRESH (Commit: $($prov.git_commit), Uptime: $($prov.uptime_seconds)s)" -ForegroundColor DarkGray
+                }
+            } catch {}
         } else {
             Write-Host " [-] Backend (FastAPI):  STOPPED (port $ApiPort not listening)" -ForegroundColor DarkGray
         }
@@ -117,6 +128,13 @@ if ($Action -eq "status") {
 # --- Action: start or restart ---
 
 Stop-ChanakyaServices
+
+# 0. Optional 90-day Fyers Historical Model Calibration
+if ($Calibrate) {
+    Write-Host "[*] Executing 90-day institutional Fyers model calibration..." -ForegroundColor Cyan
+    & $PythonExe (Join-Path $ScriptDir "calibrate_fyers_historical_models.py")
+    Write-Host " [+] Model calibration complete." -ForegroundColor Green
+}
 
 # 1. Smart Web static bundle sync: guarantees any UI source changes reflect
 if (-not $NoFrontend -and -not $SkipBuildWeb -and (Test-Path "$FrontendDir\package.json")) {
@@ -168,7 +186,8 @@ $startupInfo = $startupClass.CreateInstance()
 $startupInfo.ShowWindow = 0  # SW_HIDE (0): guarantees zero black console window
 
 $processClass = [wmiclass]"Win32_Process"
-$backendCmd = "cmd.exe /c `"`"$PythonExe`" -m uvicorn web.api:app --host $ApiHost --port $ApiPort > `"$backendOut`" 2> `"$backendErr`"`""
+$reloadFlag = if ($Reload) { "--reload" } else { "" }
+$backendCmd = "cmd.exe /c `"`"$PythonExe`" -m uvicorn web.api:app --host $ApiHost --port $ApiPort $reloadFlag > `"$backendOut`" 2> `"$backendErr`"`""
 $bRes = $processClass.Create($backendCmd, $RootDir, $startupInfo)
 $backendPid = $bRes.ProcessId
 
@@ -195,6 +214,12 @@ if (-not $backendReady) {
 }
 
 Write-Host " [+] FastAPI Sidecar is healthy and listening on http://${ApiHost}:${ApiPort} (PID: $backendPid)" -ForegroundColor Green
+
+# Foreground user protection: set process priority to BelowNormal so Office/Browser/Calls stay 100% fluid
+try {
+    (Get-Process -Id $backendPid).PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+    Write-Host " [+] Process priority calibrated to BelowNormal (Foreground office & browser protected)" -ForegroundColor DarkGray
+} catch {}
 
 # 4. Launch Frontend (if requested)
 $frontendPid = $null

@@ -32,6 +32,7 @@ import time
 from typing import Any, Optional
 
 logger = logging.getLogger("engine.alert_scrutiny")
+from engine.alert_identity import canonical_alert_symbol
 from config.constants import (
     IST,
     MIN_OPTION_PREMIUM_SL_PTS,
@@ -76,6 +77,26 @@ INDEX_MIN_SL_FLOORS: dict[str, float] = {
     "BSE SENSEX": 85.0,
     "BANKEX": 85.0,
 }
+
+
+def get_dynamic_index_min_sl_floor(
+    symbol: str,
+    spot: float = 0.0,
+    atr_14: float = 0.0,
+    vix: Optional[float] = None,
+) -> float:
+    """
+    Computes dynamic minimum stop loss floor for index futures or underlying spot
+    scaled by India VIX and live 5m ATR to eliminate static hardcoding.
+    """
+    clean = canonical_alert_symbol(symbol).upper()
+    base_floor = INDEX_MIN_SL_FLOORS.get(clean, 25.0)
+    vix_val = float(vix) if (vix and float(vix) > 0) else 15.0
+    vix_scalar = max(0.75, min(2.0, (vix_val / 15.0) ** 0.5))
+
+    if atr_14 and atr_14 > 0:
+        return round(max(atr_14 * 0.85 * vix_scalar, base_floor * 0.70 * vix_scalar), 1)
+    return round(base_floor * vix_scalar, 1)
 
 
 @dataclass
@@ -390,21 +411,69 @@ class AlertScrutinyAuditor:
                     flags,
                 )
 
-        if clean_sym in INDEX_MIN_SL_FLOORS and not is_option_premium_levels:
-            idx_floor = INDEX_MIN_SL_FLOORS[clean_sym]
-            if risk_pts < (idx_floor * 0.95):
-                flags["risk_within_bounds"] = False
-                return (
-                    False,
-                    f"Sub-Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < minimum institutional volatility floor ({idx_floor:.1f} pts). Mandate wider structural stop.",
-                    flags,
-                )
-
         metrics = (
             (getattr(alert, "metrics", {}) or {})
             if not isinstance(alert, dict)
             else (alert.get("metrics") or {})
         )
+
+        if clean_sym in INDEX_MIN_SL_FLOORS and not is_option_premium_levels:
+            idx_vix = float(
+                (metrics.get("india_vix") or metrics.get("vix") or 15.0)
+                if isinstance(metrics, dict)
+                else 15.0
+            )
+            idx_atr = float(
+                (metrics.get("atr") or metrics.get("atr_14") or 0.0)
+                if isinstance(metrics, dict)
+                else 0.0
+            )
+            dynamic_idx_floor = get_dynamic_index_min_sl_floor(
+                clean_sym, spot=ltp, atr_14=idx_atr, vix=idx_vix
+            )
+            if risk_pts < (dynamic_idx_floor * 0.95):
+                flags["risk_within_bounds"] = False
+                return (
+                    False,
+                    f"Sub-Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < minimum institutional volatility floor ({dynamic_idx_floor:.1f} pts). Mandate wider structural stop.",
+                    flags,
+                )
+
+        # For index option setups: verify that the structural spot anchor is not pinned inside normal candle noise
+        if is_option_premium_levels and (clean_sym in INDEX_MIN_SL_FLOORS or underlying_idx):
+            spot_anchor = float(
+                getattr(alert, "structural_spot_sl", 0.0)
+                or (metrics.get("spot_invalidation_anchor") if isinstance(metrics, dict) else 0.0)
+                or 0.0
+            )
+            und_spot = float(
+                getattr(alert, "underlying_spot", 0.0)
+                or (metrics.get("spot") if isinstance(metrics, dict) else 0.0)
+                or 0.0
+            )
+            if spot_anchor > 0 and und_spot > 0:
+                spot_risk = abs(und_spot - spot_anchor)
+                target_sym = clean_sym if clean_sym in INDEX_MIN_SL_FLOORS else underlying_idx
+                idx_vix = float(
+                    (metrics.get("india_vix") or metrics.get("vix") or 15.0)
+                    if isinstance(metrics, dict)
+                    else 15.0
+                )
+                idx_atr = float(
+                    (metrics.get("atr") or metrics.get("atr_14") or 0.0)
+                    if isinstance(metrics, dict)
+                    else 0.0
+                )
+                dynamic_spot_floor = get_dynamic_index_min_sl_floor(
+                    target_sym or "NIFTY", spot=und_spot, atr_14=idx_atr, vix=idx_vix
+                )
+                if spot_risk < (dynamic_spot_floor * 0.70):
+                    flags["risk_within_bounds"] = False
+                    return (
+                        False,
+                        f"Sub-Noise Spot Trap: {target_sym} structural spot SL distance ({spot_risk:.1f} pts) < minimum dynamic volatility floor ({dynamic_spot_floor:.1f} pts). Stop is inside candle noise.",
+                        flags,
+                    )
         if (
             not is_option_premium_levels
             and clean_sym not in COMMODITY_MIN_SL_FLOORS
@@ -642,6 +711,146 @@ class AlertScrutinyAuditor:
 
         flags["risk_within_bounds"] = True
 
+        # 3d-2. Institutional CVD & Order Book Absorption Trap Shield
+        # Eliminates bull traps into passive institutional distribution and bear traps into passive accumulation
+        metrics_d = getattr(alert, "metrics", {}) or {}
+        if isinstance(metrics_d, dict):
+            cvd_bias = str(
+                metrics_d.get("cvd_bias") or metrics_d.get("cvd_divergence") or ""
+            ).upper()
+            depth_ratio = float(
+                metrics_d.get("depth_imbalance")
+                or metrics_d.get("order_book_depth_imbalance")
+                or 1.0
+            )
+            depth_skew = str(metrics_d.get("depth_skew") or "").upper()
+
+            is_breakout_type = any(
+                kw in atype
+                for kw in ("BREAKOUT", "ORB", "SPARK", "IGNITION", "EXPANSION", "MOMENTUM")
+            )
+
+            if is_breakout_type:
+                # Bull Trap: Price breaking out up, but CVD indicates distribution or massive ask overhang
+                if direction in ("BULLISH", "LONG", "BUY"):
+                    if cvd_bias in (
+                        "BEARISH_ABSORPTION",
+                        "BEARISH_DIVERGENCE",
+                        "PASSIVE_DISTRIBUTION",
+                    ):
+                        flags["order_book_sanctity_valid"] = False
+                        flags["cvd_flow_valid"] = False
+                        return (
+                            False,
+                            f"Order Flow CVD Exhaustion Veto / Bull Trap Veto: Passive institutional distribution / CVD divergence detected at resistance on {clean_sym} ({cvd_bias}).",
+                            flags,
+                        )
+                    if depth_ratio > 3.0 and depth_skew == "SELLER_HEAVY":
+                        flags["order_book_sanctity_valid"] = False
+                        return (
+                            False,
+                            f"Order Book Wall Trap: Massive ask depth overhang ({depth_ratio:.1f}x seller skew) at breakout resistance on {clean_sym}.",
+                            flags,
+                        )
+                # Bear Trap: Price breaking down, but CVD indicates accumulation or massive bid floor
+                elif direction in ("BEARISH", "SHORT", "SELL"):
+                    if cvd_bias in (
+                        "BULLISH_ABSORPTION",
+                        "BULLISH_DIVERGENCE",
+                        "PASSIVE_ACCUMULATION",
+                    ):
+                        flags["order_book_sanctity_valid"] = False
+                        flags["cvd_flow_valid"] = False
+                        return (
+                            False,
+                            f"Order Flow CVD Absorption Veto: Passive institutional accumulation / CVD divergence detected at support on {clean_sym} ({cvd_bias}). Aggressive sellers are being absorbed by passive institutional limit bids at the lows.",
+                            flags,
+                        )
+                    if depth_ratio > 3.0 and depth_skew == "BUYER_HEAVY":
+                        flags["order_book_sanctity_valid"] = False
+                        return (
+                            False,
+                            f"Order Book Floor Trap: Massive bid depth floor ({depth_ratio:.1f}x buyer skew) at breakdown support on {clean_sym}.",
+                            flags,
+                        )
+
+        # 3d-3. Cross-Asset Macro Transmission & Sector Catalyst Gate
+        # Rejects single-stock setups fighting severe macro transmission headwinds
+        # (e.g. Long Paints/Aviation when Brent Crude is spiking, or Long equities when India VIX is suffering a shock)
+        try:
+            brent_chg = None
+            vix_chg = None
+            if isinstance(metrics_d, dict):
+                if "brent_change_pct" in metrics_d:
+                    brent_chg = float(metrics_d["brent_change_pct"])
+                if "vix_change_pct" in metrics_d:
+                    vix_chg = float(metrics_d["vix_change_pct"])
+
+            if (brent_chg is None or vix_chg is None) and not is_test_runner:
+                try:
+                    from market.global_macro import get_global_macro_snapshot
+
+                    macro_rep = get_global_macro_snapshot(use_cache=True)
+                    if macro_rep and macro_rep.items:
+                        if brent_chg is None and "brent" in macro_rep.items:
+                            brent_chg = float(macro_rep.items["brent"].change_pct)
+                        if vix_chg is None and "india_vix" in macro_rep.items:
+                            vix_chg = float(macro_rep.items["india_vix"].change_pct)
+                except Exception as e_m_fetch:
+                    logger.debug(f"[AlertScrutiny] Macro fetch skipped: {e_m_fetch}")
+
+            is_bull = (
+                direction in ("BULLISH", "LONG", "BUY") or getattr(alert, "option_type", "") == "CE"
+            )
+            is_bear = (
+                direction in ("BEARISH", "SHORT", "SELL")
+                or getattr(alert, "option_type", "") == "PE"
+            )
+
+            # 1. Brent Crude Transmission
+            if brent_chg is not None:
+                crude_consumers = (
+                    "ASIANPAINT",
+                    "BERGEPAINT",
+                    "KANSAINER",
+                    "INDIGO",
+                    "SPICEJET",
+                    "BPCL",
+                    "IOC",
+                    "HPCL",
+                )
+                crude_producers = ("ONGC", "OIL")
+
+                if is_bull and clean_sym in crude_consumers and brent_chg >= 1.50:
+                    flags["macro_headwind_trap"] = True
+                    return (
+                        False,
+                        f"Macro Headwind Veto: Long setup in {clean_sym} rejected. Brent Crude spike (+{brent_chg:.1f}%) imposes severe input cost & margin compression.",
+                        flags,
+                    )
+                elif is_bear and clean_sym in crude_producers and brent_chg >= 2.0:
+                    flags["macro_headwind_trap"] = True
+                    return (
+                        False,
+                        f"Macro Tailwind Veto: Short setup in {clean_sym} rejected. Brent Crude surge (+{brent_chg:.1f}%) provides strong realization tailwind.",
+                        flags,
+                    )
+
+            # 2. India VIX Volatility Shock Gate
+            if vix_chg is not None and vix_chg >= 5.0:
+                is_pure_breakout = any(kw in atype for kw in ("BREAKOUT", "ORB", "IGNITION"))
+                if is_pure_breakout and not is_option_premium_levels:
+                    conf_val = int(getattr(alert, "confidence", 0) or 0)
+                    if conf_val < 85:
+                        flags["vix_shock_veto"] = True
+                        return (
+                            False,
+                            f"Volatility Shock Veto: India VIX spike (+{vix_chg:.1f}%) triggers breakout whipsaw risk. Setup requires conviction >= 85 (current: {conf_val}).",
+                            flags,
+                        )
+        except Exception as e_macro:
+            logger.debug(f"[AlertScrutiny] Macro transmission check note: {e_macro}")
+
         # 3e. Universal Falcon & Cheetah Single-Stock Equity Adaptive Regime Gate
         # Eliminates consolidation false breakouts and whipsaw traps in cash equities & stock options
         metrics_d = getattr(alert, "metrics", {}) or {}
@@ -866,14 +1075,16 @@ class AlertScrutinyAuditor:
             t2_val = None
             plan = getattr(alert, "actionable_plan", {}) or {}
             if isinstance(plan, dict):
-                opt_p = plan.get("option_plan")
-                if isinstance(opt_p, dict) and opt_p.get("t2_premium"):
-                    try:
-                        t2_val = float(opt_p["t2_premium"])
-                    except (ValueError, TypeError) as e_suppressed:
-                        logger.debug(
-                            f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
-                        )
+                # Scale Isolation Invariant: Only inspect option_plan for option-scale setups
+                if is_option_premium_levels:
+                    opt_p = plan.get("option_plan")
+                    if isinstance(opt_p, dict) and opt_p.get("t2_premium"):
+                        try:
+                            t2_val = float(opt_p["t2_premium"])
+                        except (ValueError, TypeError) as e_suppressed:
+                            logger.debug(
+                                f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
+                            )
                 if t2_val is None and "target_2" in plan:
                     raw_t2 = plan["target_2"]
                     if isinstance(raw_t2, (int, float)):
@@ -897,7 +1108,7 @@ class AlertScrutinyAuditor:
                                 f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
                             )
 
-            if t2_val is None:
+            if t2_val is None and is_option_premium_levels:
                 metrics = getattr(alert, "metrics", {}) or {}
                 if isinstance(metrics, dict) and metrics.get("t2_premium"):
                     try:
@@ -906,6 +1117,17 @@ class AlertScrutinyAuditor:
                         logger.debug(
                             f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
                         )
+
+            # Defensive Scale Sanity Verification
+            if t2_val is not None:
+                if not is_option_premium_levels and ltp > 50:
+                    # Spot stock / index: target_2 cannot be an option premium (< 40% of spot or > 250% of spot)
+                    if t2_val < (ltp * 0.40) or t2_val > (ltp * 2.50):
+                        t2_val = None
+                elif is_option_premium_levels and ltp > 0:
+                    # Option contract: target cannot be negative, zero, or 15x entry
+                    if t2_val <= 0 or t2_val > (ltp * 15.0):
+                        t2_val = None
 
             if t2_val is not None and risk_pts > 0 and rr_ratio >= 1.0:
                 if is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY"):
@@ -1708,9 +1930,20 @@ class AlertScrutinyAuditor:
         # 4. Reject setups capped by confirmed Fortress Ask/Bid walls
         # 5. Seamlessly fallback to L2 5-depth BisectDepthBook for BSE (SENSEX/BANKEX) or when TBT is unavailable
         try:
-            from market.fyers_tbt_manager import FyersTbtManager, resolve_tradable_tbt_symbol
+            from market.fyers_tbt_manager import (
+                FyersTbtManager,
+                fyers_tbt_manager,
+                resolve_tradable_tbt_symbol,
+            )
 
-            tbt_mgr = FyersTbtManager()
+            if getattr(fyers_tbt_manager, "is_connected", False):
+                tbt_mgr = fyers_tbt_manager
+            else:
+                try:
+                    tbt_mgr = FyersTbtManager()
+                except Exception:
+                    tbt_mgr = fyers_tbt_manager
+
             depth = None
             is_index_sym = clean_sym in INDEX_MIN_SL_FLOORS or any(
                 idx in clean_sym
@@ -1723,9 +1956,12 @@ class AlertScrutinyAuditor:
             tradable_sym = resolve_tradable_tbt_symbol(alert.symbol) or resolve_tradable_tbt_symbol(
                 clean_sym
             )
+            contract_sym = getattr(alert, "contract_symbol", None) or getattr(
+                alert, "option_symbol", None
+            )
 
-            if tbt_mgr.is_connected:
-                for sym_cand in (tradable_sym, alert.symbol, clean_sym):
+            if tbt_mgr and getattr(tbt_mgr, "is_connected", False):
+                for sym_cand in (tradable_sym, contract_sym, alert.symbol, clean_sym):
                     if sym_cand and not depth:
                         d = tbt_mgr.get_50_depth(sym_cand)
                         if d and d.get("status") not in ("UNAVAILABLE", None):
@@ -4199,6 +4435,24 @@ class AlertScrutinyAuditor:
                     bid_p = float(metrics_dict.get("bid") or metrics_dict.get("best_bid") or 0.0)
                     ask_p = float(metrics_dict.get("ask") or metrics_dict.get("best_ask") or 0.0)
 
+                # Fallback to option_plan if order book depth is unavailable
+                plan_obj = getattr(alert, "actionable_plan", {}) or {}
+                if (bid_p <= 0 or ask_p <= 0) and isinstance(plan_obj, dict):
+                    opt_p = plan_obj.get("option_plan")
+                    if isinstance(opt_p, dict):
+                        bid_p = float(opt_p.get("bid") or 0.0)
+                        ask_p = float(opt_p.get("ask") or 0.0)
+                        raw_spr = opt_p.get("bid_ask_spread_pct") or opt_p.get("spread_pct")
+                        if raw_spr is not None:
+                            try:
+                                raw_spr_f = float(raw_spr)
+                                spr_pct_cand = raw_spr_f * 100.0 if raw_spr_f <= 1.0 else raw_spr_f
+                                flags["option_spread_pct"] = round(spr_pct_cand, 2)
+                            except (ValueError, TypeError) as e_spr:
+                                logger.debug(
+                                    f"[alert_scrutiny] Raw spread conversion error: {e_spr}"
+                                )
+
                 if bid_p > 0 and ask_p > 0 and ask_p >= bid_p:
                     mid_p = (bid_p + ask_p) / 2.0
                     spread_val = ask_p - bid_p
@@ -4207,21 +4461,22 @@ class AlertScrutinyAuditor:
                     flags["option_bid"] = bid_p
                     flags["option_ask"] = ask_p
 
-                    is_index_opt = any(
-                        idx in str(opt_sym).upper()
-                        for idx in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
-                    )
-                    max_allowed_spread = 2.5 if is_index_opt else 3.8
+                is_index_opt = any(
+                    idx in str(opt_sym).upper()
+                    for idx in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
+                )
+                max_allowed_spread = 2.5 if is_index_opt else 5.0
 
-                    if spread_pct > max_allowed_spread:
-                        flags["option_spread_friction_valid"] = False
-                        return (
-                            False,
-                            f"Option Bid-Ask Spread Friction Veto: Spread of ₹{spread_val:,.2f} ({spread_pct:.1f}% of mid ₹{mid_p:,.2f}) "
-                            f"exceeds maximum allowable threshold ({max_allowed_spread:.1f}% for {'Index' if is_index_opt else 'Stock'} options). "
-                            f"Punitive execution slippage destroys setup edge.",
-                            flags,
-                        )
+                chk_spread = flags.get("option_spread_pct")
+                if chk_spread is not None and chk_spread > max_allowed_spread:
+                    flags["option_spread_friction_valid"] = False
+                    return (
+                        False,
+                        f"Option Bid-Ask Spread Friction Veto: Spread of {chk_spread:.1f}% "
+                        f"exceeds maximum allowable threshold ({max_allowed_spread:.1f}% for {'Index' if is_index_opt else 'Stock'} options). "
+                        f"Punitive execution slippage destroys setup edge.",
+                        flags,
+                    )
             except Exception as e_opt_spread:
                 logger.debug(f"[Scrutiny] Option spread friction check error: {e_opt_spread}")
 
@@ -4800,6 +5055,10 @@ class AlertScrutinyAuditor:
                 or (getattr(alert, "actionable_plan", {}) or {}).get("execution_style_mandate")
                 == "HEDGED_SPREAD_MANDATORY"
             )
+            is_apex = bool(
+                getattr(alert, "confidence", 0) >= 90
+                or metrics_d.get("conviction_tier") in ("APEX_CONFLUENCE", "SUPERPERFORMER")
+            )
             runway_eval = evaluate_session_runway(
                 symbol=sym,
                 alert_type=atype,
@@ -4808,6 +5067,7 @@ class AlertScrutinyAuditor:
                 rvol=alert_rvol,
                 direction=direction,
                 is_hedged_spread=is_hedged_spread,
+                is_apex=is_apex,
             )
             if not runway_eval.is_allowed:
                 logger.info(
@@ -5423,9 +5683,15 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
                 "INTRADAY_MOVER_IGNITED",
                 "STAGE_1_TO_2_EXPANSION",
                 "OPTIONS_MOMENTUM",
+                "INDEX_PUT_SETUP",
+                "INDEX_CALL_SETUP",
+                "SQUEEZE_BREAKDOWN",
+                "SQUEEZE_BREAKOUT",
+                "GAMMA_BLAST",
             )
             or "BREAKOUT" in alert_type
             or "ORB" in alert_type
+            or "BREAKDOWN" in alert_type
         )
         is_fade = (
             alert_type
@@ -5438,9 +5704,28 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
             )
             or "REVERSAL" in alert_type
             or "FADE" in alert_type
+            or any(
+                any(
+                    kw in str(sig).upper()
+                    for kw in (
+                        "REVERSAL",
+                        "SUPPLY_REJECTION",
+                        "DEMAND_REJECTION",
+                        "FADE",
+                        "BOUNCE",
+                    )
+                )
+                for sig in (
+                    metrics.get("signals")
+                    if isinstance(metrics, dict) and isinstance(metrics.get("signals"), list)
+                    else []
+                )
+            )
+            or "REVERSAL" in str(getattr(alert, "headline", "")).upper()
+            or "REVERSAL" in str(getattr(alert, "summary", "")).upper()
         )
         if reg_dict:
-            if is_breakout and reg_dict.get("veto_breakout_chase"):
+            if is_breakout and not is_fade and reg_dict.get("veto_breakout_chase"):
                 return ScrutinyResult(
                     status="REJECTED",
                     score=35,

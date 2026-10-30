@@ -30,6 +30,7 @@ from datetime import datetime, time as dtime
 from typing import Any, Optional
 
 from config.constants import IST
+from market.instruments import format_strike
 
 
 @dataclass
@@ -209,7 +210,7 @@ def build_ratio_spread_1x2_plan(
             "premium": opt_ltp,
             "lots": 1,
             "qty": lot_sz,
-            "instrument": f"{clean_sym} {int(strike)} {opt_type}",
+            "instrument": f"{clean_sym} {format_strike(strike)} {opt_type}",
         },
         {
             "side": "SELL",
@@ -218,7 +219,7 @@ def build_ratio_spread_1x2_plan(
             "premium": sell_prem,
             "lots": 2,
             "qty": lot_sz * 2,
-            "instrument": f"{clean_sym} {int(sell_strike)} {opt_type}",
+            "instrument": f"{clean_sym} {format_strike(sell_strike)} {opt_type}",
         },
     ]
 
@@ -233,7 +234,7 @@ def build_ratio_spread_1x2_plan(
         "strategy_title": strat_title,
         "strategy_type": "RATIO_SPREAD",
         "sentiment": "BULLISH" if is_bullish else "BEARISH",
-        "description": f"Buy 1x {int(strike)} {opt_type} & Sell 2x {int(sell_strike)} {opt_type} ({entry_desc})",
+        "description": f"Buy 1x {format_strike(strike)} {opt_type} & Sell 2x {format_strike(sell_strike)} {opt_type} ({entry_desc})",
         "buy_strike": strike,
         "sell_strike": sell_strike,
         "short_strike": sell_strike,
@@ -539,9 +540,9 @@ def build_defined_risk_hedge_plan(
         logger.debug(f"[engine.options_hedging] Non-fatal exception suppressed: {e_suppressed}")
 
     strat_title = strat_name.replace("_", " ").title()
-    desc = f"Buy {int(strike)} {opt_type} & Sell {int(sell_strike)} {opt_type} (Defined Risk / Capped Loss)"
-    buy_desc = f"BUY {clean_sym} {int(strike)} {opt_type} @ ₹{opt_ltp:,.1f}"
-    sell_desc = f"SELL {clean_sym} {int(sell_strike)} {opt_type} @ ₹{sell_prem:,.1f}"
+    desc = f"Buy {format_strike(strike)} {opt_type} & Sell {format_strike(sell_strike)} {opt_type} (Defined Risk / Capped Loss)"
+    buy_desc = f"BUY {clean_sym} {format_strike(strike)} {opt_type} @ ₹{opt_ltp:,.1f}"
+    sell_desc = f"SELL {clean_sym} {format_strike(sell_strike)} {opt_type} @ ₹{sell_prem:,.1f}"
 
     booking_rule = (
         f"Book 70%–80% Max Profit (Net Spread value ₹{booking_target_70:,.1f}) "
@@ -556,7 +557,7 @@ def build_defined_risk_hedge_plan(
             "premium": opt_ltp,
             "lots": 1,
             "qty": lot_sz,
-            "instrument": f"{clean_sym} {int(strike)} {opt_type}",
+            "instrument": f"{clean_sym} {format_strike(strike)} {opt_type}",
         },
         {
             "side": "SELL",
@@ -565,7 +566,7 @@ def build_defined_risk_hedge_plan(
             "premium": sell_prem,
             "lots": 1,
             "qty": lot_sz,
-            "instrument": f"{clean_sym} {int(sell_strike)} {opt_type}",
+            "instrument": f"{clean_sym} {format_strike(sell_strike)} {opt_type}",
         },
     ]
 

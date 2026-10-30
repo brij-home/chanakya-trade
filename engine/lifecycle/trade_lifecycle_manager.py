@@ -13,7 +13,7 @@ import re
 from datetime import timezone, timedelta
 from typing import Any, Optional, Tuple
 
-from engine.alert_expiry import is_alert_option_premium_level
+from engine.alert_expiry import is_alert_option_premium_level, is_option_seller
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("engine.lifecycle.trade_lifecycle_manager")
@@ -45,18 +45,12 @@ class TradeLifecycleManager:
         dir_str = str(getattr(alert, "direction", "BULLISH")).upper()
         plan = getattr(alert, "actionable_plan", {}) or {}
         is_opt = is_alert_option_premium_level(alert)
-        act_str = str(plan.get("action", getattr(alert, "action", "")) or "").upper()
-        alert_type = str(getattr(alert, "alert_type", "") or "").upper()
 
         if is_opt:
             # Option writing / selling profits on premium decay (downward)
             # Option buying (both Call CE and Put PE) profits on premium expansion (upward)
-            is_option_seller = (
-                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
-                or alert_type == "OPTION_WRITE"
-                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
-            )
-            is_payoff_upward = not is_option_seller
+            is_opt_sell = is_option_seller(alert)
+            is_payoff_upward = not is_opt_sell
 
             # Scale Sanity Gate (Invariants 10 & 23):
             # Guard against unit-scale cross-contamination (e.g. comparing spot price ₹1,420 or underlying ₹13,750 against option premium ₹168)
@@ -85,7 +79,13 @@ class TradeLifecycleManager:
             ref_entry = float(alert.trigger_level or alert.ltp or 0.0)
             if ref_entry > 0:
                 ratio = cur_ltp / ref_entry
-                if ratio > 2.5 or ratio < 0.40:
+                is_mb = (
+                    getattr(alert, "alert_type", "") == "MULTIBAGGER"
+                    or getattr(alert, "segment", "") == "EQUITY_MULTIBAGGER"
+                )
+                max_r = 3.5 if is_mb else 1.60
+                min_r = 0.30 if is_mb else 0.60
+                if ratio > max_r or ratio < min_r:
                     return (
                         False,
                         f"Equity/spot price scale mismatch: cur_ltp={cur_ltp:,.2f} vs expected entry={ref_entry:,.2f} (ratio={ratio:.2f}x)",
@@ -239,16 +239,10 @@ class TradeLifecycleManager:
         dir_str = str(getattr(alert, "direction", "BULLISH")).upper()
         plan = getattr(alert, "actionable_plan", {}) or {}
         is_opt = is_alert_option_premium_level(alert)
-        act_str = str(plan.get("action", getattr(alert, "action", "")) or "").upper()
-        alert_type = str(getattr(alert, "alert_type", "") or "").upper()
 
         if is_opt:
-            is_option_seller = (
-                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
-                or alert_type == "OPTION_WRITE"
-                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
-            )
-            is_payoff_upward = not is_option_seller
+            is_opt_sell = is_option_seller(alert)
+            is_payoff_upward = not is_opt_sell
 
             # Scale Sanity Gate (Invariants 10 & 23):
             ref_entry = float(
@@ -276,7 +270,13 @@ class TradeLifecycleManager:
             ref_entry = float(alert.trigger_level or alert.ltp or 0.0)
             if ref_entry > 0:
                 ratio = cur_ltp / ref_entry
-                if ratio > 2.5 or ratio < 0.40:
+                is_mb = (
+                    getattr(alert, "alert_type", "") == "MULTIBAGGER"
+                    or getattr(alert, "segment", "") == "EQUITY_MULTIBAGGER"
+                )
+                max_r = 3.5 if is_mb else 1.60
+                min_r = 0.30 if is_mb else 0.60
+                if ratio > max_r or ratio < min_r:
                     return (
                         False,
                         f"Equity/spot price scale mismatch: cur_ltp={cur_ltp:,.2f} vs expected entry={ref_entry:,.2f} (ratio={ratio:.2f}x)",
@@ -456,6 +456,21 @@ class TradeLifecycleManager:
                             alert.actionable_plan["option_plan"]["sl_premium"]
                         )
                     alert.actionable_plan["option_plan"]["sl_premium"] = eval_res.recommended_stop
+
+            # Automated Server-Side Stop-Loss Ratcheting
+            # Automatically modifies resting stop-loss orders in the order ledger to protect gains
+            try:
+                from engine.order_lifecycle import ratchet_stop_loss_on_milestone
+
+                csym = getattr(alert, "contract_symbol", "") or alert.symbol
+                ratchet_stop_loss_on_milestone(
+                    symbol=csym,
+                    new_stop_loss=float(rec_stop),
+                    milestone=str(eval_res.new_milestone),
+                    actor="TRADE_LIFECYCLE_MANAGER",
+                )
+            except Exception as e_ratchet:
+                logger.debug(f"[TradeLifecycleManager] Non-fatal order ratchet sync: {e_ratchet}")
 
         if getattr(eval_res, "recommended_spot_stop", None):
             alert.trailing_spot_sl = eval_res.recommended_spot_stop

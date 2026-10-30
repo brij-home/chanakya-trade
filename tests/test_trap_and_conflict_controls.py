@@ -30,6 +30,7 @@ def test_put_option_ignition_requires_premium_breakout(monkeypatch):
 
     put_alert = AutoAlert(
         alert_id="pe-early-1",
+        expiry_date="2026-11-05",
         alert_type="OPTIONS_MOMENTUM",
         stage="EARLY_WARNING",
         symbol="NIFTY",
@@ -85,6 +86,7 @@ def test_opposing_trade_mutex_suppresses_conflicting_ignition(monkeypatch):
         stage="IGNITED",
         symbol="NIFTY",
         contract_symbol="NFO:NIFTY26OCT23050CE",
+        expiry_date="2026-11-05",
         exchange="NFO",
         direction="BULLISH",
         headline="CE Ignited",
@@ -101,6 +103,7 @@ def test_opposing_trade_mutex_suppresses_conflicting_ignition(monkeypatch):
     # Early warning Put on same index
     pe_early = AutoAlert(
         alert_id="early-pe-1",
+        expiry_date="2026-11-05",
         alert_type="OPTIONS_MOMENTUM",
         stage="EARLY_WARNING",
         symbol="NIFTY",
@@ -218,6 +221,7 @@ def test_index_macro_confluence_vetoes_secondary_index_put_when_nifty_is_green()
 
     midcp_put = AutoAlert(
         alert_id="midcp-pe-counter",
+        expiry_date="2026-11-05",
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="MIDCPNIFTY",
@@ -278,6 +282,7 @@ def test_banknifty_locomotive_tug_of_war_vetoes_naked_options(monkeypatch):
 
     bank_call = AutoAlert(
         alert_id="bn-call-chop",
+        expiry_date="2026-11-05",
         alert_type="INDEX_CALL_SETUP",
         stage="IGNITED",
         symbol="BANKNIFTY",
@@ -314,6 +319,7 @@ def test_in_flight_directional_lockout_blocks_opposing_alert():
     # Active in-flight Call trade
     active_ce = AutoAlert(
         alert_id="midcp-ce-inflight",
+        expiry_date="2026-11-05",
         alert_type="OPTIONS_MOMENTUM",
         stage="IGNITED",
         symbol="MIDCPNIFTY",
@@ -340,6 +346,7 @@ def test_in_flight_directional_lockout_blocks_opposing_alert():
     # Incoming opposing PE alert arrives 5 minutes later
     incoming_pe = AutoAlert(
         alert_id="midcp-pe-incoming",
+        expiry_date="2026-11-05",
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="MIDCPNIFTY",
@@ -382,6 +389,7 @@ def test_directional_quarantine_blocks_rapid_flip_flop(monkeypatch):
     # Create an alert and invalidate it
     bull_alert = AutoAlert(
         alert_id="nifty-bull-stop",
+        expiry_date="2026-11-05",
         alert_type="OPTIONS_MOMENTUM",
         stage="IGNITED",
         symbol="NIFTY",
@@ -413,6 +421,7 @@ def test_directional_quarantine_blocks_rapid_flip_flop(monkeypatch):
     # 1. Incoming opposing BEARISH alert arrives 5 minutes later (elapsed = 300s < 1200s)
     bear_alert = AutoAlert(
         alert_id="nifty-bear-early",
+        expiry_date="2026-11-05",
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="NIFTY",
@@ -460,6 +469,7 @@ def test_tier1_sanity_at_step_00e_protects_existing_trades():
     # Active Call trade on radar
     radar_ce = AutoAlert(
         alert_id="radar-ce-step00e",
+        expiry_date="2026-11-05",
         alert_type="OPTIONS_MOMENTUM",
         stage="EARLY_WARNING",
         symbol="FINNIFTY",
@@ -486,6 +496,7 @@ def test_tier1_sanity_at_step_00e_protects_existing_trades():
     # Incoming opposing PE setup that fails Tier-1 Macro Sanity (e.g. NIFTY is green +0.10%)
     invalid_pe = AutoAlert(
         alert_id="invalid-pe-step00e",
+        expiry_date="2026-11-05",
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="FINNIFTY",
@@ -529,6 +540,7 @@ def test_hbcm_contradiction_veto_blocks_counter_heavyweight_reversals():
 
     alert = AutoAlert(
         alert_id="bn-pe-reversal-trap",
+        expiry_date="2026-11-05",
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="BANKNIFTY",
@@ -576,6 +588,7 @@ def test_active_opposing_direction_conflict_gate_blocks_simultaneous_opposite_al
     # Provide aligned HBCM metrics so Tier-1 Perimeter passes
     call_alert = AutoAlert(
         alert_id="midcp-ce-active",
+        expiry_date="2026-11-05",
         alert_type="INDEX_CALL_SETUP",
         stage="IGNITED",
         symbol="MIDCPNIFTY",
@@ -608,6 +621,7 @@ def test_active_opposing_direction_conflict_gate_blocks_simultaneous_opposite_al
     # 7 seconds later, another detector generates an opposing PE setup on MIDCPNIFTY
     put_alert = AutoAlert(
         alert_id="midcp-pe-conflict",
+        expiry_date="2026-11-05",
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="MIDCPNIFTY",
@@ -661,6 +675,7 @@ def test_market_breadth_rally_veto_blocks_index_put_without_breakdown(monkeypatc
 
     alert = AutoAlert(
         alert_id="test-breadth-rally-put",
+        expiry_date="2026-11-05",
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="BANKNIFTY",
@@ -844,6 +859,7 @@ def test_in_flight_directional_lockout_protects_profitable_spreads():
     # Active winning NIFTY Bull Call Spread capturing 70% max profit
     active_spread_ce = AutoAlert(
         alert_id="aa-call-setup-nifty-20260930",
+        expiry_date="2026-11-05",
         alert_type="INDEX_CALL_SETUP",
         stage="SPREAD_PROFIT_70",
         symbol="NIFTY",
@@ -863,6 +879,7 @@ def test_in_flight_directional_lockout_protects_profitable_spreads():
     # Incoming conflicting Bearish Put setup
     conflicting_pe = AutoAlert(
         alert_id="aa-put-setup-nifty-20260930",
+        expiry_date="2026-11-05",
         alert_type="INDEX_PUT_SETUP",
         stage="IGNITED",
         symbol="NIFTY",

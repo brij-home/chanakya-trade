@@ -43,6 +43,7 @@ class DataSyncScheduler:
         self._last_eod_sync_date: Optional[str] = None
         self._last_fundamentals_sync_date: Optional[str] = None
         self._last_master_sync_date: Optional[str] = None
+        self._last_premarket_sync_date: Optional[str] = None
         self._is_syncing = False
 
     def get_sync_status(self) -> Dict[str, Any]:
@@ -54,7 +55,49 @@ class DataSyncScheduler:
                 "last_eod_sync_date": self._last_eod_sync_date,
                 "last_fundamentals_sync_date": self._last_fundamentals_sync_date,
                 "last_master_sync_date": self._last_master_sync_date,
+                "last_premarket_sync_date": self._last_premarket_sync_date,
             }
+
+    # ── 0. Pre-Market Daily Levels Priming ───────────────────────────
+
+    def sync_premarket_levels(self, force: bool = False) -> Dict[str, Any]:
+        """
+        Pre-market Priming Engine (08:30 - 09:12 IST):
+        Pre-computes and primes DailyLevels (CPR, Camarilla, Classic Pivots, ATR-14,
+        Straddle Bounds) for benchmark indices and the full F&O universe.
+        Ensures sub-millisecond retrieval (<0.01ms) the millisecond the 09:15 opening bell rings.
+        """
+        from analysis.universe import THEMATIC_PRESETS
+        from engine.daily_levels import get_daily_levels_store
+        from market.calendar import is_trading_day
+
+        now_ist = datetime.now(IST)
+        today_str = now_ist.strftime("%Y-%m-%d")
+
+        if not force:
+            if not is_trading_day(now_ist.date(), exchange="NSE"):
+                return {"status": "SKIPPED", "reason": f"{today_str} is not an NSE trading day"}
+
+        logger.info(
+            "[DataSync] Starting pre-market DailyLevels priming across Indices & F&O Universe..."
+        )
+        store = get_daily_levels_store()
+        fno_list = THEMATIC_PRESETS.get("fno_universe", {}).get("symbols", [])
+        indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        all_targets = indices + [s for s in fno_list if s not in indices]
+
+        primed = store.prime_universe(symbols=all_targets, session_date=today_str)
+        self._last_premarket_sync_date = today_str
+        logger.info(
+            f"[DataSync] Pre-market priming complete: {len(primed)} instruments cached in L1 RAM and disk."
+        )
+        return {
+            "status": "COMPLETED",
+            "primed_count": len(primed),
+            "session_date": today_str,
+            "indices_count": len(indices),
+            "fno_count": len(fno_list),
+        }
 
     # ── 1. Daily EOD Bar Sync ────────────────────────────────────────
 
@@ -270,6 +313,11 @@ class DataSyncScheduler:
                 await asyncio.sleep(900)  # Check every 15 minutes
                 now_ist = datetime.now(IST)
                 today_str = now_ist.strftime("%Y-%m-%d")
+
+                # Check 0: Pre-Market Priming (Runs between 08:30 and 09:12 IST on trading days)
+                if 8 <= now_ist.hour < 9 or (now_ist.hour == 9 and now_ist.minute < 12):
+                    if now_ist.weekday() < 5 and self._last_premarket_sync_date != today_str:
+                        await asyncio.to_thread(self.sync_premarket_levels)
 
                 # Check 1: Post-Market EOD sync (Runs between 16:00 and 19:00 IST on trading days)
                 if 16 <= now_ist.hour < 19:

@@ -419,6 +419,18 @@ def detect_commodity_breakouts(
             except Exception as e:
                 logger.debug(f"[CommodityDetector] SMC analysis error: {e}")
 
+        is_donchian_bull = False
+        is_donchian_bear = False
+        is_donchian_breakout = False
+        is_vwap_trend_bull = False
+        is_vwap_trend_bear = False
+        is_smc_bull = False
+        is_smc_bear = False
+        is_thrust_bull = False
+        is_thrust_bear = False
+        is_utad_bear = False
+        is_spring_bull = False
+
         if df_5m is not None and len(df_5m) >= 20:
             recent_20 = df_5m.iloc[-21:-1]
             prior_high = float(recent_20["high"].max())
@@ -550,11 +562,9 @@ def detect_commodity_breakouts(
             trough_recent = float(lookback_bars["low"].min())
 
             # Round number strike inflection levels (e.g. 8800 on Crude, 250 on Natgas)
-            strike_step = (
-                50.0
-                if clean_sym in ("CRUDEOIL", "CRUDEOILM")
-                else (100.0 if "GOLD" in clean_sym else (500.0 if "SILVER" in clean_sym else 1.0))
-            )
+            from market.symbol_master import get_strike_step
+
+            strike_step = get_strike_step(clean_sym, spot=peak_recent)
             nearest_round_high = (
                 round(peak_recent / strike_step) * strike_step if peak_recent > 0 else 0.0
             )

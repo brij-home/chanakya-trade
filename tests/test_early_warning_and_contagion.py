@@ -67,7 +67,8 @@ class TestTimeOfDayRvol:
 class TestIndexContagionEngine:
     """Validates heavyweights synchronization engine for NIFTY & BANKNIFTY."""
 
-    def test_banknifty_bullish_synchronization(self):
+    @patch("engine.daily_levels.get_daily_levels", return_value=None)
+    def test_banknifty_bullish_synchronization(self, mock_dl):
         dt = datetime(2026, 9, 15, 10, 15, tzinfo=IST)
 
         # Mock quotes where HDFCBANK and ICICIBANK (>52% weight) are surging above VWAP
@@ -128,7 +129,8 @@ class TestIndexContagionEngine:
         assert res.alert.stage == "EARLY_WARNING"
         assert "HEAVYWEIGHT CONTAGION" in res.alert.headline
 
-    def test_nifty_bearish_synchronization(self):
+    @patch("engine.daily_levels.get_daily_levels", return_value=None)
+    def test_nifty_bearish_synchronization(self, mock_dl):
         dt = datetime(2026, 9, 15, 11, 0, tzinfo=IST)
 
         quotes = {
@@ -243,7 +245,8 @@ class TestMultiTimeframeSqueeze:
 class TestOptionsOiVelocity:
     """Validates high-velocity short-term unwinding detection in options."""
 
-    def test_call_writer_panic_unwind_velocity(self):
+    @patch("engine.daily_levels.get_daily_levels", return_value=None)
+    def test_call_writer_panic_unwind_velocity(self, mock_dl):
         underlying = "NIFTY"
         spot = 25000.0
         _STRIKE_OI_SNAPSHOTS.clear()
@@ -268,7 +271,8 @@ class TestOptionsOiVelocity:
         import itertools
 
         with patch(
-            "time.time", side_effect=itertools.chain([1000.0, 1060.0], itertools.repeat(1060.0))
+            "engine.detectors.gamma_blast.time.time",
+            side_effect=itertools.chain([1000.0, 1060.0], itertools.repeat(1060.0)),
         ):
             _STRIKE_OI_SNAPSHOTS["NIFTY_25000_CE"] = (1000.0, 80000, 5000)
             c2 = OptionsContract(
@@ -355,7 +359,8 @@ class TestContagionHolisticSanity:
         # Index spot is at 25243 with vwap 25243 and change 0.0 -> must be suppressed!
         assert res.alert is None
 
-    def test_contagion_rejects_far_otm_strike(self):
+    @patch("engine.daily_levels.get_daily_levels", return_value=None)
+    def test_contagion_rejects_far_otm_strike(self, mock_dl):
         """Options chain with strikes > 2.0% away from spot (e.g. 27250 on 25250 spot) must be rejected."""
         from engine.index_contagion import IndexContagionEngine
 
@@ -400,18 +405,22 @@ class TestContagionHolisticSanity:
         assert _INDEX_MAP["NIFTY FIN SERVICE"] == "NIFTY_FIN_SERVICE.NS"
         assert _INDEX_MAP.get("FINNIFTY") != "^CNXFIN"
 
-    def test_midcpnifty_contagion_evaluation(self):
+    @patch("engine.daily_levels.get_daily_levels", return_value=None)
+    def test_midcpnifty_contagion_evaluation(self, mock_dl):
         """MIDCPNIFTY constituent synchronization triggers early warning for Midcap index."""
         dt = datetime(2026, 10, 16, 10, 15, tzinfo=IST)
+        mid_q = Quote(
+            symbol="MIDCPNIFTY",
+            last_price=13790.0,
+            vwap=13770.0,
+            change_pct=0.45,
+            high=13800.0,
+            low=13750.0,
+        )
         quotes = {
-            "NSE:NIFTY MID SELECT": Quote(
-                symbol="NIFTY MID SELECT",
-                last_price=13820.0,
-                vwap=13780.0,
-                change_pct=0.45,
-                high=13830.0,
-                low=13750.0,
-            ),
+            "NSE:NIFTY MID SELECT": mid_q,
+            "NSE:MIDCPNIFTY": mid_q,
+            "MIDCPNIFTY": mid_q,
             "NSE:PERSISTENT": Quote(
                 symbol="PERSISTENT",
                 last_price=5800.0,

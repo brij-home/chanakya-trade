@@ -169,6 +169,38 @@ _CORPORATE_ALIAS_MAP = {
     "KBL": "KIRLOSBROS.NS",
     "GSHIP": "GESHIP.NS",
     "JUPITERWAG": "JWL.NS",
+    # RCA fix: NSE ticker COCHINSHIP maps to yfinance COCHINSHIPYARD.NS (full company name)
+    "COCHINSHIP": "COCHINSHIPYARD.NS",
+    "COCHINSHIPYARD": "COCHINSHIPYARD.NS",
+    "L&TFH": "LTF.NS",
+    "LTFH": "LTF.NS",
+    "IBULHSGFIN": "SAMMAANCAP.NS",
+    "MOTHERSUMI": "MOTHERSON.NS",
+    "CADILAHC": "ZYDUSLIFE.NS",
+    "LTI": "LTIM.NS",
+    "MINDTREE": "LTIM.NS",
+    "LTM": "LTIM.NS",
+    "PVR": "PVRINOX.NS",
+    "INOXLEISUR": "PVRINOX.NS",
+    "SRTRANSFIN": "SHRIRAMFIN.NS",
+    "WELSPUNIND": "WELSPUNLIV.NS",
+    "IDFC": "IDFCFIRSTB.NS",
+    "HDFC": "HDFCBANK.NS",
+    "ADANITRANS": "ADANIENSOL.NS",
+    "MCDOWELL-N": "UNITDSPR.NS",
+    "L&T": "LT.NS",
+    "NAMINDIA": "NAM-INDIA.NS",
+    "BAJAJAUTO": "BAJAJ-AUTO.NS",
+    "BAJAJ_AUTO": "BAJAJ-AUTO.NS",
+    "TATASTEELBSL": "TATASTEEL.NS",
+    "NSLNISP": "NMDCSTEEL.NS",
+    "NMDCSTEEL": "NMDCSTEEL.NS",
+    "ICICILIFE": "ICICIPRULI.NS",
+    "ICICIPRULI": "ICICIPRULI.NS",
+    "HEG": "HEGAM.NS",
+    "HEGAM": "HEGAM.NS",
+    "SILLYMONKS": "CRESTO.NS",
+    "CRESTO": "CRESTO.NS",
 }
 
 
@@ -203,6 +235,24 @@ _CRYPTO_MAP = {
     "LINKUSDT": "LINK-USD",
 }
 
+# Indian derivative patterns (options and futures) that Yahoo Finance does not host
+import re
+
+_DERIVATIVE_OPT_PATTERN = re.compile(
+    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z0-9_& -]+?)(?:20\d{6}|\d{2}[A-Z]{3}|\d{2}[OND]\d{2}|\d{5})?\s*(?:\d{1,6}(?:\.\d+)?)\s*(?:CE|PE)$",
+    re.IGNORECASE,
+)
+_DERIVATIVE_FUT_PATTERN = re.compile(
+    r"^(?:NFO:|NSE:)?([A-Za-z&]+?)(?:\d{2}[A-Z]{3})?FUT(?:URES)?$",
+    re.IGNORECASE,
+)
+
+
+def is_derivative_ticker(symbol: str) -> bool:
+    """Return True if symbol is an Indian options or futures derivative contract."""
+    clean = symbol.split(":")[-1].replace("-EQ", "").strip().upper()
+    return bool(_DERIVATIVE_OPT_PATTERN.match(clean) or _DERIVATIVE_FUT_PATTERN.match(clean))
+
 
 def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
     """Convert NSE/BSE/MCX/Crypto symbol to Yahoo Finance ticker."""
@@ -230,6 +280,14 @@ def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
         for c in _COMMODITY_MAP:
             if upper.startswith(c):
                 return _COMMODITY_MAP[c]
+        return ""
+
+    # Derivative check: Yahoo Finance does NOT host Indian options or futures
+    if is_derivative_ticker(upper):
+        for c in _COMMODITY_MAP:
+            if upper.startswith(c):
+                return _COMMODITY_MAP[c]
+        return ""
 
     # 0. Check Crypto Map and Crypto USDT/USD suffixes (e.g. BTC, ETH, BTCUSDT)
     if upper in _CRYPTO_MAP:
@@ -319,15 +377,84 @@ import threading
 
 logger = logging.getLogger("chanakya.yfinance")
 
+# Silence noisy internal yfinance delisted/data-gap logs (Rule 10/11: Clean logging)
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
 _quote_cache_lock = threading.Lock()
 _quote_cache: dict[str, tuple[float, Quote]] = {}  # key -> (timestamp, Quote)
 _QUOTE_TTL_SECONDS = 30.0
 
 # 6-hour negative cache for delisted or 404 dead tickers to avoid synchronous network stalls
 # Uses a SEPARATE lock from _quote_cache_lock to prevent cross-blocking.
-_dead_ticker_lock = threading.Lock()
+# The cache is also persisted to disk so it survives process restarts — preventing log-flood
+# on restart when expired option contracts (e.g. M&M202609PE) are re-discovered each time.
+_dead_ticker_lock = threading.RLock()
 _DEAD_TICKER_CACHE: dict[str, float] = {}  # ticker -> timestamp
 _DEAD_TICKER_TTL = 6 * 3600.0  # 6 hours (matches config.constants.DELISTED_SYMBOL_TTL_SECONDS)
+
+
+def _dead_ticker_persist_path():
+    """Return the path to the dead-ticker persistence file (lazy import to avoid circular deps)."""
+    try:
+        from config.paths import app_data_path
+
+        return app_data_path("delisted_symbols.json")
+    except Exception:
+        return None
+
+
+def _load_dead_ticker_cache_from_disk() -> None:
+    """
+    Load previously persisted dead tickers into the in-memory cache.
+    Called once at module import time. Non-fatal — any I/O error is silently ignored.
+    """
+    path = _dead_ticker_persist_path()
+    if path is None:
+        return
+    try:
+        import json
+
+        p = path if hasattr(path, "read_text") else __import__("pathlib").Path(path)
+        if not p.exists():
+            return
+        data = json.loads(p.read_text(encoding="utf-8"))
+        now = time.time()
+        loaded = 0
+        with _dead_ticker_lock:
+            for ticker, ts in data.items():
+                if isinstance(ts, (int, float)) and now - float(ts) < _DEAD_TICKER_TTL:
+                    _DEAD_TICKER_CACHE[ticker] = float(ts)
+                    loaded += 1
+        if loaded:
+            logger.debug(
+                f"[yfinance_provider] Loaded {loaded} dead tickers from disk cache (survives restarts)."
+            )
+    except Exception as e_load:
+        logger.debug(f"[yfinance_provider] Could not load dead ticker cache: {e_load}")
+
+
+def _persist_dead_ticker_to_disk() -> None:
+    """
+    Persist current dead ticker cache to disk. Called whenever a new dead ticker is added.
+    Non-fatal — any I/O error is logged at debug level.
+    """
+    path = _dead_ticker_persist_path()
+    if path is None:
+        return
+    try:
+        import json
+
+        with _dead_ticker_lock:
+            cache_snapshot = dict(_DEAD_TICKER_CACHE)
+        p = path if hasattr(path, "write_text") else __import__("pathlib").Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(cache_snapshot), encoding="utf-8")
+    except Exception as e_persist:
+        logger.debug(f"[yfinance_provider] Could not persist dead ticker cache: {e_persist}")
+
+
+# Load persisted dead tickers on module import (RC-2 fix: prevents re-flooding on restart)
+_load_dead_ticker_cache_from_disk()
 
 # Process-level circuit breaker for Yahoo Finance 429/401 crumb rate-limiting
 _yf_rate_limit_lock = threading.Lock()
@@ -410,8 +537,13 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
                 f"yfinance rate-limited (circuit open until {int(_yf_rate_limited_until)})"
             )
 
+    if is_derivative_ticker(symbol):
+        raise RuntimeError(f"yfinance does not host Indian derivatives: {symbol}")
+
     yf = _get_yf()
     ticker = _to_yf_symbol(symbol, exchange)
+    if not ticker:
+        raise RuntimeError(f"Cannot map {symbol} to a yfinance ticker")
 
     with _dead_ticker_lock:
         if ticker in _DEAD_TICKER_CACHE:
@@ -532,6 +664,7 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
                         extra={"ticker": ticker, "symbol": symbol, "ttl_hours": 6},
                     )
                 _DEAD_TICKER_CACHE[ticker] = now
+                _persist_dead_ticker_to_disk()
         elif (
             "429" in err_str
             or "crumb" in err_str
@@ -637,8 +770,15 @@ def yf_get_ohlcv(
         List of dicts with keys: date, open, high, low, close, volume
     """
     global _yf_rate_limited_until, _yf_consecutive_rate_limits
-    yf = _get_yf()
+
+    if is_derivative_ticker(symbol):
+        return []
+
     ticker = _to_yf_symbol(symbol, exchange)
+    if not ticker:
+        return []
+
+    yf = _get_yf()
 
     now_ts = time.time()
     with _yf_rate_limit_lock:
@@ -782,7 +922,10 @@ def yf_get_ohlcv(
         return rows
     except Exception as e:
         err_str = str(e).lower()
-        if "404" in err_str or "not found" in err_str or "delisted" in err_str:
+        if "possibly delisted" in err_str or "no price data found" in err_str:
+            # Temporary yfinance data availability glitch on historical period — do not mark dead
+            logger.debug(f"[yfinance] Period data gap for {ticker}: {e}")
+        elif "404" in err_str or "not found" in err_str or "delisted" in err_str:
             if exchange.upper() == "NSE" and ticker.endswith(".NS"):
                 try:
                     bse_rows = yf_get_ohlcv(
@@ -801,6 +944,7 @@ def yf_get_ohlcv(
                     )
             with _dead_ticker_lock:
                 _DEAD_TICKER_CACHE[ticker] = time.time()
+                _persist_dead_ticker_to_disk()
         elif (
             "429" in err_str
             or "crumb" in err_str

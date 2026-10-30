@@ -4,8 +4,30 @@ import { useChatStore } from '../../store/chatStore'
 import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import { formatINR, formatPct } from '../../utils/formatINR'
 import UnavailableState from '../Common/UnavailableState'
+import MultiSelectDropdown from '../Common/MultiSelectDropdown'
+import SmartSearchBox from '../Common/SmartSearchBox'
+import { parseSearchQuery, matchesSmartSearchCandidate } from '../../utils/smartSearchParser'
 import Badge from '../Common/Badge'
 import Tooltip, { HelpHint } from '../UI/Tooltip'
+
+/**
+ * Normalizes filter selection state to a Set, handling Set, Array, string, or empty/ALL states.
+ */
+function isAllOrEmpty(val) {
+  if (!val) return true
+  if (typeof val === 'string') return val === 'ALL' || val === ''
+  if (val instanceof Set) return val.size === 0 || val.has('ALL')
+  if (Array.isArray(val)) return val.length === 0 || val.includes('ALL')
+  return true
+}
+
+function normalizeToSet(val) {
+  if (!val) return new Set()
+  if (val instanceof Set) return val
+  if (Array.isArray(val)) return new Set(val.filter((v) => v !== 'ALL'))
+  if (typeof val === 'string') return val === 'ALL' || val === '' ? new Set() : new Set([val])
+  return new Set()
+}
 
 const ARCHETYPE_TABS = [
   { id: 'ALL', label: 'All Inflections', icon: '🌐' },
@@ -66,11 +88,11 @@ export default function InflectionScannerView({
   // Scanner State
   const [universe, setUniverse] = useState('multibagger_hunters')
   const [universesList, setUniversesList] = useState([])
-  const [archetypeFilter, setArchetypeFilter] = useState('ALL')
-  const [timingFilter, setTimingFilter] = useState('ALL')
+  const [archetypeFilter, setArchetypeFilter] = useState(() => new Set())
+  const [timingFilter, setTimingFilter] = useState(() => new Set())
   const [minTurnoverCr, setMinTurnoverCr] = useState(0.5) // ₹50L median 20D turnover floor
-  const [capTierFilter, setCapTierFilter] = useState('ALL') // 'ALL' | 'LARGE' | 'MID' | 'SMALL' | 'MICRO'
-  const [sectorFilter, setSectorFilter] = useState('ALL') // 'ALL' | Specific sector name
+  const [capTierFilter, setCapTierFilter] = useState(() => new Set()) // 'ALL' | 'LARGE' | 'MID' | 'SMALL' | 'MICRO'
+  const [sectorFilter, setSectorFilter] = useState(() => new Set()) // 'ALL' | Specific sector name
   const [minScoreFilter, setMinScoreFilter] = useState(0) // 0 | 50 | 65 | 75
   const [filterCoilingOnly, setFilterCoilingOnly] = useState(false)
   const [filterVolumeSurge, setFilterVolumeSurge] = useState(false)
@@ -84,7 +106,7 @@ export default function InflectionScannerView({
   const [sortDirection, setSortDirection] = useState('desc')
 
   // Multi-Horizon & Incubation Pipeline State
-  const [horizonFilter, setHorizonFilter] = useState('ALL') // 'ALL' | 'SHORT_TERM' | 'MID_TERM' | 'LONG_TERM'
+  const [horizonFilter, setHorizonFilter] = useState(() => new Set()) // 'ALL' | 'SHORT_TERM' | 'MID_TERM' | 'LONG_TERM'
   const [activeMainTab, setActiveMainTab] = useState('scanner') // 'scanner' | 'incubation'
   const [incubatedCandidates, setIncubatedCandidates] = useState([])
   const [isLoadingIncubation, setIsLoadingIncubation] = useState(false)
@@ -201,11 +223,11 @@ export default function InflectionScannerView({
           universe: targetUniverse,
           archetype: 'ALL',
           timing: 'ALL',
-          horizon: horizonFilter,
+          horizon: isAllOrEmpty(horizonFilter) ? 'ALL' : (horizonFilter instanceof Set ? (horizonFilter.size === 1 ? Array.from(horizonFilter)[0] : 'ALL') : horizonFilter),
           min_score: 45,
           max_results: 100,
           min_turnover_cr: overrideTurnover,
-          cap_tier: overrideCap,
+          cap_tier: isAllOrEmpty(overrideCap) ? 'ALL' : (overrideCap instanceof Set ? (overrideCap.size === 1 ? Array.from(overrideCap)[0] : 'ALL') : overrideCap),
           use_local_cache: true,
           sync_missing: false,
           refresh: force,
@@ -512,14 +534,50 @@ export default function InflectionScannerView({
     return counts
   }, [scanResult])
 
+  const ARCHETYPE_OPTIONS = useMemo(() => [
+    { value: 'PRE_INFLECTION_DRYUP', label: 'Pre-Inflection Dry-Up', icon: '🤫', count: scanResult && archetypeCounts.PRE_INFLECTION_DRYUP ? archetypeCounts.PRE_INFLECTION_DRYUP : undefined },
+    { value: 'VCP_PIVOT_BREAKOUT', label: 'VCP Pivots', icon: '🎯', count: scanResult && archetypeCounts.VCP_PIVOT_BREAKOUT ? archetypeCounts.VCP_PIVOT_BREAKOUT : undefined },
+    { value: 'TTM_SQUEEZE_EXPLOSION', label: 'TTM Squeeze Breakouts', icon: '⚡', count: scanResult && archetypeCounts.TTM_SQUEEZE_EXPLOSION ? archetypeCounts.TTM_SQUEEZE_EXPLOSION : undefined },
+    { value: 'STAGE_1_TO_2_EXPANSION', label: 'Stage 1→2 Markup', icon: '🚀', count: scanResult && archetypeCounts.STAGE_1_TO_2_EXPANSION ? archetypeCounts.STAGE_1_TO_2_EXPANSION : undefined },
+    { value: 'SMC_SPRING_SWEEP', label: 'SMC Springs & Sweeps', icon: '🎪', count: scanResult && archetypeCounts.SMC_SPRING_SWEEP ? archetypeCounts.SMC_SPRING_SWEEP : undefined },
+    { value: 'RRG_SECTOR_ROTATION', label: 'Sector RRG Leaders', icon: '🔄', count: scanResult && archetypeCounts.RRG_SECTOR_ROTATION ? archetypeCounts.RRG_SECTOR_ROTATION : undefined },
+  ], [scanResult, archetypeCounts])
+
+  const HORIZON_OPTIONS = useMemo(() => [
+    { value: 'SHORT_TERM', label: 'Short (1–4W)', icon: '⚡', count: scanResult && horizonCounts.SHORT_TERM ? horizonCounts.SHORT_TERM : undefined },
+    { value: 'MID_TERM', label: 'Mid (1–6M)', icon: '📈', count: scanResult && horizonCounts.MID_TERM ? horizonCounts.MID_TERM : undefined },
+    { value: 'LONG_TERM', label: 'Multibagger (1–3Y)', icon: '💎', count: scanResult && horizonCounts.LONG_TERM ? horizonCounts.LONG_TERM : undefined },
+  ], [scanResult, horizonCounts])
+
+  const TIMING_OPTIONS = useMemo(() => [
+    { value: 'TRIGGER_NOW', label: 'Trigger Now / Active', icon: '🔥', count: scanResult && timingCounts.TRIGGER_NOW ? timingCounts.TRIGGER_NOW : undefined },
+    { value: 'COILING_IMMINENT', label: 'Coiling (1–3d)', icon: '⏳', count: scanResult && timingCounts.COILING_IMMINENT ? timingCounts.COILING_IMMINENT : undefined },
+    { value: 'PULLBACK_RETEST', label: 'Retest Zone', icon: '🎯', count: scanResult && timingCounts.PULLBACK_RETEST ? timingCounts.PULLBACK_RETEST : undefined },
+  ], [scanResult, timingCounts])
+
+  const CAP_TIER_OPTIONS = useMemo(() => [
+    { value: 'LARGE', label: 'Large Cap', icon: '🏛️' },
+    { value: 'MID', label: 'Mid Cap', icon: '⚡' },
+    { value: 'SMALL', label: 'Small Cap', icon: '🚀' },
+    { value: 'MICRO', label: 'Micro Cap', icon: '🌱' },
+  ], [])
+
+  const SECTOR_OPTIONS = useMemo(() => {
+    return availableSectors.map((sec) => ({
+      value: sec.name,
+      label: sec.name,
+      count: sec.count,
+    }))
+  }, [availableSectors])
+
   const activeFilterCount = useMemo(() => {
     let count = 0
     if (searchQuery.trim()) count++
-    if (horizonFilter !== 'ALL') count++
-    if (archetypeFilter !== 'ALL') count++
-    if (timingFilter !== 'ALL') count++
-    if (capTierFilter !== 'ALL') count++
-    if (sectorFilter !== 'ALL') count++
+    if (!isAllOrEmpty(horizonFilter)) count++
+    if (!isAllOrEmpty(archetypeFilter)) count++
+    if (!isAllOrEmpty(timingFilter)) count++
+    if (!isAllOrEmpty(capTierFilter)) count++
+    if (!isAllOrEmpty(sectorFilter)) count++
     if (minScoreFilter > 0) count++
     if (filterCoilingOnly) count++
     if (filterVolumeSurge) count++
@@ -544,11 +602,11 @@ export default function InflectionScannerView({
 
   const resetAllFilters = () => {
     setSearchQuery('')
-    setHorizonFilter('ALL')
-    setArchetypeFilter('ALL')
-    setTimingFilter('ALL')
-    setCapTierFilter('ALL')
-    setSectorFilter('ALL')
+    setHorizonFilter(new Set())
+    setArchetypeFilter(new Set())
+    setTimingFilter(new Set())
+    setCapTierFilter(new Set())
+    setSectorFilter(new Set())
     setMinScoreFilter(0)
     setFilterCoilingOnly(false)
     setFilterVolumeSurge(false)
@@ -562,42 +620,40 @@ export default function InflectionScannerView({
     if (!scanResult?.candidates) return []
     let list = [...scanResult.candidates]
 
-    // 1. Multi-field text search
+    // 1. Smart Search Filter (Directives: sym:, sec:, score:>80, rr:>3, plus aliases & free-text)
     if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim()
-      list = list.filter(
-        (c) =>
-          (c.symbol && c.symbol.toLowerCase().includes(q)) ||
-          (c.name && c.name.toLowerCase().includes(q)) ||
-          (c.sector && c.sector.toLowerCase().includes(q)) ||
-          (c.archetype_label && c.archetype_label.toLowerCase().includes(q)) ||
-          (c.timing_label && c.timing_label.toLowerCase().includes(q))
-      )
+      const parsed = parseSearchQuery(searchQuery)
+      list = list.filter((c) => matchesSmartSearchCandidate(c, parsed))
     }
 
-    // 2. Archetype filter
-    if (archetypeFilter && archetypeFilter !== 'ALL') {
-      list = list.filter((c) => c.primary_archetype === archetypeFilter)
+    // 2. Archetype filter (Multi-Select)
+    if (!isAllOrEmpty(archetypeFilter)) {
+      const aSet = normalizeToSet(archetypeFilter)
+      list = list.filter((c) => aSet.has(c.primary_archetype))
     }
 
-    // 2b. Horizon filter (Short, Mid, Long Multibagger)
-    if (horizonFilter && horizonFilter !== 'ALL') {
-      list = list.filter((c) => (c.horizon || 'MID_TERM').toUpperCase() === horizonFilter)
+    // 2b. Horizon filter (Multi-Select)
+    if (!isAllOrEmpty(horizonFilter)) {
+      const hSet = normalizeToSet(horizonFilter)
+      list = list.filter((c) => hSet.has((c.horizon || 'MID_TERM').toUpperCase()))
     }
 
-    // 3. Timing state filter
-    if (timingFilter && timingFilter !== 'ALL') {
-      list = list.filter((c) => c.timing_state === timingFilter)
+    // 3. Timing state filter (Multi-Select)
+    if (!isAllOrEmpty(timingFilter)) {
+      const tSet = normalizeToSet(timingFilter)
+      list = list.filter((c) => tSet.has(c.timing_state))
     }
 
-    // 4. Market Cap Tier filter
-    if (capTierFilter && capTierFilter !== 'ALL') {
-      list = list.filter((c) => (c.cap_tier || '').toUpperCase() === capTierFilter)
+    // 4. Market Cap Tier filter (Multi-Select)
+    if (!isAllOrEmpty(capTierFilter)) {
+      const cSet = normalizeToSet(capTierFilter)
+      list = list.filter((c) => cSet.has((c.cap_tier || '').toUpperCase()))
     }
 
-    // 5. Sector filter
-    if (sectorFilter && sectorFilter !== 'ALL') {
-      list = list.filter((c) => c.sector === sectorFilter)
+    // 5. Sector filter (Multi-Select)
+    if (!isAllOrEmpty(sectorFilter)) {
+      const sSet = normalizeToSet(sectorFilter)
+      list = list.filter((c) => sSet.has(c.sector))
     }
 
     // 6. Min Score / Conviction filter
@@ -1028,8 +1084,9 @@ export default function InflectionScannerView({
     if (!Array.isArray(centuryCandidates)) return []
     let list = [...centuryCandidates]
 
-    // 1. Text Search across Symbol, Badges, Summary, Tier, Directive
+    // 1. Smart Search Filter across Symbol, Badges, Summary, Tier, Directive & Directives
     if (centurySearchQuery.trim()) {
+      const parsed = parseSearchQuery(centurySearchQuery)
       const q = centurySearchQuery.toLowerCase().trim()
       list = list.filter((c) => {
         const sym = (c.symbol || '').toLowerCase()
@@ -1040,6 +1097,7 @@ export default function InflectionScannerView({
           ? c.catalyst_badges.join(' ').toLowerCase()
           : ''
         return (
+          matchesSmartSearchCandidate(c, parsed) ||
           sym.includes(q) ||
           tier.includes(q) ||
           summary.includes(q) ||
@@ -1368,27 +1426,15 @@ export default function InflectionScannerView({
               <HelpHint metricKey="century_score" size="xs" />
             </div>
 
-            {/* Search Input */}
-            <div className="relative flex items-center">
-              <input
-                type="text"
-                placeholder="🔍 Search..."
-                value={centurySearchQuery}
-                onChange={(e) => setCenturySearchQuery(e.target.value)}
-                className="w-28 sm:w-36 text-xs pl-2.5 pr-6 py-1 rounded-lg bg-surface border border-border text-text placeholder:text-muted focus:outline-none focus:border-emerald-500 transition-colors font-sans"
-                title="Search symbol, tier, or catalyst"
-              />
-              {centurySearchQuery && (
-                <button
-                  type="button"
-                  onClick={() => setCenturySearchQuery('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text text-xs cursor-pointer"
-                  title="Clear search"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
+            {/* Search Input with Typeahead, Aliases & Directives */}
+            <SmartSearchBox
+              value={centurySearchQuery}
+              onChange={setCenturySearchQuery}
+              placeholder="🔍 Ticker, tier, catalyst…"
+              activeItems={centuryCandidates}
+              colorTheme="emerald"
+              className="w-36 sm:w-48"
+            />
 
             {/* Reset Filters */}
             {activeCenturyFilterCount > 0 && (
@@ -2095,101 +2141,66 @@ export default function InflectionScannerView({
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 border-b border-border bg-panel text-xs">
         <div className="flex flex-wrap items-center gap-2 min-w-0">
           {/* Horizon Dropdown */}
-          <select
-            value={horizonFilter}
-            onChange={(e) => setHorizonFilter(e.target.value)}
-            className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
-              horizonFilter !== 'ALL'
-                ? 'border-purple-400 text-purple-300 font-bold bg-purple-500/10'
-                : 'border-border hover:border-gold/50'
-            }`}
-            title="Filter by investment / holding horizon"
-          >
-            <option value="ALL">All Horizons {scanResult && horizonCounts.ALL ? `(${horizonCounts.ALL})` : ''}</option>
-            <option value="SHORT_TERM">⚡ Short (1–4W) {scanResult && horizonCounts.SHORT_TERM ? `(${horizonCounts.SHORT_TERM})` : ''}</option>
-            <option value="MID_TERM">📈 Mid (1–6M) {scanResult && horizonCounts.MID_TERM ? `(${horizonCounts.MID_TERM})` : ''}</option>
-            <option value="LONG_TERM">💎 Multibagger (1–3Y) {scanResult && horizonCounts.LONG_TERM ? `(${horizonCounts.LONG_TERM})` : ''}</option>
-          </select>
+          <MultiSelectDropdown
+            title="Horizon"
+            allLabel="All Horizons"
+            options={HORIZON_OPTIONS}
+            selected={horizonFilter}
+            onChange={setHorizonFilter}
+            colorTheme="sky"
+            hiddenSelectTitle="Filter by investment / holding horizon"
+          />
 
           {/* Archetype Dropdown */}
           <div className="flex items-center gap-1">
-            <select
-              value={archetypeFilter}
-              onChange={(e) => setArchetypeFilter(e.target.value)}
-              className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
-                archetypeFilter !== 'ALL'
-                  ? 'border-gold text-gold font-bold bg-gold/10'
-                  : 'border-border hover:border-gold/50'
-              }`}
-              title="Filter by quantitative inflection archetype"
-            >
-              <option value="ALL">All Inflections {scanResult && archetypeCounts.ALL ? `(${archetypeCounts.ALL})` : ''}</option>
-              <option value="PRE_INFLECTION_DRYUP">🤫 Pre-Inflection Dry-Up {scanResult && archetypeCounts.PRE_INFLECTION_DRYUP ? `(${archetypeCounts.PRE_INFLECTION_DRYUP})` : ''}</option>
-              <option value="VCP_PIVOT_BREAKOUT">🎯 VCP Pivots {scanResult && archetypeCounts.VCP_PIVOT_BREAKOUT ? `(${archetypeCounts.VCP_PIVOT_BREAKOUT})` : ''}</option>
-              <option value="TTM_SQUEEZE_EXPLOSION">⚡ TTM Squeeze Breakouts {scanResult && archetypeCounts.TTM_SQUEEZE_EXPLOSION ? `(${archetypeCounts.TTM_SQUEEZE_EXPLOSION})` : ''}</option>
-              <option value="STAGE_1_TO_2_EXPANSION">🚀 Stage 1→2 Markup {scanResult && archetypeCounts.STAGE_1_TO_2_EXPANSION ? `(${archetypeCounts.STAGE_1_TO_2_EXPANSION})` : ''}</option>
-              <option value="SMC_SPRING_SWEEP">🎪 SMC Springs & Sweeps {scanResult && archetypeCounts.SMC_SPRING_SWEEP ? `(${archetypeCounts.SMC_SPRING_SWEEP})` : ''}</option>
-              <option value="RRG_SECTOR_ROTATION">🔄 Sector RRG Leaders {scanResult && archetypeCounts.RRG_SECTOR_ROTATION ? `(${archetypeCounts.RRG_SECTOR_ROTATION})` : ''}</option>
-            </select>
+            <MultiSelectDropdown
+              title="Archetype"
+              allLabel="All Inflections"
+              options={ARCHETYPE_OPTIONS}
+              selected={archetypeFilter}
+              onChange={setArchetypeFilter}
+              colorTheme="gold"
+              hiddenSelectTitle="Filter by quantitative inflection archetype"
+            />
             <HelpHint metricKey="vcp_pivot" size="xs" />
           </div>
 
           {/* Timing Dropdown */}
           <div className="flex items-center gap-1">
-            <select
-              value={timingFilter}
-              onChange={(e) => setTimingFilter(e.target.value)}
-              className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
-                timingFilter !== 'ALL'
-                  ? 'border-emerald-400 text-emerald-300 font-bold bg-emerald-500/10'
-                  : 'border-border hover:border-gold/50'
-              }`}
-              title="Filter by entry timing urgency"
-            >
-              <option value="ALL">All Timing {scanResult && timingCounts.ALL ? `(${timingCounts.ALL})` : ''}</option>
-              <option value="TRIGGER_NOW">🔥 Trigger Now / Active {scanResult && timingCounts.TRIGGER_NOW ? `(${timingCounts.TRIGGER_NOW})` : ''}</option>
-              <option value="COILING_IMMINENT">⏳ Coiling (1–3d) {scanResult && timingCounts.COILING_IMMINENT ? `(${timingCounts.COILING_IMMINENT})` : ''}</option>
-              <option value="PULLBACK_RETEST">🎯 Retest Zone {scanResult && timingCounts.PULLBACK_RETEST ? `(${timingCounts.PULLBACK_RETEST})` : ''}</option>
-            </select>
+            <MultiSelectDropdown
+              title="Timing"
+              allLabel="All Timing"
+              options={TIMING_OPTIONS}
+              selected={timingFilter}
+              onChange={setTimingFilter}
+              colorTheme="emerald"
+              hiddenSelectTitle="Filter by entry timing urgency"
+            />
             <HelpHint metricKey="timing_state" size="xs" />
           </div>
 
           {/* Market Cap Tier */}
-          <select
-            value={capTierFilter}
-            onChange={(e) => setCapTierFilter(e.target.value)}
-            className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
-              capTierFilter !== 'ALL'
-                ? 'border-gold text-gold font-bold bg-gold/10'
-                : 'border-border hover:border-gold/50'
-            }`}
-            title="Filter by Market Cap Tier"
-          >
-            <option value="ALL">All Caps</option>
-            <option value="LARGE">🏛️ Large Cap</option>
-            <option value="MID">⚡ Mid Cap</option>
-            <option value="SMALL">🚀 Small Cap</option>
-            <option value="MICRO">🌱 Micro Cap</option>
-          </select>
+          <MultiSelectDropdown
+            title="Cap Tier"
+            allLabel="All Caps"
+            options={CAP_TIER_OPTIONS}
+            selected={capTierFilter}
+            onChange={setCapTierFilter}
+            colorTheme="gold"
+            hiddenSelectTitle="Filter by Market Cap Tier"
+          />
 
           {/* Sector Filter */}
-          <select
-            value={sectorFilter}
-            onChange={(e) => setSectorFilter(e.target.value)}
-            className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer max-w-[130px] truncate ${
-              sectorFilter !== 'ALL'
-                ? 'border-gold text-gold font-bold bg-gold/10'
-                : 'border-border hover:border-gold/50'
-            }`}
-            title="Filter by Sector"
-          >
-            <option value="ALL">All Sectors {availableSectors.length > 0 ? `(${availableSectors.length})` : ''}</option>
-            {availableSectors.map((sec) => (
-              <option key={sec.name} value={sec.name}>
-                {sec.name} ({sec.count})
-              </option>
-            ))}
-          </select>
+          <MultiSelectDropdown
+            title="Sector"
+            allLabel="All Sectors"
+            options={SECTOR_OPTIONS}
+            selected={sectorFilter}
+            onChange={setSectorFilter}
+            colorTheme="gold"
+            hiddenSelectTitle="Filter by Sector"
+            className="max-w-[140px]"
+          />
 
           {/* Score Selector */}
           <select
@@ -2237,26 +2248,15 @@ export default function InflectionScannerView({
             <span>Exclude UC Locked</span>
           </button>
 
-          {/* Search Input */}
-          <div className="relative flex items-center">
-            <input
-              type="text"
-              placeholder="🔍 Search..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-28 sm:w-36 text-xs pl-2.5 pr-6 py-1 rounded-lg bg-surface border border-border text-text placeholder:text-muted focus:outline-none focus:border-gold transition-colors font-sans"
-            />
-            {searchQuery && (
-              <button
-                type="button"
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text text-xs cursor-pointer"
-                title="Clear search"
-              >
-                ✕
-              </button>
-            )}
-          </div>
+          {/* Smart Search Input with Typeahead, Aliases & Directives */}
+          <SmartSearchBox
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="🔍 Symbol, sector, or score:>80…"
+            activeItems={scanResult?.candidates || []}
+            colorTheme="gold"
+            className="w-36 sm:w-56"
+          />
 
           {/* Reset Filters Button */}
           {activeFilterCount > 0 && (

@@ -21,6 +21,15 @@ else:
 
 _TEST_DATA_DIR.mkdir(parents=True, exist_ok=True)
 (_TEST_DATA_DIR / "pdf").mkdir(parents=True, exist_ok=True)
+(_TEST_DATA_DIR / "sym_master").mkdir(parents=True, exist_ok=True)
+_sym_fixtures = Path(__file__).parent / "fixtures" / "sym_master"
+if _sym_fixtures.exists():
+    import shutil
+
+    for _f in _sym_fixtures.glob("*.json"):
+        _target = _TEST_DATA_DIR / "sym_master" / _f.name
+        if not _target.exists():
+            shutil.copyfile(_f, _target)
 os.environ["TRADING_PLATFORM_HOME"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_DATA"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_PDF_DIR"] = str(_TEST_DATA_DIR / "pdf")
@@ -40,7 +49,9 @@ os.environ.setdefault("PYTHONKEYRING_BACKEND", "keyring.backends.null.Keyring")
 # Institutional thread safety & leak prevention:
 # 1. Patch fyers_apiv3 WebSocket SDK so all its internal ping/worker threads are daemon threads.
 try:
-    pass
+    from market.fyers_socket_patch import patch_fyers_websocket_daemon_threads
+
+    patch_fyers_websocket_daemon_threads()
 except Exception:
     pass
 
@@ -62,45 +73,68 @@ threading.Thread.__init__ = _test_safe_thread_init
 
 
 @pytest.fixture(autouse=True)
-def _isolate_fyers_rate_gate_and_circuit_breaker():
-    """Defensively reset rate gate and circuit breaker before and after each test."""
-    try:
-        from market.fyers_circuit_breaker import get_fyers_circuit_breaker
-
-        get_fyers_circuit_breaker().record_success()
-    except Exception:
-        pass
-    try:
-        from market.fyers_rate_gate import get_fyers_rate_gate
-
-        get_fyers_rate_gate().reset_daily_quota(requests=0)
-    except Exception:
-        pass
+def _ensure_chanakya_testing_env():
+    """Defensively guarantee CHANAKYA_TESTING=1 is always intact before and after every test."""
+    os.environ["CHANAKYA_TESTING"] = "1"
     yield
-    try:
-        from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+    os.environ["CHANAKYA_TESTING"] = "1"
 
-        get_fyers_circuit_breaker().record_success()
-    except Exception:
-        pass
-    try:
-        from market.fyers_rate_gate import get_fyers_rate_gate
 
-        get_fyers_rate_gate().reset_daily_quota(requests=0)
-    except Exception:
-        pass
+@pytest.fixture(autouse=True)
+def _isolate_fyers_rate_gate_and_circuit_breaker():
+    """Defensively reset rate gate, circuit breaker, and regime cache before and after each test."""
+
+    def _do_reset():
+        try:
+            from bot.telegram_bot import _push_executor, _push_lock
+
+            with _push_lock:
+                if _push_executor is not None:
+                    _push_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        try:
+            from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+
+            get_fyers_circuit_breaker().reset()
+        except Exception:
+            pass
+        try:
+            from market.fyers_rate_gate import get_fyers_rate_gate
+
+            gate = get_fyers_rate_gate()
+            gate.reset_state()
+            gate.reset_daily_quota(requests=0)
+        except Exception:
+            pass
+        try:
+            from engine.equity_adaptive_regime import (
+                _EQUITY_REGIME_CACHE,
+                _EQUITY_REGIME_CACHE_LOCK,
+            )
+
+            with _EQUITY_REGIME_CACHE_LOCK:
+                _EQUITY_REGIME_CACHE.clear()
+        except Exception:
+            pass
+
+    _do_reset()
+    yield
+    _do_reset()
 
 
 # 3. Institutional zero-network quarantine:
 # Defensively isolate test sessions from unmocked external network connections.
 # Any attempt to connect to a non-loopback host raises RuntimeError unless marked with @pytest.mark.network.
+socket.setdefaulttimeout(15.0)
 _orig_socket_connect = socket.socket.connect
 _PROCESS_ALLOW_NETWORK = False
 _ALLOWED_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
 
 def _test_guarded_socket_connect(self, address):
-    if os.environ.get("CHANAKYA_TESTING") == "1" and not _PROCESS_ALLOW_NETWORK:
+    is_testing = os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+    if is_testing and not _PROCESS_ALLOW_NETWORK:
         if isinstance(address, (tuple, list)) and len(address) >= 1:
             host = address[0]
             if isinstance(host, str) and host not in _ALLOWED_LOCAL_HOSTS:
@@ -178,6 +212,13 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
 
         tbt_mgr = FyersTbtManager()
         tbt_mgr.reset_for_testing()
+    except Exception:
+        pass
+
+    try:
+        from market.order_book import clear_depth_books
+
+        clear_depth_books()
     except Exception:
         pass
 
@@ -263,6 +304,12 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
             from market.fyers_tbt_manager import FyersTbtManager
 
             FyersTbtManager().reset_for_testing()
+        except Exception:
+            pass
+        try:
+            from market.order_book import clear_depth_books
+
+            clear_depth_books()
         except Exception:
             pass
         try:
@@ -527,3 +574,45 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         ticker_stream.stop(timeout=0.2)
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def reset_auto_alert_engine_pacing():
+    """Ensure hermetic test isolation for AutoAlertEngine state & daily levels."""
+
+    def _do_reset():
+        try:
+            from engine.auto_alert_engine import auto_alert_engine
+
+            if auto_alert_engine is not None:
+                auto_alert_engine._alerts.clear()
+                auto_alert_engine._directional_quarantine.clear()
+                auto_alert_engine._directional_failure_history.clear()
+                auto_alert_engine._stopped_strike_quarantine.clear()
+                auto_alert_engine._alert_index.clear()
+                auto_alert_engine._recent_pacing.clear()
+                auto_alert_engine._sector_daily_telegram.clear()
+                auto_alert_engine._daily_index_telegram.clear()
+                auto_alert_engine._index_half_telegram.clear()
+                auto_alert_engine._sector_hourly_telegram.clear()
+                for k in auto_alert_engine._hourly_telegram_dispatches:
+                    auto_alert_engine._hourly_telegram_dispatches[k].clear()
+                auto_alert_engine._hourly_index_directional.clear()
+                auto_alert_engine._hourly_fno_stock_directional.clear()
+        except Exception:
+            pass
+        try:
+            from engine.daily_levels import get_daily_levels_store
+            from config.paths import app_data_path
+
+            store = get_daily_levels_store()
+            with store._lock:
+                store._memory_cache.clear()
+                store._persist_dir = app_data_path("daily_levels")
+                store._persist_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+    _do_reset()
+    yield
+    _do_reset()

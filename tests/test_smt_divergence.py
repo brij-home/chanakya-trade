@@ -152,3 +152,112 @@ def test_tier2_scrutiny_smt_divergence_gate(monkeypatch):
     assert passed is False
     assert flags.get("smt_divergence_trap") is True
     assert "SMT Bearish Divergence" in reason
+
+
+def test_smt_locomotive_polarization_bear_trap():
+    """
+    NIFTY is trading below VWAP (24,900 vs 24,950), but 34%-weighted locomotive BANKNIFTY
+    is holding above VWAP (52,000 vs 51,800).
+    Must trigger SMT Locomotive Polarization (bear trap veto).
+    """
+    mock_quotes = {
+        "BANKNIFTY": {
+            "ltp": 52000.0,
+            "vwap": 51800.0,
+            "high": 52200.0,
+            "low": 51750.0,
+        }
+    }
+
+    res = evaluate_smt_divergence(
+        primary_symbol="NIFTY",
+        direction="BEARISH",
+        primary_spot=24900.0,
+        primary_day_high=25050.0,
+        primary_day_low=24700.0,  # Spot 24,900 is >0.35% from Day Low 24,700
+        primary_vwap=24950.0,
+        quotes_map=mock_quotes,
+    )
+
+    assert res.has_divergence is True
+    assert res.is_trap is True
+    assert res.divergence_type == "LOCOMOTIVE_POLARIZATION_BEAR_TRAP"
+    assert "firmly holding above VWAP" in res.rationale
+    assert "bear trap" in res.rationale
+
+
+def test_smt_locomotive_polarization_bull_trap():
+    """
+    NIFTY is trading above VWAP (25,000 vs 24,950), but BANKNIFTY is trapped below VWAP (51,500 vs 51,800).
+    Must trigger SMT Locomotive Polarization (bull trap veto).
+    """
+    mock_quotes = {
+        "BANKNIFTY": {
+            "ltp": 51500.0,
+            "vwap": 51800.0,
+            "high": 52200.0,
+            "low": 51400.0,
+        }
+    }
+
+    res = evaluate_smt_divergence(
+        primary_symbol="NIFTY",
+        direction="BULLISH",
+        primary_spot=25000.0,
+        primary_day_high=25200.0,  # Spot 25,000 is >0.35% from Day High 25,200
+        primary_day_low=24800.0,
+        primary_vwap=24950.0,
+        quotes_map=mock_quotes,
+    )
+
+    assert res.has_divergence is True
+    assert res.is_trap is True
+    assert res.divergence_type == "LOCOMOTIVE_POLARIZATION_BULL_TRAP"
+    assert "trapped below VWAP" in res.rationale
+
+
+def test_dynamic_index_min_sl_floor_scaling():
+    """Verify that get_dynamic_index_min_sl_floor scales with India VIX regime."""
+    from engine.alert_scrutiny import get_dynamic_index_min_sl_floor
+
+    # Normal VIX (15.0) -> baseline
+    assert get_dynamic_index_min_sl_floor("BANKNIFTY", vix=15.0) == 65.0
+    assert get_dynamic_index_min_sl_floor("NIFTY", vix=15.0) == 25.0
+
+    # High VIX (24.0) -> expands by ~sqrt(24/15) = 1.265x
+    high_floor = get_dynamic_index_min_sl_floor("BANKNIFTY", vix=24.0)
+    assert high_floor > 80.0, f"Expected >80.0, got {high_floor}"
+
+    # Low VIX (10.0) -> contracts by ~sqrt(10/15) = 0.816x
+    low_floor = get_dynamic_index_min_sl_floor("BANKNIFTY", vix=10.0)
+    assert low_floor < 55.0, f"Expected <55.0, got {low_floor}"
+
+
+def test_tier1_sanity_rejects_sub_noise_spot_anchor():
+    """Verify that alert scrutiny rejects index options with spot anchors placed inside candle noise."""
+    alert = AutoAlert(
+        alert_id="test-spot-anchor-sub-noise",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="BANKNIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="BankNifty Call",
+        summary="Test",
+        ltp=150.0,
+        trigger_level=150.0,
+        target_level=220.0,
+        stop_loss=120.0,  # 30 pt option risk
+        underlying_spot=53850.0,
+        structural_spot_sl=53845.0,  # Only 5 pts below spot on BankNifty! Inside noise!
+        metrics={
+            "spot": 53850.0,
+            "spot_invalidation_anchor": 53845.0,
+            "india_vix": 15.0,
+        },
+    )
+
+    passed, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
+    assert passed is False
+    assert flags.get("risk_within_bounds") is False
+    assert "Sub-Noise Spot Trap" in reason

@@ -21,6 +21,7 @@ from engine.alert_identity import (
 from engine.alert_model import AutoAlert
 from engine.option_resolver import resolve_option_contract, is_index_symbol
 from engine.dynamic_risk import resolve_price_tier
+from market.instruments import format_strike
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -98,6 +99,18 @@ def _format_squeeze_alert(
     except Exception:
         now_dt = datetime.now(IST)
     phase_slot = get_session_phase_slot(now_dt)
+    try:
+        from engine.daily_levels import evaluate_cpr_gate
+
+        cpr_gate = evaluate_cpr_gate(clean_sym, ltp, direction)
+        if cpr_gate.cpr_data:
+            metrics["cpr"] = cpr_gate.cpr_data
+            metrics["cpr_type"] = cpr_gate.cpr_type
+            metrics["is_narrow_cpr"] = cpr_gate.is_narrow
+            metrics["is_wide_cpr"] = cpr_gate.is_wide
+    except Exception as e_cpr:
+        logger.debug(f"[SqueezeBreakout] CPR lookup in _build_alert skipped: {e_cpr}")
+
     is_idx = is_index_symbol(clean_sym)
     opt_plan = (
         resolve_option_contract(
@@ -151,7 +164,7 @@ def _format_squeeze_alert(
             alert_id=generate_alert_id(
                 clean_sym,
                 "SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
-                variant=f"{opt_plan.option_type.lower()}-{int(opt_plan.strike)}-{phase_slot}",
+                variant=f"{opt_plan.option_type.lower()}-{format_strike(opt_plan.strike).replace('.', 'p')}-{phase_slot}",
             ),
             alert_type="SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
             stage=stage,
@@ -238,6 +251,145 @@ def _format_squeeze_alert(
         confidence=conf,
         created_at=now_iso,
     )
+
+
+def _check_index_macro_filters(clean_sym: str, ltp: float, direction: str, df: Any) -> bool:
+    """
+    Validates institutional order flow, TBT 50-depth, and Camarilla H4/L4 macro levels
+    for index symbols to eliminate false squeeze breakout/breakdown traps.
+    Returns True if safe to proceed, False if vetoed.
+    """
+    if clean_sym not in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
+        return True
+
+    # 1. CPR Geometry & Camarilla Floor/Ceiling Gates
+    try:
+        from engine.daily_levels import get_daily_levels
+
+        dl = get_daily_levels(clean_sym)
+        if dl:
+            if dl.cpr:
+                cpr = dl.cpr
+                cpr_w = float(cpr.get("width_pct", 0.0) or 0.0)
+                is_wide_cpr = bool(cpr.get("is_wide")) or (cpr_w >= 0.35)
+                cpr_top = float(cpr.get("top", 0.0) or cpr.get("tc", 0.0) or 0.0)
+                cpr_bottom = float(cpr.get("bottom", 0.0) or cpr.get("bc", 0.0) or 0.0)
+
+                if (
+                    is_wide_cpr
+                    and cpr_bottom > 0
+                    and cpr_top > 0
+                    and (cpr_bottom <= ltp <= cpr_top)
+                ):
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed setup on {clean_sym}: Spot ₹{ltp:,.1f} trapped inside Wide CPR range ₹{cpr_bottom:,.1f} - ₹{cpr_top:,.1f}."
+                    )
+                    return False
+                if (
+                    direction == "BULLISH"
+                    and is_wide_cpr
+                    and cpr_top > 0
+                    and (ltp < cpr_top <= (ltp * 1.004))
+                ):
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bullish setup on {clean_sym}: Spot ₹{ltp:,.1f} testing resting Wide CPR Top resistance ₹{cpr_top:,.1f}."
+                    )
+                    return False
+                if (
+                    direction == "BEARISH"
+                    and is_wide_cpr
+                    and cpr_bottom > 0
+                    and ((ltp * 0.996) <= cpr_bottom < ltp)
+                ):
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bearish setup on {clean_sym}: Spot ₹{ltp:,.1f} testing resting Wide CPR Bottom support ₹{cpr_bottom:,.1f}."
+                    )
+                    return False
+
+            if dl.camarilla:
+                if direction == "BEARISH":
+                    l4 = float(dl.camarilla.get("l4", 0.0) or 0.0)
+                    if l4 > 0 and ltp >= (l4 * 0.998) and ltp <= (l4 * 1.0025):
+                        logger.info(
+                            f"[SqueezeBreakout] Suppressed Bearish setup on {clean_sym}: Spot ₹{ltp:,.1f} testing Camarilla L4 Floor ₹{l4:,.1f}. "
+                            f"Absorption bounce floor active."
+                        )
+                        return False
+            elif direction == "BULLISH":
+                h4 = float(dl.camarilla.get("h4", 0.0) or 0.0)
+                if h4 > 0 and ltp <= (h4 * 1.002) and ltp >= (h4 * 0.9975):
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bullish setup on {clean_sym}: Spot ₹{ltp:,.1f} testing Camarilla H4 Ceiling ₹{h4:,.1f}. "
+                        f"Resistance ceiling active."
+                    )
+                    return False
+    except Exception as e_dl:
+        logger.debug(f"[SqueezeBreakout] Daily levels check skipped for {clean_sym}: {e_dl}")
+
+    # 2. Cumulative Volume Delta (CVD) Divergence & Absorption
+    try:
+        from engine.detectors.order_flow import compute_order_flow_cvd_divergence
+
+        if df is not None and len(df) >= 6:
+            of_div = compute_order_flow_cvd_divergence(df, ltp)
+            if direction == "BEARISH" and of_div.get("is_bullish_absorption"):
+                logger.info(
+                    f"[SqueezeBreakout] Suppressed Bearish setup on {clean_sym}: CVD Bullish Absorption active "
+                    f"(divergence ratio {of_div.get('cvd_divergence_ratio')}x)."
+                )
+                return False
+            elif direction == "BULLISH" and of_div.get("is_bearish_exhaustion"):
+                logger.info(
+                    f"[SqueezeBreakout] Suppressed Bullish setup on {clean_sym}: CVD Bearish Exhaustion active "
+                    f"(divergence ratio {of_div.get('cvd_divergence_ratio')}x)."
+                )
+                return False
+    except Exception as e_cvd:
+        logger.debug(f"[SqueezeBreakout] CVD check skipped for {clean_sym}: {e_cvd}")
+
+    # 3. TBT 50-Depth & Order Book Imbalance (OBI-50) Gate
+    try:
+        from market.fyers_tbt_manager import fyers_tbt_manager, resolve_tradable_tbt_symbol
+        from market.order_book import get_depth_book
+
+        fut_sym = resolve_tradable_tbt_symbol(clean_sym)
+        tbt_depth = (
+            fyers_tbt_manager.get_50_depth(fut_sym)
+            if getattr(fyers_tbt_manager, "is_connected", False)
+            else None
+        )
+        if tbt_depth and tbt_depth.get("status") not in ("UNAVAILABLE", None):
+            obi_50_val = float(tbt_depth.get("obi_50", 0.0) or 0.0)
+            if direction == "BEARISH":
+                if obi_50_val >= 0.20 or tbt_depth.get("fortress_bid_wall_confirmed"):
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bearish setup on {clean_sym}: TBT OBI-50 {obi_50_val:+.2f} / Fortress Bid Wall on {fut_sym}."
+                    )
+                    return False
+            elif direction == "BULLISH":
+                if obi_50_val <= -0.20 or tbt_depth.get("fortress_ask_wall_confirmed"):
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bullish setup on {clean_sym}: TBT OBI-50 {obi_50_val:+.2f} / Fortress Ask Wall on {fut_sym}."
+                    )
+                    return False
+        else:
+            l2_book = get_depth_book(fut_sym or clean_sym)
+            if l2_book and l2_book.total_bid_qty > 0 and l2_book.total_ask_qty > 0:
+                obi_5_val = l2_book.obi(5)
+                if direction == "BEARISH" and obi_5_val >= 0.22:
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bearish setup on {clean_sym}: L2 OBI-5 {obi_5_val:+.2f} >= +0.22."
+                    )
+                    return False
+                elif direction == "BULLISH" and obi_5_val <= -0.22:
+                    logger.info(
+                        f"[SqueezeBreakout] Suppressed Bullish setup on {clean_sym}: L2 OBI-5 {obi_5_val:+.2f} <= -0.22."
+                    )
+                    return False
+    except Exception as e_tbt:
+        logger.debug(f"[SqueezeBreakout] TBT depth check skipped for {clean_sym}: {e_tbt}")
+
+    return True
 
 
 def detect_squeeze_breakout(
@@ -419,6 +571,8 @@ def detect_squeeze_breakout(
                         f"[SqueezeBreakout] Suppressed Bullish Early Warning on {clean_sym}: Downside ROC acceleration active ({roc_metric.summary})"
                     )
                     return None
+                if not _check_index_macro_filters(clean_sym, ltp, "BULLISH", df):
+                    return None
             if sector_align and not is_test_env:
                 sec_quad = sector_align.get("quadrant")
                 sec_align_str = sector_align.get("alignment")
@@ -560,6 +714,8 @@ def detect_squeeze_breakout(
                     logger.info(
                         f"[SqueezeBreakout] Suppressed Bearish Early Warning on {clean_sym}: Upside ROC acceleration active ({roc_metric.summary})"
                     )
+                    return None
+                if not _check_index_macro_filters(clean_sym, ltp, "BEARISH", df):
                     return None
             if sector_align and not is_test_env:
                 sec_quad = sector_align.get("quadrant")
@@ -725,6 +881,8 @@ def detect_squeeze_breakout(
                         f"[SqueezeBreakout] Suppressed Bullish Breakout on {clean_sym}: Downside ROC acceleration active ({roc_metric.summary})"
                     )
                     return None
+                if not _check_index_macro_filters(clean_sym, ltp, "BULLISH", df):
+                    return None
             if sector_align and not is_test_env:
                 sec_quad = sector_align.get("quadrant")
                 sec_align_str = sector_align.get("alignment")
@@ -868,6 +1026,8 @@ def detect_squeeze_breakout(
                     logger.info(
                         f"[SqueezeBreakout] Suppressed Bearish Breakdown on {clean_sym}: Upside ROC acceleration active ({roc_metric.summary})"
                     )
+                    return None
+                if not _check_index_macro_filters(clean_sym, ltp, "BEARISH", df):
                     return None
             if sector_align and not is_test_env:
                 sec_quad = sector_align.get("quadrant")

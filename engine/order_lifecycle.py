@@ -2065,6 +2065,7 @@ def ratchet_stop_loss_on_milestone(
     Finds resting OPEN stop-loss orders for the given symbol and updates trigger price.
     """
     clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
+    _init_orders_db()
     with _get_orders_db() as conn:
         rows = conn.execute(
             """

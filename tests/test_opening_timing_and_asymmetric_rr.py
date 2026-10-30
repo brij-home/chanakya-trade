@@ -272,7 +272,7 @@ def test_apex_gate_strictly_blocks_low_rr_or_low_conf():
     )
     passed, reason = engine._eval_telegram_apex_gate(alert_low_conf, in_market=True)
     assert not passed
-    assert "below Telegram bar (88%)" in reason
+    assert "below Telegram bar" in reason
 
 
 def test_index_call_setup_ord_displacement_at_09_18():

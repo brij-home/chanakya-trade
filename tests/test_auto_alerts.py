@@ -989,6 +989,7 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
     engine = AutoAlertEngine()
     alert = AutoAlert(
         alert_id="coiling-header-1",
+        expiry_date="2026-11-05",
         alert_type="PATTERN_COILING",
         stage="EARLY_WARNING",
         symbol="MANKIND",
@@ -1003,6 +1004,17 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
         confidence=90,
         is_live=True,
         environment="LIVE",
+        actionable_plan={
+            "trade_plan": {
+                "direction": "LONG",
+                "entry_price": 2285.4,
+                "invalidation_stop": 2271.5,
+                "target_1": 2320.0,
+                "target_2": 2350.0,
+                "is_asymmetry_viable": True,
+                "asymmetry_verdict": "ACCEPTABLE",
+            }
+        },
     )
 
     engine._dispatch(alert)
@@ -1023,6 +1035,8 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
             "ACCEPTABLE",
             "EXCELLENT_ASYMMETRY",
             "High Asymmetry",
+            "Viable Asymmetry",
+            "Asymmetry",
             "OPPOSING_ZONE_COLLISION_REJECTED",
             "Capped by Overhead Supply",
         )
@@ -1526,7 +1540,7 @@ def test_auto_alert_expiration_and_reaping(tmp_path, monkeypatch):
         target_level=950.0,
         stop_loss=1040.0,
         created_at="2026-09-09 13:25:48 IST",
-        expiry_date="2026-10-29",
+        expiry_date="2026-11-26",
         strike=1010.0,
         option_type="PE",
         contract_symbol="SBIN1010PE",
@@ -3020,6 +3034,7 @@ def test_offmarket_intraday_suppressed_while_swing_allowed(tmp_path, monkeypatch
         trigger_level=150.0,
         target_level=140.0,
         stop_loss=155.0,
+        metrics={"rvol": 2.5},
         created_at=now_str,
     )
     rec_swing = engine.record_alert(swing_alert)
@@ -3219,6 +3234,11 @@ def test_options_momentum_is_gated_in_alert_scrutiny(tmp_path, monkeypatch):
             auditor_model="TEST_AUDITOR",
             audited_at="2026-09-11 15:00:00 IST",
         ),
+    )
+    monkeypatch.setattr(
+        alert_scrutiny_auditor,
+        "verify_tier1_sanity",
+        lambda a: (True, "Sanity OK", {"benchmark_regime_valid": True}),
     )
 
     alert = AutoAlert(
@@ -3801,8 +3821,13 @@ def test_cross_detector_active_trade_mutex(monkeypatch, tmp_path):
     from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
 
     data_file = tmp_path / "auto_alerts_mutex.json"
+    monkeypatch.setenv("CHANAKYA_TESTING", "1")
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+        lambda alert: (True, "", {}),
+    )
 
     engine = AutoAlertEngine(max_buffer=20)
     engine.clear_alerts()

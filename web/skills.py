@@ -80,6 +80,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from rich.console import Console
 
 from agent.tools import _serialise
+from market.instruments import canonical_symbol
 
 console = Console(legacy_windows=False)
 router = APIRouter(prefix="/skills", tags=["OpenClaw Skills"])
@@ -256,19 +257,17 @@ _VALID_EXCHANGES = frozenset({"NSE", "BSE", "NFO", "BFO", "MCX", "CDS"})
 
 
 def _normalize_symbol_and_exchange(symbol: str, exchange: Optional[str] = "NSE") -> tuple[str, str]:
-    sym = (symbol or "").upper().strip()
+    raw_s = str(symbol or "").strip().upper()
     exch = (exchange or "NSE").upper().strip()
-    if exch not in _VALID_EXCHANGES:
-        exch = "NSE"
-    if ":" in sym:
-        parts = sym.split(":", 1)
+    if ":" in raw_s:
+        parts = raw_s.split(":", 1)
         exch_candidate = parts[0].strip().upper()
         if exch_candidate in _VALID_EXCHANGES:
             exch = exch_candidate
-            sym = parts[1].strip().upper()
-        else:
-            sym = parts[1].strip().upper()
-    elif exch == "NSE":
+    if exch not in _VALID_EXCHANGES:
+        exch = "NSE"
+    sym = canonical_symbol(raw_s)
+    if exch == "NSE":
         from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
 
         if sym in _MCX_SYMBOLS:
@@ -893,7 +892,7 @@ async def skill_sector_heatmap():
         ]
 
         instruments = [inst for _, inst, _ in canonical_sectors]
-        quotes = get_quote(instruments)
+        quotes = await asyncio.to_thread(get_quote, instruments)
 
         sectors = []
         for code, inst, name in canonical_sectors:
@@ -2627,7 +2626,7 @@ async def skill_scan(req: ScanRequest):
             symbols = [s.upper() for s in symbols]
         quick = bool(req.filters.get("quick", False))
 
-        results = scan_options(symbols=symbols, quick=quick)
+        results = await asyncio.to_thread(scan_options, symbols=symbols, quick=quick)
         return _ok(results)
     except Exception as e:
         raise _err(str(e))
@@ -3862,7 +3861,9 @@ async def skill_block_deals(symbol: str, days: int = 30):
 
         q = get_quote(symbol)
         ltp = getattr(q, "last_price", 1000.0) if q else 1000.0
-        rep = analyze_block_deal_absorption(symbol, current_price=ltp, days=days)
+        rep = await asyncio.to_thread(
+            analyze_block_deal_absorption, symbol, current_price=ltp, days=days
+        )
         return _ok({"block_deal_report": rep.to_dict()})
     except Exception as e:
         raise _err(str(e))
@@ -3881,10 +3882,10 @@ async def skill_capex_inflections(symbol: Optional[str] = None):
         )
 
         if symbol:
-            rep = analyze_capex_inflection(symbol)
+            rep = await asyncio.to_thread(analyze_capex_inflection, symbol)
             return _ok({"capex_inflection": rep.to_dict()})
 
-        universe = scan_capex_inflection_universe()
+        universe = await asyncio.to_thread(scan_capex_inflection_universe)
         return _ok({"capex_inflections": [u.to_dict() for u in universe], "count": len(universe)})
     except Exception as e:
         raise _err(str(e))
@@ -3903,10 +3904,10 @@ async def skill_rrg_orderbook_convergence(symbol: Optional[str] = None):
         )
 
         if symbol:
-            rep = evaluate_rrg_orderbook_convergence(symbol)
+            rep = await asyncio.to_thread(evaluate_rrg_orderbook_convergence, symbol)
             return _ok({"convergence_report": rep.to_dict()})
 
-        matrix = scan_rrg_orderbook_matrix()
+        matrix = await asyncio.to_thread(scan_rrg_orderbook_matrix)
         return _ok({"convergence_matrix": [m.to_dict() for m in matrix], "count": len(matrix)})
     except Exception as e:
         raise _err(str(e))
@@ -3922,10 +3923,10 @@ async def skill_insider_radar(symbol: Optional[str] = None):
         from analysis.insider_radar import analyze_insider_activity, scan_insider_radar
 
         if symbol:
-            rep = analyze_insider_activity(symbol)
+            rep = await asyncio.to_thread(analyze_insider_activity, symbol)
             return _ok({"insider_report": rep.to_dict()})
 
-        radar = scan_insider_radar()
+        radar = await asyncio.to_thread(scan_insider_radar)
         return _ok({"insider_radar": [r.to_dict() for r in radar], "count": len(radar)})
     except Exception as e:
         raise _err(str(e))
@@ -4474,7 +4475,7 @@ async def skill_pre_inflection_early_warning(
         def _do_early_warning_scan():
             alerts = []
             for sym in universe:
-                clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+                clean_sym = canonical_symbol(sym)
                 df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
                 if df is not None and len(df) >= 25:
                     ltp = float(df["close"].iloc[-1])
@@ -7606,14 +7607,7 @@ async def skill_gex_snapshot(
         elif req:
             raw_in = req.symbol or req.underlying
         clean_raw = (raw_in if raw_in else "NIFTY").strip().upper()
-        clean_sym = (
-            clean_raw.replace("NSE:", "")
-            .replace("BSE:", "")
-            .replace("NFO:", "")
-            .replace("MCX:", "")
-            .replace("CDS:", "")
-            .strip()
-        )
+        clean_sym = canonical_symbol(clean_raw)
         norm_inst = normalize_instrument(clean_sym)
 
         # 1. Fetch authentic live spot quote & option contracts off the event loop

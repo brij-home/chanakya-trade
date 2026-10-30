@@ -83,6 +83,7 @@ def test_session_regime_scrutiny_integration(monkeypatch):
     """Verifies AlertScrutinyAuditor vetoes breakout alerts when ADR is exhausted."""
     auditor = AlertScrutinyAuditor(min_rr_ratio=1.5)
     monkeypatch.setattr(auditor, "_execute_fast_llm_scrutiny", lambda *args, **kwargs: None)
+    monkeypatch.setattr("market.order_book.get_depth_book", lambda *args, **kwargs: None)
 
     # 1. Breakout alert on an ADR-exhausted session -> Must be REJECTED
     exhausted_session = {

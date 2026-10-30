@@ -29,17 +29,20 @@ async function startSidecar(venvBin, sourceRoot) {
     uvicorn = join(venvBin, 'uvicorn')
   }
   
+  const isDev = !app.isPackaged || process.env.CHANAKYA_RELOAD === '1'
+  const reloadArgs = isDev ? ['--reload'] : []
+
   if (!existsSync(uvicorn)) {
     // Fallback: run via python -m uvicorn
     const pyExec = isWin ? 'python.exe' : 'python'
     const py = join(venvBin, pyExec)
     if (!existsSync(py)) throw new Error(`uvicorn and python not found at ${venvBin}`)
-    uvicornProcess = spawn(py, ['-m', 'uvicorn', 'web.api:app', '--host', '127.0.0.1', '--port', String(PORT), '--log-level', 'warning'], {
+    uvicornProcess = spawn(py, ['-m', 'uvicorn', 'web.api:app', '--host', '127.0.0.1', '--port', String(PORT), '--log-level', 'warning', ...reloadArgs], {
       cwd: sourceRoot,
       env: { ...process.env, PYTHONPATH: sourceRoot, PATH: `${venvBin}${isWin ? ';' : ':'}${process.env.PATH}` },
     })
   } else {
-    uvicornProcess = spawn(uvicorn, ['web.api:app', '--host', '127.0.0.1', '--port', String(PORT), '--log-level', 'warning'], {
+    uvicornProcess = spawn(uvicorn, ['web.api:app', '--host', '127.0.0.1', '--port', String(PORT), '--log-level', 'warning', ...reloadArgs], {
       cwd: sourceRoot,
       env: { ...process.env, PYTHONPATH: sourceRoot, PATH: `${venvBin}${isWin ? ';' : ':'}${process.env.PATH}` },
     })

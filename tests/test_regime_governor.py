@@ -86,3 +86,47 @@ def test_detector_eligibility_in_chop():
     # Mean reversion setup (Turtle Soup) -> always approved in chop
     is_elig_ts, _ = is_detector_eligible_for_regime("TURTLE_SOUP_SWEEP", regime, rvol=1.1)
     assert is_elig_ts is True
+
+
+def test_classify_market_regime_gap_down_with_orb_breakout():
+    """Verify that if Nifty opened down but spot breaks above ORB high, regime is TREND_EXPANSION."""
+    dt = datetime(2026, 10, 1, 10, 30, tzinfo=IST)
+    # Nifty broke out above ORB high (25150 > 25100) even if yesterday was higher
+    regime = classify_market_regime(
+        vix=14.5,
+        nifty_spot=25150.0,
+        orb_high=25100.0,
+        orb_low=24900.0,
+        ref_dt=dt,
+    )
+    assert regime.regime == "TREND_EXPANSION"
+    assert regime.dominant_bias == "TREND_FRIENDLY"
+
+
+def test_detector_eligibility_call_setup_structural_sweep_in_distribution():
+    """Verify that INDEX_CALL_SETUP with verified SMC structural sweep is allowed in distribution."""
+    from analysis.regime_governor import MarketRegimeClassification
+
+    regime = MarketRegimeClassification(
+        regime="INSTITUTIONAL_DISTRIBUTION",
+        vix=15.0,
+        is_orb_trapped=False,
+        is_expiry_session=False,
+        min_scrutiny_score=75,
+        dominant_bias="BEARISH_EXPANSION",
+        guidance="Distribution active",
+        active_detectors=["INDEX_PUT_SETUP"],
+        suppressed_detectors=["OPENING_DRIVE"],
+    )
+
+    # Without structural sweep and low RVOL -> suppressed
+    is_elig_nosweep, _ = is_detector_eligible_for_regime(
+        "INDEX_CALL_SETUP", regime, rvol=1.1, has_structural_sweep=False, direction="BULLISH"
+    )
+    assert is_elig_nosweep is False
+
+    # With verified SMC structural sweep (PDL sweep / Day Low bounce) -> approved!
+    is_elig_sweep, _ = is_detector_eligible_for_regime(
+        "INDEX_CALL_SETUP", regime, rvol=1.1, has_structural_sweep=True, direction="BULLISH"
+    )
+    assert is_elig_sweep is True

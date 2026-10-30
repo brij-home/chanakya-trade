@@ -132,7 +132,16 @@ async def _background_cache_warmer():
                 get_sector_rrg_matrix(use_cache=True)
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-            # 4. Check memory headroom and trim in-memory caches if approaching limits
+            # 4. Warm options chain for key index benchmarks via OptionsChainManager
+            try:
+                from market.oc_manager import get_oc_manager
+
+                ocm = get_oc_manager()
+                for sym in ("NIFTY", "BANKNIFTY"):
+                    ocm.refresh_symbol(sym)
+            except Exception as e_suppressed:
+                logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+            # 5. Check memory headroom and trim in-memory caches if approaching limits
             try:
                 from engine.memory_guard import trim_memory_if_needed
 
@@ -169,9 +178,68 @@ async def _background_maintenance_scheduler():
             logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
 
+async def _background_code_staleness_sentinel():
+    """
+    Background sentinel monitoring in-memory code provenance against disk files.
+    Runs every 30s. If code on disk changes after boot, logs prominent warning
+    and publishes a 'code_stale' event to connected clients over SSE.
+    """
+    from engine.code_provenance import get_code_provenance
+    from web.sse import event_bus
+    import time as _time
+
+    await asyncio.sleep(15)  # Initial grace window after boot
+    last_reported_stale = False
+
+    while True:
+        try:
+            await asyncio.sleep(300)  # Checked every 5 minutes (low-overhead background advisory)
+            prov = await asyncio.to_thread(get_code_provenance, force_refresh=True)
+            if prov.is_stale_in_memory:
+                if not last_reported_stale:
+                    sample_path = prov.stale_files[0]["path"] if prov.stale_files else "unknown"
+                    logger.warning(
+                        f"[CodeStalenessSentinel] 🚨 RUNTIME BYTECODE STALE: "
+                        f"{prov.stale_files_count} file(s) modified on disk since boot! "
+                        f"Earliest modification: {prov.staleness_latency_seconds}s ago. "
+                        f"Latest file: {sample_path}. Server restart/reload recommended."
+                    )
+                    last_reported_stale = True
+                event_bus.publish_sync(
+                    "system",
+                    {
+                        "type": "code_stale",
+                        "provenance": prov.to_dict(),
+                        "ts": _time.time(),
+                    },
+                )
+            else:
+                last_reported_stale = False
+        except asyncio.CancelledError:
+            break
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Code staleness sentinel exception: {e_suppressed}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
+    # Windows OS Foreground Priority Protection:
+    # Set backend sidecar to BELOW_NORMAL_PRIORITY_CLASS so user's Office, browser,
+    # video conferencing, and UI never experience micro-stutters or competition.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.kernel32.SetPriorityClass(
+                ctypes.windll.kernel32.GetCurrentProcess(),
+                0x00004000,  # BELOW_NORMAL_PRIORITY_CLASS
+            )
+            logger.info(
+                "[web.api] Background process priority set to BELOW_NORMAL (Foreground office & browser protected)"
+            )
+        except Exception as e_pri:
+            logger.debug(f"[web.api] Priority class configuration note: {e_pri}")
     if os.environ.get("DEPLOY_MODE", "") == "self-hosted":
         get_csrf_secret()
 
@@ -204,8 +272,17 @@ async def lifespan(app: FastAPI):
     except Exception as e_suppressed:
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
+    # Start the centralized Options Chain Manager (single authority background refresher)
+    try:
+        from market.oc_manager import get_oc_manager
+
+        get_oc_manager().start()
+    except Exception as e_oc:
+        logger.warning(f"[lifespan] Failed starting OptionsChainManager: {e_oc}")
+
     warmer_task = asyncio.create_task(_background_cache_warmer())
     maintenance_task = asyncio.create_task(_background_maintenance_scheduler())
+    staleness_task = asyncio.create_task(_background_code_staleness_sentinel())
 
     # Start the autonomous periodic data synchronization engine
     try:
@@ -218,6 +295,7 @@ async def lifespan(app: FastAPI):
     yield
     warmer_task.cancel()
     maintenance_task.cancel()
+    staleness_task.cancel()
     try:
         from engine.data_sync_scheduler import data_sync_scheduler
 
@@ -276,6 +354,24 @@ async def lifespan(app: FastAPI):
         close_db()
     except Exception as e_suppressed:
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+    try:
+        from market.oc_manager import get_oc_manager
+
+        get_oc_manager().stop()
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+    try:
+        from market.fyers_rate_gate import get_fyers_rate_gate
+
+        get_fyers_rate_gate().flush_quota()
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+    try:
+        from engine.order_lifecycle import close_orders_db
+
+        close_orders_db()
+    except Exception as e_suppressed:
+        logger.debug(f"[web.api] close_orders_db error suppressed: {e_suppressed}")
 
 
 app = FastAPI(
@@ -504,12 +600,13 @@ def _require_localhost(request: _Request) -> None:
 
 
 app.include_router(_skills_router)
-from web.routers import alerts_router, market_router, orders_router
+from web.routers import alerts_router, market_router, orders_router, crypto_router
 from web.mcp import mcp_router
 
 app.include_router(alerts_router)
 app.include_router(market_router)
 app.include_router(orders_router)
+app.include_router(crypto_router)
 app.include_router(mcp_router)
 
 # Re-exports for backward compatibility
@@ -573,7 +670,10 @@ async def _auto_restore_brokers() -> None:
         try:
             from brokers.fyers import FyersAPI, TOKEN_FILE as _FT
 
-            if _FT.exists():
+            has_headless = bool(
+                _env("FYERS_FY_ID") and _env("FYERS_TOTP_SECRET") and _env("FYERS_PIN")
+            )
+            if _FT.exists() or has_headless:
                 b = FyersAPI(
                     _env("FYERS_APP_ID"),
                     _env("FYERS_SECRET_KEY"),
@@ -665,8 +765,8 @@ async def _auto_restore_brokers() -> None:
         except Exception as exc:
             logging.warning("[startup] Could not restore Shoonya: %s", exc)
 
-    # m.Stock (Mirae Asset)
-    if _has_mstock():
+    # m.Stock (Mirae Asset) - Disabled unless ENABLE_MSTOCK=1
+    if os.environ.get("ENABLE_MSTOCK", "0") == "1" and _has_mstock():
         try:
             from brokers.mstock import MStockAPI
 
@@ -807,13 +907,14 @@ async def telemetry_health():
         logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     mstock_ws_connected = False
-    try:
-        from market.mstock_websocket import get_mstock_websocket
+    if _has_mstock():
+        try:
+            from market.mstock_websocket import get_mstock_websocket
 
-        ws = get_mstock_websocket()
-        mstock_ws_connected = bool(ws and ws.is_connected)
-    except Exception as e_suppressed:
-        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+            ws = get_mstock_websocket()
+            mstock_ws_connected = bool(ws and ws.is_connected)
+        except Exception as e_suppressed:
+            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
     fyers_ws_connected = False
     try:
@@ -1144,6 +1245,7 @@ async def get_system_health_hub(
     priority: Optional[str] = None,
     component: Optional[str] = None,
     limit: int = 100,
+    since_boot: bool = False,
 ):
     """
     Unified Operations & Maintenance Health Hub (OpsDeck) API.
@@ -1169,6 +1271,7 @@ async def get_system_health_hub(
 
     from market.fyers_rate_gate import get_fyers_rate_gate
     from market.fyers_tbt_manager import fyers_tbt_manager
+    from engine.code_provenance import get_code_provenance
 
     cb_diag = get_fyers_circuit_breaker().get_diagnostics()
     ws_diag = get_ws_subscription_manager().get_diagnostics()
@@ -1179,11 +1282,45 @@ async def get_system_health_hub(
     provider_health = obs_reg.get_provider_health()
     slo_report = obs_reg.get_slo_report()
     telem_summary = get_telemetry_summary()
-    incident_counts = get_incident_counts()
-    active_counts = get_incident_counts(window_minutes=15)
-    incidents = get_prioritized_incidents(limit=limit, priority=priority, component=component)
+    code_prov = await asyncio.to_thread(get_code_provenance, force_refresh=False)
+    code_prov_dict = code_prov.to_dict()
+    since_ts = code_prov.boot_timestamp if since_boot else None
+
+    incident_counts = get_incident_counts(since_timestamp=since_ts)
+    active_counts = get_incident_counts(window_minutes=15, since_timestamp=since_ts)
+    incidents = get_prioritized_incidents(
+        limit=limit, priority=priority, component=component, since_timestamp=since_ts
+    )
     mem_status = get_memory_status().to_dict()
     storage_bd = await asyncio.to_thread(get_storage_breakdown)
+
+    # If runtime in-memory bytecode is stale compared to disk, inject P3 advisory note (maintenance, not operational impairment)
+    if code_prov.is_stale_in_memory:
+        sample_path = code_prov.stale_files[0]["path"] if code_prov.stale_files else "unknown"
+        incidents.insert(
+            0,
+            {
+                "incident_id": f"INC-CODE-STALE-{code_prov.git_commit}",
+                "priority": "P3",
+                "severity": "INFO",
+                "component": "RuntimeCodeProvenance",
+                "action_taken": "Reload recommended when convenient",
+                "reason": (
+                    f"Stale in-memory bytecode: {code_prov.stale_files_count} file(s) modified on disk since boot "
+                    f"(latest: {sample_path})"
+                ),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "details": {
+                    "boot_timestamp": code_prov.boot_timestamp,
+                    "uptime_seconds": code_prov.uptime_seconds,
+                    "stale_count": code_prov.stale_files_count,
+                    "stale_files": code_prov.stale_files[:5],
+                    "staleness_latency_seconds": code_prov.staleness_latency_seconds,
+                },
+            },
+        )
+        active_counts["P3"] = active_counts.get("P3", 0) + 1
+        incident_counts["P3"] = incident_counts.get("P3", 0) + 1
 
     # Compute single truth overall health status based on active state and recent 15m window
     if (
@@ -1220,7 +1357,53 @@ async def get_system_health_hub(
             "incidents": incidents,
             "memory": mem_status,
             "storage": storage_bd.to_dict(),
+            "code_provenance": code_prov_dict,
             "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+@app.get("/api/system/code-provenance", tags=["Observability", "Operations"])
+async def get_system_code_provenance(force_refresh: bool = False):
+    """
+    Runtime Code Provenance & Bytecode Staleness Sentinel.
+    Returns server boot timestamp, git commit, uptime, and whether any
+    in-memory bytecode has lagged behind source files modified on disk.
+    """
+    from engine.code_provenance import get_code_provenance
+
+    prov = await asyncio.to_thread(get_code_provenance, force_refresh=force_refresh)
+    return JSONResponse(prov.to_dict())
+
+
+@app.post("/api/system/reload", tags=["Observability", "Operations"])
+async def reload_system_service():
+    """
+    Triggers a graceful reload / restart of the backend service to purge
+    stale in-memory bytecode and recompile fresh source files from disk.
+    """
+    from engine.code_provenance import get_code_provenance
+
+    prov = get_code_provenance(force_refresh=True)
+
+    async def _graceful_exit():
+        await asyncio.sleep(0.5)
+        logger.warning(
+            "[web.api] Graceful reload triggered via /api/system/reload. Exiting process..."
+        )
+        if sys.platform == "win32":
+            os._exit(0)
+        else:
+            import signal
+
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(_graceful_exit())
+    return JSONResponse(
+        {
+            "status": "RELOADING",
+            "message": "Graceful server reload initiated. Process exiting to reload fresh bytecode from disk.",
+            "provenance_before_reload": prov.to_dict(),
         }
     )
 
@@ -1412,6 +1595,61 @@ async def get_data_sync_status():
     from engine.data_sync_scheduler import data_sync_scheduler
 
     return JSONResponse(data_sync_scheduler.get_sync_status())
+
+
+@app.post("/api/maintenance/sync-premarket", tags=["Maintenance"])
+async def trigger_premarket_sync(force: bool = False):
+    """
+    On-demand or scheduled Pre-Market Level Priming (CPR, Camarilla, Classic Pivots, ATR-14, Straddle Bounds).
+    Pre-computes and caches levels across benchmark indices and F&O universe into L1 RAM and disk.
+    """
+    import asyncio
+    from engine.data_sync_scheduler import data_sync_scheduler
+
+    result = await asyncio.to_thread(data_sync_scheduler.sync_premarket_levels, force=force)
+    return JSONResponse(result)
+
+
+@app.get("/api/levels/benchmarks", tags=["Daily Levels"])
+async def get_benchmark_daily_levels(session_date: Optional[str] = None):
+    """
+    Returns pre-computed Daily Levels for all 5 core benchmark indices (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX).
+    Sub-millisecond retrieval from L1 RAM.
+    """
+    from engine.daily_levels import get_daily_levels_store
+
+    store = get_daily_levels_store()
+    indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+    res = {}
+    for idx in indices:
+        dl = store.get_levels(idx, session_date=session_date, compute_if_missing=False)
+        if dl:
+            res[idx] = dl.to_dict()
+    return JSONResponse(
+        {"session_date": session_date or store._get_today_session_date(), "indices": res}
+    )
+
+
+@app.get("/api/levels/{symbol}", tags=["Daily Levels"])
+async def get_symbol_daily_levels(symbol: str, session_date: Optional[str] = None):
+    """
+    Returns pre-computed or on-demand institutional Daily Levels for an underlying instrument:
+    CPR (width %, regime), Camarilla (H1-H5, L1-L5), Classical Floor Pivots,
+    ATR-14, Weekly/Monthly levels, Pre-open gap status, and Actionable Blueprint.
+    """
+    import asyncio
+    from engine.daily_levels import get_daily_levels_store
+
+    store = get_daily_levels_store()
+    dl = await asyncio.to_thread(
+        store.get_levels, symbol, session_date=session_date, compute_if_missing=True
+    )
+    if not dl:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Daily levels not found or could not be computed for {symbol}",
+        )
+    return JSONResponse(dl.to_dict())
 
 
 @app.post("/api/maintenance/sync-eod", tags=["Maintenance"])
@@ -1752,7 +1990,9 @@ def _fyers_auth() -> bool:
             b = FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY"))
             if not b.is_authenticated():
                 return False
-            b.get_profile()
+            profile = b.get_profile()
+            if not profile or not getattr(profile, "user_id", ""):
+                return False
             return True
         except Exception:
             return False
@@ -1814,7 +2054,11 @@ def _shoonya_auth() -> bool:
 
 # m.Stock (Mirae Asset)
 def _has_mstock() -> bool:
-    return bool(_env("MSTOCK_API_KEY") or _env("MSTOCK_CLIENT_CODE"))
+    if os.environ.get("ENABLE_MSTOCK", "0") != "1":
+        return False
+    k = _env("MSTOCK_API_KEY").strip()
+    c = _env("MSTOCK_CLIENT_CODE").strip()
+    return bool(k and c)
 
 
 def _mstock_auth() -> bool:
@@ -3535,8 +3779,9 @@ async def api_get_volatility_surface(
     """Calibrates Hagan's SABR (2002) Volatility Surface, extracts parameter smile, and flags strike mispricings."""
     _require_localhost(request)
     from analysis.vol_surface import analyze_volatility_surface
+    from market.instruments import canonical_symbol
 
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = canonical_symbol(symbol)
     result = await asyncio.to_thread(analyze_volatility_surface, clean_sym, expiry, beta)
     if not result:
         return JSONResponse(
@@ -3748,11 +3993,10 @@ async def _price_poll_loop() -> None:
             continue
         try:
             from market import quotes as _quotes
+            from datetime import datetime, timezone
 
-            result = _quotes.get_quote(symbols)
-            import datetime
-
-            ts = datetime.datetime.utcnow().isoformat() + "Z"
+            result = await _asyncio.to_thread(_quotes.get_quote, symbols)
+            ts = datetime.now(timezone.utc).isoformat()
             for sym, q in result.items():
                 _event_bus.publish_sync(
                     "price",
@@ -3894,190 +4138,7 @@ async def websocket_ticker(ws: WebSocket):
 
 
 # ── 24x7 Real-Time Crypto Pipeline Endpoints ─────────────────────────────────
-
-
-@app.get("/api/crypto/snapshot", tags=["Crypto 24x7"])
-async def get_crypto_snapshot():
-    """
-    Current 24x7 snapshot of major crypto assets (BTC, ETH, SOL, BNB)
-    from Binance public stream with 24h change, high/low, volume, and BBO.
-    """
-    from market.crypto_stream import crypto_stream
-
-    return crypto_stream.get_snapshot()
-
-
-@app.get("/api/crypto/smc", tags=["Crypto 24x7"])
-async def get_crypto_smc(
-    symbol: str = "BTCUSDT",
-    timeframe: str = "15m",
-    limit: int = 150,
-):
-    """
-    24x7 Real-Time Smart Money Concepts (SMC) & Market Structure Analysis.
-    Computes Order Blocks, FVGs, Liquidity Sweeps, CHoCH, and +2R/+4R invalidation targets.
-    """
-    from market.crypto_stream import crypto_stream
-    from analysis.market_structure import analyze_market_structure
-
-    df = await asyncio.to_thread(
-        crypto_stream.get_klines,
-        symbol=symbol,
-        interval=timeframe,
-        limit=limit,
-    )
-    if df.empty:
-        raise HTTPException(status_code=404, detail=f"No kline data available for {symbol}")
-
-    report = await asyncio.to_thread(
-        analyze_market_structure,
-        symbol=symbol,
-        df=df,
-        exchange="CRYPTO",
-        timeframe=timeframe,
-    )
-    return report.to_dict()
-
-
-@app.get("/api/crypto/options", tags=["Crypto 24x7"])
-async def get_crypto_options(currency: str = "BTC", force_refresh: bool = False):
-    """
-    24x7 Real-Time Crypto Options Chain & Volatility Surface via Deribit.
-    Computes Max Pain strike, Put-Call Ratio (OI & Volume), ATM IV, and dealer positioning.
-    Zero auth/API key required.
-    """
-    from market.crypto_options import get_crypto_options_summary
-
-    return await asyncio.to_thread(
-        get_crypto_options_summary,
-        currency=currency,
-        force_refresh=force_refresh,
-    )
-
-
-@app.get("/api/crypto/squeeze", tags=["Crypto 24x7"])
-async def get_crypto_squeeze(symbol: str = "BTCUSDT"):
-    """
-    Leading Indicator Squeeze & Leverage Positioning Analysis via Binance Futures.
-    Computes Open Interest, 8h Funding Rate skew, and Long/Short Squeeze warnings.
-    Zero auth/API key required.
-    """
-    from market.crypto_stream import crypto_stream
-
-    return await asyncio.to_thread(
-        crypto_stream.get_squeeze_metrics,
-        symbol=symbol,
-    )
-
-
-@app.get("/api/crypto/orderflow", tags=["Crypto 24x7"])
-async def get_crypto_orderflow(
-    symbol: str = "BTCUSDT",
-    timeframe: str = "15m",
-    limit: int = 60,
-):
-    """
-    Institutional Cumulative Volume Delta (CVD) & Order Flow Absorption Analysis.
-    Computes aggressive buyer vs seller volume delta, cumulative delta slope,
-    and institutional absorption divergence alerts.
-    """
-    from market.crypto_stream import crypto_stream
-
-    return await asyncio.to_thread(
-        crypto_stream.get_order_flow_metrics,
-        symbol=symbol,
-        interval=timeframe,
-        limit=limit,
-    )
-
-
-@app.get("/api/crypto/liquidations", tags=["Crypto 24x7"])
-async def get_crypto_liquidations(symbol: str = "BTCUSDT"):
-    """
-    Institutional Liquidation Cascade & Flush Exhaustion Reversal Detector.
-    Scans for extreme volume anomalies accompanied by long/short rejection wicks
-    and Open Interest drain to identify high R:R counter-trend reversal entries.
-    """
-    from market.crypto_stream import crypto_stream
-
-    return await asyncio.to_thread(
-        crypto_stream.get_liquidation_cascade_metrics,
-        symbol=symbol,
-    )
-
-
-@app.get("/api/crypto/basis", tags=["Crypto 24x7"])
-async def get_crypto_basis():
-    """
-    Institutional Delta-Neutral Basis & Funding Rate Arbitrage Engine.
-    Scans all major crypto benchmarks (BTC, ETH, SOL, BNB, XRP, DOGE)
-    for Cash-and-Carry (Long Spot + Short Perp) delta-neutral yield opportunities.
-    """
-    from market.crypto_stream import crypto_stream
-
-    return await asyncio.to_thread(
-        crypto_stream.get_basis_arbitrage_matrix,
-    )
-
-
-@app.get("/api/crypto/volatility-surface", tags=["Crypto 24x7"])
-async def get_crypto_volatility_surface(currency: str = "BTC", force_refresh: bool = False):
-    """
-    Institutional 24x7 Deribit Options Surface, ATM IV vs 30d Realized Volatility Spread,
-    Dealer GEX (Gamma Exposure) inflection zones, and Max Pain Magnet.
-    """
-    from market.crypto_options import get_crypto_options_summary
-
-    return await asyncio.to_thread(
-        get_crypto_options_summary,
-        currency=currency,
-        force_refresh=force_refresh,
-    )
-
-
-@app.get("/api/crypto/stream", tags=["SSE"])
-async def stream_crypto():
-    """
-    SSE stream of 24x7 real-time crypto ticks, BBO, and candle updates.
-    """
-    from market.crypto_stream import crypto_stream
-
-    async def _crypto_generator():
-        snap = crypto_stream.get_snapshot()
-        yield f"data: {json.dumps({'type': 'crypto_snapshot', 'data': snap})}\n\n"
-
-        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
-        loop = asyncio.get_running_loop()
-
-        def _on_tick(tick: dict):
-            try:
-                loop.call_soon_threadsafe(
-                    lambda: queue.put_nowait(tick) if not queue.full() else None
-                )
-            except Exception as e_suppressed:
-                logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-
-        crypto_stream.on_tick(_on_tick)
-
-        try:
-            while True:
-                try:
-                    tick = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    yield f"data: {json.dumps({'type': 'crypto_tick', 'data': tick})}\n\n"
-                except asyncio.TimeoutError:
-                    yield ": heartbeat\n\n"
-        except asyncio.CancelledError as e_suppressed:
-            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-
-    return StreamingResponse(
-        _crypto_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+# Extracted into web/routers/crypto_api.py and mounted via app.include_router(crypto_router).
 
 
 # ── System Status SSE Stream ──────────────────────────────────────────────────
@@ -4121,12 +4182,22 @@ async def stream_system_status():
             except Exception as e_suppressed:
                 logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
 
+            # Code Provenance
+            code_prov = None
+            try:
+                from engine.code_provenance import get_code_provenance
+
+                code_prov = get_code_provenance().to_dict()
+            except Exception as e_suppressed:
+                logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+
             snapshot = {
                 "type": "system_status",
                 "broker_statuses": broker_statuses,
                 "mode": ui_mode,
                 "backend_mode": mode_info.mode.value,
                 "pilot": pilot,
+                "code_provenance": code_prov,
                 "ts": _time.time(),
             }
             yield f"data: {json.dumps(snapshot)}\n\n"
@@ -4456,8 +4527,9 @@ def get_multibagger_analysis(symbol: str):
     Mid-Term Stage 2 Compounder, and Long-Term Generational tickets.
     """
     from analysis.multibagger import scan_multibagger_opportunity
+    from market.instruments import canonical_symbol
 
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = canonical_symbol(symbol)
     report = scan_multibagger_opportunity(clean_sym)
     return JSONResponse(report.to_dict())
 

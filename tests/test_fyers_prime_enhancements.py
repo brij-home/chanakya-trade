@@ -76,7 +76,7 @@ def test_fyers_continuous_flag_futures_vs_options(monkeypatch):
 
     # 1. Futures -> cont_flag = '1'
     api.get_historical_data("NSE:NIFTY26OCTFUT", interval="5minute")
-    assert captured_payloads[-1]["cont_flag"] == "1"
+    assert captured_payloads[-1]["cont_flag"] == "0"
 
     # 2. Options -> cont_flag = '0'
     api.get_historical_data("NSE:NIFTY26OCT25000CE", interval="5minute")

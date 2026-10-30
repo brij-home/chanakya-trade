@@ -49,6 +49,77 @@ logger = logging.getLogger(__name__)
 # Supported core crypto pairs and canonical alias map
 DEFAULT_CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"]
 
+BINANCE_INTERVAL_MAP: dict[str, str] = {
+    # Seconds / 1m fallback
+    "1s": "1s",
+    "5s": "1m",
+    "10s": "1m",
+    "15s": "1m",
+    "30s": "1m",
+    "45s": "1m",
+    # 1 Minute
+    "1m": "1m",
+    "1min": "1m",
+    "minute": "1m",
+    "1minute": "1m",
+    # 3 Minute
+    "3m": "3m",
+    "3min": "3m",
+    "3minute": "3m",
+    # 5 Minute
+    "5m": "5m",
+    "5min": "5m",
+    "5minute": "5m",
+    # 10 / 15 Minute
+    "10m": "15m",
+    "10min": "15m",
+    "10minute": "15m",
+    "15m": "15m",
+    "15min": "15m",
+    "15minute": "15m",
+    # 30 Minute
+    "30m": "30m",
+    "30min": "30m",
+    "30minute": "30m",
+    # 1 Hour
+    "1h": "1h",
+    "60m": "1h",
+    "60min": "1h",
+    "60minute": "1h",
+    "hour": "1h",
+    "1hour": "1h",
+    # Multi-hour
+    "2h": "2h",
+    "2hour": "2h",
+    "4h": "4h",
+    "4hour": "4h",
+    "6h": "6h",
+    "6hour": "6h",
+    "8h": "8h",
+    "8hour": "8h",
+    "12h": "12h",
+    "12hour": "12h",
+    # Daily
+    "1d": "1d",
+    "d": "1d",
+    "day": "1d",
+    "1day": "1d",
+    "daily": "1d",
+    "3d": "3d",
+    "3day": "3d",
+    # Weekly
+    "1w": "1w",
+    "w": "1w",
+    "week": "1w",
+    "1wk": "1w",
+    "weekly": "1w",
+    # Monthly
+    "1mo": "1M",
+    "month": "1M",
+    "1month": "1M",
+    "monthly": "1M",
+}
+
 CRYPTO_ALIAS_MAP = {
     "BTC": "BTCUSDT",
     "BITCOIN": "BTCUSDT",
@@ -105,12 +176,20 @@ CRYPTO_ALIAS_MAP = {
     "DOGEUSDT": "DOGEUSDT",
 }
 
-BINANCE_WS_URL = (
-    "wss://stream.binance.com:9443/stream?streams="
+BINANCE_WS_STREAM_PATH = (
     "btcusdt@ticker/ethusdt@ticker/solusdt@ticker/bnbusdt@ticker/xrpusdt@ticker/dogeusdt@ticker/"
     "btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/bnbusdt@bookTicker/xrpusdt@bookTicker/dogeusdt@bookTicker/"
     "btcusdt@kline_1m/ethusdt@kline_1m/solusdt@kline_1m/bnbusdt@kline_1m/xrpusdt@kline_1m/dogeusdt@kline_1m"
 )
+
+# Multi-endpoint failover: Binance Vision mirror + Binance stream ports 9443 & 443
+BINANCE_WS_ENDPOINTS = [
+    f"wss://stream.binance.com:9443/stream?streams={BINANCE_WS_STREAM_PATH}",
+    f"wss://data-stream.binance.vision/stream?streams={BINANCE_WS_STREAM_PATH}",
+    f"wss://stream.binance.com:443/stream?streams={BINANCE_WS_STREAM_PATH}",
+]
+
+BINANCE_WS_URL = BINANCE_WS_ENDPOINTS[0]
 
 BINANCE_REST_KLINES = "https://api.binance.com/api/v3/klines"
 
@@ -198,6 +277,12 @@ class CryptoStreamManager:
             if callback not in self._listeners:
                 self._listeners.append(callback)
 
+    def off_tick(self, callback: Callable[[dict[str, Any]], None]) -> None:
+        """Deregister a previously registered tick listener."""
+        with self._lock:
+            if callback in self._listeners:
+                self._listeners.remove(callback)
+
     def _run_event_loop(self) -> None:
         """Background asyncio worker loop."""
         self._loop = asyncio.new_event_loop()
@@ -210,18 +295,23 @@ class CryptoStreamManager:
             self._loop.close()
 
     async def _stream_loop(self) -> None:
-        """Main WebSocket loop with automated backoff and reconnects."""
+        """Main WebSocket loop with automated backoff, multi-endpoint failover, and resilient keepalive."""
         import websockets
 
         backoff = 1.0
+        endpoint_idx = 0
         while self._running:
+            endpoint = BINANCE_WS_ENDPOINTS[endpoint_idx % len(BINANCE_WS_ENDPOINTS)]
+            endpoint_host = endpoint.split("/stream")[0]
             try:
-                logger.info("CryptoStreamManager: connecting to Binance streams...")
+                logger.info(
+                    f"CryptoStreamManager: connecting to Binance stream endpoint {endpoint_host}..."
+                )
                 async with websockets.connect(
-                    BINANCE_WS_URL,
-                    ping_interval=20,
-                    ping_timeout=20,
-                    close_timeout=5,
+                    endpoint,
+                    ping_interval=None,
+                    close_timeout=10,
+                    max_size=10_000_000,
                 ) as ws:
                     with self._lock:
                         self._connected = True
@@ -230,21 +320,36 @@ class CryptoStreamManager:
 
                     while self._running:
                         try:
-                            msg = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                            msg = await asyncio.wait_for(ws.recv(), timeout=60.0)
                             data = json.loads(msg)
                             self._handle_ws_message(data)
                         except asyncio.TimeoutError:
-                            # Send ping to keep connection alive
-                            pong_waiter = await ws.ping()
-                            await asyncio.wait_for(pong_waiter, timeout=10.0)
+                            # Verify socket liveness if idle for 60s
+                            try:
+                                pong_waiter = await ws.ping()
+                                await asyncio.wait_for(pong_waiter, timeout=15.0)
+                            except Exception as ping_exc:
+                                logger.info(
+                                    f"CryptoStreamManager: Liveness ping failed ({ping_exc}), recycling socket..."
+                                )
+                                break
             except Exception as e:
                 with self._lock:
                     self._connected = False
                 if not self._running:
                     break
-                logger.warning(
-                    f"CryptoStreamManager: WS connection dropped ({e}), retrying in {backoff:.1f}s..."
-                )
+                endpoint_idx += 1
+                next_endpoint_host = BINANCE_WS_ENDPOINTS[
+                    endpoint_idx % len(BINANCE_WS_ENDPOINTS)
+                ].split("/stream")[0]
+                if backoff <= 1.0:
+                    logger.info(
+                        f"CryptoStreamManager: WS connection recycled ({e}), reconnecting in {backoff:.1f}s via {next_endpoint_host}..."
+                    )
+                else:
+                    logger.warning(
+                        f"CryptoStreamManager: WS connection dropped ({e}), retrying in {backoff:.1f}s via {next_endpoint_host}..."
+                    )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 1.5, 30.0)
 
@@ -423,17 +528,11 @@ class CryptoStreamManager:
         Intervals: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 1w.
         """
         canon_sym = normalize_crypto_symbol(symbol)
-        binance_interval = interval.lower()
-        if binance_interval in ("minute", "1min"):
-            binance_interval = "1m"
-        elif binance_interval in ("5minute", "5min"):
-            binance_interval = "5m"
-        elif binance_interval in ("15minute", "15min"):
-            binance_interval = "15m"
-        elif binance_interval in ("60minute", "hour", "1hour"):
-            binance_interval = "1h"
-        elif binance_interval in ("day", "1day"):
-            binance_interval = "1d"
+        raw_intv = str(interval).strip()
+        if raw_intv == "1M":
+            binance_interval = "1M"
+        else:
+            binance_interval = BINANCE_INTERVAL_MAP.get(raw_intv.lower(), "15m")
 
         params = {"symbol": canon_sym, "interval": binance_interval, "limit": min(limit, 1000)}
         try:

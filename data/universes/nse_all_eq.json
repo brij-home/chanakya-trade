@@ -3738,6 +3738,13 @@
     "listing_date": "18-MAR-2011"
   },
   {
+    "symbol": "DIACABS",
+    "name": "Diamond Power Infrastructure Ltd.",
+    "series": "BE",
+    "isin": "INE989C01038",
+    "listing_date": "01-JAN-2010"
+  },
+  {
     "symbol": "DIAMINESQ",
     "name": "Diamines & Chemicals Limited",
     "series": "EQ",
@@ -5810,6 +5817,13 @@
     "listing_date": "30-DEC-2021"
   },
   {
+    "symbol": "HEG",
+    "name": "H.E.G. Ltd.",
+    "series": "EQ",
+    "isin": "INE545A01024",
+    "listing_date": "19-MAY-1995"
+  },
+  {
     "symbol": "HEIDELBERG",
     "name": "HeidelbergCement India Limited",
     "series": "EQ",
@@ -5864,6 +5878,13 @@
     "series": "EQ",
     "isin": "INE093A01041",
     "listing_date": "19-FEB-2025"
+  },
+  {
+    "symbol": "HFCL",
+    "name": "HFCL Ltd.",
+    "series": "BE",
+    "isin": "INE548A01028",
+    "listing_date": "18-OCT-1995"
   },
   {
     "symbol": "HGINFRA",
@@ -6403,6 +6424,13 @@
     "series": "EQ",
     "isin": "INE383A01012",
     "listing_date": "31-MAY-2000"
+  },
+  {
+    "symbol": "INDIAGLYCO",
+    "name": "India Glycols Ltd.",
+    "series": "BE",
+    "isin": "INE560A01023",
+    "listing_date": "24-MAY-1995"
   },
   {
     "symbol": "INDIAMART",
@@ -8393,6 +8421,13 @@
     "listing_date": "17-AUG-2026"
   },
   {
+    "symbol": "LOTUSDEV",
+    "name": "Sri Lotus Developers and Realty Ltd.",
+    "series": "BE",
+    "isin": "INE0V9Q01010",
+    "listing_date": "01-JAN-2024"
+  },
+  {
     "symbol": "LOTUSEYE",
     "name": "Lotus Eye Hospital and Institute Limited",
     "series": "EQ",
@@ -9427,6 +9462,13 @@
     "series": "EQ",
     "isin": "INE0FS801015",
     "listing_date": "28-MAR-2022"
+  },
+  {
+    "symbol": "MTARTECH",
+    "name": "MTAR Technologies Ltd.",
+    "series": "BE",
+    "isin": "INE864I01014",
+    "listing_date": "15-MAR-2021"
   },
   {
     "symbol": "MTNL",
@@ -13606,6 +13648,13 @@
     "series": "EQ",
     "isin": "INE205F01016",
     "listing_date": "17-AUG-2026"
+  },
+  {
+    "symbol": "STLTECH",
+    "name": "Sterlite Technologies Ltd.",
+    "series": "BE",
+    "isin": "INE089C01029",
+    "listing_date": "22-NOV-2000"
   },
   {
     "symbol": "STOVEKRAFT",

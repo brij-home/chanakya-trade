@@ -3,6 +3,26 @@ import { createPortal } from 'react-dom'
 import { useChatStore, getBaseUrl } from '../../store/chatStore'
 import { useToastStore } from '../../hooks/useToast'
 import DepthLadderWidget from '../Widgets/DepthLadderWidget'
+import MultiSelectDropdown from '../Common/MultiSelectDropdown'
+
+/**
+ * Normalizes filter selection state to a Set, handling Set, Array, string, or empty/ALL states.
+ */
+function isAllOrEmpty(val) {
+  if (!val) return true
+  if (typeof val === 'string') return val === 'ALL' || val === ''
+  if (val instanceof Set) return val.size === 0 || val.has('ALL')
+  if (Array.isArray(val)) return val.length === 0 || val.includes('ALL')
+  return true
+}
+
+function normalizeToSet(val) {
+  if (!val) return new Set()
+  if (val instanceof Set) return val
+  if (Array.isArray(val)) return new Set(val.filter((v) => v !== 'ALL'))
+  if (typeof val === 'string') return val === 'ALL' || val === '' ? new Set() : new Set([val])
+  return new Set()
+}
 
 /**
  * OpsDeckView — Institutional Operations, Maintenance & Monitoring Terminal.
@@ -106,13 +126,15 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  const [selectedPriority, setSelectedPriority] = useState('ALL')
-  const [selectedComponent, setSelectedComponent] = useState('ALL')
+  const [selectedPriority, setSelectedPriority] = useState(() => new Set())
+  const [selectedComponent, setSelectedComponent] = useState(() => new Set())
+  const [scopeFilter, setScopeFilter] = useState('ALL')
   const [expandedTracebacks, setExpandedTracebacks] = useState({})
   const [actionInProgress, setActionInProgress] = useState('')
   const [newTbtSymbol, setNewTbtSymbol] = useState('')
   const [tbtFilterRole, setTbtFilterRole] = useState('ALL')
   const [showSentinelGuide, setShowSentinelGuide] = useState(false)
+  const [copiedIncKey, setCopiedIncKey] = useState(null)
 
   // ── L2 Universe Depth Radar State ─────────────────────────────────
   const [radarItems, setRadarItems] = useState([])
@@ -274,7 +296,8 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     if (!port) return
     try {
       setLoading(true)
-      const res = await fetch(`${getBaseUrl(port)}/api/system/health-hub?limit=150`, {
+      const sinceParam = scopeFilter === 'SESSION' ? '&since_boot=true' : ''
+      const res = await fetch(`${getBaseUrl(port)}/api/system/health-hub?limit=150${sinceParam}`, {
         signal: AbortSignal.timeout(10000),
       })
       if (res.ok) {
@@ -286,7 +309,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     } finally {
       setLoading(false)
     }
-  }, [port])
+  }, [port, scopeFilter])
 
   useEffect(() => {
     fetchHubData()
@@ -420,6 +443,41 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     setExpandedTracebacks((prev) => ({ ...prev, [id]: !prev[id] }))
   }
 
+  const handleCopyIncident = useCallback((inc, incKey) => {
+    try {
+      const parts = [
+        `[${inc.priority || 'P2'}] ${inc.component || 'SYSTEM'} • ${inc.event_type || 'INCIDENT'} ${inc.incident_id ? `[${inc.incident_id}]` : ''}`.trim(),
+        `Time: ${inc.timestamp ? new Date(inc.timestamp).toLocaleString('en-IN') : 'N/A'}`,
+        `Error: ${inc.reason || 'Unhandled System Condition'}`,
+      ]
+      if (inc.action_taken) {
+        parts.push(`Remediation: ${inc.action_taken}`)
+      }
+      if (inc.details?.traceback) {
+        parts.push(`\nTraceback:\n${inc.details.traceback}`)
+      }
+      navigator.clipboard.writeText(parts.join('\n'))
+      setCopiedIncKey(incKey)
+      setTimeout(() => setCopiedIncKey(null), 2000)
+      if (addToast) {
+        addToast({ title: 'Copied to Clipboard', message: 'Incident error details copied.', type: 'info' })
+      }
+    } catch {
+      // Ignore clipboard fallback
+    }
+  }, [addToast])
+
+  const handleCopyTraceback = useCallback((traceback, incKey) => {
+    try {
+      navigator.clipboard.writeText(traceback || '')
+      setCopiedIncKey(`${incKey}-tb`)
+      setTimeout(() => setCopiedIncKey(null), 2000)
+      if (addToast) {
+        addToast({ title: 'Traceback Copied', message: 'Full traceback copied to clipboard.', type: 'info' })
+      }
+    } catch {}
+  }, [addToast])
+
   // TBT 50-Depth & Rate Gate Actions
   const handleEvictTbtSlot = async (symbol) => {
     try {
@@ -524,14 +582,68 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
     }
   }
 
+  const handleClearTbtCooldowns = async (symbol = null) => {
+    try {
+      setActionInProgress('clear_tbt_cooldowns')
+      const res = await fetch(`${getBaseUrl(port)}/api/fyers/tbt-clear-cooldowns`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(symbol ? { symbol } : {}),
+      })
+      if (res.ok) {
+        addToast({
+          title: 'Cooldowns Cleared',
+          message: symbol ? `Cleared cooldown for ${symbol}` : 'Cleared all active eviction cooldowns.',
+          type: 'success',
+        })
+        fetchHubData()
+      } else {
+        const err = await res.json().catch(() => ({}))
+        addToast({ title: 'Clear Failed', message: err.detail || 'Could not clear cooldowns', type: 'error' })
+      }
+    } catch (e) {
+      addToast({ title: 'Clear Failed', message: String(e), type: 'error' })
+    } finally {
+      setActionInProgress('')
+    }
+  }
+
+  // Dynamic options for incident components with occurrence counts
+  const componentOptions = useMemo(() => {
+    const list = data?.incidents || []
+    const map = new Map()
+    for (const inc of list) {
+      const comp = (inc.component || 'GENERAL').toUpperCase()
+      map.set(comp, (map.get(comp) || 0) + 1)
+    }
+    return Array.from(map.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([comp, count]) => ({
+        value: comp,
+        label: comp,
+        count,
+      }))
+  }, [data?.incidents])
+
   // Filtered incidents
   const filteredIncidents = useMemo(() => {
     const list = data?.incidents || []
     return list.filter((inc) => {
-      if (selectedPriority !== 'ALL' && inc.priority !== selectedPriority) return false
-      if (selectedComponent !== 'ALL' && !inc.component?.toLowerCase().includes(selectedComponent.toLowerCase())) {
-        return false
+      // 1. Priority Multi-Filter
+      if (!isAllOrEmpty(selectedPriority)) {
+        const pSet = normalizeToSet(selectedPriority)
+        if (!pSet.has(inc.priority)) return false
       }
+
+      // 2. Component Multi-Filter
+      if (!isAllOrEmpty(selectedComponent)) {
+        const cSet = normalizeToSet(selectedComponent)
+        const comp = (inc.component || 'GENERAL').toUpperCase()
+        const matches = Array.from(cSet).some((target) => comp.includes(target))
+        if (!matches) return false
+      }
+
+      // 3. Search Query Filter
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase()
         const matchReason = inc.reason?.toLowerCase().includes(q)
@@ -549,7 +661,15 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
   const rg = data?.rate_gate || {}
   const tbt = data?.tbt || {}
   const ws = data?.websocket || {}
-  const counts = data?.incident_counts || { P0: 0, P1: 0, P2: 0, P3: 0 }
+  const counts = useMemo(() => {
+    const list = data?.incidents || []
+    const derived = { P0: 0, P1: 0, P2: 0, P3: 0 }
+    for (const inc of list) {
+      const p = inc.priority || 'P2'
+      if (derived[p] !== undefined) derived[p]++
+    }
+    return derived
+  }, [data?.incidents])
   const brokers = data?.brokers || {}
   const slo = data?.slo_report || {}
   const providerHealth = data?.provider_health || {}
@@ -565,7 +685,7 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
         : 'var(--color-rose)'
 
   return (
-    <div className="flex flex-col h-full bg-surface overflow-hidden select-none font-ui">
+    <div className="flex flex-col h-full bg-surface overflow-hidden font-ui">
       {/* ── Top Bar / Header ────────────────────────────────────────── */}
       <div
         className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-panel flex-shrink-0"
@@ -968,13 +1088,26 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="text-[11px] font-mono text-muted mr-1">Priority:</span>
                 {['ALL', 'P0', 'P1', 'P2', 'P3'].map((p) => {
-                  const isActive = selectedPriority === p
+                  const pSet = normalizeToSet(selectedPriority)
+                  const isActive = p === 'ALL' ? isAllOrEmpty(selectedPriority) : pSet.has(p)
                   const color = p === 'P0' ? 'var(--color-rose)' : p === 'P1' ? 'var(--color-gold)' : p === 'P2' ? 'var(--color-sapphire)' : 'var(--color-muted)'
                   return (
                     <button
                       key={p}
                       type="button"
-                      onClick={() => setSelectedPriority(p)}
+                      onClick={() => {
+                        if (p === 'ALL') {
+                          setSelectedPriority(new Set())
+                        } else {
+                          const next = new Set(pSet)
+                          if (next.has(p)) {
+                            next.delete(p)
+                          } else {
+                            next.add(p)
+                          }
+                          setSelectedPriority(next)
+                        }
+                      }}
                       className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold cursor-pointer transition-all border ${
                         isActive ? 'bg-elevated' : 'border-transparent text-muted hover:text-text'
                       }`}
@@ -982,11 +1115,66 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                         borderColor: isActive ? color : 'transparent',
                         color: isActive ? color : undefined,
                       }}
+                      title={p === 'ALL' ? 'Reset to All Priorities' : `Toggle ${p} filter (Multi-select enabled)`}
                     >
                       {p === 'ALL' ? 'All Priorities' : `${p} (${counts[p] || 0})`}
                     </button>
                   )
                 })}
+
+                {/* Component MultiSelectDropdown */}
+                <div className="h-3 w-px bg-border mx-1" />
+                <MultiSelectDropdown
+                  title="Component"
+                  allLabel="All Components"
+                  options={componentOptions}
+                  selected={selectedComponent}
+                  onChange={setSelectedComponent}
+                  colorTheme="gold"
+                  className="w-auto"
+                />
+
+                <div className="h-3 w-px bg-border mx-1" />
+                <span className="text-[11px] font-mono text-muted mr-1">Scope:</span>
+                <button
+                  type="button"
+                  onClick={() => setScopeFilter('ALL')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-mono cursor-pointer transition-all border ${
+                    scopeFilter === 'ALL'
+                      ? 'bg-elevated border-gold text-gold font-bold'
+                      : 'border-transparent text-muted hover:text-text'
+                  }`}
+                >
+                  All Logs
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScopeFilter('SESSION')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-mono cursor-pointer transition-all border ${
+                    scopeFilter === 'SESSION'
+                      ? 'bg-elevated border-emerald text-emerald font-bold'
+                      : 'border-transparent text-muted hover:text-text'
+                  }`}
+                >
+                  Current Session
+                </button>
+
+                {/* Reset Filters */}
+                {(!isAllOrEmpty(selectedPriority) || !isAllOrEmpty(selectedComponent) || searchQuery || scopeFilter !== 'ALL') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedPriority(new Set())
+                      setSelectedComponent(new Set())
+                      setSearchQuery('')
+                      setScopeFilter('ALL')
+                    }}
+                    className="px-2 py-0.5 rounded text-[11px] font-mono font-bold text-gold hover:text-amber-200 border border-gold/30 hover:bg-gold/10 transition-colors cursor-pointer ml-1"
+                    title="Reset priority, component, and search filters"
+                  >
+                    ✕ Reset
+                  </button>
+                )}
               </div>
 
               {/* Search Box */}
@@ -1020,27 +1208,28 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                 </p>
               </div>
             ) : (
-              <div className="space-y-2.5">
+              <div className="space-y-2.5 select-text">
                 {filteredIncidents.map((inc, idx) => {
                   const isP0 = inc.priority === 'P0'
                   const isP1 = inc.priority === 'P1'
                   const pColor = isP0 ? 'var(--color-rose)' : isP1 ? 'var(--color-gold)' : 'var(--color-sapphire)'
                   const incKey = inc.incident_id || idx
                   const isExpanded = !!expandedTracebacks[incKey]
+                  const isCopied = copiedIncKey === incKey
 
                   return (
                     <div
                       key={incKey}
-                      className="p-3.5 rounded-xl border text-xs font-mono transition-all space-y-2"
+                      className="p-3.5 rounded-xl border text-xs font-mono transition-all space-y-2 select-text"
                       style={{
                         background: isP0 ? 'rgba(255, 79, 123, 0.05)' : 'var(--color-panel)',
                         borderColor: isP0 ? 'rgba(255, 79, 123, 0.35)' : 'var(--color-border)',
                       }}
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <span
-                            className="px-2 py-0.5 rounded font-black text-[10px] tracking-wider uppercase"
+                            className="px-2 py-0.5 rounded font-black text-[10px] tracking-wider uppercase select-none"
                             style={{
                               background: isP0 ? 'rgba(255, 79, 123, 0.2)' : isP1 ? 'rgba(245, 166, 35, 0.2)' : 'rgba(77, 155, 255, 0.15)',
                               color: pColor,
@@ -1048,51 +1237,77 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                           >
                             {inc.priority || 'P2'}
                           </span>
-                          <span className="text-text font-bold">
+                          <span className="text-text font-bold select-text cursor-text">
                             {inc.component || 'SYSTEM'}
                           </span>
-                          <span className="text-muted/60">•</span>
-                          <span className="text-muted text-[10px]">
+                          <span className="text-muted/60 select-none">•</span>
+                          <span className="text-muted text-[10px] select-text">
                             {inc.event_type || 'INCIDENT'}
                           </span>
                           {inc.incident_id && (
-                            <span className="text-muted/60 text-[10px]">
+                            <span className="text-muted/70 text-[10px] font-mono select-text cursor-text bg-elevated px-1.5 py-0.5 rounded border border-border/60">
                               [{inc.incident_id}]
                             </span>
                           )}
                         </div>
 
-                        <span className="text-muted text-[11px]">
-                          {inc.timestamp ? new Date(inc.timestamp).toLocaleTimeString('en-IN') : 'Just now'}
-                        </span>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <span className="text-muted text-[11px] select-text">
+                            {inc.timestamp ? new Date(inc.timestamp).toLocaleTimeString('en-IN') : 'Just now'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleCopyIncident(inc, incKey)}
+                            className="px-2 py-0.5 rounded text-[10px] font-mono border transition-all cursor-pointer flex items-center gap-1 select-none"
+                            style={{
+                              background: isCopied ? 'rgba(0,214,143,0.15)' : 'var(--color-elevated)',
+                              borderColor: isCopied ? 'var(--color-emerald)' : 'var(--color-border)',
+                              color: isCopied ? 'var(--color-emerald)' : 'var(--color-muted)',
+                            }}
+                            title="Copy incident error summary and details"
+                          >
+                            {isCopied ? '✓ Copied' : '📋 Copy Error'}
+                          </button>
+                        </div>
                       </div>
 
-                      <div className="text-sm font-bold text-text leading-snug">
+                      <div className="text-sm font-bold text-text leading-snug select-text cursor-text">
                         {inc.reason || 'Unhandled System Condition'}
                       </div>
 
                       {inc.action_taken && (
-                        <div className="text-xs text-muted flex items-start gap-1">
-                          <span className="text-muted/60 font-semibold">Remediation / Action Taken:</span>
-                          <span className="text-text">{inc.action_taken}</span>
+                        <div className="text-xs text-muted flex items-start gap-1 select-text cursor-text">
+                          <span className="text-muted/60 font-semibold select-none">Remediation / Action Taken:</span>
+                          <span className="text-text select-text">{inc.action_taken}</span>
                         </div>
                       )}
 
                       {/* Expandable Traceback */}
                       {inc.details?.traceback && (
                         <div className="pt-1">
-                          <button
-                            type="button"
-                            onClick={() => toggleTraceback(incKey)}
-                            className="text-xs text-sapphire hover:underline cursor-pointer flex items-center gap-1"
-                          >
-                            <span>{isExpanded ? '▲ Hide Full Traceback' : '▼ Inspect Full Traceback & Context'}</span>
-                          </button>
+                          <div className="flex items-center justify-between">
+                            <button
+                              type="button"
+                              onClick={() => toggleTraceback(incKey)}
+                              className="text-xs text-sapphire hover:underline cursor-pointer flex items-center gap-1 select-none"
+                            >
+                              <span>{isExpanded ? '▲ Hide Full Traceback' : '▼ Inspect Full Traceback & Context'}</span>
+                            </button>
+                            {isExpanded && (
+                              <button
+                                type="button"
+                                onClick={() => handleCopyTraceback(inc.details.traceback, incKey)}
+                                className="text-[10px] text-muted hover:text-text cursor-pointer select-none flex items-center gap-1 font-mono"
+                              >
+                                {copiedIncKey === `${incKey}-tb` ? '✓ Traceback Copied' : '📋 Copy Traceback'}
+                              </button>
+                            )}
+                          </div>
                           {isExpanded && (
-                            <div className="mt-2 p-3 rounded-lg bg-black/50 border border-border/80 text-[11px] font-mono text-muted overflow-x-auto max-h-60 no-scrollbar space-y-2">
-                              <pre className="text-rose/90">{inc.details.traceback}</pre>
+                            <div className="mt-2 p-3 rounded-lg bg-black/50 border border-border/80 text-[11px] font-mono text-muted overflow-x-auto max-h-60 no-scrollbar space-y-2 select-text">
+                              <pre className="text-rose/90 select-text cursor-text font-mono whitespace-pre-wrap">{inc.details.traceback}</pre>
                               {inc.details?.system_vitals && (
-                                <div className="pt-2 border-t border-border/40 text-[10px] text-muted flex gap-4">
+                                <div className="pt-2 border-t border-border/40 text-[10px] text-muted flex gap-4 select-text cursor-text">
                                   <span>RSS: {Math.round(inc.details.system_vitals.process_rss_mb || 0)} MB</span>
                                   <span>RAM: {inc.details.system_vitals.system_ram_pct || 0}%</span>
                                 </div>
@@ -1465,14 +1680,32 @@ export default function OpsDeckView({ onOpenOrderTicket }) {
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-gold font-bold">⏳ Active Eviction Cooldowns:</span>
                   {Object.entries(tbt.cooldowns).map(([sym, remSec]) => (
-                    <span key={sym} className="px-2 py-0.5 rounded bg-surface border border-border text-muted">
-                      {sym} ({Math.ceil(remSec)}s left)
+                    <span key={sym} className="px-2 py-0.5 rounded bg-surface border border-border text-muted inline-flex items-center gap-1.5">
+                      <span>{sym} ({Math.ceil(remSec)}s left)</span>
+                      <button
+                        type="button"
+                        onClick={() => handleClearTbtCooldowns(sym)}
+                        className="text-[10px] text-muted hover:text-rose cursor-pointer ml-0.5 font-bold"
+                        title={`Clear cooldown for ${sym}`}
+                      >
+                        ✕
+                      </button>
                     </span>
                   ))}
                 </div>
-                <span className="text-[10px] text-muted whitespace-nowrap">
-                  Automated loops will not re-subscribe these symbols until cooldown expires.
-                </span>
+                <div className="flex items-center gap-2 whitespace-nowrap">
+                  <span className="text-[10px] text-muted hidden lg:inline">
+                    Automated loops will not re-subscribe these symbols until cooldown expires.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleClearTbtCooldowns(null)}
+                    disabled={actionInProgress === 'clear_tbt_cooldowns'}
+                    className="px-2 py-1 rounded bg-elevated hover:bg-highlight border border-border text-[11px] font-bold text-text cursor-pointer transition-all"
+                  >
+                    {actionInProgress === 'clear_tbt_cooldowns' ? 'Clearing…' : '⚡ Clear All'}
+                  </button>
+                </div>
               </div>
             )}
 

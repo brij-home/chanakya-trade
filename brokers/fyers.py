@@ -43,6 +43,7 @@ import threading
 import time
 import datetime as dt
 from datetime import datetime
+from market.instruments import format_strike
 from pathlib import Path
 from typing import Any, Optional
 
@@ -63,6 +64,7 @@ from brokers.base import (
 
 TOKEN_FILE = Path.home() / ".trading_platform" / "fyers.json"
 TOKEN_EXPIRY = 12 * 3600  # Fyers tokens valid ~12 h
+_GLOBAL_FYERS_AUTH_LOCK = threading.RLock()
 
 # ── Symbol mapping (instrument format → Fyers format) ────────
 
@@ -259,9 +261,20 @@ def format_fyers_option_symbol(
     prefix = "BSE" if clean_und in ("SENSEX", "BANKEX") else "NSE"
     yy = exp_d.strftime("%y")
     opt = option_type.upper().strip()
-    strike_int = int(round(strike))
+    strike_str = format_strike(strike)
 
-    # Check if exp_d is monthly expiry
+    # SEBI mandate: Only NIFTY & SENSEX have weekly contracts; BANKNIFTY, MIDCPNIFTY, FINNIFTY and stocks are strictly monthly
+    is_weekly_allowed = clean_und in ("NIFTY", "SENSEX")
+    month_map = _REVERSE_WEEKLY_MONTH_MAP
+    m_char = month_map.get(exp_d.month, str(exp_d.month))
+    weekly_cand = f"{prefix}:{clean_und}{yy}{m_char}{exp_d.day:02d}{strike_str}{opt}"
+    mo_str = exp_d.strftime("%b").upper()
+    monthly_cand = f"{prefix}:{clean_und}{yy}{mo_str}{strike_str}{opt}"
+
+    if not is_weekly_allowed:
+        return monthly_cand
+
+    # Check if monthly expiry: last Thursday (NSE) or last Friday (BSE) of the month
     is_bse = prefix == "BSE"
     days_in_month = monthrange(exp_d.year, exp_d.month)[1]
     last_day = dt_mod.date(exp_d.year, exp_d.month, days_in_month)
@@ -269,15 +282,9 @@ def format_fyers_option_symbol(
     while last_day.weekday() != target_weekday:
         last_day -= dt_mod.timedelta(days=1)
 
-    is_monthly = exp_d == last_day
-
-    if is_monthly:
-        date_str = exp_d.strftime("%b").upper()
-    else:
-        m_char = _REVERSE_WEEKLY_MONTH_MAP.get(exp_d.month, str(exp_d.month))
-        date_str = f"{m_char}{exp_d.day:02d}"
-
-    return f"{prefix}:{clean_und}{yy}{date_str}{strike_int}{opt}"
+    if exp_d == last_day:
+        return monthly_cand
+    return weekly_cand
 
 
 # ── Precision Order Utilities (Decimal Tick Rounding & Lot Validation) ─────────
@@ -446,7 +453,7 @@ def _resolve_currency_contract(symbol: str) -> str:
     return f"NSE:{clean}{target_dt.strftime('%y%b').upper()}FUT"
 
 
-def _to_fyers_symbol(instrument: str) -> str:
+def to_fyers_symbol(instrument: str) -> str:
     """Convert any instrument format ('NSE:RELIANCE', 'GOLD', 'USDINR', 'NIFTY') to Fyers API format."""
     s = str(instrument).strip()
     if ":" in s:
@@ -457,6 +464,10 @@ def _to_fyers_symbol(instrument: str) -> str:
     exch_upper = exch.upper().strip()
     sym_upper = sym.upper().strip()
 
+    from market.instruments import resolve_corporate_alias
+
+    sym_upper = resolve_corporate_alias(sym_upper)
+
     # Direct index map check
     if sym_upper in _FYERS_INDEX_MAP:
         return _FYERS_INDEX_MAP[sym_upper]
@@ -464,8 +475,8 @@ def _to_fyers_symbol(instrument: str) -> str:
     if s.upper() in _FYERS_INDEX_MAP:
         return _FYERS_INDEX_MAP[s.upper()]
 
-    # Already formatted with -INDEX, -EQ, etc.
-    if sym_upper.endswith(("-INDEX", "-EQ", "-BE", "-SM", "-BZ", "-GB")):
+    # Already formatted index
+    if sym_upper.endswith("-INDEX"):
         return f"{exch_upper}:{sym_upper}"
 
     # Crypto / Non-Fyers Assets
@@ -518,18 +529,48 @@ def _to_fyers_symbol(instrument: str) -> str:
             return f"MCX:{sym_upper}"
         return f"NSE:{sym_upper}"
 
-    # Check if index by explicit prefixes (only if not an option/futures contract)
+    # Check if index by explicit prefixes (only if not an option/futures contract or equity ETF)
     clean = sym_upper.replace(" ", "")
-    if clean.startswith(_INDEX_PREFIXES) or clean in ("VIX", "INDIAVIX"):
-        return f"{exch_upper}:{clean}-INDEX"
+    clean_no_eq = clean[:-3] if clean.endswith("-EQ") else clean
 
-    # BSE Equity
-    if exch_upper == "BSE":
-        if not any(sym_upper.endswith(sfx) for sfx in ("-A", "-B", "-X", "-XT", "-T", "-Z", "-EQ")):
-            return f"BSE:{sym_upper}-A"
-        return f"BSE:{sym_upper}"
+    if not clean.endswith("-EQ") and not clean_no_eq.startswith(("NIFTYBEES", "NIFTYETF")):
+        if (
+            clean_no_eq in _INDEX_PREFIXES
+            or any(
+                clean_no_eq.startswith(pfx)
+                for pfx in (
+                    "NIFTY50",
+                    "NIFTYBANK",
+                    "NIFTYIT",
+                    "NIFTYAUTO",
+                    "NIFTYFMCG",
+                    "NIFTYMETAL",
+                    "NIFTYENERGY",
+                    "NIFTYPHARMA",
+                    "NIFTYREALTY",
+                    "NIFTYINFRA",
+                    "NIFTYPSE",
+                    "NIFTYMEDIA",
+                    "NIFTYFINSERVICE",
+                    "NIFTYMIDSELECT",
+                    "NIFTYMIDCAP100",
+                )
+            )
+            or clean in ("VIX", "INDIAVIX")
+        ):
+            return f"{exch_upper}:{clean}-INDEX"
+
+    # Dynamic Fyers symbol mapping for equities via authoritative symbol master
+    if exch_upper in ("NSE", "BSE"):
+        from market.symbol_master import resolve_fyers_equity_symbol
+
+        return resolve_fyers_equity_symbol(sym_upper, exch=exch_upper)
 
     return f"NSE:{sym_upper}-EQ"
+
+
+# Backward compatibility alias
+_to_fyers_symbol = to_fyers_symbol
 
 
 def _get_sdk():
@@ -540,6 +581,31 @@ def _get_sdk():
         return fyersModel
     except ImportError:
         raise RuntimeError("fyers-apiv3 not installed. Run:\n  pip install fyers-apiv3")
+
+
+def _is_fyers_auth_error(data: Any) -> bool:
+    """Check if Fyers API response indicates an invalid, expired, or rejected session token."""
+    if not isinstance(data, dict):
+        return False
+    if data.get("code") in (-14, -15, -16, -17, -99, 401, 403):
+        return True
+    msg = str(data.get("message", "")).lower()
+    return any(
+        token_err in msg
+        for token_err in (
+            "could not authenticate",
+            "token is expired",
+            "token expired",
+            "valid token",
+            "invalid token",
+            "token is invalid",
+            "token invalid or expired",
+            "invalid or expired",
+            "jwt expired",
+            "signature has expired",
+            "unauthorized",
+        )
+    )
 
 
 class FyersAPI(BrokerAPI):
@@ -613,7 +679,12 @@ class FyersAPI(BrokerAPI):
             fy_id
             and totp_secret
             and pin
-            and (not redirect_uri or redirect_uri == "http://127.0.0.1:8765/fyers/callback")
+            and (
+                not redirect_uri
+                or redirect_uri
+                in ("http://127.0.0.1:8765/fyers/callback", "http://localhost:8765/fyers/callback")
+                or redirect_uri.endswith("/fyers/callback")
+            )
         ):
             redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
         self._redirect_uri = (
@@ -626,7 +697,7 @@ class FyersAPI(BrokerAPI):
         self._access_token = ""
         self._profile: Optional[UserProfile] = None
         self._token_ts: float = 0.0
-        self._reauth_lock = threading.Lock()
+        self._reauth_lock = _GLOBAL_FYERS_AUTH_LOCK
         self._fyers = None  # FyersModel instance
         self._last_oc_metadata: dict[str, Any] = {}
         self._expiries_dates_cache: dict[str, tuple[float, list[str]]] = {}
@@ -637,6 +708,10 @@ class FyersAPI(BrokerAPI):
         self._depth_cache_lock = threading.Lock()
         self._depth_cache_ttl: float = 25.0
         self._market_status_cache: tuple[float, dict[str, Any]] = (0.0, {})
+        self._funds_cache: Optional[tuple[float, Funds]] = None
+        self._holdings_cache: Optional[tuple[float, list[Holding]]] = None
+        self._positions_cache: Optional[tuple[float, list[Position]]] = None
+        self._portfolio_cache_lock = threading.Lock()
         self.name: str = "fyers"
         self._load_token()
 
@@ -655,8 +730,9 @@ class FyersAPI(BrokerAPI):
 
     def _is_token_expired(self, ts: float) -> bool:
         """
-        Validates token freshness against both maximum TTL and market session boundaries.
-        Fyers invalidates tokens daily before market open (~06:00-08:00 AM IST).
+        Validates token freshness against maximum TTL and market session boundaries.
+        Fyers invalidates tokens daily at 06:00 AM IST (daily session cutoff).
+        Any token generated prior to the most recent 06:00 AM IST cutoff is expired.
         """
         if not ts or ts <= 0:
             return True
@@ -665,14 +741,17 @@ class FyersAPI(BrokerAPI):
             return True
         try:
             from config.constants import IST
+            from datetime import timedelta
 
             dt_token = datetime.fromtimestamp(ts, tz=IST)
             dt_now = datetime.fromtimestamp(now, tz=IST)
-            if dt_token.date() < dt_now.date():
-                return True
-            if dt_token.hour < 8 and (
-                dt_now.hour > 8 or (dt_now.hour == 8 and dt_now.minute >= 30)
-            ):
+
+            # Fyers daily server session reset occurs at 06:00 AM IST.
+            # Determine the latest 06:00 AM IST boundary at or prior to dt_now.
+            today_reset = dt_now.replace(hour=6, minute=0, second=0, microsecond=0)
+            latest_reset = today_reset if dt_now >= today_reset else today_reset - timedelta(days=1)
+
+            if dt_token < latest_reset:
                 return True
         except Exception as e_suppressed:
             logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
@@ -691,6 +770,9 @@ class FyersAPI(BrokerAPI):
                 else:
                     self._access_token = ""
                     self._token_ts = 0.0
+                    self._profile = None
+                    self._fyers = None
+                    TOKEN_FILE.unlink(missing_ok=True)
         except Exception as e_suppressed:
             logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -726,6 +808,12 @@ class FyersAPI(BrokerAPI):
             fyers_order_stream.update_token(access_token=token, app_id=self._app_id)
         except Exception as e_suppressed:
             logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
+
+        # Instantly clear any circuit breaker trip caused by previous token expiry
+        try:
+            get_fyers_circuit_breaker().record_auth_success()
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.fyers] Error recording auth success: {e_suppressed}")
 
     # ── Auth ──────────────────────────────────────────────────
 
@@ -787,115 +875,152 @@ class FyersAPI(BrokerAPI):
         BASE_API = "https://api-t1.fyers.in/api/v3"
         headers = {"Content-Type": "application/json"}
 
-        # ── Step 1: Send login OTP (initiates session, gets request_key) ─
-        # app_id here is APP_ID_TYPE = "2" (web login), per Fyers vagator spec.
-        r1 = _req.post(
-            f"{BASE_VAGATOR}/send_login_otp",
-            json={"fy_id": self._fy_id, "app_id": "2"},
-            headers=headers,
-            timeout=15,
-        )
-        if r1.status_code != 200:
-            raise RuntimeError(f"Fyers auto-login step 1 failed (HTTP {r1.status_code}): {r1.text}")
-        data1 = r1.json()
-        request_key = data1.get("request_key", "")
-        if not request_key:
-            raise RuntimeError(f"Fyers auto-login step 1: no request_key in response: {data1}")
+        MAX_ATTEMPTS = 2
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                # ── Step 1: Send login OTP (initiates session, gets request_key) ─
+                # app_id here is APP_ID_TYPE = "2" (web login), per Fyers vagator spec.
+                r1 = _req.post(
+                    f"{BASE_VAGATOR}/send_login_otp",
+                    json={"fy_id": self._fy_id, "app_id": "2"},
+                    headers=headers,
+                    timeout=15,
+                )
+                if r1.status_code != 200:
+                    raise RuntimeError(
+                        f"Fyers auto-login step 1 failed (HTTP {r1.status_code}): {r1.text}"
+                    )
+                data1 = r1.json()
+                request_key = data1.get("request_key", "")
+                if not request_key:
+                    raise RuntimeError(
+                        f"Fyers auto-login step 1: no request_key in response: {data1}"
+                    )
 
-        # ── Step 2: Verify TOTP ───────────────────────────────────────────
-        totp = pyotp.TOTP(self._totp_secret).now()
-        r2 = _req.post(
-            f"{BASE_VAGATOR}/verify_otp",
-            json={"request_key": request_key, "otp": totp},
-            headers=headers,
-            timeout=15,
-        )
-        if r2.status_code != 200:
-            raise RuntimeError(
-                f"Fyers auto-login step 2 (TOTP) failed (HTTP {r2.status_code}): {r2.text}"
-            )
-        data2 = r2.json()
-        request_key2 = data2.get("request_key", "")
-        if not request_key2:
-            raise RuntimeError(f"Fyers auto-login step 2: no request_key in response: {data2}")
+                # ── Step 2: Verify TOTP ───────────────────────────────────────────
+                totp = pyotp.TOTP(self._totp_secret).now()
+                r2 = _req.post(
+                    f"{BASE_VAGATOR}/verify_otp",
+                    json={"request_key": request_key, "otp": totp},
+                    headers=headers,
+                    timeout=15,
+                )
+                if r2.status_code != 200:
+                    raise RuntimeError(
+                        f"Fyers auto-login step 2 (TOTP) failed (HTTP {r2.status_code}): {r2.text}"
+                    )
+                data2 = r2.json()
+                request_key2 = data2.get("request_key", "")
+                if not request_key2:
+                    raise RuntimeError(
+                        f"Fyers auto-login step 2: no request_key in response: {data2}"
+                    )
 
-        # ── Step 3: Verify PIN ────────────────────────────────────────────
-        # Fyers vagator expects the PIN as PLAIN TEXT — NOT SHA-256 hashed.
-        r3 = _req.post(
-            f"{BASE_VAGATOR}/verify_pin",
-            json={
-                "request_key": request_key2,
-                "identity_type": "pin",
-                "identifier": self._pin,
-            },
-            headers=headers,
-            timeout=15,
-        )
-        if r3.status_code != 200:
-            raise RuntimeError(
-                f"Fyers auto-login step 3 (PIN) failed (HTTP {r3.status_code}): {r3.text}"
-            )
-        data3 = r3.json()
-        intermediate_token = data3.get("data", {}).get("access_token", "")
-        if not intermediate_token:
-            raise RuntimeError(f"Fyers auto-login step 3: no access_token in response: {data3}")
+                # ── Step 3: Verify PIN ────────────────────────────────────────────
+                # Fyers vagator expects the PIN as PLAIN TEXT — NOT SHA-256 hashed.
+                r3 = _req.post(
+                    f"{BASE_VAGATOR}/verify_pin",
+                    json={
+                        "request_key": request_key2,
+                        "identity_type": "pin",
+                        "identifier": self._pin,
+                    },
+                    headers=headers,
+                    timeout=15,
+                )
+                if r3.status_code != 200:
+                    raise RuntimeError(
+                        f"Fyers auto-login step 3 (PIN) failed (HTTP {r3.status_code}): {r3.text}"
+                    )
+                data3 = r3.json()
+                intermediate_token = data3.get("data", {}).get("access_token", "")
+                if not intermediate_token:
+                    raise RuntimeError(
+                        f"Fyers auto-login step 3: no access_token in response: {data3}"
+                    )
 
-        # ── Step 4: Generate OAuth auth_code via Bearer intermediate token ─
-        r4 = _req.post(
-            f"{BASE_API}/token",
-            json={
-                "fyers_id": self._fy_id,
-                "app_id": bare_app_id,
-                "redirect_uri": self._redirect_uri,
-                "appType": app_type,
-                "code_challenge": "",
-                "state": "chanakya_trade",
-                "scope": "",
-                "nonce": "",
-                "response_type": "code",
-                "create_cookie": True,
-            },
-            headers={
-                "Authorization": f"Bearer {intermediate_token}",
-                "Content-Type": "application/json",
-            },
-            timeout=15,
-        )
-        if r4.status_code not in (200, 308):
-            raise RuntimeError(
-                f"Fyers auto-login step 4 (token) failed (HTTP {r4.status_code}): {r4.text}"
-            )
-        url = r4.json().get("Url", "")
-        if not url:
-            raise RuntimeError(f"Fyers auto-login step 4: no Url in response: {r4.text}")
+                # ── Step 4: Generate OAuth auth_code via Bearer intermediate token ─
+                r4 = _req.post(
+                    f"{BASE_API}/token",
+                    json={
+                        "fyers_id": self._fy_id,
+                        "app_id": bare_app_id,
+                        "redirect_uri": self._redirect_uri,
+                        "appType": app_type,
+                        "code_challenge": "",
+                        "state": "chanakya_trade",
+                        "scope": "",
+                        "nonce": "",
+                        "response_type": "code",
+                        "create_cookie": True,
+                    },
+                    headers={
+                        "Authorization": f"Bearer {intermediate_token}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=15,
+                )
+                if r4.status_code not in (200, 308):
+                    raise RuntimeError(
+                        f"Fyers auto-login step 4 (token) failed (HTTP {r4.status_code}): {r4.text}"
+                    )
+                url = r4.json().get("Url", "")
+                if not url:
+                    raise RuntimeError(f"Fyers auto-login step 4: no Url in response: {r4.text}")
 
-        parsed_query = parse.parse_qs(parse.urlparse(url).query)
-        auth_code_list = parsed_query.get("auth_code")
-        if not auth_code_list or not auth_code_list[0]:
-            raise RuntimeError(f"Fyers auto-login step 4: auth_code not found in Url: {url}")
-        auth_code = auth_code_list[0]
+                parsed_query = parse.parse_qs(parse.urlparse(url).query)
+                auth_code_list = parsed_query.get("auth_code")
+                if not auth_code_list or not auth_code_list[0]:
+                    raise RuntimeError(
+                        f"Fyers auto-login step 4: auth_code not found in Url: {url}"
+                    )
+                auth_code = auth_code_list[0]
 
-        # ── Step 5: Validate auth_code to obtain final access token ────────
-        r5 = _req.post(
-            f"{BASE_API}/validate-authcode",
-            json={
-                "grant_type": "authorization_code",
-                "appIdHash": app_id_hash,
-                "code": auth_code,
-            },
-            headers=headers,
-            timeout=15,
-        )
-        if r5.status_code != 200:
-            raise RuntimeError(
-                f"Fyers auto-login step 5 (validate-authcode) failed (HTTP {r5.status_code}): {r5.text}"
-            )
-        data5 = r5.json()
-        access_token = data5.get("access_token", "")
-        if not access_token:
-            raise RuntimeError(f"Fyers auto-login step 5: no access_token in response: {data5}")
+                # Brief sync pause (0.2s) before validating auth_code
+                time.sleep(0.2)
 
-        return access_token
+                # ── Step 5: Validate auth_code to obtain final access token ────────
+                r5 = _req.post(
+                    f"{BASE_API}/validate-authcode",
+                    json={
+                        "grant_type": "authorization_code",
+                        "appIdHash": app_id_hash,
+                        "code": auth_code,
+                    },
+                    headers=headers,
+                    timeout=15,
+                )
+                if r5.status_code != 200:
+                    err_text = r5.text
+                    if attempt < MAX_ATTEMPTS:
+                        logger.warning(
+                            f"[FyersAPI] Headless auto-login Step 5 transient failure on attempt {attempt}/{MAX_ATTEMPTS} "
+                            f"(HTTP {r5.status_code}): {err_text}. Retrying in 1.5s..."
+                        )
+                        time.sleep(1.5)
+                        continue
+                    raise RuntimeError(
+                        f"Fyers auto-login step 5 (validate-authcode) failed (HTTP {r5.status_code}): {err_text}"
+                    )
+                data5 = r5.json()
+                access_token = data5.get("access_token", "")
+                if not access_token:
+                    raise RuntimeError(
+                        f"Fyers auto-login step 5: no access_token in response: {data5}"
+                    )
+
+                return access_token
+
+            except Exception as e:
+                if attempt < MAX_ATTEMPTS and (
+                    "step 5" in str(e).lower() or "invalid auth code" in str(e).lower()
+                ):
+                    logger.warning(
+                        f"[FyersAPI] Retrying headless auto-login flow (attempt {attempt}/{MAX_ATTEMPTS}) due to: {e}"
+                    )
+                    time.sleep(1.5)
+                    continue
+                raise
 
     def complete_login(self, auth_code: str = "", **kwargs) -> UserProfile:
         """
@@ -905,64 +1030,82 @@ class FyersAPI(BrokerAPI):
         instance, the headless TOTP auto-login path is used first (no browser).
         Otherwise falls back to the standard OAuth auth_code exchange.
         """
-        # ── Path A: Headless auto-login (TOTP + PIN) ──────────────────────
-        if self._fy_id and self._totp_secret and self._pin and not auth_code:
-            token = self._auto_login_totp()
-            self._access_token = token
-            self._token_ts = time.time()
-            self._fyers = None
-            self._save_token(token)
-            return self.get_profile()
+        with _GLOBAL_FYERS_AUTH_LOCK:
+            # ── Path A: Headless auto-login (TOTP + PIN) ──────────────────────
+            if self._fy_id and self._totp_secret and self._pin and not auth_code:
+                # Double-check if token was already refreshed while waiting for lock
+                if self._access_token and not self._is_token_expired(self._token_ts):
+                    return self.get_profile()
 
-        # ── Path B: Standard OAuth auth_code exchange ─────────────────────
-        fyersModel = _get_sdk()
-        session = fyersModel.SessionModel(
-            client_id=self._app_id,
-            secret_key=self._secret_key,
-            redirect_uri=self._redirect_uri,
-            response_type="code",
-            grant_type="authorization_code",
-            state="chanakya_trade",
-        )
-        session.set_token(auth_code)
-        response = session.generate_token()
-        token = response.get("access_token", "")
-        if not token:
-            error_msg = response.get("message", "Unknown error")
-            if "invalid app id" in error_msg.lower() or "app id hash" in error_msg.lower():
+                token = self._auto_login_totp()
+                self._access_token = token
+                self._token_ts = time.time()
+                self._fyers = None
+                self._save_token(token)
+                return self.get_profile()
+
+            # ── Path B: Standard OAuth auth_code exchange ─────────────────────
+            fyersModel = _get_sdk()
+            session = fyersModel.SessionModel(
+                client_id=self._app_id,
+                secret_key=self._secret_key,
+                redirect_uri=self._redirect_uri,
+                response_type="code",
+                grant_type="authorization_code",
+                state="chanakya_trade",
+            )
+            session.set_token(auth_code)
+            response = session.generate_token()
+            token = response.get("access_token", "")
+            if not token:
+                error_msg = response.get("message", "Unknown error")
+                if "invalid app id" in error_msg.lower() or "app id hash" in error_msg.lower():
+                    raise RuntimeError(
+                        f"Fyers login failed: {error_msg}\n"
+                        "Your App ID and Secret Key don't match. To fix:\n"
+                        "  trade\n"
+                        "  > credentials delete FYERS_APP_ID\n"
+                        "  > credentials delete FYERS_SECRET_KEY\n"
+                        "  > login\n"
+                        "Then re-enter the correct values from myapi.fyers.in"
+                    )
                 raise RuntimeError(
                     f"Fyers login failed: {error_msg}\n"
-                    "Your App ID and Secret Key don't match. To fix:\n"
-                    "  trade\n"
-                    "  > credentials delete FYERS_APP_ID\n"
-                    "  > credentials delete FYERS_SECRET_KEY\n"
-                    "  > login\n"
-                    "Then re-enter the correct values from myapi.fyers.in"
+                    "Possible causes: expired auth code, wrong redirect URL, or network issue.\n"
+                    "Try logging in again. If it persists, verify your app config at myapi.fyers.in\n"
+                    "and ensure Redirect URL is exactly: http://127.0.0.1:8765/fyers/callback"
                 )
-            raise RuntimeError(
-                f"Fyers login failed: {error_msg}\n"
-                "Possible causes: expired auth code, wrong redirect URL, or network issue.\n"
-                "Try logging in again. If it persists, verify your app config at myapi.fyers.in\n"
-                "and ensure Redirect URL is exactly: http://127.0.0.1:8765/fyers/callback"
-            )
 
-        self._access_token = token
-        self._token_ts = time.time()
-        self._fyers = None  # reset so it gets recreated with new token
-        self._save_token(token)
-        return self.get_profile()
+            self._access_token = token
+            self._token_ts = time.time()
+            self._fyers = None  # reset so it gets recreated with new token
+            self._save_token(token)
+            return self.get_profile()
 
     def _handle_auth_failure(self, failed_ts: float | None = None) -> bool:
         """
         Thread-safe self-healing recovery when Fyers API rejects the token.
         Clears expired token and triggers headless auto-login.
         """
-        with self._reauth_lock:
+        with _GLOBAL_FYERS_AUTH_LOCK:
             if failed_ts and self._token_ts > failed_ts and self._access_token:
                 return True
 
+            # If failed_ts is provided, check if TOKEN_FILE on disk was updated AFTER failed_ts by another process
+            if failed_ts and TOKEN_FILE.exists():
+                try:
+                    data = json.loads(TOKEN_FILE.read_text())
+                    disk_ts = data.get("timestamp", 0)
+                    if disk_ts > failed_ts and not self._is_token_expired(disk_ts):
+                        self._access_token = data.get("access_token", "")
+                        self._token_ts = disk_ts
+                        self._fyers = None
+                        return True
+                except Exception as e_suppressed:
+                    logger.debug(f"[brokers.fyers] Non-fatal exception suppressed: {e_suppressed}")
+
             logger.warning(
-                "[FyersAPI] Token rejected by Fyers. Attempting headless re-authentication..."
+                "[FyersAPI] Token rejected by Fyers. Invalidation & recovery pipeline triggered."
             )
             self._access_token = ""
             self._profile = None
@@ -988,14 +1131,58 @@ class FyersAPI(BrokerAPI):
                         return True
                 except Exception as exc:
                     logger.error(f"[FyersAPI] Headless re-authentication failed: {exc}")
-                    return False
+
+            # Headless TOTP not configured or auto-login failed:
+            # Stop streaming sockets to halt infinite 403 Forbidden reconnect storms
+            try:
+                from market.fyers_order_stream import fyers_order_stream
+
+                fyers_order_stream.stop()
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[brokers.fyers] Error stopping order stream on auth failure: {e_suppressed}"
+                )
+
+            try:
+                from market.websocket import ws_manager
+
+                ws_manager.stop()
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[brokers.fyers] Error stopping websocket on auth failure: {e_suppressed}"
+                )
+
+            try:
+                from market.fyers_tbt_manager import fyers_tbt_manager
+
+                fyers_tbt_manager.stop()
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[brokers.fyers] Error stopping tbt manager on auth failure: {e_suppressed}"
+                )
+
+            try:
+                from web.api import _invalidate_auth_cache
+
+                _invalidate_auth_cache("fyers")
+            except Exception as e_suppressed:
+                logger.debug(f"[brokers.fyers] Error invalidating auth cache: {e_suppressed}")
+
             return False
 
     def is_authenticated(self) -> bool:
-        if not self._access_token or self._is_token_expired(self._token_ts):
+        if self._access_token and not self._is_token_expired(self._token_ts):
+            return True
+
+        with _GLOBAL_FYERS_AUTH_LOCK:
+            # Double-check after acquiring lock
+            if self._access_token and not self._is_token_expired(self._token_ts):
+                return True
+
             self._load_token()
             if self._access_token and not self._is_token_expired(self._token_ts):
                 return True
+
             if (
                 self._fy_id
                 and self._totp_secret
@@ -1012,8 +1199,11 @@ class FyersAPI(BrokerAPI):
                 except Exception as e:
                     logger.warning(f"[FyersAPI] Headless auto-login attempt failed: {e}")
                     return False
+
+            self._access_token = ""
+            self._profile = None
+            self._fyers = None
             return False
-        return True
 
     def logout(self) -> None:
         try:
@@ -1033,11 +1223,48 @@ class FyersAPI(BrokerAPI):
     # ── Profile & Funds ───────────────────────────────────────
 
     def get_profile(self) -> UserProfile:
-        if self._profile:
+        if self._profile and not self._is_token_expired(self._token_ts):
             return self._profile
+        if get_fyers_circuit_breaker().is_tripped():
+            self._profile = None
+            raise PermissionError(
+                "Fyers circuit breaker is OPEN. Profile requests blocked to avoid dead-session rate exhaustion."
+            )
+        if not self.is_authenticated():
+            self._profile = None
+            raise PermissionError(
+                "Fyers session is expired or unauthenticated. Please login via /fyers/login."
+            )
+
         _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
+        if not fyers:
+            self._profile = None
+            raise PermissionError("Fyers SDK instance unavailable (missing or expired token).")
+
         data = fyers.get_profile()
+        if _is_fyers_auth_error(data):
+            failed_ts = self._token_ts
+            logger.warning(
+                f"[FyersAPI] Profile API auth rejection ({data.get('message')}). Retrying after auto-reauth..."
+            )
+            if self._handle_auth_failure(failed_ts=failed_ts):
+                fyers = self._get_fyers()
+                if fyers:
+                    data = fyers.get_profile()
+
+        if not isinstance(data, dict) or data.get("s") != "ok" or not data.get("data"):
+            self._profile = None
+            err_msg = data.get("message", "Unknown error") if isinstance(data, dict) else str(data)
+            code = data.get("code", 0) if isinstance(data, dict) else 0
+            if _is_fyers_auth_error(data):
+                get_fyers_circuit_breaker().record_failure(
+                    status_code=code or -16, error_message=err_msg
+                )
+            raise PermissionError(f"Fyers profile request rejected: {err_msg}")
+
+        get_fyers_circuit_breaker().record_success()
+
         payload = data.get("data", {})
         self._profile = UserProfile(
             user_id=payload.get("fy_id", ""),
@@ -1047,10 +1274,50 @@ class FyersAPI(BrokerAPI):
         )
         return self._profile
 
-    def get_funds(self) -> Funds:
+    def invalidate_portfolio_caches(self) -> None:
+        """Invalidate in-RAM funds, holdings, and positions caches immediately."""
+        with getattr(self, "_portfolio_cache_lock", threading.Lock()):
+            self._funds_cache = None
+            self._holdings_cache = None
+            self._positions_cache = None
+
+    def get_funds(self, bypass_cache: bool = False) -> Funds:
+        if not bypass_cache and self._funds_cache:
+            ts, cached_funds = self._funds_cache
+            if time.time() - ts < 3.0:
+                return cached_funds
+        if get_fyers_circuit_breaker().is_tripped():
+            raise PermissionError(
+                "Fyers circuit breaker is OPEN. Funds requests blocked to avoid dead-session rate exhaustion."
+            )
+        if not self.is_authenticated():
+            raise PermissionError("Fyers session is expired or unauthenticated.")
         _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
+        if not fyers:
+            raise PermissionError("Fyers SDK instance unavailable.")
         data = fyers.funds()
+        if _is_fyers_auth_error(data):
+            failed_ts = self._token_ts
+            logger.warning(
+                f"[FyersAPI] Funds API auth rejection ({data.get('message')}). Retrying after auto-reauth..."
+            )
+            if self._handle_auth_failure(failed_ts=failed_ts):
+                fyers = self._get_fyers()
+                if fyers:
+                    data = fyers.funds()
+
+        if not isinstance(data, dict) or data.get("s") != "ok":
+            err_msg = data.get("message", "Unknown error") if isinstance(data, dict) else str(data)
+            code = data.get("code", 0) if isinstance(data, dict) else 0
+            if _is_fyers_auth_error(data):
+                get_fyers_circuit_breaker().record_failure(
+                    status_code=code or -16, error_message=err_msg
+                )
+            raise RuntimeError(f"Fyers funds request failed: {err_msg}")
+
+        get_fyers_circuit_breaker().record_success()
+
         payload = data.get("fund_limit", [])
         # fund_limit is a list of {id, title, equityAmount, commodityAmount}
         cash = next(
@@ -1062,18 +1329,50 @@ class FyersAPI(BrokerAPI):
         total = next(
             (float(x.get("equityAmount", 0)) for x in payload if x.get("id") == 1), 0.0
         )  # id=1  → Total Balance
-        return Funds(
+        funds_res = Funds(
             available_cash=cash,
             used_margin=margin,
             total_balance=total,
         )
+        with self._portfolio_cache_lock:
+            self._funds_cache = (time.time(), funds_res)
+        return funds_res
 
     # ── Portfolio ─────────────────────────────────────────────
 
-    def get_holdings(self) -> list[Holding]:
+    def get_holdings(self, bypass_cache: bool = False) -> list[Holding]:
+        if not bypass_cache and self._holdings_cache:
+            ts, cached_holdings = self._holdings_cache
+            if time.time() - ts < 15.0:
+                return list(cached_holdings)
+        if get_fyers_circuit_breaker().is_tripped():
+            return []
+        if not self.is_authenticated():
+            return []
         _fyers_rate_limiter.acquire(category=FyersCallCategory.SCANNER_QUOTE)
         fyers = self._get_fyers()
+        if not fyers:
+            return []
         data = fyers.holdings()
+        if _is_fyers_auth_error(data):
+            failed_ts = self._token_ts
+            logger.warning(f"[FyersAPI] Holdings API auth rejection ({data.get('message')}).")
+            if self._handle_auth_failure(failed_ts=failed_ts):
+                fyers = self._get_fyers()
+                if fyers:
+                    data = fyers.holdings()
+
+        if not isinstance(data, dict) or data.get("s") != "ok":
+            if _is_fyers_auth_error(data):
+                err_msg = data.get("message", "") if isinstance(data, dict) else str(data)
+                code = data.get("code", 0) if isinstance(data, dict) else 0
+                get_fyers_circuit_breaker().record_failure(
+                    status_code=code or -16, error_message=err_msg
+                )
+            return []
+
+        get_fyers_circuit_breaker().record_success()
+
         holdings = []
         for item in data.get("holdings", []):
             qty = int(item.get("quantity", 0))
@@ -1096,12 +1395,43 @@ class FyersAPI(BrokerAPI):
                     day_change_pct=0.0,
                 )
             )
+        with self._portfolio_cache_lock:
+            self._holdings_cache = (time.time(), list(holdings))
         return holdings
 
-    def get_positions(self) -> list[Position]:
+    def get_positions(self, bypass_cache: bool = False) -> list[Position]:
+        if not bypass_cache and self._positions_cache:
+            ts, cached_positions = self._positions_cache
+            if time.time() - ts < 3.0:
+                return list(cached_positions)
+        if get_fyers_circuit_breaker().is_tripped():
+            return []
+        if not self.is_authenticated():
+            return []
         _fyers_rate_limiter.acquire(category=FyersCallCategory.ORDER)
         fyers = self._get_fyers()
+        if not fyers:
+            return []
         data = fyers.positions()
+        if _is_fyers_auth_error(data):
+            failed_ts = self._token_ts
+            logger.warning(f"[FyersAPI] Positions API auth rejection ({data.get('message')}).")
+            if self._handle_auth_failure(failed_ts=failed_ts):
+                fyers = self._get_fyers()
+                if fyers:
+                    data = fyers.positions()
+
+        if not isinstance(data, dict) or data.get("s") != "ok":
+            if _is_fyers_auth_error(data):
+                err_msg = data.get("message", "") if isinstance(data, dict) else str(data)
+                code = data.get("code", 0) if isinstance(data, dict) else 0
+                get_fyers_circuit_breaker().record_failure(
+                    status_code=code or -16, error_message=err_msg
+                )
+            return []
+
+        get_fyers_circuit_breaker().record_success()
+
         positions = []
         for item in data.get("netPositions", []):
             qty = int(item.get("netQty", 0))
@@ -1123,6 +1453,8 @@ class FyersAPI(BrokerAPI):
                     instrument_type="EQ",
                 )
             )
+        with self._portfolio_cache_lock:
+            self._positions_cache = (time.time(), list(positions))
         return positions
 
     # ── Quotes ────────────────────────────────────────────────
@@ -1184,24 +1516,20 @@ class FyersAPI(BrokerAPI):
             unique_fyers_symbols, max_symbols=max_symbols, max_chars=SAFE_URL_MAX_CHARS
         )
         for chunk in chunks:
+            if get_fyers_circuit_breaker().is_tripped():
+                _warn_circuit_breaker_open("get_quote")
+                break
             try:
                 if not rate_gate_acquired:
-                    _fyers_rate_limiter.acquire(category=category)
+                    if not _fyers_rate_limiter.acquire(category=category):
+                        logger.warning(
+                            f"[FyersAPI] Rate gate denied permit for {category.name} chunk ({len(chunk)} symbols)."
+                        )
+                        continue
                 else:
                     rate_gate_acquired = False
                 data = fyers.quotes({"symbols": ",".join(chunk)})
-                if isinstance(data, dict) and (
-                    data.get("code") in (-15, -16, -99, 401)
-                    or any(
-                        p in str(data.get("message", "")).lower()
-                        for p in (
-                            "could not authenticate",
-                            "token is expired",
-                            "valid token",
-                            "invalid token",
-                        )
-                    )
-                ):
+                if _is_fyers_auth_error(data):
                     failed_ts = self._token_ts
                     logger.warning(
                         f"[FyersAPI] Quotes API auth rejection ({data.get('message')}). Retrying after auto-reauth..."
@@ -1217,17 +1545,24 @@ class FyersAPI(BrokerAPI):
                         if isinstance(data, dict)
                         else "Invalid quotes response"
                     )
-                    if (
+                    code = data.get("code", 0) if isinstance(data, dict) else 0
+                    if _is_fyers_auth_error(data):
+                        get_fyers_circuit_breaker().record_failure(
+                            status_code=code or -16, error_message=err_msg
+                        )
+                        break
+                    elif (
                         "429" in err_msg
                         or "rate limit" in err_msg.lower()
                         or "plan limit" in err_msg.lower()
                         or "5,000 requests" in err_msg.lower()
                         or (isinstance(data, dict) and data.get("code") in (-360, 429))
                     ):
-                        code = data.get("code", 429) if isinstance(data, dict) else 429
+                        c_code = code if code in (-360, 429) else 429
                         get_fyers_circuit_breaker().record_failure(
-                            status_code=code, error_message=err_msg
+                            status_code=c_code, error_message=err_msg
                         )
+                        break
                 else:
                     get_fyers_circuit_breaker().record_success()
                 for item in data.get("d", []):
@@ -1421,6 +1756,16 @@ class FyersAPI(BrokerAPI):
         try:
             _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
             data = fyers.depth({"symbol": fyers_sym, "ohlcv_flag": 1})
+            if _is_fyers_auth_error(data):
+                failed_ts = self._token_ts
+                logger.warning(
+                    f"[FyersAPI] Market depth auth rejection ({data.get('message')}). Retrying after auto-reauth..."
+                )
+                if self._handle_auth_failure(failed_ts=failed_ts):
+                    fyers = self._get_fyers()
+                    if fyers:
+                        data = fyers.depth({"symbol": fyers_sym, "ohlcv_flag": 1})
+
             if not isinstance(data, dict) or data.get("s") != "ok":
                 err_msg = (
                     str(data.get("message", "Error fetching market depth"))
@@ -1538,26 +1883,44 @@ class FyersAPI(BrokerAPI):
                     if exp_ts:
                         params["timestamp"] = str(exp_ts)
 
-            _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN)
+            if not _fyers_rate_limiter.acquire(category=FyersCallCategory.DEPTH_CHAIN):
+                logger.warning(
+                    f"[FyersAPI] Rate gate denied permit for DEPTH_CHAIN optionchain ({underlying})."
+                )
+                return []
             data = fyers.optionchain(params)
+            if _is_fyers_auth_error(data):
+                failed_ts = self._token_ts
+                logger.warning(
+                    f"[FyersAPI] Optionchain auth rejection ({data.get('message')}). Retrying after auto-reauth..."
+                )
+                if self._handle_auth_failure(failed_ts=failed_ts):
+                    fyers = self._get_fyers()
+                    if fyers:
+                        data = fyers.optionchain(params)
+
             if not isinstance(data, dict) or data.get("s") != "ok":
                 err_msg = (
                     str(data.get("message", "Fyers options chain error"))
                     if isinstance(data, dict)
                     else "Invalid options chain response"
                 )
+                code = data.get("code", 0) if isinstance(data, dict) else 0
                 if (
                     "429" in err_msg
                     or "rate limit" in err_msg.lower()
                     or "plan limit" in err_msg.lower()
                     or "5,000 requests" in err_msg.lower()
-                    or (isinstance(data, dict) and data.get("code") in (-360, 429))
+                    or _is_fyers_auth_error(data)
+                    or code in (-360, 429, -16)
                 ):
-                    code = data.get("code", 429) if isinstance(data, dict) else 429
                     get_fyers_circuit_breaker().record_failure(
-                        status_code=code, error_message=err_msg
+                        status_code=code
+                        or (429 if "429" in err_msg else -16 if _is_fyers_auth_error(data) else 0),
+                        error_message=err_msg,
                     )
                 return []
+            get_fyers_circuit_breaker().record_success()
             payload = data.get("data", {})
             chain: list[OptionsContract] = []
 
@@ -1654,6 +2017,8 @@ class FyersAPI(BrokerAPI):
 
     def get_expiries(self, underlying: str) -> list[str]:
         """Extract all official available expiry dates from Fyers formatted as YYYY-MM-DD."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return []
         fyers = self._get_fyers()
         if not fyers:
             return []
@@ -1692,6 +2057,8 @@ class FyersAPI(BrokerAPI):
 
     def _resolve_expiry_timestamp(self, fyers_symbol: str, target_expiry_iso: str) -> Optional[str]:
         """Convert YYYY-MM-DD to Fyers epoch timestamp with 12h TTL cache."""
+        if get_fyers_circuit_breaker().is_tripped():
+            return None
         cache_key = f"{fyers_symbol}:{target_expiry_iso}"
         now_ts = time.time()
         cached = self._expiry_ts_cache.get(cache_key)
@@ -1784,7 +2151,19 @@ class FyersAPI(BrokerAPI):
         return 1  # LIMIT default
 
     def place_order(self, req: OrderRequest) -> OrderResponse:
+        if not self.is_authenticated():
+            return OrderResponse(
+                order_id="",
+                status="REJECTED",
+                message="Fyers session is expired or unauthenticated. Order rejected.",
+            )
         fyers = self._get_fyers()
+        if not fyers:
+            return OrderResponse(
+                order_id="",
+                status="REJECTED",
+                message="Fyers SDK instance unavailable.",
+            )
         product_map = {
             "CNC": "CNC",
             "MIS": "INTRADAY",
@@ -1812,8 +2191,36 @@ class FyersAPI(BrokerAPI):
             "disclosedQty": 0,
             "offlineOrder": False,
         }
+        if get_fyers_circuit_breaker().is_tripped():
+            return OrderResponse(
+                order_id="",
+                status="REJECTED",
+                message="Fyers circuit breaker is OPEN. Live order placement blocked to prevent uncoordinated submission.",
+            )
         _fyers_rate_limiter.acquire()
         data = fyers.place_order(payload)
+        if _is_fyers_auth_error(data):
+            failed_ts = self._token_ts
+            logger.warning(
+                f"[FyersAPI] Place order auth rejection ({data.get('message')}). Retrying after auto-reauth..."
+            )
+            if self._handle_auth_failure(failed_ts=failed_ts):
+                fyers = self._get_fyers()
+                if fyers:
+                    data = fyers.place_order(payload)
+            if _is_fyers_auth_error(data):
+                err_msg = (
+                    data.get("message", "Auth failure") if isinstance(data, dict) else str(data)
+                )
+                code = data.get("code", 0) if isinstance(data, dict) else 0
+                get_fyers_circuit_breaker().record_failure(
+                    status_code=code or -16, error_message=err_msg
+                )
+
+        if isinstance(data, dict) and data.get("s") == "ok":
+            get_fyers_circuit_breaker().record_success()
+            self.invalidate_portfolio_caches()
+
         return OrderResponse(
             order_id=str(data.get("id", "")),
             status="OPEN" if data.get("s") == "ok" else "REJECTED",
@@ -2176,9 +2583,36 @@ class FyersAPI(BrokerAPI):
             return []
 
     def get_orders(self) -> list[Order]:
+        if get_fyers_circuit_breaker().is_tripped():
+            return []
+        if not self.is_authenticated():
+            return []
         fyers = self._get_fyers()
+        if not fyers:
+            return []
         _fyers_rate_limiter.acquire()
         data = fyers.orderbook()
+        if _is_fyers_auth_error(data):
+            failed_ts = self._token_ts
+            logger.warning(
+                f"[FyersAPI] Orderbook auth rejection ({data.get('message')}). Retrying after auto-reauth..."
+            )
+            if self._handle_auth_failure(failed_ts=failed_ts):
+                fyers = self._get_fyers()
+                if fyers:
+                    data = fyers.orderbook()
+
+        if not isinstance(data, dict) or data.get("s") != "ok":
+            if _is_fyers_auth_error(data):
+                err_msg = data.get("message", "") if isinstance(data, dict) else str(data)
+                code = data.get("code", 0) if isinstance(data, dict) else 0
+                get_fyers_circuit_breaker().record_failure(
+                    status_code=code or -16, error_message=err_msg
+                )
+            return []
+
+        get_fyers_circuit_breaker().record_success()
+
         orders = []
         for item in data.get("orderBook", []):
             symbol = item.get("symbol", "")
@@ -2205,7 +2639,10 @@ class FyersAPI(BrokerAPI):
         try:
             _fyers_rate_limiter.acquire()
             data = fyers.cancel_order({"id": order_id})
-            return data.get("s") == "ok"
+            ok = data.get("s") == "ok"
+            if ok:
+                self.invalidate_portfolio_caches()
+            return ok
         except Exception:
             return False
 
@@ -2231,9 +2668,12 @@ class FyersAPI(BrokerAPI):
         try:
             _fyers_rate_limiter.acquire()
             data = fyers.modify_order(payload)
+            ok = data.get("s") == "ok"
+            if ok:
+                self.invalidate_portfolio_caches()
             return OrderResponse(
                 order_id=str(data.get("id", order_id)),
-                status="OPEN" if data.get("s") == "ok" else "REJECTED",
+                status="OPEN" if ok else "REJECTED",
                 message=data.get("message", "Order modified"),
             )
         except Exception as e:
@@ -2261,6 +2701,22 @@ class FyersAPI(BrokerAPI):
         Concatenates seamlessly and deduplicates by candle timestamp.
         """
         from datetime import timedelta
+
+        # Proactively guard against non-broker crypto assets
+        from config.market_universes import CRYPTO_BASE_ASSETS, CRYPTO_SYMBOLS
+
+        clean_sym_check = str(symbol).upper().split(":")[-1].strip()
+        if (
+            clean_sym_check in CRYPTO_SYMBOLS
+            or clean_sym_check in CRYPTO_BASE_ASSETS
+            or clean_sym_check.endswith(("USDT", "USDC"))
+            or (exchange and str(exchange).upper() in ("CRYPTO", "BINANCE"))
+            or str(symbol).upper().startswith(("CRYPTO:", "BINANCE:", "BYBIT:", "COINBASE:"))
+        ):
+            logger.debug(
+                f"[FyersAPI] Proactively bypassed historical data for non-broker crypto asset '{symbol}'"
+            )
+            return []
 
         fyers = self._get_fyers()
         if not fyers:
@@ -2352,13 +2808,21 @@ class FyersAPI(BrokerAPI):
                 chunks.append((curr_start, curr_end))
                 curr_start = curr_end + timedelta(days=1)
 
-        # Fyers continuous data flag: "1" for continuous futures series, "0" for non-continuous contracts (equities/options)
+        # Fyers continuous data flag: "1" for continuous futures series, "0" for specific expiry contract.
+        # Futures start with "0" (specific contract) and retry with "1" (continuous series) on code -300.
         is_futures = fyers_sym.endswith("FUT") or "-FUT" in fyers_sym or "FUT" in fyers_sym
-        cont_flag = "1" if is_futures else "0"
+        cont_flag = "0"
 
         all_candles: list[list] = []
         for c_from, c_to in chunks:
-            _fyers_rate_limiter.acquire(category=FyersCallCategory.HISTORICAL)
+            if get_fyers_circuit_breaker().is_tripped():
+                _warn_circuit_breaker_open("historical data", fyers_sym)
+                break
+            if not _fyers_rate_limiter.acquire(category=FyersCallCategory.HISTORICAL):
+                logger.warning(
+                    f"[FyersAPI] Rate gate denied permit for HISTORICAL chunk ({fyers_sym}, {c_from} to {c_to})."
+                )
+                break
             payload = {
                 "symbol": fyers_sym,
                 "resolution": res_str,
@@ -2369,18 +2833,7 @@ class FyersAPI(BrokerAPI):
             }
             try:
                 data = fyers.history(payload)
-                if isinstance(data, dict) and (
-                    data.get("code") in (-15, -16, -99, 401)
-                    or any(
-                        p in str(data.get("message", "")).lower()
-                        for p in (
-                            "could not authenticate",
-                            "token is expired",
-                            "valid token",
-                            "invalid token",
-                        )
-                    )
-                ):
+                if _is_fyers_auth_error(data):
                     failed_ts = self._token_ts
                     logger.warning(
                         f"[FyersAPI] History API auth rejection ({data.get('message')}). Retrying after auto-reauth..."
@@ -2391,16 +2844,25 @@ class FyersAPI(BrokerAPI):
                             data = fyers.history(payload)
                 if isinstance(data, dict) and data.get("s") == "ok":
                     all_candles.extend(data.get("candles", []))
+                    get_fyers_circuit_breaker().record_success()
                 elif isinstance(data, dict):
                     err_msg = str(data.get("message", "History error"))
+                    if _is_fyers_auth_error(data):
+                        code = data.get("code", -16)
+                        get_fyers_circuit_breaker().record_failure(
+                            status_code=code, error_message=err_msg
+                        )
+                        break
                     if data.get("code") == -300 or "valid symbol" in err_msg.lower():
-                        # Fallback: For futures contracts, retry with Fyers continuous futures data flag (cont_flag="1")
-                        if is_futures and cont_flag == "0":
+                        # Fallback: For futures, retry with continuous series flag (cont_flag="1") when
+                        # specific contract (cont_flag="0") returns -300 (expired/delisted specific expiry).
+                        if is_futures and payload.get("cont_flag", "0") == "0":
                             payload["cont_flag"] = "1"
                             try:
                                 retry_data = fyers.history(payload)
                                 if isinstance(retry_data, dict) and retry_data.get("s") == "ok":
                                     all_candles.extend(retry_data.get("candles", []))
+                                    get_fyers_circuit_breaker().record_success()
                                     continue
                             except Exception as e_suppressed:
                                 logger.debug(
@@ -2422,6 +2884,7 @@ class FyersAPI(BrokerAPI):
                         get_fyers_circuit_breaker().record_failure(
                             status_code=code, error_message=err_msg
                         )
+                        break
             except Exception as exc:
                 logger.warning(
                     f"[FyersAPI] Historical data fetch failed for {fyers_sym} ({res_str}, {c_from} to {c_to}): {exc}",

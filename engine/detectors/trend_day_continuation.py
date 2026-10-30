@@ -34,6 +34,8 @@ from engine.alert_identity import (
     canonical_alert_symbol,
 )
 from engine.alert_model import AutoAlert
+from engine.dynamic_risk import resolve_price_tier
+from market.instruments import format_strike
 
 logger = logging.getLogger("chanakya.detectors.trend_day_continuation")
 
@@ -144,6 +146,17 @@ def detect_trend_day_pullback(
     if vol_sma20 <= 0:
         vol_sma20 = max(1.0, cur_v)
 
+    # Calculate pullback bar dry-up ratio vs 20-period 5m SMA
+    pullback_vol_ratio = round(cur_v / max(1.0, vol_sma20), 2)
+
+    # Derive real session trend RVOL from the trend impulse bars preceding the pullback:
+    impulse_vols = volumes.iloc[:-1] if len(volumes) > 1 else volumes
+    impulse_avg = float(np.mean(impulse_vols)) if len(impulse_vols) > 0 else vol_sma20
+    trend_rvol = round(impulse_avg / max(1.0, vol_sma20), 2) if vol_sma20 > 0 else 1.0
+
+    if rvol_val <= 1.0 and trend_rvol > 0:
+        rvol_val = max(rvol_val, trend_rvol)
+
     atr_5m = _calculate_5m_atr(df_5m)
 
     # ── Directional Trend Alignment ─────────────────────────────────────
@@ -220,8 +233,90 @@ def detect_trend_day_pullback(
 
     direction = "BULLISH" if is_bull_pullback else "BEARISH"
 
-    # ── Stop Loss & Target Geometry (Asymmetric R:R >= 1:2.0) ──────────
-    min_noise_pts = max(atr_5m * 1.10, ltp * 0.0030)
+    # ── Central Pivot Range (CPR) & Camarilla Levels Gate ─────────────
+    cpr_data: dict = {}
+    is_narrow_cpr = False
+    is_wide_cpr = False
+    if not is_test_env:
+        try:
+            from engine.daily_levels import evaluate_cpr_gate, get_daily_levels
+
+            cpr_gate = evaluate_cpr_gate(clean_sym, ltp, direction)
+            if cpr_gate.is_vetoed:
+                logger.info(
+                    f"[TrendContinuation] Suppressed Continuation on {clean_sym}: {cpr_gate.veto_reason}"
+                )
+                return None
+            cpr_data = cpr_gate.cpr_data
+            is_narrow_cpr = cpr_gate.is_narrow
+            is_wide_cpr = cpr_gate.is_wide
+
+            dl = get_daily_levels(clean_sym)
+            if dl:
+                if is_index and dl.camarilla:
+                    if is_bull_pullback:
+                        h5 = float(dl.camarilla.get("h5", 0.0) or 0.0)
+                        h4 = float(dl.camarilla.get("h4", 0.0) or 0.0)
+                        if h5 > 0 and ltp >= (h5 * 0.999):
+                            logger.info(
+                                f"[TrendContinuation] Suppressed Bullish Continuation on {clean_sym}: Reached Camarilla H5 Ceiling ₹{h5:,.1f}."
+                            )
+                            return None
+                        # Only suppress if approaching H4 from below without breakout (testing resistance)
+                        if h4 > 0 and (h4 * 0.9975) <= ltp < h4 and cur_c < h4:
+                            logger.info(
+                                f"[TrendContinuation] Suppressed Bullish Continuation on {clean_sym}: Testing Camarilla H4 ₹{h4:,.1f}."
+                            )
+                            return None
+                    elif is_bear_pullback:
+                        l5 = float(dl.camarilla.get("l5", 0.0) or 0.0)
+                        l4 = float(dl.camarilla.get("l4", 0.0) or 0.0)
+                        if l5 > 0 and ltp <= (l5 * 1.001):
+                            logger.info(
+                                f"[TrendContinuation] Suppressed Bearish Continuation on {clean_sym}: Reached Camarilla L5 Floor ₹{l5:,.1f}."
+                            )
+                            return None
+                        # Only suppress if approaching L4 from above without breakdown (testing support)
+                        if l4 > 0 and l4 < ltp <= (l4 * 1.0025) and cur_c > l4:
+                            logger.info(
+                                f"[TrendContinuation] Suppressed Bearish Continuation on {clean_sym}: Testing Camarilla L4 ₹{l4:,.1f}."
+                            )
+                            return None
+        except Exception as e_dl:
+            logger.debug(f"[TrendContinuation] Daily levels check skipped for {clean_sym}: {e_dl}")
+
+        try:
+            from market.fyers_tbt_manager import fyers_tbt_manager, resolve_tradable_tbt_symbol
+
+            fut_sym = resolve_tradable_tbt_symbol(clean_sym)
+            tbt_depth = (
+                fyers_tbt_manager.get_50_depth(fut_sym)
+                if getattr(fyers_tbt_manager, "is_connected", False)
+                else None
+            )
+            if tbt_depth and tbt_depth.get("status") not in ("UNAVAILABLE", None):
+                obi_50_val = float(tbt_depth.get("obi_50", 0.0) or 0.0)
+                if is_bear_pullback and (
+                    obi_50_val >= 0.20 or tbt_depth.get("fortress_bid_wall_confirmed")
+                ):
+                    logger.info(
+                        f"[TrendContinuation] Suppressed Bearish Continuation on {clean_sym}: TBT OBI-50 {obi_50_val:+.2f} / Fortress Bid Wall on {fut_sym}."
+                    )
+                    return None
+                elif is_bull_pullback and (
+                    obi_50_val <= -0.20 or tbt_depth.get("fortress_ask_wall_confirmed")
+                ):
+                    logger.info(
+                        f"[TrendContinuation] Suppressed Bullish Continuation on {clean_sym}: TBT OBI-50 {obi_50_val:+.2f} / Fortress Ask Wall on {fut_sym}."
+                    )
+                    return None
+        except Exception as e_tbt:
+            logger.debug(f"[TrendContinuation] TBT depth check skipped for {clean_sym}: {e_tbt}")
+
+    # ── Stop Loss & Multi-Target Geometry (Structural Invalidation & Asymmetric R:R) ──
+    tier = resolve_price_tier(ltp)
+    abs_min_floor = tier.abs_min_risk_pts
+
     if is_index:
         idx_floors = {
             "NIFTY": 18.0,
@@ -230,26 +325,83 @@ def detect_trend_day_pullback(
             "MIDCPNIFTY": 14.0,
             "SENSEX": 60.0,
         }
-        min_noise_pts = max(min_noise_pts, idx_floors.get(clean_sym, 18.0))
+        abs_min_floor = max(abs_min_floor, idx_floors.get(clean_sym, 18.0))
 
     if is_bull_pullback:
+        # Structural Invalidation: Pullback swing low or 20-EMA support floor
         pivot_low = min(cur_l, prev_l, val_ema20)
-        sl_price = round(min(pivot_low * 0.9985, ltp - min_noise_pts), 2)
-        risk_pts = max(min_noise_pts, ltp - sl_price)
+        raw_sl = round(pivot_low * 0.9995, 2)
+        raw_risk = ltp - raw_sl
+        risk_pts = max(abs_min_floor, raw_risk)
+        sl_price = round(ltp - risk_pts, 2)
+
         t1_price = round(ltp + 2.0 * risk_pts, 2)
-        t2_price = round(ltp + 3.5 * risk_pts, 2)
-        t3_price = round(ltp + 5.5 * risk_pts, 2)
+        t2_price = round(ltp + 3.8 * risk_pts, 2)
+        t3_price = round(ltp + 6.0 * risk_pts, 2)
         no_chase_lvl = round(ltp + 0.35 * risk_pts, 2)
     else:
+        # Symmetrical Bearish Invalidation: Retracement swing high or 20-EMA resistance ceiling
         pivot_high = max(cur_h, prev_h, val_ema20)
-        sl_price = round(max(pivot_high * 1.0015, ltp + min_noise_pts), 2)
-        risk_pts = max(min_noise_pts, sl_price - ltp)
+        raw_sl = round(pivot_high * 1.0005, 2)
+        raw_risk = raw_sl - ltp
+        risk_pts = max(abs_min_floor, raw_risk)
+        sl_price = round(ltp + risk_pts, 2)
+
         t1_price = round(ltp - 2.0 * risk_pts, 2)
-        t2_price = round(ltp - 3.5 * risk_pts, 2)
-        t3_price = round(ltp - 5.5 * risk_pts, 2)
+        t2_price = round(ltp - 3.8 * risk_pts, 2)
+        t3_price = round(ltp - 6.0 * risk_pts, 2)
         no_chase_lvl = round(ltp - 0.35 * risk_pts, 2)
 
     rr_ratio = round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)
+    asymmetric_rr = round(abs(t3_price - ltp) / max(0.01, risk_pts), 1)
+
+    # ── 4-Pillar Alpha Quality Score (AQS: 0–100) ──────────────────────
+    # Extract session discovery references
+    col_o = "open" if "open" in df_5m.columns else "Open"
+    col_h = "high" if "high" in df_5m.columns else "High"
+    col_l = "low" if "low" in df_5m.columns else "Low"
+    day_open = float(df_5m[col_o].iloc[0])
+    day_low = float(df_5m[col_l].min())
+    day_high = float(df_5m[col_h].max())
+
+    # Pillar 1: Volume Dry-Up (Lower volume on pullback = institutional liquidity absorption)
+    vol_ratio = cur_v / max(1.0, vol_sma20)
+    score_vol = max(0.0, min(100.0, (1.25 - min(1.25, vol_ratio)) / 1.25 * 100.0))
+
+    # Pillar 2: Trend Slope & Strict EMA/VWAP Dynamic Separation
+    if is_bull_pullback:
+        ema_slope = (val_ema20 - prev_ema20) / max(0.01, prev_ema20) * 1000.0
+        separation_bonus = 30.0 if (cur_c >= val_ema9 >= val_ema20 >= val_vwap) else 10.0
+        score_trend = min(100.0, separation_bonus + min(70.0, max(0.0, ema_slope * 25.0)))
+    else:
+        ema_slope = (prev_ema20 - val_ema20) / max(0.01, prev_ema20) * 1000.0
+        separation_bonus = 30.0 if (cur_c <= val_ema9 <= val_ema20 <= val_vwap) else 10.0
+        score_trend = min(100.0, separation_bonus + min(70.0, max(0.0, ema_slope * 25.0)))
+
+    # Pillar 3: Support / Resistance Retest Precision
+    if is_bull_pullback:
+        prox_pct = abs(min(cur_l, prev_l) - val_ema20) / max(1.0, val_ema20) * 100.0
+    else:
+        prox_pct = abs(max(cur_h, prev_h) - val_ema20) / max(1.0, val_ema20) * 100.0
+    score_proximity = max(0.0, min(100.0, (0.50 - min(0.50, prox_pct)) / 0.50 * 100.0))
+
+    # Pillar 4: Session Discovery Conviction (Open ≈ Low for Bull, Open ≈ High for Bear)
+    if is_bull_pullback:
+        open_low_diff_pct = abs(day_open - day_low) / max(1.0, day_open) * 100.0
+        score_discovery = max(0.0, min(100.0, (0.75 - min(0.75, open_low_diff_pct)) / 0.75 * 100.0))
+    else:
+        open_high_diff_pct = abs(day_high - day_open) / max(1.0, day_open) * 100.0
+        score_discovery = max(
+            0.0, min(100.0, (0.75 - min(0.75, open_high_diff_pct)) / 0.75 * 100.0)
+        )
+
+    alpha_quality_score = round(
+        score_vol * 0.30 + score_trend * 0.30 + score_proximity * 0.20 + score_discovery * 0.20,
+        1,
+    )
+    confidence_score = int(round(min(98, max(75, 72 + (alpha_quality_score * 0.26)))))
+    if is_narrow_cpr:
+        confidence_score = min(98, confidence_score + 6)
 
     # ── Option Resolution via Unified VIX-Aware Resolver ──────────────
     from engine.option_resolver import resolve_option_contract
@@ -299,7 +451,8 @@ def detect_trend_day_pullback(
         "no_chase_boundary": f"₹{opt_no_chase:,.1f}" if has_opt else f"₹{resolved_no_chase:,.1f}",
         "spot_no_chase_boundary": f"₹{resolved_no_chase:,.1f}",
         "risk_reward": f"1:{rr_ratio:.1f}",
-        "asymmetric_rr": f"1:{max(3.0, rr_ratio):.1f}",
+        "asymmetric_rr": f"1:{asymmetric_rr:.1f}",
+        "alpha_quality_score": alpha_quality_score,
         "underlying_symbol": clean_sym,
         "underlying_spot": f"₹{ltp:,.1f}",
         "underlying_sl": f"₹{sl_price:,.1f}",
@@ -347,18 +500,16 @@ def detect_trend_day_pullback(
     )
 
     if has_opt and opt_strike:
-        opt_action = f"{int(opt_strike)} {opt_type} Buy"
+        opt_action = f"{format_strike(opt_strike)} {opt_type} Buy"
         headline = (
             f"🎯 [TREND PULLBACK] {clean_sym} {opt_action}: 20-EMA Support Retest (Spot ₹{ltp:,.1f})"
             if is_bull_pullback
             else f"🎯 [TREND PULLBACK] {clean_sym} {opt_action}: 20-EMA Resistance Reject (Spot ₹{ltp:,.1f})"
         )
         summary = (
-            f"Institutional shallow pullback into rising 20-EMA/VWAP on {clean_sym}. Low-volume retest holds support. "
-            f"Enter {clean_sym} {int(opt_strike)} {opt_type} @ {rec_entry}. Stop loss: {rec_sl}. Target 1: {rec_t1} (R:R {rr_ratio:.1f})."
+            f"Institutional shallow pullback into rising 20-EMA/VWAP on {clean_sym}. Low-volume retest holds support."
             if is_bull_pullback
-            else f"Institutional shallow bounce into falling 20-EMA/VWAP on {clean_sym}. Low-volume retest rejected at resistance. "
-            f"Enter {clean_sym} {int(opt_strike)} {opt_type} @ {rec_entry}. Stop loss: {rec_sl}. Target 1: {rec_t1} (R:R {rr_ratio:.1f})."
+            else f"Institutional shallow bounce into falling 20-EMA/VWAP on {clean_sym}. Low-volume retest rejected at resistance."
         )
     else:
         eq_action = "Long" if is_bull_pullback else "Short"
@@ -368,11 +519,9 @@ def detect_trend_day_pullback(
             else f"🎯 [TREND PULLBACK] {clean_sym} {eq_action}: 20-EMA Resistance Reject @ ₹{ltp:,.1f} (T1: ₹{t1_price:,.1f})"
         )
         summary = (
-            f"Institutional shallow pullback into rising 20-EMA/VWAP on {clean_sym}. Low-volume retest holds support. "
-            f"Enter {rec_entry}. Stop loss: {rec_sl}. Target 1: {rec_t1} (R:R {rr_ratio:.1f})."
+            f"Institutional shallow pullback into rising 20-EMA/VWAP on {clean_sym}. Low-volume retest holds support."
             if is_bull_pullback
-            else f"Institutional shallow bounce into falling 20-EMA/VWAP on {clean_sym}. Low-volume retest rejected at resistance. "
-            f"Enter {rec_entry}. Stop loss: {rec_sl}. Target 1: {rec_t1} (R:R {rr_ratio:.1f})."
+            else f"Institutional shallow bounce into falling 20-EMA/VWAP on {clean_sym}. Low-volume retest rejected at resistance."
         )
 
     alert_seg = "FNO_INDEX" if is_index else ("FNO_STOCK" if has_opt else segment)
@@ -398,8 +547,8 @@ def detect_trend_day_pullback(
         trigger_level=float(opt_ltp if has_opt else ltp),
         target_level=float(opt_t1 if has_opt else t1_price),
         stop_loss=float(opt_sl if has_opt else sl_price),
-        confidence=90,
-        r_multiple=max(2.0, rr_ratio),
+        confidence=confidence_score,
+        r_multiple=None,
         time_horizon="INTRADAY",
         contract_symbol=opt_contract_sym,
         strike=opt_strike,
@@ -412,7 +561,9 @@ def detect_trend_day_pullback(
         tactical_sl=opt_sl if has_opt else sl_price,
         actionable_plan=act_plan,
         metrics={
-            "rvol": round(max(1.10, rvol_val), 2),
+            "rvol": round(rvol_val, 2),
+            "pullback_vol_ratio": pullback_vol_ratio,
+            "is_volume_dryup": is_dryup,
             "atr_5m": round(atr_5m, 2),
             "ema_9": round(val_ema9, 2),
             "ema_20": round(val_ema20, 2),
@@ -420,12 +571,18 @@ def detect_trend_day_pullback(
             "vol_sma20": round(vol_sma20, 1),
             "risk_pts": round(risk_pts, 2),
             "rr_ratio": rr_ratio,
+            "asymmetric_rr": asymmetric_rr,
+            "alpha_quality_score": alpha_quality_score,
             "target_1": float(opt_t1 if has_opt else t1_price),
             "target_2": float(opt_t2 if (has_opt and opt_t2) else t2_price),
             "target_3": float(opt_runner if (has_opt and opt_runner) else t3_price),
             "hedged_spread": spread_info,
             "no_chase_boundary": opt_no_chase if has_opt else resolved_no_chase,
             "spot_no_chase_boundary": resolved_no_chase,
+            "cpr": cpr_data,
+            "cpr_type": "NARROW" if is_narrow_cpr else ("WIDE" if is_wide_cpr else "AVERAGE"),
+            "is_narrow_cpr": is_narrow_cpr,
+            "is_wide_cpr": is_wide_cpr,
         },
         no_chase_boundary=opt_no_chase if has_opt else resolved_no_chase,
         spot_no_chase_boundary=resolved_no_chase if has_opt else None,

@@ -322,3 +322,14 @@ def test_new_crypto_fastapi_endpoints():
     v_data = resp_vol.json()
     assert "currency" in v_data
     assert v_data["currency"] == "BTC"
+
+
+def test_crypto_stream_endpoints_and_keepalive_resilience():
+    """Verify BINANCE_WS_ENDPOINTS contains multi-endpoint failover mirrors and valid stream path."""
+    from market.crypto_stream import BINANCE_WS_ENDPOINTS, BINANCE_WS_URL, BINANCE_WS_STREAM_PATH
+
+    assert len(BINANCE_WS_ENDPOINTS) >= 3
+    assert BINANCE_WS_URL == BINANCE_WS_ENDPOINTS[0]
+    assert "data-stream.binance.vision" in BINANCE_WS_ENDPOINTS[1]
+    assert "btcusdt@ticker" in BINANCE_WS_STREAM_PATH
+    assert "btcusdt@kline_1m" in BINANCE_WS_STREAM_PATH

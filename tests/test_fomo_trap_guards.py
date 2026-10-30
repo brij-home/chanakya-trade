@@ -109,6 +109,7 @@ def test_tier1_scrutiny_vetoes_alerts_extended_past_no_chase_boundary():
         stop_loss=2460.0,  # 40 pts risk, clears the 26.5 pts ATR floor
         target_level=2600.0,  # 100 pts reward -> 1:2.5 RR
         no_chase_boundary=2515.0,
+        metrics={"rvol": 2.5, "tod_rvol": 2.5, "chop_index": 45.0},
         is_live=True,
         environment="LIVE",
     )

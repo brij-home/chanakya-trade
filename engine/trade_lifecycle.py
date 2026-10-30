@@ -130,8 +130,9 @@ def audit_position_lifecycle(
       - GENERATIONAL: 1–3+ year wealth builder (200-SMA / 40-week trail, fundamental review).
     """
     pos_mode = (mode or "SWING").upper().strip()
+    df_provided = df is not None and len(df) > 0
     # Fetch historical data if not provided
-    if df is None or len(df) == 0:
+    if not df_provided:
         try:
             from market.history import get_ohlcv
 
@@ -157,6 +158,7 @@ def audit_position_lifecycle(
 
     # 1. Trailing Stops Calculation
     highest_price = ltp
+    lowest_price = ltp
     atr = initial_risk * 0.8
     ema20 = entry_price
     sma50 = entry_price * 0.95
@@ -176,6 +178,7 @@ def audit_position_lifecycle(
         atr = float(np.mean(tr[-14:])) if len(tr) >= 14 else float(np.mean(tr))
 
         highest_price = float(np.max(highs[-20:]))
+        lowest_price = float(np.min(lows[-20:]))
 
         # EMA 20, SMA 50, SMA 200
         ema20 = float(pd.Series(closes).ewm(span=20, adjust=False).mean().iloc[-1])
@@ -184,28 +187,44 @@ def audit_position_lifecycle(
         if len(closes) >= 60:
             sma200 = float(pd.Series(closes).rolling(min(200, len(closes))).mean().iloc[-1])
 
-        # Find highest swing low in recent bars
+        # Find structural swing point (recent Higher Low for longs, Lower High for shorts)
         try:
             from analysis.market_structure import find_swing_points
 
             swings = find_swing_points(df, window=2)
-            low_swings = [
-                s.price for s in swings if s.type == "LOW" and s.price > initial_stop_loss
-            ]
-            if low_swings:
-                recent_hl = float(low_swings[-1])
+            if position_type.upper() == "LONG":
+                low_swings = [
+                    s.price for s in swings if s.type == "LOW" and s.price > initial_stop_loss
+                ]
+                if low_swings:
+                    recent_hl = float(low_swings[-1])
+            else:
+                high_swings = [
+                    s.price for s in swings if s.type == "HIGH" and s.price < initial_stop_loss
+                ]
+                if high_swings:
+                    recent_hl = float(high_swings[-1])
         except Exception:
-            recent_hl = float(min(lows[-5:]))
+            recent_hl = (
+                float(min(lows[-5:])) if position_type.upper() == "LONG" else float(max(highs[-5:]))
+            )
 
-    # Chandelier ATR Trailing Stop (Highest High - 3.0 * ATR for longs)
-    chandelier_stop = max(initial_stop_loss, highest_price - (3.0 * atr))
-    structure_stop = max(initial_stop_loss, recent_hl)
-    ema20_stop = max(initial_stop_loss, ema20 * 0.985)
-    sma50_stop = max(initial_stop_loss, sma50 * 0.98)
-    sma200_stop = max(initial_stop_loss, sma200 * 0.95)
-
-    breakeven_price = entry_price * 1.002  # Entry + 0.2% brokerage buffer
-    breakeven_reached = r_multiple >= 2.0
+    # Chandelier ATR Trailing Stop (Highest High - 3.0 * ATR for longs, Lowest Low + 3.0 * ATR for shorts)
+    if position_type.upper() == "LONG":
+        chandelier_stop = max(initial_stop_loss, highest_price - (3.0 * atr))
+        structure_stop = max(initial_stop_loss, recent_hl)
+        ema20_stop = max(initial_stop_loss, ema20 * 0.985)
+        sma50_stop = max(initial_stop_loss, sma50 * 0.98)
+        sma200_stop = max(initial_stop_loss, sma200 * 0.95)
+        breakeven_price = entry_price * 1.002  # Entry + 0.2% brokerage buffer
+    else:
+        chandelier_stop = min(initial_stop_loss, lowest_price + (3.0 * atr))
+        structure_stop = min(initial_stop_loss, recent_hl)
+        ema20_stop = min(initial_stop_loss, ema20 * 1.015)
+        sma50_stop = min(initial_stop_loss, sma50 * 1.02)
+        sma200_stop = min(initial_stop_loss, sma200 * 1.05)
+        breakeven_price = entry_price * 0.998  # Entry - 0.2% brokerage buffer
+    breakeven_reached = r_multiple >= 1.8
     pyramid_signal: Optional[dict[str, Any]] = None
 
     # ── Branch by Position Mode ─────────────────────────────────
@@ -329,29 +348,110 @@ def audit_position_lifecycle(
         action = "HOLD_COMPOUNDER"
 
     else:
-        # Default SWING Mode: Institutional Dynamic Profit Ladder (+2R auto-partial 50%, +4R T2, trailing runner)
-        t1_lock_price = (
-            entry_price + (initial_risk * 2.0)
-            if position_type.upper() == "LONG"
-            else entry_price - (initial_risk * 2.0)
-        )
-        if r_multiple >= 4.0:
-            # At +4R, trail SL to lock at least +2R (T1) profit or higher Chandelier ATR trail
-            recommended_stop = max(t1_lock_price, breakeven_price, structure_stop, chandelier_stop)
-            stop_method = (
-                "CHANDELIER_ATR"
-                if chandelier_stop >= max(t1_lock_price, structure_stop)
-                else "T1_LOCK_2R"
-            )
-        elif r_multiple >= 2.0:
-            recommended_stop = max(breakeven_price, structure_stop)
-            stop_method = "BREAKEVEN" if recommended_stop <= breakeven_price else "STRUCTURE_HL"
-        elif is_0dte and (current_hour is not None and current_hour >= 14) and r_multiple >= 0.8:
-            recommended_stop = max(breakeven_price, initial_stop_loss)
-            stop_method = "0DTE_AFTERNOON_BREAKEVEN_LOCK"
+        # Default SWING / INTRADAY Mode: 5-Stage Institutional Dynamic Chandelier Convexity Ratchet
+        is_long = position_type.upper() == "LONG"
+
+        # Check for Exhaustion Rejection Wick (when in profit >= 2.5R)
+        is_exhaustion_wick = False
+        if r_multiple >= 2.5 and df is not None and len(df) >= 2:
+            try:
+                curr_c = float(df["close"].iloc[-1])
+                curr_o = float(df["open"].iloc[-1])
+                curr_h = float(df["high"].iloc[-1])
+                curr_l = float(df["low"].iloc[-1])
+                c_range = max(0.01, curr_h - curr_l)
+                candle_ltp = current_ltp if current_ltp is not None else curr_c
+                if df_provided or abs(candle_ltp - curr_c) / max(1.0, curr_c) <= 0.03:
+                    if is_long:
+                        upper_wick = curr_h - max(curr_c, curr_o)
+                        if (upper_wick / c_range) >= 0.55:
+                            is_exhaustion_wick = True
+                    else:
+                        lower_wick = min(curr_c, curr_o) - curr_l
+                        if (lower_wick / c_range) >= 0.55:
+                            is_exhaustion_wick = True
+            except Exception:
+                is_exhaustion_wick = False
+
+        if is_long:
+            half_risk_stop = round(entry_price - (initial_risk * 0.50), 2)
+            be_stop = round(entry_price + (initial_risk * 0.20), 2)
+            r1_lock = round(entry_price + (initial_risk * 1.0), 2)
+            r2_lock = round(entry_price + (initial_risk * 2.0), 2)
+            chandelier_2atr = round(highest_price - (2.0 * atr), 2)
+            chandelier_15atr = round(highest_price - (1.5 * atr), 2)
+
+            if r_multiple >= 4.0:
+                recommended_stop = max(r2_lock, chandelier_15atr, structure_stop)
+                stop_method = (
+                    "PARABOLIC_RUNNER_LOCK_2R" if recommended_stop == r2_lock else "CHANDELIER_ATR"
+                )
+            elif r_multiple >= 2.5:
+                recommended_stop = max(r1_lock, chandelier_2atr, structure_stop)
+                stop_method = (
+                    "CHANDELIER_CONVEXITY_RATCHET_1R"
+                    if recommended_stop == r1_lock
+                    else "CHANDELIER_ATR"
+                )
+            elif r_multiple >= 1.8:
+                recommended_stop = max(be_stop, structure_stop)
+                stop_method = "BREAKEVEN"
+            elif r_multiple >= 1.0:
+                recommended_stop = max(half_risk_stop, initial_stop_loss)
+                stop_method = "HALF_RISK_LOCKED"
+            elif (
+                is_0dte and (current_hour is not None and current_hour >= 14) and r_multiple >= 0.8
+            ):
+                recommended_stop = max(be_stop, initial_stop_loss)
+                stop_method = "0DTE_AFTERNOON_BREAKEVEN_LOCK"
+            else:
+                recommended_stop = initial_stop_loss
+                stop_method = "INITIAL_STOP"
         else:
-            recommended_stop = initial_stop_loss
-            stop_method = "INITIAL_STOP"
+            # SHORT Trailing Stop (Ratchets DOWNWARDS)
+            half_risk_stop = round(entry_price + (initial_risk * 0.50), 2)
+            be_stop = round(entry_price - (initial_risk * 0.20), 2)
+            r1_lock = round(entry_price - (initial_risk * 1.0), 2)
+            r2_lock = round(entry_price - (initial_risk * 2.0), 2)
+            chandelier_2atr = round(lowest_price + (2.0 * atr), 2)
+            chandelier_15atr = round(lowest_price + (1.5 * atr), 2)
+
+            if r_multiple >= 4.0:
+                recommended_stop = min(
+                    r2_lock,
+                    chandelier_15atr,
+                    structure_stop if structure_stop < entry_price else r2_lock,
+                )
+                stop_method = (
+                    "PARABOLIC_RUNNER_LOCK_2R" if recommended_stop == r2_lock else "CHANDELIER_ATR"
+                )
+            elif r_multiple >= 2.5:
+                recommended_stop = min(
+                    r1_lock,
+                    chandelier_2atr,
+                    structure_stop if structure_stop < entry_price else r1_lock,
+                )
+                stop_method = (
+                    "CHANDELIER_CONVEXITY_RATCHET_1R"
+                    if recommended_stop == r1_lock
+                    else "CHANDELIER_ATR"
+                )
+            elif r_multiple >= 1.8:
+                recommended_stop = min(
+                    be_stop, structure_stop if structure_stop < entry_price else be_stop
+                )
+                stop_method = "BREAKEVEN"
+            elif r_multiple >= 1.0:
+                recommended_stop = min(half_risk_stop, initial_stop_loss)
+                stop_method = "HALF_RISK_LOCKED"
+            elif (
+                is_0dte and (current_hour is not None and current_hour >= 14) and r_multiple >= 0.8
+            ):
+                recommended_stop = min(be_stop, initial_stop_loss)
+                stop_method = "0DTE_AFTERNOON_BREAKEVEN_LOCK"
+            else:
+                recommended_stop = initial_stop_loss
+                stop_method = "INITIAL_STOP"
 
         milestones = [
             ProfitMilestone(
@@ -405,7 +505,14 @@ def audit_position_lifecycle(
         ]
 
         diagnostics = []
-        if r_multiple >= 4.0:
+        if is_exhaustion_wick:
+            health_status = "EXHAUSTION_CLIMAX"
+            health_score = 92
+            action = "EXHAUSTION_HARVEST"
+            diagnostics.append(
+                f"Exhaustion Rejection Wick detected at +{r_multiple:.1f}R: Recommend locking 80% remaining runner immediately."
+            )
+        elif r_multiple >= 4.0:
             health_status = "HEALTHY_ACCELERATING"
             health_score = 98
             action = "HOLD_RUNNER"
@@ -515,3 +622,72 @@ def audit_position_lifecycle(
         summary=summary,
         diagnostic_bullet_points=diagnostics,
     )
+
+
+def apply_autonomous_breakeven_lock(
+    symbol: str,
+    current_price: float,
+    entry_price: float,
+    initial_stop_loss: float,
+    target_1: Optional[float] = None,
+    position_type: str = "LONG",
+    cost_buffer_pct: float = 0.002,  # 0.20% to cover STT, GST, Exchange & Brokerage charges
+    actor: str = "AUTONOMOUS_LIFECYCLE",
+) -> dict[str, Any]:
+    """
+    Autonomous Breakeven Locking Engine (Advisor & Automated Protection Mode):
+    When Target 1 (+1.8R to +2.0R) is achieved, automatically ratchets resting stop-loss
+    orders to Breakeven (+ transactional cost buffer) without requiring manual trader
+    intervention, guaranteeing a risk-free position ('Free-Roll').
+
+    Returns structured status dictionary with details of ratcheted orders.
+    """
+    initial_risk = max(0.01, abs(entry_price - initial_stop_loss))
+    is_long = position_type.upper() in ("LONG", "BUY")
+
+    # Evaluate if Target 1 is reached
+    t1_reached = False
+    if target_1 and target_1 > 0:
+        if is_long:
+            t1_reached = current_price >= (target_1 * 0.998)
+        else:
+            t1_reached = current_price <= (target_1 * 1.002)
+    else:
+        # Measure via R-multiple (>= 1.8R)
+        pnl = (current_price - entry_price) if is_long else (entry_price - current_price)
+        r_mult = pnl / initial_risk
+        t1_reached = r_mult >= 1.8
+
+    if not t1_reached:
+        return {
+            "locked": False,
+            "symbol": symbol,
+            "target_1": target_1,
+            "current_price": current_price,
+            "reason": "Target 1 not yet reached",
+            "ratcheted_orders_count": 0,
+        }
+
+    # Calculate Breakeven Stop Level (+ buffer for costs)
+    if is_long:
+        breakeven_sl = round(entry_price * (1.0 + cost_buffer_pct), 2)
+    else:
+        breakeven_sl = round(entry_price * (1.0 - cost_buffer_pct), 2)
+
+    from engine.order_lifecycle import ratchet_stop_loss_on_milestone
+
+    modified_orders = ratchet_stop_loss_on_milestone(
+        symbol=symbol,
+        new_stop_loss=breakeven_sl,
+        milestone="T1_ACHIEVED",
+        actor=actor,
+    )
+
+    return {
+        "locked": True,
+        "symbol": symbol,
+        "breakeven_stop": breakeven_sl,
+        "milestone": "T1_ACHIEVED",
+        "ratcheted_orders_count": len(modified_orders),
+        "modified_order_ids": [o.order_id for o in modified_orders],
+    }

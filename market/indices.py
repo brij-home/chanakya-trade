@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
 from config.constants import IST
+from market.instruments import canonical_symbol
 
 
 # ── Key instruments ──────────────────────────────────────────
@@ -531,9 +532,7 @@ def get_heavyweights_posture(underlying: str) -> dict[str, Any]:
     locomotives that drive the given index.
     Uses in-memory quote cache (0ms, no network I/O).
     """
-    clean_und = (
-        underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
-    )
+    clean_und = canonical_symbol(underlying)
     heavyweights = INDEX_HEAVYWEIGHTS.get(clean_und, [])
     if not heavyweights:
         return {
@@ -634,11 +633,11 @@ def get_premarket_battle_plan(
     from engine.daily_levels import get_daily_levels
     from market.quotes import get_quote
 
-    target_indices = indices or ["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"]
+    target_indices = indices or ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
     results: dict[str, Any] = {}
 
     for name in target_indices:
-        clean_name = name.upper()
+        clean_name = canonical_symbol(name)
         inst = INDEX_INSTRUMENTS.get(clean_name, f"NSE:{clean_name}")
         dl = get_daily_levels(clean_name)
 
@@ -656,11 +655,9 @@ def get_premarket_battle_plan(
                 cam = dl.camarilla or {}
                 h4 = cam.get("h4", round(dl.spot * 1.004, 1))
                 l4 = cam.get("l4", round(dl.spot * 0.996, 1))
-                step = (
-                    50.0
-                    if clean_name in ("NIFTY", "FINNIFTY")
-                    else (25.0 if clean_name == "MIDCPNIFTY" else 100.0)
-                )
+                from market.symbol_master import get_strike_step
+
+                step = get_strike_step(clean_name, spot=dl.spot) or 50.0
                 bull_stk = int(round(h4 / step) * step)
                 bear_stk = int(round(l4 / step) * step)
                 bp["bull_strike"] = bull_stk
@@ -772,7 +769,7 @@ def format_premarket_strike_radar(plan: Optional[dict[str, Any]] = None) -> str:
     Provides the exact CE and PE strikes to pre-populate in watchlists BEFORE 09:15.
     """
     if plan is None:
-        plan = get_premarket_battle_plan(["NIFTY", "BANKNIFTY", "SENSEX"])
+        plan = get_premarket_battle_plan(["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"])
 
     now_str = datetime.now(IST).strftime("%d-%b-%Y %H:%M IST")
     lines = [
@@ -783,7 +780,7 @@ def format_premarket_strike_radar(plan: Optional[dict[str, Any]] = None) -> str:
         "",
     ]
 
-    for sym in ("NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"):
+    for sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"):
         data = plan.get(sym)
         if not data:
             continue
@@ -837,7 +834,7 @@ def get_opening_range_battle_plan(symbols: Optional[list[str]] = None) -> dict[s
       - Invalidation stops anchored to opposite side of ORB or midpoint
     """
     if symbols is None:
-        symbols = ["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"]
+        symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
 
     try:
         from market.quotes import get_quote
@@ -864,7 +861,7 @@ def get_opening_range_battle_plan(symbols: Optional[list[str]] = None) -> dict[s
 
     results: dict[str, Any] = {}
     for sym in symbols:
-        clean_name = sym.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
+        clean_name = canonical_symbol(sym)
         q = quotes.get(clean_name) or quotes.get(sym) or quotes.get(f"{clean_name}.NS")
         spot = getattr(q, "ltp", 0.0) or getattr(q, "close", 0.0) or 0.0
         if spot <= 0:
@@ -880,7 +877,9 @@ def get_opening_range_battle_plan(symbols: Optional[list[str]] = None) -> dict[s
         orb_range = round(day_high - day_low, 1)
         midpoint = round((day_high + day_low) / 2.0, 1)
 
-        step = 100.0 if clean_name in ("BANKNIFTY", "SENSEX", "BANKEX") else 50.0
+        from market.symbol_master import get_strike_step
+
+        step = get_strike_step(clean_name, spot=spot) or 50.0
         bull_strike = int(round(day_high / step) * step)
         bear_strike = int(round(day_low / step) * step)
 
@@ -917,7 +916,9 @@ def format_opening_range_radar(plan: Optional[dict[str, Any]] = None) -> str:
     two-sided battle plan for Telegram and Terminal display.
     """
     if plan is None:
-        plan = get_opening_range_battle_plan(["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"])
+        plan = get_opening_range_battle_plan(
+            ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+        )
 
     now_str = datetime.now(IST).strftime("%d-%b-%Y %H:%M IST")
     lines = [
@@ -928,7 +929,7 @@ def format_opening_range_radar(plan: Optional[dict[str, Any]] = None) -> str:
         "",
     ]
 
-    for sym in ("NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"):
+    for sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"):
         data = plan.get(sym)
         if not data:
             continue

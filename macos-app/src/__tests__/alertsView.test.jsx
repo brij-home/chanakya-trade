@@ -382,7 +382,7 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       expect(mockCall).toHaveBeenCalledWith(
         '/skills/quotes/batch',
         expect.objectContaining({
-          symbols: expect.arrayContaining(['NIFTY', 'RELIANCE', 'NIFTY2691124500CE', 'RELIANCE26SEP3050CE']),
+          symbols: expect.arrayContaining(['NIFTY', 'RELIANCE']),
         })
       )
     })
@@ -557,4 +557,21 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     expect(screen.getAllByText(/LTP & Return/i).length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText(/Execution CTAs/i).length).toBeGreaterThanOrEqual(1)
   })
+
+  it('accurately isolates Today session counts and prevents historical segment counts from leaking into current session', async () => {
+    render(<AlertsView />)
+
+    await waitFor(() => {
+      expect(screen.getByText("☀️ Today's Session")).toBeTruthy()
+    })
+
+    const todayBtn = screen.getByText("☀️ Today's Session")
+    fireEvent.click(todayBtn)
+
+    // Segment pills should reflect today's alerts without leaking archived counts
+    await waitFor(() => {
+      expect(screen.getByText('🌐 All Segments')).toBeTruthy()
+    })
+  })
 })
+

@@ -514,7 +514,7 @@ export function formatExpiryDetails(alert) {
   // 4. If no explicit date string, parse contract symbol tokens
   if ((!d || isNaN(d.getTime())) && contractSym) {
     // 4a. Broker YYYYMMDD format (matched FIRST before weekly): e.g. UNITDSPR202609291380PE, POLICYBZR202610271100PE, HAL202609294800PE
-    const mIso = contractSym.match(/([A-Z0-9_&]+?)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(\d+)(CE|PE)$/i)
+    const mIso = contractSym.match(/([A-Z0-9_&]+?)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(\d+(?:\.\d+)?)(CE|PE)$/i)
     if (mIso) {
       const yr = parseInt(mIso[2], 10)
       const mo = parseInt(mIso[3], 10) - 1
@@ -530,7 +530,7 @@ export function formatExpiryDetails(alert) {
     // Month codes: 1-9 for Jan-Sep, O for Oct, N for Nov, D for Dec
     // Strictly requires valid day (01-31) and applies only to index contracts
     if ((!d || isNaN(d.getTime())) && isIndex) {
-      const mWeekly = contractSym.match(/^([A-Z]+)(\d{2})([1-9OND])(0[1-9]|[12]\d|3[01])(\d+)(CE|PE)$/i)
+      const mWeekly = contractSym.match(/^([A-Z]+)(\d{2})([1-9OND])(0[1-9]|[12]\d|3[01])(\d+(?:\.\d+)?)(CE|PE)$/i)
       if (mWeekly) {
         const yr = 2000 + parseInt(mWeekly[2], 10)
         const mCode = mWeekly[3].toUpperCase()
@@ -734,9 +734,11 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   if (isDerivative) {
     if (optPlan?.entry_premium && Number(optPlan.entry_premium) > 0) {
       entry = Number(optPlan.entry_premium)
+    } else if (plan.option_entry && Number(String(plan.option_entry).replace(/[^0-9.-]/g, '')) > 0) {
+      entry = Number(String(plan.option_entry).replace(/[^0-9.-]/g, ''))
     } else if (alert.option_premium && Number(alert.option_premium) > 0) {
       entry = Number(String(alert.option_premium).replace(/[^0-9.-]/g, ''))
-    } else if (plan.recommended_entry) {
+    } else if (plan.recommended_entry && Number(String(plan.recommended_entry).replace(/[^0-9.-]/g, '')) > 0 && !alert.underlying_spot) {
       entry = Number(String(plan.recommended_entry).replace(/[^0-9.-]/g, ''))
     } else if (isPureOption && alert.ltp && Number(alert.ltp) > 0) {
       entry = Number(String(alert.ltp).replace(/[^0-9.-]/g, ''))
@@ -746,6 +748,8 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   } else {
     if (tradePlan.entry_price) {
       entry = Number(tradePlan.entry_price)
+    } else if (plan.spot_entry) {
+      entry = Number(String(plan.spot_entry).replace(/[^0-9.-]/g, ''))
     } else if (alert.trigger_level) {
       entry = Number(String(alert.trigger_level).replace(/[^0-9.-]/g, ''))
     } else if (alert.ltp) {
@@ -762,6 +766,8 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   if (isDerivative) {
     if (optPlan?.sl_premium) {
       sl = Number(optPlan.sl_premium)
+    } else if (plan.option_sl) {
+      sl = Number(String(plan.option_sl).replace(/[^0-9.-]/g, ''))
     } else if (alert.option_stop_loss) {
       sl = Number(String(alert.option_stop_loss).replace(/[^0-9.-]/g, ''))
     } else if (alert.stop_loss && (alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE')) {
@@ -770,6 +776,8 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   } else {
     if (tradePlan.invalidation_stop) {
       sl = Number(tradePlan.invalidation_stop)
+    } else if (plan.spot_stop_loss) {
+      sl = Number(String(plan.spot_stop_loss).replace(/[^0-9.-]/g, ''))
     } else if (alert.stop_loss) {
       sl = Number(String(alert.stop_loss).replace(/[^0-9.-]/g, ''))
     }
@@ -782,14 +790,18 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   if (isDerivative) {
     if (optPlan?.t1_premium) {
       t1 = Number(optPlan.t1_premium)
-    } else if (alert.option_target_1) {
-      t1 = Number(String(alert.option_target_1).replace(/[^0-9.-]/g, ''))
+    } else if (plan.option_target_1 || plan.option_target) {
+      t1 = Number(String(plan.option_target_1 || plan.option_target).replace(/[^0-9.-]/g, ''))
+    } else if (alert.option_target_1 || alert.option_target) {
+      t1 = Number(String(alert.option_target_1 || alert.option_target).replace(/[^0-9.-]/g, ''))
     } else if (alert.target_level && (alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE')) {
       t1 = Number(String(alert.target_level).replace(/[^0-9.-]/g, ''))
     }
   } else {
     if (tradePlan.target_1) {
       t1 = Number(tradePlan.target_1)
+    } else if (plan.spot_target_1 || plan.spot_target) {
+      t1 = Number(String(plan.spot_target_1 || plan.spot_target).replace(/[^0-9.-]/g, ''))
     } else if (alert.target_level) {
       t1 = Number(String(alert.target_level).replace(/[^0-9.-]/g, ''))
     }

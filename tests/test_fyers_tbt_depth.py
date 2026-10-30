@@ -90,6 +90,25 @@ def test_tbt_slippage_simulation():
     assert res_large["expected_vwap_price"] > 100.05
     assert res_large["estimated_slippage_pct"] > 0.0
 
+    # Stale depth test (older than 3.0s threshold)
+    import time
+
+    with mgr._depth_lock:
+        stale_parsed = dict(parsed)
+        stale_parsed["received_at"] = time.time() - 5.0
+        mgr._depth_cache["NSE:NIFTY24OCTFUT"] = stale_parsed
+
+    res_stale = mgr.simulate_slippage("NSE:NIFTY24OCTFUT", quantity=500, side="BUY")
+    assert res_stale["status"] == "STALE_DEPTH"
+    assert res_stale["expected_vwap_price"] is None
+    assert "stale" in res_stale["message"].lower()
+
+    # Verify caller can bypass threshold if explicitly set to None
+    res_bypass = mgr.simulate_slippage(
+        "NSE:NIFTY24OCTFUT", quantity=500, side="BUY", max_age_seconds=None
+    )
+    assert res_bypass["status"] == "ok"
+
 
 def test_tbt_audit_candidate_depth():
     mgr = FyersTbtManager()
@@ -689,6 +708,9 @@ def test_options_chain_single_flight_coalescing():
                 option_type="CE",
                 expiry="2026-10-29",
                 last_price=120.0,
+                oi=50000,
+                oi_change=1200,
+                volume=15000,
             )
         ]
 

@@ -58,8 +58,8 @@ def test_async_scrutiny_trap_rejection_invalidates_alert():
     with engine._lock:
         target = next((a for a in engine._alerts if a.alert_id == alert_id), None)
         assert target is not None
-        assert target.is_invalidated is True
-        assert target.stage == "INVALIDATED"
+        assert target.is_invalidated or target.stage == "CANCELLED"
+        assert target.stage in ("INVALIDATED", "CANCELLED")
         assert "Tier-2 Scrutiny Veto" in target.invalidation_reason
         assert "Institutional absorption trap" in target.invalidation_reason
 

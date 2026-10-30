@@ -422,8 +422,11 @@ def evaluate_synthetic_spot_sl(
     opt_type = str(_safe_get(alert, "option_type", "") or "").upper()
     is_bullish = (opt_type == "CE") or (direction in ("BULLISH", "BUY", "LONG"))
 
-    # Noise buffer: 0.05% on spot to filter single tick noise
-    noise_buffer = spot_anchor * 0.0005
+    # Noise buffer: 0.10% for index benchmarks (absorbs 1-min spread/wicks), 0.05% for equities
+    clean_und = canonical_alert_symbol(und_sym or "")
+    is_index = clean_und in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+    buffer_multiplier = 0.0010 if is_index else 0.0005
+    noise_buffer = spot_anchor * buffer_multiplier
 
     if is_bullish:
         # Bullish (Call / Long): Spot support is below entry.
@@ -437,6 +440,21 @@ def evaluate_synthetic_spot_sl(
         spot_distance_pct = ((spot_anchor - live_spot) / spot_anchor) * 100.0
         spot_is_holding = live_spot <= (spot_anchor + noise_buffer)
         spot_breached = live_spot > (spot_anchor + noise_buffer)
+
+    # Option breakeven absorption shield:
+    # If the option premium is still holding at or above breakeven (current_option_ltp >= opt_entry * 0.98),
+    # do NOT invalidate on a shallow spot breach (< 0.20% beyond anchor) because the option order flow
+    # is absorbing the temporary spot wick with positive institutional delta.
+    is_option_healthy = (
+        current_option_ltp > 0 and opt_entry > 0 and current_option_ltp >= (opt_entry * 0.98)
+    )
+    if spot_breached and is_option_healthy and abs(spot_distance_pct) < 0.20:
+        spot_breached = False
+        spot_is_holding = True
+        logger.info(
+            f"[SyntheticSL] 🛡️ Premium Absorption Shield for {_safe_get(alert, 'symbol')}: "
+            f"Spot breached by {spot_distance_pct:+.2f}%, but option premium ₹{current_option_ltp:,.1f} is holding at/above entry ₹{opt_entry:,.1f}. Position protected."
+        )
 
     # Nominal option stop loss level
     nominal_sl = float(_safe_get(alert, "stop_loss", 0.0) or 0.0)
@@ -468,6 +486,22 @@ def evaluate_synthetic_spot_sl(
     # Determine DTE & 0-DTE status
     dte = extract_dte(alert)
     is_0dte = (dte == 0) if dte is not None else False
+
+    # Determine timeframe / horizon
+    time_horizon = str(_safe_get(alert, "time_horizon", "") or "").upper()
+    alert_type = str(_safe_get(alert, "alert_type", "") or "").upper()
+    is_intraday = time_horizon in ("INTRADAY", "T0", "SCALP") or alert_type in (
+        "TREND_DAY_PULLBACK",
+        "ORB_BREAKOUT",
+        "ORB_BREAKDOWN",
+        "ORB_PRIMED",
+        "INTRADAY_BREAKOUT_SPARK",
+        "INTRADAY_BREAKDOWN_SPARK",
+        "OPENING_RANGE_BREAKOUT",
+        "GAMMA_BLAST",
+        "INDEX_MICRO_SCALP",
+        "AFTERNOON_THRUST",
+    )
 
     # Determine whether position has achieved profit milestones / de-risked
     achieved_m = getattr(alert, "achieved_milestones", None) or []
@@ -507,10 +541,14 @@ def evaluate_synthetic_spot_sl(
     designed_risk_ratio = (
         ((opt_entry - nominal_sl) / opt_entry) if (opt_entry > nominal_sl > 0) else 0.25
     )
+    is_idx = und_sym in INDEX_ROOTS
     if is_0dte:
         catastrophic_dd_threshold = min(0.18, max(0.12, designed_risk_ratio * 0.85))
     elif has_derisked:
         catastrophic_dd_threshold = 0.05
+    elif not is_idx and is_intraday:
+        # Intraday single-stock equity option: wider than 25% drawdown indicates severe illiquidity or gamma decay
+        catastrophic_dd_threshold = min(0.25, max(0.16, designed_risk_ratio * 1.15))
     else:
         catastrophic_dd_threshold = max(0.32, min(0.42, designed_risk_ratio * 1.25))
 

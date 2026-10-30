@@ -29,6 +29,7 @@ Operational Invariants:
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone, timedelta, time as dtime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -195,7 +196,15 @@ def detect_opening_range_breakout(
     max_bear_chase = round(orb_low - no_chase_buffer, 2)
 
     min_rvol = 1.30 if is_index else 1.45
-    rvol_val = float(rvol or 1.5)
+    if rvol is not None:
+        rvol_val = float(rvol)
+    elif df is not None and len(df) >= 3:
+        from engine.daily_levels import calculate_intraday_rvol
+
+        rvol_val = calculate_intraday_rvol(df)
+    else:
+        # Zero hallucination invariant: Missing volume must NOT assume 1.5x expansion (Rule 10 & 11)
+        rvol_val = 1.0
 
     vwap_tol = 0.0 if is_index else 0.002
     if ltp >= orb_high:
@@ -242,6 +251,39 @@ def detect_opening_range_breakout(
     if not (is_bullish or is_bearish or is_primed):
         return None
 
+    # 4.04 Central Pivot Range (CPR) Geometry & Daily Levels Overhead Gate (Indices & Equities)
+    dir_to_check = (
+        "BULLISH" if (is_bullish or (is_primed and primed_direction == "BULLISH")) else "BEARISH"
+    )
+    try:
+        from engine.daily_levels import evaluate_cpr_gate, get_daily_levels
+
+        dl = get_daily_levels(symbol)
+        cpr_gate = evaluate_cpr_gate(symbol, ltp, dir_to_check, dl=dl, boundary_proximity_pct=0.004)
+        if cpr_gate.is_vetoed:
+            logger.info(f"[ORB] Suppressed ORB on {symbol}: {cpr_gate.veto_reason}")
+            return None
+
+        is_narrow_cpr = cpr_gate.is_narrow
+
+        if dl and is_index and dl.camarilla:
+            if is_bearish or (is_primed and primed_direction == "BEARISH"):
+                l4 = float(dl.camarilla.get("l4", 0.0) or 0.0)
+                if l4 > 0 and ltp >= (l4 * 0.998) and ltp <= (l4 * 1.0025):
+                    logger.info(
+                        f"[ORB] Suppressed Bearish ORB on {symbol}: Spot ₹{ltp:,.1f} testing Camarilla L4 Floor ₹{l4:,.1f}."
+                    )
+                    return None
+            elif is_bullish or (is_primed and primed_direction == "BULLISH"):
+                h4 = float(dl.camarilla.get("h4", 0.0) or 0.0)
+                if h4 > 0 and ltp <= (h4 * 1.002) and ltp >= (h4 * 0.9975):
+                    logger.info(
+                        f"[ORB] Suppressed Bullish ORB on {symbol}: Spot ₹{ltp:,.1f} testing Camarilla H4 Ceiling ₹{h4:,.1f}."
+                    )
+                    return None
+    except Exception as e_dl:
+        logger.debug(f"[ORB] Daily levels & CPR check skipped for {symbol}: {e_dl}")
+
     # 4.05 Directional Momentum & Velocity Veto for Index ORB
     if is_index and df is not None:
         try:
@@ -268,6 +310,34 @@ def detect_opening_range_breakout(
                 return None
         except Exception as e_roc:
             logger.debug(f"[ORB] Index ROC check skipped: {e_roc}")
+
+        try:
+            from market.fyers_tbt_manager import fyers_tbt_manager, resolve_tradable_tbt_symbol
+
+            fut_sym = resolve_tradable_tbt_symbol(symbol)
+            tbt_depth = (
+                fyers_tbt_manager.get_50_depth(fut_sym)
+                if getattr(fyers_tbt_manager, "is_connected", False)
+                else None
+            )
+            if tbt_depth and tbt_depth.get("status") not in ("UNAVAILABLE", None):
+                obi_50_val = float(tbt_depth.get("obi_50", 0.0) or 0.0)
+                if (is_bearish or (is_primed and primed_direction == "BEARISH")) and (
+                    obi_50_val >= 0.20 or tbt_depth.get("fortress_bid_wall_confirmed")
+                ):
+                    logger.info(
+                        f"[ORB] Suppressed Bearish ORB on {symbol}: TBT OBI-50 {obi_50_val:+.2f} / Fortress Bid Wall on {fut_sym}."
+                    )
+                    return None
+                elif (is_bullish or (is_primed and primed_direction == "BULLISH")) and (
+                    obi_50_val <= -0.20 or tbt_depth.get("fortress_ask_wall_confirmed")
+                ):
+                    logger.info(
+                        f"[ORB] Suppressed Bullish ORB on {symbol}: TBT OBI-50 {obi_50_val:+.2f} / Fortress Ask Wall on {fut_sym}."
+                    )
+                    return None
+        except Exception as e_tbt:
+            logger.debug(f"[ORB] TBT depth check skipped for {symbol}: {e_tbt}")
 
     # 4.1 Candlestick Pattern Confirmation & Divergence Trap Veto
     conf_candle = None
@@ -336,8 +406,9 @@ def detect_opening_range_breakout(
     from engine.alert_identity import generate_alert_id
 
     # 4.3 Volatility Noise Floor Calculation
-    atr_val = round(ltp * 0.015, 2)
-    if df is not None and len(df) >= 14:
+    is_idx_sym = is_index_symbol(symbol)
+    atr_val = round(ltp * (0.002 if is_idx_sym else 0.015), 2)
+    if df is not None and len(df) >= 2:
         try:
             import numpy as np
 
@@ -347,7 +418,7 @@ def detect_opening_range_breakout(
             tr = np.maximum(
                 highs - lows, np.maximum(abs(highs - closes.shift(1)), abs(lows - closes.shift(1)))
             )
-            calc_atr = float(tr.rolling(14).mean().iloc[-1])
+            calc_atr = float(tr.rolling(min(14, len(tr)), min_periods=1).mean().iloc[-1])
             if calc_atr > 0 and not np.isnan(calc_atr):
                 atr_val = round(calc_atr, 2)
         except Exception as e_suppressed:
@@ -359,6 +430,40 @@ def detect_opening_range_breakout(
     pct_floor = 0.0055 if ltp >= 2500 else 0.008
     atr_factor = 0.25 if ltp >= 2500 else 0.35
     min_orb_risk = max(abs_min_risk, round(max(atr_factor * atr_val, ltp * pct_floor), 2))
+
+    # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance).
+    # Symmetrically, buying equity breakouts in a crashing market is a bull trap.
+    planned_dir = (
+        (primed_direction or "BULLISH") if is_primed else ("BULLISH" if is_bullish else "BEARISH")
+    )
+    if (
+        not is_idx_sym
+        and ("PYTEST_CURRENT_TEST" not in os.environ)
+        and (os.environ.get("CHANAKYA_TESTING") != "1")
+    ):
+        try:
+            from market.quotes import get_quote
+
+            n_probe = get_quote("NSE:NIFTY 50")
+            nq = n_probe.get("NSE:NIFTY 50") or n_probe.get("NIFTY 50")
+            if nq:
+                n_chg = getattr(nq, "change_pct", 0.0) or 0.0
+                n_ltp = float(getattr(nq, "last_price", 0.0) or 0.0)
+                n_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
+                if planned_dir == "BEARISH" and n_chg >= 0.15 and (n_vwap <= 0 or n_ltp >= n_vwap):
+                    logger.debug(
+                        f"[ORB] Suppressed counter-trend BEARISH ORB on {symbol}: NIFTY green +{n_chg:.2f}% holding VWAP"
+                    )
+                    return None
+                elif (
+                    planned_dir == "BULLISH" and n_chg <= -0.15 and (n_vwap <= 0 or n_ltp <= n_vwap)
+                ):
+                    logger.debug(
+                        f"[ORB] Suppressed counter-trend BULLISH ORB on {symbol}: NIFTY red {n_chg:.2f}% below VWAP"
+                    )
+                    return None
+        except Exception as e_regime:
+            logger.debug(f"[ORB] Benchmark regime check suppressed: {e_regime}")
 
     stage_val = "PRIMED" if is_primed else "IGNITED"
     if is_primed:
@@ -460,6 +565,8 @@ def detect_opening_range_breakout(
         (is_bullish and div_bias == "BULLISH") or (is_bearish and div_bias == "BEARISH")
     ):
         confidence += 4
+    if is_narrow_cpr:
+        confidence += 8
     confidence = min(96, confidence)
 
     clean_sym = canonical_alert_symbol(symbol)
@@ -536,7 +643,7 @@ def detect_opening_range_breakout(
             created_at=now_iso,
             is_live=True,
             environment="LIVE",
-            entry_type="LIMIT_ON_PULLBACK",
+            entry_type="BREAKOUT_STOP",
             setup_style="CONTINUATION",
             metrics={
                 "orb_high": orb_high,
@@ -556,6 +663,10 @@ def detect_opening_range_breakout(
                 "spot": ltp,
                 "underlying_ltp": ltp,
                 "underlying_symbol": clean_sym,
+                "cpr": cpr_gate.cpr_data,
+                "cpr_type": cpr_gate.cpr_type,
+                "is_narrow_cpr": cpr_gate.is_narrow,
+                "is_wide_cpr": cpr_gate.is_wide,
             },
             actionable_plan=act_plan,
         )
@@ -578,7 +689,7 @@ def detect_opening_range_breakout(
         created_at=now_iso,
         is_live=True,
         environment="LIVE",
-        entry_type="LIMIT_ON_PULLBACK",
+        entry_type="BREAKOUT_STOP",
         setup_style="CONTINUATION",
         metrics={
             "orb_high": orb_high,
@@ -595,6 +706,10 @@ def detect_opening_range_breakout(
             "atr": round(atr_val, 2),
             "atr_14": round(atr_val, 2),
             "min_noise_sl_pts": round(min_orb_risk, 2),
+            "cpr": cpr_gate.cpr_data,
+            "cpr_type": cpr_gate.cpr_type,
+            "is_narrow_cpr": cpr_gate.is_narrow,
+            "is_wide_cpr": cpr_gate.is_wide,
         },
         actionable_plan={
             "action": f"BUY_{alert_type}"

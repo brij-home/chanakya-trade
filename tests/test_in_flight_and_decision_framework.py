@@ -815,3 +815,226 @@ class TestInFlightAlertTemplates:
             assert "0DTE Theta Cliff" in cliff_alert.headline
             assert cliff_alert.trailing_decision == "EXIT_0DTE_OPTION_IMMEDIATELY"
             assert mock_dispatch.call_count == 3
+
+
+class TestAdanientOrbRcaRegression:
+    """Institutional RCA Regression Suite: Prevents scale contamination, inverted payoffs,
+    and concurrent ignition mutations on equity setups with derivative recommendations."""
+
+    def test_equity_orb_breakdown_with_pe_option_never_triggers_false_danger_zone(self):
+        """Spot ORB breakdown with recommended PE option contract MUST anchor in-flight decay
+        evaluation strictly to underlying equity coordinates (SL ₹2,528.90, not option SL ₹22.74)."""
+        alert = AutoAlert(
+            alert_id="aa-orb-breakdown-adanient-rca",
+            alert_type="ORB_BREAKDOWN",
+            stage="IGNITED",
+            symbol="ADANIENT",
+            exchange="NSE",
+            direction="BEARISH",
+            headline="ADANIENT ORB Breakdown Ignition",
+            summary="Bearish breakdown below 2506.70",
+            trigger_level=2506.70,
+            stop_loss=2528.90,
+            target_level=2425.30,
+            ltp=2490.50,
+            is_live=True,
+            environment="LIVE",
+            metrics={
+                "underlying_spot": 2506.70,
+                "atr": 45.0,
+                "vwap": 2520.00,
+            },
+            actionable_plan={
+                "action": "SELL_ORB_PRIMED",
+                "entry_type": "LIMIT_ON_PULLBACK",
+                "optimal_entry_limit": 2506.7,
+                "retest_invalidation_sl": 2519.1,
+                "stop_loss": "₹22.74",  # Option premium SL
+                "target": "₹2,462.3",
+                "contract": "NSE:ADANIENT26OCT2500PE",
+                "strike": 2500.0,
+                "option_type": "PE",
+                "option_plan": {
+                    "contract_symbol": "NSE:ADANIENT26OCT2500PE",
+                    "strike": 2500.0,
+                    "option_type": "PE",
+                    "entry_premium": 29.15,
+                    "sl_premium": 22.74,
+                    "underlying_spot": 2509.0,
+                    "underlying_sl": 2528.9,
+                    "underlying_target": 2462.3,
+                },
+                "recommended_entry": "₹29.15",
+                "underlying_sl": "₹2,528.90",
+                "spot_invalidation_anchor": "₹2,528.90",
+            },
+        )
+
+        # 1. At LTP 2490.50, the short equity trade is in +16.20 pts profit!
+        # It must NEVER trigger DANGER_ZONE or compare 2490.50 against 22.74.
+        res = evaluate_alert_in_flight_decay(alert, current_ltp=2490.50)
+        assert res is None, "In-profit equity breakdown short must not trigger danger zone"
+
+        # 2. Even if quote rises to 2515.00 (underwater, but within risk budget of 2528.90):
+        # 2515 - 2506.7 = 8.3 pts consumed on 22.2 pts risk budget = 37.4% risk consumed (< 70% threshold).
+        res_pullback = evaluate_alert_in_flight_decay(alert, current_ltp=2515.00)
+        assert res_pullback is None, "Pullback within 37% risk budget must not trigger danger zone"
+
+    def test_milestone_alert_data_pnl_never_mixes_spot_entry_with_option_cmp(self):
+        """MilestoneAlertData must not subtract Option CMP (₹36.75) from Spot Entry (₹2,506.70),
+        and must recognize SELL_ORB_PRIMED with PE contract as long put (buyer) payoff."""
+        from bot.alert_templates import MilestoneAlertData
+
+        alert = AutoAlert(
+            alert_id="aa-orb-breakdown-adanient-pnl",
+            alert_type="ORB_BREAKDOWN",
+            stage="DE_RISK_0_5R",
+            symbol="ADANIENT",
+            exchange="NSE",
+            direction="BEARISH",
+            headline="ADANIENT 2500 PE Breakdown",
+            summary="Put buyer taking scale 1 profit",
+            trigger_level=2506.70,
+            stop_loss=2528.90,
+            target_level=2425.30,
+            ltp=36.75,  # Option CMP
+            is_live=True,
+            environment="LIVE",
+            contract_symbol="NSE:ADANIENT26OCT2500PE",
+            strike=2500.0,
+            option_type="PE",
+            actionable_plan={
+                "action": "SELL_ORB_PRIMED",
+                "contract": "NSE:ADANIENT26OCT2500PE",
+                "strike": 2500.0,
+                "option_type": "PE",
+                "recommended_entry": "₹29.15",
+                "stop_loss": "₹22.74",
+                "option_plan": {
+                    "contract_symbol": "NSE:ADANIENT26OCT2500PE",
+                    "entry_premium": 29.15,
+                    "sl_premium": 22.74,
+                    "t0_5_premium": 32.06,
+                    "t1_premium": 36.15,
+                },
+            },
+        )
+
+        m_data = MilestoneAlertData.from_alert(alert, "DE_RISK_0_5R")
+
+        # Must NOT treat long PE buyer as an option writer (payoff is bullish on option premium)
+        assert m_data.is_payoff_bullish is True, (
+            "Directional PE buyer must have bullish payoff on premium"
+        )
+
+        # Must anchor entry price to option entry premium (₹29.15), NOT spot equity entry (₹2506.70)
+        assert m_data.entry_price == 29.15, f"Expected entry_price=29.15, got {m_data.entry_price}"
+
+        # P&L calculation: 36.75 - 29.15 = +7.60 pts (+26.07% | +1.19R)
+        # MUST NEVER produce +₹2,469.95 or +111.26R!
+        assert abs(m_data.pnl_pts - 7.60) < 0.1, f"Expected pnl_pts ~7.60, got {m_data.pnl_pts}"
+        assert abs(m_data.pnl_pct - 26.07) < 1.0, f"Expected pnl_pct ~26%, got {m_data.pnl_pct}"
+        assert m_data.r_multiple is not None and m_data.r_multiple < 3.0, (
+            f"Expected sensible r_multiple < 3R, got {m_data.r_multiple}"
+        )
+
+    def test_undispatched_ignited_alert_skipped_by_in_flight_decay_sweep(self):
+        """An IGNITED alert whose primary setup has not finished dispatching to Telegram
+        must be skipped by check_and_alert_in_flight_decay, preventing race condition stage mutation."""
+        engine = AutoAlertEngine()
+        fresh_alert = AutoAlert(
+            alert_id="aa-fresh-race-check-1",
+            alert_type="ORB_BREAKDOWN",
+            stage="IGNITED",
+            symbol="ADANIENT",
+            exchange="NSE",
+            direction="BEARISH",
+            headline="Fresh ADANIENT Ignition",
+            summary="Awaiting primary setup dispatch",
+            trigger_level=2506.70,
+            stop_loss=2528.90,
+            target_level=2425.30,
+            ltp=2506.70,
+            is_live=True,
+            environment="LIVE",
+            telegram_dispatched=False,  # Primary setup has NOT been dispatched yet!
+        )
+        engine._alerts = [fresh_alert]
+
+        warnings = engine.check_and_alert_in_flight_decay()
+        assert len(warnings) == 0, (
+            "Un-dispatched IGNITED alert must not be evaluated for in-flight decay"
+        )
+        assert fresh_alert.stage == "IGNITED", "Stage must remain IGNITED and not be mutated"
+        assert fresh_alert.in_flight_warning_sent is False
+
+    def test_tvsmotor_orb_breakdown_with_pe_option_rca_verification(self):
+        """Verify TVSMOTOR 3950 PE ORB BREAKDOWN setup:
+        1. In-flight decay evaluator must never mistake Spot LTP ₹3,934.00 against Option SL ₹48.32.
+        2. MilestoneAlertData must not treat put buyer as option seller (+3,881.45 / +174.45R).
+        3. is_option_seller must return False."""
+        from bot.alert_templates import MilestoneAlertData
+        from engine.alert_evaluator import evaluate_alert_in_flight_decay
+        from engine.alert_expiry import is_option_seller
+
+        alert = AutoAlert(
+            alert_id="aa-orb-breakdown-tvsmotor-bear-20261023",
+            alert_type="ORB_BREAKDOWN",
+            stage="IGNITED",
+            symbol="TVSMOTOR",
+            exchange="NSE",
+            direction="BEARISH",
+            headline="TVSMOTOR 3950 PE (ORB BREAKDOWN)",
+            summary="Underlying ORB Breakdown with Bear Put Spread",
+            trigger_level=3943.40,
+            stop_loss=3965.65,
+            target_level=3864.70,
+            ltp=3934.00,
+            is_live=True,
+            environment="LIVE",
+            contract_symbol="NSE:TVSMOTOR26OCT3950PE",
+            strike=3950.0,
+            option_type="PE",
+            option_premium=61.95,
+            actionable_plan={
+                "action": "SELL_ORB_BREAKDOWN",
+                "contract": "NSE:TVSMOTOR26OCT3950PE",
+                "strike": 3950.0,
+                "option_type": "PE",
+                "optimal_entry_limit": 3943.4,
+                "recommended_entry": "₹61.95",
+                "stop_loss": "₹48.32",
+                "underlying_sl": "₹3,965.65",
+                "target": "₹3,864.7",
+                "target_1": "₹3,864.7",
+                "target_2": "₹87.97",
+                "option_plan": {
+                    "contract_symbol": "NSE:TVSMOTOR26OCT3950PE",
+                    "entry_premium": 61.95,
+                    "sl_premium": 48.32,
+                    "t0_5_premium": 68.15,
+                    "t1_premium": 76.82,
+                    "t2_premium": 87.97,
+                    "underlying_spot": 3929.6,
+                    "underlying_sl": 3965.65,
+                    "underlying_target": 3864.71,
+                    "strategy_type": "BEAR_PUT_SPREAD",
+                },
+            },
+        )
+
+        # 1. Option seller check must be False (Put buyer, not option writer)
+        assert is_option_seller(alert) is False
+
+        # 2. In-flight decay check at spot LTP ₹3,934.00 must return None (NO false danger zone)
+        eval_res = evaluate_alert_in_flight_decay(alert, current_ltp=3934.00)
+        assert eval_res is None or eval_res.triggered is False
+
+        # 3. MilestoneAlertData P&L formatting must use option entry ₹61.95, NOT spot ₹3,943.40
+        alert.ltp = 55.10  # Option CMP
+        m_data = MilestoneAlertData.from_alert(alert, "IN_FLIGHT_WARNING")
+        assert m_data.is_payoff_bullish is True
+        assert m_data.entry_price == 61.95
+        assert m_data.pnl_pts == round(55.10 - 61.95, 2)  # -6.85 pts
+        assert m_data.pnl_pct == round((-6.85 / 61.95) * 100, 1)  # -11.1%
+        assert m_data.pnl_pts < 0, "Loss must be negative, never +3881.45!"

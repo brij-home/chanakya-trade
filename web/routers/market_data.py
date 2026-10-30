@@ -15,6 +15,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 import json
+from market.instruments import canonical_symbol
 
 logger = logging.getLogger("chanakya.web.routers.market_data")
 router = APIRouter(tags=["Market Intelligence", "Market Data"])
@@ -1332,7 +1333,7 @@ async def get_fyers_tbt_status_endpoint():
 async def post_fyers_tbt_evict_endpoint(
     req: Optional[dict[str, Any]] = None,
     symbol: Optional[str] = None,
-    cooldown_seconds: float = 300.0,
+    cooldown_seconds: float = 60.0,
 ):
     """
     Manually evict a symbol/strike from 15-slot TBT market depth.
@@ -1348,6 +1349,18 @@ async def post_fyers_tbt_evict_endpoint(
         req.get("cooldown_seconds") if req and "cooldown_seconds" in req else cooldown_seconds
     )
     res = await asyncio.to_thread(fyers_tbt_manager.evict_symbol, target, cooldown_sec=cd)
+    return res
+
+
+@router.post("/api/fyers/tbt-clear-cooldowns", tags=["Fyers 50-Depth TBT"])
+async def post_fyers_tbt_clear_cooldowns_endpoint(req: Optional[dict[str, Any]] = None):
+    """
+    Manually clear all eviction cooldowns (or for a specific symbol) to instantly liberate slots.
+    """
+    from market.fyers_tbt_manager import fyers_tbt_manager
+
+    target = (req.get("symbol") if req else None) or None
+    res = await asyncio.to_thread(fyers_tbt_manager.clear_eviction_cooldowns, symbol=target)
     return res
 
 
@@ -1425,7 +1438,7 @@ async def get_index_adaptive_regime_endpoint(symbol: Optional[str] = "NIFTY"):
         symbols = [target_sym]
 
     def _eval_single(sym: str) -> dict[str, Any]:
-        clean = sym.replace("NSE:", "").replace("BSE:", "").strip().upper()
+        clean = canonical_symbol(sym)
         # Fetch spot quote
         quote_sym = f"NSE:{clean}" if clean != "SENSEX" else "BSE:SENSEX"
         q_map = get_quote([quote_sym])

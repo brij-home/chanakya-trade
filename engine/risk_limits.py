@@ -135,7 +135,10 @@ class RiskLimits:
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
+        from engine.db_pool import configure_sqlite_connection
+
         conn = sqlite3.connect(str(self._db), timeout=30.0)
+        configure_sqlite_connection(conn, timeout_sec=30.0)
         try:
             with conn:
                 yield conn

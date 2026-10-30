@@ -13,6 +13,9 @@ import { useAPI } from '../../hooks/useAPI'
 import { useChatStore } from '../../store/chatStore'
 import { useNotificationStore } from '../../store/notificationStore'
 import UnavailableState from '../Common/UnavailableState'
+import MultiSelectDropdown from '../Common/MultiSelectDropdown'
+import SmartSearchBox from '../Common/SmartSearchBox'
+import { parseSearchQuery, matchesSmartSearchAlert } from '../../utils/smartSearchParser'
 import MoversAutopsyPanel from './MoversAutopsyPanel'
 import AlertRoutingModal from '../Modals/AlertRoutingModal'
 
@@ -49,6 +52,25 @@ import {
   resolveHorizonAndETA,
 } from './alerts'
 import DepthLadderWidget from '../Widgets/DepthLadderWidget'
+
+/**
+ * Normalizes filter selection state to a Set, handling Set, Array, string, or empty/ALL states.
+ */
+function isAllOrEmpty(val) {
+  if (!val) return true
+  if (typeof val === 'string') return val === 'ALL' || val === ''
+  if (val instanceof Set) return val.size === 0 || val.has('ALL')
+  if (Array.isArray(val)) return val.length === 0 || val.includes('ALL')
+  return true
+}
+
+function normalizeToSet(val) {
+  if (!val) return new Set()
+  if (val instanceof Set) return val
+  if (Array.isArray(val)) return new Set(val.filter((v) => v !== 'ALL'))
+  if (typeof val === 'string') return val === 'ALL' || val === '' ? new Set() : new Set([val])
+  return new Set()
+}
 
 /**
  * In-place differential merger:
@@ -1924,9 +1946,14 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }, [autoViewMode, chimeEnabled])
 
-  // Re-fetch when autoViewMode toggles (view filter changed — must re-query)
+  // Re-fetch when autoViewMode toggles (view filter changed — must re-query).
+  // Debounced 500ms: rapid tab/filter clicks collapse into a single HTTP request
+  // instead of one fetch per click (RC-1 polling storm fix).
+  const _autoViewDebounceRef = useRef(null)
   useEffect(() => {
-    loadAutoAlerts(false)
+    clearTimeout(_autoViewDebounceRef.current)
+    _autoViewDebounceRef.current = setTimeout(() => loadAutoAlerts(false), 500)
+    return () => clearTimeout(_autoViewDebounceRef.current)
   }, [autoViewMode, loadAutoAlerts])
 
   // Sync store notifications into local autoAlerts so SSE-driven store updates
@@ -2029,10 +2056,10 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
     window.addEventListener('auto-alerts-cleared', handleClearEvent)
 
-    // 4. Background polling — MANUAL alerts only (30s); auto-alerts come from SSE + store.
+    // 4. Background polling — MANUAL alerts only (60s); auto-alerts come from SSE + store.
     const syncTimer = setInterval(() => {
       loadAlerts(false)
-    }, 30_000)
+    }, 60_000)
 
     return () => {
       window.removeEventListener('new-market-alert', handleLiveAlert)
@@ -2043,31 +2070,28 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }, [loadAlerts, loadAutoAlerts, chimeEnabled])
 
-  // Extract all active / visible symbols to stream spot prices and option/future contract prices for.
+  // Extract all active / visible underlying spot symbols to stream spot prices for.
   // Crucial: Only stream quotes for TRULY ACTIVE setups (filter out archived, invalidated, expired, or completed)
   // to prevent saturating the broker rate limits and starving API requests.
+  // Derivative option & futures contracts are strictly excluded here (handled via broker WebSocket or option chains).
   const activeSymbols = useMemo(() => {
     const syms = new Set()
     const addSym = (raw) => {
       if (!raw || typeof raw !== 'string') return
       const clean = raw.replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
-      if (clean) syms.add(clean)
+      const isDerivative =
+        /^(?:[A-Z&]+?)(?:\d{2,4}[A-Z0-9]{3,6})(\d+(?:\.\d+)?)(?:CE|PE)$/i.test(clean) ||
+        /^(?:[A-Z&]+?)(?:\d{2}[A-Z]{3}FUT|\d{4}FUT|FUT)$/i.test(clean)
+      if (clean && !isDerivative) syms.add(clean)
     }
 
     for (const alt of autoAlerts) {
       if (!isAlertActive(alt)) continue
       addSym(alt.symbol)
-      addSym(alt.contract_symbol)
-      addSym(alt.actionable_plan?.option_plan?.contract_symbol)
-      addSym(alt.actionable_plan?.option_contract)
-      addSym(alt.metrics?.option_symbol)
     }
     for (const a of alerts) {
       if (a.triggered || a.is_invalidated || a.target_achieved) continue
       addSym(a.symbol)
-      addSym(a.contract_symbol)
-      addSym(a.actionable_plan?.option_plan?.contract_symbol)
-      addSym(a.actionable_plan?.option_contract)
     }
     // Cap to top 50 active symbols max per cycle to strictly preserve broker rate limit quotas
     return Array.from(syms).slice(0, 50)
@@ -2187,9 +2211,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       const fresh = res?.data ?? []
       if (Array.isArray(fresh) && fresh.length > 0) {
         setAutoAlerts((prev) => mergeAlertsInPlace(prev, fresh))
-      } else {
-        await loadAutoAlerts(false)
       }
+      // Do NOT call loadAutoAlerts() here — SSE stream will deliver new alerts in-place.
+      // If the scan returned nothing, the empty state is correct; no REST re-fetch needed.
       setHorizonFilter('SWING_ALL')
       setViewMode('ACTIVE')
     } catch (_) {
@@ -2208,7 +2232,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         symbol: isInvalidation ? 'RELIANCE' : 'NIFTY',
         is_invalidation: isInvalidation,
       })
-      await loadAutoAlerts(false)
+      // SSE stream delivers the test alert in-place — no REST re-fetch needed.
     } catch (_) {
     } finally {
       setTesting(false)
@@ -2219,7 +2243,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const handleCheckInvalidations = async () => {
     try {
       await callRef.current('/skills/alerts/auto/check_invalidations', {})
-      await loadAutoAlerts(false)
+      // SSE broadcasts invalidation updates in real-time — no REST re-fetch needed.
     } catch (_) {}
   }
 
@@ -2232,7 +2256,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         should_trail: shouldTrail,
         symbol: 'RELIANCE',
       })
-      await loadAutoAlerts(false)
+      // SSE stream delivers the test target alert — no REST re-fetch needed.
     } catch (_) {
     } finally {
       setTesting(false)
@@ -2243,7 +2267,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const handleCheckTargets = async () => {
     try {
       await callRef.current('/skills/alerts/auto/check_targets', {})
-      await loadAutoAlerts(false)
+      // SSE broadcasts target milestone updates — no REST re-fetch needed.
     } catch (_) {}
   }
 
@@ -2267,9 +2291,10 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         archive,
         reason: archive ? 'Manual user archive to avoid clutter' : 'Restored to active trades',
       })
-      await loadAutoAlerts(false)
+      // Optimistic local state already applied above; SSE will confirm server-side change.
     } catch (err) {
       console.error('Failed to toggle archive status:', err)
+      // On error, revert optimistic update via a fresh server fetch.
       await loadAutoAlerts(false)
     } finally {
       setArchiving(null)
@@ -2312,6 +2337,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
           ? `🧹 Successfully purged ${purged} expired contracts from alerts storage.`
           : '✨ No expired derivative contracts found to purge.'
       )
+      // After a full expiry-purge, force a clean reload so the list reflects the purged state.
       await loadAutoAlerts(true)
       setTimeout(() => setCleanupNotice(null), 5000)
     } catch (err) {
@@ -2371,12 +2397,12 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
   const handleResetFilters = () => {
     setSearchQuery('')
-    setSelectedFilter('ALL')
-    setSelectedDirection('ALL')
+    setSelectedFilter(new Set())
+    setSelectedDirection(new Set())
     setSelectedSegment('ALL')
-    setSelectedStage('ALL')
-    setSelectedEnv('ALL')
-    setSelectedHorizon('ALL')
+    setSelectedStage(new Set())
+    setSelectedEnv(new Set())
+    setSelectedHorizon(new Set())
     setDensityMode('compact')
     setSelectedSort('NEWEST')
     setExpandedRows(new Set())
@@ -2468,7 +2494,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const handleClearLockout = useCallback(async (symbol) => {
     try {
       await callRef.current('/skills/alerts/auto/clear_lockout', { symbol })
-      await loadAutoAlerts(false)
+      // SSE broadcasts lockout cleared — no REST re-fetch needed.
     } catch (err) {
       console.error('Failed to clear lockout:', err)
     }
@@ -2644,15 +2670,64 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }, [])
 
-  const activeCount = serverCounts?.active ?? autoAlerts.filter(isAlertActive).length
-  const todayCount = serverCounts?.today ?? autoAlerts.filter(isTodayAlert).length
-  const todayClosedCount = serverCounts?.today_closed ?? autoAlerts.filter((a) => isTodayAlert(a) && !isAlertActive(a)).length
-  const archivedCount = serverCounts?.archived ?? autoAlerts.filter((a) => !isAlertActive(a)).length
+  // Base institutional eligibility for auto-alerts
+  const isAlertEligible = useCallback((a) => {
+    if (!a || typeof a !== 'object') return false
+    const sym = String(a.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
+    if (!sym || sym === 'UNKNOWN' || sym === '—') return false
+
+    // Zero-Futures Invariant Gate: Purge all legacy Indian futures contracts/signals
+    // (Crypto perpetuals / 24x7 instruments are NOT Indian equity/index futures)
+    const seg = classifyAlertSegment(a)
+    if (seg !== 'CRYPTO') {
+      const isFut = Boolean(
+        a.derivative_type === 'FUT' ||
+        a.preferred_vehicle === 'FUTURES' ||
+        a.instrument_type === 'FUTURES' ||
+        a.primary_deriv === 'FUT' ||
+        a.contract_symbol?.toUpperCase().endsWith('FUT') ||
+        a.contract_symbol?.toUpperCase().includes(':FUT') ||
+        a.symbol?.toUpperCase().endsWith('FUT') ||
+        a.alert_id?.toLowerCase().includes('-fut-') ||
+        a.alert_id?.toLowerCase().endsWith('-fut') ||
+        a.actionable_plan?.preferred_vehicle === 'FUTURES'
+      )
+      if (isFut) return false
+    }
+    return true
+  }, [])
+
+  // SSOT: Base alerts matching the active view mode (ACTIVE, TODAY, ARCHIVED, ALL)
+  // before segment, search, category, or horizon filtering
+  const baseViewModeAlerts = useMemo(() => {
+    const seen = new Set()
+    return autoAlerts.filter((a) => {
+      if (!isAlertEligible(a)) return false
+      const id = a.alert_id || a.id
+      if (id) {
+        if (seen.has(id)) return false
+        seen.add(id)
+      }
+      if (autoViewMode === 'ACTIVE' && !isAlertActive(a)) return false
+      if (autoViewMode === 'TODAY' && !isTodayAlert(a)) return false
+      if (autoViewMode === 'ARCHIVED' && isAlertActive(a)) return false
+      return true
+    })
+  }, [autoAlerts, autoViewMode, isAlertEligible, isTodayAlert])
+
+  const localActiveAlerts = useMemo(() => autoAlerts.filter((a) => isAlertEligible(a) && isAlertActive(a)), [autoAlerts, isAlertEligible])
+  const localTodayAlerts = useMemo(() => autoAlerts.filter((a) => isAlertEligible(a) && isTodayAlert(a)), [autoAlerts, isAlertEligible, isTodayAlert])
+  const localArchivedAlerts = useMemo(() => autoAlerts.filter((a) => isAlertEligible(a) && !isAlertActive(a)), [autoAlerts, isAlertEligible])
+
+  const activeCount = serverCounts?.active ?? localActiveAlerts.length
+  const todayCount = serverCounts?.today ?? localTodayAlerts.length
+  const todayClosedCount = serverCounts?.today_closed ?? localTodayAlerts.filter((a) => !isAlertActive(a)).length
+  const archivedCount = serverCounts?.archived ?? localArchivedAlerts.length
   const totalAlertsCount = serverCounts?.total ?? (activeCount + archivedCount)
   const expiredCount = autoAlerts.filter((a) => a.is_expired || a.stage === 'EXPIRED').length
-  const tgSentCount = useMemo(() => autoAlerts.filter((a) => a.telegram_dispatched).length, [autoAlerts])
-  const tgHeldCount = useMemo(() => autoAlerts.filter((a) => a.telegram_suppression_reason && !a.telegram_dispatched).length, [autoAlerts])
-  const preInflectionCount = useMemo(() => autoAlerts.filter((a) => a.alert_type === 'PRE_INFLECTION_DRYUP').length, [autoAlerts])
+  const tgSentCount = useMemo(() => baseViewModeAlerts.filter((a) => a.telegram_dispatched).length, [baseViewModeAlerts])
+  const tgHeldCount = useMemo(() => baseViewModeAlerts.filter((a) => a.telegram_suppression_reason && !a.telegram_dispatched).length, [baseViewModeAlerts])
+  const preInflectionCount = useMemo(() => baseViewModeAlerts.filter((a) => a.alert_type === 'PRE_INFLECTION_DRYUP').length, [baseViewModeAlerts])
 
   // Invalidation count for banner:
   // 1. Must not already be archived (archived setups belong in history tab, not active radar)
@@ -2688,55 +2763,100 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     return Array.from(map.values())
   }, [invalidatedAlerts])
 
-  // Filter auto-alerts with duplicate suppression and memoization
+  const categoryCounts = useMemo(() => {
+    const counts = {}
+    for (const a of baseViewModeAlerts) {
+      if (a.alert_type) {
+        counts[a.alert_type] = (counts[a.alert_type] || 0) + 1
+      }
+      if (a.event_type && a.event_type !== a.alert_type) {
+        counts[a.event_type] = (counts[a.event_type] || 0) + 1
+      }
+    }
+    return counts
+  }, [baseViewModeAlerts])
+
+  const CATEGORY_OPTIONS = useMemo(() => [
+    { value: 'TG_SENT', label: 'Dispatched to Telegram', icon: '📱', count: tgSentCount },
+    { value: 'TG_HELD', label: 'Terminal Only / TG Held', icon: '🔒', count: tgHeldCount },
+    { value: 'TARGET_HIT', label: 'Targets Hit', icon: '🎯' },
+    { value: 'HIGH_CONVICTION', label: 'Conviction 85%+', icon: '⭐' },
+    { value: 'MULTI_FLOW', label: 'Multi-Strike Flow', icon: '🌊' },
+    { value: 'GAMMA_BLAST', label: 'Gamma Blast', icon: '⚡', count: categoryCounts['GAMMA_BLAST'] || 0 },
+    { value: 'SQUEEZE_BREAKOUT', label: 'Squeeze Breakout', icon: '🚀', count: categoryCounts['SQUEEZE_BREAKOUT'] || 0 },
+    { value: 'MULTIBAGGER', label: 'Multibagger Alpha', icon: '🚀', count: categoryCounts['MULTIBAGGER'] || 0 },
+    { value: 'CFAI_FLOAT_EXHAUSTION', label: 'Float Exhaustion (CFAI)', icon: '🐋', count: categoryCounts['CFAI_FLOAT_EXHAUSTION'] || 0 },
+    { value: 'ORDER_BOOK_EXPANSION', label: 'Order-Book Titan', icon: '🏗️', count: categoryCounts['ORDER_BOOK_EXPANSION'] || 0 },
+    { value: 'BLOCK_DEAL_ABSORPTION', label: 'Block Deal Absorption', icon: '🛡️', count: categoryCounts['BLOCK_DEAL_ABSORPTION'] || 0 },
+    { value: 'CAPEX_INFLECTION', label: 'Capex & CWIP Inflection', icon: '🏭', count: categoryCounts['CAPEX_INFLECTION'] || 0 },
+    { value: 'RRG_ORDERBOOK_CONVERGENCE', label: 'RRG × Order-Book Convergence', icon: '🔄', count: categoryCounts['RRG_ORDERBOOK_CONVERGENCE'] || 0 },
+    { value: 'PROMOTER_SKIN_IN_THE_GAME', label: 'Promoter Skin-in-the-Game', icon: '💎', count: categoryCounts['PROMOTER_SKIN_IN_THE_GAME'] || 0 },
+    { value: 'SMC_SWEEP', label: 'SMC Sweep', icon: '🌊', count: categoryCounts['SMC_SWEEP'] || 0 },
+    { value: 'TURTLE_SOUP_SWEEP', label: 'Turtle Soup Sweep', icon: '🐢', count: categoryCounts['TURTLE_SOUP_SWEEP'] || 0 },
+    { value: 'TURTLE_SOUP_PLUS_ONE_LONG', label: 'Turtle Soup Bullish Inversion', icon: '🐢', count: categoryCounts['TURTLE_SOUP_PLUS_ONE_LONG'] || 0 },
+    { value: 'TURTLE_SOUP_SHORT', label: 'Turtle Soup Bearish Upthrust', icon: '🐢', count: categoryCounts['TURTLE_SOUP_SHORT'] || 0 },
+    { value: 'PRE_INFLECTION_DRYUP', label: 'Pre-Inflection Dry-Up', icon: '🤫', count: preInflectionCount },
+    { value: 'PRECURSOR_RADAR', label: 'Precursor Radar', icon: '⚡', count: categoryCounts['PRECURSOR_RADAR'] || 0 },
+    { value: 'ASYMMETRIC_OPPORTUNITY', label: 'Asymmetric R:R', icon: '🎯', count: categoryCounts['ASYMMETRIC_OPPORTUNITY'] || 0 },
+    { value: 'CIRCUIT_WARNING', label: 'Circuit Warning', icon: '🔒', count: categoryCounts['CIRCUIT_WARNING'] || 0 },
+    { value: 'CRYPTO_SQUEEZE', label: 'Crypto Squeeze (24x7)', icon: '🪙', count: categoryCounts['CRYPTO_SQUEEZE'] || 0 },
+    { value: 'CRYPTO_MOMENTUM', label: 'Crypto Momentum', icon: '🪙', count: categoryCounts['CRYPTO_MOMENTUM'] || 0 },
+    { value: 'CRYPTO_VOLATILITY', label: 'Crypto Volatility', icon: '🪙', count: categoryCounts['CRYPTO_VOLATILITY'] || 0 },
+    { value: 'CRYPTO_CVD_ABSORPTION', label: 'Crypto Order Flow (CVD)', icon: '🪙', count: categoryCounts['CRYPTO_CVD_ABSORPTION'] || 0 },
+    { value: 'CRYPTO_LIQUIDATION_FLUSH', label: 'Crypto Liquidation Flush', icon: '⚡', count: categoryCounts['CRYPTO_LIQUIDATION_FLUSH'] || 0 },
+    { value: 'CRYPTO_BASIS_ARBITRAGE', label: 'Crypto Basis Arbitrage', icon: '🌾', count: categoryCounts['CRYPTO_BASIS_ARBITRAGE'] || 0 },
+    { value: 'CRYPTO_VOL_ARBITRAGE', label: 'Crypto Vol Arbitrage', icon: '🎯', count: categoryCounts['CRYPTO_VOL_ARBITRAGE'] || 0 },
+    { value: 'INVALIDATED', label: 'Invalidated', icon: '❌', count: invalidatedCount },
+  ], [tgSentCount, tgHeldCount, preInflectionCount, invalidatedCount, categoryCounts])
+
+  const HORIZON_OPTIONS = useMemo(() => [
+    { value: 'SWING_ALL', label: 'All Swings (Short + Mid)', icon: '🌊' },
+    { value: 'SWING_SHORT', label: '2–5D Short Swing', icon: '⚡' },
+    { value: 'SWING_MID', label: '1–4W Mid Swing', icon: '📈' },
+    { value: 'POSITIONAL', label: '1–6M Long Positional', icon: '🏛️' },
+    { value: 'MULTIBAGGER', label: '6–24M Multibagger Alpha', icon: '🚀' },
+    { value: 'INTRADAY', label: 'Intraday (Today)', icon: '⏱️' },
+    { value: 'SCALP', label: 'Scalp (15–45 Min)', icon: '⚡' },
+    { value: 'ROLLING_24H', label: '24H Rolling (Crypto)', icon: '🪙' },
+  ], [])
+
+  const DIRECTION_OPTIONS = useMemo(() => [
+    { value: 'BULLISH', label: 'Bullish', icon: '📈' },
+    { value: 'BEARISH', label: 'Bearish', icon: '📉' },
+  ], [])
+
+  const STAGE_OPTIONS = useMemo(() => [
+    { value: 'STALK', label: 'Stalk (Radar)', icon: '🦅' },
+    { value: 'PRIMED', label: 'Primed (Proximity)', icon: '🎯' },
+    { value: 'IGNITED', label: 'Ignited (In-Flight)', icon: '🔥' },
+    { value: 'EARLY_WARNING', label: 'Early Warning', icon: '⏳' },
+    { value: 'T1_ACHIEVED', label: 'Target 1 Hit', icon: '🎯' },
+    { value: 'TARGET_ACHIEVED', label: 'Final Target', icon: '🏁' },
+    { value: 'INVALIDATED', label: 'Invalidated', icon: '❌' },
+  ], [])
+
+  const ENV_OPTIONS = useMemo(() => [
+    { value: 'LIVE', label: 'Live', icon: '🟢' },
+    { value: 'TEST', label: 'Test', icon: '🧪' },
+  ], [])
+
+  // Filter auto-alerts starting from baseViewModeAlerts with secondary interactive filters
   const filteredAutoAlerts = useMemo(() => {
-    const seenIds = new Set()
-    let results = autoAlerts.filter((a) => {
-      if (!a || typeof a !== 'object') return false
-      const sym = String(a.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
-      if (!sym || sym === 'UNKNOWN' || sym === '—') return false
+    const parsedSearch = parseSearchQuery(searchQuery)
 
-      const id = a.alert_id || a.id
-      if (id) {
-        if (seenIds.has(id)) return false
-        seenIds.add(id)
+    let results = baseViewModeAlerts.filter((a) => {
+      // 1. Smart Search Filter (Directives: sym:, strike:, rr:>3, score:>80, dir:, stage:, plus aliases & free-text)
+      if (parsedSearch.trimmed) {
+        if (!matchesSmartSearchAlert(a, parsedSearch)) return false
       }
 
-      // 0. Zero-Futures Invariant Gate: Purge all futures contracts/signals
-      const isFut = Boolean(
-        a.derivative_type === 'FUT' ||
-        a.preferred_vehicle === 'FUTURES' ||
-        a.instrument_type === 'FUTURES' ||
-        a.primary_deriv === 'FUT' ||
-        a.contract_symbol?.toUpperCase().endsWith('FUT') ||
-        a.contract_symbol?.toUpperCase().includes(':FUT') ||
-        a.symbol?.toUpperCase().endsWith('FUT') ||
-        a.alert_id?.toLowerCase().includes('-fut-') ||
-        a.alert_id?.toLowerCase().endsWith('-fut') ||
-        a.actionable_plan?.preferred_vehicle === 'FUTURES' ||
-        a.actionable_plan?.action?.toUpperCase().includes('FUT')
-      )
-      if (isFut) return false
-
-      // 1. Primary Filter: View Mode
-      if (autoViewMode === 'ACTIVE' && !isAlertActive(a)) return false
-      if (autoViewMode === 'TODAY' && !isTodayAlert(a)) return false
-      if (autoViewMode === 'ARCHIVED' && isAlertActive(a)) return false
-
-      // 2. Search Query Filter (Symbol, Contract, Headline, Summary)
-      if (searchQuery.trim()) {
-        const q = searchQuery.trim().toUpperCase()
-        const matchSym = a.symbol?.toUpperCase().includes(q)
-        const matchContract = a.contract_symbol?.toUpperCase().includes(q)
-        const matchHeadline = a.headline?.toUpperCase().includes(q)
-        const matchSummary = a.summary?.toUpperCase().includes(q)
-        if (!matchSym && !matchContract && !matchHeadline && !matchSummary) return false
+      // 2. Direction Filter
+      if (!isAllOrEmpty(selectedDirection)) {
+        const dSet = normalizeToSet(selectedDirection)
+        if (!dSet.has(a.direction)) return false
       }
 
-      // 3. Direction Filter
-      if (selectedDirection !== 'ALL' && a.direction !== selectedDirection) return false
-
-      // 4. Unified Multi-Select Segment Filter (FNO_INDEX, FNO_STOCK, EQUITY, COMMODITY, CURRENCY, CRYPTO)
+      // 3. Unified Multi-Select Segment Filter (FNO_INDEX, FNO_STOCK, EQUITY, COMMODITY, CURRENCY, CRYPTO)
       if (selectedSegments.size < ALL_CANONICAL_SEGMENTS.length) {
         const seg = classifyAlertSegment(a)
         if (!selectedSegments.has(seg) && !(selectedSegments.has('FNO') && (seg === 'FNO_INDEX' || seg === 'FNO_STOCK'))) {
@@ -2744,74 +2864,78 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         }
       }
 
-      // 5. Category / Alert-Type / Channel Delivery Filter
-      if (selectedFilter === 'TG_SENT') {
-        if (!a.telegram_dispatched) return false
-      } else if (selectedFilter === 'TG_HELD') {
-        if (!a.telegram_suppression_reason || a.telegram_dispatched) return false
-      } else if (selectedFilter === 'INVALIDATED') {
-        if (!a.is_invalidated && a.stage !== 'INVALIDATED') return false
-      } else if (selectedFilter === 'TARGET_HIT') {
-        if (
-          a.stage !== 'T1_ACHIEVED' &&
-          a.stage !== 'TARGET_ACHIEVED' &&
-          a.target_status !== 'T1_ACHIEVED' &&
-          a.target_status !== 'TARGET_ACHIEVED'
-        ) return false
-      } else if (selectedFilter === 'HIGH_CONVICTION') {
-        if (Number(a.confidence || 0) < 85) return false
-      } else if (selectedFilter === 'MULTI_FLOW') {
-        const rel = a.metrics?.related_strikes || a.related_strikes
-        if (!Array.isArray(rel) || rel.length === 0) return false
-      } else if (selectedFilter === 'TURTLE_SOUP_SWEEP') {
-        const at = String(a.alert_type || a.event_type || '')
-        if (!at.includes('TURTLE_SOUP')) return false
-      } else if (selectedFilter !== 'ALL' && a.alert_type !== selectedFilter && a.event_type !== selectedFilter) {
-        return false
+      // 4. Category / Alert-Type / Channel Delivery Filter
+      if (!isAllOrEmpty(selectedFilter)) {
+        const fSet = normalizeToSet(selectedFilter)
+        const matchAny = Array.from(fSet).some((key) => {
+          if (key === 'TG_SENT') return Boolean(a.telegram_dispatched)
+          if (key === 'TG_HELD') return Boolean(a.telegram_suppression_reason && !a.telegram_dispatched)
+          if (key === 'INVALIDATED') return Boolean(a.is_invalidated || a.stage === 'INVALIDATED')
+          if (key === 'TARGET_HIT') {
+            return (
+              a.stage === 'T1_ACHIEVED' ||
+              a.stage === 'TARGET_ACHIEVED' ||
+              a.target_status === 'T1_ACHIEVED' ||
+              a.target_status === 'TARGET_ACHIEVED'
+            )
+          }
+          if (key === 'HIGH_CONVICTION') return Number(a.confidence || 0) >= 85
+          if (key === 'MULTI_FLOW') {
+            const rel = a.metrics?.related_strikes || a.related_strikes
+            return Array.isArray(rel) && rel.length > 0
+          }
+          if (key === 'TURTLE_SOUP_SWEEP') {
+            const at = String(a.alert_type || a.event_type || '')
+            return at.includes('TURTLE_SOUP')
+          }
+          return a.alert_type === key || a.event_type === key
+        })
+        if (!matchAny) return false
       }
 
-      // 6. Stage Filter
-      if (selectedStage !== 'ALL') {
-        if (selectedStage === 'INVALIDATED' && !a.is_invalidated && a.stage !== 'INVALIDATED') return false
-        if (selectedStage === 'T1_ACHIEVED' && a.stage !== 'T1_ACHIEVED' && a.target_status !== 'T1_ACHIEVED') return false
-        if (selectedStage === 'TARGET_ACHIEVED' && a.stage !== 'TARGET_ACHIEVED' && a.target_status !== 'TARGET_ACHIEVED') return false
-        if (
-          selectedStage !== 'INVALIDATED' &&
-          selectedStage !== 'T1_ACHIEVED' &&
-          selectedStage !== 'TARGET_ACHIEVED' &&
-          a.stage !== selectedStage
-        ) return false
+      // 5. Stage Filter
+      if (!isAllOrEmpty(selectedStage)) {
+        const sSet = normalizeToSet(selectedStage)
+        const matchAny = Array.from(sSet).some((key) => {
+          if (key === 'INVALIDATED') return Boolean(a.is_invalidated || a.stage === 'INVALIDATED')
+          if (key === 'T1_ACHIEVED') return a.stage === 'T1_ACHIEVED' || a.target_status === 'T1_ACHIEVED'
+          if (key === 'TARGET_ACHIEVED') return a.stage === 'TARGET_ACHIEVED' || a.target_status === 'TARGET_ACHIEVED'
+          return a.stage === key
+        })
+        if (!matchAny) return false
       }
 
-      // 7. Environment Filter
-      if (selectedEnv === 'LIVE') {
-        if (a.environment === 'TEST' || a.is_live === false) return false
-      } else if (selectedEnv === 'TEST') {
-        if (a.environment !== 'TEST' && a.is_live !== false) return false
+      // 6. Environment Filter
+      if (!isAllOrEmpty(selectedEnv)) {
+        const eSet = normalizeToSet(selectedEnv)
+        const matchAny = Array.from(eSet).some((key) => {
+          if (key === 'LIVE') return a.environment !== 'TEST' && a.is_live !== false
+          if (key === 'TEST') return a.environment === 'TEST' || a.is_live === false
+          return true
+        })
+        if (!matchAny) return false
       }
 
-      // 7b. Time Horizon Filter
-      if (selectedHorizon !== 'ALL') {
+      // 7. Time Horizon Filter
+      if (!isAllOrEmpty(selectedHorizon)) {
+        const hSet = normalizeToSet(selectedHorizon)
         const hzInfo = resolveHorizonAndETA(a)
-        if (selectedHorizon === 'SCALP') {
-          if (hzInfo.key !== 'SCALP' && a.time_horizon !== 'SCALP' && a.time_horizon !== 'INTRADAY_SCALP_ONLY') return false
-        } else if (selectedHorizon === 'SWING_ALL' || selectedHorizon === 'SWING') {
-          if (!['SWING', 'SWING_SHORT', 'SWING_MID'].includes(hzInfo.key) && !['SWING', 'SWING_SHORT', 'SWING_MID'].includes(a.time_horizon)) return false
-        } else if (selectedHorizon === 'MULTIBAGGER') {
-          if (hzInfo.key !== 'MULTIBAGGER') return false
-        } else if (selectedHorizon === 'LONG_TERM' || selectedHorizon === 'POSITIONAL') {
-          if (hzInfo.key !== 'LONG_TERM' && hzInfo.key !== 'POSITIONAL') return false
-        } else if (selectedHorizon === 'SWING_MID') {
-          if (hzInfo.key !== 'SWING_MID') return false
-        } else if (selectedHorizon === 'SWING_SHORT') {
-          if (hzInfo.key !== 'SWING_SHORT') return false
-        } else if (selectedHorizon === 'INTRADAY') {
-          if (hzInfo.key !== 'INTRADAY') return false
-        } else if (selectedHorizon === 'ROLLING_24H') {
-          if (hzInfo.key !== 'ROLLING_24H') return false
-        } else if (hzInfo.key !== selectedHorizon && (a.time_horizon || 'INTRADAY') !== selectedHorizon) {
-          return false
-        }
+        const matchAny = Array.from(hSet).some((key) => {
+          if (key === 'SCALP') {
+            return hzInfo.key === 'SCALP' || a.time_horizon === 'SCALP' || a.time_horizon === 'INTRADAY_SCALP_ONLY'
+          }
+          if (key === 'SWING_ALL' || key === 'SWING') {
+            return ['SWING', 'SWING_SHORT', 'SWING_MID'].includes(hzInfo.key) || ['SWING', 'SWING_SHORT', 'SWING_MID'].includes(a.time_horizon)
+          }
+          if (key === 'MULTIBAGGER') return hzInfo.key === 'MULTIBAGGER'
+          if (key === 'LONG_TERM' || key === 'POSITIONAL') return hzInfo.key === 'LONG_TERM' || hzInfo.key === 'POSITIONAL'
+          if (key === 'SWING_MID') return hzInfo.key === 'SWING_MID'
+          if (key === 'SWING_SHORT') return hzInfo.key === 'SWING_SHORT'
+          if (key === 'INTRADAY') return hzInfo.key === 'INTRADAY'
+          if (key === 'ROLLING_24H') return hzInfo.key === 'ROLLING_24H'
+          return hzInfo.key === key || (a.time_horizon || 'INTRADAY') === key
+        })
+        if (!matchAny) return false
       }
 
       return true
@@ -2868,7 +2992,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     })
 
     return results
-  }, [autoAlerts, autoViewMode, selectedFilter, selectedHorizon, selectedStage, selectedEnv, searchQuery, selectedDirection, selectedSegment, selectedSegments, selectedSort])
+  }, [baseViewModeAlerts, searchQuery, selectedDirection, selectedSegments, selectedFilter, selectedStage, selectedEnv, selectedHorizon, selectedSort])
 
   // Group repeated attempts for the same symbol so the screen remains clean and uncluttered
   const groupedAutoAlerts = useMemo(() => {
@@ -2909,12 +3033,10 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     return primaryAlerts
   }, [filteredAutoAlerts])
 
-  // Segregate into 6 canonical market segments using classifyAlertSegment across active alerts
+  // Segregate into 6 canonical market segments across baseViewModeAlerts (SSOT)
   const { fnoIndexCount, fnoStockCount, equityCount, commodityCount, currencyCount, cryptoCount, totalSegmentCount } = useMemo(() => {
     let fi = 0, fs = 0, e = 0, c = 0, cu = 0, cr = 0
-    for (const a of autoAlerts) {
-      if (autoViewMode === 'ACTIVE' && !isAlertActive(a)) continue
-      if (autoViewMode === 'ARCHIVED' && isAlertActive(a)) continue
+    for (const a of baseViewModeAlerts) {
       const seg = classifyAlertSegment(a)
       if (seg === 'FNO_INDEX') fi++
       else if (seg === 'FNO_STOCK') fs++
@@ -2925,7 +3047,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
     const total = fi + fs + e + c + cu + cr
     return { fnoIndexCount: fi, fnoStockCount: fs, equityCount: e, commodityCount: c, currencyCount: cu, cryptoCount: cr, totalSegmentCount: total }
-  }, [autoAlerts, autoViewMode])
+  }, [baseViewModeAlerts])
 
   const { groupedFnoIndexAlerts, groupedFnoStockAlerts, groupedEquityAlerts, groupedCommodityAlerts, groupedCurrencyAlerts, groupedCryptoAlerts } = useMemo(() => {
     const fnoIdx = []
@@ -3240,7 +3362,10 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       {activeTab === 'auto' && (
         <div className="space-y-3">
           {/* Institutional Unified High-Density Control Center */}
-          <div className="p-2.5 rounded-2xl bg-panel/95 border border-border/80 backdrop-blur-md space-y-2">
+          <div
+            className="p-2.5 rounded-2xl border border-border/80 space-y-2 relative z-30 shadow-md"
+            style={{ backgroundColor: 'var(--color-panel, #0d1320)' }}
+          >
 
             {/* ROW 1: View Mode + 5-way Segment Rail + Scan Now + Tools */}
             <div className="flex items-center justify-between flex-wrap gap-2">
@@ -3335,7 +3460,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 </button>
 
                 {/* Unified ⚙️ Tools dropdown (maintenance + simulation + clear) */}
-                <div className="relative" ref={toolsMenuRef}>
+                <div className={`relative ${showTools ? 'z-50' : 'z-auto'}`} ref={toolsMenuRef}>
                   <button
                     onClick={() => setShowTools((v) => !v)}
                     className={`btn btn-sm btn-ghost text-xs border flex items-center gap-1 py-1 px-2.5 transition-all ${
@@ -3515,7 +3640,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   <span className={`text-[10px] font-mono px-1.5 py-px rounded-full ${
                     isAllSegmentsSelected ? 'bg-black/20 font-bold' : 'bg-elevated'
                   }`}>{totalSegmentCount}</span>
-                  {groupedAutoAlerts.length !== totalSegmentCount && (
+                  {isAllSegmentsSelected && groupedAutoAlerts.length !== totalSegmentCount && (
                     <span className={`text-[11px] font-mono opacity-70 hidden sm:inline ${
                       isAllSegmentsSelected ? 'text-black/80 dark:text-black/70 font-semibold' : 'text-muted'
                     }`} title={`${totalSegmentCount} total setups deduplicated into ${groupedAutoAlerts.length} symbol cards`}>
@@ -3571,137 +3696,76 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
             </div>
 
             {/* ROW 3: Search + Category chips + Dropdowns */}
-            <div className="flex items-center justify-between flex-wrap gap-2 pt-1.5 border-t border-border/40 text-[11px]">
+            <div className="flex items-center justify-between flex-wrap gap-2 pt-1.5 border-t border-border/40 text-[11px] relative z-20">
               <div className="flex items-center gap-2 flex-wrap min-w-0">
-                {/* Symbol / Contract Search Input */}
-                <div className="relative w-44 flex-shrink-0">
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="🔍 Symbol, strike…"
-                    className="w-full text-xs pl-2.5 pr-6 py-1 rounded-lg bg-surface border border-border text-text placeholder:text-muted focus:outline-none focus:border-gold transition-colors font-sans"
-                  />
-                  {searchQuery && (
-                    <button
-                      onClick={() => setSearchQuery('')}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text text-xs cursor-pointer"
-                      title="Clear search"
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
+                {/* Symbol / Contract Search Input with Typeahead, Directives & Aliases */}
+                <SmartSearchBox
+                  value={searchQuery}
+                  onChange={setSearchQuery}
+                  placeholder="🔍 Symbol, strike, or rr:>3…"
+                  activeItems={baseViewModeAlerts}
+                  colorTheme="gold"
+                  className="w-52 sm:w-64 flex-shrink-0"
+                />
 
-                {/* Category / Setup Dropdown */}
-                <select
-                  value={selectedFilter}
-                  onChange={(e) => setSelectedFilter(e.target.value)}
-                  className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer max-w-[210px] truncate ${
-                    selectedFilter !== 'ALL'
-                      ? 'border-gold text-gold font-bold bg-gold/10'
-                      : 'border-border hover:border-gold/50'
-                  }`}
-                  title="Filter by setup / strategy category"
-                >
-                  <option value="ALL">All Categories / Setups</option>
-                  <option value="TG_SENT">📱 Dispatched to Telegram ({tgSentCount})</option>
-                  <option value="TG_HELD">🔒 Terminal Only / TG Held ({tgHeldCount})</option>
-                  <option value="TARGET_HIT">🎯 Targets Hit</option>
-                  <option value="HIGH_CONVICTION">⭐ Conviction 85%+</option>
-                  <option value="MULTI_FLOW">🌊 Multi-Strike Flow</option>
-                  <option value="GAMMA_BLAST">⚡ Gamma Blast</option>
-                  <option value="SQUEEZE_BREAKOUT">🚀 Squeeze Breakout</option>
-                  <option value="MULTIBAGGER">🚀 Multibagger Alpha</option>
-                  <option value="CFAI_FLOAT_EXHAUSTION">🐋 Float Exhaustion (CFAI)</option>
-                  <option value="ORDER_BOOK_EXPANSION">🏗️ Order-Book Titan</option>
-                  <option value="BLOCK_DEAL_ABSORPTION">🛡️ Block Deal Absorption</option>
-                  <option value="CAPEX_INFLECTION">🏭 Capex & CWIP Inflection</option>
-                  <option value="RRG_ORDERBOOK_CONVERGENCE">🔄 RRG × Order-Book Convergence</option>
-                  <option value="PROMOTER_SKIN_IN_THE_GAME">💎 Promoter Skin-in-the-Game</option>
-                  <option value="SMC_SWEEP">🌊 SMC Sweep</option>
-                  <option value="TURTLE_SOUP_SWEEP">🐢 Turtle Soup Sweep</option>
-                  <option value="TURTLE_SOUP_PLUS_ONE_LONG">🐢 Turtle Soup Bullish Inversion</option>
-                  <option value="TURTLE_SOUP_SHORT">🐢 Turtle Soup Bearish Upthrust</option>
-                  <option value="PRE_INFLECTION_DRYUP">🤫 Pre-Inflection Dry-Up ({preInflectionCount})</option>
-                  <option value="PRECURSOR_RADAR">⚡ Precursor Radar</option>
-                  <option value="ASYMMETRIC_OPPORTUNITY">🎯 Asymmetric R:R</option>
-                  <option value="CIRCUIT_WARNING">🔒 Circuit Warning</option>
-                  <option value="CRYPTO_SQUEEZE">🪙 Crypto Squeeze (24x7)</option>
-                  <option value="CRYPTO_MOMENTUM">🪙 Crypto Momentum</option>
-                  <option value="CRYPTO_VOLATILITY">🪙 Crypto Volatility</option>
-                  <option value="CRYPTO_CVD_ABSORPTION">🪙 Crypto Order Flow (CVD)</option>
-                  <option value="CRYPTO_LIQUIDATION_FLUSH">⚡ Crypto Liquidation Flush</option>
-                  <option value="CRYPTO_BASIS_ARBITRAGE">🌾 Crypto Basis Arbitrage</option>
-                  <option value="CRYPTO_VOL_ARBITRAGE">🎯 Crypto Vol Arbitrage</option>
-                  <option value="INVALIDATED">❌ Invalidated ({invalidatedCount})</option>
-                </select>
+                {/* Category / Setup Dropdown (Multi-Select Excel Style) */}
+                <MultiSelectDropdown
+                  title="Category"
+                  allLabel="All Categories / Setups"
+                  options={CATEGORY_OPTIONS}
+                  selected={selectedFilter}
+                  onChange={setSelectedFilter}
+                  colorTheme="gold"
+                  hiddenSelectTitle="Filter by setup / strategy category"
+                  className="max-w-[210px]"
+                />
 
-                {/* Horizon Filter Dropdown */}
-                <select
-                  value={selectedHorizon}
-                  onChange={(e) => setSelectedHorizon(e.target.value)}
-                  className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer ${
-                    selectedHorizon !== 'ALL'
-                      ? 'border-sky-400 text-sky-300 font-bold bg-sky-500/10'
-                      : 'border-border hover:border-gold/50'
-                  }`}
-                  title="Filter by trade time horizon & ETA"
-                >
-                  <option value="ALL">All Horizons</option>
-                  <option value="SWING_ALL">🌊 All Swings (Short + Mid)</option>
-                  <option value="SWING_SHORT">⚡ 2–5D Short Swing</option>
-                  <option value="SWING_MID">📈 1–4W Mid Swing</option>
-                  <option value="POSITIONAL">🏛️ 1–6M Long Positional</option>
-                  <option value="MULTIBAGGER">🚀 6–24M Multibagger Alpha</option>
-                  <option value="INTRADAY">⏱️ Intraday (Today)</option>
-                  <option value="SCALP">⚡ Scalp (15–45 Min)</option>
-                  <option value="ROLLING_24H">🪙 24H Rolling (Crypto)</option>
-                </select>
+                {/* Horizon Filter Dropdown (Multi-Select Excel Style) */}
+                <MultiSelectDropdown
+                  title="Horizon"
+                  allLabel="All Horizons"
+                  options={HORIZON_OPTIONS}
+                  selected={selectedHorizon}
+                  onChange={setSelectedHorizon}
+                  colorTheme="sky"
+                  hiddenSelectTitle="Filter by trade time horizon & ETA"
+                />
               </div>
 
               {/* Right: compact inline dropdowns + density + sort + reset */}
               <div className="flex items-center gap-1.5 flex-wrap">
                 {/* Direction Filter */}
-                <select
-                  value={selectedDirection}
-                  onChange={(e) => setSelectedDirection(e.target.value)}
-                  className="text-xs py-1 px-2.5 rounded-lg bg-surface border border-border text-text hover:border-gold/50 focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer w-auto"
-                  title="Filter by direction"
-                >
-                  <option value="ALL">All Directions</option>
-                  <option value="BULLISH">📈 Bullish</option>
-                  <option value="BEARISH">📉 Bearish</option>
-                </select>
+                <MultiSelectDropdown
+                  title="Direction"
+                  allLabel="All Directions"
+                  options={DIRECTION_OPTIONS}
+                  selected={selectedDirection}
+                  onChange={setSelectedDirection}
+                  colorTheme="emerald"
+                  hiddenSelectTitle="Filter by direction"
+                />
 
                 {/* Stage Filter */}
-                <select
-                  value={selectedStage}
-                  onChange={(e) => setSelectedStage(e.target.value)}
-                  className="text-xs py-1 px-2.5 rounded-lg bg-surface border border-border text-text hover:border-gold/50 focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer w-auto"
-                  title="Filter by trade lifecycle stage"
-                >
-                  <option value="ALL">All Stages</option>
-                  <option value="STALK">🦅 Stalk (Radar)</option>
-                  <option value="PRIMED">🎯 Primed (Proximity)</option>
-                  <option value="IGNITED">🔥 Ignited (In-Flight)</option>
-                  <option value="EARLY_WARNING">⏳ Early Warning</option>
-                  <option value="T1_ACHIEVED">🎯 Target 1 Hit</option>
-                  <option value="TARGET_ACHIEVED">🏁 Final Target</option>
-                  <option value="INVALIDATED">❌ Invalidated</option>
-                </select>
+                <MultiSelectDropdown
+                  title="Stage"
+                  allLabel="All Stages"
+                  options={STAGE_OPTIONS}
+                  selected={selectedStage}
+                  onChange={setSelectedStage}
+                  colorTheme="gold"
+                  hiddenSelectTitle="Filter by trade lifecycle stage"
+                />
 
                 {/* Environment Filter */}
-                <select
-                  value={selectedEnv}
-                  onChange={(e) => setSelectedEnv(e.target.value)}
-                  className="text-xs py-1 px-2.5 rounded-lg bg-surface border border-border text-text hover:border-gold/50 focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer w-auto"
-                  title="Filter by environment"
-                >
-                  <option value="ALL">All Envs</option>
-                  <option value="LIVE">🟢 Live</option>
-                  <option value="TEST">🧪 Test</option>
-                </select>
+                <MultiSelectDropdown
+                  title="Environment"
+                  allLabel="All Envs"
+                  options={ENV_OPTIONS}
+                  selected={selectedEnv}
+                  onChange={setSelectedEnv}
+                  colorTheme="sapphire"
+                  hiddenSelectTitle="Filter by environment"
+                />
 
                 {/* Sort Order */}
                 <select
@@ -3774,7 +3838,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 </button>
 
                 {/* Reset Filters Button */}
-                {(searchQuery || selectedFilter !== 'ALL' || selectedStage !== 'ALL' || selectedEnv !== 'ALL' || selectedDirection !== 'ALL' || selectedSegment !== 'ALL' || selectedSort !== 'NEWEST') && (
+                {(searchQuery || !isAllOrEmpty(selectedFilter) || !isAllOrEmpty(selectedStage) || !isAllOrEmpty(selectedEnv) || !isAllOrEmpty(selectedDirection) || !isAllOrEmpty(selectedHorizon) || selectedSegment !== 'ALL' || selectedSort !== 'NEWEST') && (
                   <button
                     onClick={handleResetFilters}
                     className="btn btn-sm btn-ghost text-xs text-gold hover:text-gold-light border border-gold/30 hover:bg-gold/10 flex items-center gap-1 font-bold px-2 py-0.5"

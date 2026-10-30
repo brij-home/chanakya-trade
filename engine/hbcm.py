@@ -302,8 +302,8 @@ def evaluate_hbcm(
             is_bear = False
         else:
             # Directional scoring with absolute VWAP boundary
-            is_above_vwap = (ltp > vwap * 1.0005) if vwap > 0 else (chg_pct > 0.05)
-            is_below_vwap = (ltp < vwap * 0.9995) if vwap > 0 else (chg_pct < -0.05)
+            is_above_vwap = (ltp > vwap * 1.0005) if vwap > 0 else (chg_pct >= 0.15)
+            is_below_vwap = (ltp < vwap * 0.9995) if vwap > 0 else (chg_pct <= -0.15)
 
             candle_is_strongly_red = (
                 (c_5m < o_5m * 0.9985)

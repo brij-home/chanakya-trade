@@ -47,6 +47,7 @@ import pandas as pd
 logger = logging.getLogger("chanakya.trade_plan")
 from config.constants import IST_ZONE as IST
 from engine.dynamic_risk import resolve_price_tier
+from market.instruments import format_strike
 
 
 @dataclass
@@ -1692,6 +1693,10 @@ def calculate_option_execution_plan(
     scalp_pct = (
         round(((scalp_target_prem - option_ltp) / option_ltp) * 100, 1) if option_ltp > 0 else 18.0
     )
+    is_micro_scalp = (getattr(trade_plan, "timeframe", "") or "").upper() in (
+        "SCALP",
+        "MICRO_SCALP",
+    )
     fast_scalp_plan = {
         "scalp_target_premium": scalp_target_prem,
         "scalp_target_pct": scalp_pct,
@@ -1701,6 +1706,7 @@ def calculate_option_execution_plan(
             f"move SL to Cost (₹{breakeven_stop:,.2f}), or exit on first 5m candle close below prior low."
         ),
         "time_stop_mins": 20,
+        "is_micro_scalp": is_micro_scalp,
         "time_stop_rule": (
             "If trade active 20m with < +5% gain, exit or convert to defined-risk spread to eliminate theta decay."
         ),
@@ -1764,10 +1770,10 @@ def calculate_option_execution_plan(
         "theta_reduction_pct": 75.0,
         "risk_reduction_pct": round(((option_ltp - net_debit) / max(0.01, option_ltp)) * 100, 1),
         "guidance": (
-            f"Trade a {spread_name} (Buy {int(strike)} + Sell {int(short_strike)}): "
+            f"Trade a {spread_name} (Buy {format_strike(strike)} + Sell {format_strike(short_strike)}): "
             f"Cuts risk by {round(((option_ltp - net_debit) / max(0.01, option_ltp)) * 100, 0):.0f}% "
             f"(₹{net_debit:,.1f} vs ₹{option_ltp:,.1f}), flattens theta decay to zero, "
-            f"and monetizes overhead resistance at {int(short_strike)}."
+            f"and monetizes overhead resistance at {format_strike(short_strike)}."
         ),
     }
 
@@ -1792,7 +1798,7 @@ def calculate_option_execution_plan(
         "runner_target_3": t3_prem,
         "runner_trailing_strategy": "1.5x ATR dynamic trail behind swing pivots",
         "synthetic_hedge_option": (
-            f"At T1 (₹{t1_prem:,.1f}), optionally sell {int(short_strike)} {option_type.upper()} "
+            f"At T1 (₹{t1_prem:,.1f}), optionally sell {format_strike(short_strike)} {option_type.upper()} "
             f"to lock in max profit and eliminate all theta on remaining runner."
         ),
         "protocol_summary": (
@@ -1868,6 +1874,14 @@ def calculate_option_execution_plan(
         # Free-Roll Execution Protocol (+2R Scale 50% & Zero-Risk Runner)
         "free_roll_plan": free_roll_plan,
         "time_stop_minutes": time_stop_mins,
+        # Broker Disaster Parachute Stop (-25% ceiling against disconnects)
+        "broker_disaster_stop": round(max(0.05, option_ltp * 0.75), 2) if option_ltp > 0 else None,
+        "disaster_stop_rule": (
+            f"Hard catastrophic broker parachute stop placed at ₹{round(max(0.05, option_ltp * 0.75), 2):,.2f} (-25% ceiling) "
+            "directly with broker to eliminate tail risk if local network/terminal disconnects."
+        )
+        if option_ltp > 0
+        else None,
     }
 
 

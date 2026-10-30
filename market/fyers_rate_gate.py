@@ -26,6 +26,7 @@ Priority Tiers (Lower value = Higher priority):
 from __future__ import annotations
 
 import heapq
+import atexit
 import itertools
 import json
 import logging
@@ -41,6 +42,8 @@ from typing import Any, Optional
 from config.constants import IST_ZONE as IST
 
 logger = logging.getLogger(__name__)
+
+_ENABLE_CALLER_TRACKING = os.environ.get("FYERS_CALLER_TRACKING", "0") == "1"
 
 
 def _get_quota_file() -> Path:
@@ -92,6 +95,8 @@ class UnifiedFyersRateGate:
     and Fyers Standard (5k req/day, 50 req/min, 5 req/s, 50 symbols/req).
     """
 
+    _last_instance: Optional["UnifiedFyersRateGate"] = None
+
     def __init__(
         self,
         plan: Optional[str] = None,
@@ -99,6 +104,21 @@ class UnifiedFyersRateGate:
         max_per_min: Optional[float] = None,
         max_per_day: Optional[float] = None,
     ) -> None:
+        self._quota_file = _QUOTA_FILE
+        if (
+            UnifiedFyersRateGate._last_instance is not None
+            and UnifiedFyersRateGate._last_instance is not self
+        ):
+            try:
+                if (
+                    getattr(UnifiedFyersRateGate._last_instance, "_quota_file", None)
+                    == self._quota_file
+                ):
+                    UnifiedFyersRateGate._last_instance.flush_quota()
+            except Exception as e:
+                logger.warning(f"Error flushing previous rate gate instance quota: {e}")
+        UnifiedFyersRateGate._last_instance = self
+
         selected_plan = (plan or os.environ.get("FYERS_PLAN", "PRIME")).upper()
         if selected_plan not in FYERS_PLAN_PRESETS:
             selected_plan = "PRIME"
@@ -156,7 +176,10 @@ class UnifiedFyersRateGate:
         self._last_depth_dispatch_ts: float = 0.0
         self._last_hist_dispatch_ts: float = 0.0
         self._caller_counts: dict[str, int] = {}
+        self._quota_dirty: bool = False
         self._load_daily_quota()
+        self._start_quota_persistence_loop()
+        atexit.register(self.flush_quota)
 
     @property
     def plan(self) -> str:
@@ -197,20 +220,58 @@ class UnifiedFyersRateGate:
                 f"{self._quotes_chunk_size} symbols/batch"
             )
 
+    def reset_state(self) -> None:
+        """Reset all in-memory sliding windows, waiters, and timestamps (e.g. for test isolation)."""
+        with self._lock:
+            self._sliding_window.clear()
+            for _, _, _, event in self._waiters:
+                event.set()
+            self._waiters.clear()
+            self._last_dispatch_ts = 0.0
+            self._last_depth_dispatch_ts = 0.0
+            self._last_hist_dispatch_ts = 0.0
+            self._counter = itertools.count()
+
     def reset_daily_quota(self, requests: int = 0) -> None:
         """Reset the persisted daily quota counter (e.g. after purchasing Prime)."""
         with self._lock:
             self._daily_requests = requests
+            self._quota_dirty = False
             self._save_daily_quota()
             logger.info(
                 f"[FyersRateGate] Daily request counter set to {requests} / {int(self._max_per_day):,}"
             )
 
+    def _start_quota_persistence_loop(self) -> None:
+        """Persist daily quota to disk every 30s in background to eliminate ~1M sync disk writes per session."""
+
+        def _loop():
+            while True:
+                time.sleep(30.0)
+                try:
+                    with self._lock:
+                        if self._quota_dirty:
+                            self._save_daily_quota()
+                            self._quota_dirty = False
+                except Exception as exc:
+                    logger.debug(f"[FyersRateGate] Quota persistence background error: {exc}")
+
+        t = threading.Thread(target=_loop, daemon=True, name="FyersRateGate-QuotaPersist")
+        t.start()
+
+    def flush_quota(self) -> None:
+        """Synchronously persist quota to disk if dirty."""
+        with self._lock:
+            if self._quota_dirty:
+                self._save_daily_quota()
+                self._quota_dirty = False
+
     def _load_daily_quota(self) -> None:
         """Load persisted daily request count to survive service restarts."""
         try:
-            if _QUOTA_FILE.exists():
-                data = json.loads(_QUOTA_FILE.read_text(encoding="utf-8"))
+            q_file = getattr(self, "_quota_file", _QUOTA_FILE)
+            if q_file.exists():
+                data = json.loads(q_file.read_text(encoding="utf-8"))
                 if data.get("date") == self._today_str:
                     self._daily_requests = int(data.get("requests", 0))
                 else:
@@ -223,15 +284,16 @@ class UnifiedFyersRateGate:
     def _save_daily_quota(self) -> None:
         """Atomically persist daily counter to disk."""
         try:
-            _QUOTA_FILE.parent.mkdir(parents=True, exist_ok=True)
+            q_file = getattr(self, "_quota_file", _QUOTA_FILE)
+            q_file.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "date": self._today_str,
                 "requests": self._daily_requests,
                 "last_updated": datetime.now(IST).isoformat(),
             }
-            tmp_path = _QUOTA_FILE.with_suffix(".tmp")
+            tmp_path = q_file.with_suffix(".tmp")
             tmp_path.write_text(json.dumps(payload), encoding="utf-8")
-            tmp_path.replace(_QUOTA_FILE)
+            tmp_path.replace(q_file)
         except Exception as e_suppressed:
             logger.debug(f"[market.fyers_rate_gate] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -239,6 +301,7 @@ class UnifiedFyersRateGate:
         """Explicitly record that Fyers returned 429 daily limit reached."""
         with self._lock:
             self._daily_requests = max(self._daily_requests, int(self._max_per_day) + 500)
+            self._quota_dirty = False
             self._save_daily_quota()
 
     def _check_and_rollover_day(self) -> None:
@@ -248,6 +311,7 @@ class UnifiedFyersRateGate:
             self._today_str = now_day
             self._daily_requests = 0
             self._daily_by_category = {c: 0 for c in FyersCallCategory}
+            self._quota_dirty = False
             self._save_daily_quota()
             logger.info(
                 "[FyersRateGate] Daily request counter reset for new calendar session: %s", now_day
@@ -269,35 +333,75 @@ class UnifiedFyersRateGate:
         else:
             min_interval = 1.0 / max(self._max_per_sec, 1.0)
 
-        time_since_last = now - self._last_dispatch_ts
+        # Guard against backwards clock skew or future mocked timestamps
+        if self._last_dispatch_ts > now:
+            self._last_dispatch_ts = now
+        time_since_last = max(0.0, now - self._last_dispatch_ts)
         sleep_sec = max(0.0, min_interval - time_since_last)
 
         # 1b. Dedicated rate pacing for DEPTH_CHAIN calls to eliminate Fyers /depth burst throttling (-360/429)
         if category == FyersCallCategory.DEPTH_CHAIN:
             depth_spacing = (
-                0.38  # Max ~2.6 depth requests/sec (strictly protects Fyers /depth limit)
+                0.40  # Max ~2.5 depth requests/sec (strictly protects Fyers /depth limit)
             )
-            time_since_depth = now - self._last_depth_dispatch_ts
+            last_depth = getattr(self, "_last_depth_dispatch_ts", 0.0)
+            if last_depth > now:
+                self._last_depth_dispatch_ts = now
+                last_depth = now
+            time_since_depth = max(0.0, now - last_depth)
             sleep_sec = max(sleep_sec, depth_spacing - time_since_depth)
+
+            # Dedicated 1-second rolling cap for DEPTH_CHAIN (max 2 per second)
+            depth_sec_cutoff = now - 1.0
+            recent_depth = [
+                t
+                for t, c in self._sliding_window
+                if c == FyersCallCategory.DEPTH_CHAIN and t >= depth_sec_cutoff
+            ]
+            if len(recent_depth) >= 2:
+                oldest_depth = min(now, recent_depth[0])
+                sleep_sec = max(sleep_sec, 1.0 - (now - oldest_depth) + 0.01)
 
         # 1c. Dedicated rate pacing for HISTORICAL calls to pace multi-bar history fetches
         if category == FyersCallCategory.HISTORICAL:
-            hist_spacing = 0.30  # Max ~3.3 historical requests/sec
-            time_since_hist = now - getattr(self, "_last_hist_dispatch_ts", 0.0)
+            hist_spacing = (
+                0.35  # Max ~2.85 historical requests/sec (strictly protects Fyers /history limit)
+            )
+            last_hist = getattr(self, "_last_hist_dispatch_ts", 0.0)
+            if last_hist > now:
+                self._last_hist_dispatch_ts = now
+                last_hist = now
+            time_since_hist = max(0.0, now - last_hist)
             sleep_sec = max(sleep_sec, hist_spacing - time_since_hist)
+
+            # Dedicated 1-second rolling cap for HISTORICAL (max 3 per second)
+            hist_sec_cutoff = now - 1.0
+            recent_hist = [
+                t
+                for t, c in self._sliding_window
+                if c == FyersCallCategory.HISTORICAL and t >= hist_sec_cutoff
+            ]
+            if len(recent_hist) >= 3:
+                oldest_hist = min(now, recent_hist[0])
+                sleep_sec = max(sleep_sec, 1.0 - (now - oldest_hist) + 0.01)
 
         # 2. Check 1-second rolling window
         sec_cutoff = now - 1.0
         recent_sec = [t for t, _ in self._sliding_window if t >= sec_cutoff]
         if len(recent_sec) >= self._max_per_sec:
             # Must wait until oldest entry in current 1s window ages out
-            oldest_in_sec = recent_sec[0]
+            oldest_in_sec = min(now, recent_sec[0])
             sleep_sec = max(sleep_sec, 1.0 - (now - oldest_in_sec) + 0.005)
 
-        # 3. Check 60-second rolling window
-        if len(self._sliding_window) >= self._max_per_min:
-            oldest_in_min = self._sliding_window[0][0]
+        # 3. Check 60-second rolling window including pending waiter load
+        effective_min_load = len(self._sliding_window) + len(self._waiters)
+        if effective_min_load >= self._max_per_min:
+            oldest_in_min = min(now, self._sliding_window[0][0]) if self._sliding_window else now
             sleep_sec = max(sleep_sec, 60.0 - (now - oldest_in_min) + 0.02)
+
+        # Rate gate operates on 1-sec and 60-sec rolling windows; sleep can never legitimately exceed 60s.
+        # Clamping sleep_sec protects against clock skew and Windows DWORD/TIMEOUT_MAX overflow errors.
+        sleep_sec = max(0.0, min(sleep_sec, 60.0))
 
         # Apply slight micro-jitter (2-6ms) when sleep is needed to desynchronize thread releases
         if sleep_sec > 0.0:
@@ -318,22 +422,23 @@ class UnifiedFyersRateGate:
         Higher priority categories jump ahead in the wait queue.
         Returns True if acquired, False if timed out or rejected due to daily quota.
         """
-        # Track caller attribution for institutional rate observability
-        import traceback
+        # Track caller attribution for institutional rate observability (debug only)
+        if _ENABLE_CALLER_TRACKING:
+            import traceback
 
-        try:
-            frames = traceback.extract_stack(limit=12)[:-1]
-            relevant = [
-                f"{Path(fr.filename).name}:{fr.lineno} ({fr.name})"
-                for fr in frames
-                if "fyers_rate_gate" not in fr.filename and "threading" not in fr.filename
-            ]
-            if relevant:
-                c_key = " <- ".join(reversed(relevant[-3:]))
-                with self._lock:
-                    self._caller_counts[c_key] = self._caller_counts.get(c_key, 0) + 1
-        except Exception as e_suppressed:
-            logger.debug(f"[market.fyers_rate_gate] Caller tracking error: {e_suppressed}")
+            try:
+                frames = traceback.extract_stack(limit=12)[:-1]
+                relevant = [
+                    f"{Path(fr.filename).name}:{fr.lineno} ({fr.name})"
+                    for fr in frames
+                    if "fyers_rate_gate" not in fr.filename and "threading" not in fr.filename
+                ]
+                if relevant:
+                    c_key = " <- ".join(reversed(relevant[-3:]))
+                    with self._lock:
+                        self._caller_counts[c_key] = self._caller_counts.get(c_key, 0) + 1
+            except Exception as e_suppressed:
+                logger.debug(f"[market.fyers_rate_gate] Caller tracking error: {e_suppressed}")
         event = threading.Event()
         start_wait = time.time()
         tie_breaker = next(self._counter)
@@ -383,7 +488,10 @@ class UnifiedFyersRateGate:
                 self._total_requests[category] += 1
                 self._daily_requests += 1
                 self._daily_by_category[category] += 1
-                self._save_daily_quota()
+                self._quota_dirty = True
+                if self._daily_requests % 50 == 0:
+                    self._save_daily_quota()
+                    self._quota_dirty = False
                 if len(self._sliding_window) > self._peak_minute_count:
                     self._peak_minute_count = len(self._sliding_window)
                 return True
@@ -416,7 +524,10 @@ class UnifiedFyersRateGate:
                         self._total_requests[category] += 1
                         self._daily_requests += 1
                         self._daily_by_category[category] += 1
-                        self._save_daily_quota()
+                        self._quota_dirty = True
+                        if self._daily_requests % 50 == 0:
+                            self._save_daily_quota()
+                            self._quota_dirty = False
                         elapsed_wait = now - start_wait
                         self._total_throttle_seconds += elapsed_wait
                         if len(self._sliding_window) > self._peak_minute_count:
@@ -446,8 +557,9 @@ class UnifiedFyersRateGate:
                 sleep_to_use = min(sleep_to_use, remaining)
 
             # Wait on event or sleep
-            event.wait(timeout=sleep_to_use)
             event.clear()
+            safe_sleep = max(0.0, min(sleep_to_use, 60.0))
+            event.wait(timeout=safe_sleep)
 
     def get_diagnostics(self) -> dict[str, Any]:
         """Return real-time usage telemetry, remaining capacity, and diagnostic stats."""

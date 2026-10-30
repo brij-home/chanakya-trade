@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+from market.instruments import format_strike
 
 from brokers.base import (
     BrokerAPI,
@@ -802,7 +803,7 @@ class KotakNeoAPI(BrokerAPI):
                             c_vol = int(item.get("callVolume") or 0)
                             contracts.append(
                                 OptionsContract(
-                                    symbol=f"{clean_und}{exp}{int(strike)}CE",
+                                    symbol=f"{clean_und}{exp}{format_strike(strike)}CE",
                                     underlying=clean_und,
                                     expiry=exp,
                                     strike=strike,
@@ -820,7 +821,7 @@ class KotakNeoAPI(BrokerAPI):
                             p_vol = int(item.get("putVolume") or 0)
                             contracts.append(
                                 OptionsContract(
-                                    symbol=f"{clean_und}{exp}{int(strike)}PE",
+                                    symbol=f"{clean_und}{exp}{format_strike(strike)}PE",
                                     underlying=clean_und,
                                     expiry=exp,
                                     strike=strike,

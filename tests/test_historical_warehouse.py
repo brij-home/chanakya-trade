@@ -77,6 +77,7 @@ def test_warehouse_integration_with_market_history(tmp_path, monkeypatch):
     """Verify market.history.get_ohlcv transparently serves intraday data from the warehouse."""
     wh = HistoricalWarehouse(base_dir=tmp_path)
     monkeypatch.setattr("engine.historical_warehouse.historical_warehouse", wh)
+    monkeypatch.setattr("market.calendar.is_market_open", lambda *args, **kwargs: False)
     mh.clear_df_memory_cache()
 
     from market.calendar import get_latest_trading_day

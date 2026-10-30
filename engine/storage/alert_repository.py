@@ -567,7 +567,42 @@ class AlertRepository:
         Reaps or purges alerts whose contract expiry or intraday shelf-life has elapsed.
         Preserves winning trades by transitioning them to COMPLETED rather than EXPIRED.
         """
-        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        now_dt = datetime.now(IST)
+        now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+        today = now_dt.date()
+
+        # Pre-pass: proactively identify expired derivative contracts whose expiry date has elapsed
+        import re
+
+        for a in alerts:
+            if not getattr(a, "is_archived", False):
+                contract = getattr(a, "contract_symbol", "") or ""
+                m = re.search(r"20(\d{2})(\d{2})(\d{2})", contract)
+                if m:
+                    try:
+                        c_date = datetime(
+                            int("20" + m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=IST
+                        ).date()
+                        if c_date < today:
+                            a._force_test_expiry = True
+                            if not a.expiry_date:
+                                a.expiry_date = f"20{m.group(1)}-{m.group(2)}-{m.group(3)}"
+                    except ValueError as e_val:
+                        logger.debug(
+                            f"[AlertRepository] Could not parse contract expiry from {contract}: {e_val}"
+                        )
+                else:
+                    exp_date = getattr(a, "expiry_date", None)
+                    if exp_date and isinstance(exp_date, str) and len(exp_date) >= 10:
+                        try:
+                            parsed_exp = datetime.strptime(exp_date[:10], "%Y-%m-%d").date()
+                            if parsed_exp < today:
+                                a._force_test_expiry = True
+                        except Exception as e_exp:
+                            logger.debug(
+                                f"[AlertRepository] Could not parse alert expiry date string {exp_date}: {e_exp}"
+                            )
+
         if purge:
             purged = 0
             surviving: list[AutoAlert] = []

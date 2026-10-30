@@ -58,8 +58,7 @@ def _make_index_alert(
 
 def test_direction_aware_reversal_bypass_granted(tmp_path, monkeypatch):
     """
-    When the hourly index pacing limit is reached (e.g. 4 BEARISH dispatches with limit=4),
-    a new high-conviction BULLISH alert (confidence >= 85) must be granted dispatch.
+    Index setups have ZERO hourly pacing: both prevailing and reversal index alerts pass unthrottled.
     """
     monkeypatch.setenv("TELEGRAM_MAX_INDEX_ALERTS_PER_DIR_HOUR", "4")
     engine = AutoAlertEngine()
@@ -82,13 +81,13 @@ def test_direction_aware_reversal_bypass_granted(tmp_path, monkeypatch):
         (now_ts - 300, "BEARISH"),
     ]
 
-    # Another BEARISH alert should be blocked by hourly pacing
+    # Another high-conviction BEARISH alert passes without arbitrary pacing throttle
     bearish_alert = _make_index_alert("aa-idx-bear-1", direction="BEARISH", confidence=90)
     allowed, reason = engine._eval_telegram_apex_gate(bearish_alert, in_market=True, now_ts=now_ts)
-    assert not allowed
-    assert "hourly pacing limit reached" in reason
+    assert allowed is True
+    assert reason == "PASSED_APEX_GATE"
 
-    # A high-conviction BULLISH alert (reversal) MUST be granted dispatch
+    # A high-conviction BULLISH alert (reversal) also passes unthrottled
     bullish_alert = _make_index_alert("aa-idx-bull-rev", direction="BULLISH", confidence=90)
     allowed_rev, reason_rev = engine._eval_telegram_apex_gate(
         bullish_alert, in_market=True, now_ts=now_ts
@@ -116,7 +115,7 @@ def test_reversal_bypass_not_granted_for_low_confidence(tmp_path, monkeypatch):
 
 
 def test_reversal_bypass_capped_at_two(tmp_path, monkeypatch):
-    """Directional pacing ensures dispatches in the new direction cannot exceed directional limit."""
+    """Zero pacing ensures valid index setups in any direction pass unthrottled."""
     monkeypatch.setenv("TELEGRAM_MAX_INDEX_ALERTS_PER_DIR_HOUR", "2")
     engine = AutoAlertEngine()
     engine._alerts_file = tmp_path / "auto_alerts.json"
@@ -134,8 +133,8 @@ def test_reversal_bypass_capped_at_two(tmp_path, monkeypatch):
         (now_ts - 100, "BULLISH"),
     ]
 
-    # 3rd BULLISH reversal alert must be paced (BULLISH count 2 >= limit 2)
+    # 3rd BULLISH reversal alert passes without pacing choke
     third_rev = _make_index_alert("aa-idx-third-rev", direction="BULLISH", confidence=92)
     allowed, reason = engine._eval_telegram_apex_gate(third_rev, in_market=True, now_ts=now_ts)
-    assert not allowed
-    assert "hourly pacing limit reached" in reason
+    assert allowed is True
+    assert reason == "PASSED_APEX_GATE"

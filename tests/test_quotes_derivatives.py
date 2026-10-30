@@ -122,6 +122,25 @@ def test_options_quotes_resolution():
         assert q.change_pct == 13.75
         assert q.volume == 54000
 
+    # Test alias resolution: ZOMATO -> ETERNAL
+    clear_quote_cache()
+    mock_zomato_contract = MagicMock()
+    mock_zomato_contract.expiry = "2026-10-27"
+    mock_zomato_contract.last_price = 14.50
+    mock_zomato_contract.pchange = 5.0
+    mock_zomato_contract.volume = 12000
+    mock_zomato_contract.oi = 300000
+    mock_zomato_contract.strike = 280.0
+    mock_zomato_contract.option_type = "CE"
+
+    zomato_snapshot = ([mock_zomato_contract], 285.0, ["2026-10-27"], {"provider": "fyers"})
+    with patch("market.options.get_options_snapshot", return_value=zomato_snapshot) as mock_snap:
+        quotes = get_quote(["NFO:ZOMATO20261027280CE"])
+        assert "NFO:ZOMATO20261027280CE" in quotes
+        assert quotes["NFO:ZOMATO20261027280CE"].last_price == 14.50
+        # Ensure underlying was resolved to ETERNAL
+        mock_snap.assert_called_with("ETERNAL", expiry="2026-10-27")
+
 
 def test_futures_quotes_resolution():
     from market.quotes import clear_quote_cache

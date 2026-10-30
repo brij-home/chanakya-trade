@@ -195,6 +195,7 @@ def _get_telegram():
             CommandHandler,
             ContextTypes,
             MessageHandler,
+            CallbackQueryHandler,
             filters,
         )
 
@@ -205,6 +206,7 @@ def _get_telegram():
             CommandHandler,
             ContextTypes,
             MessageHandler,
+            CallbackQueryHandler,
             filters,
         )
     except ImportError:
@@ -245,12 +247,13 @@ _bot_thread: Optional[threading.Thread] = None
 # Bounded push notification executor to prevent thread explosion on alert storms
 _push_executor: Optional[Any] = None
 _push_lock = threading.Lock()
+_ALLOW_TEST_DISPATCH = False
 
 
 def _get_push_executor() -> Any:
     global _push_executor
     with _push_lock:
-        if _push_executor is None:
+        if _push_executor is None or getattr(_push_executor, "_shutdown", False):
             import concurrent.futures
 
             _push_executor = concurrent.futures.ThreadPoolExecutor(
@@ -338,6 +341,8 @@ async def cmd_start(update, context) -> None:
             "/channels — multi-channel routing destinations & status\n"
             "/ping_all — diagnostic heartbeat test across all channels\n"
             "/filter [SEGMENTS] — view or update allowed alert segments\n"
+            "/mute — quiet mode: silence audible alerts during meetings/zoom calls\n"
+            "/unmute — enable audible chime alerts\n"
             "/memory — recent analyses\n"
             "/pnl — portfolio P&L\n"
             "/help — this message\n\n"
@@ -657,7 +662,9 @@ async def cmd_strike_radar(update, context) -> None:
         loop = asyncio.get_running_loop()
 
         def _get():
-            plan = get_premarket_battle_plan(["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"])
+            plan = get_premarket_battle_plan(
+                ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+            )
             return format_premarket_strike_radar(plan)
 
         text = await loop.run_in_executor(None, _get)
@@ -674,7 +681,9 @@ async def cmd_orb_radar(update, context) -> None:
         loop = asyncio.get_running_loop()
 
         def _get():
-            plan = get_opening_range_battle_plan(["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"])
+            plan = get_opening_range_battle_plan(
+                ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+            )
             return format_opening_range_radar(plan)
 
         text = await loop.run_in_executor(None, _get)
@@ -2198,6 +2207,424 @@ def clear_signal_message_ids() -> None:
         logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
 
 
+# ── Callback Data Registry & 64-Byte Bounded Sanitizer ──────────
+
+_CALLBACKS_FILE = Path(__file__).parent.parent / "data" / "telegram_callbacks.json"
+_callback_data_registry: dict[str, str] = {}
+_callback_lock = threading.Lock()
+_MAX_CALLBACK_REGISTRY_SIZE = 5000
+_callbacks_loaded = False
+
+
+def _load_callbacks_if_needed() -> None:
+    global _callbacks_loaded
+    if _callbacks_loaded:
+        return
+    with _callback_lock:
+        if _callbacks_loaded:
+            return
+        if _CALLBACKS_FILE.exists():
+            try:
+                with open(_CALLBACKS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        _callback_data_registry.update({str(k): str(v) for k, v in data.items()})
+            except Exception as e_suppressed:
+                logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
+        _callbacks_loaded = True
+
+
+def _save_callbacks() -> None:
+    try:
+        _CALLBACKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with _callback_lock:
+            data = dict(_callback_data_registry)
+        with open(_CALLBACKS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}")
+
+
+def build_alert_callback_data(action: str, alert_id: str) -> str:
+    """
+    Construct safe, protocol-compliant callback_data for Telegram InlineKeyboardButtons.
+    Telegram Bot API strictly enforces that callback_data must be 1 to 64 bytes in UTF-8.
+    For alerts with long IDs (e.g. commodities or multi-token names > 53 chars),
+    compacts the identifier using a deterministic SHA-256 slice registered in the callback registry.
+    """
+    clean_action = str(action or "").strip()
+    clean_aid = str(alert_id or "").strip()
+    raw = f"{clean_action}:{clean_aid}"
+    if len(raw.encode("utf-8")) <= 64:
+        return raw
+
+    import hashlib
+
+    # Deterministic 16-char hash token guarantees total payload <= 64 bytes
+    h_token = f"h_{hashlib.sha256(clean_aid.encode('utf-8')).hexdigest()[:16]}"
+    compact_data = f"{clean_action}:{h_token}"
+
+    _load_callbacks_if_needed()
+    with _callback_lock:
+        _callback_data_registry[h_token] = clean_aid
+        if len(_callback_data_registry) > _MAX_CALLBACK_REGISTRY_SIZE:
+            for k in list(_callback_data_registry.keys())[:200]:
+                _callback_data_registry.pop(k, None)
+    _save_callbacks()
+    return compact_data
+
+
+def resolve_alert_callback_data(raw_data: str) -> tuple[str, str]:
+    """
+    Resolve callback query data back to (action, alert_id), decoding compact tokens if present.
+    """
+    if not raw_data or ":" not in raw_data:
+        return ("", "")
+    parts = raw_data.split(":", 1)
+    action, target = parts[0].strip(), parts[1].strip()
+    if target.startswith("h_"):
+        _load_callbacks_if_needed()
+        with _callback_lock:
+            resolved_aid = _callback_data_registry.get(target, target)
+        return (action, resolved_aid)
+    return (action, target)
+
+
+def build_alert_execution_keyboard(alert_id: str) -> dict[str, Any]:
+    """
+    Construct 1-tap mobile execution buttons (⚡ Execute Live, 🛡️ Paper Trade, ❌ Dismiss)
+    with bounded callback_data guaranteed never to trigger BUTTON_DATA_INVALID.
+    """
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "⚡ Execute Live",
+                    "callback_data": build_alert_callback_data("exec_live", alert_id),
+                },
+                {
+                    "text": "🛡️ Paper Trade",
+                    "callback_data": build_alert_callback_data("exec_paper", alert_id),
+                },
+                {
+                    "text": "❌ Dismiss",
+                    "callback_data": build_alert_callback_data("dismiss", alert_id),
+                },
+            ]
+        ]
+    }
+
+
+def sanitize_reply_markup(reply_markup: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """
+    Sanitize reply_markup payload ensuring all callback_data values strictly obey Telegram's
+    64-byte protocol limit. If any oversized callback data is found, it is safely compacted.
+    """
+    if not reply_markup or not isinstance(reply_markup, dict):
+        return reply_markup
+    inline_kb = reply_markup.get("inline_keyboard")
+    if not inline_kb or not isinstance(inline_kb, list):
+        return reply_markup
+
+    sanitized_rows: list[list[dict[str, Any]]] = []
+    for row in inline_kb:
+        if not isinstance(row, list):
+            continue
+        sanitized_row: list[dict[str, Any]] = []
+        for btn in row:
+            if not isinstance(btn, dict):
+                continue
+            btn_copy = dict(btn)
+            cb = btn_copy.get("callback_data")
+            if cb is not None and len(str(cb).encode("utf-8")) > 64:
+                cb_str = str(cb).strip()
+                if ":" in cb_str:
+                    act, val = cb_str.split(":", 1)
+                    btn_copy["callback_data"] = build_alert_callback_data(act, val)
+                else:
+                    import hashlib
+
+                    h = f"cb_{hashlib.sha256(cb_str.encode('utf-8')).hexdigest()[:24]}"
+                    _load_callbacks_if_needed()
+                    with _callback_lock:
+                        _callback_data_registry[h] = cb_str
+                    _save_callbacks()
+                    btn_copy["callback_data"] = h
+            sanitized_row.append(btn_copy)
+        sanitized_rows.append(sanitized_row)
+
+    res = dict(reply_markup)
+    res["inline_keyboard"] = sanitized_rows
+    return res
+
+
+# ── Quiet Mode & 1-Tap Execution Handlers ──────────────────────
+
+
+async def cmd_mute(update, context) -> None:
+    """Silence audible alert chimes (Quiet mode during meetings/zoom calls)."""
+    try:
+        from engine.alert_preferences import get_alert_preferences_manager
+
+        mgr = get_alert_preferences_manager()
+        mgr.update_preferences({"sound": {"enabled": False}})
+        msg = (
+            "🔇 <b>Quiet Mode Active:</b> Audio alerts are muted.\n"
+            "System is operating in silent mode. All quantitative scanning, "
+            "terminal SSE updates, and Telegram setups run at full unconstrained power."
+        )
+    except Exception as e:
+        msg = f"⚠️ Could not set quiet mode: {e}"
+    if update and update.message:
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_unmute(update, context) -> None:
+    """Enable audible alert chimes."""
+    try:
+        from engine.alert_preferences import get_alert_preferences_manager
+
+        mgr = get_alert_preferences_manager()
+        mgr.update_preferences({"sound": {"enabled": True}})
+        msg = "🔊 <b>Audio Unmuted:</b> Audio chime alerts are now active."
+    except Exception as e:
+        msg = f"⚠️ Could not unmute audio: {e}"
+    if update and update.message:
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def handle_alert_callback(update, context) -> None:
+    """Handle 1-tap mobile interactive actions: Execute Live, Paper Trade, Dismiss."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    raw_data = str(query.data or "").strip()
+    action, alert_id = resolve_alert_callback_data(raw_data)
+    if not action or not alert_id:
+        return
+
+    if action == "dismiss":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as e_suppressed:
+            logger.debug(f"[TelegramBot] Callback markup remove exception: {e_suppressed}")
+        if query.message:
+            await query.message.reply_text(
+                f"❌ <b>Alert Dismissed:</b> <code>{alert_id}</code>", parse_mode="HTML"
+            )
+        return
+
+    if action == "exec_paper":
+        try:
+            from engine.auto_alert_engine import get_auto_alert_engine
+
+            engine = get_auto_alert_engine()
+            alert = engine.get_alert(alert_id)
+            if not alert:
+                if query.message:
+                    await query.message.reply_text(
+                        f"⚠️ <b>Alert Not Found:</b> <code>{alert_id}</code>", parse_mode="HTML"
+                    )
+                return
+
+            plan = getattr(alert, "actionable_plan", {}) or {}
+            hedge_plan = plan.get("hedge_plan") or getattr(alert, "hedge_plan", None)
+            if hedge_plan and isinstance(hedge_plan, dict) and hedge_plan.get("legs"):
+                from engine.multi_leg_executor import execute_defined_risk_spread
+                from engine.defined_risk_spreads import DefinedRiskSpread, SpreadLeg
+
+                legs = [
+                    SpreadLeg(
+                        symbol=l.get("symbol", ""),
+                        option_type=l.get("option_type", "CE"),
+                        strike=float(l.get("strike", 0.0)),
+                        side=l.get("side", "BUY"),
+                        premium=float(l.get("premium", 0.0)),
+                        lot_size=int(l.get("lot_size", 1)),
+                        quantity=int(l.get("quantity", l.get("lot_size", 1))),
+                    )
+                    for l in hedge_plan.get("legs", [])
+                ]
+                spread_obj = DefinedRiskSpread(
+                    strategy_name=hedge_plan.get("strategy_name", "BULL_CALL_SPREAD"),
+                    underlying=getattr(alert, "canonical_symbol", None)
+                    or getattr(alert, "symbol", "NIFTY"),
+                    spot_price=float(getattr(alert, "ltp", 0.0) or 0.0),
+                    legs=legs,
+                    net_debit=float(hedge_plan.get("net_debit_per_share", 0.0) or 0.0),
+                    max_profit=float(hedge_plan.get("max_profit", 0.0) or 0.0),
+                    max_loss=float(hedge_plan.get("max_loss", 0.0) or 0.0),
+                    risk_reward_ratio=2.5,
+                    breakeven_points=[],
+                )
+                res = execute_defined_risk_spread(spread=spread_obj, product="MIS")
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[telegram_bot] Non-fatal reply markup edit error: {e_suppressed}"
+                    )
+                if query.message:
+                    await query.message.reply_text(
+                        f"🛡️ <b>PAPER SPREAD DISPATCHED</b>\n"
+                        f"• Alert: <code>{alert_id}</code>\n"
+                        f"• Strategy: <b>{res.strategy_name}</b>\n"
+                        f"• Status: <b>{res.status}</b>\n"
+                        f"• Legs Filled: {len(res.executed_legs)}/{len(res.executed_legs) + len(res.failed_legs)}\n"
+                        f"• Net Fill: ₹{res.net_fill_price:.2f}/sh",
+                        parse_mode="HTML",
+                    )
+            else:
+                from engine.order_lifecycle import (
+                    preview_order_intent,
+                    confirm_order_intent,
+                    execute_order_intent,
+                )
+
+                sym = getattr(alert, "canonical_symbol", None) or getattr(alert, "symbol", "NIFTY")
+                act = (plan.get("action") or "BUY").upper()
+                side = "SELL" if "SELL" in act or "SHORT" in act else "BUY"
+                qty = int(getattr(alert, "lot_size", 1) or 1)
+                px = float(getattr(alert, "entry_price", getattr(alert, "ltp", 100.0)) or 100.0)
+                import uuid
+
+                intent = preview_order_intent(
+                    symbol=sym,
+                    side=side,
+                    quantity=qty,
+                    price=px,
+                    idempotency_key=f"TG-PAPER-{alert_id}-{uuid.uuid4().hex[:8]}",
+                )
+                conf = confirm_order_intent(intent.order_id, intent.preview_hash)
+                exec_res = execute_order_intent(conf.order_id)
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception as e_suppressed:
+                    logger.debug(
+                        f"[telegram_bot] Non-fatal reply markup edit error: {e_suppressed}"
+                    )
+                if query.message:
+                    await query.message.reply_text(
+                        f"🛡️ <b>PAPER ORDER EXECUTED</b>\n"
+                        f"• Symbol: <b>{sym}</b> ({side} {qty} qty)\n"
+                        f"• Order ID: <code>{exec_res.order_id}</code>\n"
+                        f"• Status: <b>{exec_res.status}</b>\n"
+                        f"• Price: ₹{exec_res.price:.2f}",
+                        parse_mode="HTML",
+                    )
+        except Exception as e:
+            logger.error(f"[TelegramBot] Paper execution error for {alert_id}: {e}", exc_info=True)
+            if query.message:
+                await query.message.reply_text(f"❌ <b>Execution Error:</b> {e}", parse_mode="HTML")
+        return
+
+    if action == "exec_live":
+        if os.environ.get("ALLOW_LIVE_TRADING") != "1":
+            if query.message:
+                await query.message.reply_text(
+                    "⚠️ <b>LIVE EXECUTION LOCKED (Safety Guardrail)</b>\n"
+                    "Live trading is guarded by <code>ALLOW_LIVE_TRADING=1</code>.\n"
+                    "Tap <b>[🛡️ Paper Trade]</b> to execute in simulation mode.",
+                    parse_mode="HTML",
+                )
+            return
+
+        try:
+            from engine.auto_alert_engine import get_auto_alert_engine
+
+            engine = get_auto_alert_engine()
+            alert = engine.get_alert(alert_id)
+            if not alert:
+                if query.message:
+                    await query.message.reply_text(
+                        f"⚠️ <b>Alert Not Found:</b> <code>{alert_id}</code>", parse_mode="HTML"
+                    )
+                return
+
+            plan = getattr(alert, "actionable_plan", {}) or {}
+            from engine.order_lifecycle import (
+                preview_order_intent,
+                confirm_order_intent,
+                execute_order_intent,
+            )
+
+            sym = getattr(alert, "canonical_symbol", None) or getattr(alert, "symbol", "NIFTY")
+            act = (plan.get("action") or "BUY").upper()
+            side = "SELL" if "SELL" in act or "SHORT" in act else "BUY"
+            qty = int(getattr(alert, "lot_size", 1) or 1)
+            px = float(getattr(alert, "entry_price", getattr(alert, "ltp", 100.0)) or 100.0)
+            import uuid
+
+            intent = preview_order_intent(
+                symbol=sym,
+                side=side,
+                quantity=qty,
+                price=px,
+                idempotency_key=f"TG-LIVE-{alert_id}-{uuid.uuid4().hex[:8]}",
+            )
+            conf = confirm_order_intent(intent.order_id, intent.preview_hash)
+            exec_res = execute_order_intent(conf.order_id)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception as e_suppressed:
+                logger.debug(f"[telegram_bot] Non-fatal reply markup edit error: {e_suppressed}")
+            if query.message:
+                await query.message.reply_text(
+                    f"⚡ <b>LIVE BROKER ORDER SUBMITTED</b>\n"
+                    f"• Symbol: <b>{sym}</b> ({side} {qty} qty)\n"
+                    f"• Order ID: <code>{exec_res.order_id}</code>\n"
+                    f"• Status: <b>{exec_res.status}</b>\n"
+                    f"• Broker Order ID: <code>{exec_res.broker_order_id}</code>",
+                    parse_mode="HTML",
+                )
+        except Exception as e:
+            logger.error(f"[TelegramBot] Live execution error for {alert_id}: {e}", exc_info=True)
+            if query.message:
+                await query.message.reply_text(
+                    f"❌ <b>Live Execution Failure:</b> {e}", parse_mode="HTML"
+                )
+        return
+
+
+def sanitize_telegram_html(text: str) -> str:
+    """
+    Sanitize text for Telegram HTML parse_mode:
+    Preserves valid supported HTML tags (b, strong, i, em, u, ins, s, strike, del,
+    code, pre, blockquote, tg-spoiler, a, span), while escaping stray or invalid
+    literal '<' and '>' characters (e.g. '< 0.5%', '<>', '<<') to prevent HTTP 400
+    'Unsupported start tag' entity parsing errors.
+    """
+    if not text or ("<" not in text and ">" not in text):
+        return text
+
+    # Regex matching supported Telegram tags
+    tag_pattern = re.compile(
+        r"(</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|blockquote|tg-spoiler)"
+        r'(?:\s+[^>]*)?>|<span\s+class="tg-spoiler">|</span>|<a\s+href="[^"]*">|</a>)',
+        re.IGNORECASE,
+    )
+
+    tokens = []
+    last_idx = 0
+    for match in tag_pattern.finditer(text):
+        start, end = match.span()
+        # Text before the valid tag: escape literal < and >
+        segment = text[last_idx:start]
+        segment = segment.replace("<", "&lt;").replace(">", "&gt;")
+        tokens.append(segment)
+        # Valid tag preserved verbatim
+        tokens.append(match.group(0))
+        last_idx = end
+
+    # Remaining text after the last tag
+    trailing = text[last_idx:]
+    trailing = trailing.replace("<", "&lt;").replace(">", "&gt;")
+    tokens.append(trailing)
+
+    return "".join(tokens)
+
+
 def format_telegram_push_payload(
     message: str,
     chat_id: Optional[str] = None,
@@ -2208,6 +2635,7 @@ def format_telegram_push_payload(
     parse_mode: str = "HTML",
     alert_id: Optional[str] = None,
     is_update: Optional[bool] = None,
+    reply_markup: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
     Construct the canonical Telegram sendMessage payload.
@@ -2248,7 +2676,10 @@ def format_telegram_push_payload(
         if m_blocked:
             return {}
 
-    payload: dict[str, Any] = {"chat_id": target_chat_id, "text": message}
+    clean_message = (
+        sanitize_telegram_html(message) if (parse_mode or "").upper() == "HTML" else message
+    )
+    payload: dict[str, Any] = {"chat_id": target_chat_id, "text": clean_message}
     if parse_mode:
         payload["parse_mode"] = parse_mode
     if message_thread_id:
@@ -2309,10 +2740,6 @@ def format_telegram_push_payload(
             "message_id": int(reply_to_message_id),
             "allow_sending_without_reply": True,
         }
-        payload["reply_parameters"] = {
-            "message_id": int(reply_to_message_id),
-            "allow_sending_without_reply": True,
-        }
 
     # Audio / Tone Differentiator:
     # Silent (disable_notification=True): TRAIL RATCHET, PRECURSOR RADAR, EOD, morning brief
@@ -2334,6 +2761,9 @@ def format_telegram_push_payload(
     if disable_notification:
         payload["disable_notification"] = True
 
+    if reply_markup is not None:
+        payload["reply_markup"] = sanitize_reply_markup(reply_markup)
+
     return payload
 
 
@@ -2349,6 +2779,7 @@ def send_push(
     on_success: Optional[Callable[[int], None]] = None,
     alert_id: Optional[str] = None,
     is_update: Optional[bool] = None,
+    reply_markup: Optional[dict[str, Any]] = None,
 ) -> None:
     """
     Send a push notification to the configured Telegram chat, group, or channel.
@@ -2404,6 +2835,7 @@ def send_push(
         parse_mode=parse_mode,
         alert_id=alert_id,
         is_update=is_update,
+        reply_markup=reply_markup,
     )
     if not payload or not payload.get("text"):
         return
@@ -2414,7 +2846,7 @@ def send_push(
         resolved_sig = tags[0]
 
     def _send():
-        if os.environ.get("CHANAKYA_TESTING") == "1":
+        if os.environ.get("CHANAKYA_TESTING") == "1" and not _ALLOW_TEST_DISPATCH:
             logger.debug(
                 "[TelegramPush] Network call skipped during test execution (CHANAKYA_TESTING=1)"
             )
@@ -2423,10 +2855,9 @@ def send_push(
             import httpx
 
             url = f"https://api.telegram.org/bot{token}/sendMessage"
-            resp = httpx.post(url, json=payload, timeout=10)
-            if resp.is_success:
+
+            def _record_and_callback(data: dict[str, Any]) -> None:
                 try:
-                    data = resp.json()
                     msg_id = data.get("result", {}).get("message_id")
                     if msg_id:
                         keys_to_record = set()
@@ -2434,6 +2865,8 @@ def send_push(
                             keys_to_record.add(resolved_sig)
                         for t in tags:
                             keys_to_record.add(t)
+                        if alert_id:
+                            keys_to_record.add(alert_id)
                         for k in keys_to_record:
                             record_signal_message_id(
                                 k,
@@ -2447,61 +2880,146 @@ def send_push(
                                 on_success(int(msg_id))
                             except Exception as e_suppressed:
                                 logger.debug(
-                                    f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}"
+                                    f"[bot.telegram_bot] Non-fatal on_success exception: {e_suppressed}"
                                 )
                 except Exception as e_suppressed:
                     logger.debug(
-                        f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}"
+                        f"[bot.telegram_bot] Non-fatal record_signal exception: {e_suppressed}"
                     )
-            elif parse_mode == "HTML":
-                # If HTML parsing fails due to any unescaped tags/characters, retry as plain text so the alert is never lost
-                clean_text = re.sub(r"<[^>]+>", "", message)
-                fallback_payload = dict(payload)
-                fallback_payload.pop("parse_mode", None)
-                fallback_payload["text"] = clean_text
-                resp2 = httpx.post(url, json=fallback_payload, timeout=10)
-                if resp2.is_success:
-                    try:
-                        data = resp2.json()
-                        msg_id = data.get("result", {}).get("message_id")
-                        if msg_id:
-                            keys_to_record = set()
-                            if resolved_sig:
-                                keys_to_record.add(resolved_sig)
-                            for t in tags:
-                                keys_to_record.add(t)
-                            for k in keys_to_record:
-                                record_signal_message_id(
-                                    k,
-                                    msg_id,
-                                    chat_id=target_chat_id,
-                                    alert_id=alert_id,
-                                    overwrite=not bool(is_update),
-                                )
-                            if on_success and callable(on_success):
-                                try:
-                                    on_success(int(msg_id))
-                                except Exception as e_suppressed:
-                                    logger.debug(
-                                        f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}"
-                                    )
-                    except Exception as e_suppressed:
-                        logger.debug(
-                            f"[bot.telegram_bot] Non-fatal exception suppressed: {e_suppressed}"
-                        )
-                else:
-                    logger.warning(
-                        f"[TelegramPush] Telegram plaintext retry failed for chat {target_chat_id}: "
-                        f"HTTP {resp2.status_code} - {resp2.text[:200]}"
+
+            # Stage 1: Attempt standard formatted dispatch
+            resp = httpx.post(url, json=payload, timeout=10)
+            if resp.is_success:
+                _record_and_callback(resp.json())
+                return
+
+            err_data: dict[str, Any] = {}
+            try:
+                err_data = resp.json()
+            except Exception as e_json:
+                logger.debug("[TelegramPush] Non-JSON error response from Telegram: %s", e_json)
+            err_desc = err_data.get("description", resp.text[:200])
+
+            logger.warning(
+                f"[TelegramPush] Telegram API rejected message for chat {target_chat_id}: "
+                f"HTTP {resp.status_code} - {err_desc}"
+            )
+
+            # Stage 2: Multi-Stage Adaptive Recovery based on Telegram error cause
+            adaptive_payload = dict(payload)
+            needs_adaptive_retry = False
+            err_desc_lower = err_desc.lower()
+
+            # 2a. Button data error (e.g. BUTTON_DATA_INVALID) -> strip reply_markup
+            if "button_data_invalid" in err_desc_lower or "button" in err_desc_lower:
+                if "reply_markup" in adaptive_payload:
+                    adaptive_payload.pop("reply_markup", None)
+                    needs_adaptive_retry = True
+                    logger.info(
+                        f"[TelegramPush] Stripped reply_markup for chat {target_chat_id} due to button error: {err_desc}"
                     )
-            else:
-                logger.warning(
-                    f"[TelegramPush] Telegram API rejected message for chat {target_chat_id}: "
-                    f"HTTP {resp.status_code} - {resp.text[:200]}"
+
+            # 2b. Reply reference error (e.g. replied message not found) -> strip reply parameters
+            if any(
+                k in err_desc_lower
+                for k in (
+                    "replied",
+                    "reply_to_message_id",
+                    "message to be replied not found",
+                    "reply_parameters",
                 )
+            ):
+                if (
+                    "reply_to_message_id" in adaptive_payload
+                    or "reply_parameters" in adaptive_payload
+                ):
+                    adaptive_payload.pop("reply_to_message_id", None)
+                    adaptive_payload.pop("reply_parameters", None)
+                    adaptive_payload.pop("allow_sending_without_reply", None)
+                    needs_adaptive_retry = True
+                    logger.info(
+                        f"[TelegramPush] Stripped reply parameters for chat {target_chat_id} due to reply error: {err_desc}"
+                    )
+
+            # 2c. Thread error (e.g. message thread not found) -> strip message_thread_id
+            if "thread" in err_desc_lower:
+                if "message_thread_id" in adaptive_payload:
+                    adaptive_payload.pop("message_thread_id", None)
+                    needs_adaptive_retry = True
+                    logger.info(
+                        f"[TelegramPush] Stripped message_thread_id for chat {target_chat_id} due to thread error: {err_desc}"
+                    )
+
+            # 2d. HTML parsing / entities error
+            if any(
+                k in err_desc_lower
+                for k in ("can't parse entities", "parse", "tag", "html", "entity")
+            ):
+                clean_text = (
+                    re.sub(r"<[^>]*>", "", message).replace("<", "").replace(">", "").strip()
+                )
+                adaptive_payload.pop("parse_mode", None)
+                adaptive_payload["text"] = clean_text
+                needs_adaptive_retry = True
+                logger.info(
+                    f"[TelegramPush] Stripped HTML formatting for chat {target_chat_id} due to parse error: {err_desc}"
+                )
+
+            if needs_adaptive_retry:
+                resp2 = httpx.post(url, json=adaptive_payload, timeout=10)
+                if resp2.is_success:
+                    logger.info(
+                        f"[TelegramPush] Telegram adaptive retry succeeded for chat {target_chat_id}"
+                    )
+                    _record_and_callback(resp2.json())
+                    return
+
+                err2_data: dict[str, Any] = {}
+                try:
+                    err2_data = resp2.json()
+                except Exception as e_json:
+                    logger.debug("[TelegramPush] Non-JSON error response on retry: %s", e_json)
+                err2_desc = err2_data.get("description", resp2.text[:200])
+                logger.warning(
+                    f"[TelegramPush] Telegram adaptive retry failed for chat {target_chat_id}: "
+                    f"HTTP {resp2.status_code} - {err2_desc}"
+                )
+
+            # Stage 3: Ultimate Fail-Safe Barebones Delivery (Zero-Blackout Guarantee)
+            # Guarantees market setups and critical alerts are never lost
+            barebones_text = (
+                re.sub(r"<[^>]*>", "", message).replace("<", "").replace(">", "")[:4096].strip()
+            )
+            if barebones_text:
+                barebones_payload = {
+                    "chat_id": target_chat_id,
+                    "text": barebones_text,
+                }
+                if barebones_payload != adaptive_payload:
+                    resp3 = httpx.post(url, json=barebones_payload, timeout=10)
+                    if resp3.is_success:
+                        logger.info(
+                            f"[TelegramPush] Telegram barebones fail-safe succeeded for chat {target_chat_id}"
+                        )
+                        _record_and_callback(resp3.json())
+                        return
+
+                    err3_data: dict[str, Any] = {}
+                    try:
+                        err3_data = resp3.json()
+                    except Exception as e_json:
+                        logger.debug(
+                            "[TelegramPush] Non-JSON error response on fail-safe: %s", e_json
+                        )
+                    err3_desc = err3_data.get("description", resp3.text[:200])
+                    logger.error(
+                        f"[TelegramPush] Telegram barebones fail-safe failed for chat {target_chat_id}: "
+                        f"HTTP {resp3.status_code} - {err3_desc}"
+                    )
         except Exception as e:
             logger.warning(
-                f"[TelegramPush] Exception delivering push to Telegram chat {target_chat_id}: {e}"
+                f"[TelegramPush] Exception delivering push to Telegram chat {target_chat_id}: {e}",
+                exc_info=True,
             )
 
     _get_push_executor().submit(_send)
@@ -2656,9 +3174,16 @@ def patch_alert_manager() -> None:
 
 def run_bot() -> None:
     """Start the Telegram bot (blocking — runs the event loop)."""
-    Update, Bot, ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters = (
-        _get_telegram()
-    )
+    (
+        Update,
+        Bot,
+        ApplicationBuilder,
+        CommandHandler,
+        ContextTypes,
+        MessageHandler,
+        CallbackQueryHandler,
+        filters,
+    ) = _get_telegram()
 
     token = _get_bot_token()
 
@@ -2693,10 +3218,13 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("alerts", _track_command(cmd_alerts)))
     app.add_handler(CommandHandler("filter", _track_command(cmd_filter)))
     app.add_handler(CommandHandler("segments", _track_command(cmd_filter)))
+    app.add_handler(CommandHandler("mute", _track_command(cmd_mute)))
+    app.add_handler(CommandHandler("unmute", _track_command(cmd_unmute)))
     app.add_handler(CommandHandler("channels", _track_command(cmd_channels)))
     app.add_handler(CommandHandler("ping_all", _track_command(cmd_ping_all)))
     app.add_handler(CommandHandler("memory", _track_command(cmd_memory)))
     app.add_handler(CommandHandler("pnl", _track_command(cmd_pnl)))
+    app.add_handler(CallbackQueryHandler(_track_command(handle_alert_callback)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _track_command(cmd_unknown)))
 
     async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

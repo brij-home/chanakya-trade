@@ -61,7 +61,7 @@ class TestPrestigeAndLiquidUniverseResolution:
             "BEL": ("defence", "Defence & Aerospace"),
             "HAL": ("defence", "Defence & Aerospace"),
             "TRENT": ("fmcg", "FMCG, Retail & Consumption"),
-            "ZOMATO": ("it", "IT, Software & Technology"),
+            "ZOMATO": ("fmcg", "FMCG, Retail & Consumption"),
             "DIXON": ("it", "IT, Software & Technology"),
             "SUZLON": ("energy", "Energy, Power & Green Transition"),
             "BSE": ("banking", "Banking & Financial Services"),

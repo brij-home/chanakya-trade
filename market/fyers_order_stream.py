@@ -26,12 +26,17 @@ class FyersOrderStreamManager:
     def __init__(self) -> None:
         self._ws = None
         self._connected = False
+        self._running = False
         self._access_token = ""
         self._callbacks_orders: list[Callable] = []
         self._callbacks_trades: list[Callable] = []
         self._callbacks_positions: list[Callable] = []
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
+        self._reconnect_lock = threading.Lock()
+        self._is_reconnecting = False
+        self._reconnect_thread: Optional[threading.Thread] = None
+        self._last_packet_at: float = 0.0
 
     @property
     def is_connected(self) -> bool:
@@ -49,6 +54,7 @@ class FyersOrderStreamManager:
             logger.info("[OrderStream] Restarting order socket with renewed access token")
             self.stop()
 
+        self._running = True
         self._access_token = target_token
         self._thread = threading.Thread(target=self._connect, daemon=True)
         self._thread.start()
@@ -59,6 +65,7 @@ class FyersOrderStreamManager:
 
     def stop(self, timeout: float = 1.0) -> None:
         """Gracefully disconnect the Order WebSocket without blocking."""
+        self._running = False
         ws_to_close = self._ws
         self._connected = False
         self._ws = None
@@ -103,6 +110,74 @@ class FyersOrderStreamManager:
 
     # ── Private ──────────────────────────────────────────────
 
+    def _schedule_proactive_reconnect(self, delay_sec: Optional[float] = None) -> None:
+        """Schedules single-flight thread-safe reconnect with backoff."""
+        with self._reconnect_lock:
+            if self._is_reconnecting or (
+                self._reconnect_thread is not None and self._reconnect_thread.is_alive()
+            ):
+                logger.debug("[OrderStream] Reconnect worker already in flight; skipping.")
+                return
+            self._is_reconnecting = True
+
+            effective_delay = delay_sec if delay_sec is not None else 3.0
+
+            def _reconnect_worker():
+                import time
+
+                try:
+                    time.sleep(effective_delay)
+                    if not getattr(self, "_running", False) or getattr(self, "_connected", False):
+                        return
+                    try:
+                        from market.calendar import is_market_open
+
+                        if not is_market_open("NSE"):
+                            logger.info(
+                                "[OrderStream] Off-market session detected. Pausing order stream reconnect."
+                            )
+                            return
+                    except Exception as e_suppressed:
+                        logger.debug(f"[OrderStream] Market open check non-fatal: {e_suppressed}")
+
+                    logger.info("[OrderStream] Executing proactive order socket reconnect...")
+                    self._connect()
+                except Exception as e_recon:
+                    logger.warning(f"[OrderStream] Proactive reconnect failed: {e_recon}")
+                finally:
+                    with self._reconnect_lock:
+                        self._is_reconnecting = False
+
+            self._reconnect_thread = threading.Thread(
+                target=_reconnect_worker, daemon=True, name="FyersOrderReconnect"
+            )
+            self._reconnect_thread.start()
+
+    def _check_connection_health(self) -> bool:
+        """Evaluates order socket connection health. Triggers reconnect if zombie."""
+        if not self._connected or not self._access_token or not self._running:
+            return True
+        import time
+
+        now = time.time()
+        silence_sec = now - self._last_packet_at if self._last_packet_at > 0 else 0.0
+        # If active market and silence > 180s (order stream has lower frequency than quote stream)
+        if self._last_packet_at > 0 and silence_sec > 300.0:
+            try:
+                from market.calendar import is_market_open
+
+                if not is_market_open("NSE"):
+                    return True
+            except Exception as e_suppressed:
+                logger.debug(f"[OrderStream] Health check market status non-fatal: {e_suppressed}")
+            logger.warning(
+                f"[OrderStream] 🚨 Order WebSocket silence detected ({silence_sec:.1f}s). Proactively reconnecting."
+            )
+            self._connected = False
+            self._schedule_proactive_reconnect(delay_sec=1.0)
+            return False
+        return True
+
     def _connect(self) -> None:
         try:
             from fyers_apiv3.FyersWebsocket import order_ws
@@ -118,7 +193,7 @@ class FyersOrderStreamManager:
                 on_connect=self._handle_connect,
                 on_close=self._handle_close,
                 on_error=self._handle_error,
-                reconnect=True,
+                reconnect=False,  # Autonomous control: ensures on_close triggers our self-healing reconnect
             )
             # Ensure background thread is daemon
             setattr(self._ws, "background_flag", True)
@@ -127,9 +202,14 @@ class FyersOrderStreamManager:
             logger.warning("fyers-apiv3 order_ws unavailable")
         except Exception as e:
             logger.debug(f"Fyers order websocket connection failed: {e}")
+            if self._running:
+                self._schedule_proactive_reconnect(delay_sec=5.0)
 
     def _handle_connect(self) -> None:
+        import time
+
         self._connected = True
+        self._last_packet_at = time.time()
         logger.info("Fyers Order WebSocket: connected")
         try:
             if self._ws:
@@ -143,9 +223,27 @@ class FyersOrderStreamManager:
     def _handle_close(self, *args, **kwargs) -> None:
         self._connected = False
         logger.info("Fyers Order WebSocket: disconnected")
+        if getattr(self, "_running", False) and getattr(self, "_access_token", ""):
+            self._schedule_proactive_reconnect(delay_sec=2.0)
 
     def _handle_error(self, message) -> None:
         logger.debug(f"Fyers Order WebSocket error: {message}")
+        msg_str = str(message)
+        if "403" in msg_str or "forbidden" in msg_str.lower() or "unauthorized" in msg_str.lower():
+            logger.warning(
+                "[FyersOrderStream] 403 Forbidden received. Halting reconnect loop and notifying broker."
+            )
+            self.stop()
+            try:
+                from brokers.session import get_data_broker
+
+                b = get_data_broker()
+                if hasattr(b, "_handle_auth_failure"):
+                    b._handle_auth_failure()
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.fyers_order_stream] Auth failure notification suppressed: {e_suppressed}"
+                )
 
     def _handle_orders(self, message) -> None:
         """Process incoming order lifecycle events."""
@@ -198,6 +296,17 @@ class FyersOrderStreamManager:
                     f"[market.fyers_order_stream] Non-fatal exception suppressed: {e_suppressed}"
                 )
 
+            try:
+                from brokers.session import get_execution_broker
+
+                b = get_execution_broker()
+                if hasattr(b, "invalidate_portfolio_caches"):
+                    b.invalidate_portfolio_caches()
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.fyers_order_stream] Cache invalidation non-fatal: {e_suppressed}"
+                )
+
             for cb in self._callbacks_trades:
                 try:
                     cb(message)
@@ -211,6 +320,17 @@ class FyersOrderStreamManager:
     def _handle_positions(self, message) -> None:
         """Process incoming position adjustments."""
         try:
+            try:
+                from brokers.session import get_execution_broker
+
+                b = get_execution_broker()
+                if hasattr(b, "invalidate_portfolio_caches"):
+                    b.invalidate_portfolio_caches()
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[market.fyers_order_stream] Cache invalidation non-fatal: {e_suppressed}"
+                )
+
             try:
                 from web.sse import event_bus
 

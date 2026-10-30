@@ -32,6 +32,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from market.instruments import format_strike
+
 try:
     import dotenv
 
@@ -214,7 +216,7 @@ class MStockAPI(BrokerAPI):
         und, yyyy, mm, dd, strike, opt_type = m.groups()
         yy = yyyy[2:]
         m_int = int(mm)
-        s_int = str(int(float(strike)))
+        s_int = format_strike(strike)
         opt_t = opt_type.upper()
         cands = [clean_sym]
         m_map_3 = {
@@ -1343,7 +1345,7 @@ class MStockAPI(BrokerAPI):
                                     oi = int(parts[2].strip()) if len(parts) >= 3 else 0
                                     vol = int(parts[3].strip()) if len(parts) >= 4 else 0
                                     c_obj = OptionsContract(
-                                        symbol=f"{clean_sym}{expiry_str.replace('-', '')}{int(strike)}CE",
+                                        symbol=f"{clean_sym}{expiry_str.replace('-', '')}{format_strike(strike)}CE",
                                         underlying=clean_sym,
                                         expiry=expiry_str,
                                         strike=strike,
@@ -1367,7 +1369,7 @@ class MStockAPI(BrokerAPI):
                                     oi = int(parts[2].strip()) if len(parts) >= 3 else 0
                                     vol = int(parts[3].strip()) if len(parts) >= 4 else 0
                                     p_obj = OptionsContract(
-                                        symbol=f"{clean_sym}{expiry_str.replace('-', '')}{int(strike)}PE",
+                                        symbol=f"{clean_sym}{expiry_str.replace('-', '')}{format_strike(strike)}PE",
                                         underlying=clean_sym,
                                         expiry=expiry_str,
                                         strike=strike,

@@ -60,7 +60,11 @@ def evaluate_alert_invalidation(
 
         # 0a. Hard Intraday Cutoff (15:15 IST NSE/BSE/NFO, 23:15 IST MCX; Crypto is 24x7 rolling)
         # Enforce unconditionally on all INTRADAY setups (equity & derivatives) to eliminate zombie in-flight positions.
-        if th == "INTRADAY":
+        if th == "INTRADAY" and getattr(alert, "stage", "") not in (
+            "EARLY_WARNING",
+            "STALK",
+            "PRIMED",
+        ):
             exch = (getattr(alert, "exchange", "NSE") or "NSE").upper()
             cutoff_reached = False
             if exch in ("CRYPTO", "BINANCE", "DERIBIT"):
@@ -263,12 +267,9 @@ def evaluate_alert_invalidation(
     if alert.stop_loss and alert.stop_loss > 0:
         if is_option:
             # Check if option writing / selling position:
-            act = str((alert.actionable_plan or {}).get("action", "")).upper()
-            is_option_sell = act in ("SELL", "WRITE", "SHORT")
-            if not is_option_sell and alert.stop_loss > 0 and alert.target_level > 0:
-                ref_entry = alert.option_premium or alert.ltp
-                if ref_entry and alert.stop_loss > ref_entry and alert.target_level < ref_entry:
-                    is_option_sell = True
+            from engine.alert_expiry import is_option_seller
+
+            is_option_sell = is_option_seller(alert)
 
             if is_option_sell:
                 # Option writing / selling (Short CE / Short PE):
@@ -607,8 +608,7 @@ def evaluate_alert_invalidation(
             if alert.direction == "BEARISH":
                 # For short positions, stop loss is moved downward below entry
                 ref_entry = (
-                    getattr(alert, "initial_entry_premium", None)
-                    or getattr(alert, "entry_price", None)
+                    getattr(alert, "entry_price", None)
                     or alert.trigger_level
                     or (init_sl_val * 0.95 if init_sl_val else 0.0)
                 )
@@ -689,8 +689,7 @@ def evaluate_alert_invalidation(
                 # Use initial_stop_loss to derive original entry proxy; alert.ltp is the
                 # LIVE ticker (not entry) and must NOT be used as entry reference here.
                 ref_entry = (
-                    getattr(alert, "initial_entry_premium", None)
-                    or getattr(alert, "entry_price", None)
+                    getattr(alert, "entry_price", None)
                     or alert.trigger_level
                     or (init_sl_val * 1.05 if init_sl_val else 0.0)
                 )
@@ -849,6 +848,11 @@ class TargetTrailingEvaluation:
     is_risk_compression: bool = False
     risk_reduction_pct: float = 0.0
     recommended_spot_stop: Optional[float] = None
+    target_level: Optional[float] = None
+
+    @property
+    def new_stop_loss(self) -> float:
+        return self.recommended_stop
 
     @property
     def is_t0_5_hit(self) -> bool:
@@ -1205,10 +1209,17 @@ def evaluate_alert_targets_and_trailing(
     # Sanity guard against unit-scale corruption (e.g. comparing spot price ₹1,442 against option entry ₹16)
     if entry > 0 and current_ltp > 0:
         ratio = current_ltp / entry
-        if not is_option and (ratio > 2.5 or ratio < 0.4):
+        is_multibagger = (
+            getattr(alert, "alert_type", "") == "MULTIBAGGER"
+            or getattr(alert, "segment", "") == "EQUITY_MULTIBAGGER"
+        )
+        max_ratio = 3.5 if is_multibagger else 1.60
+        min_ratio = 0.30 if is_multibagger else 0.60
+        if not is_option and (ratio > max_ratio or ratio < min_ratio):
             logger.warning(
                 f"[AlertEvaluator] Spot/futures price scale mismatch for {getattr(alert, 'symbol', '')} "
-                f"({getattr(alert, 'alert_id', '')}): current_ltp={current_ltp} vs entry={entry}. Suppressing false evaluation."
+                f"({getattr(alert, 'alert_id', '')}): current_ltp={current_ltp} vs entry={entry} (ratio={ratio:.2f}x). "
+                f"Suppressing false evaluation."
             )
             return None
         elif is_option:
@@ -1274,13 +1285,13 @@ def evaluate_alert_targets_and_trailing(
         pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
         r_multiple = pnl_pts / initial_risk
 
-    # Defensive sanity clamp against wild R-multiple spikes
+    # Defensive sanity guard against wild R-multiple spikes (Invariant 10 & 16)
     if r_multiple > 25.0:
         logger.warning(
             f"[AlertEvaluator] Extreme r_multiple ({r_multiple:.2f}R) detected for {getattr(alert, 'symbol', '')} "
-            f"(entry={entry}, initial_stop={initial_stop}, risk={initial_risk}). Clamping to +25.0R."
+            f"(entry={entry}, initial_stop={initial_stop}, risk={initial_risk}). Suppressing false evaluation."
         )
-        r_multiple = 25.0
+        return None
     elif r_multiple < -5.0:
         r_multiple = -5.0
 
@@ -1357,6 +1368,42 @@ def evaluate_alert_targets_and_trailing(
             plan_t2 = None
         if plan_t3 and plan_t3 > entry * 10:
             plan_t3 = None
+    elif not is_option and entry > 0:
+        # Sanity filter for cash equity / futures: discard option premium pollution
+        # Option premium targets (e.g. ₹20-50 for an ₹1,000 stock) must never contaminate equity targets!
+        def _is_invalid_equity_target(tgt: Optional[float]) -> bool:
+            if tgt is None or tgt <= 0:
+                return True
+            if is_bullish:
+                if tgt <= entry * 0.5 or (initial_stop and tgt < initial_stop):
+                    return True
+            else:
+                if tgt >= entry * 1.5 or (initial_stop and tgt > initial_stop):
+                    return True
+            return False
+
+        if _is_invalid_equity_target(plan_t0_5):
+            plan_t0_5 = None
+        if _is_invalid_equity_target(plan_t1):
+            plan_t1 = None
+        if _is_invalid_equity_target(plan_t2):
+            plan_t2 = None
+        if _is_invalid_equity_target(plan_t3):
+            plan_t3 = None
+
+        if plan and isinstance(plan, dict):
+            underlying_t3 = plan.get("underlying_target_3") or plan.get("underlying_target")
+            if underlying_t3:
+                m_ut3 = re.search(r"[\d,]+(?:\.\d+)?", str(underlying_t3))
+                if m_ut3:
+                    try:
+                        parsed_ut3 = float(m_ut3.group(0).replace(",", ""))
+                        if not _is_invalid_equity_target(parsed_ut3):
+                            plan_t3 = parsed_ut3
+                    except ValueError as e_val:
+                        logger.debug(
+                            "Failed parsing underlying_target_3 (%s): %s", underlying_t3, e_val
+                        )
 
     valid_alert_tgt = None
     if getattr(alert, "target_level", 0) and alert.target_level > 0:
@@ -1367,12 +1414,17 @@ def evaluate_alert_targets_and_trailing(
             elif not is_bullish and 0.05 <= raw_tgt < entry:
                 valid_alert_tgt = raw_tgt
         elif not is_option:
-            valid_alert_tgt = raw_tgt
+            if is_bullish and (entry <= 0 or raw_tgt > entry * 0.8):
+                valid_alert_tgt = raw_tgt
+            elif not is_bullish and (entry <= 0 or raw_tgt < entry * 1.2):
+                valid_alert_tgt = raw_tgt
 
-    if plan_t3:
-        target_final = plan_t3
-    elif valid_alert_tgt and valid_alert_tgt > (plan_t2 or 0):
+    if valid_alert_tgt and is_bullish and valid_alert_tgt > (plan_t2 or 0):
         target_final = valid_alert_tgt
+    elif valid_alert_tgt and not is_bullish and valid_alert_tgt < (plan_t2 or 1e9):
+        target_final = valid_alert_tgt
+    elif plan_t3:
+        target_final = plan_t3
     elif plan_t2:
         target_final = plan_t2
     elif valid_alert_tgt:
@@ -1389,15 +1441,50 @@ def evaluate_alert_targets_and_trailing(
             2,
         )
 
-    # 1. Target 1 (+2R Milestone): Book 50% partial profit & lock SL to Breakeven
-    if plan_t1:
+    # ── Regime-Adaptive Target Calibration (CPR & ADR Exhaustion) ──
+    alert_metrics = getattr(alert, "metrics", {}) or {}
+    session_regime = alert_metrics.get("session_regime")
+    cpr_type = alert_metrics.get("cpr_type")
+    is_chop_regime = bool(
+        alert_metrics.get("is_chop_regime")
+        or session_regime == "CHOP_MEAN_REVERSION"
+        or cpr_type == "WIDE"
+        or (float(alert_metrics.get("adr_exhaustion_pct", 0.0) or 0.0) >= 70.0)
+    )
+
+    # 1. Target 1 (Regime-Adaptive: +1.2R in Chop/Wide-CPR, +2.0R in Trend): Book 50% & lock Breakeven
+    t1_r_mult = 1.2 if is_chop_regime else 2.0
+    if is_chop_regime and entry > 0:
+        # In Chop / Wide CPR regime, compress T1 to +1.2R (+18% options) to harvest profits before mean reversion
+        if is_option:
+            opt_chop_mult = 1.18 if is_bullish else 0.82
+            chop_t1 = round(
+                entry * opt_chop_mult if is_bullish else max(0.05, entry * opt_chop_mult), 2
+            )
+            t1_level = (
+                min(plan_t1, chop_t1)
+                if (plan_t1 and is_bullish)
+                else (max(plan_t1, chop_t1) if plan_t1 else chop_t1)
+            )
+        elif is_bullish:
+            chop_t1 = round(entry + (initial_risk * 1.2), 2)
+            t1_level = min(plan_t1, chop_t1) if plan_t1 else chop_t1
+        else:
+            chop_t1 = round(entry - (initial_risk * 1.2), 2)
+            t1_level = max(plan_t1, chop_t1) if plan_t1 else chop_t1
+    elif plan_t1:
         t1_level = plan_t1
+    elif is_option and entry > 0:
+        opt_t1_pct = 1.35
+        t1_level = round(
+            entry * opt_t1_pct if is_bullish else max(0.05, entry * (2.0 - opt_t1_pct)), 2
+        )
     elif is_bullish:
-        t1_level = round(entry + (initial_risk * 2.0), 2)
+        t1_level = round(entry + (initial_risk * t1_r_mult), 2)
         if target_final > entry and t1_level >= target_final:
             t1_level = round(entry + (target_final - entry) * 0.5, 2)
     else:
-        t1_level = round(entry - (initial_risk * 2.0), 2)
+        t1_level = round(entry - (initial_risk * t1_r_mult), 2)
         if target_final < entry and t1_level <= target_final:
             t1_level = round(entry - (entry - target_final) * 0.5, 2)
 
@@ -1413,15 +1500,19 @@ def evaluate_alert_targets_and_trailing(
             if target_final < t1_level and t2_level <= target_final:
                 t2_level = round(t1_level - (t1_level - target_final) * 0.5, 2)
 
-    # 3. Target 0.5 (Scale 1 / Early De-Risk at +1.0R):
+    # 3. Target 0.5 (Scale 1 / Early De-Risk at +0.75R to +0.8R):
     t0_5_level = plan_t0_5
     if not t0_5_level:
+        t0_5_r = 0.70 if is_chop_regime else 0.80
         if is_option and entry > 0:
-            t0_5_level = round(entry * 1.16 if is_bullish else max(0.05, entry * 0.84), 2)
+            opt_t0_5_pct = 1.10 if is_chop_regime else 1.15
+            t0_5_level = round(
+                entry * opt_t0_5_pct if is_bullish else max(0.05, entry * (2.0 - opt_t0_5_pct)), 2
+            )
         elif is_bullish:
-            t0_5_level = round(entry + (initial_risk * 1.0), 2)
+            t0_5_level = round(entry + (initial_risk * t0_5_r), 2)
         else:
-            t0_5_level = round(entry - (initial_risk * 1.0), 2)
+            t0_5_level = round(entry - (initial_risk * t0_5_r), 2)
 
     # Ensure t0_5_level sits strictly between entry and t1_level
     if is_bullish:
@@ -1511,6 +1602,9 @@ def evaluate_alert_targets_and_trailing(
                     pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
                     r_multiple = pnl_pts / initial_risk
                     is_t1_hit = current_ltp >= t1_level
+                    is_t0_5_hit = bool(
+                        t0_5_level and current_ltp >= t0_5_level and t0_5_level < t1_level
+                    )
                     is_t2_hit = bool(t2_level and current_ltp >= t2_level and t2_level > t1_level)
                     is_final_hit = current_ltp >= target_final
             elif not is_bullish and day_low > 0 and is_coherent:
@@ -1524,6 +1618,9 @@ def evaluate_alert_targets_and_trailing(
                     pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
                     r_multiple = pnl_pts / initial_risk
                     is_t1_hit = current_ltp <= t1_level
+                    is_t0_5_hit = bool(
+                        t0_5_level and current_ltp <= t0_5_level and t0_5_level > t1_level
+                    )
                     is_t2_hit = bool(t2_level and current_ltp <= t2_level and t2_level < t1_level)
                     is_final_hit = current_ltp <= target_final
         except Exception as e:
@@ -1594,6 +1691,7 @@ def evaluate_alert_targets_and_trailing(
                 is_superperforming=False,
                 strike_roll_recommendation=roll_rec,
                 should_roll_strike=bool(roll_rec),
+                target_level=target_final,
             )
 
     # 2. Target 2 (T2) Check - Target 2 at +4R (lock SL to +2R / T1 level)
@@ -1636,6 +1734,7 @@ def evaluate_alert_targets_and_trailing(
             is_superperforming=is_superperforming,
             strike_roll_recommendation=roll_rec,
             should_roll_strike=bool(roll_rec),
+            target_level=t2_level,
         )
 
     # 3. Target 1 (T1) Check - Auto-partial at +2R (close 50%, lock SL to Breakeven)
@@ -1746,13 +1845,14 @@ def evaluate_alert_targets_and_trailing(
             recommended_spot_stop=rec_spot_stop,
             strike_roll_recommendation=roll_rec,
             should_roll_strike=bool(roll_rec),
+            target_level=t1_level,
         )
 
-    # 4. Target 0.5 (T0.5 / Scale 1) Check - De-risks trades early at +1.0R / +16%
+    # 4. Target 0.5 (T0.5 / Scale 1) Check - De-risks trades early at +0.70R to +0.80R
+    min_t0_5_r = 0.65 if is_chop_regime else 0.75
     if (
-        is_t0_5_hit
+        (is_t0_5_hit or r_multiple >= min_t0_5_r)
         and pnl_pts > 0
-        and r_multiple >= 0.4
         and "T0_5_ACHIEVED" not in achieved
         and "T1_ACHIEVED" not in achieved
         and "T2_ACHIEVED" not in achieved
@@ -1763,8 +1863,9 @@ def evaluate_alert_targets_and_trailing(
         locked_pts = abs(rec_stop - entry)
         locked_pct = 0.2
         next_tgt = t1_level or target_final
+        regime_tag = " [CHOP/WIDE-CPR REGIME: Early De-Risk]" if is_chop_regime else ""
         rationale = (
-            f"Target 0.5 (Scale 1) reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
+            f"Target 0.5 (Scale 1) reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R){regime_tag}. "
             f"DECISION: SCALE 35% PARTIAL PROFIT & TRAIL STOP-LOSS TO BREAKEVEN (₹{rec_stop:,.2f}). "
             f"Trade is now de-risked to 100% free trade. Hold remaining 65% runner for Target 1 (₹{next_tgt:,.2f})."
         )
@@ -1782,6 +1883,7 @@ def evaluate_alert_targets_and_trailing(
             is_superperforming=is_superperforming,
             is_risk_compression=True,
             risk_reduction_pct=100.0,
+            target_level=t0_5_level,
         )
 
     # 5. Trailing Stop Ratchet Higher (Dynamic Trail)
@@ -2143,14 +2245,31 @@ def evaluate_alert_targets_and_trailing(
                     ):
                         elapsed_mins = (now_ist - c_dt).total_seconds() / 60.0
                         fast_scalp = plan.get("fast_scalp", {}) or {}
-                        is_explicit_scalp = bool(fast_scalp.get("time_stop_mins"))
-                        time_stop_limit = float(fast_scalp.get("time_stop_mins") or 45.0)
+                        is_micro_explicit = bool(
+                            fast_scalp.get("is_micro_scalp")
+                            or getattr(alert, "alert_type", "")
+                            in ("INDEX_MICRO_SCALP", "FAST_SCALP", "INTRADAY_SPARK")
+                        )
+                        is_explicit_scalp = is_micro_explicit or bool(
+                            fast_scalp.get("time_stop_mins")
+                        )
+                        time_stop_limit = float(
+                            fast_scalp.get("time_stop_mins")
+                            if is_explicit_scalp
+                            else (plan.get("time_stop_limit") or 45.0)
+                        )
 
                         # Structural health check
                         spot = float(alert.underlying_spot or 0.0)
                         metrics_d = alert.metrics if isinstance(alert.metrics, dict) else {}
                         vwap = float(
                             getattr(alert, "vwap", 0.0) or metrics_d.get("vwap", 0.0) or 0.0
+                        )
+                        spot_anchor = float(
+                            metrics_d.get("spot_anchor", 0.0)
+                            or metrics_d.get("support_anchor", 0.0)
+                            or (plan.get("spot_anchor") if isinstance(plan, dict) else 0.0)
+                            or 0.0
                         )
                         opt_t = str(getattr(alert, "option_type", "") or "").upper()
                         is_spot_bullish = (
@@ -2160,12 +2279,18 @@ def evaluate_alert_targets_and_trailing(
                         )
 
                         is_struct_intact = True
-                        if spot > 0 and vwap > 0:
-                            if is_spot_bullish and spot < (vwap * 0.997):
-                                is_struct_intact = False
-                            elif not is_spot_bullish and spot > (vwap * 1.003):
-                                is_struct_intact = False
-                        elif pnl_pct < -4.0:
+                        if spot > 0:
+                            if spot_anchor > 0:
+                                if is_spot_bullish and spot < (spot_anchor * 0.998):
+                                    is_struct_intact = False
+                                elif not is_spot_bullish and spot > (spot_anchor * 1.002):
+                                    is_struct_intact = False
+                            elif vwap > 0:
+                                if is_spot_bullish and spot < (vwap * 0.995):
+                                    is_struct_intact = False
+                                elif not is_spot_bullish and spot > (vwap * 1.005):
+                                    is_struct_intact = False
+                        if stop and stop > 0 and current_ltp <= (stop * 1.01):
                             is_struct_intact = False
 
                         # Institutional Regime-Adaptive Time-Stop Guardrail:
@@ -2196,15 +2321,20 @@ def evaluate_alert_targets_and_trailing(
                         is_0dte = (dte == 0) if dte is not None else False
 
                         effective_time_limit = time_stop_limit
+                        has_spot_structure = spot > 0 and (spot_anchor > 0 or vwap > 0)
                         if is_0dte:
                             # 0-DTE Expiry Day: Theta accelerates aggressively; strictly cap time stop at 20m
                             effective_time_limit = min(20.0, time_stop_limit)
+                        elif is_micro_explicit:
+                            effective_time_limit = time_stop_limit
                         elif (
-                            (is_trend_day or is_dir_aligned)
-                            and is_struct_intact
-                            and pnl_pct >= -3.5
-                        ):
-                            effective_time_limit = max(60.0, time_stop_limit * 2.5)
+                            is_trend_day
+                            or is_dir_aligned
+                            or (has_spot_structure and is_struct_intact)
+                        ) and pnl_pct >= -12.0:
+                            effective_time_limit = max(
+                                45.0, time_stop_limit * (2.5 if is_trend_day else 2.0)
+                            )
 
                         # Institutional Session Horizon Boundary:
                         # For INTRADAY setups, consolidation runway must never extend past the session cutoff (15:15 IST for NSE/BSE/NFO, 23:15 for MCX)
@@ -2474,28 +2604,42 @@ def evaluate_alert_in_flight_decay(
             or getattr(alert, "ltp", None)
         )
     else:
-        plan = getattr(alert, "actionable_plan", None)
-        if plan and plan.get("recommended_entry"):
-            m_ent = re.findall(r"[\d,]+(?:\.\d+)?", str(plan["recommended_entry"]))
-            if len(m_ent) >= 2:
-                try:
-                    entry = round(
-                        (float(m_ent[0].replace(",", "")) + float(m_ent[1].replace(",", ""))) / 2.0,
-                        2,
-                    )
-                except ValueError as e_suppressed:
-                    logger.debug(
-                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
-                    )
-            elif len(m_ent) == 1:
-                try:
-                    entry = float(m_ent[0].replace(",", ""))
-                except ValueError as e_suppressed:
-                    logger.debug(
-                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
-                    )
-        if not entry and getattr(alert, "trigger_level", None) and alert.trigger_level > 0:
+        # Non-option (Underlying Spot setup): canonical entry is trigger_level, entry_price, or spot from plan
+        if getattr(alert, "trigger_level", None) and alert.trigger_level > 0:
             entry = alert.trigger_level
+        elif getattr(alert, "entry_price", None) and alert.entry_price > 0:
+            entry = alert.entry_price
+
+        plan = getattr(alert, "actionable_plan", None)
+        if not entry and plan:
+            if plan.get("optimal_entry_limit"):
+                try:
+                    entry = float(plan["optimal_entry_limit"])
+                except (ValueError, TypeError) as e_conv:
+                    logger.debug(
+                        f"[alert_evaluator] optimal_entry_limit float parse note: {e_conv}"
+                    )
+            elif plan.get("underlying_spot"):
+                m_spot = re.search(r"[\d,]+(?:\.\d+)?", str(plan["underlying_spot"]))
+                if m_spot:
+                    try:
+                        entry = float(m_spot.group(0).replace(",", ""))
+                    except ValueError as e_conv:
+                        logger.debug(
+                            f"[alert_evaluator] underlying_spot float parse note: {e_conv}"
+                        )
+            elif plan.get("recommended_entry"):
+                # Only use recommended_entry if it matches current_ltp scale (not an option premium recommendation)
+                m_ent = re.findall(r"[\d,]+(?:\.\d+)?", str(plan["recommended_entry"]))
+                if m_ent:
+                    try:
+                        cand = float(m_ent[0].replace(",", ""))
+                        if current_ltp and 0.25 <= (cand / current_ltp) <= 4.0:
+                            entry = cand
+                    except ValueError as e_conv:
+                        logger.debug(
+                            f"[alert_evaluator] recommended_entry float parse note: {e_conv}"
+                        )
         if not entry:
             entry = alert.ltp if getattr(alert, "ltp", 0) > 0 else current_ltp
 
@@ -2534,24 +2678,92 @@ def evaluate_alert_in_flight_decay(
     # 3. Extract Stop Loss
     stop = None
     plan = getattr(alert, "actionable_plan", None)
-    if plan and plan.get("stop_loss"):
-        m_sl = re.search(r"[\d,]+(?:\.\d+)?", str(plan["stop_loss"]))
-        if m_sl:
-            try:
-                stop = float(m_sl.group(0).replace(",", ""))
-            except ValueError as e_suppressed:
-                logger.debug(
-                    f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+    if is_option:
+        if plan and plan.get("stop_loss"):
+            m_sl = re.search(r"[\d,]+(?:\.\d+)?", str(plan["stop_loss"]))
+            if m_sl:
+                try:
+                    stop = float(m_sl.group(0).replace(",", ""))
+                except ValueError as e_suppressed:
+                    logger.debug(
+                        f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"
+                    )
+        if not stop and getattr(alert, "stop_loss", None) and alert.stop_loss > 0:
+            stop = alert.stop_loss
+    else:
+        # Non-option (Underlying Spot): SL MUST be spot scale
+        if getattr(alert, "stop_loss", None) and alert.stop_loss > 0:
+            cand_sl = alert.stop_loss
+            if (
+                current_ltp
+                and current_ltp > 50
+                and (cand_sl < current_ltp * 0.50 or cand_sl > current_ltp * 1.60)
+            ):
+                cand_sl = None
+            stop = cand_sl
+        if plan:
+            if not stop or (current_ltp and abs(stop - current_ltp) / current_ltp > 0.35):
+                und_sl = plan.get("underlying_sl") or plan.get("spot_invalidation_anchor")
+                if und_sl:
+                    m_und = re.search(r"[\d,]+(?:\.\d+)?", str(und_sl))
+                    if m_und:
+                        try:
+                            cand = float(m_und.group(0).replace(",", ""))
+                            if current_ltp and (
+                                cand >= current_ltp * 0.50 and cand <= current_ltp * 1.60
+                            ):
+                                stop = cand
+                        except ValueError as e_conv:
+                            logger.debug(
+                                f"[alert_evaluator] underlying_sl float parse note: {e_conv}"
+                            )
+            if not stop and plan.get("stop_loss"):
+                m_sl = re.search(r"[\d,]+(?:\.\d+)?", str(plan["stop_loss"]))
+                if m_sl:
+                    try:
+                        cand = float(m_sl.group(0).replace(",", ""))
+                        if current_ltp and 0.50 <= (cand / current_ltp) <= 1.60:
+                            stop = cand
+                    except ValueError as e_conv:
+                        logger.debug(f"[alert_evaluator] stop_loss float parse note: {e_conv}")
+
+    # Universal Scale Separation Guard (Invariant 14.1):
+    # If entry or stop is on a totally different scale than current_ltp, suppress evaluation!
+    if not is_option:
+        if current_ltp and current_ltp > 50:
+            if entry and (entry < current_ltp * 0.50 or entry > current_ltp * 1.60):
+                logger.warning(
+                    f"[evaluate_alert_in_flight_decay] Suppressed evaluation for {getattr(alert, 'symbol', '')}: "
+                    f"Scale mismatch (quote LTP ₹{current_ltp:,.2f} vs entry ₹{entry:,.2f})"
                 )
-    if not stop and getattr(alert, "stop_loss", None) and alert.stop_loss > 0:
-        stop = alert.stop_loss
+                return None
+            raw_sl = getattr(alert, "stop_loss", None)
+            if (stop and (stop < current_ltp * 0.50 or stop > current_ltp * 1.60)) or (
+                raw_sl and (raw_sl < current_ltp * 0.50 or raw_sl > current_ltp * 1.60)
+            ):
+                logger.warning(
+                    f"[evaluate_alert_in_flight_decay] Suppressed evaluation for {getattr(alert, 'symbol', '')}: "
+                    f"Scale mismatch (quote LTP ₹{current_ltp:,.2f} vs stop ₹{(stop or raw_sl):,.2f})"
+                )
+                return None
+    else:
+        if current_ltp and entry and (current_ltp > entry * 4.0 or entry > current_ltp * 4.0):
+            logger.warning(
+                f"[evaluate_alert_in_flight_decay] Suppressed evaluation for {getattr(alert, 'symbol', '')}: "
+                f"Scale mismatch (quote LTP ₹{current_ltp:,.2f} vs entry ₹{entry:,.2f})"
+            )
+            return None
+        if current_ltp and stop and (current_ltp > stop * 4.0 or stop > current_ltp * 4.0):
+            logger.warning(
+                f"[evaluate_alert_in_flight_decay] Suppressed evaluation for {getattr(alert, 'symbol', '')}: "
+                f"Scale mismatch (quote LTP ₹{current_ltp:,.2f} vs stop ₹{stop:,.2f})"
+            )
+            return None
 
     is_bullish = str(getattr(alert, "direction", "BULLISH")).upper() != "BEARISH"
-    act_str = str((plan or {}).get("action", "")).upper()
-    is_option_sell = is_option and (
-        act_str in ("SELL", "WRITE", "SHORT")
-        or (stop and entry and stop > entry and getattr(alert, "target_level", 0) < entry)
-    )
+    from engine.alert_expiry import is_option_seller
+
+    is_option_sell = is_option and is_option_seller(alert)
 
     # 4. Compute Risk Budget & Payoff
     if is_option and not is_option_sell:
@@ -2595,6 +2807,10 @@ def evaluate_alert_in_flight_decay(
             ((stop - current_ltp) / current_ltp) * 100 if (stop and current_ltp > 0) else 999.0
         )
 
+    # Defensive boundary clamping
+    pnl_pct = max(-100.0, min(1000.0, pnl_pct))
+    risk_consumed_pct = max(-500.0, min(500.0, risk_consumed_pct))
+
     # 5. Trigger A: Danger Zone Warning (>= 70% Risk Consumed OR within 1.5% of SL)
     # INVARIANT: Danger Zone STRICTLY applies to positions in an active LOSS.
     # A position in profit (pnl_pts >= 0, pnl_pct >= 0, or risk_consumed_pct <= 0) can NEVER be in the Danger Zone!
@@ -2609,16 +2825,63 @@ def evaluate_alert_in_flight_decay(
         if is_danger:
             eff_consumed = max(50.0, min(99.0, risk_consumed_pct))
             headline = f"⚠️ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (Danger Zone: {eff_consumed:.0f}% Risk Consumed)"
-            summary = (
-                f"LTP ₹{current_ltp:,.2f} is within {dist_to_sl_pct:.1f}% of Stop-Loss (₹{stop:,.2f}). "
-                f"{eff_consumed:.0f}% of risk budget is eroded (P&L: {pnl_pct:+.1f}%). "
-                f"DECISION: SCRATCH POSITION AT MARKET OR TIGHTEN STOP TO PREVENT FULL CAPITAL LOSS."
+
+            # Check spot structural health for danger zone context
+            spot_val = float(getattr(alert, "underlying_spot", 0.0) or 0.0)
+            metrics_dict = alert.metrics if isinstance(alert.metrics, dict) else {}
+            spot_anchor_val = float(
+                metrics_dict.get("spot_anchor", 0.0)
+                or metrics_dict.get("support_anchor", 0.0)
+                or 0.0
             )
+            vwap_val = float(
+                current_vwap or getattr(alert, "vwap", 0.0) or metrics_dict.get("vwap", 0.0) or 0.0
+            )
+            opt_t = str(getattr(alert, "option_type", "") or "").upper()
+            is_bullish_dir = (
+                False
+                if opt_t == "PE"
+                else (
+                    True
+                    if opt_t == "CE"
+                    else (getattr(alert, "direction", "").upper() != "BEARISH")
+                )
+            )
+            spot_holding = False
+            if spot_val > 0:
+                if spot_anchor_val > 0:
+                    spot_holding = (
+                        (spot_val >= spot_anchor_val * 0.998)
+                        if is_bullish_dir
+                        else (spot_val <= spot_anchor_val * 1.002)
+                    )
+                elif vwap_val > 0:
+                    spot_holding = (
+                        (spot_val >= vwap_val * 0.997)
+                        if is_bullish_dir
+                        else (spot_val <= vwap_val * 1.003)
+                    )
+
+            if spot_holding:
+                coaching_dec = "HOLD_AND_MONITOR_SPOT"
+                summary = (
+                    f"LTP ₹{current_ltp:,.2f} is within {dist_to_sl_pct:.1f}% of Stop-Loss (₹{stop:,.2f}). "
+                    f"{eff_consumed:.0f}% of risk budget is eroded (P&L: {pnl_pct:+.1f}%). "
+                    f"Underlying spot is holding structural support above anchor. "
+                    f"DECISION: HOLD BASE PARAMETERS — DO NOT PANIC SCRATCH AT LIQUIDITY RETEST. Honor planned SL."
+                )
+            else:
+                coaching_dec = "SCRATCH_OR_TIGHTEN_STOP"
+                summary = (
+                    f"LTP ₹{current_ltp:,.2f} is within {dist_to_sl_pct:.1f}% of Stop-Loss (₹{stop:,.2f}). "
+                    f"{eff_consumed:.0f}% of risk budget is eroded (P&L: {pnl_pct:+.1f}%). "
+                    f"DECISION: SCRATCH POSITION AT MARKET OR TIGHTEN STOP TO PREVENT FULL CAPITAL LOSS."
+                )
             return InFlightWarningEvaluation(
                 triggered=True,
                 warning_type="DANGER_ZONE",
                 reason=f"DANGER ZONE: {eff_consumed:.0f}% risk budget consumed. LTP ₹{current_ltp:,.2f} near SL ₹{stop:,.2f}",
-                coaching_decision="SCRATCH_OR_TIGHTEN_STOP",
+                coaching_decision=coaching_dec,
                 current_ltp=current_ltp,
                 entry_price=entry,
                 stop_loss=stop,
@@ -2699,16 +2962,39 @@ def evaluate_alert_in_flight_decay(
 
         # Dynamic Greeks-Aware Decay Horizon
         # On 0DTE after 13:30 IST, gamma flip and rapid theta acceleration demand an 8-minute exit window.
-        # On 0DTE morning/midday, compress to 10 minutes. Standard weekly/monthly is 15 minutes.
+        # On 0DTE morning/midday, compress to 10 minutes.
+        # On standard weekly/monthly contracts, if underlying spot is holding structural support (VWAP/anchor),
+        # grant a 35-minute runway for base consolidation to prevent premature shakeouts!
+        # Only collapse to 15m if spot structure is deteriorating or unverified.
         is_afternoon_0dte = is_0dte and (
             now_dt.hour > 13 or (now_dt.hour == 13 and now_dt.minute >= 30)
         )
+        spot_ref_val = float(getattr(alert, "underlying_spot", 0.0) or 0.0)
+        vwap_ref_val = float(
+            current_vwap
+            or getattr(alert, "vwap", 0.0)
+            or (alert.metrics.get("vwap", 0.0) if isinstance(alert.metrics, dict) else 0.0)
+            or 0.0
+        )
+        opt_t_upper = str(getattr(alert, "option_type", "") or "").upper()
+        is_bull_opt = False if opt_t_upper == "PE" else True
+        spot_struct_ok = False
+        if spot_ref_val > 0 and vwap_ref_val > 0:
+            spot_struct_ok = (
+                (spot_ref_val >= vwap_ref_val * 0.998)
+                if is_bull_opt
+                else (spot_ref_val <= vwap_ref_val * 1.002)
+            )
+
         if is_afternoon_0dte:
             stagnation_threshold_secs = 480.0  # 8 minutes
             decay_profile = "0DTE_AFTERNOON_THETA_CLIFF"
         elif is_0dte:
             stagnation_threshold_secs = 600.0  # 10 minutes
             decay_profile = "0DTE_INTRADAY_DECAY"
+        elif spot_struct_ok:
+            stagnation_threshold_secs = 2100.0  # 35 minutes (grant coiling base runway)
+            decay_profile = "THETA_STAGNATION"
         else:
             stagnation_threshold_secs = 900.0  # 15 minutes
             decay_profile = "THETA_STAGNATION"
@@ -2992,3 +3278,7 @@ def evaluate_alert_in_flight_decay(
                 )
 
     return None
+
+
+# Canonical and backward-compatible alias for alert milestone & trailing progress evaluation
+evaluate_alert_progress = evaluate_alert_targets_and_trailing

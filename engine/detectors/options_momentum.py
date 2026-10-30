@@ -24,6 +24,7 @@ from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
 
 from engine.alert_identity import canonical_alert_symbol
+from market.instruments import format_strike
 
 logger = logging.getLogger("chanakya.detectors.options_momentum")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -239,6 +240,12 @@ def detect_options_momentum_breakouts(
         except Exception as e_sym:
             logger.debug(f"[OptionsBreakout] Pre-filter error for {sym}: {e_sym}")
 
+    # Prioritize indices and top 10 highest-momentum single-stock options to eliminate rate-gate bottlenecks
+    idx_targets = [t for t in active_targets if t["is_idx"]]
+    eq_targets = [t for t in active_targets if not t["is_idx"]]
+    eq_targets.sort(key=lambda t: abs(t.get("spot_change_pct", 0.0)), reverse=True)
+    active_targets = idx_targets + eq_targets[:10]
+
     def _eval_sym(sym_info: dict[str, Any]) -> Optional[tuple[float, AutoAlert]]:
         sym = sym_info["sym"]
         clean_sym = sym_info["clean_sym"]
@@ -288,18 +295,20 @@ def detect_options_momentum_breakouts(
                         f"[OptionsBreakout] Next-month rollover check failed for {clean_sym}: {e_exp}"
                     )
 
+            if (
+                not is_idx
+                and "exp_res" in locals()
+                and exp_res
+                and exp_res.get("is_next_month_routed")
+                and not is_next_month_routed
+            ):
+                logger.info(
+                    f"[OptionsBreakout] {clean_sym} next-month chain unavailable during expiry week. "
+                    f"Suppressed current-month stock options to eliminate SEBI physical delivery margin risk."
+                )
+                return None
+
             if chain is None:
-                if (
-                    not is_idx
-                    and "exp_res" in locals()
-                    and exp_res
-                    and exp_res.get("is_next_month_routed")
-                ):
-                    logger.info(
-                        f"[OptionsBreakout] {clean_sym} next-month chain unavailable during expiry week. "
-                        f"Suppressed current-month stock options to eliminate SEBI physical delivery margin risk."
-                    )
-                    return None
                 chain = get_options_chain(clean_sym)
 
             if not chain:
@@ -418,6 +427,24 @@ def detect_options_momentum_breakouts(
                         f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
                     )
 
+            # ── Institutional Daily Levels & Central Pivot Range (CPR) ───────────
+            from engine.daily_levels import get_daily_levels, evaluate_cpr_gate
+
+            dl = None
+            try:
+                dl = get_daily_levels(clean_sym, session_date=str(now_dt.date()))
+            except Exception as e_dl:
+                logger.debug(
+                    f"[OptionsBreakout] Daily levels lookup failed for {clean_sym}: {e_dl}"
+                )
+
+            cpr_gate_ce = evaluate_cpr_gate(
+                clean_sym, spot, "BULLISH", dl=dl, session_date=str(now_dt.date())
+            )
+            cpr_gate_pe = evaluate_cpr_gate(
+                clean_sym, spot, "BEARISH", dl=dl, session_date=str(now_dt.date())
+            )
+
             for c in atm_contracts:
                 vol = getattr(c, "volume", 0)
                 oi = getattr(c, "oi", 0)
@@ -426,7 +453,7 @@ def detect_options_momentum_breakouts(
                 opt_ltp = float(getattr(c, "last_price", 0.0) or 0.0)
                 opt_type = getattr(c, "option_type", "")
                 strike = float(getattr(c, "strike", 0.0))
-                contract_sym = getattr(c, "symbol", f"{clean_sym}{int(strike)}{opt_type}")
+                contract_sym = getattr(c, "symbol", f"{clean_sym}{format_strike(strike)}{opt_type}")
                 expiry_date = getattr(c, "expiry", None)
                 lot_sz = get_lot_size(clean_sym)
 
@@ -512,9 +539,53 @@ def detect_options_momentum_breakouts(
                         continue
                     if spot_open and spot_open > 0 and spot < spot_open * 0.995:
                         continue
+                    if cpr_gate_ce.is_vetoed:
+                        logger.debug(
+                            f"[OptionsBreakout] CE vetoed for {clean_sym}: {cpr_gate_ce.veto_reason}"
+                        )
+                        continue
+
                     if is_idx:
                         if spot_vwap and spot_vwap > 0 and spot < spot_vwap:
                             continue
+                        try:
+                            if dl and dl.camarilla:
+                                cam_h4 = float(dl.camarilla.get("h4", 0.0) or 0.0)
+                                cam_rng = float(dl.camarilla.get("range", 0.0) or (spot * 0.008))
+                                h4_buf = min(spot * 0.0008, 0.15 * cam_rng)
+                                if cam_h4 > 0 and spot <= cam_h4 and spot >= (cam_h4 - h4_buf):
+                                    if df_5m is not None and len(df_5m) >= 1:
+                                        c_last = float(
+                                            df_5m.iloc[-1].get(
+                                                "close", df_5m.iloc[-1].get("Close", 0.0)
+                                            )
+                                        )
+                                        if c_last <= cam_h4:
+                                            continue
+                        except Exception as e_cam:
+                            logger.debug(f"[OptionsBreakout] Camarilla check skipped: {e_cam}")
+
+                        try:
+                            from market.fyers_tbt_manager import (
+                                fyers_tbt_manager,
+                                FyersTbtManager,
+                                resolve_tradable_tbt_symbol,
+                            )
+
+                            mgr = (
+                                fyers_tbt_manager
+                                if getattr(fyers_tbt_manager, "is_connected", False)
+                                else FyersTbtManager()
+                            )
+                            tradable = resolve_tradable_tbt_symbol(clean_sym)
+                            depth = mgr.get_50_depth(tradable or clean_sym)
+                            if depth and depth.get("status") not in ("UNAVAILABLE", None):
+                                obi_val = float(depth.get("obi_50", 0.0) or 0.0)
+                                fortress_ask = bool(depth.get("fortress_ask_wall_confirmed", False))
+                                if obi_val <= -0.20 or fortress_ask:
+                                    continue
+                        except Exception as e_tbt:
+                            logger.debug(f"[OptionsBreakout] TBT check skipped: {e_tbt}")
                     else:
                         if spot_vwap and spot_vwap > 0 and spot < spot_vwap * 1.0005:
                             continue
@@ -528,9 +599,53 @@ def detect_options_momentum_breakouts(
                         continue
                     if spot_open and spot_open > 0 and spot > spot_open * 1.005:
                         continue
+                    if cpr_gate_pe.is_vetoed:
+                        logger.debug(
+                            f"[OptionsBreakout] PE vetoed for {clean_sym}: {cpr_gate_pe.veto_reason}"
+                        )
+                        continue
+
                     if is_idx:
                         if spot_vwap and spot_vwap > 0 and spot > spot_vwap:
                             continue
+                        try:
+                            if dl and dl.camarilla:
+                                cam_l4 = float(dl.camarilla.get("l4", 0.0) or 0.0)
+                                cam_rng = float(dl.camarilla.get("range", 0.0) or (spot * 0.008))
+                                l4_buf = min(spot * 0.0008, 0.15 * cam_rng)
+                                if cam_l4 > 0 and spot >= cam_l4 and spot <= (cam_l4 + l4_buf):
+                                    if df_5m is not None and len(df_5m) >= 1:
+                                        c_last = float(
+                                            df_5m.iloc[-1].get(
+                                                "close", df_5m.iloc[-1].get("Close", 0.0)
+                                            )
+                                        )
+                                        if c_last >= cam_l4:
+                                            continue
+                        except Exception as e_cam:
+                            logger.debug(f"[OptionsBreakout] Camarilla check skipped: {e_cam}")
+
+                        try:
+                            from market.fyers_tbt_manager import (
+                                fyers_tbt_manager,
+                                FyersTbtManager,
+                                resolve_tradable_tbt_symbol,
+                            )
+
+                            mgr = (
+                                fyers_tbt_manager
+                                if getattr(fyers_tbt_manager, "is_connected", False)
+                                else FyersTbtManager()
+                            )
+                            tradable = resolve_tradable_tbt_symbol(clean_sym)
+                            depth = mgr.get_50_depth(tradable or clean_sym)
+                            if depth and depth.get("status") not in ("UNAVAILABLE", None):
+                                obi_val = float(depth.get("obi_50", 0.0) or 0.0)
+                                fortress_bid = bool(depth.get("fortress_bid_wall_confirmed", False))
+                                if obi_val >= +0.20 or fortress_bid:
+                                    continue
+                        except Exception as e_tbt:
+                            logger.debug(f"[OptionsBreakout] TBT check skipped: {e_tbt}")
                     else:
                         if spot_vwap and spot_vwap > 0 and spot > spot_vwap * 0.9995:
                             continue
@@ -948,7 +1063,7 @@ def detect_options_momentum_breakouts(
                 alert_id = generate_alert_id(
                     clean_sym,
                     "OPTIONS_MOMENTUM",
-                    variant=f"{opt_type.lower()}-{int(strike)}-{phase_slot}",
+                    variant=f"{opt_type.lower()}-{format_strike(strike).replace('.', 'p')}-{phase_slot}",
                 )
 
                 tp = None
@@ -1113,6 +1228,17 @@ def detect_options_momentum_breakouts(
 
                 confidence = min(96, max(50, conf_score))
 
+                best_bid = float(getattr(c, "best_bid", 0.0) or getattr(c, "bid", 0.0) or 0.0)
+                best_ask = float(getattr(c, "best_ask", 0.0) or getattr(c, "ask", 0.0) or 0.0)
+                sfr = 0.0
+                is_wide_spread = False
+                midpoint_price = opt_ltp
+                if best_bid > 0 and best_ask > 0 and opt_ltp > 0:
+                    sfr = round(((best_ask - best_bid) / opt_ltp) * 100.0, 2)
+                    midpoint_price = round((best_bid + best_ask) / 2.0, 2)
+                    if sfr >= 3.0:
+                        is_wide_spread = True
+
                 ote_lower = round(max(0.05, opt_ltp * 0.96), 1)
                 ote_upper = round(opt_ltp * 1.01, 1)
                 max_chase = round(opt_ltp * 1.08, 1)
@@ -1123,11 +1249,17 @@ def detect_options_momentum_breakouts(
                     if (tp and tp.invalidation_stop > 0)
                     else ""
                 )
-                when_to_buy_str = (
-                    f"Buy on ask/limit within entry range with spot invalidation anchor at ₹{tp.invalidation_stop:,.1f} (Option SL ₹{opt_sl:,.1f})."
-                    if (tp and tp.invalidation_stop > 0)
-                    else f"Buy on ask/limit within entry range with tight defined risk below ₹{opt_sl:,.1f}."
-                )
+                if is_wide_spread:
+                    when_to_buy_str = (
+                        f"LIMIT ORDER ONLY: Best bid ₹{best_bid:,.2f} / Best ask ₹{best_ask:,.2f} (Spread {sfr:.1f}%). "
+                        f"Enter via Limit Order at midpoint ₹{midpoint_price:,.2f} to eliminate -{sfr / 2.0:.1f}% immediate market slippage."
+                    )
+                else:
+                    when_to_buy_str = (
+                        f"Buy on ask/limit within entry range with spot invalidation anchor at ₹{tp.invalidation_stop:,.1f} (Option SL ₹{opt_sl:,.1f})."
+                        if (tp and tp.invalidation_stop > 0)
+                        else f"Buy on ask/limit within entry range with tight defined risk below ₹{opt_sl:,.1f}."
+                    )
 
                 lot_tag = f" (Lot: {lot_sz})" if (lot_sz and lot_sz > 1) else ""
                 sec_badge = ""
@@ -1144,14 +1276,14 @@ def detect_options_momentum_breakouts(
                 if opt_type == "PE":
                     headline = f"🔴 OPTIONS MOMENTUM{sec_badge}{cat_badge} (PUT SURGE): {contract_sym} @ ₹{opt_ltp:,.1f}{lot_tag} (Vol/OI {vol_oi}x)"
                     summary = (
-                        f"Institutional Put surge in {clean_sym} {int(strike)} PE. "
+                        f"Institutional Put surge in {clean_sym} {format_strike(strike)} PE. "
                         f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
                         f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}{high_vix_tag}"
                     )
                 else:
                     headline = f"🟢 OPTIONS MOMENTUM{sec_badge}{cat_badge}: {contract_sym} @ ₹{opt_ltp:,.1f}{lot_tag} (Vol/OI {vol_oi}x)"
                     summary = (
-                        f"Institutional Call surge in {clean_sym} {int(strike)} CE. "
+                        f"Institutional Call surge in {clean_sym} {format_strike(strike)} CE. "
                         f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
                         f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}{high_vix_tag}"
                     )
@@ -1237,6 +1369,12 @@ def detect_options_momentum_breakouts(
                     ),
                     vix_regime=vix_regime,
                     metrics={
+                        "cpr": (cpr_gate_ce if opt_type == "CE" else cpr_gate_pe).cpr_data,
+                        "cpr_type": (cpr_gate_ce if opt_type == "CE" else cpr_gate_pe).cpr_type,
+                        "is_narrow_cpr": (
+                            cpr_gate_ce if opt_type == "CE" else cpr_gate_pe
+                        ).is_narrow,
+                        "is_wide_cpr": (cpr_gate_ce if opt_type == "CE" else cpr_gate_pe).is_wide,
                         "delta": opt_delta,
                         "gamma": opt_gamma,
                         "iv": opt_iv,
@@ -1340,8 +1478,16 @@ def detect_options_momentum_breakouts(
                             else None
                         ),
                         "hedge_plan": hedge_plan,
-                        "recommended_entry": f"₹{opt_ltp:,.2f}",
+                        "recommended_entry": (
+                            f"₹{midpoint_price:,.2f} (Midpoint Limit)"
+                            if is_wide_spread
+                            else f"₹{opt_ltp:,.2f}"
+                        ),
                         "entry_range": entry_range_str,
+                        "spread_friction_ratio": sfr,
+                        "is_wide_spread": is_wide_spread,
+                        "recommended_limit_price": midpoint_price if is_wide_spread else None,
+                        "broker_order_type": "BUY LIMIT" if is_wide_spread else "LIMIT_OR_MARKET",
                         "stop_loss": f"₹{opt_sl:,.1f}",
                         "target_0_5": f"₹{opt_t0_5:,.1f}",
                         "target_1": f"₹{opt_t1:,.1f}",
@@ -1358,6 +1504,7 @@ def detect_options_momentum_breakouts(
                             "scalp_target_eta": "10m–15m",
                             "scalp_profit_rule": "Book 70% at scalp target (+20%), move SL to Breakeven (+0.2%), let 30% runner ride",
                             "time_stop_mins": 20,
+                            "is_micro_scalp": False,
                             "time_stop_rule": "If position has < +0.40R or < +5% gain after 20 minutes, scratch at CMP to halt theta decay",
                         },
                         "profit_rule": (

@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta, date
 from typing import Any, Optional
 
+from market.instruments import format_strike
+
 logger = logging.getLogger("bot.alert_templates")
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -330,7 +332,7 @@ def resolve_expiry_cycle(
         # Pattern B0: Broker YYYYMMDD format e.g. M&M202610272950PE, HAL202609294800PE, UNITDSPR202609291380PE
         if dt is None:
             m_yyyymmdd = re.search(
-                r"([A-Za-z0-9_&]+?)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d*(?:CE|PE)",
+                r"([A-Za-z0-9_&]+?)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d*(?:\.\d+)?(?:CE|PE)",
                 c_upper,
             )
             if m_yyyymmdd:
@@ -344,7 +346,8 @@ def resolve_expiry_cycle(
         # Only index options have weekly expiries; day must be valid 01-31
         if dt is None and is_index:
             m_weekly = re.search(
-                r"([A-Za-z0-9_&]+?)(\d{2})([1-9OND])(0[1-9]|[12]\d|3[01])\d*(?:CE|PE)", c_upper
+                r"([A-Za-z0-9_&]+?)(\d{2})([1-9OND])(0[1-9]|[12]\d|3[01])\d*(?:\.\d+)?(?:CE|PE)",
+                c_upper,
             )
             if m_weekly:
                 _sym, yy_str, m_code, dd_str = m_weekly.groups()
@@ -373,7 +376,7 @@ def resolve_expiry_cycle(
 
         # Pattern C: NSE Monthly format e.g. RELIANCE26SEP3000PE or MCX CRUDEOIL26OCT8750CE
         if dt is None:
-            m_monthly = re.search(r"[A-Z0-9_&]+(\d{2})([A-Z]{3})\d+(?:CE|PE)", c_upper)
+            m_monthly = re.search(r"[A-Z0-9_&]+(\d{2})([A-Z]{3})\d+(?:\.\d+)?(?:CE|PE)", c_upper)
             if m_monthly:
                 yy_str, mon_str = m_monthly.groups()
                 month_map = {
@@ -558,7 +561,9 @@ def _parse_ts_to_dt(ts_str: Optional[str]) -> Optional[datetime]:
         try:
             dt = datetime.strptime(cleaned, fmt)
             if fmt == "%H:%M:%S":
-                now = datetime.now()
+                from config.constants import now_ist
+
+                now = now_ist()
                 dt = dt.replace(year=now.year, month=now.month, day=now.day)
             return dt
         except ValueError:
@@ -692,13 +697,13 @@ def format_contract_display(contract: str) -> str:
     if m_fut_spaced:
         return f"{m_fut_spaced.group(1)} {m_fut_spaced.group(2)} FUT"
 
-    # Already well-formatted (has spaces): e.g. "HAL 4800 PE", "NIFTY 25000 CE"
-    m_spaced = re.match(r"^([A-Z0-9_]+)\s+(\d+)\s*(CE|PE|FUT)$", c.upper().strip())
+    # Already well-formatted (has spaces): e.g. "HAL 4800 PE", "NIFTY 25000 CE", "ASHOKLEY 142.5 PE"
+    m_spaced = re.match(r"^([A-Z0-9_]+)\s+(\d+(?:\.\d+)?)\s*(CE|PE|FUT)$", c.upper().strip())
     if m_spaced:
         sym, strike, opt = m_spaced.groups()
         if opt == "FUT":
             return f"{sym} FUT"
-        return f"{sym} {int(strike)} {opt}"
+        return f"{sym} {format_strike(strike)} {opt}"
 
     c_upper = c.upper()
 
@@ -721,28 +726,28 @@ def format_contract_display(contract: str) -> str:
 
     # MStock / broker YYYYMMDD format: e.g. HAL202609294800PE, M&M202610272950PE
     # Must start with "20" followed by 6 digits (8-digit date YYYYMMDD)
-    m_yyyymmdd = re.match(r"^([A-Z&]+)(20\d{6})(\d+)(CE|PE)$", c_upper)
+    m_yyyymmdd = re.match(r"^([A-Z&]+)(20\d{6})(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
     if m_yyyymmdd:
         sym, _date, strike_str, opt = m_yyyymmdd.groups()
-        return f"{sym} {int(strike_str)} {opt}"
+        return f"{sym} {format_strike(strike_str)} {opt}"
 
     # NSE Weekly compact: e.g. NIFTY2692524800CE (YY + month-code(1-9/O/N/D) + DD(2) + strike + CE/PE)
-    m_weekly = re.match(r"^([A-Z&]+)\d{2}[1-9OND]\d{2}(\d+)(CE|PE)$", c_upper)
+    m_weekly = re.match(r"^([A-Z&]+)\d{2}[1-9OND]\d{2}(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
     if m_weekly:
         sym, strike_str, opt = m_weekly.groups()
-        return f"{sym} {int(strike_str)} {opt}"
+        return f"{sym} {format_strike(strike_str)} {opt}"
 
-    # NSE Monthly: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE
-    m_monthly = re.match(r"^([A-Z0-9_&]+)\d{2}[A-Z]{3}(\d+)(CE|PE)$", c_upper)
+    # NSE Monthly: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE, ASHOKLEY26NOV142.5PE
+    m_monthly = re.match(r"^([A-Z0-9_&]+)\d{2}[A-Z]{3}(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
     if m_monthly:
         sym, strike_str, opt = m_monthly.groups()
-        return f"{sym} {int(strike_str)} {opt}"
+        return f"{sym} {format_strike(strike_str)} {opt}"
 
-    # Compact without date: e.g. HDFCBANK680CE, MIDCPNIFTY14250CE, M&M2950PE
-    m_compact = re.match(r"^([A-Z0-9_&]+?)(\d+)(CE|PE)$", c_upper)
+    # Compact without date: e.g. HDFCBANK680CE, MIDCPNIFTY14250CE, M&M2950PE, ASHOKLEY142.5PE
+    m_compact = re.match(r"^([A-Z0-9_&]+?)(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
     if m_compact:
         sym, strike_str, opt = m_compact.groups()
-        return f"{sym} {int(strike_str)} {opt}"
+        return f"{sym} {format_strike(strike_str)} {opt}"
 
     # Fallback: return as-is (already clean or unrecognised format)
     return c.strip()
@@ -781,7 +786,7 @@ def format_signal_badge_and_lot(
     # 1. Infer or lookup symbol
     inferred_sym = symbol
     if not inferred_sym:
-        m_sym = re.search(r"\b([A-Z0-9_&]{2,})\s+\d+\s*(?:CE|PE)\b", s)
+        m_sym = re.search(r"\b([A-Z0-9_&]{2,})\s+\d+(?:\.\d+)?\s*(?:CE|PE)\b", s)
         if m_sym:
             inferred_sym = m_sym.group(1)
         else:
@@ -911,8 +916,8 @@ def format_signal_badge_and_lot(
         pattern = r"(@\s*₹?\s*[\d,]+(?:\.\d+)?)"
         if re.search(pattern, s):
             s = re.sub(pattern, rf"\1 (Lot: {resolved_lot})", s, count=1)
-        elif bool(re.search(r"\b\d+\s*(?:CE|PE)\b", s)):
-            s = re.sub(r"(\b\d+\s*(?:CE|PE)\b)", rf"\1 (Lot: {resolved_lot})", s, count=1)
+        elif bool(re.search(r"\b\d+(?:\.\d+)?\s*(?:CE|PE)\b", s)):
+            s = re.sub(r"(\b\d+(?:\.\d+)?\s*(?:CE|PE)\b)", rf"\1 (Lot: {resolved_lot})", s, count=1)
 
     # 5. Prepend Badge if not already present
     has_leading_badge = bool(re.match(r"^[🟢🔴🟡⚡🎯🏆🛑⚠️🚨💎🌙🛢️💱🪙🛡️]", s))
@@ -966,6 +971,22 @@ def parse_contract_components(
     opt = str(option_type or "").strip().upper()
     exp_extracted: Optional[str] = None
 
+    try:
+        from market.instruments import parse_derivative_contract
+
+        parsed = parse_derivative_contract(contract)
+        if parsed:
+            if not und:
+                und = parsed.underlying
+            if stk is None:
+                stk = parsed.strike
+            if not opt:
+                opt = parsed.contract_type
+            if not expiry_date and parsed.expiry_date:
+                expiry_date = parsed.expiry_date
+    except Exception as e_suppressed:
+        logger.debug(f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}")
+
     # 1. Spaced format: e.g. "HAL 4800 PE", "HAL 26SEP 4500 CE", "MIDCPNIFTY 14250 CE"
     m_spaced = re.match(
         r"^([A-Z]+)\s+(?:(\d{1,2}[A-Z]{3}|\d{2}[A-Z]{3})\s+)?(\d+(?:\.\d+)?)\s*(CE|PE|FUT)$",
@@ -989,7 +1010,7 @@ def parse_contract_components(
 
     # 2. Broker YYYYMMDD format: e.g. HAL202609294800PE, MIDCPNIFTY2026092914250CE
     if stk is None:
-        m_yyyymmdd = re.match(r"^([A-Z]+)(20\d{6})(\d+)(CE|PE)$", c_upper)
+        m_yyyymmdd = re.match(r"^([A-Z]+)(20\d{6})(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
         if m_yyyymmdd:
             und_found, dt_str, stk_raw, opt_found = m_yyyymmdd.groups()
             if not und:
@@ -1007,7 +1028,7 @@ def parse_contract_components(
 
     # 3. NSE Weekly compact: e.g. NIFTY2692524800CE
     if stk is None:
-        m_weekly = re.match(r"^([A-Z]+)(\d{2}[1-9OND]\d{2})(\d+)(CE|PE)$", c_upper)
+        m_weekly = re.match(r"^([A-Z]+)(\d{2}[1-9OND]\d{2})(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
         if m_weekly:
             und_found, exp_code, stk_raw, opt_found = m_weekly.groups()
             if not und:
@@ -1017,9 +1038,9 @@ def parse_contract_components(
             if not expiry_date:
                 exp_extracted = exp_code
 
-    # 4. NSE Monthly compact: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE
+    # 4. NSE Monthly compact: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE, ASHOKLEY26NOV142.5PE
     if stk is None:
-        m_monthly = re.match(r"^([A-Z]+)(\d{2}[A-Z]{3})(\d+)(CE|PE)$", c_upper)
+        m_monthly = re.match(r"^([A-Z]+)(\d{2}[A-Z]{3})(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
         if m_monthly:
             und_found, exp_code, stk_raw, opt_found = m_monthly.groups()
             if not und:
@@ -1029,9 +1050,9 @@ def parse_contract_components(
             if not expiry_date:
                 exp_extracted = exp_code
 
-    # 5. Compact no-date: e.g. HDFCBANK680CE, MIDCPNIFTY14250CE
+    # 5. Compact no-date: e.g. HDFCBANK680CE, MIDCPNIFTY14250CE, ASHOKLEY142.5PE
     if stk is None:
-        m_compact = re.match(r"^([A-Z]+?)(\d+)(CE|PE)$", c_upper)
+        m_compact = re.match(r"^([A-Z]+?)(\d+(?:\.\d+)?)(CE|PE)$", c_upper)
         if m_compact:
             und_found, stk_raw, opt_found = m_compact.groups()
             if not und:
@@ -1054,9 +1075,7 @@ def parse_contract_components(
         und = re.sub(r"[^A-Z]", "", c_upper) if c_upper else "STOCK"
 
     # Formatted strike string
-    stk_str = ""
-    if stk is not None and stk > 0:
-        stk_str = f"{int(stk)}" if stk.is_integer() else f"{stk}"
+    stk_str = format_strike(stk) if stk is not None and stk > 0 else ""
 
     is_option = bool(stk_str and opt in ("CE", "PE"))
 
@@ -1165,16 +1184,16 @@ def escape_tg(text: Any) -> str:
 
 
 def format_price(val: Any) -> str:
-    """Format numeric value as Indian Rupee string or pass through if string."""
+    """Format numeric value as currency string or pass through if string."""
     if val is None:
         return ""
     if isinstance(val, (int, float)):
         return f"₹{val:,.2f}"
     s = str(val).strip()
-    if s.startswith("₹") or s.startswith("`") or s == "Open":
+    if s.startswith("₹") or s.startswith("$") or s.startswith("`") or s == "Open":
         return s
     try:
-        f = float(s.replace(",", "").replace("₹", ""))
+        f = float(s.replace(",", "").replace("₹", "").replace("$", ""))
         return f"₹{f:,.2f}"
     except ValueError:
         return s
@@ -1218,7 +1237,7 @@ def strip_provenance_and_icons(text: str) -> str:
         flags=re.IGNORECASE,
     )
     # Strip leading alert emojis followed by optional space
-    s = re.sub(r"^[🚨🎯🚀⚡🛢️💱🟢⚠️🏆💎🔔🌙\s]+", "", s)
+    s = re.sub(r"^[🚨🎯🚀⚡🛢️💱🟢🔴🪙🦅🌟⚠️🏆💎🔔🌙\s]+", "", s)
     return s.strip()
 
 
@@ -1301,7 +1320,7 @@ def _resolve_monotonic_display_targets(
         dec = 2
     elif seg == "CDS":
         dec = 4
-    elif candidates[0] < 100 and seg in ("FNO_INDEX", "NFO", "BFO"):
+    elif candidates[0] < 100:
         dec = 2
     else:
         dec = 1
@@ -1382,6 +1401,7 @@ class FNOAlertData:
     spot_invalidation_anchor: Optional[float] = None
     structural_spot_sl: Optional[float] = None
     disaster_stop_floor: Optional[float] = None
+    is_do_not_miss: bool = False
 
     @classmethod
     def from_dict(
@@ -1399,11 +1419,11 @@ class FNOAlertData:
         if not contract or contract.strip().endswith("OPTION"):
             strike = d.get("strike")
             if strike:
-                contract = f"{und} {int(float(strike))} {opt_type}"
+                contract = f"{und} {format_strike(strike)} {opt_type}"
             elif spot and spot > 0:
                 step = 100 if "BANK" in und.upper() else (50 if "NIFTY" in und.upper() else 10)
-                atm_strike = int(round(spot / step) * step)
-                contract = f"{und} {atm_strike} {opt_type}"
+                atm_strike = round(spot / step) * step
+                contract = f"{und} {format_strike(atm_strike)} {opt_type}"
             else:
                 contract = f"{und} OPTION"
 
@@ -1568,6 +1588,7 @@ class FNOAlertData:
             spot_invalidation_anchor=spot_anchor_val,
             structural_spot_sl=spot_anchor_val,
             disaster_stop_floor=disaster_floor,
+            is_do_not_miss=bool(d.get("is_do_not_miss", False)),
         )
 
 
@@ -1601,6 +1622,7 @@ class EquityAlertData:
     quick_command: Optional[str] = None
     environment: str = "LIVE"
     in_market: bool = True
+    is_do_not_miss: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any], in_market: bool = True) -> EquityAlertData:
@@ -1695,6 +1717,7 @@ class EquityAlertData:
             quick_command=quick_cmd,
             environment=final_env,
             in_market=in_market,
+            is_do_not_miss=bool(d.get("is_do_not_miss", False)),
         )
 
 
@@ -1839,9 +1862,7 @@ class MilestoneAlertData:
             or act_plan.get("contract")
         )
         if not contract and getattr(alert, "strike", None) and getattr(alert, "option_type", None):
-            contract = (
-                f"{getattr(alert, 'symbol', '')} {int(alert.strike)} {alert.option_type}".strip()
-            )
+            contract = f"{getattr(alert, 'symbol', '')} {format_strike(alert.strike)} {alert.option_type}".strip()
 
         # Determine payoff direction (higher price = profit vs lower price = profit)
         alert_type_raw = str(getattr(alert, "alert_type", "SETUP") or "").upper()
@@ -1859,8 +1880,21 @@ class MilestoneAlertData:
         if is_opt_contract:
             # Option sellers/writers profit on premium decay; Option buyers (both CE and PE) profit on premium expansion!
             is_option_seller = (
-                any(k in action_str for k in ("SELL", "WRITE", "SHORT"))
+                action_str
+                in (
+                    "SELL_OPTION",
+                    "WRITE_OPTION",
+                    "SHORT_OPTION",
+                    "WRITE",
+                    "SELL_CE",
+                    "SELL_PE",
+                    "SHORT_CE",
+                    "SHORT_PE",
+                )
                 or alert_type_raw == "OPTION_WRITE"
+                or getattr(alert, "derivative_type", "") == "OPTION_SELL"
+                or act_plan.get("strategy_type")
+                in ("CREDIT_SPREAD", "SHORT_STRADDLE", "SHORT_STRANGLE")
             )
             is_payoff_bullish = not is_option_seller
         else:
@@ -1893,38 +1927,82 @@ class MilestoneAlertData:
 
         # Entry Price resolution (Actionable plan recommended_entry takes canonical precedence)
         entry_price = getattr(alert, "initial_entry_premium", None)
-        if not entry_price and is_opt_contract and getattr(alert, "entry_price", None):
-            try:
-                entry_price = float(alert.entry_price)
-            except (ValueError, TypeError):
-                entry_price = None
         opt_plan = act_plan.get("option_plan") if isinstance(act_plan, dict) else None
+        spot_ref = (
+            getattr(alert, "underlying_spot", None)
+            or (opt_plan.get("underlying_spot") if isinstance(opt_plan, dict) else None)
+            or (
+                alert.metrics.get("spot")
+                if isinstance(getattr(alert, "metrics", None), dict)
+                else None
+            )
+            or getattr(alert, "trigger_level", None)
+        )
+
+        # For option contracts, extract explicit option premium first
         if not entry_price and is_opt_contract and isinstance(opt_plan, dict):
             if opt_plan.get("entry_premium"):
-                entry_price = float(opt_plan["entry_premium"])
+                try:
+                    entry_price = float(opt_plan["entry_premium"])
+                except (ValueError, TypeError) as e_conv:
+                    logger.debug(f"[alert_templates] entry_premium float parse error: {e_conv}")
 
         entry_range = act_plan.get("entry_range")
         rec_entry = act_plan.get("recommended_entry")
         if not entry_price and rec_entry:
             m = re.search(r"[\d,]+(?:\.\d+)?", str(rec_entry))
             if m:
-                entry_price = float(m.group(0).replace(",", ""))
+                cand_r = float(m.group(0).replace(",", ""))
+                if (
+                    not is_opt_contract
+                    or not spot_ref
+                    or abs(cand_r - spot_ref) / max(1.0, spot_ref) >= 0.20
+                ):
+                    entry_price = cand_r
+
+        if not entry_price and is_opt_contract:
+            # For option contracts, verify that alert.entry_price is option premium, NOT spot scale!
+            cand_ep = getattr(alert, "entry_price", None)
+            if cand_ep:
+                try:
+                    cand_ep_f = float(cand_ep)
+                    # If spot_ref exists and cand_ep is near spot_ref, it is spot, NOT option premium!
+                    if spot_ref and abs(cand_ep_f - spot_ref) / max(1.0, spot_ref) < 0.20:
+                        cand_ep_f = None
+                    elif cand_ep_f > 500 and not str(contract or "").startswith("BTC"):
+                        cand_ep_f = None
+                    if cand_ep_f and cand_ep_f > 0:
+                        entry_price = cand_ep_f
+                except (ValueError, TypeError) as e_conv:
+                    logger.debug(f"[alert_templates] cand_ep float parse error: {e_conv}")
         if not entry_price and entry_range:
             matches = re.findall(r"[\d,]+(?:\.\d+)?", str(entry_range))
             if len(matches) >= 2:
                 try:
-                    entry_price = round(
+                    cand_mid = round(
                         (float(matches[0].replace(",", "")) + float(matches[1].replace(",", "")))
                         / 2.0,
                         2,
                     )
+                    if (
+                        not is_opt_contract
+                        or not spot_ref
+                        or abs(cand_mid - spot_ref) / max(1.0, spot_ref) >= 0.20
+                    ):
+                        entry_price = cand_mid
                 except ValueError as e_suppressed:
                     logger.debug(
                         f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
                     )
             elif len(matches) == 1:
                 try:
-                    entry_price = float(matches[0].replace(",", ""))
+                    cand_1 = float(matches[0].replace(",", ""))
+                    if (
+                        not is_opt_contract
+                        or not spot_ref
+                        or abs(cand_1 - spot_ref) / max(1.0, spot_ref) >= 0.20
+                    ):
+                        entry_price = cand_1
                 except ValueError as e_suppressed:
                     logger.debug(
                         f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}"
@@ -1946,18 +2024,32 @@ class MilestoneAlertData:
                 alert, "threshold", None
             )
 
-        # Strict Option LTP & Spot Contamination Interceptor
+        # Strict Option LTP & Spot Contamination Interceptor (Rule 14.1)
         if is_opt_contract and entry_price and entry_price > 0:
             spot_ref = getattr(alert, "underlying_spot", None)
-            is_spot_scale = (ltp > entry_price * 3.5) or (
+            # Case 1: LTP is spot scale while entry is option scale
+            is_ltp_spot_scale = (ltp > entry_price * 3.5) or (
                 spot_ref and abs(ltp - spot_ref) / max(1.0, spot_ref) < 0.15
             )
-            if is_spot_scale:
+            if is_ltp_spot_scale:
                 opt_prem_saved = getattr(alert, "option_premium", None)
                 if opt_prem_saved and 0 < float(opt_prem_saved) <= (entry_price * 3.5):
                     ltp = float(opt_prem_saved)
                 else:
                     ltp = entry_price
+
+            # Case 2: Entry is spot scale while LTP is option scale
+            is_entry_spot_scale = (entry_price > ltp * 3.5) or (
+                spot_ref and abs(entry_price - spot_ref) / max(1.0, spot_ref) < 0.15
+            )
+            if is_entry_spot_scale and spot_ref and entry_price > spot_ref * 0.5:
+                opt_prem_saved = getattr(alert, "option_premium", None)
+                if opt_prem_saved and 0 < float(opt_prem_saved) <= (ltp * 3.5):
+                    entry_price = float(opt_prem_saved)
+                elif isinstance(opt_plan, dict) and opt_plan.get("entry_premium"):
+                    entry_price = float(opt_plan["entry_premium"])
+                else:
+                    entry_price = ltp
 
         # Initial Stop Loss resolution
         initial_sl = None
@@ -2843,6 +2935,8 @@ def render_fno_alert(
         f"{conv_badge}\n"
         f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
     )
+    if getattr(d, "is_do_not_miss", False):
+        msg = f"🌟 <b>DO NOT MISS SETUP · APEX ASYMMETRY</b>\n{msg}"
     return msg
 
 
@@ -2913,6 +3007,8 @@ def render_equity_alert(data: EquityAlertData | dict[str, Any], in_market: bool 
         f"⚡ <b>Quick Size:</b> <code>{d.quick_command}</code>\n"
         f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
     )
+    if getattr(d, "is_do_not_miss", False):
+        msg = f"🌟 <b>DO NOT MISS SETUP · APEX ASYMMETRY</b>\n{msg}"
     return msg
 
 
@@ -2954,7 +3050,7 @@ def render_precursor_alert(data: dict[str, Any], in_market: bool = True) -> str:
 
     env_tag = normalize_env_tag(data.get("environment", "LIVE"), in_market)
     if not in_market:
-        header_line = f"🌙 <b>{env_tag} POST-MARKET EOD WATCHLIST [{seg}]</b>"
+        header_line = f"🌙 <b>{env_tag} NEW CALL · POST-MARKET EOD WATCHLIST [{seg}]</b>"
         off_note = (
             "\n\n⏸️ <i>Market is closed. Setup calibrated for tomorrow's opening gameplan.</i>"
         )
@@ -3033,7 +3129,7 @@ def render_primed_strike_clock_alert(data: dict[str, Any] | Any, in_market: bool
     rr = plan.get("risk_reward") or "1:2.0"
 
     env_tag = normalize_env_tag(d.get("environment", "LIVE"), in_market)
-    header = f"🎯 <b>{env_tag} PREDATOR STRIKE CLOCK · T-60s [{seg}]</b>"
+    header = f"🎯 <b>{env_tag} ADVANCE CALL · PREDATOR STRIKE CLOCK (T-60s) [{seg}]</b>"
 
     lines = [
         header,
@@ -3229,9 +3325,7 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
         setup_title_tag = "ASYMMETRIC SETUP"
 
     if not in_market:
-        header_line = (
-            f"🌙 <b>{env_tag} POST-MARKET EOD WATCHLIST — {setup_title_tag} [{rr_display} R:R]</b>"
-        )
+        header_line = f"🌙 <b>{env_tag} NEW CALL · POST-MARKET EOD WATCHLIST — {setup_title_tag} [{rr_display} R:R]</b>"
         off_note = (
             "\n\n⏸️ <i>Market is closed. Setup calibrated for tomorrow's opening gameplan.</i>"
         )
@@ -3506,6 +3600,13 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
             f"{off_note}\n"
             f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
         )
+    is_dnm = bool(
+        data.get("is_do_not_miss")
+        or metrics.get("is_do_not_miss")
+        or (float(score or 0) >= 85 and float(str(raw_rr).replace("1:", "").strip() or 0) >= 2.5)
+    )
+    if is_dnm:
+        msg = f"🌟 <b>DO NOT MISS SETUP · APEX ASYMMETRY</b>\n{msg}"
     return msg
 
 
@@ -3714,8 +3815,10 @@ def render_milestone_alert(
         act_verb = "Roll Down" if "DOWN" in action else "Roll Up" if "UP" in action else "Roll"
         pnl_pct = rec.get("pnl_pct")
         pnl_str = f"Lock +{pnl_pct:.0f}% ITM Gains · " if pnl_pct else ""
-        target_disp = rec_contract or (f"{int(rec_strike)}" if rec_strike else "ATM strike")
-        cur_disp = f"{int(cur_strike)}" if cur_strike else "current strike"
+        target_disp = rec_contract or (
+            f"{format_strike(rec_strike)}" if rec_strike else "ATM strike"
+        )
+        cur_disp = f"{format_strike(cur_strike)}" if cur_strike else "current strike"
         base_line = f"\n🔄 <b>STRIKE ROLL:</b> Book <code>{cur_disp}</code> &amp; {act_verb} to <code>{target_disp}</code> ({pnl_str}Reset Gamma Leverage)"
 
         # Institutional financial enrichment
@@ -4579,7 +4682,7 @@ def render_price_alert(
     env_tag = normalize_env_tag(environment, in_market)
     ltp_str = f" · LTP: <b>₹{ltp:,.2f}</b>" if ltp is not None else ""
     return (
-        f"🟢 <b>{env_tag} ALERT TRIGGERED</b>\n"
+        f"🟢 <b>{env_tag} UPDATE · PRICE ALERT TRIGGERED</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔔 <b>{symbol}</b>: {condition_desc}{ltp_str}"
     )
@@ -4816,11 +4919,9 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
         )
         if is_opt:
-            is_option_seller = (
-                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
-                or alert_type_raw == "OPTION_WRITE"
-                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
-            )
+            from engine.alert_expiry import is_option_seller
+
+            is_option_seller = is_option_seller(alert)
             is_downward = is_option_seller
         else:
             if t1_num and entry_p and entry_p > 0:
@@ -4931,11 +5032,9 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
         )
         if is_opt:
-            is_option_seller = (
-                any(k in act_str for k in ("SELL", "WRITE", "SHORT"))
-                or alert_type_raw == "OPTION_WRITE"
-                or str(getattr(alert, "option_write", False)).lower() in ("true", "1")
-            )
+            from engine.alert_expiry import is_option_seller
+
+            is_option_seller = is_option_seller(alert)
             is_t2_downward = is_option_seller
         else:
             if t2_num and entry_p and entry_p > 0:
@@ -5049,7 +5148,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     elif is_crypto:
         tg_header = "🪙 <b>[CRYPTO 24x7] NEW CALL · ALPHA VORTEX</b>"
     elif not in_market:
-        tg_header = f"🌙 <b>{env_tag} NEW EOD WATCHLIST</b>"
+        tg_header = f"🌙 <b>{env_tag} NEW CALL · NEW EOD WATCHLIST</b>"
     else:
         if (
             getattr(alert, "exchange", "") == "MCX"
@@ -5195,6 +5294,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
     actionable_plan = getattr(alert, "actionable_plan", {}) or {}
     plan_str = ""
+    sector_line_str = ""
+    signals_line_str = ""
 
     # Options Contract Plan
     is_option_plan = bool(
@@ -5235,7 +5336,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         inst = format_contract_display(
             raw_contract
             or (
-                f"{alert.symbol} {int(getattr(alert, 'strike', 0) or 0)} {opt_type_hint}".strip()
+                f"{alert.symbol} {format_strike(getattr(alert, 'strike', 0))} {opt_type_hint}".strip()
                 if getattr(alert, "strike", None)
                 else alert.symbol
             )
@@ -5249,8 +5350,9 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             act = re.sub(r"\b(CE|PE)\b", "", act, flags=re.IGNORECASE).strip()
             act = re.sub(r"\s+", " ", act)
 
-        # If action is labelled as SPREAD but the target instrument is a single option contract (CE/PE),
-        # normalize action verb to BUY so that the single leg's entry/SL/target match the action,
+        # If action is labelled as SPREAD but a hedge plan box is rendered below,
+        # the primary top ticket represents the single option contract (Naked Leg).
+        # Normalize action verb to BUY, resolve instrument to the single contract,
         # and attach a clear reference to the attached Defined-Risk Spread below.
         spread_ref_inline = ""
         has_hedge_box = bool(
@@ -5260,10 +5362,18 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 and alert.metrics.get("hedge_plan")
             )
         )
-        if "SPREAD" in act.upper() and any(tok in inst_u for tok in (" CE", " PE", "CE", "PE")):
-            act = "BUY"
-
         if has_hedge_box:
+            if "SPREAD" in act.upper():
+                act = "BUY"
+            if "SPREAD" in inst.upper() or "/" in inst:
+                naked_sym = getattr(alert, "contract_symbol", None)
+                if not naked_sym or "SPREAD" in str(naked_sym).upper():
+                    strk = format_strike(getattr(alert, "strike", 0))
+                    if strk and opt_type_hint:
+                        naked_sym = f"{alert.symbol} {strk} {opt_type_hint}"
+                if naked_sym and "SPREAD" not in str(naked_sym).upper():
+                    inst = format_contract_display(naked_sym)
+                    inst_u = inst.upper()
             pref_veh = ""
             hp = actionable_plan.get("hedge_plan") or (
                 alert.metrics.get("hedge_plan")
@@ -5276,12 +5386,19 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 spread_ref_inline = " <i>(Hedged Spread Preferred 👇)</i> [Naked Leg]"
             else:
                 spread_ref_inline = " <i>(or Hedged Spread below 👇)</i> [Naked Leg]"
+        elif "SPREAD" in act.upper() and any(tok in inst_u for tok in (" CE", " PE", "CE", "PE")):
+            act = "BUY"
 
         entry = (
             actionable_plan.get("recommended_entry")
             or actionable_plan.get("entry_range")
             or f"₹{alert.ltp:.1f}"
         )
+        # Extract clean limit range if entry contains embedded pullback note (e.g. "₹4.65 (OTE Pullback: ₹4.4 – ₹4.7)")
+        m_ote = re.search(r"\(OTE Pullback:\s*([^)]+)\)", str(entry), flags=re.IGNORECASE)
+        if m_ote:
+            entry = m_ote.group(1).strip()
+
         sl = actionable_plan.get("stop_loss", f"₹{getattr(alert, 'stop_loss', 0):.1f}")
 
         # Spot-leakage defense: if entry or SL is in underlying spot units, rescue from option_plan
@@ -5543,18 +5660,46 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             disaster_stop = round(entry_val * 0.68, 2)
 
         if spot_anchor and str(spot_anchor) not in str(sl):
+            try:
+                spot_anchor_num = float(
+                    re.findall(r"[\d,]+(?:\.\d+)?", str(spot_anchor))[0].replace(",", "")
+                )
+                spot_anchor_fmt = f"₹{spot_anchor_num:,.1f}"
+            except Exception:
+                spot_anchor_fmt = str(spot_anchor)
+                if not spot_anchor_fmt.startswith("₹") and not spot_anchor_fmt.startswith("$"):
+                    spot_anchor_fmt = f"₹{spot_anchor_fmt}"
             disaster_str = (
                 f" [Disaster Floor: -32% @ ₹{disaster_stop:,.1f}]" if disaster_stop else ""
             )
             sl_line = (
                 f"• <b>🛑 Safe SL (Tactical):</b> <code>{sl}</code> <i>(1m close — filters freak wicks)</i>\n"
-                f"• <b>🏛️ Structural SL (Spot):</b> <code>{spot_anchor}</code><i>{disaster_str}</i>{max_loss_str}\n"
+                f"• <b>🏛️ Structural SL (Spot):</b> <code>{spot_anchor_fmt}</code><i>{disaster_str}</i>{max_loss_str}\n"
             )
         else:
             sl_line = f"• <b>SL:</b> <code>{sl}</code>{max_loss_str}\n"
 
+        free_roll_data = actionable_plan.get("free_roll_plan") or (
+            isinstance(actionable_plan.get("option_plan"), dict)
+            and actionable_plan["option_plan"].get("free_roll_plan")
+        )
+        has_eligible_free_roll = bool(
+            isinstance(free_roll_data, dict)
+            and free_roll_data.get("status") == "ELIGIBLE"
+            and free_roll_data.get("protocol_summary")
+        )
         profit_rule = actionable_plan.get("profit_rule")
-        rule_str = f"\n• <b>Playbook:</b> <i>{profit_rule}</i>" if profit_rule else ""
+        if profit_rule and isinstance(profit_rule, str):
+            if tgt and "Target 1" in profit_rule:
+                profit_rule = re.sub(r"Target\s*1\s*\([^)]+\)", f"Target 1 ({tgt})", profit_rule)
+            if tgt2 and "Target 2" in profit_rule:
+                profit_rule = re.sub(r"Target\s*2\s*\([^)]+\)", f"Target 2 ({tgt2})", profit_rule)
+        # Suppress duplicate Playbook line when Free-Roll Protocol is active
+        rule_str = (
+            f"\n• <b>Playbook:</b> <i>{profit_rule}</i>"
+            if (profit_rule and not has_eligible_free_roll)
+            else ""
+        )
 
         no_chase_val = getattr(alert, "no_chase_boundary", None)
         if is_option_plan and entry_val and entry_val > 0:
@@ -6053,9 +6198,9 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 wait_str = f"\n• <b>Discipline:</b> <i>{wait_rule}</i>"
         plan_str = (
             f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>\n"
-            f"• <b>SL:</b> <code>{sl}</code>\n"
+            f"• <b>SL:</b> <code>{sl}</code>{no_chase_inline}\n"
             f"• <b>T1:</b> <code>{tgt1}</code>{tgt2_str}{tgt3_str}\n"
-            f"• <b>R:R:</b> <b>{rr}</b> | 24x7 Continuous Liquidity{no_chase_inline}\n"
+            f"• <b>R:R:</b> <b>{rr}</b> | 24x7 Continuous Liquidity\n"
             f"• <b>Structure:</b> <i>{confluence}</i>\n"
             f"• <b>Playbook:</b> <i>{rule}</i>"
             f"{wait_str}"
@@ -6299,7 +6444,19 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         )
         plan_str = (plan_str + hedge_box) if plan_str else hedge_box.strip()
 
-    # Execution style mandate note (when defined-risk spread is required)
+    # Execution style mandate note (when defined-risk spread or risk haircut is required)
+    has_opt_vehicle = bool(
+        getattr(alert, "option_type", None)
+        or getattr(alert, "strike", None)
+        or getattr(alert, "segment", "") in ("FNO", "NFO", "BFO")
+        or getattr(alert, "alert_type", "") in ("GAMMA_BLAST", "OPTIONS_MOMENTUM")
+        or "PE" in str(getattr(alert, "contract_symbol", "")).upper()
+        or "CE" in str(getattr(alert, "contract_symbol", "")).upper()
+        or (actionable_plan.get("instrument_type") == "OPTION")
+        or actionable_plan.get("option_alternative")
+        or actionable_plan.get("option_plan")
+    )
+    is_spot_asset = is_crypto or (not has_opt_vehicle)
     if actionable_plan.get("execution_style_mandate") == "HEDGED_SPREAD_MANDATORY" or (
         isinstance(getattr(alert, "metrics", None), dict)
         and alert.metrics.get("execution_style_mandate") == "HEDGED_SPREAD_MANDATORY"
@@ -6309,15 +6466,33 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             or actionable_plan.get("trap_warning")
             or "Defined-risk vertical spread required to monetize resistance & neutralize theta decay."
         )
-        if "DEFINED-RISK HEDGE SPREAD" not in (plan_str or "") and "MANDATE:" not in (
-            plan_str or ""
-        ):
-            spread_guidance = (
-                "\n• ⚠️ <i>Automated spread legs unavailable on illiquid strikes. Convert naked leg to vertical spread (sell OTM wing) or size at 50% risk.</i>"
-                if not has_hedge_legs
-                else ""
+        if is_spot_asset:
+            if "RISK MANDATE:" not in (plan_str or "") and "MANDATE:" not in (plan_str or ""):
+                mandate_box = f"\n\n🛡️ <b>RISK MANDATE: 50% POSITION SIZING HAIRCUT</b>\n• <i>{mandate_note} Size at 50% risk.</i>"
+                plan_str = (plan_str + mandate_box) if plan_str else mandate_box.strip()
+        else:
+            if "DEFINED-RISK HEDGE SPREAD" not in (plan_str or "") and "MANDATE:" not in (
+                plan_str or ""
+            ):
+                spread_guidance = (
+                    "\n• ⚠️ <i>Automated spread legs unavailable on illiquid strikes. Convert naked leg to vertical spread (sell OTM wing) or size at 50% risk.</i>"
+                    if not has_hedge_legs
+                    else ""
+                )
+                mandate_box = f"\n\n🛡️ <b>EXECUTION MANDATE: DEFINED-RISK SPREAD REQUIRED</b>\n• <i>{mandate_note}</i>{spread_guidance}"
+                plan_str = (plan_str + mandate_box) if plan_str else mandate_box.strip()
+    elif actionable_plan.get("execution_style_mandate") == "SIZE_HAIRCUT_50PCT" or (
+        isinstance(getattr(alert, "metrics", None), dict)
+        and alert.metrics.get("execution_style_mandate") == "SIZE_HAIRCUT_50PCT"
+    ):
+        mandate_note = (
+            actionable_plan.get("sector_concurrency_warning")
+            or "Position concentration limit reached. Size at 50% capital risk."
+        )
+        if "RISK MANDATE:" not in (plan_str or "") and "MANDATE:" not in (plan_str or ""):
+            mandate_box = (
+                f"\n\n🛡️ <b>RISK MANDATE: 50% POSITION SIZING HAIRCUT</b>\n• <i>{mandate_note}</i>"
             )
-            mandate_box = f"\n\n🛡️ <b>EXECUTION MANDATE: DEFINED-RISK SPREAD REQUIRED</b>\n• <i>{mandate_note}</i>{spread_guidance}"
             plan_str = (plan_str + mandate_box) if plan_str else mandate_box.strip()
 
     # Free-roll execution protocol (+2R Scale 50% & Zero-Risk Runner)
@@ -6350,7 +6525,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         return format_contract_display(m.group(0))
 
     clean_hl = re.sub(
-        r"(?:[A-Z0-9_&]{2,})(?:\d{8}|\d{2}[A-Z]{3}|\d{2}[1-9OND]\d{2})\d+(?:CE|PE)",
+        r"(?:[A-Z0-9_&]{2,})(?:\d{8}|\d{2}[A-Z]{3}|\d{2}[1-9OND]\d{2})\d+(?:\.\d+)?(?:CE|PE)",
         _replace_contract_token,
         clean_hl,
     )
@@ -6445,7 +6620,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         opt_type_val = getattr(alert, "option_type", "") or ""
         sym_val = getattr(alert, "symbol", "ALERT")
         if strike_val and opt_type_val:
-            clean_hl = f"{sym_val} {int(strike_val)} {opt_type_val} · Momentum Surge"
+            clean_hl = f"{sym_val} {format_strike(strike_val)} {opt_type_val} · Momentum Surge"
         else:
             clean_hl = f"{sym_val} · {getattr(alert, 'alert_type', 'BREAKOUT').replace('_', ' ')}"
 
@@ -6460,15 +6635,46 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             clean_summary,
             flags=re.IGNORECASE,
         ).strip()
+        # Strip duplicate execution directives (e.g. "Enter JSWSTEEL 1210 PE @ ₹32.15.", "Enter ₹1,212.4.")
+        clean_summary = re.sub(
+            r"\bEnter\s+[^.!?|]*?@\s*[^.!?|]+[.!?|]?",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip()
+        clean_summary = re.sub(
+            r"\bEnter\s+[\$₹]?[\d,]+(?:\.\d+)?[.!?|]?",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip()
+        # Strip duplicate Stop Loss statements (e.g. "Stop loss: ₹30.2.", "SL: ₹30.2.")
+        clean_summary = re.sub(
+            r"\b(?:Stop\s*loss|Stoploss|SL)\s*:[^.!?|]+[.!?|]?",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip()
+        # Strip duplicate Target statements (e.g. "Target 1: ₹39.2.", "Target: ₹39.2.")
+        clean_summary = re.sub(
+            r"\b(?:Target\s*\d*|T[123]|Upside\s+target)\s*:[^.!?|]+[.!?|]?",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip()
+        # Strip trailing/embedded R:R notes (e.g. "(R:R 2.0)", "R:R 1:2.0")
+        clean_summary = re.sub(
+            r"\(?\s*R:R\s*(?:1:)?[\d.]+\s*(?:\([^)]*\))?\)?\.?",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip()
         # Strip redundant Entry/SL/Target lists if plan_str already formats them
         clean_summary = re.sub(
             r"\s*(?:Entry|SL|T1|T2|Target|Risk|Reward|R:R)\s*:[^|]+(?:\||$)",
             "",
             clean_summary,
             flags=re.IGNORECASE,
-        ).strip()
-        clean_summary = re.sub(
-            r"R:R\s*1:[\d.]+\s*\([^)]*\)", "", clean_summary, flags=re.IGNORECASE
         ).strip()
         # Strip high-conviction inflection / scanner catalyst boilerplate
         clean_summary = re.sub(
@@ -6529,7 +6735,19 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 continue
             if re.search(r"^(?:Entry|SL|T1|T2|Target)\s*:", p, flags=re.IGNORECASE):
                 continue
+            if re.search(r"^(?:Stop\s*loss|Stoploss)\s*:", p, flags=re.IGNORECASE):
+                continue
+            if re.search(r"^Enter\s+", p, flags=re.IGNORECASE):
+                continue
             if re.search(r"\bSL\s+at\s+₹?[\d,.]+", p, flags=re.IGNORECASE):
+                continue
+            if re.search(
+                r"^(?:OTE Entry|OTE|Entry Zone|No Chase|OTE No Chase|DO NOT CHASE|Rule)\b",
+                p,
+                flags=re.IGNORECASE,
+            ):
+                continue
+            if re.search(r"\bNo Chase\s*[><=]\s*₹?[\d,.]+", p, flags=re.IGNORECASE):
                 continue
             if re.search(
                 r"^(?:Wait for minor pullback|Immediate market/limit entry|Stalk pivot|Accumulate in range)\b",
@@ -6603,6 +6821,73 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 clean_summary = f"Institutional {opt_type_val} order flow and volatility expansion on {getattr(alert, 'symbol', '')}."
             else:
                 clean_summary = f"Technical momentum surge and volume expansion on {getattr(alert, 'symbol', '')}."
+
+    if clean_summary:
+        # Strip duplicate Target prices (e.g. Target 1: $2,451.54 or Target: ₹250) if already in plan_str
+        if plan_str and any(k in plan_str for k in ("T1:", "Target:", "target")):
+            clean_summary = re.sub(
+                r"(?:Target\s*\d*|Upside\s+target):\s*[\$₹]?[\d,]+(?:\.\d+)?\.?\s*",
+                "",
+                clean_summary,
+                flags=re.IGNORECASE,
+            ).strip()
+        # If RVOL is already in clean_hl or plan_str, strip RVOL from Reason
+        if ("RVOL" in (clean_hl or "") or "RVOL" in (plan_str or "")) and "RVOL" in clean_summary:
+            clean_summary = re.sub(
+                r"\(?RVOL\s*[\d.]+x(?:,\s*)?",
+                "",
+                clean_summary,
+                flags=re.IGNORECASE,
+            ).strip(" ,()")
+        # If 20-EMA is already in Structure or plan_str, strip 20-EMA confirmation sentence
+        if (
+            "20-EMA" in (plan_str or "") or "EMA" in (plan_str or "")
+        ) and "20-EMA" in clean_summary:
+            clean_summary = re.sub(
+                r"Structure confirmed (?:above|below) 20-EMA\s*\(?[\$₹]?[\d,.]*\)?\.?\s*",
+                "",
+                clean_summary,
+                flags=re.IGNORECASE,
+            ).strip()
+        # Strip duplicate OTE, No Chase, or Rule boilerplate if present in Reason
+        clean_summary = re.sub(
+            r"[·\-|]?\s*OTE:\s*₹?[\d,.\s–—-]+",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip(" .·,|")
+        clean_summary = re.sub(
+            r"[·\-|]?\s*(?:OTE\s+)?No\s+Chase\s*[><=]\s*₹?[\d,.]+\.?\s*",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip(" .·,|")
+        clean_summary = re.sub(
+            r"[·\-|]?\s*Rule:\s*50%\s*@\s*T1\s*->\s*SL\s*to\s*BE\.?\s*",
+            "",
+            clean_summary,
+            flags=re.IGNORECASE,
+        ).strip(" .·,|")
+        # If Vol/OI turnover or V/OI is already reported in metrics, plan_str, or clean_hl, strip from Reason
+        metrics_d_chk = getattr(alert, "metrics", {}) or {}
+        has_voi = bool(
+            (metrics_d_chk.get("vol_oi_ratio") if isinstance(metrics_d_chk, dict) else 0)
+            or getattr(alert, "vol_oi_ratio", None)
+            or "V/OI" in (clean_hl or "")
+            or "V/OI" in (plan_str or "")
+        )
+        if has_voi and "OI" in clean_summary:
+            clean_summary = re.sub(
+                r"\bVol(?:ume)?/OI(?:\s+turnover)?\s+[\d.]+x\.?\s*",
+                "",
+                clean_summary,
+                flags=re.IGNORECASE,
+            ).strip(" .·,|")
+        # Clean dangling punctuation and empty parentheses like '()'
+        clean_summary = re.sub(r"\(\s*\)", "", clean_summary).strip(" .·,|")
+        # If clean_summary has become a pure substring of plan_str, suppress it to prevent duplication
+        if clean_summary and clean_summary.lower() in (plan_str or "").lower():
+            clean_summary = ""
 
     reason_line = f"💡 <b>Reason:</b> <i>{clean_summary}</i>" if clean_summary else ""
 
@@ -6688,7 +6973,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             and inst
             and (
                 inst not in clean_hl
-                and (not getattr(alert, "strike", None) or str(int(alert.strike)) not in clean_hl)
+                and (
+                    not getattr(alert, "strike", None)
+                    or format_strike(alert.strike) not in clean_hl
+                )
             )
         ):
             if clean_hl in ("BUY PE", "BUY CE", "BUY_PE", "BUY_CE"):
@@ -6887,7 +7175,12 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         tier_tag = " [🛡️ SPREAD]"
     conf_badge = f" | 🧠 <b>Confidence:</b> <b>{conf_val or 85}%</b>{tier_tag}"
     style_short = setup_style_val.replace("_", " ")
-    horizon_line = f"• <b>Horizon:</b> {horizon_display} | 🎯 <b>ETA:</b> <b>{eta_val}</b> | <b>Style:</b> <i>{style_short}</i>{conf_badge}"
+    if is_crypto:
+        horizon_line = (
+            f"• <b>Horizon:</b> 🪙 24h Rolling | <b>Style:</b> <i>{style_short}</i>{conf_badge}"
+        )
+    else:
+        horizon_line = f"• <b>Horizon:</b> {horizon_display} | 🎯 <b>ETA:</b> <b>{eta_val}</b> | <b>Style:</b> <i>{style_short}</i>{conf_badge}"
 
     # Order flow / broker depth provenance
     order_flow = getattr(alert, "order_flow_signals", None) or {}
@@ -6937,6 +7230,15 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
         # Sector name + RRG quadrant
         sec_name_val = metrics_d.get("sector_name") or getattr(alert, "sector", None)
+        if not sec_name_val:
+            try:
+                from analysis.universe import get_stock_sector
+
+                sec_res = get_stock_sector(getattr(alert, "symbol", ""))
+                if sec_res and sec_res[1]:
+                    sec_name_val = sec_res[1]
+            except Exception as e_suppressed:
+                logger.debug(f"[bot.alert_templates] Sector lookup non-fatal: {e_suppressed}")
         rrg_q = metrics_d.get("rrg_quadrant") or metrics_d.get("rrg_phase")
         rrg_icons = {
             "LEADING": "📈 Leading",
@@ -6957,15 +7259,25 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         imbal_v = metrics_d.get("imbalance_ratio")
 
         sec_parts: list[str] = []
-        if sec_name_val:
+        if sec_name_val and str(sec_name_val).lower() not in (
+            "broad market",
+            "general",
+            "crypto 24x7",
+            "crypto",
+        ):
             sec_short = shorten_sector_name(sec_name_val, symbol=getattr(alert, "symbol", ""))
-            sec_parts.append(f"Sec: <b>{sec_short}</b>")
+            if sec_short:
+                sec_parts.append(f"Sec: <b>{sec_short}</b>")
         if rrg_short:
             sec_parts.append(f"RRG: {rrg_short}")
         if rvol_v is not None and float(rvol_v) > 0:
-            sec_parts.append(f"RVOL: {float(rvol_v):.1f}x")
+            rvol_str = f"{float(rvol_v):.1f}x"
+            if rvol_str not in (clean_hl or "") and rvol_str not in (plan_str or ""):
+                sec_parts.append(f"RVOL: {rvol_str}")
         if vol_oi_v is not None and float(vol_oi_v) > 0:
-            sec_parts.append(f"V/OI: {float(vol_oi_v):.1f}x")
+            voi_str = f"{float(vol_oi_v):.1f}x"
+            if voi_str not in (clean_hl or "") and voi_str not in (plan_str or ""):
+                sec_parts.append(f"V/OI: {voi_str}")
         if sec_rs_v is not None:
             sec_parts.append(f"RS: {float(sec_rs_v):+.2f}")
         if imbal_v is not None and float(imbal_v) > 1.2:
@@ -7052,6 +7364,13 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                         "pre-trade sanity",
                     )
                 ):
+                    lc_str = re.sub(r"\b(?:NSE|BSE|NFO|MCX):[A-Z0-9_]+\b", "", lc_str)
+                    lc_str = re.sub(
+                        r"\b[A-Z0-9_]+(?:\d{2}[A-Z]{3}|\d{4}[0-9A-Z]{2})\d+(?:\.\d+)?(?:CE|PE)\b",
+                        "",
+                        lc_str,
+                    )
+                    lc_str = re.sub(r"\s+", " ", lc_str).strip()
                     c_excerpt = _clean_sig_phrase(lc_str, 50)
                     if c_excerpt and c_excerpt not in clean_summary and c_excerpt not in plan_str:
                         sigs.append(f"AI: {c_excerpt}")
@@ -7062,9 +7381,14 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         logger.debug(f"[bot.alert_templates] Non-fatal exception suppressed: {e_suppressed}")
 
     # ── Final message assembly: action first, context next, meta at bottom ─────
-    # Surface APEX Confluence header badge
+    # Surface APEX Confluence header badge without wiping out NEW CALL / UPDATE lifecycle state
     if getattr(alert, "is_apex_confluence", False) or c_tier == "APEX_CONFLUENCE":
-        tg_header = tg_header.replace("NEW CALL", "💎 APEX CONFLUENCE")
+        if "NEW CALL" in tg_header:
+            tg_header = tg_header.replace("NEW CALL", "NEW CALL · 💎 APEX CONFLUENCE")
+        elif "UPDATE" in tg_header:
+            tg_header = tg_header.replace("UPDATE", "UPDATE · 💎 APEX CONFLUENCE")
+        elif "💎 APEX CONFLUENCE" not in tg_header:
+            tg_header = f"{tg_header} · 💎 APEX CONFLUENCE"
 
     # Surface Execution Friction & Slippage Mandate
     friction_badge = (
@@ -7079,7 +7403,25 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     slip_bps = getattr(alert, "estimated_slippage_bps", None) or (
         actionable_plan.get("estimated_slippage_bps") if isinstance(actionable_plan, dict) else None
     )
-    if friction_badge and str(friction_badge) not in (plan_str or ""):
+    is_real_friction = bool(
+        friction_badge
+        and any(
+            w in str(friction_badge).upper()
+            for w in (
+                "WIDE SPREAD",
+                "ILLIQUID",
+                "THIN",
+                "STRICT LIMIT",
+                "HIGH SLIPPAGE",
+                "FRICTION",
+            )
+        )
+        and "✓ LIQUID" not in str(friction_badge).upper()
+        and "NORMAL DEPTH" not in str(friction_badge).upper()
+        and "PRIME LIQUIDITY" not in str(friction_badge).upper()
+        and "TIGHT SPREAD" not in str(friction_badge).upper()
+    )
+    if is_real_friction and str(friction_badge) not in (plan_str or ""):
         slip_note = (
             f" <i>(Est. Slippage: {slip_bps:.0f} bps)</i>"
             if (slip_bps and float(slip_bps) > 0)
@@ -7099,15 +7441,83 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         scratch_line = f"\n• 🛑 <b>0DTE Stagnation Bailout:</b> <i>{scratch_reason}</i>"
         plan_str = f"{plan_str.strip()}{scratch_line}" if plan_str else scratch_line.strip()
 
+    # ── Central Pivot Range (CPR) & Daily Levels Anchor Line ─────────────
+    cpr_line_str = ""
+    try:
+        cpr_dict = metrics_d.get("cpr")
+        if not cpr_dict:
+            try:
+                from engine.daily_levels import get_daily_levels
+
+                dl = get_daily_levels(getattr(alert, "symbol", ""))
+                if dl and dl.cpr:
+                    cpr_dict = dl.cpr
+            except Exception:
+                cpr_dict = None
+
+        if isinstance(cpr_dict, dict) and (
+            cpr_dict.get("pivot") or cpr_dict.get("tc") or cpr_dict.get("bc")
+        ):
+            c_piv = float(cpr_dict.get("pivot", 0.0) or 0.0)
+            c_tc = float(cpr_dict.get("tc", 0.0) or cpr_dict.get("top_central", 0.0) or 0.0)
+            c_bc = float(cpr_dict.get("bc", 0.0) or cpr_dict.get("bottom_central", 0.0) or 0.0)
+            c_top = float(cpr_dict.get("top", 0.0) or max(c_tc, c_bc) or 0.0)
+            c_btm = float(cpr_dict.get("bottom", 0.0) or min(c_tc, c_bc) or 0.0)
+            c_width = float(
+                cpr_dict.get("width_pct", 0.0) or cpr_dict.get("cpr_width_pct", 0.0) or 0.0
+            )
+            c_type = str(metrics_d.get("cpr_type") or cpr_dict.get("cpr_type") or "").upper()
+            if not c_type or c_type == "UNKNOWN":
+                c_type = (
+                    "NARROW"
+                    if cpr_dict.get("is_narrow")
+                    else ("WIDE" if cpr_dict.get("is_wide") else "AVERAGE")
+                )
+
+            # Spot proximity/position vs CPR
+            spot_px = float(
+                getattr(alert, "underlying_spot", 0.0) or getattr(alert, "ltp", 0.0) or 0.0
+            )
+            if spot_px > 0 and c_top > 0 and c_btm > 0:
+                if spot_px > c_top:
+                    pos_tag = "Above CPR (Support)"
+                elif spot_px < c_btm:
+                    pos_tag = "Below CPR (Resistance)"
+                else:
+                    pos_tag = "Inside CPR (Trap Zone)"
+            else:
+                pos_tag = ""
+
+            if c_type == "NARROW":
+                badge = f"🎯 <b>CPR:</b> NARROW ({c_width:.2f}%) | Pivot: <code>₹{c_piv:,.1f}</code> [BC: ₹{c_btm:,.1f} / TC: ₹{c_top:,.1f}] · <i>Trend Expansion</i>"
+            elif c_type == "WIDE":
+                badge = f"⚠️ <b>CPR:</b> WIDE ({c_width:.2f}%) | Pivot: <code>₹{c_piv:,.1f}</code> [Btm: ₹{c_btm:,.1f} / Top: ₹{c_top:,.1f}] · <i>Chop Containment</i>"
+            else:
+                pos_suffix = f" · <i>{pos_tag}</i>" if pos_tag else ""
+                badge = f"📍 <b>CPR:</b> Pivot: <code>₹{c_piv:,.1f}</code> [BC: ₹{c_btm:,.1f} / TC: ₹{c_top:,.1f}] ({c_width:.2f}%){pos_suffix}"
+
+            # Append ADR exhaustion if available
+            adr_exh = metrics_d.get("adr_exhaustion_pct")
+            if adr_exh is not None and float(adr_exh) > 0:
+                badge += f" · ADR: {float(adr_exh):.0f}%"
+
+            cpr_line_str = "• " + badge if not badge.startswith("•") else badge
+    except Exception as e_cpr_tpl:
+        logger.debug(f"[bot.alert_templates] CPR rendering error non-fatal: {e_cpr_tpl}")
+
     lines = [
         tg_header,
         "━━━━━━━━━━━━━━━━━━━━",
         hl_line,
     ]
+    if getattr(alert, "is_do_not_miss", False) or getattr(alert, "do_not_miss_label", None):
+        lines.insert(0, "🌟 <b>DO NOT MISS SETUP · APEX ASYMMETRY</b>")
     if plan_str:
         lines.append(plan_str.strip())
     if sector_line_str:
         lines.append(sector_line_str)
+    if cpr_line_str:
+        lines.append(cpr_line_str)
     if signals_line_str:
         lines.append(signals_line_str)
     if reason_line:

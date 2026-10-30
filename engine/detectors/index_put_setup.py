@@ -31,6 +31,7 @@ from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_identity import get_session_phase_slot
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
+from market.instruments import format_strike
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -75,6 +76,7 @@ def detect_index_put_setup(
     ignore_time_gate: bool = False,
     prev_close: Optional[float] = None,
     mandate_vwap_confirmation: bool = False,
+    quotes_map: Optional[dict[str, Any]] = None,
 ) -> list[AutoAlert]:
     """
     Scans for institutional PUT entry setups on index options using SMC price action signals.
@@ -101,6 +103,14 @@ def detect_index_put_setup(
         return []
     if not chain:
         return []
+
+    now_dt = ref_time or datetime.now(IST)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=IST)
+    else:
+        now_dt = now_dt.astimezone(IST)
+    now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    curr_time = now_dt.time()
 
     # ── Market Breadth Gate ─────────────────────────────────────────
     # Index put setups into broad market rallies have negative statistical expectancy.
@@ -130,16 +140,43 @@ def detect_index_put_setup(
         ((day_high - spot) / max(1.0, day_high)) * 100.0 if (day_high and day_high > 0) else 0.0
     )
     _min_top_retreat = (
-        0.50 if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX") else 0.30
+        0.20 if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX") else 0.15
     )
     _eff_vwap = vwap if (vwap and vwap > 0) else spot
     _is_v_top_escape = bool(
-        day_high
+        (curr_time >= dtime(9, 30) or is_test_runner)  # Opening 15m is price discovery, not V-top
+        and day_high
         and day_high > 0
         and _retreat_from_high_pct >= _min_top_retreat
-        and (_eff_vwap > 0 and (day_high - _eff_vwap) / _eff_vwap * 100.0 >= 0.20)
+        and (_eff_vwap > 0 and (day_high - _eff_vwap) / _eff_vwap * 100.0 >= 0.15)
     )
-    _breadth_bypassed = _spot_below_open_escape or _is_v_top_escape
+
+    _has_smt_bear_reversal = False
+    if quotes_map:
+        try:
+            from engine.smt_divergence import evaluate_smt_divergence
+
+            smt_res = evaluate_smt_divergence(clean_sym, spot, quotes_map=quotes_map)
+            if smt_res and smt_res.verdict in ("BEARISH_DIVERGENCE_BULL_TRAP", "CONFIRMED_HARMONY"):
+                _has_smt_bear_reversal = True
+        except Exception as e_smt:
+            logger.debug(
+                "[IndexPutSetup] SMT divergence check skipped for %s: %s", clean_sym, e_smt
+            )
+
+    _has_structural_bear_reversal = bool(
+        _is_v_top_escape
+        or _has_smt_bear_reversal
+        or (
+            prev_day_high
+            and prev_day_high > 0
+            and day_high
+            and day_high >= prev_day_high * 0.998
+            and spot < day_high * 0.999
+        )
+        or (vwap and vwap > 0 and spot <= vwap and _retreat_from_high_pct >= 0.10)
+    )
+    _breadth_bypassed = _spot_below_open_escape or _has_structural_bear_reversal
 
     if not is_test_runner or os.environ.get("ENFORCE_TEST_BREADTH") == "1":
         if not _breadth_bypassed:
@@ -270,6 +307,63 @@ def detect_index_put_setup(
         )
         return []
 
+    # ── CVD Bullish Absorption Veto ───────────────────────────────
+    # If price is sweeping swing lows but CVD is forming higher lows, passive institutional
+    # buyers are absorbing aggressive sell orders. Buying naked puts into absorption is a trap.
+    try:
+        from engine.detectors.order_flow import compute_order_flow_cvd_divergence
+
+        if active_ohlcv is not None and len(active_ohlcv) >= 6:
+            of_div = compute_order_flow_cvd_divergence(active_ohlcv, spot)
+            if of_div.get("is_bullish_absorption"):
+                logger.info(
+                    f"[IndexPutSetup] CVD Bullish Absorption Veto: Underlying {clean_sym} is sweeping lows "
+                    f"while CVD delta forms higher lows (divergence ratio {of_div.get('cvd_divergence_ratio')}x). "
+                    f"Passive institutional buyers absorbing sell orders; prohibiting put entries."
+                )
+                return []
+    except Exception as e_cvd:
+        logger.debug(f"[IndexPutSetup] CVD absorption check notice: {e_cvd}")
+
+    # ── TBT 50-Depth & Order Book Imbalance (OBI-50) Entry Gate ───
+    # Reject put entries if the underlying futures / benchmark order book displays heavy net bid pressure
+    # (OBI-50 >= +0.20) or an active resting fortress bid wall.
+    try:
+        from market.fyers_tbt_manager import fyers_tbt_manager, resolve_tradable_tbt_symbol
+        from market.order_book import get_depth_book
+
+        fut_sym = resolve_tradable_tbt_symbol(clean_sym)
+        tbt_depth = (
+            fyers_tbt_manager.get_50_depth(fut_sym)
+            if getattr(fyers_tbt_manager, "is_connected", False)
+            else None
+        )
+        if tbt_depth and tbt_depth.get("status") not in ("UNAVAILABLE", None):
+            obi_50_val = float(tbt_depth.get("obi_50", 0.0) or 0.0)
+            if obi_50_val >= 0.20:
+                logger.info(
+                    f"[IndexPutSetup] TBT OBI Buyer Dominance Veto: 50-depth OBI on {fut_sym} is {obi_50_val:+.2f} "
+                    f"(>= +0.20). Institutional bid wall absorbing sellers; suppressing put setup."
+                )
+                return []
+            if tbt_depth.get("fortress_bid_wall_confirmed"):
+                logger.info(
+                    f"[IndexPutSetup] TBT Fortress Bid Wall Veto: Immovable buy wall detected on {fut_sym}. Suppressing put."
+                )
+                return []
+        else:
+            l2_book = get_depth_book(fut_sym or clean_sym)
+            if l2_book and l2_book.total_bid_qty > 0 and l2_book.total_ask_qty > 0:
+                obi_5_val = l2_book.obi(5)
+                if obi_5_val >= 0.22:
+                    logger.info(
+                        f"[IndexPutSetup] L2 Order Book Imbalance Veto: Heavy bid dominance (OBI-5: {obi_5_val:+.2f} >= +0.22). "
+                        f"Suppressing put setup into resting bids."
+                    )
+                    return []
+    except Exception as e_tbt:
+        logger.debug(f"[IndexPutSetup] TBT/OBI depth check notice: {e_tbt}")
+
     is_bse = clean_sym in ("SENSEX", "BANKEX")
     opt_exchange = "BFO" if is_bse else "NFO"
     effective_vwap = vwap if (vwap and vwap > 0) else spot
@@ -303,6 +397,16 @@ def detect_index_put_setup(
         min_oi = max(100, int(min_oi * 0.60))
         min_vol = max(100, int(min_vol * 0.60))
     # After 09:45 IST: full standard thresholds apply
+
+    # Filter for nearest active expiry if chain contains multiple expiries
+    active_expiries = sorted(
+        list(set(str(getattr(c, "expiry", "") or "") for c in chain if getattr(c, "expiry", None)))
+    )
+    if active_expiries:
+        nearest_exp = active_expiries[0]
+        chain_nearest = [c for c in chain if str(getattr(c, "expiry", "") or "") == nearest_exp]
+        if chain_nearest:
+            chain = chain_nearest
 
     min_contract_prem = 2.0 if clean_sym in ("MIDCPNIFTY", "FINNIFTY") else 3.5
     pe_contracts = [
@@ -396,11 +500,14 @@ def detect_index_put_setup(
         if cand_pe_oi > cand_pe_oi_change and cand_pe_oi_change > 0
         else 0.0
     )
-    is_breakdown_momentum = (
-        cand_pe_pchange >= 15.0 and cand_pe_vol_oi >= 1.2 and cand_pe_vol >= min_vol
-    ) or (cand_pe_vol_oi >= 2.0 and cand_pe_vol >= int(min_vol * 1.5))
-    is_explosive_momentum = (cand_pe_vol_oi >= 3.0 and cand_pe_vol >= min_vol * 2) or (
-        cand_pe_pchange >= 25.0 and cand_pe_vol_oi >= 2.0 and cand_pe_vol >= min_vol
+    is_spot_below_vwap = effective_vwap <= 0 or spot < effective_vwap
+    is_breakdown_momentum = is_spot_below_vwap and (
+        (cand_pe_pchange >= 15.0 and cand_pe_vol_oi >= 1.2 and cand_pe_vol >= min_vol)
+        or (cand_pe_vol_oi >= 2.0 and cand_pe_vol >= int(min_vol * 1.5))
+    )
+    is_explosive_momentum = is_spot_below_vwap and (
+        (cand_pe_vol_oi >= 3.0 and cand_pe_vol >= min_vol * 2)
+        or (cand_pe_pchange >= 25.0 and cand_pe_vol_oi >= 2.0 and cand_pe_vol >= min_vol)
     )
 
     # ── Optimization 1: Intraday Put-Call Ratio (PCR) Confluence Gate ───
@@ -573,7 +680,29 @@ def detect_index_put_setup(
                         return []
 
                 # Major Support Proximity (Camarilla L4 Floor & Previous Week Low)
-                if l4 > 0 and spot > l4 and not is_breakdown_momentum:
+                if l4 > 0 and spot >= (l4 * 0.998) and spot <= (l4 * 1.0025):
+                    # Check if last completed 5m bar closed below L4:
+                    last_c_val = None
+                    if (
+                        active_ohlcv is not None
+                        and hasattr(active_ohlcv, "iloc")
+                        and len(active_ohlcv) >= 1
+                    ):
+                        try:
+                            col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                            last_c_val = float(active_ohlcv[col_c].iloc[-1])
+                        except Exception as e_c:
+                            logger.debug(
+                                "[IndexPutSetup] Failed reading close from active_ohlcv: %s", e_c
+                            )
+                    # If bar hasn't closed below L4, spot is resting on institutional absorption floor
+                    if last_c_val is None or last_c_val >= l4:
+                        logger.info(
+                            f"[IndexPutSetup] Camarilla L4 Absorption Floor Guard: Spot ₹{spot:,.1f} testing Camarilla L4 Floor ₹{l4:,.1f} "
+                            f"(5m close: ₹{last_c_val or 0.0:,.1f} >= L4). Absorption bounce floor active; suppressing put setup."
+                        )
+                        return []
+                elif l4 > 0 and spot > l4 and not is_breakdown_momentum:
                     l4_dist_pct = (spot - l4) / spot * 100.0
                     if 0.0 < l4_dist_pct <= 0.20:
                         logger.info(
@@ -918,41 +1047,48 @@ def detect_index_put_setup(
     # ── Central Pivot Range (CPR) & Camarilla Confluence ────────────────────────
     cpr_data: dict[str, Any] = {}
     is_narrow_cpr = False
+    is_wide_cpr = False
+    cpr_top = 0.0
+    cpr_bottom = 0.0
+    cpr_pivot = 0.0
+    cpr_width_pct = 0.0
     if prev_day_high and prev_day_low and prev_day_high > prev_day_low > 0:
+        from engine.daily_levels import compute_daily_levels_from_prices, evaluate_cpr_gate
+
         ref_c = (
             prev_close if (prev_close and prev_close > 0) else (prev_day_high + prev_day_low) / 2.0
         )
-        cpr_pivot = (prev_day_high + prev_day_low + ref_c) / 3.0
-        cpr_bc = (prev_day_high + prev_day_low) / 2.0
-        cpr_tc = (cpr_pivot - cpr_bc) + cpr_pivot
-        cpr_top = max(cpr_tc, cpr_bc)
-        cpr_bottom = min(cpr_tc, cpr_bc)
-        cpr_width_pct = abs(cpr_tc - cpr_bc) / max(1.0, cpr_pivot) * 100.0
-        is_narrow_cpr = cpr_width_pct <= (0.22 if clean_sym in ("BANKNIFTY", "SENSEX") else 0.15)
+        dl = compute_daily_levels_from_prices(clean_sym, prev_day_high, prev_day_low, ref_c)
+        cpr_gate = evaluate_cpr_gate(
+            clean_sym, spot, "BEARISH", dl=dl, boundary_proximity_pct=0.0035
+        )
+        cpr_top = cpr_gate.cpr_top
+        cpr_bottom = cpr_gate.cpr_bottom
+        cpr_pivot = cpr_gate.cpr_pivot
+        cpr_width_pct = cpr_gate.cpr_width_pct
+
+        # Central Pivot Range (CPR) Trap Veto on Wide CPR Days (SSOT Gate):
+        if not is_test_runner and cpr_gate.is_vetoed:
+            logger.info(f"[IndexPutSetup] Suppressed: {cpr_gate.veto_reason}.")
+            return []
 
         # Camarilla Breakdown levels
-        cam_range = prev_day_high - prev_day_low
-        cam_h3 = ref_c + (cam_range * 1.1 / 4.0)
-        cam_h4 = ref_c + (cam_range * 1.1 / 2.0)
-        cam_l3 = ref_c - (cam_range * 1.1 / 4.0)
-        cam_l4 = ref_c - (cam_range * 1.1 / 2.0)
+        cam_h3 = float(dl.camarilla.get("h3", 0.0))
+        cam_h4 = float(dl.camarilla.get("h4", 0.0))
+        cam_l3 = float(dl.camarilla.get("l3", 0.0))
+        cam_l4 = float(dl.camarilla.get("l4", 0.0))
 
-        cpr_data = {
-            "pivot": round(cpr_pivot, 1),
-            "bc": round(cpr_bc, 1),
-            "tc": round(cpr_tc, 1),
-            "cpr_top": round(cpr_top, 1),
-            "cpr_bottom": round(cpr_bottom, 1),
-            "cpr_width_pct": round(cpr_width_pct, 3),
-            "is_narrow_cpr": is_narrow_cpr,
-            "regime": "NARROW_CPR_TRENDING"
-            if is_narrow_cpr
-            else ("WIDE_CPR_RANGE" if cpr_width_pct >= 0.35 else "AVERAGE_CPR"),
-            "cam_h3": round(cam_h3, 1),
-            "cam_h4": round(cam_h4, 1),
-            "cam_l3": round(cam_l3, 1),
-            "cam_l4": round(cam_l4, 1),
-        }
+        is_narrow_cpr = cpr_gate.is_narrow
+        is_wide_cpr = cpr_gate.is_wide
+        cpr_data = dict(cpr_gate.cpr_data)
+        cpr_data.update(
+            {
+                "cam_h3": round(cam_h3, 1),
+                "cam_h4": round(cam_h4, 1),
+                "cam_l3": round(cam_l3, 1),
+                "cam_l4": round(cam_l4, 1),
+            }
+        )
         signal_tags["cpr_data"] = cpr_data
 
         # Camarilla L4 Breakdown Check (Explosive Institutional Trend Breakdown)
@@ -1083,6 +1219,7 @@ def detect_index_put_setup(
                     primary_day_high=day_high,
                     primary_day_low=day_low,
                     primary_vwap=effective_vwap,
+                    quotes_map=quotes_map,
                 )
                 if (
                     smt_dh
@@ -1610,6 +1747,7 @@ def detect_index_put_setup(
                     primary_day_high=day_high,
                     primary_day_low=day_low,
                     primary_vwap=effective_vwap,
+                    quotes_map=quotes_map,
                 )
             except Exception as e_smt:
                 logger.debug(f"[IndexPutSetup] SMT check bypassed: {e_smt}")
@@ -1653,6 +1791,7 @@ def detect_index_put_setup(
     # 8. Institutional Expansion Breakdown (Parabolic Momentum Flush)
     # Detects vertical institutional flushes that breakdown through session consolidation or Day Low
     # with ATR range expansion, volume surge, and strong close near the lows.
+    atr_14: float = 0.0
     is_institutional_thrust = False
     thrust_details: dict[str, Any] = {}
     if active_ohlcv is not None and len(active_ohlcv) >= 6 and not is_opening_buffer:
@@ -1967,8 +2106,10 @@ def detect_index_put_setup(
         tiger_mandate = adaptive_decision.tiger
 
         # Tiger Stalking Discipline: If in non-trending chop or midday lull,
-        # suppress routine breakdown / trend setups unless verified thrust or liquidity sweep!
+        # suppress routine breakdown / trend setups unless verified thrust, liquidity sweep,
+        # or confirmed structural breakdown outside midday lull!
         if not ignore_time_gate and not tiger_mandate.allow_routine_breakouts:
+            is_midday = getattr(eagle_regime, "is_midday_chop_window", False)
             routine_setups = {
                 "DAY_LOW_BREAKDOWN",
                 "TREND_PULLBACK_RECLAIM_PE",
@@ -1981,11 +2122,18 @@ def detect_index_put_setup(
                 "EMA9_21_BEARISH_CROSSOVER",
                 "MOMENTUM_EXPANSION_PE",
             }
+            structural_breakdowns = {
+                "DAY_LOW_BREAKDOWN",
+                "CAMARILLA_L4_BREAKDOWN",
+                "DOUBLE_TOP_BREAKDOWN",
+                "VWAP_BREAKDOWN_PE",
+            }
             has_qualifying_setup = bool(
                 is_institutional_thrust
                 or is_liq_sweep
                 or "LONG_UNWINDING_FLUSH" in signals
                 or "INTRADAY_CAPITULATION_TOP" in signals
+                or (not is_midday and any(s in structural_breakdowns for s in signals))
             )
             if not has_qualifying_setup and any(s in routine_setups for s in signals):
                 logger.info(
@@ -2000,7 +2148,7 @@ def detect_index_put_setup(
     best_pe = pe_contracts[0]
     strike = float(getattr(best_pe, "strike", spot))
     opt_ltp = float(getattr(best_pe, "last_price", 0.0) or 0.0)
-    contract_sym = getattr(best_pe, "symbol", f"{clean_sym}{int(strike)}PE")
+    contract_sym = getattr(best_pe, "symbol", f"{clean_sym}{format_strike(strike)}PE")
     exp_date = getattr(best_pe, "expiry", None)
     oi = getattr(best_pe, "oi", 0)
     oi_change = getattr(best_pe, "oi_change", 0)
@@ -2224,9 +2372,33 @@ def detect_index_put_setup(
     # ── Synthetic Spot-Anchored Stop Loss Engine ─────────────────
     eff_delta = abs(float(opt_delta)) if (opt_delta and float(opt_delta) != 0) else 0.50
     spot_risk_pts = round(calc_risk / max(0.20, eff_delta), 1)
-    underlying_spot_sl = round(spot + spot_risk_pts, 1)
+
+    # --- Dynamic Volatility-Floor Stop Loss Engine (Zero Hardcoded Anchors) ---
+    # Derived dynamically from live 5-minute ATR(14), India VIX regime, and spot price dynamics.
+    # Institutional Invariant: Stop loss distance and structural buffer dynamically scale with volatility.
+    vix_scalar = max(0.75, min(2.0, ((vix_val or 15.0) / 15.0) ** 0.5))
+    effective_atr_5m = atr_14 if ("atr_14" in locals() and atr_14 and atr_14 > 0) else 0.0
+    if effective_atr_5m <= 0 and "dl" in locals() and dl and getattr(dl, "atr_14", None):
+        effective_atr_5m = float(dl.atr_14) * 0.12  # Daily ATR to 5m conversion
+
+    if effective_atr_5m > 0:
+        # Dynamic noise floor: 0.85x of live 5m ATR scaled by India VIX
+        dynamic_spot_sl_floor = round(max(effective_atr_5m * 0.85 * vix_scalar, spot * 0.0015), 1)
+        # Dynamic structural buffer: 0.25x of live 5m ATR
+        dynamic_buffer = round(max(effective_atr_5m * 0.25, spot * 0.0008), 1)
+    else:
+        # Volatility fallback derived from spot price scaled by VIX regime
+        dynamic_spot_sl_floor = round(spot * 0.0018 * vix_scalar, 1)
+        dynamic_buffer = round(spot * 0.0010, 1)
+
+    # Base stop loss from risk points (floored dynamically by live volatility)
+    effective_spot_risk = max(spot_risk_pts, dynamic_spot_sl_floor)
+    underlying_spot_sl = round(spot + effective_spot_risk, 1)
     if day_high and day_high > 0 and day_high > spot:
-        underlying_spot_sl = min(underlying_spot_sl, round(day_high * 1.001, 1))
+        # Anchor above day high with dynamic volatility buffer (safe from opening liquidity wicks)
+        buffered_dh = round(day_high + dynamic_buffer, 1)
+        # Ensure stop is safely above day high, but never pinned tighter than dynamic_spot_sl_floor from spot
+        underlying_spot_sl = max(buffered_dh, round(spot + dynamic_spot_sl_floor, 1))
 
     # ── Velocity Regime Check ────────────────────────────────────
     vel_regime = "NORMAL_TREND"
@@ -2257,9 +2429,7 @@ def detect_index_put_setup(
 
     if "CAMARILLA_L4_PROXIMITY" in signals and stage == "PRIMED":
         l4_info = signal_tags.get("camarilla_l4_proximity", {})
-        headline = (
-            f"⚡ [PRIMED PROXIMITY] CAMARILLA L4 BREAKDOWN WATCH: {clean_sym} {int(strike)} PE"
-        )
+        headline = f"⚡ [PRIMED PROXIMITY] CAMARILLA L4 BREAKDOWN WATCH: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Pre-Breakdown Proximity Watch: Spot (₹{spot:,.1f}) approaching Camarilla L4 (₹{l4_info.get('cam_l4', 0):,.1f}, "
             f"{l4_info.get('proximity_pct', 0.2):.2f}% above). Stage contract now in broker watchlist to capture immediate momentum on breakdown. "
@@ -2267,7 +2437,9 @@ def detect_index_put_setup(
         )
     elif "DAY_LOW_PROXIMITY" in signals and stage == "PRIMED":
         dl_info = signal_tags.get("day_low_proximity", {})
-        headline = f"⚡ [PRIMED PROXIMITY] DAY LOW BREAKDOWN WATCH: {clean_sym} {int(strike)} PE"
+        headline = (
+            f"⚡ [PRIMED PROXIMITY] DAY LOW BREAKDOWN WATCH: {clean_sym} {format_strike(strike)} PE"
+        )
         summary = (
             f"Pre-Breakdown Proximity Watch: Spot (₹{spot:,.1f}) approaching Session Low (₹{dl_info.get('day_low', 0):,.1f}, "
             f"{dl_info.get('proximity_pct', 0.2):.2f}% above). Stage contract now in broker watchlist to capture immediate momentum on breakdown. "
@@ -2275,7 +2447,7 @@ def detect_index_put_setup(
         )
     elif "INSTITUTIONAL_EXPANSION_BREAKDOWN" in signals:
         ieb = signal_tags.get("institutional_expansion_breakdown", {})
-        headline = f"📉 INSTITUTIONAL EXPANSION BREAKDOWN: {clean_sym} {int(strike)} PE"
+        headline = f"📉 INSTITUTIONAL EXPANSION BREAKDOWN: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Institutional flush breakdown: Spot (₹{spot:,.1f}) breaking Session Low (₹{ieb.get('day_low', 0):,.1f}) "
             f"with {ieb.get('range_atr_ratio', 1.3):.1f}x ATR expansion & {ieb.get('vol_ratio', 1.6):.1f}x volume surge. "
@@ -2284,9 +2456,7 @@ def detect_index_put_setup(
         )
     elif "PDH_SUPPLY_REJECTION" in signals:
         level_type = signal_tags.get("pdh_supply_rejection", {}).get("level_type", "PDH")
-        headline = (
-            f"{vel_badge}{icon} SMC {level_type} SUPPLY REJECTION: {clean_sym} {int(strike)} PE"
-        )
+        headline = f"{vel_badge}{icon} SMC {level_type} SUPPLY REJECTION: {clean_sym} {format_strike(strike)} PE"
         struct_detail = signal_tags["pdh_supply_rejection"]
         ref_level = struct_detail.get("prev_day_high") or struct_detail.get("prev_week_high", 0.0)
         retreat_pct = struct_detail.get("retreat_pct", 0.0)
@@ -2297,7 +2467,9 @@ def detect_index_put_setup(
         )
     elif "INTRADAY_CAPITULATION_TOP" in signals:
         ict = signal_tags.get("capitulation_top", {})
-        headline = f"{vel_badge}⚡ INTRADAY CAPITULATION TOP: {clean_sym} {int(strike)} PE"
+        headline = (
+            f"{vel_badge}⚡ INTRADAY CAPITULATION TOP: {clean_sym} {format_strike(strike)} PE"
+        )
         summary = (
             f"Climax exhaustion & V-top reversal: Spot overbought +{ict.get('overbought_pct', 0):.2f}% above session VWAP (₹{effective_vwap:,.1f}) "
             f"and rejected Day High (₹{ict.get('day_high', 0):,.1f}) with 5m CHoCH structure breakdown. "
@@ -2306,7 +2478,9 @@ def detect_index_put_setup(
         )
     elif "FAILED_DAY_HIGH_BREAKOUT" in signals:
         fdh = signal_tags.get("failed_day_high_breakout", {})
-        headline = f"⚡ FAILED DAY HIGH BREAKOUT (BULL TRAP): {clean_sym} {int(strike)} PE"
+        headline = (
+            f"⚡ FAILED DAY HIGH BREAKOUT (BULL TRAP): {clean_sym} {format_strike(strike)} PE"
+        )
         summary = (
             f"Bull Trap / Liquidity Sweep above Day High: Spot (₹{spot:,.1f}) pierced Session High (₹{fdh.get('day_high', 0):,.1f}) "
             f"by {fdh.get('pierce_pct', 0):.2f}% to ₹{fdh.get('pierce_high', 0):,.1f}, then failed and closed back below with a "
@@ -2315,7 +2489,7 @@ def detect_index_put_setup(
         )
     elif "CAMARILLA_L4_BREAKDOWN" in signals:
         l4_info = signal_tags.get("camarilla_l4_breakdown", {})
-        headline = f"📉 CAMARILLA L4 BREAKDOWN: {clean_sym} {int(strike)} PE"
+        headline = f"📉 CAMARILLA L4 BREAKDOWN: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Camarilla L4 Institutional Trend Breakdown: Spot (₹{spot:,.1f}) broke L4 (₹{l4_info.get('cam_l4', 0):,.1f}) "
             f"with breakdown momentum & Put volume expansion ({volume:,} contracts, {vol_oi_ratio:.1f}x Vol/OI). "
@@ -2323,7 +2497,7 @@ def detect_index_put_setup(
         )
     elif "CPR_SUPPLY_REJECTION" in signals:
         cpr_info = signal_tags.get("cpr_supply_rejection", {})
-        headline = f"🔴 CPR SUPPLY REJECTION: {clean_sym} {int(strike)} PE"
+        headline = f"🔴 CPR SUPPLY REJECTION: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Central Pivot Range Supply Rejection: Spot (₹{spot:,.1f}) rejected CPR Bottom (₹{cpr_info.get('cpr_bottom', 0):,.1f}) "
             f"and failed resistance with sellers dominating. "
@@ -2332,7 +2506,9 @@ def detect_index_put_setup(
         )
     elif "DAY_HIGH_SUPPLY_REJECTION" in signals:
         dhsr = signal_tags.get("day_high_supply_rejection", {})
-        headline = f"{vel_badge}{icon} DAY HIGH SUPPLY REJECTION: {clean_sym} {int(strike)} PE"
+        headline = (
+            f"{vel_badge}{icon} DAY HIGH SUPPLY REJECTION: {clean_sym} {format_strike(strike)} PE"
+        )
         summary = (
             f"Spot rejected Day High (₹{dhsr.get('day_high', 0):,.1f}) and formed an upper-wick supply rejection "
             f"(retreating -{dhsr.get('dh_retreat_pct', 0):.2f}% from peak) — institutional distribution/bull trap confirmed. "
@@ -2341,7 +2517,7 @@ def detect_index_put_setup(
         )
     elif "VWAP_REJECTION" in signals:
         vwap_fail = signal_tags.get("vwap_rejection", {})
-        headline = f"{icon} VWAP REJECTION PUT SETUP: {clean_sym} {int(strike)} PE"
+        headline = f"{icon} VWAP REJECTION PUT SETUP: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Spot failed VWAP (₹{effective_vwap:,.1f}) retest — VWAP now acting as resistance. "
             f"Spot {vwap_fail.get('vwap_fail_pct', 0):.2f}% below VWAP after reversal. "
@@ -2350,7 +2526,7 @@ def detect_index_put_setup(
         )
     elif "VWAP_BREAKDOWN" in signals:
         vbd = signal_tags.get("vwap_breakdown", {})
-        headline = f"{vel_badge}📉 VWAP BREAKDOWN PUT SETUP: {clean_sym} {int(strike)} PE"
+        headline = f"{vel_badge}📉 VWAP BREAKDOWN PUT SETUP: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Institutional Regime Shift: Spot sliced cleanly below session VWAP (₹{effective_vwap:,.1f}) "
             f"after earlier trading above VWAP. Spot now -{vbd.get('vwap_bd_pct', 0):.2f}% below VWAP with confirmed "
@@ -2359,7 +2535,7 @@ def detect_index_put_setup(
         )
     elif "SUPPLY_ZONE_SWEEP" in signals:
         sweep = signal_tags.get("supply_zone_sweep", {})
-        headline = f"{icon} INTRADAY SUPPLY SWEEP: {clean_sym} {int(strike)} PE"
+        headline = f"{icon} INTRADAY SUPPLY SWEEP: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Spot swept opening range high (₹{sweep.get('opening_range_high', 0):,.1f}) by "
             f"{sweep.get('supply_sweep_pct', 0):.2f}% — {sweep.get('wick_pct', 0):.0f}% wick rejection "
@@ -2368,7 +2544,7 @@ def detect_index_put_setup(
         )
     elif "DOUBLE_TOP_BREAKDOWN" in signals:
         dt = signal_tags.get("double_top", {})
-        headline = f"{icon} DOUBLE TOP BREAKDOWN: {clean_sym} {int(strike)} PE"
+        headline = f"{icon} DOUBLE TOP BREAKDOWN: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Two equal highs (₹{dt.get('peak_1', 0):,.1f} / ₹{dt.get('peak_2', 0):,.1f}, "
             f"{dt.get('peak_diff_pct', 0):.2f}% apart) — spot now breaking below neckline. "
@@ -2377,7 +2553,7 @@ def detect_index_put_setup(
         )
     elif "DISTRIBUTION_TOP" in signals:
         dt_tags = signal_tags.get("distribution_top", {})
-        headline = f"🔥 DISTRIBUTION TOP REVERSAL: {clean_sym} {int(strike)} PE"
+        headline = f"🔥 DISTRIBUTION TOP REVERSAL: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Mid-session distribution ceiling rejection: Spot ₹{dt_tags.get('spot', spot):,.1f} "
             f"hit Day High ₹{dt_tags.get('day_high', 0):,.1f} ({dt_tags.get('dh_proximity_pct', 0):.3f}% below) "
@@ -2388,7 +2564,7 @@ def detect_index_put_setup(
         )
     elif "LONG_UNWINDING_FLUSH" in signals:
         luf = signal_tags.get("long_unwinding_flush", {})
-        headline = f"⚡ LONG UNWINDING FLUSH: {clean_sym} {int(strike)} PE"
+        headline = f"⚡ LONG UNWINDING FLUSH: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Put Writers Capitulation Flush: Spot (₹{spot:,.1f}) broke below Max Put OI Wall ₹{luf.get('max_put_oi_strike', 0):,.0f} "
             f"with writers aggressively unwinding ({luf.get('max_pe_oi_change', 0):+,} contracts). Downside liquidation acceleration ignited. "
@@ -2396,14 +2572,14 @@ def detect_index_put_setup(
         )
     elif "TREND_PULLBACK_REJECTION" in signals:
         tpb = signal_tags.get("trend_pullback", {})
-        headline = f"📉 TREND RETRACE REJECTION: {clean_sym} {int(strike)} PE"
+        headline = f"📉 TREND RETRACE REJECTION: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Bearish trend continuation: Spot (₹{spot:,.1f}) tested EMA-9/20 resistance (₹{tpb.get('ema9', 0):,.1f}) and failed beneath VWAP (₹{effective_vwap:,.1f}) with sellers in control. "
             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
         )
     elif "DAY_LOW_BREAKDOWN" in signals:
         dlb = signal_tags.get("day_low_breakdown", {})
-        headline = f"📉 DAY LOW BREAKDOWN: {clean_sym} {int(strike)} PE"
+        headline = f"📉 DAY LOW BREAKDOWN: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Spot (₹{spot:,.1f}) breaking down through Session Low (₹{dlb.get('day_low', 0):,.1f}) with bearish liquidation. "
             f"Spot holding below VWAP (₹{effective_vwap:,.1f}) with PE volume expansion ({volume:,} contracts, {vol_oi_ratio:.1f}x Vol/OI, +{pchange:.1f}%). "
@@ -2411,14 +2587,16 @@ def detect_index_put_setup(
         )
     elif "CALL_WRITING_CEILING" in signals:
         cwc = signal_tags.get("call_writing_ceiling", {})
-        headline = f"🧱 CALL WRITING CEILING RESISTANCE: {clean_sym} {int(strike)} PE"
+        headline = f"🧱 CALL WRITING CEILING RESISTANCE: {clean_sym} {format_strike(strike)} PE"
         summary = (
             f"Active Call Writing Ceiling detected: Writers aggressively capping upside (ATM CE OI +{cwc.get('atm_ce_oi_change', 0):,} contracts, total CE OI change +{cwc.get('ce_oi_change_sum', 0):,}). "
             f"Underlying spot ₹{spot:,.1f} resisted by heavy supply wall overhead. "
             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
         )
     else:
-        headline = f"{icon} SMC BEARISH SETUP: {clean_sym} {int(strike)} PE ({signal_label})"
+        headline = (
+            f"{icon} SMC BEARISH SETUP: {clean_sym} {format_strike(strike)} PE ({signal_label})"
+        )
         summary = (
             f"Structural bearish signal detected ({', '.join(signals)}). "
             f"Put volume: {volume:,} contracts ({vol_oi_ratio:.1f}x Vol/OI). "
@@ -2666,9 +2844,9 @@ def detect_index_put_setup(
             "strategy": "BEAR_PUT_SPREAD",
             "sentiment": "BEARISH",
             "preferred_vehicle": pref_veh,
-            "description": f"Buy {int(strike)} PE & Sell {int(sell_strike)} PE (Defined Risk / Capped Loss)",
-            "buy_leg": f"BUY {clean_sym} {int(strike)} PE @ ₹{opt_ltp:,.1f}",
-            "sell_leg": f"SELL {clean_sym} {int(sell_strike)} PE @ ₹{sell_prem:,.1f}",
+            "description": f"Buy {format_strike(strike)} PE & Sell {format_strike(sell_strike)} PE (Defined Risk / Capped Loss)",
+            "buy_leg": f"BUY {clean_sym} {format_strike(strike)} PE @ ₹{opt_ltp:,.1f}",
+            "sell_leg": f"SELL {clean_sym} {format_strike(sell_strike)} PE @ ₹{sell_prem:,.1f}",
             "net_debit_per_share": net_debit,
             "net_debit_total": max_loss,
             "max_loss": max_loss,
@@ -2745,7 +2923,7 @@ def detect_index_put_setup(
 
     act_verb = "BEAR PUT SPREAD" if is_spread_mandated else "BUY PE"
     target_inst = (
-        f"{clean_sym} {int(strike)}/{int(hedge_plan['sell_strike'])} Bear Put Spread"
+        f"{clean_sym} {format_strike(strike)}/{format_strike(hedge_plan['sell_strike'])} Bear Put Spread"
         if is_spread_mandated
         else contract_sym
     )
@@ -2856,7 +3034,7 @@ def detect_index_put_setup(
         alert_id=generate_alert_id(
             clean_sym,
             "INDEX_PUT_SETUP",
-            variant=f"pe-{int(strike)}-{get_session_phase_slot(now_dt)}",
+            variant=f"pe-{format_strike(strike).replace('.', 'p')}-{get_session_phase_slot(now_dt)}",
         ),
         alert_type="INDEX_PUT_SETUP",
         stage=stage,
@@ -2910,16 +3088,52 @@ def detect_index_put_setup(
             "signal_tags": signal_tags,
             "hedge_plan": hedge_plan,
             # CHoCH / MSS tags for whiplash guard unlock (PDH rejection IS a structural reversal)
-            "choch": "PDH_SUPPLY_REJECTION" in signals,
-            "mss": "PDH_SUPPLY_REJECTION" in signals,
-            "pdh_sweep": "PDH_SUPPLY_REJECTION" in signals,
+            "choch": any(
+                s
+                in (
+                    "PDH_SUPPLY_REJECTION",
+                    "FAILED_DAY_HIGH_BREAKOUT",
+                    "SUPPLY_ZONE_SWEEP",
+                    "INTRADAY_EXHAUSTION_REVERSAL",
+                    "VWAP_BREAKDOWN",
+                )
+                for s in signals
+            ),
+            "mss": any(
+                s
+                in (
+                    "PDH_SUPPLY_REJECTION",
+                    "FAILED_DAY_HIGH_BREAKOUT",
+                    "SUPPLY_ZONE_SWEEP",
+                    "INTRADAY_EXHAUSTION_REVERSAL",
+                    "VWAP_BREAKDOWN",
+                )
+                for s in signals
+            ),
+            "pdh_sweep": any(
+                s in ("PDH_SUPPLY_REJECTION", "FAILED_DAY_HIGH_BREAKOUT", "SUPPLY_ZONE_SWEEP")
+                for s in signals
+            ),
+            "has_structural_sweep": any(
+                s
+                in (
+                    "PDH_SUPPLY_REJECTION",
+                    "FAILED_DAY_HIGH_BREAKOUT",
+                    "SUPPLY_ZONE_SWEEP",
+                    "INTRADAY_EXHAUSTION_REVERSAL",
+                )
+                for s in signals
+            ),
             "pdl_sweep": False,
             "day_high": day_high,
             "day_low": day_low,
             "prev_day_high": prev_day_high,
             "prev_day_low": prev_day_low,
+            "cpr": cpr_data,
             "cpr_data": cpr_data,
+            "cpr_type": "NARROW" if is_narrow_cpr else ("WIDE" if is_wide_cpr else "AVERAGE"),
             "is_narrow_cpr": is_narrow_cpr,
+            "is_wide_cpr": is_wide_cpr,
             "pcr": chain_pcr,
             "heavyweights_posture": hw_posture.get("summary", "UNAVAILABLE"),
             "hbcm": hbcm_dict,

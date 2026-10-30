@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import struct
 import threading
 import time
@@ -481,6 +482,20 @@ class MStockWebSocket:
         if access_token:
             self.access_token = access_token
 
+        if os.environ.get("ENABLE_MSTOCK", "0") != "1":
+            logger.debug(
+                "[mstock_websocket] mStock is disabled (ENABLE_MSTOCK != 1). Skipping WebSocket start."
+            )
+            return
+
+        eff_key = (self.api_key or os.environ.get("MSTOCK_API_KEY", "")).strip()
+        eff_tok = (self.access_token or os.environ.get("MSTOCK_TOKEN", "")).strip()
+        if not eff_key or not eff_tok:
+            logger.debug(
+                "[mstock_websocket] mStock credentials not configured, skipping WebSocket start."
+            )
+            return
+
         if self._running:
             return
 
@@ -682,9 +697,12 @@ class MStockWebSocket:
                         else:
                             logger.debug(f"m.Stock WS retry backoff in {reconnect_delay:.0f}s: {e}")
                 else:
-                    logger.warning(
-                        f"m.Stock WebSocket connection dropped ({e}), retrying in {reconnect_delay:.1f}s..."
-                    )
+                    if self._consecutive_errors <= 2 or self._consecutive_errors % 10 == 0:
+                        logger.warning(
+                            f"m.Stock WebSocket connection dropped ({e}), retrying in {reconnect_delay:.1f}s..."
+                        )
+                    else:
+                        logger.debug(f"m.Stock WS retry backoff in {reconnect_delay:.1f}s: {e}")
                     reconnect_delay = min(60.0, reconnect_delay * 1.5)
 
                 try:
@@ -932,3 +950,7 @@ mstock_ws = MStockWebSocket()
 def get_mstock_ws() -> MStockWebSocket:
     """Return the global MStockWebSocket client instance."""
     return mstock_ws
+
+
+# Backward-compatible alias
+get_mstock_websocket = get_mstock_ws

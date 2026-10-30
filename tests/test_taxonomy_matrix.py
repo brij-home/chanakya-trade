@@ -43,7 +43,7 @@ from analysis.pipeline import run_analysis_pipeline
         ("RELIANCE", "NSE", "RELIANCE", "NSE"),
         ("reliance", "", "RELIANCE", "NSE"),
         ("TCS", "NSE", "TCS", "NSE"),
-        ("NIFTY50", "NSE", "NIFTY50", "NSE"),
+        ("NIFTY50", "NSE", "NIFTY", "NSE"),
         ("GOLDBEES", "NSE", "GOLDBEES", "NSE"),
         ("BAJAJ_AUTO", "NSE", "BAJAJ-AUTO", "NSE"),
     ],

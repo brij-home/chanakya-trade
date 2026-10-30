@@ -420,7 +420,9 @@ class AlertPreferences:
     telegram: ChannelPreferences = field(default_factory=ChannelPreferences)
     ui: ChannelPreferences = field(default_factory=ChannelPreferences)
     desktop: ChannelPreferences = field(default_factory=ChannelPreferences)
-    sound: ChannelPreferences = field(default_factory=ChannelPreferences)
+    sound: ChannelPreferences = field(
+        default_factory=lambda: ChannelPreferences(enabled=False)
+    )  # Muted by default to avoid office/Zoom disturbances
 
     # Engine optimization: pause background scanning of segments that are disabled everywhere
     pause_disabled_scanners: bool = True
@@ -563,9 +565,11 @@ class AlertPreferences:
             ch_data: Optional[dict[str, Any]],
             default_min_conf: int = 75,
             default_trails: bool = False,
+            default_enabled: bool = True,
         ) -> ChannelPreferences:
             if not isinstance(ch_data, dict):
                 return ChannelPreferences(
+                    enabled=default_enabled,
                     allowed_segments=list(allowed),
                     min_confidence=default_min_conf,
                     allow_intermediate_trails=default_trails,
@@ -577,7 +581,7 @@ class AlertPreferences:
                 ch_segs = normalize_segment_list(ch_raw)
 
             return ChannelPreferences(
-                enabled=bool(ch_data.get("enabled", True)),
+                enabled=bool(ch_data.get("enabled", default_enabled)),
                 allowed_segments=ch_segs,
                 min_confidence=int(ch_data.get("min_confidence", default_min_conf)),
                 allow_early_warnings=bool(ch_data.get("allow_early_warnings", False)),
@@ -592,7 +596,12 @@ class AlertPreferences:
             telegram=_make_channel(data.get("telegram"), default_min_conf=85, default_trails=False),
             ui=_make_channel(data.get("ui"), default_min_conf=75, default_trails=True),
             desktop=_make_channel(data.get("desktop"), default_min_conf=80, default_trails=False),
-            sound=_make_channel(data.get("sound"), default_min_conf=80, default_trails=False),
+            sound=_make_channel(
+                data.get("sound"),
+                default_min_conf=80,
+                default_trails=False,
+                default_enabled=False,
+            ),
             pause_disabled_scanners=bool(data.get("pause_disabled_scanners", True)),
             fno_index_allowed_symbols=list(
                 data.get("fno_index_allowed_symbols")
@@ -955,6 +964,10 @@ class AlertPreferencesManager:
                 or stage
                 in (
                     "T0_5_ACHIEVED",
+                    "DE_RISK_0_5R",
+                    "TARGET_0_5",
+                    "T0.5_ACHIEVED",
+                    "SCALE_1_ACHIEVED",
                     "T1_ACHIEVED",
                     "T2_ACHIEVED",
                     "TARGET_ACHIEVED",
@@ -968,9 +981,11 @@ class AlertPreferencesManager:
                 )
                 or "T0_5" in target_status
                 or "T0.5" in target_status
+                or "DE_RISK" in target_status
                 or "T1" in target_status
                 or "T2" in target_status
-                or "TARGET" in target_status
+                or ("TARGET" in target_status and "PENDING" not in target_status)
+                or "FINAL" in target_status
             )
 
             # Milestones check
@@ -1117,3 +1132,8 @@ class AlertPreferencesManager:
 
 # Module-level singleton
 alert_preferences = AlertPreferencesManager()
+
+
+def get_alert_preferences_manager() -> AlertPreferencesManager:
+    """Returns the global AlertPreferencesManager singleton."""
+    return alert_preferences

@@ -330,6 +330,15 @@ def compute_allowed_actions(
                 flags.append("SEBI_PHYSICAL_DELIVERY_PROXIMITY")
                 warnings.append(sebi_risk["warning"])
 
+        # ── Check 6: SEBI 2026 Expiry Day 2% ELM & Margin Check (DTE == 0) ───
+        if dte == 0:
+            # For derivative indices/stocks on expiry date, warn about 2% ELM on short legs
+            flags.append("SEBI_2026_EXPIRY_DAY")
+            warnings.append(
+                "[SEBI 2026] Expiry day derivative trading active: short option positions require an additional "
+                "2.0% Extreme Loss Margin (ELM), and calendar spread offsets are eliminated."
+            )
+
     # ── Final: determine direction ────────────────────────────
     # Default to BOTH — caller can override based on portfolio context
     direction: Literal["BUY_ONLY", "SELL_ONLY", "BOTH", "NONE"] = "BOTH"

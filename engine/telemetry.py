@@ -41,6 +41,7 @@ EVENT_DATA_FALLBACK = "DATA_FALLBACK"
 EVENT_BROKER_FAILOVER = "BROKER_FAILOVER"
 EVENT_EXCEPTION = "EXCEPTION"
 EVENT_API_RETRY = "API_RETRY"
+EVENT_CODE_STALE = "CODE_STALE"
 
 VALID_EVENT_TYPES = {
     EVENT_LLM_FAILOVER,
@@ -50,6 +51,7 @@ VALID_EVENT_TYPES = {
     EVENT_BROKER_FAILOVER,
     EVENT_EXCEPTION,
     EVENT_API_RETRY,
+    EVENT_CODE_STALE,
 }
 
 MAX_LOG_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB per rotated log
@@ -79,13 +81,19 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
     rsn = (reason or "").upper()
 
     # Multi-key LLM failover, Guardian screening vetoes, risk suppressions, delisted/expired symbols,
-    # in-flight trade coaching/warnings, and self-healing rewrites are informational audits (P3)
+    # in-flight trade coaching/warnings, self-healing rewrites, and routine scout rotation are informational audits (P3)
     if event_type == EVENT_LLM_FAILOVER or any(
         k in rsn
         for k in (
             "VETO",
+            "MILESTONE",
+            "INTEGRITY GATE",
             "CODE -300",
+            "-300",
+            "CODE: -300",
             "INVALID_SYMBOLS",
+            "INVALID SYMBOL",
+            "INVALID SYMBOL PROVIDED",
             "PLEASE PROVIDE A VALID SYMBOL",
             "DELISTED",
             "EXPIRED",
@@ -97,6 +105,18 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
             "POSSIBLY DELISTED",
             "FAILOVER TO FALLBACK",
             "THROTTLED OR HIGH DEMAND",
+            "UNRESPONSIVE SECTOR SCOUT",
+            "ZERO PACKETS RECEIVED",
+            "DEAD TBT SCOUT",
+            "REVOLVING IDLE",
+            "EVICTING UNRESPONSIVE",
+            "CONNECTION TO REMOTE HOST WAS LOST",
+            "REMOTE HOST WAS LOST",
+            "GOODBYE",
+            "JSONDECODEERROR",
+            "OPTIONS-CHAIN-V3",
+            "PROTOCOLERROR",
+            "REMOTE DISCONNECTED",
         )
     ):
         return "P3"
@@ -110,6 +130,13 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
         or "LOCKOUT" in rsn
     ):
         return "P0"
+    if (
+        event_type == EVENT_CODE_STALE
+        or "CODE STALE" in rsn
+        or "STALE BYTECODE" in rsn
+        or "STALE IN-MEMORY BYTECODE" in rsn
+    ):
+        return "P3"
     if sev in ("ERROR", "WARNING") and (
         sev == "ERROR"
         or event_type in (EVENT_LLM_COOLDOWN, EVENT_DATA_FALLBACK, EVENT_QUANT_FALLBACK)
@@ -169,55 +196,7 @@ def _load_recent_events_from_disk(limit: int = 250) -> None:
                         )
                     ):
                         continue
-                    prio = data.get("priority")
-                    comp_lower = comp.lower()
-                    is_ext = any(
-                        ign in comp_lower
-                        for ign in (
-                            "yfinance",
-                            "urllib3",
-                            "websocket",
-                            "fyerswebsocket",
-                            "fyersdatasocket",
-                            "fyerstbtsocket",
-                            "httpcore",
-                            "starlette",
-                        )
-                    )
-                    is_rate_lim = (
-                        "429" in rsn
-                        or "RATE LIMIT" in rsn.upper()
-                        or "TOO MANY REQUESTS" in rsn.upper()
-                    )
-                    if is_ext:
-                        if is_rate_lim:
-                            prio = "P2"
-                        else:
-                            prio = "P3" if sev != "ERROR" else "P2"
-                    elif ev_type == EVENT_LLM_FAILOVER or any(
-                        k in rsn.upper()
-                        for k in (
-                            "VETO",
-                            "CODE -300",
-                            "INVALID_SYMBOLS",
-                            "PLEASE PROVIDE A VALID SYMBOL",
-                            "DELISTED",
-                            "EXPIRED",
-                            "SUPPRESS",
-                            "POLARIZATION",
-                            "REWRITING",
-                            "IN-FLIGHT WARNING",
-                            "THROTTLED OR HIGH DEMAND",
-                        )
-                    ):
-                        prio = "P3"
-                    elif (
-                        not prio
-                        or prio not in ("P0", "P1", "P2", "P3")
-                        or "CIRCUIT" in rsn.upper()
-                        or "VETO" in rsn.upper()
-                    ):
-                        prio = derive_priority(ev_type, comp, sev, rsn)
+                    prio = data.get("priority") or derive_priority(ev_type, comp, sev, rsn)
                     ev = TelemetryEvent(
                         event_type=ev_type,
                         component=comp,
@@ -520,8 +499,9 @@ def get_prioritized_incidents(
     limit: int = 100,
     priority: Optional[str] = None,
     component: Optional[str] = None,
+    since_timestamp: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Return incidents matching priority and component filters, sorted newest first."""
+    """Return incidents matching priority, component, and since_timestamp filters, sorted newest first."""
     with _lock:
         events = list(_events_buffer)
 
@@ -531,24 +511,40 @@ def get_prioritized_incidents(
     target_comp = component.lower() if component else None
 
     for ev in events:
-        ev_prio = getattr(ev, "priority", None) or "P3"
+        if since_timestamp is not None:
+            ts_str = getattr(ev, "timestamp", None)
+            if ts_str and str(ts_str) < str(since_timestamp):
+                continue
+        ev_type = getattr(ev, "event_type", "INCIDENT")
+        comp = getattr(ev, "component", "SYSTEM")
+        sev = getattr(ev, "severity", "INFO")
+        rsn = getattr(ev, "reason", "")
+        ev_prio = getattr(ev, "priority", None) or derive_priority(ev_type, comp, sev, rsn)
+        ev.priority = ev_prio
         if target_prio and ev_prio != target_prio:
             continue
         if target_comp and target_comp not in (ev.component or "").lower():
             continue
-        results.append(ev.to_dict())
+        ev_dict = ev.to_dict()
+        ev_dict["priority"] = ev_prio
+        results.append(ev_dict)
         if len(results) >= limit:
             break
     return results
 
 
-def get_incident_counts(window_minutes: Optional[int] = None) -> dict[str, int]:
+def get_incident_counts(
+    window_minutes: Optional[int] = None,
+    since_timestamp: Optional[str] = None,
+) -> dict[str, int]:
     """Return counts of events segregated by priority level.
 
     Args:
         window_minutes: If specified, counts only events occurring within the
             last N minutes (for active system health evaluation). If None,
             counts all events in the in-memory rolling buffer.
+        since_timestamp: If specified, counts only events occurring at or after
+            this ISO timestamp.
     """
     with _lock:
         events = list(_events_buffer)
@@ -556,8 +552,11 @@ def get_incident_counts(window_minutes: Optional[int] = None) -> dict[str, int]:
     now = datetime.now(timezone.utc)
 
     for ev in events:
+        ts_str = getattr(ev, "timestamp", None)
+        if since_timestamp is not None:
+            if ts_str and str(ts_str) < str(since_timestamp):
+                continue
         if window_minutes is not None:
-            ts_str = getattr(ev, "timestamp", None)
             if ts_str:
                 try:
                     ts = datetime.fromisoformat(ts_str)
@@ -567,14 +566,12 @@ def get_incident_counts(window_minutes: Optional[int] = None) -> dict[str, int]:
                     logger.debug(
                         f"[engine.telemetry] Non-fatal exception suppressed: {e_suppressed}"
                     )
-        p = getattr(ev, "priority", None)
-        if not p or p not in counts:
-            p = derive_priority(
-                getattr(ev, "event_type", "INCIDENT"),
-                getattr(ev, "component", "SYSTEM"),
-                getattr(ev, "severity", "INFO"),
-                getattr(ev, "reason", ""),
-            )
+        ev_type = getattr(ev, "event_type", "INCIDENT")
+        comp = getattr(ev, "component", "SYSTEM")
+        sev = getattr(ev, "severity", "INFO")
+        rsn = getattr(ev, "reason", "")
+        p = getattr(ev, "priority", None) or derive_priority(ev_type, comp, sev, rsn)
+        ev.priority = p
         counts[p] = counts.get(p, 0) + 1
     return counts
 
@@ -726,7 +723,15 @@ class TelemetryLogHandler(logging.Handler):
                 # Fyers broker socket invalid_symbols feedback is P3 informational audit
                 if any(
                     k in msg.upper()
-                    for k in ("CODE -300", "INVALID_SYMBOLS", "PLEASE PROVIDE A VALID SYMBOL")
+                    for k in (
+                        "CODE -300",
+                        "-300",
+                        "CODE: -300",
+                        "INVALID_SYMBOLS",
+                        "INVALID SYMBOL",
+                        "INVALID SYMBOL PROVIDED",
+                        "PLEASE PROVIDE A VALID SYMBOL",
+                    )
                 ):
                     severity = "INFO"
                     priority = "P3"
@@ -743,8 +748,14 @@ class TelemetryLogHandler(logging.Handler):
                     k in msg.upper()
                     for k in (
                         "VETO",
+                        "MILESTONE",
+                        "INTEGRITY GATE",
                         "CODE -300",
+                        "-300",
+                        "CODE: -300",
                         "INVALID_SYMBOLS",
+                        "INVALID SYMBOL",
+                        "INVALID SYMBOL PROVIDED",
                         "PLEASE PROVIDE A VALID SYMBOL",
                         "DELISTED",
                         "EXPIRED",
@@ -753,6 +764,13 @@ class TelemetryLogHandler(logging.Handler):
                         "REWRITING",
                         "IN-FLIGHT WARNING",
                         "THROTTLED OR HIGH DEMAND",
+                        "CONNECTION TO REMOTE HOST WAS LOST",
+                        "REMOTE HOST WAS LOST",
+                        "GOODBYE",
+                        "JSONDECODEERROR",
+                        "OPTIONS-CHAIN-V3",
+                        "PROTOCOLERROR",
+                        "REMOTE DISCONNECTED",
                     )
                 ):
                     severity = "INFO"

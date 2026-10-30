@@ -9,9 +9,11 @@ from __future__ import annotations
 from web.routers.alerts_api import router as alerts_router
 from web.routers.market_data import router as market_router
 from web.routers.orders_api import router as orders_router
+from web.routers.crypto_api import router as crypto_router
 
 __all__ = [
     "alerts_router",
     "market_router",
     "orders_router",
+    "crypto_router",
 ]
