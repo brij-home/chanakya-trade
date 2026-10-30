@@ -96,6 +96,14 @@ class ReconciliationBaselineRequest(BaseModel):
     opening_cash: float = Field(..., ge=0)
 
 
+class WingLockExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    alert_id: str
+    limit_price: Optional[float] = None
+    quantity: Optional[int] = None
+
+
 # ── Route Handlers ────────────────────────────────────────────────────────────
 
 
@@ -469,3 +477,55 @@ async def api_cancel_gtt(gtt_id: str):
         paper = PaperBroker()
         success = await asyncio.to_thread(paper.cancel_gtt, gtt_id)
         return {"status": "ok" if success else "error", "gtt_id": gtt_id, "cancelled": success}
+
+
+@router.post("/api/orders/wing-lock")
+async def api_order_wing_lock(req: WingLockExecuteRequest, request: Request):
+    """Execute 1-Click Free-Roll Wing Lock hedge order from alert."""
+    from engine.order_lifecycle import execute_wing_lock_hedge
+
+    actor = "LOCAL"
+    if hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
+
+    try:
+        res = await asyncio.to_thread(
+            execute_wing_lock_hedge,
+            alert_id=req.alert_id,
+            limit_price=req.limit_price,
+            quantity=req.quantity,
+            actor=actor,
+        )
+        return JSONResponse(res)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+
+@router.post("/api/alerts/auto/{alert_id}/wing-lock")
+async def api_alert_wing_lock(alert_id: str, request: Request):
+    """RESTful alias for 1-Click Free-Roll Wing Lock hedge order from alert ID."""
+    from engine.order_lifecycle import execute_wing_lock_hedge
+
+    actor = "LOCAL"
+    if hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
+
+    try:
+        res = await asyncio.to_thread(
+            execute_wing_lock_hedge,
+            alert_id=alert_id,
+            actor=actor,
+        )
+        return JSONResponse(res)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, str(exc)) from exc

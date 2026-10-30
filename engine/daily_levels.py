@@ -101,6 +101,7 @@ class DailyLevels:
     pre_open: dict[str, Any] = field(default_factory=dict)
     blueprint: dict[str, Any] = field(default_factory=dict)
     straddle: dict[str, Any] = field(default_factory=dict)
+    virgin_cpr: dict[str, Any] = field(default_factory=dict)
     updated_at: str = ""
 
     @property
@@ -191,6 +192,7 @@ class DailyLevels:
             monthly=data.get("monthly") or {},
             pre_open=data.get("pre_open") or {},
             blueprint=data.get("blueprint") or {},
+            virgin_cpr=data.get("virgin_cpr") or {},
             updated_at=data.get("updated_at", ""),
         )
 
@@ -601,6 +603,19 @@ class DailyLevelsStore:
             except Exception as e_straddle:
                 logger.debug(f"[DailyLevels] Straddle calculation note for {clean}: {e_straddle}")
 
+        # 10. Untested Virgin CPR Detection across previous sessions
+        virgin_cpr_data: dict[str, Any] = {}
+        try:
+            virgin_cpr_data = detect_virgin_cpr(
+                symbol=clean,
+                history_df=df_day,
+                current_price=spot_price,
+                session_date=s_date,
+            )
+            cpr_dict["virgin_cpr"] = virgin_cpr_data
+        except Exception as e_vcpr:
+            logger.debug(f"[DailyLevels] Virgin CPR calculation note for {clean}: {e_vcpr}")
+
         dl = DailyLevels(
             symbol=clean,
             canonical_symbol=clean,
@@ -619,6 +634,7 @@ class DailyLevelsStore:
             monthly=monthly_dict,
             pre_open=pre_open_dict,
             straddle=straddle_dict,
+            virgin_cpr=virgin_cpr_data,
             blueprint=blueprint,
             updated_at=now_iso,
         )
@@ -1050,6 +1066,14 @@ def evaluate_cpr_gate(
         elif cpr_bottom > 0 and abs(spot - cpr_bottom) / max(1.0, spot) <= 0.0025:
             has_confluence = True
             confluence_tag = "CPR_BOTTOM_CONFLUENCE"
+        else:
+            v_cpr = getattr(dl, "virgin_cpr", None) or cpr_data.get("virgin_cpr") or {}
+            if v_cpr.get("has_virgin_cpr"):
+                nearest_m = v_cpr.get("nearest_magnet") or {}
+                m_pivot = float(nearest_m.get("pivot", 0.0) or 0.0)
+                if m_pivot > 0 and abs(spot - m_pivot) / max(1.0, spot) <= 0.0025:
+                    has_confluence = True
+                    confluence_tag = "VIRGIN_CPR_MAGNET_CONFLUENCE"
 
     if is_wide and cpr_bottom > 0 and cpr_top > 0 and spot > 0:
         # Core chop containment: spot is strictly inside the CPR range
@@ -1083,6 +1107,208 @@ def evaluate_cpr_gate(
         has_confluence=has_confluence,
         confluence_tag=confluence_tag,
     )
+
+
+def detect_virgin_cpr(
+    symbol: str,
+    history_df: Optional[pd.DataFrame] = None,
+    current_price: float = 0.0,
+    lookback_days: int = 5,
+    session_date: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Detects Untested / Virgin Central Pivot Ranges (Virgin CPR) across recent sessions.
+
+    A Virgin CPR is defined as a historical completed session where the entire intraday price
+    range [Low, High] NEVER touched or intersected the CPR corridor [CPR Bottom, CPR Top].
+    Furthermore, subsequent completed sessions must NOT have traded through or filled that corridor.
+
+    Because the Central Pivot Range represents institutional fair value, an untested corridor
+    leaves high-density latent liquidity and acts as a powerful mean-reversion magnet.
+
+    Returns:
+        dict containing:
+          - has_virgin_cpr: bool
+          - virgin_cprs: list of active virgin CPR records (sorted by proximity)
+          - nearest_magnet: dict of the closest active virgin CPR
+          - magnet_target: float (pivot price of closest virgin CPR)
+          - magnet_bias: "MAGNET_ABOVE" | "MAGNET_BELOW" | "AT_MAGNET" | None
+          - distance_pts: float
+          - distance_pct: float
+          - summary: str
+    """
+    clean = canonical_alert_symbol(symbol)
+    s_date = session_date or datetime.now(IST).strftime("%Y-%m-%d")
+
+    df = history_df
+    if df is None or df.empty:
+        try:
+            from market.history import get_ohlcv
+
+            exch = "BSE" if clean in ("SENSEX", "BANKEX") else "NSE"
+            df = get_ohlcv(clean, exchange=exch, interval="day", days=max(20, lookback_days + 15))
+        except Exception as e:
+            logger.debug(f"[VirginCPR] Could not fetch daily bars for {clean}: {e}")
+            df = None
+
+    if df is None or len(df) < 2:
+        return {
+            "has_virgin_cpr": False,
+            "virgin_cprs": [],
+            "nearest_magnet": None,
+            "magnet_target": None,
+            "magnet_bias": None,
+            "distance_pts": 0.0,
+            "distance_pct": 0.0,
+            "summary": "Insufficient historical daily data for Virgin CPR detection.",
+        }
+
+    # Normalize column names
+    col_h = "high" if "high" in df.columns else "High"
+    col_l = "low" if "low" in df.columns else "Low"
+    col_c = "close" if "close" in df.columns else "Close"
+
+    if not all(k in df.columns for k in (col_h, col_l, col_c)):
+        return {
+            "has_virgin_cpr": False,
+            "virgin_cprs": [],
+            "nearest_magnet": None,
+            "magnet_target": None,
+            "magnet_bias": None,
+            "distance_pts": 0.0,
+            "distance_pct": 0.0,
+            "summary": "Missing OHLC columns for Virgin CPR detection.",
+        }
+
+    # If the last bar represents today's incomplete session, exclude it
+    last_dt = df.index[-1]
+    last_dt_str = (
+        last_dt.strftime("%Y-%m-%d") if hasattr(last_dt, "strftime") else str(last_dt)[:10]
+    )
+    completed_df = df.iloc[:-1] if last_dt_str == s_date and len(df) > 1 else df
+
+    total_bars = len(completed_df)
+    if total_bars < 2:
+        return {
+            "has_virgin_cpr": False,
+            "virgin_cprs": [],
+            "nearest_magnet": None,
+            "magnet_target": None,
+            "magnet_bias": None,
+            "distance_pts": 0.0,
+            "distance_pct": 0.0,
+            "summary": "Insufficient completed daily bars for Virgin CPR detection.",
+        }
+
+    max_scan = min(lookback_days, total_bars - 1)
+    active_virgin_cprs: list[dict[str, Any]] = []
+
+    ref_price = current_price if current_price > 0 else float(completed_df[col_c].iloc[-1])
+
+    # Scan backwards from yesterday (idx = total_bars - 1)
+    for offset in range(1, max_scan + 1):
+        target_idx = total_bars - offset
+        if target_idx < 1:
+            break
+
+        # Day target_idx CPR is calculated from target_idx - 1
+        prev_h = float(completed_df[col_h].iloc[target_idx - 1])
+        prev_l = float(completed_df[col_l].iloc[target_idx - 1])
+        prev_c = float(completed_df[col_c].iloc[target_idx - 1])
+
+        p = (prev_h + prev_l + prev_c) / 3.0
+        bc = (prev_h + prev_l) / 2.0
+        tc = (p - bc) + p
+        cpr_top = max(tc, bc)
+        cpr_bottom = min(tc, bc)
+
+        # On day target_idx: did price touch this CPR corridor?
+        day_h = float(completed_df[col_h].iloc[target_idx])
+        day_l = float(completed_df[col_l].iloc[target_idx])
+
+        # Virgin condition: day's Low was strictly above CPR Top, OR day's High was strictly below CPR Bottom
+        is_virgin_on_day = (day_l > cpr_top) or (day_h < cpr_bottom)
+        if not is_virgin_on_day:
+            continue
+
+        # Day target_idx was virgin. Check if any subsequent completed day filled/touched it
+        filled = False
+        for sub_idx in range(target_idx + 1, total_bars):
+            sub_h = float(completed_df[col_h].iloc[sub_idx])
+            sub_l = float(completed_df[col_l].iloc[sub_idx])
+            if sub_l <= cpr_top and sub_h >= cpr_bottom:
+                filled = True
+                break
+
+        if filled:
+            continue
+
+        # Still virgin and untouched
+        target_dt = completed_df.index[target_idx]
+        target_dt_str = (
+            target_dt.strftime("%Y-%m-%d")
+            if hasattr(target_dt, "strftime")
+            else str(target_dt)[:10]
+        )
+
+        if ref_price > cpr_top:
+            m_bias = "MAGNET_BELOW"
+            dist_pts = round(ref_price - p, 2)
+        elif ref_price < cpr_bottom:
+            m_bias = "MAGNET_ABOVE"
+            dist_pts = round(p - ref_price, 2)
+        else:
+            m_bias = "AT_MAGNET"
+            dist_pts = 0.0
+
+        dist_pct = round((dist_pts / max(1.0, ref_price)) * 100.0, 3)
+
+        active_virgin_cprs.append(
+            {
+                "session_date": target_dt_str,
+                "age_days": offset,
+                "pivot": round(p, 2),
+                "tc": round(tc, 2),
+                "bc": round(bc, 2),
+                "top": round(cpr_top, 2),
+                "bottom": round(cpr_bottom, 2),
+                "status": "UNTOUCHED",
+                "magnet_bias": m_bias,
+                "distance_pts": dist_pts,
+                "distance_pct": dist_pct,
+            }
+        )
+
+    if not active_virgin_cprs:
+        return {
+            "has_virgin_cpr": False,
+            "virgin_cprs": [],
+            "nearest_magnet": None,
+            "magnet_target": None,
+            "magnet_bias": None,
+            "distance_pts": 0.0,
+            "distance_pct": 0.0,
+            "summary": f"No active untested Virgin CPR found in the last {max_scan} sessions.",
+        }
+
+    # Sort by absolute distance to ref_price
+    active_virgin_cprs.sort(key=lambda x: x["distance_pts"])
+    nearest = active_virgin_cprs[0]
+
+    return {
+        "has_virgin_cpr": True,
+        "virgin_cprs": active_virgin_cprs,
+        "nearest_magnet": nearest,
+        "magnet_target": nearest["pivot"],
+        "magnet_bias": nearest["magnet_bias"],
+        "distance_pts": nearest["distance_pts"],
+        "distance_pct": nearest["distance_pct"],
+        "summary": (
+            f"Active Untested Virgin CPR ({nearest['session_date']}) at ₹{nearest['pivot']:,.1f} "
+            f"[₹{nearest['bottom']:,.1f} - ₹{nearest['top']:,.1f}] serves as {nearest['magnet_bias'].replace('_', ' ').lower()} "
+            f"({nearest['distance_pts']:,.1f} pts / {nearest['distance_pct']:.2f}% away)."
+        ),
+    }
 
 
 def prime_daily_levels(symbols: Optional[list[str]] = None) -> dict[str, DailyLevels]:

@@ -3191,6 +3191,17 @@ class FyersTbtManager:
             "audit_timestamp": int(time.time()),
         }
 
+    def get_realtime_orderbook_greeks(
+        self,
+        symbol: str,
+        spot: Optional[float] = None,
+        allow_rest_fallback: bool = False,
+    ) -> dict[str, Any]:
+        """Wrapper method on FyersTbtManager singleton to fuse 50-DOM and GEX/DEX."""
+        return get_realtime_orderbook_greeks(
+            symbol, spot=spot, allow_rest_fallback=allow_rest_fallback
+        )
+
 
 # Global Singleton Instance
 fyers_tbt_manager = FyersTbtManager()
@@ -3201,3 +3212,173 @@ def promote_jit_tbt_scout(
 ) -> bool:
     """Convenience helper to promote a symbol to Fyers TBT 50-depth stream."""
     return fyers_tbt_manager.promote_jit_scout(symbol, duration_sec=duration_sec, reason=reason)
+
+
+def get_realtime_orderbook_greeks(
+    symbol: str,
+    spot: Optional[float] = None,
+    allow_rest_fallback: bool = False,
+) -> dict[str, Any]:
+    """
+    Fuses real-time Fyers 50-level Level-3 Depth (DOM) with Gamma Exposure (GEX)
+    and Dealer Delta Exposure (DEX) to compute Institutional Microstructure Wall Conviction.
+
+    Cross-correlates:
+      1. DOM Resting Bid Walls vs GEX Put Walls (Support Confluence).
+      2. DOM Resting Ask Walls vs GEX Call Walls (Resistance Confluence).
+      3. OBI-50 Order Book Imbalance vs DEX Net Delta Regime (Short-covering / Cascade risk).
+    """
+    from engine.alert_identity import canonical_alert_symbol
+
+    clean_sym = canonical_alert_symbol(symbol)
+    spot_val = float(spot or 0.0)
+
+    # Resolve spot if not supplied
+    if spot_val <= 0:
+        try:
+            from market.quotes import get_quote
+
+            q = get_quote([clean_sym])
+            q_obj = q.get(clean_sym) or (list(q.values())[0] if q else None)
+            if q_obj:
+                spot_val = float(
+                    getattr(q_obj, "ltp", 0.0) or getattr(q_obj, "last_price", 0.0) or 0.0
+                )
+        except Exception as e_spot:
+            logger.debug(f"[get_realtime_orderbook_greeks] Spot lookup note: {e_spot}")
+
+    # Step 1: Query DOM 50-Depth
+    depth_data = fyers_tbt_manager.get_50_depth(clean_sym, allow_rest_fallback=allow_rest_fallback)
+    if (
+        not depth_data or depth_data.get("status") == "UNAVAILABLE" or not depth_data.get("bids")
+    ) and clean_sym in ("NIFTY", "BANKNIFTY", "SENSEX", "MIDCPNIFTY"):
+        fut_sym = resolve_tradable_tbt_symbol(clean_sym)
+        if fut_sym:
+            depth_data = fyers_tbt_manager.get_50_depth(
+                fut_sym, allow_rest_fallback=allow_rest_fallback
+            )
+
+    bids = depth_data.get("bids", []) or []
+    asks = depth_data.get("asks", []) or []
+
+    # Extract dominant resting walls
+    bid_wall = None
+    ask_wall = None
+    if bids:
+        bid_wall = max(bids, key=lambda b: (int(b.get("qty", 0)), int(b.get("orders", 1))))
+    if asks:
+        ask_wall = max(asks, key=lambda a: (int(a.get("qty", 0)), int(a.get("orders", 1))))
+
+    obi_50 = float(depth_data.get("obi_50", 0.0) or 0.0)
+    density_score = float(depth_data.get("density_score", 0.0) or 0.0)
+    fortress_bid = bool(depth_data.get("fortress_bid_wall_confirmed", False))
+    fortress_ask = bool(depth_data.get("fortress_ask_wall_confirmed", False))
+
+    # Step 2: Query GEX & DEX Analysis
+    call_wall = 0.0
+    put_wall = 0.0
+    gamma_flip = 0.0
+    dex_regime = "BALANCED"
+    dex_neutral = 0.0
+    net_gex_cr = 0.0
+    net_dex_cr = 0.0
+
+    try:
+        from analysis.gex import get_gex_analysis
+
+        gex_res = get_gex_analysis(clean_sym, spot=spot_val if spot_val > 0 else None)
+        if gex_res:
+            call_wall = float(gex_res.call_wall or 0.0)
+            put_wall = float(gex_res.put_wall or 0.0)
+            gamma_flip = float(gex_res.gamma_flip or 0.0)
+            dex_regime = str(getattr(gex_res, "dex_regime", "BALANCED"))
+            dex_neutral = float(getattr(gex_res, "dex_neutral_level", 0.0) or 0.0)
+            net_gex_cr = float(gex_res.total_net_gex_cr or 0.0)
+            net_dex_cr = float(getattr(gex_res, "total_net_dex_cr", 0.0) or 0.0)
+    except Exception as e_gex:
+        logger.debug(f"[get_realtime_orderbook_greeks] GEX lookup note: {e_gex}")
+
+    # Step 3: Compute Confluence between DOM walls and GEX walls
+    bid_confluence = False
+    ask_confluence = False
+    step = 100.0 if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX") else 50.0
+
+    if bid_wall and put_wall > 0:
+        bid_p = float(bid_wall.get("price", 0.0))
+        if abs(bid_p - put_wall) <= step * 1.2:
+            bid_confluence = True
+
+    if ask_wall and call_wall > 0:
+        ask_p = float(ask_wall.get("price", 0.0))
+        if abs(ask_p - call_wall) <= step * 1.2:
+            ask_confluence = True
+
+    # Step 4: Microstructure Wall Conviction Score (0 to 100)
+    conviction = 50
+    if bid_confluence:
+        conviction += 20
+    if ask_confluence:
+        conviction += 20
+    if fortress_bid or fortress_ask:
+        conviction += 10
+    if obi_50 > 0.25 and "SHORT_DELTA" in dex_regime:
+        conviction += 12
+    elif obi_50 < -0.25 and "LONG_DELTA" in dex_regime:
+        conviction += 12
+    conviction = max(10, min(98, conviction))
+
+    # Step 5: Wall Bias & Actionable plain Synthesis
+    if bid_confluence and obi_50 >= 0:
+        wall_bias = "STRONG_SUPPORT_CONFIRMED"
+        synthesis = (
+            f"CONFLUENCE: Resting DOM Bid Wall at ₹{bid_wall.get('price', 0):,.1f} reinforces GEX Put Wall ₹{put_wall:,.0f}. "
+            f"Institutional buyers provide solid double-layer cushion against downside."
+        )
+    elif ask_confluence and obi_50 <= 0:
+        wall_bias = "STRONG_RESISTANCE_CONFIRMED"
+        synthesis = (
+            f"CONFLUENCE: Resting DOM Ask Wall at ₹{ask_wall.get('price', 0):,.1f} reinforces GEX Call Wall ₹{call_wall:,.0f}. "
+            f"Heavy institutional sell supply acts as overhead ceiling."
+        )
+    elif obi_50 > 0.20 and "SHORT_DELTA" in dex_regime:
+        wall_bias = "SQUEEZE_ALERT"
+        synthesis = (
+            f"SQUEEZE FUEL: Order book heavily bid (OBI {obi_50:+.2f}) with Dealer Short Delta ({net_dex_cr:+.1f} Cr). "
+            f"Short covering squeeze likely on push above Call Wall ₹{call_wall:,.0f}."
+        )
+    elif obi_50 < -0.20 and "LONG_DELTA" in dex_regime:
+        wall_bias = "CASCADE_ALERT"
+        synthesis = (
+            f"CASCADE RISK: Order book heavily offered (OBI {obi_50:+.2f}) with Dealer Long Delta ({net_dex_cr:+.1f} Cr). "
+            f"Long liquidation cascade likely on breakdown below Put Wall ₹{put_wall:,.0f}."
+        )
+    else:
+        wall_bias = "BALANCED_RANGE"
+        synthesis = (
+            f"BALANCED MICROSTRUCTURE: OBI {obi_50:+.2f} | Put Wall: ₹{put_wall:,.0f} | "
+            f"Call Wall: ₹{call_wall:,.0f} | Gamma Flip: ₹{gamma_flip:,.0f}."
+        )
+
+    return {
+        "symbol": clean_sym,
+        "spot": spot_val,
+        "dom_status": depth_data.get("status", "OK"),
+        "obi_50": round(obi_50, 4),
+        "density_score": round(density_score, 1),
+        "dom_bid_wall": bid_wall,
+        "dom_ask_wall": ask_wall,
+        "fortress_bid_wall": fortress_bid,
+        "fortress_ask_wall": fortress_ask,
+        "gex_call_wall": call_wall,
+        "gex_put_wall": put_wall,
+        "gex_gamma_flip": gamma_flip,
+        "dex_regime": dex_regime,
+        "dex_neutral_level": dex_neutral,
+        "total_net_gex_cr": round(net_gex_cr, 2),
+        "total_net_dex_cr": round(net_dex_cr, 2),
+        "bid_confluence": bid_confluence,
+        "ask_confluence": ask_confluence,
+        "microstructure_wall_conviction": conviction,
+        "wall_bias": wall_bias,
+        "synthesis": synthesis,
+    }

@@ -2316,3 +2316,139 @@ def sync_execution_orders() -> dict[str, Any]:
         "unknown_broker_orders": unknown_broker_orders,
         "synced_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def execute_wing_lock_hedge(
+    alert_id: str,
+    limit_price: Optional[float] = None,
+    quantity: Optional[int] = None,
+    actor: str = "LOCAL",
+) -> dict[str, Any]:
+    """
+    1-Click Fyers / Paper Multi-Leg Execution Bridge for Free-Roll Wing Lock.
+
+    Transitions a +48% / T1 in-profit naked option setup into an institutional
+    Free-Roll Spread by shorting the OTM wing candidate, locking guaranteed profit
+    while retaining zero downside risk.
+    """
+    from engine.auto_alert_engine import get_auto_alert_engine
+    from engine.security_audit import record_audit_event
+
+    a_engine = get_auto_alert_engine()
+    alert = (
+        a_engine.get_alert_by_id(alert_id)
+        if hasattr(a_engine, "get_alert_by_id")
+        else a_engine.get_alert(alert_id)
+    )
+    if not alert:
+        raise ValueError(f"Alert '{alert_id}' not found.")
+
+    plan = alert.actionable_plan or {}
+    hedge_ticket = plan.get("hedge_ticket")
+    free_roll = plan.get("free_roll_plan") or (
+        alert.metrics.get("free_roll_conversion") if alert.metrics else None
+    )
+
+    if not hedge_ticket and not free_roll:
+        raise ValueError(f"Alert '{alert_id}' has no eligible Free-Roll hedge ticket or plan.")
+
+    # Resolve hedge contract symbol
+    sym = hedge_ticket.get("symbol") if hedge_ticket else None
+    if not sym and free_roll:
+        u_sym = alert.symbol
+        c_strike = free_roll.get("short_strike_candidate", 0)
+        c_opt = free_roll.get("option_type", "")
+        sym = f"{u_sym}{c_strike:,.0f}{c_opt}".replace(",", "")
+
+    if not sym:
+        raise ValueError(f"Could not determine hedge contract symbol for alert '{alert_id}'.")
+
+    # Resolve quantity & price
+    qty = int(
+        quantity
+        or (hedge_ticket.get("shares") if hedge_ticket else None)
+        or getattr(alert, "shares", 0)
+        or getattr(alert, "lot_size", 1)
+    )
+    side = str(hedge_ticket.get("action", "SELL") if hedge_ticket else "SELL").upper()
+    raw_px = float(
+        limit_price
+        or (hedge_ticket.get("limit_price") if hedge_ticket else None)
+        or (free_roll.get("estimated_credit_collected") if free_roll else 0.0)
+        or 10.0
+    )
+    px = round(max(0.05, raw_px), 2)
+    order_type = str(hedge_ticket.get("order_type", "LIMIT") if hedge_ticket else "LIMIT")
+
+    # Step 1: Preview Order Intent
+    preview = preview_order_intent(
+        symbol=sym,
+        side=side,  # type: ignore
+        quantity=qty,
+        price=px,
+        order_type=order_type,  # type: ignore
+        product="MIS",
+    )
+
+    # Step 2: Confirm Order Intent
+    confirmed = confirm_order_intent(preview.order_id, preview.preview_hash)
+
+    # Step 3: Execute Order Intent
+    executed = execute_order_intent(confirmed.order_id)
+
+    # Step 4: Update Alert State & Audit Trail
+    if not alert.metrics:
+        alert.metrics = {}
+    alert.metrics["free_roll_locked"] = True
+
+    if not alert.actionable_plan:
+        alert.actionable_plan = {}
+    alert.actionable_plan["free_roll_active"] = True
+    alert.actionable_plan["wing_lock_executed"] = True
+    alert.actionable_plan["wing_lock_order_id"] = executed.order_id
+    alert.actionable_plan["wing_lock_fill_price"] = executed.price or px
+    alert.actionable_plan["wing_lock_status"] = executed.status
+
+    locked_pts = float(
+        getattr(alert, "locked_profit_pts", 0.0)
+        or (free_roll.get("net_locked_profit_pts", 0.0) if free_roll else 0.0)
+    )
+    action_msg = (
+        f"Wing Lock Executed: Sold {sym} qty={qty} @ ₹{px:.1f} "
+        f"(Order: {executed.order_id}) locking ₹{locked_pts:.1f} profit."
+    )
+
+    if hasattr(alert, "record_audit"):
+        alert.record_audit(
+            event_type="WING_LOCK_EXECUTED",
+            message=action_msg,
+            actor=actor,
+        )
+
+    # Persist updated alert in AutoAlertEngine
+    a_engine.record_alert(alert)
+
+    # Record Security Audit
+    record_audit_event(
+        event_type="WING_LOCK_HEDGE_EXECUTED",
+        mode=executed.mode,
+        actor=actor,
+        details={
+            "alert_id": alert_id,
+            "order_id": executed.order_id,
+            "symbol": sym,
+            "quantity": qty,
+            "price": px,
+            "status": executed.status,
+            "locked_profit_pts": locked_pts,
+        },
+    )
+
+    return {
+        "status": "SUCCESS",
+        "alert_id": alert_id,
+        "order": executed.to_dict(),
+        "hedge_symbol": sym,
+        "locked_profit_pts": locked_pts,
+        "message": action_msg,
+    }

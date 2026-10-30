@@ -17008,6 +17008,8 @@ class AutoAlertEngine:
                     return a
         return None
 
+    get_alert = get_alert_by_id  # Method alias for unified API parity
+
     def get_audit_trail(
         self,
         alert_id: Optional[str] = None,
