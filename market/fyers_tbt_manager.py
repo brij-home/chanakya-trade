@@ -29,6 +29,29 @@ from engine.ring_buffer import RollingTickBuffer
 
 logger = logging.getLogger("market.fyers_tbt")
 
+# -- SDK availability sentinel: checked ONCE at process start, never repeated.
+# Prevents 80+ repeated 'fyers_apiv3 not installed' P2 incidents per session.
+# RCA: INC-001 2026-10-30 -- 81 repetitions masking real P2s in OPS deck.
+_FYERS_APIV3_AVAILABLE: bool | None = None
+
+
+def _is_fyers_sdk_available() -> bool:
+    """Check fyers_apiv3 SDK installation. Result cached after first call."""
+    global _FYERS_APIV3_AVAILABLE
+    if _FYERS_APIV3_AVAILABLE is None:
+        try:
+            import fyers_apiv3  # noqa: F401
+            _FYERS_APIV3_AVAILABLE = True
+        except ImportError:
+            _FYERS_APIV3_AVAILABLE = False
+            logger.warning(
+                "[TbtManager] fyers_apiv3 SDK not installed -- "
+                "TBT 50-level depth WebSocket PERMANENTLY UNAVAILABLE this session. "
+                "Install with: pip install fyers-apiv3"
+            )
+    return _FYERS_APIV3_AVAILABLE
+
+
 MAX_TBT_SYMBOLS = 15
 RESERVED_ANCHOR_SLOTS = 3  # Slots 0..2: NIFTY, BANKNIFTY, MIDCPNIFTY near-month futures
 MAX_DYNAMIC_SLOTS = 12  # Slots 3..14: 100% elastic demand-driven slots
@@ -592,9 +615,11 @@ class TbtSocketWorker:
             self.ws.background_flag = True
             self.ws.connect()
         except ImportError:
-            logger.warning(f"[TbtWorker-{self.worker_id}] fyers_apiv3 not installed")
             with self._lock:
-                self.status = "DISCONNECTED"
+                self.status = "UNAVAILABLE"
+            # SDK absence logged once per session by _is_fyers_sdk_available().
+            # Suppress per-worker repeats -- INC-001 RCA 2026-10-30.
+            logger.debug(f"[TbtWorker-{self.worker_id}] fyers_apiv3 unavailable (already logged)")
         except Exception as e:
             logger.warning(f"[TbtWorker-{self.worker_id}] Connect exception: {e}")
             with self._lock:
@@ -1252,6 +1277,10 @@ class FyersTbtManager:
         Connect workers in the multi-socket pool with staggered handshakes.
         Staggering handshakes (0s, 5s, 11s) prevents Cloudflare / Fyers 429 Too Many Requests.
         """
+        # Fast-path: use cached SDK check; avoids repeated ImportError overhead.
+        if not _is_fyers_sdk_available():
+            return
+
         auth_token = self._get_auth_token()
         if not auth_token:
             logger.warning("[TbtManager] Cannot connect: missing auth token")

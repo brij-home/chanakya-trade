@@ -282,8 +282,11 @@ class WebSocketManager:
 
         now = time.time()
         silence_sec = now - self._last_packet_at if self._last_packet_at > 0 else 0.0
-        # If market is active, connected is True, subscribed to >0 symbols, but zero packets in 30s:
-        if self._last_packet_at > 0 and silence_sec > 30.0:
+        # Adaptive zombie threshold: 15s during active market (high-subscription risk),
+        # 30s outside market hours (lower tick frequency expected).
+        # RCA: INC-003 2026-10-30 -- 33.7s zombie with 1,166 subscriptions missed ~3 scan cycles.
+        _zombie_threshold = 15.0 if mkt_open else 30.0
+        if self._last_packet_at > 0 and silence_sec > _zombie_threshold:
             logger.warning(
                 f"[WebSocket] 🚨 Zombie WebSocket detected: 0 packets received for {silence_sec:.1f}s "
                 f"during active market session ({sub_count} subscriptions). Triggering proactive reconnect."

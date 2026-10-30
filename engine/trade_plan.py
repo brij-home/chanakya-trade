@@ -503,13 +503,13 @@ def calculate_trade_plan(
         )
         if is_index and tf == "INTRADAY":
             index_min_stop_floor = {
-                "NIFTY": 20.5,
-                "BANKNIFTY": 55.0,
-                "FINNIFTY": 25.0,
-                "MIDCPNIFTY": 16.0,
-                "SENSEX": 75.0,
-                "BANKEX": 75.0,
-            }.get(clean_sym, 20.5)
+                "NIFTY": 50.0,
+                "BANKNIFTY": 110.0,
+                "FINNIFTY": 45.0,
+                "MIDCPNIFTY": 28.0,
+                "SENSEX": 160.0,
+                "BANKEX": 150.0,
+            }.get(clean_sym, 45.0)
             min_stop_distance = max(min_stop_distance, index_min_stop_floor)
 
         if candidates:
@@ -580,13 +580,13 @@ def calculate_trade_plan(
         )
         if is_index and tf == "INTRADAY":
             index_min_stop_floor = {
-                "NIFTY": 20.5,
-                "BANKNIFTY": 55.0,
-                "FINNIFTY": 25.0,
-                "MIDCPNIFTY": 16.0,
-                "SENSEX": 75.0,
-                "BANKEX": 75.0,
-            }.get(clean_sym, 20.5)
+                "NIFTY": 50.0,
+                "BANKNIFTY": 110.0,
+                "FINNIFTY": 45.0,
+                "MIDCPNIFTY": 28.0,
+                "SENSEX": 160.0,
+                "BANKEX": 150.0,
+            }.get(clean_sym, 45.0)
             min_stop_distance = max(min_stop_distance, index_min_stop_floor)
 
         if candidates:
@@ -1374,13 +1374,13 @@ def calculate_option_execution_plan(
         # Prevents sub-ATR noise traps on volatile index options
         if is_index_contract and option_ltp >= 80.0:
             if "SENSEX" in clean_contract or "BANKEX" in clean_contract:
-                idx_opt_floor = 45.0
+                idx_opt_floor = max(80.0, round(option_ltp * 0.18, 1))
             elif "BANKNIFTY" in clean_contract:
-                idx_opt_floor = 35.0
+                idx_opt_floor = max(35.0, round(option_ltp * 0.16, 1))
             elif "FINNIFTY" in clean_contract or "MIDCPNIFTY" in clean_contract:
-                idx_opt_floor = 20.0
+                idx_opt_floor = max(20.0, round(option_ltp * 0.15, 1))
             else:
-                idx_opt_floor = 15.0
+                idx_opt_floor = max(15.0, round(option_ltp * 0.15, 1))
 
             effective_sl_floor = max(
                 round(option_ltp - idx_opt_floor, 2), round(option_ltp * 0.72, 2)

@@ -1774,8 +1774,31 @@ def detect_index_put_setup(
             and not is_5m_bull_trend
             and (spot <= (effective_vwap * 1.002) if effective_vwap > 0 else True)
         ):
+            # Check for Rebound & Demand Absorption off Day Low:
+            # If price reached Day Low recently and is now actively rising away from Day Low with green candles,
+            # this is an absorption bounce/mean-reversion, NOT a breakdown setup!
+            is_rebounding_from_low = False
+            if active_ohlcv is not None and len(active_ohlcv) >= 2:
+                try:
+                    col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                    col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                    col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                    recent_low = float(active_ohlcv[col_l].iloc[-6:].min())
+                    latest_c = float(active_ohlcv[col_c].iloc[-1])
+                    latest_o = float(active_ohlcv[col_o].iloc[-1])
+                    if abs(recent_low - day_low) / max(1.0, day_low) <= 0.0010:
+                        if (latest_c > recent_low * 1.0008) and (latest_c >= latest_o):
+                            is_rebounding_from_low = True
+                except Exception as _e_reb:
+                    logger.debug(f"[IndexPutSetup] Day low rebound check failed: {_e_reb}")
+
+            if is_rebounding_from_low:
+                logger.info(
+                    f"[IndexPutSetup] Suppressed DAY_LOW_PROXIMITY on {clean_sym}: "
+                    f"Price actively rebounding from Day Low ₹{day_low:,.1f} (Demand Absorption Bounce)."
+                )
             # Day Low Proximity Surveillance (STAGE_PRIMED)
-            if (
+            elif (
                 "DAY_LOW_PROXIMITY" not in signals
                 and "DAY_LOW_BREAKDOWN" not in signals
                 and "CAMARILLA_L4_PROXIMITY" not in signals
@@ -1905,9 +1928,11 @@ def detect_index_put_setup(
     # that was previously missed because is_strong_bull_trend permanently blocked the put scanner.
     if day_high and day_high > 0 and not is_opening_buffer and "DISTRIBUTION_TOP" not in signals:
         spot_at_dh_pct = (day_high - spot) / max(1.0, spot) * 100.0  # distance below day high
+        min_dist_overextended_pct = 0.22 if clean_sym == "NIFTY" else 0.25
         vwap_overextended = bool(
-            effective_vwap > 0 and spot > effective_vwap * 1.010
-        )  # ≥ 1.0% above VWAP
+            effective_vwap > 0
+            and ((spot - effective_vwap) / effective_vwap * 100.0) >= min_dist_overextended_pct
+        )  # ≥ 0.22%-0.25% above VWAP (realistic index session extreme)
 
         has_distribution_bar = False
         _dist_bar_tags: dict[str, Any] = {}
@@ -2126,7 +2151,6 @@ def detect_index_put_setup(
                 "DAY_LOW_BREAKDOWN",
                 "CAMARILLA_L4_BREAKDOWN",
                 "DOUBLE_TOP_BREAKDOWN",
-                "VWAP_BREAKDOWN_PE",
             }
             has_qualifying_setup = bool(
                 is_institutional_thrust
@@ -2237,17 +2261,48 @@ def detect_index_put_setup(
         confidence += 5
     elif prem_vel >= 10.0:
         confidence += 3
-    # Narrow CPR Breakdown Confluence Boost
-    if is_narrow_cpr and (
-        "DAY_LOW_BREAKDOWN" in signals
-        or "DAY_LOW_PROXIMITY" in signals
-        or "CAMARILLA_L4_BREAKDOWN" in signals
-        or "CAMARILLA_L4_PROXIMITY" in signals
-        or is_institutional_thrust
+    # Narrow CPR Breakdown Confluence Boost:
+    # Only award when spot is below or near CPR Top (not trading 1000 pts above value).
+    cpr_allows_bearish_expansion = bool(cpr_top <= 0 or spot <= (cpr_top * 1.008))
+    if (
+        is_narrow_cpr
+        and cpr_allows_bearish_expansion
+        and (
+            "DAY_LOW_BREAKDOWN" in signals
+            or "DAY_LOW_PROXIMITY" in signals
+            or "CAMARILLA_L4_BREAKDOWN" in signals
+            or "CAMARILLA_L4_PROXIMITY" in signals
+            or is_institutional_thrust
+        )
     ):
         confidence += 6
 
-    confidence = min(98, confidence)
+    confidence = min(92, confidence)
+
+    # Chop / Balanced Range Confidence Dampener:
+    # In choppy non-trending regimes, breakout continuation setups have negative edge; damp confidence <= 78%.
+    # EXEMPTION: Mean-reversion & structural boundary fades thrive at range edges; do not penalize them for low ADX.
+    is_range_boundary_fade = any(
+        s in signals
+        for s in (
+            "DISTRIBUTION_TOP",
+            "ACCUMULATION_BOTTOM",
+            "LONG_UNWINDING_FLUSH",
+            "SHORT_SQUEEZE_UNWIND",
+            "SUPPLY_ZONE_SWEEP",
+            "DEMAND_ZONE_SWEEP",
+            "INTRADAY_CAPITULATION_REVERSAL",
+            "FAILED_DAY_HIGH_BREAKOUT",
+            "FAILED_DAY_LOW_BREAKDOWN",
+        )
+    )
+    if eagle_regime is not None and not is_range_boundary_fade:
+        if (
+            eagle_regime.chop_index >= 50.0
+            or eagle_regime.overall_environment in ("WHIPSAW_CHOP_TRAP", "BALANCED_RANGE")
+            or eagle_regime.adx_14 < 22.0
+        ):
+            confidence = min(78, max(50, confidence - 10))
 
     # Single-signal unconfirmed guard: if only 1 signal and without explosive momentum, cap at 72%
     # (Exempt PRIMED proximity surveillance setups which require >= 85 confidence for advance heads-up dispatch)
@@ -2344,7 +2399,9 @@ def detect_index_put_setup(
             effective_min_risk = (
                 min(opt_ltp * 0.35, min_intraday_opt_risk)
                 if opt_ltp < 80.0
-                else min_intraday_opt_risk
+                else min(
+                    max_intraday_opt_risk, max(min_intraday_opt_risk, round(opt_ltp * 0.10, 1))
+                )
             )
             if calc_risk < effective_min_risk:
                 calc_risk = effective_min_risk

@@ -57,7 +57,20 @@ def detect_pairs_arbitrage(
             return None
 
         try:
-            analysis = analyze_pair(matched_pair[0], matched_pair[1])
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                _fut = _pool.submit(analyze_pair, matched_pair[0], matched_pair[1])
+                try:
+                    # Hard 8s per-detector cap -- half of 18s scan cycle guard.
+                    # RCA: INC-005 2026-10-30 -- pairs_arbitrage stalled scan cycle at open.
+                    analysis = _fut.result(timeout=8.0)
+                except concurrent.futures.TimeoutError:
+                    logger.warning(
+                        "[pairs_arbitrage] analyze_pair(%s, %s) exceeded 8s timeout "
+                        "-- skipping this cycle",
+                        matched_pair[0], matched_pair[1],
+                    )
+                    return None
         except Exception as exc:
             logger.debug("Failed analyzing pair %s: %s", matched_pair, exc)
             return None
@@ -131,6 +144,7 @@ def detect_pairs_arbitrage(
         headline=headline,
         summary=summary,
         ltp=ctx.ltp,
+        underlying_spot=ctx.ltp,
         trigger_level=ctx.ltp,
         target_level=round(ctx.ltp * (1.025 if direction == "BULLISH" else 0.975), 2),
         stop_loss=round(ctx.ltp * (0.985 if direction == "BULLISH" else 1.015), 2),

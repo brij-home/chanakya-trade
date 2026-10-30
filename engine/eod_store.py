@@ -387,7 +387,7 @@ def get_cached_ohlcv(symbol: str, days: int = 504) -> Optional[pd.DataFrame]:
     data = [dict(r) for r in rows]
     df = pd.DataFrame(data)
     df["date"] = pd.to_datetime(df["date"])
-    df.set_index("date", inplace=True)
+    df = df.set_index("date")
     df.index = df.index.tz_localize(None)
 
     for col in ["open", "high", "low", "close"]:
@@ -484,7 +484,7 @@ def get_cached_ohlcv_batch(
             if len(bar_list) >= 15:
                 df = pd.DataFrame(bar_list)
                 df["date"] = pd.to_datetime(df["date"])
-                df.set_index("date", inplace=True)
+                df = df.set_index("date")
                 df.index = df.index.tz_localize(None)
                 newly_loaded[sym] = df
                 orig_key = clean_map.get(sym, sym)
@@ -589,8 +589,8 @@ def validate_and_sanitize_ohlcv_dataframe(df: pd.DataFrame, symbol: str = "") ->
         clean_df["turnover"] = pd.to_numeric(clean_df["turnover"], errors="coerce")
 
     # Drop NaNs / Infs
-    clean_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    clean_df.dropna(subset=req_cols, inplace=True)
+    clean_df = clean_df.replace([np.inf, -np.inf], np.nan)
+    clean_df = clean_df.dropna(subset=req_cols)
 
     if clean_df.empty:
         return pd.DataFrame(columns=req_cols)
@@ -624,7 +624,7 @@ def validate_and_sanitize_ohlcv_dataframe(df: pd.DataFrame, symbol: str = "") ->
         clean_df.index = clean_df.index.tz_localize(None)
 
     clean_df = clean_df[~clean_df.index.duplicated(keep="last")]
-    clean_df.sort_index(inplace=True)
+    clean_df = clean_df.sort_index()
 
     return clean_df
 
@@ -1644,8 +1644,14 @@ def _download_chunk_yfinance(
 
     try:
         from analysis.universe import CORPORATE_ALIASES
-    except Exception as e:
-        logger.warning(f"[eod_store] Could not import CORPORATE_ALIASES: {e}")
+          except Exception as e:
+          logger.error(
+              f"[eod_store] CRITICAL: Cannot import CORPORATE_ALIASES from "
+              f"analysis.universe: {e}. "
+              "Corporate merger/demerger alias resolution DISABLED for this batch. "
+              "Fix the export in analysis/universe.py.",
+              exc_info=True,
+          )
         CORPORATE_ALIASES = {}
 
     ticker_to_syms: dict[str, list[str]] = {}
