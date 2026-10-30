@@ -2755,13 +2755,7 @@ def detect_index_put_setup(
         regime_note = "ADAPTIVE SPREAD"
 
     # DTE, 0DTE Phase and Options IV Skew evaluation
-    from engine.options_hedging import get_0dte_intraday_phase
-    from market.options import compute_options_iv_skew
-
-    zero_dte_phase = get_0dte_intraday_phase(clean_sym, now_dt)
-    iv_skew = compute_options_iv_skew(chain, spot, clean_sym)
-
-    dte = 0 if zero_dte_phase.get("is_0dte") else 7
+    dte = 7
     try:
         from engine.alert_expiry import get_expiry_metadata
 
@@ -2772,6 +2766,18 @@ def detect_index_put_setup(
         logger.debug(
             f"[engine.detectors.index_put_setup] Non-fatal exception suppressed: {e_suppressed}"
         )
+
+    from engine.options_hedging import get_0dte_intraday_phase
+    from market.options import compute_options_iv_skew
+
+    zero_dte_phase = get_0dte_intraday_phase(
+        clean_sym,
+        now_dt=now_dt,
+        contract_symbol=contract_sym,
+        expiry_date=exp_date,
+        dte=dte,
+    )
+    iv_skew = compute_options_iv_skew(chain, spot, clean_sym)
 
     iv_val = max(0.10, (vix_val / 100.0) if vix_val else 0.14)
     from engine.options_backtest import bs_delta

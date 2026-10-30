@@ -85,29 +85,38 @@ def test_free_roll_conversion_target_1_achieved():
 
 
 def test_0dte_phase_weekly_schedule():
-    """Verify correct 0DTE classification across Indian index weekly expiry days."""
-    # Monday (2026-10-26): MIDCPNIFTY is 0DTE, NIFTY is not
+    """Verify correct 0DTE classification under SEBI's single-benchmark weekly regime."""
+    # Under SEBI index derivative regulations (effective Nov 2024):
+    # Mon (MIDCPNIFTY), Tue (FINNIFTY), Wed (BANKNIFTY) weekly expiries are DISCONTINUED.
+    # Only NSE NIFTY (Thursday) and BSE SENSEX (Friday) offer weekly options.
     mon_dt = datetime(2026, 10, 26, 10, 30, tzinfo=IST)
     res_midcp = get_0dte_intraday_phase("MIDCPNIFTY", now_dt=mon_dt)
     res_nifty_mon = get_0dte_intraday_phase("NIFTY", now_dt=mon_dt)
-    assert res_midcp["is_0dte"] is True
+    assert res_midcp["is_0dte"] is False  # Discontinued! No false 0DTE on Monday
     assert res_nifty_mon["is_0dte"] is False
 
-    # Tuesday (2026-10-27): FINNIFTY is 0DTE
+    # Tuesday (2026-10-27): FINNIFTY weekly discontinued -> is_0dte is False
     tue_dt = datetime(2026, 10, 27, 10, 30, tzinfo=IST)
-    assert get_0dte_intraday_phase("FINNIFTY", now_dt=tue_dt)["is_0dte"] is True
+    assert get_0dte_intraday_phase("FINNIFTY", now_dt=tue_dt)["is_0dte"] is False
 
-    # Wednesday (2026-10-28): BANKNIFTY is 0DTE
+    # Wednesday (2026-10-28): BANKNIFTY weekly discontinued -> is_0dte is False
     wed_dt = datetime(2026, 10, 28, 10, 30, tzinfo=IST)
-    assert get_0dte_intraday_phase("BANKNIFTY", now_dt=wed_dt)["is_0dte"] is True
+    assert get_0dte_intraday_phase("BANKNIFTY", now_dt=wed_dt)["is_0dte"] is False
 
-    # Thursday (2026-10-29): NIFTY is 0DTE
+    # Thursday (2026-10-29): NSE NIFTY 50 authorized weekly expiry -> is_0dte is True
     thu_dt = datetime(2026, 10, 29, 10, 30, tzinfo=IST)
     assert get_0dte_intraday_phase("NIFTY", now_dt=thu_dt)["is_0dte"] is True
 
-    # Friday (2026-10-30): SENSEX is 0DTE
+    # Friday (2026-10-30): BSE SENSEX authorized weekly expiry -> is_0dte is True
     fri_dt = datetime(2026, 10, 30, 10, 30, tzinfo=IST)
     assert get_0dte_intraday_phase("SENSEX", now_dt=fri_dt)["is_0dte"] is True
+
+    # Monthly Expiry: BANKNIFTY on last Thursday of the month (2026-10-29) -> is_0dte is True!
+    assert get_0dte_intraday_phase("BANKNIFTY", now_dt=thu_dt)["is_0dte"] is True
+
+    # Contract-level DTE: Any contract with dte=0 is explicitly 0DTE regardless of day
+    assert get_0dte_intraday_phase("RELIANCE", dte=0, now_dt=mon_dt)["is_0dte"] is True
+    assert get_0dte_intraday_phase("RELIANCE", dte=10, now_dt=mon_dt)["is_0dte"] is False
 
 
 def test_0dte_intraday_clock_phases():

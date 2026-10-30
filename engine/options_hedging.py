@@ -104,15 +104,27 @@ def get_optimal_expiry_recommendation(
 def get_0dte_intraday_phase(
     symbol: str,
     now_dt: Optional[datetime] = None,
+    contract_symbol: Optional[str] = None,
+    expiry_date: Optional[str] = None,
+    dte: Optional[int] = None,
 ) -> dict[str, Any]:
     """
-    Evaluates the 0DTE Intraday Phase for Indian Index / Stock Options:
-    Calendar Expiry Map (NSE/BSE):
-      - Monday (weekday 0): MIDCPNIFTY
-      - Tuesday (weekday 1): FINNIFTY
-      - Wednesday (weekday 2): BANKNIFTY weekly
-      - Thursday (weekday 3): NIFTY / BANKNIFTY monthly
-      - Friday (weekday 4): SENSEX / BANKEX
+    Evaluates the 0DTE Intraday Phase for Indian Index / Stock Options.
+
+    SEBI Index Derivatives Regulatory Framework (Effective Nov 2024):
+      - Exchanges provide derivative contracts for ONLY ONE benchmark index with weekly expiry:
+        • NSE: NIFTY 50 (Weekly Expiry on Thursday). Weekly contracts on BANKNIFTY, FINNIFTY, MIDCPNIFTY are DISCONTINUED.
+        • BSE: SENSEX (Weekly Expiry on Friday). Weekly contracts on BANKEX are DISCONTINUED.
+      - All other indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX) and single-stock options trade strictly MONTHLY expiries (last Thursday of the month).
+      - Monday, Tuesday, and Wednesday have ZERO index weekly expiries.
+
+    Deterministic 0DTE Verification (Rules 10, 11, 20, 22):
+      1. If `dte` is provided, `is_0dte = (dte == 0)`.
+      2. If `expiry_date` or `contract_symbol` is provided, compare contract expiration date against current session date.
+      3. If only `symbol` is provided:
+         - NIFTY is 0DTE on Thursdays (weekday == 3).
+         - SENSEX is 0DTE on Fridays (weekday == 4).
+         - BANKNIFTY, FINNIFTY, MIDCPNIFTY, and Stock F&O are 0DTE ONLY on their monthly expiry date (last Thursday of the month), NEVER every Mon/Tue/Wed.
 
     Intraday Clock Phases (IST):
       1. MORNING_EXPANSION (09:15 - 11:00):
@@ -131,6 +143,7 @@ def get_0dte_intraday_phase(
          Outside 09:15-15:30 IST.
     """
     now = now_dt or datetime.now(IST)
+    now_date = now.date()
     weekday = now.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
     now_time = now.time()
 
@@ -145,15 +158,39 @@ def get_0dte_intraday_phase(
         .upper()
     )
 
-    expiry_map = {
-        0: {"MIDCPNIFTY"},
-        1: {"FINNIFTY"},
-        2: {"BANKNIFTY"},
-        3: {"NIFTY", "BANKNIFTY"},
-        4: {"SENSEX", "BANKEX"},
-    }
+    # 1. Authoritative contract-level DTE check
+    is_0dte = False
+    if dte is not None:
+        is_0dte = bool(dte == 0)
+    elif expiry_date or contract_symbol:
+        try:
+            from engine.alert_expiry import is_0dte_expiry, extract_contract_expiry_date
 
-    is_0dte = clean_sym in expiry_map.get(weekday, set())
+            if expiry_date:
+                is_0dte = bool(is_0dte_expiry(expiry_date, ref_dt=now))
+            if not is_0dte and contract_symbol:
+                exp_d = extract_contract_expiry_date(contract_symbol)
+                if exp_d:
+                    is_0dte = bool(exp_d == now_date)
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.options_hedging] 0DTE contract resolution exception: {e_suppressed}"
+            )
+    else:
+        # 2. General ticker fallback under SEBI single-benchmark weekly regime:
+        if clean_sym in ("NIFTY", "NIFTY50") and weekday == 3:
+            is_0dte = True
+        elif clean_sym in ("SENSEX", "BSX") and weekday == 4:
+            is_0dte = True
+        else:
+            # BANKNIFTY, FINNIFTY, MIDCPNIFTY, and Stock F&O are 0DTE ONLY on their monthly expiry day
+            try:
+                from engine.alert_expiry import get_last_thursday_of_month
+
+                last_thu = get_last_thursday_of_month(now_date.year, now_date.month)
+                is_0dte = bool(now_date == last_thu and weekday == 3)
+            except Exception:
+                is_0dte = False
 
     if not is_0dte:
         return {
