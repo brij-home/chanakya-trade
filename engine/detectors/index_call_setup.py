@@ -3251,6 +3251,50 @@ def detect_index_call_setup(
         conf_rule_str = "1_MIN_CANDLE_CLOSE_MANDATORY"
         exec_notes_str = f"Enter on confirmation above ₹{opt_ltp:,.1f}."
 
+    # ── Dual-Blueprint Execution: Naked Convexity vs Dynamic Adaptive Spread ─
+    regime_verdict = (
+        "MARKET_FAVORS_NAKED"
+        if (is_explosive_momentum or vel_score >= 70)
+        and not (is_chop_regime or is_0dte_midday_trap or is_high_iv_risk)
+        else "HEDGE_RECOMMENDED"
+    )
+
+    route_a_naked = {
+        "route": "ROUTE_A_NAKED",
+        "title": "Route A: Naked High Convexity",
+        "contract": contract_sym,
+        "strike": strike,
+        "option_type": "CE",
+        "recommended_entry": opt_ltp,
+        "entry_range": entry_range_str,
+        "stop_loss": sl_premium,
+        "target_1": t1_premium,
+        "target_2": t2_premium,
+        "target_moonshot": t3_premium,
+        "risk_reward": rr_str,
+        "max_loss_rupees": max_loss_rupees,
+        "convexity": "100% Uncapped Gamma Acceleration",
+        "is_favored": bool(regime_verdict == "MARKET_FAVORS_NAKED"),
+        "execution_guidance": "High Convexity: Fast scalpers & trend riders execute Naked with strict 1R stop loss to capture 100% gamma acceleration.",
+    }
+
+    route_b_spread = {
+        "route": "ROUTE_B_SPREAD",
+        "title": "Route B: Dynamic Adaptive Spread",
+        "strategy": (hedge_plan or {}).get("strategy", "BULL_CALL_SPREAD"),
+        "description": (hedge_plan or {}).get("description", ""),
+        "buy_leg": (hedge_plan or {}).get("buy_leg", ""),
+        "sell_leg": (hedge_plan or {}).get("sell_leg", ""),
+        "strike_width": (hedge_plan or {}).get("strike_width", actual_width),
+        "adaptive_regime": (hedge_plan or {}).get("adaptive_regime", regime_note),
+        "net_debit_per_share": (hedge_plan or {}).get("net_debit_per_share", 0.0),
+        "max_loss_rupees": (hedge_plan or {}).get("max_loss", 0.0),
+        "max_profit_rupees": (hedge_plan or {}).get("max_profit", 0.0),
+        "risk_reward": (hedge_plan or {}).get("risk_reward", ""),
+        "is_favored": bool(regime_verdict != "MARKET_FAVORS_NAKED"),
+        "execution_guidance": "Defined Risk Defense: Execute Hedged Spread to eliminate theta bleed and cap downside risk.",
+    }
+
     alert = AutoAlert(
         alert_id=generate_alert_id(
             clean_sym,
@@ -3390,6 +3434,9 @@ def detect_index_call_setup(
             "eagle_regime": eagle_regime.to_dict() if eagle_regime else None,
             "tiger_mandate": tiger_mandate.to_dict() if tiger_mandate else None,
             "sniper_plan": sniper_plan.to_dict() if sniper_plan else None,
+            "regime_verdict": regime_verdict,
+            "route_a_naked": route_a_naked,
+            "route_b_spread": route_b_spread,
         },
         actionable_plan={
             "action": act_verb,
@@ -3497,6 +3544,9 @@ def detect_index_call_setup(
                 "t2_premium": t2_premium,
                 "lot_size": lot_sz,
             },
+            "regime_verdict": regime_verdict,
+            "route_a_naked": route_a_naked,
+            "route_b_spread": route_b_spread,
         },
     )
     alert.structural_spot_sl = underlying_spot_sl

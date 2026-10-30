@@ -42,7 +42,7 @@ from typing import Any, Optional
 import numpy as np
 
 logger = logging.getLogger("engine.auto_alert_engine")
-from config.constants import IST
+from config.constants import IST, SESSION_FOCUS_MODE
 
 
 from engine.storage.alert_repository import (
@@ -15446,6 +15446,13 @@ class AutoAlertEngine:
         if self._should_run_detector("precursor", 120.0):
             tasks.append(("precursor", lambda: self.scan_precursor_radars()))
 
+        # Operational Focus Gate: Under FNO_PRIORITY, bypass cash-only distracting detectors
+        # during active market hours to preserve broker API rate limits & eliminate UI clutter:
+        session_focus = os.environ.get("SESSION_FOCUS_MODE", SESSION_FOCUS_MODE).upper()
+        if session_focus == "FNO_PRIORITY" and not is_test:
+            cash_distracting_detectors = {"circuits", "incubation_triggers", "pairs_arbitrage"}
+            tasks = [t for t in tasks if t[0] not in cash_distracting_detectors]
+
         now_ist = datetime.now(IST)
         curr_t = now_ist.time()
 
@@ -16089,6 +16096,22 @@ class AutoAlertEngine:
 
         # Default AUTO: respect strict operational sessions
         session = get_current_ist_session()
+        session_focus = os.environ.get("SESSION_FOCUS_MODE", SESSION_FOCUS_MODE).upper()
+        is_test_runner = (
+            (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+
+        # Operational Focus Gate: Under FNO_PRIORITY during active NSE equity/NFO hours (09:15 - 15:30 IST),
+        # prioritize 100% of pipeline compute & broker API bandwidth on domestic Equity/NFO F&O.
+        if (
+            session_focus == "FNO_PRIORITY"
+            and session["equity_nfo"]
+            and not is_test_runner
+            and seg == "AUTO"
+        ):
+            return self.scan_equity_nfo_now()
         if session["equity_nfo"]:
             results.extend(self.scan_equity_nfo_now())
         if session["currency"]:

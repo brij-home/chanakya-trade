@@ -268,6 +268,7 @@ def build_defined_risk_hedge_plan(
     spread_width: Optional[float] = None,
     asymmetric_r_r: bool = False,
     expiry_date: Optional[str] = None,
+    target_level: Optional[float] = None,
 ) -> Optional[dict[str, Any]]:
     """
     Constructs an institutional defined-risk hedge plan for any option signal.
@@ -392,6 +393,20 @@ def build_defined_risk_hedge_plan(
             adaptive_regime_desc = f"TREND CONTINUATION ({int(width)} pt width)"
 
     is_bullish = str(direction).upper() in ("BULLISH", "LONG", "BUY") or opt_type == "CE"
+
+    # 3.5 Dynamic Runway Principle: Level-Anchored Short Leg Calibration
+    # If a verified target resistance/support level is provided, dynamically anchor
+    # the short strike to sit at or beyond that level to maximize the long leg's runway.
+    if target_level is not None and float(target_level) > 0:
+        ref_price = strike if strike > 0 else spot
+        target_dist = abs(float(target_level) - ref_price)
+        if target_dist >= step:
+            level_anchored_width = max(step, round(target_dist / step) * step)
+            if level_anchored_width > width:
+                width = level_anchored_width
+                adaptive_regime_desc = (
+                    f"LEVEL-ANCHORED RUNWAY ({int(width)} pt width to ₹{float(target_level):,.1f})"
+                )
 
     # Evaluate Macro Market Breadth alignment for spread selection
     mb = None
@@ -730,6 +745,18 @@ def build_defined_risk_hedge_plan(
         "ratio_spread_1x2": ratio_plan,
         "expiry_recommendation": expiry_rec,
         "expiry_date": expiry_date,
+        "target_level": target_level,
+        "regime_verdict": (
+            "MARKET_FAVORS_NAKED"
+            if (is_explosive and not is_high_iv and not is_chop_regime and not is_counter_trend)
+            else (
+                "HEDGE_RECOMMENDED"
+                if (is_chop_regime or is_high_iv or is_counter_trend)
+                else "DYNAMIC_SPREAD_OPTIMAL"
+            )
+        ),
+        "route_a_guidance": "High convexity: Buy Naked Option with 1R strict SL to capture 100% uncapped gamma acceleration.",
+        "route_b_guidance": f"Defined-Risk spread ({adaptive_regime_desc}): Zero theta bleed, capped downside loss of ₹{max_loss:,.0f}.",
     }
 
 

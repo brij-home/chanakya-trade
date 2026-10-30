@@ -6340,6 +6340,20 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             sl = actionable_plan.get("stop_loss", f"₹{getattr(alert, 'stop_loss', 0)}")
             plan_str = f"• <b>Action:</b> {action} @ <code>{entry}</code>\n• <b>T1:</b> <code>{target}</code> | 🛑 <b>SL:</b> <code>{sl}</code>"
 
+    # Dual-Blueprint Regime Verdict Tag
+    rv = actionable_plan.get("regime_verdict") or (
+        alert.metrics.get("regime_verdict")
+        if isinstance(getattr(alert, "metrics", None), dict)
+        else None
+    )
+    if rv:
+        verdict_line = (
+            "⚡ <b>EXECUTION REGIME:</b> <code>MARKET FAVORS NAKED</code> <i>(High Gamma Convexity)</i>\n"
+            if rv == "MARKET_FAVORS_NAKED"
+            else "🛡️ <b>EXECUTION REGIME:</b> <code>DYNAMIC SPREAD RECOMMENDED</code> <i>(Defined Risk / Zero Theta Bleed)</i>\n"
+        )
+        plan_str = (verdict_line + plan_str) if plan_str else verdict_line.strip()
+
     hedge_plan = actionable_plan.get("hedge_plan") or (
         alert.metrics.get("hedge_plan")
         if isinstance(getattr(alert, "metrics", None), dict)

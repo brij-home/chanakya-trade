@@ -851,3 +851,65 @@ def test_evaluate_spread_pre_breached_short_strike_prevents_false_trigger():
     assert res_clean.triggered is True
     assert res_clean.milestone_type == "SPREAD_SHORT_STRIKE_TOUCH"
     assert res_clean.pnl_pts > 0
+
+
+def test_dynamic_runway_level_anchored_width():
+    """Verify short hedge strike dynamically expands to give long leg full runway up to target_level."""
+    from engine.options_hedging import build_defined_risk_hedge_plan
+
+    # NIFTY spot 24,500, Strike 24,500 CE, Normal width is 150 pts
+    # Target level is 24,750 (250 pts away)
+    plan = build_defined_risk_hedge_plan(
+        symbol="NIFTY",
+        direction="BULLISH",
+        spot=24500.0,
+        strike=24500.0,
+        opt_type="CE",
+        opt_ltp=120.0,
+        vel_score=60.0,
+        target_level=24750.0,
+    )
+    assert plan is not None
+    assert plan["strike_width"] >= 250.0, (
+        f"Expected width >= 250.0 to accommodate target, got {plan['strike_width']}"
+    )
+    assert "LEVEL-ANCHORED RUNWAY" in plan["adaptive_regime"]
+    assert plan["sell_strike"] >= 24750.0
+
+
+def test_regime_verdict_naked_vs_hedge():
+    """Verify regime_verdict distinguishes MARKET_FAVORS_NAKED from HEDGE_RECOMMENDED."""
+    from engine.options_hedging import build_defined_risk_hedge_plan
+    from datetime import datetime
+
+    # High velocity (vel_score=85), low VIX (13.5), morning hour (10:00 AM) -> MARKET_FAVORS_NAKED
+    dt_morning = datetime(2026, 10, 30, 10, 0)
+    plan_naked = build_defined_risk_hedge_plan(
+        symbol="NIFTY",
+        direction="BULLISH",
+        spot=24500.0,
+        strike=24500.0,
+        opt_type="CE",
+        opt_ltp=120.0,
+        vix=13.5,
+        vel_score=85.0,
+        now_dt=dt_morning,
+    )
+    assert plan_naked is not None
+    assert plan_naked["regime_verdict"] == "MARKET_FAVORS_NAKED"
+
+    # Midday chop (12:30 PM), lower velocity (50.0), high VIX (18.0) -> HEDGE_RECOMMENDED
+    dt_midday = datetime(2026, 10, 30, 12, 30)
+    plan_hedge = build_defined_risk_hedge_plan(
+        symbol="NIFTY",
+        direction="BULLISH",
+        spot=24500.0,
+        strike=24500.0,
+        opt_type="CE",
+        opt_ltp=120.0,
+        vix=18.0,
+        vel_score=50.0,
+        now_dt=dt_midday,
+    )
+    assert plan_hedge is not None
+    assert plan_hedge["regime_verdict"] == "HEDGE_RECOMMENDED"
