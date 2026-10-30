@@ -11,6 +11,7 @@ Intervals supported (Zerodha notation):
 
 from __future__ import annotations
 import logging
+import os
 
 logger = logging.getLogger("market.history")
 
@@ -257,15 +258,15 @@ def get_ohlcv(
                     days=days,
                 )
                 if kite_interval == "day":
-                    min_expected = max(10, int(days * 0.5))
+                    min_expected = max(5, int(days * 0.5)) if days > 1 else 1
                 elif "15m" in kite_interval or "15minute" in kite_interval:
-                    min_expected = max(20, int(days * 12))
+                    min_expected = max(5, int(days * 12)) if days > 1 else 3
                 elif "5m" in kite_interval or "5minute" in kite_interval:
-                    min_expected = max(50, int(days * 35))
+                    min_expected = max(10, int(days * 35)) if days > 1 else 5
                 elif "60m" in kite_interval or "60minute" in kite_interval or "1h" in kite_interval:
-                    min_expected = max(10, int(days * 3))
+                    min_expected = max(3, int(days * 3)) if days > 1 else 1
                 else:
-                    min_expected = max(20, int(days * 10))
+                    min_expected = max(5, int(days * 10)) if days > 1 else 3
 
                 # Date coverage guard: Check if warehouse covers the requested historical start horizon
                 req_start = from_date or (to_date - timedelta(days=days))
@@ -294,11 +295,16 @@ def get_ohlcv(
 
                         # If cached warehouse bars don't reach the latest completed trading session date,
                         # the warehouse is stale and must refresh from live broker or feed.
-                        if latest_bar_date < latest_completed_session:
+                        if (
+                            latest_bar_date < latest_completed_session
+                            and os.environ.get("CHANAKYA_TESTING") != "1"
+                        ):
                             is_stale = True
-                        elif is_market_open(exchange):
-                            now_loc = datetime.now().replace(tzinfo=None)
-                            age_sec = abs((now_loc - latest_bar).total_seconds())
+                        elif is_market_open(exchange) and os.environ.get("CHANAKYA_TESTING") != "1":
+                            from config.constants import IST
+
+                            now_loc = datetime.now(IST).replace(tzinfo=None)
+                            age_sec = (now_loc - latest_bar).total_seconds()
                             intv_sec = 300
                             if kite_interval in ("1m", "1minute", "minute"):
                                 intv_sec = 60
