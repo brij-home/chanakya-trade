@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
-from config.constants import IST, MIN_SYMPATHY_FOLLOWER_RVOL
+from config.constants import IST
 from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 
@@ -77,7 +77,17 @@ class ThematicPeerSympathyEngine:
         self._symbol_to_sector: dict[str, str] = {}
         self._sector_symbols: dict[str, list[str]] = {}
         self._last_peer_alert: dict[str, float] = {}  # Symbol -> timestamp
+        self._session_sector_count: dict[str, int] = {}  # f"{session_date}:{sec_id}" -> count
+        self._session_total_count: dict[str, int] = {}  # session_date -> count
         self._init_taxonomy()
+
+    def clear_sympathy_session_state(self) -> None:
+        """Clear sympathy session state for hermetic test isolation."""
+        with self._lock:
+            self._session_sector_count.clear()
+            self._session_total_count.clear()
+            self._active_sectors.clear()
+            self._last_peer_alert.clear()
 
     def _init_taxonomy(self) -> None:
         """Build bidirectional symbol <-> sector mappings from analysis.universe."""
@@ -180,8 +190,18 @@ class ThematicPeerSympathyEngine:
 
         found: list[AutoAlert] = []
 
+        session_date = now_dt.strftime("%Y-%m-%d")
         for act in active_activations:
             sec_id = act.sector_id
+            sec_key = f"{session_date}:{sec_id}"
+            with self._lock:
+                sec_count = self._session_sector_count.get(sec_key, 0)
+                total_count = self._session_total_count.get(session_date, 0)
+            if sec_count >= 2:
+                continue  # Max 2 sympathy alerts per sector per session (Invariant 26)
+            if total_count >= 6:
+                break  # Max 6 sympathy alerts total across all sectors per session
+
             peers = self._sector_symbols.get(sec_id, [])
             leader = act.leader_symbol
             is_bull = act.direction == "BULLISH"
@@ -221,7 +241,23 @@ class ThematicPeerSympathyEngine:
                 avg_vol = _extract_float(
                     q, "average_volume", "avg_vol", "avg_volume", "volume_ma20"
                 )
-                dyn_rvol = round(vol / max(1.0, avg_vol), 2) if (vol > 0 and avg_vol > 0) else 1.0
+                if avg_vol <= 0:
+                    try:
+                        from engine.detectors.intraday_spark import get_cached_avg_volume_20
+
+                        avg_vol = get_cached_avg_volume_20(peer)
+                    except Exception:
+                        avg_vol = 0.0
+
+                if vol > 0 and avg_vol > 0:
+                    try:
+                        from engine.detectors.intraday_spark import compute_time_of_day_rvol
+
+                        dyn_rvol = compute_time_of_day_rvol(vol, avg_vol, ref_dt=now_dt)
+                    except Exception:
+                        dyn_rvol = round(vol / max(1.0, avg_vol), 2)
+                else:
+                    dyn_rvol = 1.0
 
                 vwap_val = _extract_float(q, "vwap")
                 if vwap_val <= 0:
@@ -233,12 +269,30 @@ class ThematicPeerSympathyEngine:
                     else _extract_float(q, "change_pct")
                 )
 
+                # Gate 31: Index Tide Gate - Never short into advancing index tide or buy into plunging index
+                try:
+                    from engine.market_regime_gate import evaluate_index_tide_gate
+
+                    tide_gate = evaluate_index_tide_gate(
+                        symbol=peer,
+                        direction=act.direction,
+                        ltp=ltp,
+                        rvol=dyn_rvol,
+                        change_pct=chg_pct,
+                        quotes_map=quotes_map,
+                    )
+                    if tide_gate.is_vetoed:
+                        logger.debug(
+                            f"[ThematicPeerSympathy] Suppressed {peer}: {tide_gate.veto_reason}"
+                        )
+                        continue
+                except Exception as e_tide:
+                    logger.debug(
+                        f"[ThematicPeerSympathy] Index tide check skipped for {peer}: {e_tide}"
+                    )
+
                 # Sympathy Validation Rules: Strict VWAP alignment, proven momentum & institutional volume confirmation
-                # Eliminates thin sympathy follower traps where dead stocks get dragged along without institutional orderflow
-                # (RCA: -14.6R loss on sympathy followers due to STRUCTURAL_ORDERFLOW_FAILURE).
-                is_volume_confirmed = (dyn_rvol >= MIN_SYMPATHY_FOLLOWER_RVOL) or (
-                    vol >= 500000 and avg_vol <= 0
-                )
+                is_volume_confirmed = (dyn_rvol >= 1.40) or (vol >= 2000000)
 
                 is_qualified = False
                 if is_volume_confirmed:
@@ -587,6 +641,12 @@ class ThematicPeerSympathyEngine:
 
                 with self._lock:
                     self._last_peer_alert[peer] = now
+                    self._session_sector_count[sec_key] = (
+                        self._session_sector_count.get(sec_key, 0) + 1
+                    )
+                    self._session_total_count[session_date] = (
+                        self._session_total_count.get(session_date, 0) + 1
+                    )
 
                 found.append(peer_alert)
                 logger.info(

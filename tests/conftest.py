@@ -282,6 +282,18 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         clear_trade_plan_cache()
     except Exception:
         pass
+    try:
+        from engine.market_regime_gate import clear_index_tide_cache
+
+        clear_index_tide_cache()
+    except Exception:
+        pass
+    try:
+        from engine.thematic_peer_sympathy import thematic_sympathy_engine
+
+        thematic_sympathy_engine.clear_sympathy_session_state()
+    except Exception:
+        pass
 
     try:
         from engine.detector_circuit_breaker import detector_circuit_breaker

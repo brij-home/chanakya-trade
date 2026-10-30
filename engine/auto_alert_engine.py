@@ -15299,6 +15299,27 @@ class AutoAlertEngine:
         chains_map: dict[str, Any] = {}
         ohlcv_map: dict[str, Any] = {}
 
+        # Step 1.5: Dynamic Top Mover Prioritization (Invariant 38):
+        # Sort watched equities dynamically so session high-velocity movers (gainers/losers) are evaluated first in slices
+        if (
+            quotes_map
+            and hasattr(self, "_watched_equities")
+            and not getattr(self, "_override_watched_equities", False)
+        ):
+            try:
+
+                def _mover_priority(sym: str) -> float:
+                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
+                    if not q:
+                        return 0.0
+                    chg = abs(float(getattr(q, "change_pct", 0.0) or 0.0))
+                    vol = float(getattr(q, "volume", 0.0) or 0.0)
+                    return chg * (1.5 if vol > 500000 else 1.0)
+
+                self._watched_equities.sort(key=_mover_priority, reverse=True)
+            except Exception as e_sort:
+                logger.debug(f"[AutoAlertEngine] Dynamic equity prioritization skipped: {e_sort}")
+
         # Step 2: Concurrent evaluation of all orthogonal detectors (bounded max_workers=12)
         import concurrent.futures
 
