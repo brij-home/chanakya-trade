@@ -427,6 +427,10 @@ def detect_index_put_setup(
         else (100.0 if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX") else 50.0)
     )
 
+    is_0dte_today = (clean_sym == "NIFTY" and now_dt.weekday() == 3) or (
+        clean_sym in ("SENSEX", "BSX") and now_dt.weekday() == 4
+    )
+
     # Sort by optimal Institutional Moneyness, Delta Torque & Liquidity (ATM / 1-Strike ITM Priority)
     def _contract_score(c: Any) -> float:
         lp = float(getattr(c, "last_price", 0.0) or 0.0)
@@ -479,12 +483,22 @@ def detect_index_put_setup(
         else:  # NIFTY, BANKNIFTY
             ideal_prem = 100.0 if clean_sym == "NIFTY" else 240.0
         prem_dist = abs(lp - ideal_prem) / ideal_prem if lp > 0 else 2.0
+
+        # 0DTE Penny Option Lottery Filter (Institutional EV Invariant):
+        # On 0DTE, OTM options under ₹35 (Nifty) or ₹80 (Sensex/Bank Nifty) face 95%+ probability of total zero expiry.
+        # Penalize heavily to prevent selecting low-delta lottery traps.
+        penny_trap_penalty = 0.0
+        if is_0dte_today and c_strike < spot:
+            min_floor = 35.0 if clean_sym == "NIFTY" else 80.0
+            if lp < min_floor:
+                penny_trap_penalty = 150.0
         return (
             moneyness_bonus
             + (vol_oi * 10.0)
             + (min(10.0, vol / 500.0))
             - (dist_pct * 600.0)
             - (prem_dist * 5.0)
+            - penny_trap_penalty
         )
 
     pe_contracts.sort(key=_contract_score, reverse=True)
@@ -3114,10 +3128,14 @@ def detect_index_put_setup(
         annotated_hl = headline
 
     # ── Dual-Blueprint Execution: Naked Convexity vs Dynamic Adaptive Spread ─
+    is_0dte_penny_trap = bool(
+        zero_dte_phase.get("is_0dte") and opt_ltp < (35.0 if clean_sym == "NIFTY" else 80.0)
+    )
+
     regime_verdict = (
         "MARKET_FAVORS_NAKED"
         if (is_explosive_momentum or vel_score >= 70)
-        and not (is_chop_regime or is_0dte_midday_trap or is_high_iv_risk)
+        and not (is_chop_regime or is_0dte_midday_trap or is_high_iv_risk or is_0dte_penny_trap)
         else "HEDGE_RECOMMENDED"
     )
 

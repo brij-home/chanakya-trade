@@ -57,18 +57,62 @@ def get_optimal_expiry_recommendation(
     now_dt: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """
-    Evaluates whether current day/time warrants trading the Current Weekly vs Next Weekly expiry.
-    Protects positions from the Wednesday/Thursday post-13:00 IST Theta Cliff.
+    Evaluates optimal contract expiry cycle recommendation.
+    - For Weekly Benchmark Indices (NIFTY 50 on Thursday, SENSEX on Friday):
+      Protects positions from the post-13:15 IST 0DTE Theta Cliff.
+    - For Stock Options and Monthly-Only Indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, Stocks):
+      Enforces SEBI Physical Delivery Protection: routes to NEXT_MONTHLY during the final 4 days
+      of the monthly settlement cycle to avoid 100% margin surcharges and assignment risks.
     """
     now = now_dt or datetime.now(IST)
     weekday = now.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
     now_time = now.time()
 
-    is_wed_afternoon = weekday == 2 and now_time >= dtime(13, 0)
-    is_thu_expiry_day = weekday == 3
+    clean_sym = (
+        (symbol or "")
+        .replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("NIFTY 50", "NIFTY")
+        .replace("NIFTY BANK", "BANKNIFTY")
+        .strip()
+        .upper()
+    )
+
+    is_weekly_index = clean_sym in ("NIFTY", "SENSEX")
+
+    # 1. Single-Stock and Monthly-Only Index Physical Settlement Checks
+    if not is_weekly_index:
+        try:
+            from engine.alert_expiry import is_monthly_physical_expiry_week
+
+            if is_monthly_physical_expiry_week(symbol=clean_sym, ref_dt=now):
+                return {
+                    "preferred_expiry": "NEXT_MONTHLY",
+                    "warning": "⚠️ SEBI PHYSICAL SETTLEMENT SURGE: Expiring stock/monthly derivatives enter mandatory 100% delivery margin. Route all positions to NEXT MONTHLY expiry.",
+                    "reason": "SEBI_PHYSICAL_SETTLEMENT_WEEK",
+                }
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.options_hedging] Physical settlement check error: {e_suppressed}"
+            )
+
+        return {
+            "preferred_expiry": "CURRENT_MONTHLY",
+            "warning": None,
+            "reason": "NORMAL_MONTHLY_CYCLE",
+        }
+
+    # 2. Benchmark Weekly Index Expiries (NIFTY on Thursday, SENSEX on Friday)
+    is_expiry_day = (clean_sym == "NIFTY" and weekday == 3) or (
+        clean_sym == "SENSEX" and weekday == 4
+    )
+    is_pre_expiry_eve = (clean_sym == "NIFTY" and weekday == 2 and now_time >= dtime(13, 0)) or (
+        clean_sym == "SENSEX" and weekday == 3 and now_time >= dtime(13, 0)
+    )
     is_fri_weekend_eve = weekday == 4 and now_time >= dtime(14, 0)
 
-    if is_thu_expiry_day:
+    if is_expiry_day:
         if now_time >= dtime(13, 15):
             return {
                 "preferred_expiry": "NEXT_WEEKLY",
@@ -81,11 +125,11 @@ def get_optimal_expiry_recommendation(
                 "warning": "⚡ EXPIRY DAY MORNING: Fast morning scalp viable; for swing holds, select Next Weekly.",
                 "reason": "EXPIRY_DAY_MORNING",
             }
-    elif is_wed_afternoon:
+    elif is_pre_expiry_eve:
         return {
             "preferred_expiry": "NEXT_WEEKLY",
             "warning": "⏳ PRE-EXPIRY DECAY ACCELERATION: Next Weekly contract provides ~5x more theta runway and avoids pin risk.",
-            "reason": "WEDNESDAY_PRE_EXPIRY",
+            "reason": "WEDNESDAY_PRE_EXPIRY" if weekday == 2 else "PRE_EXPIRY_AFTERNOON",
         }
     elif is_fri_weekend_eve:
         return {

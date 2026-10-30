@@ -1594,13 +1594,31 @@ def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
     if len(order_ids) == 1:
         return [execute_order_intent(order_ids[0])]
 
+    _init_orders_db()
+
+    # Institutional Spread Leg Sequencing Invariant:
+    # BUY legs MUST strictly execute before SELL legs so the long hedge is registered
+    # with broker RMS, providing ~70%+ margin relief and preventing false naked margin rejections.
+    with _get_orders_db() as conn:
+        conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in order_ids)
+        rows = conn.execute(
+            f"SELECT order_id, side FROM orders_ledger WHERE order_id IN ({placeholders})",
+            order_ids,
+        ).fetchall()
+        side_map = {r["order_id"]: str(r["side"]).upper() for r in rows}
+        sorted_order_ids = sorted(
+            order_ids,
+            key=lambda oid: 0 if side_map.get(oid) == "BUY" else 1,
+        )
+
     mode_info = get_trading_mode()
     now_iso = datetime.now(timezone.utc).isoformat()
 
     # If in OBSERVE or SIMULATE mode, execute sequentially via execute_order_intent
     # (paper execution maintains accurate sequential fill sequence and balances)
     if not mode_info.is_execute:
-        return [execute_order_intent(oid) for oid in order_ids]
+        return [execute_order_intent(oid) for oid in sorted_order_ids]
 
     # Live Execution Mode
     from engine.modes import assert_live_execution_allowed
@@ -1621,15 +1639,13 @@ def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
 
     # Fall back to sequential execution if adapter does not support basket placement
     if not hasattr(live_broker, "place_basket_orders"):
-        return [execute_order_intent(oid) for oid in order_ids]
+        return [execute_order_intent(oid) for oid in sorted_order_ids]
 
-    _init_orders_db()
-
-    # Step 1: Load and pre-validate all orders from ledger
+    # Step 1: Load and pre-validate all orders from ledger in strictly sorted BUY-first sequence
     loaded_orders: list[dict[str, Any]] = []
     with _get_orders_db() as conn:
         conn.row_factory = sqlite3.Row
-        for oid in order_ids:
+        for oid in sorted_order_ids:
             cursor = conn.execute("SELECT * FROM orders_ledger WHERE order_id = ?", (oid,))
             row = cursor.fetchone()
             if not row:

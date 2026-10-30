@@ -319,3 +319,49 @@ def test_evaluate_spread_in_flight_wires_roll_plan():
     assert res.milestone_type == "SPREAD_SHORT_STRIKE_TOUCH"
     assert res.roll_plan is not None
     assert res.roll_plan["action"] == "ROLL_SHORT_STRIKE_OTM"
+
+
+# ── Calibrations: Order Sequencing, Physical Settlement & Penny Trap ─────────
+
+
+def test_get_optimal_expiry_stock_fno_physical_delivery():
+    """Verify stock options get routed to NEXT_MONTHLY during SEBI physical delivery week."""
+    from engine.options_hedging import get_optimal_expiry_recommendation
+
+    # 2026-10-27 is Tuesday of monthly expiry week (last Thursday is 2026-10-29)
+    settlement_tue = datetime(2026, 10, 27, 11, 0, tzinfo=IST)
+    res_stock = get_optimal_expiry_recommendation("RELIANCE", now_dt=settlement_tue)
+    assert res_stock["preferred_expiry"] == "NEXT_MONTHLY"
+    assert res_stock["reason"] == "SEBI_PHYSICAL_SETTLEMENT_WEEK"
+    assert "PHYSICAL SETTLEMENT" in res_stock["warning"]
+
+    # Normal mid-month session (e.g. 2026-10-14) returns CURRENT_MONTHLY
+    normal_dt = datetime(2026, 10, 14, 11, 0, tzinfo=IST)
+    res_normal = get_optimal_expiry_recommendation("RELIANCE", now_dt=normal_dt)
+    assert res_normal["preferred_expiry"] == "CURRENT_MONTHLY"
+    assert res_normal["reason"] == "NORMAL_MONTHLY_CYCLE"
+
+
+def test_execute_order_batch_buy_first_sequencing(tmp_path, monkeypatch):
+    """Verify execute_order_batch strictly executes BUY orders before SELL orders to ensure margin relief."""
+    from engine.order_lifecycle import (
+        preview_order_intent,
+        confirm_order_intent,
+        execute_order_batch,
+    )
+
+    # Create sell order first, then buy order
+    intent_sell = preview_order_intent(symbol="INFY", side="SELL", quantity=10, price=1800.0)
+    intent_buy = preview_order_intent(symbol="INFY", side="BUY", quantity=10, price=1800.0)
+
+    confirm_order_intent(intent_sell.order_id, intent_sell.preview_hash)
+    confirm_order_intent(intent_buy.order_id, intent_buy.preview_hash)
+
+    # Pass in [SELL, BUY] sequence
+    results = execute_order_batch([intent_sell.order_id, intent_buy.order_id])
+    assert len(results) == 2
+    # Verify the executed order results place BUY first!
+    assert results[0].order_id == intent_buy.order_id
+    assert results[0].side == "BUY"
+    assert results[1].order_id == intent_sell.order_id
+    assert results[1].side == "SELL"
