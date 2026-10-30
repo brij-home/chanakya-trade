@@ -217,6 +217,30 @@ def detect_opening_drive(
             hw_bulls = hw_posture.get("bull_count", 0)
             hw_bears = hw_posture.get("bear_count", 0)
             if hw_total > 0:
+                # BankNifty Dual-Locomotive Alignment: HDFCBANK (~28%) + ICICIBANK (~23%) = >51% of index.
+                # An opening drive CANNOT succeed if the top 2 banks are actively diverging or opposing!
+                if clean_sym in ("BANKNIFTY", "NIFTY BANK", "BANKEX"):
+                    hw_by_sym = {h.get("symbol"): h for h in active_hw if isinstance(h, dict)}
+                    hdfc_h = hw_by_sym.get("HDFCBANK")
+                    icici_h = hw_by_sym.get("ICICIBANK")
+                    if hdfc_h and icici_h:
+                        if is_bull_drive and (
+                            hdfc_h.get("is_bearish") or icici_h.get("is_bearish")
+                        ):
+                            logger.info(
+                                f"[OpeningDrive] Suppressed bullish drive on {clean_sym}: Dual locomotive opposing "
+                                f"(HDFCBANK: {hdfc_h.get('change_pct'):+.2f}%, ICICIBANK: {icici_h.get('change_pct'):+.2f}%)."
+                            )
+                            return None
+                        if is_bear_drive and (
+                            hdfc_h.get("is_bullish") or icici_h.get("is_bullish")
+                        ):
+                            logger.info(
+                                f"[OpeningDrive] Suppressed bearish drive on {clean_sym}: Dual locomotive opposing "
+                                f"(HDFCBANK: {hdfc_h.get('change_pct'):+.2f}%, ICICIBANK: {icici_h.get('change_pct'):+.2f}%)."
+                            )
+                            return None
+
                 if is_bull_drive and (
                     hw_bulls == 0 or hw_posture.get("all_bearish") or hw_bears > hw_bulls
                 ):
@@ -475,8 +499,12 @@ def detect_opening_drive(
         "target_3": f"₹{opt_runner:,.1f}" if (has_opt and opt_runner) else f"₹{t3_price:,.1f}",
         "runner_target": f"₹{opt_runner:,.1f}" if (has_opt and opt_runner) else f"₹{t3_price:,.1f}",
         "entry_type": "LIMIT_ON_PULLBACK",
-        "optimal_entry_limit": bar_open,
-        "retest_entry": bar_open,
+        "optimal_entry_limit": round(bar_open + 0.382 * max(0.1, bar_high - bar_open), 2)
+        if is_bull_drive
+        else round(bar_open - 0.382 * max(0.1, bar_open - bar_low), 2),
+        "retest_entry": round(bar_open + 0.382 * max(0.1, bar_high - bar_open), 2)
+        if is_bull_drive
+        else round(bar_open - 0.382 * max(0.1, bar_open - bar_low), 2),
         "no_chase_boundary": f"₹{opt_no_chase:,.1f}" if has_opt else f"₹{resolved_no_chase:,.1f}",
         "spot_no_chase_boundary": f"₹{resolved_no_chase:,.1f}",
         "risk_reward": rr_str,

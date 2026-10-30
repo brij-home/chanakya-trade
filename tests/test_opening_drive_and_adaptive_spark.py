@@ -122,3 +122,80 @@ def test_index_call_setup_bypasses_breadth_on_strong_vwap_trend():
 
         assert len(alerts) >= 1
         assert alerts[0].direction == "BULLISH"
+
+
+def test_banknifty_opening_drive_requires_dual_locomotive_alignment():
+    """Verify BankNifty opening drive vetoes when HDFCBANK or ICICIBANK opposes the move."""
+    dates = [datetime(2026, 10, 30, 9, 15, tzinfo=IST)]
+    df_5m = pd.DataFrame(
+        {
+            "open": [49000.0],
+            "high": [49250.0],
+            "low": [49000.0],  # Open == Low
+            "close": [49200.0],
+            "volume": [150000.0],
+        },
+        index=dates,
+    )
+
+    # Mock heavyweights posture where 3 mid-tier banks are bullish, but HDFCBANK is bearish
+    opposed_posture = {
+        "heavyweights": [
+            {"symbol": "HDFCBANK", "change_pct": -0.85, "is_bullish": False, "is_bearish": True},
+            {"symbol": "ICICIBANK", "change_pct": 0.40, "is_bullish": True, "is_bearish": False},
+            {"symbol": "SBIN", "change_pct": 0.50, "is_bullish": True, "is_bearish": False},
+            {"symbol": "AXISBANK", "change_pct": 0.30, "is_bullish": True, "is_bearish": False},
+            {"symbol": "KOTAKBANK", "change_pct": 0.25, "is_bullish": True, "is_bearish": False},
+        ],
+        "bull_count": 4,
+        "bear_count": 1,
+        "all_bullish": False,
+        "all_bearish": False,
+    }
+
+    aligned_posture = {
+        "heavyweights": [
+            {"symbol": "HDFCBANK", "change_pct": 0.65, "is_bullish": True, "is_bearish": False},
+            {"symbol": "ICICIBANK", "change_pct": 0.80, "is_bullish": True, "is_bearish": False},
+            {"symbol": "SBIN", "change_pct": 0.50, "is_bullish": True, "is_bearish": False},
+            {"symbol": "AXISBANK", "change_pct": 0.30, "is_bullish": True, "is_bearish": False},
+            {"symbol": "KOTAKBANK", "change_pct": 0.25, "is_bullish": True, "is_bearish": False},
+        ],
+        "bull_count": 5,
+        "bear_count": 0,
+        "all_bullish": True,
+        "all_bearish": False,
+    }
+
+    # 1. Opposed: HDFCBANK is bearish -> VETOED
+    with patch("market.indices.get_heavyweights_posture", return_value=opposed_posture):
+        alert_vetoed = detect_opening_drive(
+            symbol="BANKNIFTY",
+            df_5m=df_5m,
+            ltp=49200.0,
+            vwap=49100.0,
+            rvol=2.0,
+            ref_time=datetime(2026, 10, 30, 9, 20, tzinfo=IST),
+            prev_close=48900.0,
+            prev_high=49100.0,
+            prev_low=48700.0,
+            ignore_time_gate=True,
+        )
+        assert alert_vetoed is None
+
+    # 2. Aligned: Both HDFCBANK and ICICIBANK are bullish -> ALLOWED
+    with patch("market.indices.get_heavyweights_posture", return_value=aligned_posture):
+        alert_allowed = detect_opening_drive(
+            symbol="BANKNIFTY",
+            df_5m=df_5m,
+            ltp=49200.0,
+            vwap=49100.0,
+            rvol=2.0,
+            ref_time=datetime(2026, 10, 30, 9, 20, tzinfo=IST),
+            prev_close=48900.0,
+            prev_high=49100.0,
+            prev_low=48700.0,
+            ignore_time_gate=True,
+        )
+        assert alert_allowed is not None
+        assert alert_allowed.direction == "BULLISH"
