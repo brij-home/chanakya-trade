@@ -67,7 +67,8 @@ class TestTimeOfDayRvol:
 class TestIndexContagionEngine:
     """Validates heavyweights synchronization engine for NIFTY & BANKNIFTY."""
 
-    def test_banknifty_bullish_synchronization(self):
+    @patch("engine.daily_levels.get_daily_levels", return_value=None)
+    def test_banknifty_bullish_synchronization(self, mock_dl):
         dt = datetime(2026, 9, 15, 10, 15, tzinfo=IST)
 
         # Mock quotes where HDFCBANK and ICICIBANK (>52% weight) are surging above VWAP
@@ -128,7 +129,8 @@ class TestIndexContagionEngine:
         assert res.alert.stage == "EARLY_WARNING"
         assert "HEAVYWEIGHT CONTAGION" in res.alert.headline
 
-    def test_nifty_bearish_synchronization(self):
+    @patch("engine.daily_levels.get_daily_levels", return_value=None)
+    def test_nifty_bearish_synchronization(self, mock_dl):
         dt = datetime(2026, 9, 15, 11, 0, tzinfo=IST)
 
         quotes = {
@@ -401,7 +403,8 @@ class TestContagionHolisticSanity:
         assert _INDEX_MAP["NIFTY FIN SERVICE"] == "NIFTY_FIN_SERVICE.NS"
         assert _INDEX_MAP.get("FINNIFTY") != "^CNXFIN"
 
-    def test_midcpnifty_contagion_evaluation(self):
+    @patch("engine.daily_levels.get_daily_levels", return_value=None)
+    def test_midcpnifty_contagion_evaluation(self, mock_dl):
         """MIDCPNIFTY constituent synchronization triggers early warning for Midcap index."""
         dt = datetime(2026, 10, 16, 10, 15, tzinfo=IST)
         mid_q = Quote(

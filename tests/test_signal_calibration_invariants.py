@@ -101,12 +101,13 @@ def test_unverified_rvol_does_not_supersede_sector_leader():
 def test_index_directional_hysteresis_suppresses_rapid_flip():
     """Flaw 1: Index directional hysteresis blocks opposing flip within 20m without confirmed CHoCH."""
     from unittest.mock import patch
+    from config.constants import IST
 
     with patch("engine.alerts._is_market_hours", return_value=True):
         engine = AutoAlertEngine()
         engine._alerts.clear()
 
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
         # 1. First alert: BANKNIFTY BULLISH CE
         alert_ce = AutoAlert(
@@ -130,7 +131,9 @@ def test_index_directional_hysteresis_suppresses_rapid_flip():
         assert res_ce is True
 
         # 2. Opposing alert: BANKNIFTY BEARISH PE arrives 5 minutes later without CHoCH
-        five_mins_later = (datetime.now() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S IST")
+        five_mins_later = (datetime.now(IST) + timedelta(minutes=5)).strftime(
+            "%Y-%m-%d %H:%M:%S IST"
+        )
         alert_pe = AutoAlert(
             alert_id="aa-bn-pe-02",
             alert_type="GAMMA_BLAST",

@@ -21,6 +21,15 @@ else:
 
 _TEST_DATA_DIR.mkdir(parents=True, exist_ok=True)
 (_TEST_DATA_DIR / "pdf").mkdir(parents=True, exist_ok=True)
+(_TEST_DATA_DIR / "sym_master").mkdir(parents=True, exist_ok=True)
+_sym_fixtures = Path(__file__).parent / "fixtures" / "sym_master"
+if _sym_fixtures.exists():
+    import shutil
+
+    for _f in _sym_fixtures.glob("*.json"):
+        _target = _TEST_DATA_DIR / "sym_master" / _f.name
+        if not _target.exists():
+            shutil.copyfile(_f, _target)
 os.environ["TRADING_PLATFORM_HOME"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_DATA"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_PDF_DIR"] = str(_TEST_DATA_DIR / "pdf")
@@ -555,19 +564,38 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
 @pytest.fixture(autouse=True)
 def reset_auto_alert_engine_pacing():
-    """Ensure hermetic test isolation for AutoAlertEngine pacing & dispatch tables."""
-    yield
-    try:
-        from engine.auto_alert_engine import auto_alert_engine
+    """Ensure hermetic test isolation for AutoAlertEngine state & daily levels."""
 
-        if auto_alert_engine is not None:
-            auto_alert_engine._sector_daily_telegram.clear()
-            auto_alert_engine._daily_index_telegram.clear()
-            auto_alert_engine._index_half_telegram.clear()
-            auto_alert_engine._sector_hourly_telegram.clear()
-            for k in auto_alert_engine._hourly_telegram_dispatches:
-                auto_alert_engine._hourly_telegram_dispatches[k].clear()
-            auto_alert_engine._hourly_index_directional.clear()
-            auto_alert_engine._hourly_fno_stock_directional.clear()
-    except Exception:
-        pass
+    def _do_reset():
+        try:
+            from engine.auto_alert_engine import auto_alert_engine
+
+            if auto_alert_engine is not None:
+                auto_alert_engine._alerts.clear()
+                auto_alert_engine._directional_quarantine.clear()
+                auto_alert_engine._directional_failure_history.clear()
+                auto_alert_engine._stopped_strike_quarantine.clear()
+                auto_alert_engine._alert_index.clear()
+                auto_alert_engine._recent_pacing.clear()
+                auto_alert_engine._sector_daily_telegram.clear()
+                auto_alert_engine._daily_index_telegram.clear()
+                auto_alert_engine._index_half_telegram.clear()
+                auto_alert_engine._sector_hourly_telegram.clear()
+                for k in auto_alert_engine._hourly_telegram_dispatches:
+                    auto_alert_engine._hourly_telegram_dispatches[k].clear()
+                auto_alert_engine._hourly_index_directional.clear()
+                auto_alert_engine._hourly_fno_stock_directional.clear()
+        except Exception:
+            pass
+        try:
+            from engine.daily_levels import get_daily_levels_store
+
+            store = get_daily_levels_store()
+            with store._lock:
+                store._memory_cache.clear()
+        except Exception:
+            pass
+
+    _do_reset()
+    yield
+    _do_reset()

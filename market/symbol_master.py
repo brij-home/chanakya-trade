@@ -63,6 +63,16 @@ def _cache_path(master: str) -> Path:
     standard_home = Path.home() / ".trading_platform" / "sym_master" / f"{master}.json"
     if standard_home.exists():
         return standard_home
+    # Fixture fallback for hermetic offline test suites / CI runners
+    test_fixture = (
+        Path(__file__).resolve().parent.parent
+        / "tests"
+        / "fixtures"
+        / "sym_master"
+        / f"{master}.json"
+    )
+    if test_fixture.exists():
+        return test_fixture
     return p
 
 
@@ -105,9 +115,10 @@ def load_master(master: str, force: bool = False, offline_fallback: bool = True)
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            tmp_path = path.with_suffix(".tmp")
+            dest_cache = CACHE_DIR / f"{master_upper}.json"
+            tmp_path = dest_cache.with_suffix(".tmp")
             tmp_path.write_text(json.dumps(data), encoding="utf-8")
-            tmp_path.replace(path)
+            tmp_path.replace(dest_cache)
             _IN_MEMORY_CACHE[master_upper] = data
             return data
         except Exception as e:

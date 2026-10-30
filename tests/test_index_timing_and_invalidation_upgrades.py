@@ -97,7 +97,10 @@ def test_directional_lockout_bypassed_on_structural_breakout():
     from engine.auto_alert_engine import AutoAlertEngine
 
     engine = AutoAlertEngine()
-    engine._directional_quarantine = {}
+    engine._alerts.clear()
+    engine._directional_quarantine.clear()
+    engine._directional_failure_history.clear()
+    engine._stopped_strike_quarantine.clear()
 
     # Simulate BankNifty stopped out in BULLISH direction 10 minutes ago
     ten_mins_ago = time.time() - 600.0
@@ -272,7 +275,10 @@ def test_opposing_quarantine_bypassed_on_structural_sweep():
     from engine.auto_alert_engine import AutoAlertEngine
 
     engine = AutoAlertEngine()
-    engine._directional_quarantine = {}
+    engine._alerts.clear()
+    engine._directional_quarantine.clear()
+    engine._directional_failure_history.clear()
+    engine._stopped_strike_quarantine.clear()
 
     # Simulate BankNifty stopped out on a BEARISH trade 5 minutes ago
     five_mins_ago = time.time() - 300.0

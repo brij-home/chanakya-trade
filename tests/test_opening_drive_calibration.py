@@ -103,6 +103,7 @@ def test_bearish_opening_drive_banknifty(monkeypatch):
             "all_bullish": False,
         },
     )
+    monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda *args, **kwargs: None)
 
     alert = detect_opening_drive(
         symbol="BANKNIFTY",
