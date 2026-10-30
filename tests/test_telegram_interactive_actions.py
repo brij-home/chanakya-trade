@@ -294,7 +294,7 @@ def test_send_push_adaptive_recovery_on_button_data_invalid(monkeypatch):
     monkeypatch.setattr(tb_module, "_load_chat_id", lambda: "-1004320002599")
     monkeypatch.setattr(tb_module, "_get_bot_token", lambda: "fake-bot-token")
     monkeypatch.setattr(tb_module, "_get_push_executor", lambda: ImmediateExecutor())
-    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
+    monkeypatch.setattr(tb_module, "_ALLOW_TEST_DISPATCH", True)
 
     oversized_markup = {"inline_keyboard": [[{"text": "Bad", "callback_data": "bad"}]]}
     success_called = []
@@ -350,7 +350,7 @@ def test_send_push_adaptive_recovery_on_replied_message_not_found(monkeypatch):
     monkeypatch.setattr(tb_module, "_load_chat_id", lambda: "-1004320002599")
     monkeypatch.setattr(tb_module, "_get_bot_token", lambda: "fake-bot-token")
     monkeypatch.setattr(tb_module, "_get_push_executor", lambda: ImmediateExecutor())
-    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
+    monkeypatch.setattr(tb_module, "_ALLOW_TEST_DISPATCH", True)
 
     success_called = []
     send_push(
@@ -413,7 +413,7 @@ def test_send_push_ultimate_barebones_fail_safe(monkeypatch):
     monkeypatch.setattr(tb_module, "_load_chat_id", lambda: "-1004320002599")
     monkeypatch.setattr(tb_module, "_get_bot_token", lambda: "fake-bot-token")
     monkeypatch.setattr(tb_module, "_get_push_executor", lambda: ImmediateExecutor())
-    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
+    monkeypatch.setattr(tb_module, "_ALLOW_TEST_DISPATCH", True)
 
     oversized_markup = {"inline_keyboard": [[{"text": "Bad", "callback_data": "bad"}]]}
     success_called = []

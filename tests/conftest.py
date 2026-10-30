@@ -64,10 +64,26 @@ threading.Thread.__init__ = _test_safe_thread_init
 
 
 @pytest.fixture(autouse=True)
+def _ensure_chanakya_testing_env():
+    """Defensively guarantee CHANAKYA_TESTING=1 is always intact before and after every test."""
+    os.environ["CHANAKYA_TESTING"] = "1"
+    yield
+    os.environ["CHANAKYA_TESTING"] = "1"
+
+
+@pytest.fixture(autouse=True)
 def _isolate_fyers_rate_gate_and_circuit_breaker():
     """Defensively reset rate gate, circuit breaker, and regime cache before and after each test."""
 
     def _do_reset():
+        try:
+            from bot.telegram_bot import _push_executor, _push_lock
+
+            with _push_lock:
+                if _push_executor is not None:
+                    _push_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
         try:
             from market.fyers_circuit_breaker import get_fyers_circuit_breaker
 
@@ -107,7 +123,8 @@ _ALLOWED_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
 
 def _test_guarded_socket_connect(self, address):
-    if os.environ.get("CHANAKYA_TESTING") == "1" and not _PROCESS_ALLOW_NETWORK:
+    is_testing = os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+    if is_testing and not _PROCESS_ALLOW_NETWORK:
         if isinstance(address, (tuple, list)) and len(address) >= 1:
             host = address[0]
             if isinstance(host, str) and host not in _ALLOWED_LOCAL_HOSTS:

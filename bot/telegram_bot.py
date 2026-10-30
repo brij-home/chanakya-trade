@@ -247,6 +247,7 @@ _bot_thread: Optional[threading.Thread] = None
 # Bounded push notification executor to prevent thread explosion on alert storms
 _push_executor: Optional[Any] = None
 _push_lock = threading.Lock()
+_ALLOW_TEST_DISPATCH = False
 
 
 def _get_push_executor() -> Any:
@@ -2845,7 +2846,7 @@ def send_push(
         resolved_sig = tags[0]
 
     def _send():
-        if os.environ.get("CHANAKYA_TESTING") == "1":
+        if os.environ.get("CHANAKYA_TESTING") == "1" and not _ALLOW_TEST_DISPATCH:
             logger.debug(
                 "[TelegramPush] Network call skipped during test execution (CHANAKYA_TESTING=1)"
             )
