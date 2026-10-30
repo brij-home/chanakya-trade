@@ -13706,6 +13706,16 @@ class AutoAlertEngine:
         is_test_runner = (
             os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
         )
+
+        # Check and auto-trigger background model calibration if stale for today's session
+        if is_preopen:
+            try:
+                from engine.calibration_runner import calibration_runner
+
+                calibration_runner.auto_trigger_premarket_calibration()
+            except Exception as e_cal:
+                logger.debug(f"[AutoAlertEngine] Pre-market calibration auto-check: {e_cal}")
+
         if not is_preopen and not is_test_runner:
             return []
 

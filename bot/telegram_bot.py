@@ -330,6 +330,7 @@ async def cmd_start(update, context) -> None:
             "/precursors — high-conviction coiling setups before breakout\n"
             "/dryup [FNO|ALL] — pre-inflection volume dry-up & fair-value accumulation (anti-FOMO, 1:4+ R:R)\n"
             "/squeeze [N] — top F&O stocks coiled in TTM Squeeze for explosive expansion\n"
+            "/recalibrate — trigger 95-day historical model calibration in background\n"
             "/asymmetric — scan low risk : big reward setups (1:3+ R:R)\n"
             "/scan [UNIVERSE] — scan top liquid/F&O list for breakouts & gamma blasts\n"
             "/radar — quick market radar on today's top liquid setups\n"
@@ -1623,6 +1624,35 @@ async def cmd_dryup(update, context) -> None:
         await update.message.reply_text(res_text, parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"Dry-up scan failed: {e}")
+
+
+async def cmd_recalibrate(update, context) -> None:
+    """Handle /recalibrate — Triggers 95-day historical model calibration in background."""
+    from engine.calibration_runner import calibration_runner
+
+    force = bool(context.args and context.args[0].lower() in ("force", "true", "1"))
+    started, msg = calibration_runner.trigger_calibration_async(force=force)
+
+    if started:
+        await update.message.reply_text(
+            "⚙️ <b>Walk-Forward Model Calibration Started</b>\n\n"
+            f"<i>{msg}</i>\n"
+            "• Syncing 90-day 1m & 5m bars for NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX\n"
+            "• Fitting 75-slot Time-of-Day (TOD) Volume Accumulation U-Curves\n"
+            "• Calibrating CPR geometry percentiles (p25, p50, p75) & ADR distributions\n"
+            "• Scanning 219 F&O stocks for active TTM Squeeze compression\n\n"
+            "<i>Use /squeeze to inspect updated results upon completion.</i>",
+            parse_mode="HTML",
+        )
+    else:
+        st = calibration_runner.get_status()
+        await update.message.reply_text(
+            f"⚠️ <b>Calibration Busy / Already Running</b>\n\n"
+            f"Current state: <code>{st.state}</code> (started at: {st.started_at or 'recently'})\n"
+            f"Last run: <code>{st.last_run or 'N/A'}</code>\n"
+            "<i>Please wait for the current cycle to complete.</i>",
+            parse_mode="HTML",
+        )
 
 
 async def cmd_squeeze(update, context) -> None:
@@ -3273,6 +3303,8 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("pre_inflection", _track_command(cmd_dryup)))
     app.add_handler(CommandHandler("squeeze", _track_command(cmd_squeeze)))
     app.add_handler(CommandHandler("coilers", _track_command(cmd_squeeze)))
+    app.add_handler(CommandHandler("recalibrate", _track_command(cmd_recalibrate)))
+    app.add_handler(CommandHandler("calibrate", _track_command(cmd_recalibrate)))
     app.add_handler(CommandHandler("asymmetric", _track_command(cmd_asymmetric)))
     app.add_handler(CommandHandler("opps", _track_command(cmd_asymmetric)))
     app.add_handler(CommandHandler("scan", _track_command(cmd_scan)))

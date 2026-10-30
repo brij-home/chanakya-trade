@@ -3990,6 +3990,45 @@ async def get_calibration_metrics():
         raise _HTTPException(status_code=500, detail=str(exc))
 
 
+@app.post("/api/calibration/run", tags=["Maintenance", "Quant"])
+async def trigger_calibration(force: bool = False):
+    """
+    Trigger 95-day Fyers walk-forward historical model calibration in background.
+    Fits TOD volume accumulation curve, CPR width percentiles, ADR, and TTM Squeeze compression.
+    """
+    try:
+        from engine.calibration_runner import calibration_runner
+
+        started, msg = calibration_runner.trigger_calibration_async(force=force)
+        return {
+            "status": "RUNNING" if started else "BUSY",
+            "message": msg,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.error(f"[API] Failed to trigger calibration: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/calibration/status", tags=["Observability", "Quant"])
+async def get_calibration_status():
+    """
+    Get live progress state and latest execution report for model calibration.
+    """
+    try:
+        from engine.calibration_runner import calibration_runner
+
+        status = calibration_runner.get_status()
+        return {
+            "status": "success",
+            "data": status.to_dict(),
+            "is_stale": calibration_runner.is_calibration_stale(),
+        }
+    except Exception as exc:
+        logger.error(f"[API] Failed to get calibration status: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/api/v1/tools/position-size", tags=["Tools"])
 async def post_position_sizing(req: _Request):
     """
