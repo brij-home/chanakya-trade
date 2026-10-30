@@ -339,6 +339,25 @@ def compute_allowed_actions(
                 "2.0% Extreme Loss Margin (ELM), and calendar spread offsets are eliminated."
             )
 
+    # ── Check 7: Heavyweight Correlation Shield ───────────────
+    try:
+        from engine.options_hedging import audit_heavyweight_correlation_shield
+
+        shield_res = audit_heavyweight_correlation_shield(
+            sym, direction="BULLISH", open_positions=portfolio
+        )
+        if shield_res.get("shield_triggered"):
+            flags.append("CORRELATED_INDEX_EXPOSURE")
+            haircut = shield_res.get("haircut_multiplier", 0.50)
+            max_qty = max(1, int(max_qty * haircut)) if max_qty > 0 else 0
+            max_capital = max_capital * haircut
+            if shield_res.get("warning"):
+                warnings.append(shield_res["warning"])
+    except Exception as e_shield:
+        import logging
+
+        logging.getLogger(__name__).debug(f"[risk_gate] Correlation shield check: {e_shield}")
+
     # ── Final: determine direction ────────────────────────────
     # Default to BOTH — caller can override based on portfolio context
     direction: Literal["BUY_ONLY", "SELL_ONLY", "BOTH", "NONE"] = "BOTH"

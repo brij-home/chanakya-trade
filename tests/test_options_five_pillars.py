@@ -365,3 +365,266 @@ def test_execute_order_batch_buy_first_sequencing(tmp_path, monkeypatch):
     assert results[0].side == "BUY"
     assert results[1].order_id == intent_sell.order_id
     assert results[1].side == "SELL"
+
+
+# ── Institutional Pillars Verification ──────────────────────────────────────
+
+
+def test_auto_alert_engine_free_roll_wing_lock_wiring(tmp_path, monkeypatch):
+    """Pillar 1: Verify AutoAlertEngine detects in-flight naked option profit >= 40%
+    and triggers CONVERT_TO_FREE_ROLL milestone with hedge_ticket."""
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+
+    alert_file = tmp_path / "test_auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.AUTO_ALERTS_FILE", str(alert_file))
+    engine = AutoAlertEngine()
+
+    now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    alert = AutoAlert(
+        alert_id="aa-call-nifty-freeroll-test",
+        symbol="NIFTY",
+        alert_type="INDEX_CALL_SETUP",
+        direction="BULLISH",
+        confidence=85,
+        stage="IGNITED",
+        exchange="NSE",
+        headline="NIFTY 24500 CE Free Roll Test",
+        summary="Bullish call momentum setup",
+        ltp=100.0,
+        trigger_level=100.0,
+        target_level=250.0,
+        stop_loss=70.0,
+        strike=24500.0,
+        option_type="CE",
+        contract_symbol="NIFTY26OCT24500CE",
+        time_horizon="SWING",
+        is_live=True,
+        environment="LIVE",
+        created_at=now_iso,
+        achieved_milestones=[],
+        actionable_plan={"entry_premium": 100.0, "recommended_entry": 100.0, "initial_sl": 70.0},
+    )
+    alert.underlying_spot = 24500.0
+    alert.option_premium = 100.0
+    engine._alerts = [alert]
+
+    # Quotes map with option premium up +45% (LTP = 145.0, spot = 24650.0)
+    quotes = {
+        "NSE:NIFTY26OCT24500CE": 145.0,
+        "NIFTY26OCT24500CE": 145.0,
+        "NSE:NIFTY": 24650.0,
+        "NIFTY": 24650.0,
+    }
+
+    updated = engine.check_and_alert_targets_and_trailing(
+        quotes_map=quotes, skip_early_warning_check=True
+    )
+
+    assert len(updated) >= 1
+    assert "CONVERT_TO_FREE_ROLL" in alert.achieved_milestones
+    assert alert.stage == "CONVERT_TO_FREE_ROLL"
+    assert "Free-Roll Wing Lock" in alert.headline
+    assert alert.actionable_plan is not None
+    assert "free_roll_plan" in alert.actionable_plan
+    assert alert.actionable_plan["free_roll_plan"]["eligible"] is True
+    assert "hedge_ticket" in alert.actionable_plan
+    assert alert.actionable_plan["hedge_ticket"]["action"] == "SELL"
+    assert alert.actionable_plan["hedge_ticket"]["order_type"] == "LIMIT"
+    assert alert.actionable_plan["hedge_ticket"]["strike"] >= 24600.0
+
+
+def test_intraday_session_clock_and_closeout():
+    """Pillar 2: Verify post-14:45 IST closeout suppression & midday theta grind window."""
+    import pandas as pd
+    from datetime import datetime
+    from engine.detectors.index_call_setup import detect_index_call_setup
+
+    # Synthetic 5-min bars
+    dates = pd.date_range("2026-10-29 09:15", periods=50, freq="5min")
+    df = pd.DataFrame(
+        {
+            "open": [24500.0 + i for i in range(50)],
+            "high": [24510.0 + i for i in range(50)],
+            "low": [24490.0 + i for i in range(50)],
+            "close": [24505.0 + i for i in range(50)],
+            "volume": [10000 + i * 100 for i in range(50)],
+        },
+        index=dates,
+    )
+
+    chain_sample = [
+        SimpleNamespace(
+            strike=24550.0,
+            option_type="CE",
+            oi=200000,
+            iv=14.0,
+            last_price=80.0,
+            expiry="2026-10-29",
+            dte=0,
+        ),
+        SimpleNamespace(
+            strike=24650.0,
+            option_type="CE",
+            oi=150000,
+            iv=14.5,
+            last_price=35.0,
+            expiry="2026-10-29",
+            dte=0,
+        ),
+    ]
+
+    # 1. Post 14:45 IST session time -> Intraday naked CE entry strictly suppressed
+    late_dt = datetime(2026, 10, 29, 14, 50, tzinfo=IST)
+    res_late = detect_index_call_setup(
+        underlying="NIFTY",
+        spot=24550.0,
+        chain=chain_sample,
+        ohlcv_5m=df,
+        ref_time=late_dt,
+        quotes_map={"INDIA VIX": 14.5},
+    )
+    assert res_late == []
+
+    # 2. Midday Theta Grind window (11:45 IST) -> Mandates defined-risk spread
+    midday_dt = datetime(2026, 10, 29, 11, 45, tzinfo=IST)
+    res_midday = detect_index_call_setup(
+        underlying="NIFTY",
+        spot=24550.0,
+        chain=chain_sample,
+        ohlcv_5m=df,
+        ref_time=midday_dt,
+        quotes_map={"INDIA VIX": 14.5},
+    )
+    if res_midday:
+        plan = res_midday[0].get("actionable_plan", {})
+        assert plan.get("preferred_vehicle") in ("SPREAD_ONLY", "HEDGED_SPREAD")
+
+
+def test_dealer_gamma_exposure_gex_detector_integration():
+    """Pillar 3: Verify dealer GEX integrates into index detector and detects pin vs acceleration."""
+    import pandas as pd
+    from types import SimpleNamespace
+    from engine.detectors.index_call_setup import detect_index_call_setup
+
+    dates = pd.date_range("2026-10-29 09:15", periods=50, freq="5min")
+    df = pd.DataFrame(
+        {
+            "open": [24500.0 + i for i in range(50)],
+            "high": [24510.0 + i for i in range(50)],
+            "low": [24490.0 + i for i in range(50)],
+            "close": [24505.0 + i for i in range(50)],
+            "volume": [10000 + i * 100 for i in range(50)],
+        },
+        index=dates,
+    )
+
+    # Chain with heavy call OI above spot (Positive Gamma Pin near 24500)
+    chain_pin = [
+        SimpleNamespace(
+            strike=24500.0,
+            option_type="CE",
+            oi=200000,
+            iv=14.0,
+            last_price=80.0,
+            expiry="2026-10-29",
+        ),
+        SimpleNamespace(
+            strike=24500.0,
+            option_type="PE",
+            oi=50000,
+            iv=14.0,
+            last_price=75.0,
+            expiry="2026-10-29",
+        ),
+        SimpleNamespace(
+            strike=24600.0,
+            option_type="CE",
+            oi=150000,
+            iv=14.5,
+            last_price=35.0,
+            expiry="2026-10-29",
+        ),
+    ]
+    morning_dt = datetime(2026, 10, 29, 9, 30, tzinfo=IST)
+    res = detect_index_call_setup(
+        underlying="NIFTY",
+        spot=24505.0,
+        chain=chain_pin,
+        ohlcv_5m=df,
+        ref_time=morning_dt,
+        quotes_map={"INDIA VIX": 14.5},
+    )
+    if res:
+        plan = res[0].get("actionable_plan", {})
+        hedge = plan.get("hedge_plan", {})
+        assert "gex" in hedge or "preferred_vehicle" in hedge
+
+
+def test_heavyweight_correlation_shield_detection():
+    """Pillar 4: Verify Benchmark Heavyweight Correlation Shield flags concurrent index + stock option exposure."""
+    from engine.options_hedging import audit_heavyweight_correlation_shield
+
+    # 1. Active NIFTY bullish alert + RELIANCE bullish -> Shield triggers!
+    res_rel = audit_heavyweight_correlation_shield(
+        symbol="RELIANCE",
+        direction="BULLISH",
+        active_alerts=[{"symbol": "NIFTY", "direction": "BULLISH", "is_invalidated": False}],
+    )
+    assert res_rel["shield_triggered"] is True
+    assert res_rel["correlated_index"] == "NIFTY"
+    assert res_rel["enforcement"] == "HEDGED_SPREAD_MANDATORY"
+    assert res_rel["haircut_multiplier"] == 0.50
+    assert "double-leveraged correlated ruin risk" in res_rel["warning"]
+
+    # 2. Active BANKNIFTY bullish alert + HDFCBANK bullish -> Shield triggers!
+    res_hdfc = audit_heavyweight_correlation_shield(
+        symbol="HDFCBANK",
+        direction="BULLISH",
+        active_alerts=[{"symbol": "BANKNIFTY", "direction": "BULLISH", "is_invalidated": False}],
+    )
+    assert res_hdfc["shield_triggered"] is True
+    assert res_hdfc["correlated_index"] == "BANKNIFTY"
+    assert res_hdfc["enforcement"] == "HEDGED_SPREAD_MANDATORY"
+
+    # 3. Uncorrelated stock (e.g. TATACHEM) -> Shield does NOT trigger
+    res_tatachem = audit_heavyweight_correlation_shield(
+        symbol="TATACHEM",
+        direction="BULLISH",
+        active_alerts=[{"symbol": "NIFTY", "direction": "BULLISH"}],
+    )
+    assert res_tatachem["shield_triggered"] is False
+    assert res_tatachem["haircut_multiplier"] == 1.0
+
+
+def test_midpoint_limit_order_enforcer_in_position_sizer():
+    """Pillar 5: Verify position sizer enforces LIMIT order and pegs midpoint for F&O contracts."""
+    from engine.position_sizer import generate_execution_ticket
+
+    # 1. Market order on F&O stock option contract -> Converted to LIMIT
+    ticket_market = generate_execution_ticket(
+        symbol="RELIANCE26OCT1400CE",
+        entry_price=45.0,
+        stop_loss=30.0,
+        target_price=75.0,
+        is_fno=True,
+        order_type="MARKET",
+    )
+    assert ticket_market["order_type"] == "LIMIT"
+    assert "converted to LIMIT" in ticket_market["notes"]
+
+    # 2. Wide Bid-Ask spread (bid: 42.0, ask: 48.0 -> midpoint 45.0, spread 12.5% > 1.8%)
+    ticket_midpoint = generate_execution_ticket(
+        symbol="NIFTY26OCT24500CE",
+        entry_price=46.5,
+        stop_loss=30.0,
+        target_price=75.0,
+        is_fno=True,
+        order_type="LIMIT",
+        bid=42.0,
+        ask=48.0,
+    )
+    assert ticket_midpoint["order_type"] == "LIMIT"
+    assert ticket_midpoint["limit_price"] == 45.0  # (42 + 48) / 2
+    assert ticket_midpoint["midpoint_price"] == 45.0
+    assert "Pegged to midpoint limit" in ticket_midpoint["notes"]

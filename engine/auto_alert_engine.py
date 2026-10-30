@@ -10069,6 +10069,104 @@ class AutoAlertEngine:
                         logger.debug(
                             f"[AutoAlertEngine] Spread eval error for {alert.symbol}: {e_sp}"
                         )
+                else:
+                    # In-flight dynamic evaluation for naked options (Pillar 1: Free-Roll Conversion)
+                    is_opt = (
+                        is_alert_option_premium_level(alert)
+                        or bool(getattr(alert, "option_type", None))
+                        or any(
+                            x in str(getattr(alert, "contract_symbol", "") or "")
+                            for x in ("CE", "PE")
+                        )
+                    )
+                    if is_opt and "CONVERT_TO_FREE_ROLL" not in (alert.achieved_milestones or []):
+                        try:
+                            from engine.options_hedging import evaluate_naked_option_free_roll
+
+                            u_sym = (
+                                (alert.symbol or "")
+                                .replace("NIFTY 50", "NIFTY")
+                                .replace("NIFTY BANK", "BANKNIFTY")
+                                .strip()
+                            )
+                            exch = alert.exchange or "NSE"
+                            live_spot = (
+                                tgt_ltp_batch.get(f"{exch}:{u_sym}")
+                                or tgt_ltp_batch.get(u_sym)
+                                or tgt_ltp_batch.get(alert.symbol)
+                                or getattr(alert, "underlying_spot", 0.0)
+                                or 0.0
+                            )
+                            free_roll_res = evaluate_naked_option_free_roll(
+                                alert,
+                                current_ltp=cur_quote_ltp,
+                                spot_price=live_spot,
+                            )
+                            if free_roll_res and free_roll_res.get("eligible"):
+                                with self._lock:
+                                    now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+                                    alert.updated_at = now_str
+                                    alert.triggered_at = now_str
+                                    if alert.achieved_milestones is None:
+                                        alert.achieved_milestones = []
+                                    alert.achieved_milestones.append("CONVERT_TO_FREE_ROLL")
+                                    alert.stage = "CONVERT_TO_FREE_ROLL"
+                                    alert.target_status = "CONVERT_TO_FREE_ROLL"
+                                    alert.headline = f"🛡️ Free-Roll Wing Lock: Convert {alert.symbol} naked option into zero-downside spread"
+                                    alert.summary = free_roll_res.get("recommendation", "")
+                                    alert.trailing_decision = (
+                                        f"CONVERT TO SPREAD: Sell {free_roll_res.get('short_strike_candidate', 0):,.0f} "
+                                        f"{free_roll_res.get('option_type', '')} @ ~₹{free_roll_res.get('estimated_credit_collected', 0):,.1f} "
+                                        f"to lock ₹{free_roll_res.get('net_locked_profit_pts', 0):,.1f} profit with zero downside risk."
+                                    )
+                                    alert.pnl_pts = free_roll_res.get("pnl_pts", 0.0)
+                                    alert.pnl_pct = free_roll_res.get("pnl_pct", 0.0)
+                                    alert.locked_profit_pts = free_roll_res.get(
+                                        "net_locked_profit_pts", 0.0
+                                    )
+                                    alert.locked_profit_pct = free_roll_res.get("pnl_pct", 0.0)
+                                    if not alert.actionable_plan:
+                                        alert.actionable_plan = {}
+                                    alert.actionable_plan["free_roll_plan"] = free_roll_res
+                                    c_strike = free_roll_res.get("short_strike_candidate", 0)
+                                    c_opt = free_roll_res.get("option_type", "")
+                                    alert.actionable_plan["hedge_ticket"] = {
+                                        "action": "SELL",
+                                        "symbol": f"{u_sym}{c_strike:,.0f}{c_opt}".replace(",", ""),
+                                        "strike": c_strike,
+                                        "option_type": c_opt,
+                                        "limit_price": free_roll_res.get(
+                                            "estimated_credit_collected", 0.0
+                                        ),
+                                        "order_type": "LIMIT",
+                                        "shares": getattr(alert, "shares", 0)
+                                        or getattr(alert, "lot_size", 1),
+                                    }
+                                    if not alert.metrics:
+                                        alert.metrics = {}
+                                    alert.metrics["free_roll_conversion"] = free_roll_res
+                                    if hasattr(alert, "record_audit"):
+                                        alert.record_audit(
+                                            event_type="FREE_ROLL_WING_LOCK_ELIGIBLE",
+                                            message=free_roll_res.get("recommendation", ""),
+                                            actor="AUTO_ALERT_ENGINE",
+                                            details={
+                                                "eligible": True,
+                                                "action": "CONVERT_TO_FREE_ROLL",
+                                            },
+                                        )
+                                    self._save()
+
+                                self._dispatch(alert)
+                                updated_alerts.append(alert)
+                                logger.info(
+                                    f"[AutoAlertEngine] Alert {alert.alert_id} free-roll milestone: {free_roll_res.get('recommendation')}"
+                                )
+                                continue
+                        except Exception as e_fr:
+                            logger.debug(
+                                f"[AutoAlertEngine] Free-roll eval error for {alert.symbol}: {e_fr}"
+                            )
 
                 # Fast delta filter: skip redundant evaluation if price hasn't shifted significantly
                 # and price is far from stop_loss and target levels

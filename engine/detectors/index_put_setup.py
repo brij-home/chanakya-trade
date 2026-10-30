@@ -2792,6 +2792,9 @@ def detect_index_put_setup(
         dte=dte,
     )
     iv_skew = compute_options_iv_skew(chain, spot, clean_sym)
+    from market.options import compute_chain_gex
+
+    gex_data = compute_chain_gex(chain, spot, underlying=clean_sym, lot_size=lot_sz)
 
     iv_val = max(0.10, (vix_val / 100.0) if vix_val else 0.14)
     from engine.options_backtest import bs_delta
@@ -2882,7 +2885,16 @@ def detect_index_put_setup(
         rr_spread = round(max_profit / max(1.0, max_loss), 2)
 
         now_time = now_dt.time()
-        is_midday_chop_window = (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 70)
+        is_midday_chop_window = (dtime(11, 15) <= now_time <= dtime(13, 15)) or (
+            (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 70)
+        )
+        is_terminal_mis_closeout = now_time >= dtime(14, 45)
+
+        net_gex = gex_data.get("net_gex", 0.0) if gex_data else 0.0
+        gex_regime = gex_data.get("gamma_regime", "NEUTRAL") if gex_data else "NEUTRAL"
+        gex_flip = gex_data.get("gex_flip_strike", 0.0) if gex_data else 0.0
+        is_dealer_long_gamma_pin = (gex_regime == "POSITIVE_GAMMA_PIN") and (net_gex > 0)
+        is_dealer_short_gamma_accel = gex_regime == "NEGATIVE_GAMMA_ACCELERATION"
 
         # 0DTE Expiry Check:
         is_0dte = False
@@ -2930,9 +2942,24 @@ def detect_index_put_setup(
                 "⚠️ 0DTE MIDDAY THETA TRAP (11:30–14:00 IST): Naked option buying strictly prohibited on expiry day; "
                 "execute defined-risk Bear Put Spread only to eliminate theta bleed."
             )
+        elif is_dealer_long_gamma_pin and (
+            abs(spot - gex_flip) / max(1.0, spot) < 0.0075
+            or abs(spot - strike) / max(1.0, spot) < 0.0075
+        ):
+            pref_veh = "SPREAD_ONLY"
+            spread_guidance = (
+                f"⚠️ POSITIVE DEALER GAMMA PIN (Net GEX +₹{net_gex / 1e7:,.1f} Cr): Dealers hedging counter-trend; index pinned near {gex_flip:,.0f}. "
+                "Naked puts suffer heavy theta decay; Bear Put Spread required."
+            )
         elif is_midday_chop_window:
             pref_veh = "HEDGED_SPREAD"
-            spread_guidance = "⚠️ MIDDAY CHOP WINDOW: Execute Bear Put Spread to avoid theta decay."
+            spread_guidance = "⚠️ MIDDAY CHOP WINDOW (11:15–13:15 IST): Execute Bear Put Spread to avoid theta decay."
+        elif is_dealer_short_gamma_accel and spot <= gex_flip:
+            pref_veh = "NAKED_OPTION_OR_SPREAD"
+            spread_guidance = (
+                f"🚀 NEGATIVE DEALER GAMMA ACCELERATION (Net GEX -₹{abs(net_gex) / 1e7:,.1f} Cr): Dealers short gamma below {gex_flip:,.0f}; "
+                "pro-trend dealer hedging fuels explosive downside cascade."
+            )
         else:
             pref_veh = "NAKED_OPTION_OR_SPREAD"
             spread_guidance = "High Momentum: Fast scalpers can trade Naked PE; for defined risk, trade Bear Put Spread."
@@ -3004,11 +3031,19 @@ def detect_index_put_setup(
                 or is_0dte_late_session
                 or is_put_wall_collision
                 or is_long_dated_monthly
+                or (is_dealer_long_gamma_pin and pref_veh == "SPREAD_ONLY")
             )
             and hedge_plan is not None
         )
 
     # ── Optimal Trade Entry (OTE) & No-Chase Guard ───────────────
+    if is_terminal_mis_closeout and not is_spread_mandated:
+        logger.info(
+            f"[IndexPutSetup] Suppressed intraday naked PE on {clean_sym}: "
+            "Terminal Closeout Phase post 14:45 IST (MIS Auto Square-Off threshold)."
+        )
+        return []
+
     if (
         is_low_vix_range or is_0dte_midday_trap or is_0dte_late_session or is_put_wall_collision
     ) and not hedge_plan:

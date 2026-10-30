@@ -1491,3 +1491,146 @@ def evaluate_spread_in_flight(
         )
 
     return None
+
+
+# ── Benchmark Heavyweight Correlation Shield ──────────────────────────────
+
+NIFTY_HEAVYWEIGHTS: dict[str, float] = {
+    "RELIANCE": 0.095,
+    "HDFCBANK": 0.115,
+    "ICICIBANK": 0.082,
+    "INFY": 0.058,
+    "TCS": 0.042,
+    "ITC": 0.038,
+    "LT": 0.036,
+    "AXISBANK": 0.033,
+    "KOTAKBANK": 0.030,
+    "BHARTIARTL": 0.032,
+    "SBIN": 0.028,
+}
+
+BANKNIFTY_HEAVYWEIGHTS: dict[str, float] = {
+    "HDFCBANK": 0.28,
+    "ICICIBANK": 0.23,
+    "AXISBANK": 0.11,
+    "KOTAKBANK": 0.10,
+    "SBIN": 0.09,
+    "INDUSINDBK": 0.05,
+    "FEDERALBNK": 0.03,
+    "PNB": 0.025,
+}
+
+
+def audit_heavyweight_correlation_shield(
+    symbol: str,
+    direction: str = "BULLISH",
+    active_alerts: Optional[list[Any]] = None,
+    open_positions: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """
+    Evaluates whether entering a directional stock option (e.g. RELIANCE CE or HDFCBANK CE)
+    creates an unhedged double-leveraged correlated exposure with an active Index derivative.
+
+    Institutional Invariant:
+      If a trader holds/targets an active long NIFTY or BANKNIFTY call/put, concurrent naked
+      calls/puts on its heavyweights (e.g. RELIANCE, HDFCBANK) introduce correlated double-leverage.
+      A sudden index reversal inflicts simultaneous compounding losses on both positions.
+
+    Enforcement:
+      - Mandatory Defined-Risk Spread (HEDGED_SPREAD_MANDATORY) on the stock option.
+      - 50% position sizing haircut.
+    """
+    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").replace("NFO:", "").strip()
+    norm_dir = "BULLISH" if direction.upper() in ("BULLISH", "BUY", "LONG", "CE") else "BEARISH"
+
+    correlated_index = None
+    weight_pct = 0.0
+
+    if clean_sym in BANKNIFTY_HEAVYWEIGHTS:
+        correlated_index = "BANKNIFTY"
+        weight_pct = round(BANKNIFTY_HEAVYWEIGHTS[clean_sym] * 100.0, 1)
+    elif clean_sym in NIFTY_HEAVYWEIGHTS:
+        correlated_index = "NIFTY"
+        weight_pct = round(NIFTY_HEAVYWEIGHTS[clean_sym] * 100.0, 1)
+
+    if not correlated_index:
+        return {
+            "shield_triggered": False,
+            "symbol": clean_sym,
+            "direction": norm_dir,
+            "correlated_index": None,
+            "weight_pct": 0.0,
+            "enforcement": "STANDARD_SIZING",
+            "haircut_multiplier": 1.0,
+            "warning": None,
+        }
+
+    has_active_index_exposure = False
+    active_sources: list[str] = []
+
+    if active_alerts:
+        for a in active_alerts:
+            a_sym = str(
+                (a.get("symbol", "") if isinstance(a, dict) else getattr(a, "symbol", "")) or ""
+            ).upper()
+            if correlated_index in a_sym or (correlated_index == "NIFTY" and "NIFTY 50" in a_sym):
+                raw_dir = (
+                    a.get("direction", "BULLISH")
+                    if isinstance(a, dict)
+                    else getattr(a, "direction", "BULLISH")
+                )
+                a_dir = (
+                    "BULLISH"
+                    if str(raw_dir or "BULLISH").upper() in ("BULLISH", "BUY", "LONG", "CE")
+                    else "BEARISH"
+                )
+                is_inv = (
+                    a.get("is_invalidated", False)
+                    if isinstance(a, dict)
+                    else getattr(a, "is_invalidated", False)
+                )
+                if a_dir == norm_dir and not is_inv:
+                    has_active_index_exposure = True
+                    alt_id = (
+                        a.get("alert_id", a_sym)
+                        if isinstance(a, dict)
+                        else getattr(a, "alert_id", a_sym)
+                    )
+                    active_sources.append(f"Alert {alt_id}")
+                    break
+
+    if not has_active_index_exposure and open_positions:
+        for pos_sym, pos_data in open_positions.items():
+            pos_upper = str(pos_sym).upper()
+            if correlated_index in pos_upper:
+                has_active_index_exposure = True
+                active_sources.append(f"Position {pos_sym}")
+                break
+
+    if has_active_index_exposure:
+        warning_msg = (
+            f"Active {correlated_index} {norm_dir} exposure detected (~{weight_pct:.1f}% weight in {clean_sym}). "
+            f"Concurrent naked {clean_sym} option creates double-leveraged correlated ruin risk. "
+            "Defined-risk spread (HEDGED_SPREAD) strictly mandated with 50% position haircut."
+        )
+        return {
+            "shield_triggered": True,
+            "symbol": clean_sym,
+            "direction": norm_dir,
+            "correlated_index": correlated_index,
+            "weight_pct": weight_pct,
+            "enforcement": "HEDGED_SPREAD_MANDATORY",
+            "haircut_multiplier": 0.50,
+            "warning": warning_msg,
+        }
+
+    return {
+        "shield_triggered": False,
+        "symbol": clean_sym,
+        "direction": norm_dir,
+        "correlated_index": correlated_index,
+        "weight_pct": weight_pct,
+        "enforcement": "STANDARD_SIZING",
+        "haircut_multiplier": 1.0,
+        "warning": None,
+    }

@@ -861,6 +861,8 @@ def generate_execution_ticket(
     order_type: str = "LIMIT",
     conviction_tier: Optional[str] = None,
     execution_friction_badge: Optional[str] = None,
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     Builds a capital-calibrated, ready-to-execute institutional order ticket.
@@ -894,9 +896,22 @@ def generate_execution_ticket(
 
     side = "BUY" if direction.upper() in ("BULLISH", "BUY", "LONG") else "SELL"
 
-    # Strict Limit Mandate: wide bid-ask spread or option orders mandate LIMIT orders
+    # Strict Limit & Midpoint Enforcer for F&O derivatives
+    is_opt = (
+        is_fno
+        or any(token in clean_sym for token in ("CE", "PE", "CALL", "PUT"))
+        or (alert_type and "OPTION" in alert_type.upper())
+    )
     final_order_type = order_type
     ticket_notes = res.notes
+    final_limit_price = round(entry_price, 2)
+    midpoint_price = None
+
+    if is_opt and str(final_order_type).upper() == "MARKET":
+        final_order_type = "LIMIT"
+        f_note = "Market order prohibited on F&O options; converted to LIMIT"
+        ticket_notes = f"{ticket_notes} | {f_note}" if ticket_notes else f_note
+
     if execution_friction_badge and (
         "STRICT LIMIT" in execution_friction_badge.upper()
         or "WIDE SPREAD" in execution_friction_badge.upper()
@@ -904,6 +919,18 @@ def generate_execution_ticket(
         final_order_type = "LIMIT"
         f_note = "Strict LIMIT order enforced due to wide bid-ask spread"
         ticket_notes = f"{ticket_notes} | {f_note}" if ticket_notes else f_note
+
+    if bid is not None and ask is not None and bid > 0 and ask > 0:
+        midpoint_price = round((bid + ask) / 2.0, 2)
+        spread_pct = round(((ask - bid) / ask) * 100.0, 2)
+        if spread_pct > 1.8 or is_opt:
+            final_order_type = "LIMIT"
+            final_limit_price = midpoint_price
+            f_note = f"Pegged to midpoint limit ₹{midpoint_price:,.2f} ({spread_pct:.1f}% B/A spread) to eliminate slippage"
+            ticket_notes = f"{ticket_notes} | {f_note}" if ticket_notes else f_note
+
+    # Tick-size quantization (0.05 standard NSE/NFO)
+    final_limit_price = round(round(final_limit_price / 0.05) * 0.05, 2)
 
     # Generate Smart Order Router (SOR) execution plan
     from engine.smart_order_router import build_smart_execution_plan
@@ -920,7 +947,10 @@ def generate_execution_ticket(
         "symbol": clean_sym,
         "side": side,
         "order_type": final_order_type,
-        "limit_price": round(entry_price, 2),
+        "limit_price": final_limit_price,
+        "bid": bid,
+        "ask": ask,
+        "midpoint_price": midpoint_price,
         "shares": res.shares,
         "lots": res.lots,
         "lot_size": res.lot_size,
