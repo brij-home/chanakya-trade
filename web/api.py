@@ -3932,6 +3932,64 @@ async def get_stock_profile(symbol: str):
         raise _HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/scanners/coiling-squeezes", tags=["Scanners", "Quant"])
+async def get_coiling_squeezes():
+    """
+    Get top compressed F&O setups coiled in Bollinger-Keltner TTM Squeeze,
+    calibrated from 95-day historical dataset and live intraday metrics.
+    """
+    try:
+        import json
+        from pathlib import Path
+
+        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        squeezes = []
+        gen_at = None
+        if cal_path.exists():
+            with open(cal_path, "r", encoding="utf-8") as f:
+                cal_data = json.load(f)
+            squeezes = cal_data.get("fno_coiling_squeezes", [])
+            gen_at = cal_data.get("generated_at")
+        return {
+            "status": "success",
+            "total_coiling": len(squeezes),
+            "candidates": squeezes,
+            "generated_at": gen_at,
+        }
+    except Exception as exc:
+        logger.error(f"[API] Failed to get coiling squeezes: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/calibration/metrics", tags=["Observability", "Quant"])
+async def get_calibration_metrics():
+    """
+    Get empirical 95-day historical calibration metrics including
+    TOD volume profiles, CPR geometry distributions, ADRs, and 5m ATRs.
+    """
+    try:
+        import json
+        from pathlib import Path
+
+        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        if not cal_path.exists():
+            return {"status": "UNAVAILABLE", "message": "Calibration file not found"}
+        with open(cal_path, "r", encoding="utf-8") as f:
+            cal_data = json.load(f)
+        return {
+            "status": "success",
+            "version": cal_data.get("version"),
+            "generated_at": cal_data.get("generated_at"),
+            "provenance": cal_data.get("provenance"),
+            "indices": cal_data.get("indices"),
+            "fno_stock_count": len(cal_data.get("fno_stocks", {})),
+            "coiling_squeezes_count": len(cal_data.get("fno_coiling_squeezes", [])),
+        }
+    except Exception as exc:
+        logger.error(f"[API] Failed to get calibration metrics: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/api/v1/tools/position-size", tags=["Tools"])
 async def post_position_sizing(req: _Request):
     """

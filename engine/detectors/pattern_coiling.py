@@ -51,6 +51,16 @@ def detect_learned_pattern_coiling(
             )
             return None
 
+        # Gate 31: Institutional Index Tide Gate
+        from engine.market_regime_gate import evaluate_index_tide_gate
+
+        tide_res = evaluate_index_tide_gate(symbol, direction="BULLISH", ltp=ltp)
+        if tide_res.is_vetoed:
+            logger.info(
+                f"[PatternCoiling] Gating alert for {symbol}: Under Index Tide Veto ({tide_res.veto_reason})"
+            )
+            return None
+
         res = pattern_learning_engine.evaluate_candidate(
             symbol=symbol, df=df, chain=None, ltp=ltp, allow_network=False
         )
