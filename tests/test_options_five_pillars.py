@@ -628,3 +628,69 @@ def test_midpoint_limit_order_enforcer_in_position_sizer():
     assert ticket_midpoint["limit_price"] == 45.0  # (42 + 48) / 2
     assert ticket_midpoint["midpoint_price"] == 45.0
     assert "Pegged to midpoint limit" in ticket_midpoint["notes"]
+
+
+def test_dealer_delta_exposure_dex_calculation():
+    """Verify Analytical Black-Scholes Dealer Delta Exposure (DEX) in analysis.gex and market.options."""
+    from analysis.gex import _bs_delta, compute_dex_at_strike, classify_dex_regime
+    from market.options import compute_chain_gex
+    from types import SimpleNamespace
+
+    # 1. Delta & DEX computation
+    spot = 24500.0
+    strike = 24500.0
+    call_delta = _bs_delta(spot, strike, dte_days=4, iv_pct=14.0, is_call=True)
+    put_delta = _bs_delta(spot, strike, dte_days=4, iv_pct=14.0, is_call=False)
+    assert 0.45 <= call_delta <= 0.55
+    assert -0.55 <= put_delta <= -0.45
+
+    # Dealer DEX: Dealer short calls has -delta, short puts has +delta
+    call_dex = compute_dex_at_strike(
+        oi=100000, delta=call_delta, spot=spot, lot_size=25, is_call=True
+    )
+    put_dex = compute_dex_at_strike(
+        oi=100000, delta=put_delta, spot=spot, lot_size=25, is_call=False
+    )
+    assert call_dex < 0.0  # Dealer short calls
+    assert put_dex > 0.0  # Dealer short puts
+
+    # 2. DEX neutral level and regime classification
+    assert classify_dex_regime(-100.0) == "DEALER_NET_SHORT_DELTA"
+    assert classify_dex_regime(100.0) == "DEALER_NET_LONG_DELTA"
+    assert classify_dex_regime(0.0) == "DEALER_DELTA_NEUTRAL"
+
+    # 3. Full chain DEX integration in market.options.compute_chain_gex
+    chain = [
+        SimpleNamespace(
+            strike=24500.0,
+            option_type="CE",
+            oi=250000,
+            iv=14.0,
+            last_price=80.0,
+            expiry="2026-11-05",
+        ),
+        SimpleNamespace(
+            strike=24500.0,
+            option_type="PE",
+            oi=100000,
+            iv=14.0,
+            last_price=75.0,
+            expiry="2026-11-05",
+        ),
+        SimpleNamespace(
+            strike=24600.0,
+            option_type="CE",
+            oi=200000,
+            iv=14.5,
+            last_price=35.0,
+            expiry="2026-11-05",
+        ),
+    ]
+    gex_res = compute_chain_gex(chain, spot=24500.0, underlying="NIFTY", lot_size=25)
+    assert "net_dex" in gex_res
+    assert "call_dex" in gex_res
+    assert "put_dex" in gex_res
+    assert "dex_regime" in gex_res
+    assert "dex_neutral_strike" in gex_res
+    assert gex_res["call_dex"] < 0.0
+    assert gex_res["put_dex"] > 0.0

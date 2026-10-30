@@ -1376,8 +1376,11 @@ def compute_chain_gex(
             resolved_lot = 1
 
     strike_gex: dict[float, float] = defaultdict(float)
+    strike_dex: dict[float, float] = defaultdict(float)
     total_call_gex = 0.0
     total_put_gex = 0.0
+    total_call_dex = 0.0
+    total_put_dex = 0.0
     analyzed_count = 0
     now = datetime.now(timezone.utc)
 
@@ -1433,12 +1436,25 @@ def compute_chain_gex(
         # Notional Rupee Gamma Exposure
         notional_gamma = gamma_val * (spot**2) * 0.01 * oi * resolved_lot
 
+        # Analytical Black-Scholes Dealer Delta Exposure (DEX in Crores)
+        try:
+            cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
+            delta_val = cdf_d1 if opt_type == "CE" else (cdf_d1 - 1.0)
+            dealer_delta = -delta_val if opt_type == "CE" else (1.0 - delta_val)
+            dex_cr = (dealer_delta * spot * oi * resolved_lot) / 1e7
+        except Exception:
+            dex_cr = 0.0
+
         if opt_type == "CE":
             total_call_gex += notional_gamma
             strike_gex[strike] += notional_gamma
+            total_call_dex += dex_cr
+            strike_dex[strike] += dex_cr
         else:
             total_put_gex += notional_gamma
             strike_gex[strike] -= notional_gamma
+            total_put_dex += dex_cr
+            strike_dex[strike] += dex_cr
 
         analyzed_count += 1
 
@@ -1457,6 +1473,23 @@ def compute_chain_gex(
 
     is_acceleration = net_gex < 0 or (net_gex >= 0 and spot < flip_strike)
 
+    net_dex = total_call_dex + total_put_dex
+    dex_regime = (
+        "DEALER_NET_LONG_DELTA"
+        if net_dex > 25.0
+        else ("DEALER_NET_SHORT_DELTA" if net_dex < -25.0 else "DEALER_DELTA_NEUTRAL")
+    )
+
+    # Compute DEX Neutral Strike (where cumulative dealer delta crosses zero)
+    sorted_dex_strikes = sorted(strike_dex.keys())
+    cum_dex = 0.0
+    dex_neutral_strike = spot
+    for s in sorted_dex_strikes:
+        cum_dex += strike_dex[s]
+        if cum_dex >= 0:
+            dex_neutral_strike = s
+            break
+
     return {
         "net_gex": round(net_gex, 2),
         "call_gex": round(total_call_gex, 2),
@@ -1464,6 +1497,11 @@ def compute_chain_gex(
         "gamma_regime": regime,
         "gex_flip_strike": round(flip_strike, 2),
         "is_acceleration_zone": bool(is_acceleration),
+        "net_dex": round(net_dex, 2),
+        "call_dex": round(total_call_dex, 2),
+        "put_dex": round(total_put_dex, 2),
+        "dex_regime": dex_regime,
+        "dex_neutral_strike": round(dex_neutral_strike, 2),
         "contracts_analyzed": analyzed_count,
     }
 

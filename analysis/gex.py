@@ -107,6 +107,75 @@ def _bs_charm(
         return put_charm / 365.0
 
 
+def _bs_delta(
+    spot: float,
+    strike: float,
+    dte_days: int,
+    iv_pct: float,
+    is_call: bool,
+    rate: float = RISK_FREE_RATE,
+) -> float:
+    """Analytical Black-Scholes Delta calculation."""
+    if spot <= 0 or strike <= 0:
+        return 0.0
+    t_years = max(1.0 / 365.0, dte_days / 365.0)
+    sigma = max(0.05, min(3.0, (iv_pct / 100.0) if iv_pct > 0 else 0.15))
+    sqrt_t = math.sqrt(t_years)
+    denom = sigma * sqrt_t
+    if denom <= 0:
+        return 0.0
+    d1 = (math.log(spot / strike) + (rate + 0.5 * sigma * sigma) * t_years) / denom
+    cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
+    return cdf_d1 if is_call else (cdf_d1 - 1.0)
+
+
+def compute_dex_at_strike(
+    oi: int,
+    delta: float,
+    spot: float,
+    lot_size: int,
+    is_call: bool,
+) -> float:
+    """
+    Compute Rupee Dealer Delta Exposure (DEX) in Crores for a single strike.
+
+    Dealers take the opposing side of client positions:
+      - Call: Client is long call (+delta), dealer is short call (-delta).
+        Dealer DEX (Cr) = -delta * spot * oi * lot_size / 1e7
+      - Put: Client is long put (-delta), dealer is short put (+delta = -(delta - 1) = 1 - delta).
+        Dealer DEX (Cr) = (1.0 - delta) * spot * oi * lot_size / 1e7
+    """
+    if oi <= 0 or spot <= 0 or lot_size <= 0:
+        return 0.0
+    dealer_delta = -delta if is_call else (1.0 - delta)
+    dex_cr = dealer_delta * spot * oi * lot_size / 1e7
+    return round(dex_cr, 2)
+
+
+def find_dex_neutral(dex_by_strike: List[Tuple[float, float]]) -> Optional[float]:
+    """Find the interpolated strike level where cumulative dealer delta crosses zero."""
+    if len(dex_by_strike) < 2:
+        return None
+    for i in range(1, len(dex_by_strike)):
+        prev_strike, prev_dex = dex_by_strike[i - 1]
+        curr_strike, curr_dex = dex_by_strike[i]
+        if (prev_dex > 0 and curr_dex <= 0) or (prev_dex < 0 and curr_dex >= 0):
+            if prev_dex != curr_dex:
+                ratio = abs(prev_dex) / (abs(prev_dex) + abs(curr_dex))
+                return round(prev_strike + ratio * (curr_strike - prev_strike), 1)
+            return round(curr_strike, 1)
+    return None
+
+
+def classify_dex_regime(total_dex: float, threshold: float = 50.0) -> str:
+    """Classify institutional dealer delta hedging regime."""
+    if total_dex > threshold:
+        return "DEALER_NET_LONG_DELTA"
+    elif total_dex < -threshold:
+        return "DEALER_NET_SHORT_DELTA"
+    return "DEALER_DELTA_NEUTRAL"
+
+
 def compute_gex_at_strike(
     oi: int,
     gamma: float,
@@ -299,6 +368,12 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
             put_gex = compute_gex_at_strike(row["pe_oi"], gamma, spot, lot_size, is_call=False)
             net_gex = round(call_gex + put_gex, 2)
 
+            call_delta = _bs_delta(spot, k, dte_days, row["ce_iv"], is_call=True)
+            put_delta = _bs_delta(spot, k, dte_days, row["pe_iv"], is_call=False)
+            call_dex = compute_dex_at_strike(row["ce_oi"], call_delta, spot, lot_size, is_call=True)
+            put_dex = compute_dex_at_strike(row["pe_oi"], put_delta, spot, lot_size, is_call=False)
+            net_dex = round(call_dex + put_dex, 2)
+
             call_vex = compute_vex_at_strike(row["ce_oi"], vanna, spot, lot_size, is_call=True)
             put_vex = compute_vex_at_strike(row["pe_oi"], vanna, spot, lot_size, is_call=False)
             net_vex = round(call_vex + put_vex, 2)
@@ -315,9 +390,14 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
                     "put_charm": float(f"{put_charm:.6f}"),
                     "ce_oi": row["ce_oi"],
                     "pe_oi": row["pe_oi"],
+                    "call_delta": float(f"{call_delta:.4f}"),
+                    "put_delta": float(f"{put_delta:.4f}"),
                     "call_gex_cr": call_gex,
                     "put_gex_cr": put_gex,
                     "net_gex_cr": net_gex,
+                    "call_dex_cr": call_dex,
+                    "put_dex_cr": put_dex,
+                    "net_dex_cr": net_dex,
                     "call_vex_cr": call_vex,
                     "put_vex_cr": put_vex,
                     "net_vex_cr": net_vex,
@@ -329,6 +409,13 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
         total_call_gex = round(sum(s["call_gex_cr"] for s in gex_strip), 2)
         total_put_gex = round(sum(s["put_gex_cr"] for s in gex_strip), 2)
         total_net_gex = round(total_call_gex + total_put_gex, 2)
+
+        total_call_dex = round(sum(s["call_dex_cr"] for s in gex_strip), 2)
+        total_put_dex = round(sum(s["put_dex_cr"] for s in gex_strip), 2)
+        total_net_dex = round(total_call_dex + total_put_dex, 2)
+        dex_regime = classify_dex_regime(total_net_dex)
+        dex_tuples = [(s["strike"], s["net_dex_cr"]) for s in gex_strip]
+        dex_neutral = find_dex_neutral(dex_tuples)
 
         total_call_vex = round(sum(s["call_vex_cr"] for s in gex_strip), 2)
         total_put_vex = round(sum(s["put_vex_cr"] for s in gex_strip), 2)
@@ -388,6 +475,11 @@ def get_gex_analysis(underlying: str, expiry: Optional[str] = None) -> Dict[str,
             "total_net_gex_cr": total_net_gex,
             "total_call_gex_cr": total_call_gex,
             "total_put_gex_cr": total_put_gex,
+            "total_net_dex_cr": total_net_dex,
+            "total_call_dex_cr": total_call_dex,
+            "total_put_dex_cr": total_put_dex,
+            "dex_regime": dex_regime,
+            "dex_neutral_level": dex_neutral,
             "total_net_vex_cr": total_net_vex,
             "total_call_vex_cr": total_call_vex,
             "total_put_vex_cr": total_put_vex,
