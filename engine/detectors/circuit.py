@@ -60,6 +60,7 @@ def detect_circuit_proximity(
                 f"the ₹{upper_circuit:,.1f} circuit ceiling. Limit entry before buyer lock; T1 continuation ₹{t1_price:,.1f}."
             ),
             ltp=ltp,
+            underlying_spot=ltp,
             trigger_level=upper_circuit,
             target_level=t1_price,
             stop_loss=sl_price,

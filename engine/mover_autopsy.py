@@ -248,7 +248,7 @@ class MoverAutopsyEngine:
             "HINDUNILVR",
             "ITC",
             "NESTLEIND",
-            "ZOMATO",
+            "ETERNAL",
         ]
 
     def fetch_daily_movers_and_control(

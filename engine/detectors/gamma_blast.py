@@ -353,12 +353,19 @@ def detect_gamma_blast(
             max_pe_oi_chg = int(getattr(p_obj, "oi_change", 0) or 0)
 
     # ── Analyze CALL Gamma Blast (Bullish Upside Explosion) ───
+    # Prioritize liquid ATM / Near-ATM strikes: Sort by distance to spot, then by turnover volume
+    ce_contracts.sort(
+        key=lambda c_cand: (
+            abs(float(getattr(c_cand, "strike", 0.0) or 0.0) - spot),
+            -int(getattr(c_cand, "volume", 0) or 0),
+        )
+    )
     for c in ce_contracts:
         strike = getattr(c, "strike", 0.0)
         strike_diff_pct = ((strike - spot) / spot) * 100.0
-        # Delta-Gated Sweet-Spot Filter: Indices demand ATM/Near-ATM (<= 0.6%), equities allow up to 1.2%
-        max_call_otm = 0.6 if is_index else 1.2
-        max_call_itm = 0.6 if is_index else 0.8
+        # Delta-Gated Sweet-Spot Filter: Indices demand ATM/Near-ATM (<= 0.25%), equities allow up to 1.2%
+        max_call_otm = 0.35 if is_index else 1.2
+        max_call_itm = 0.25 if is_index else 0.8
         if not (-max_call_itm <= strike_diff_pct <= max_call_otm):
             continue
 
@@ -924,6 +931,23 @@ def detect_gamma_blast(
                 else f"Book 50% at T1 (₹{target_premium:,.2f}), move SL to Cost."
             )
 
+            clean_und = canonical_alert_symbol(underlying or "")
+            index_spot_fallback = {
+                "SENSEX": 160.0,
+                "BANKEX": 150.0,
+                "BANKNIFTY": 110.0,
+                "FINNIFTY": 45.0,
+                "MIDCPNIFTY": 28.0,
+                "NIFTY": 50.0,
+            }.get(clean_und, max(1.0, round(spot * 0.005, 1)))
+
+            structural_spot_sl_ce = (
+                float(getattr(tp, "invalidation_stop", 0.0) or 0.0)
+                if tp and getattr(tp, "invalidation_stop", None)
+                else round(spot - index_spot_fallback, 1)
+            )
+            disaster_stop_ce = round(opt_ltp * 0.68, 1) if opt_ltp else None
+
             alerts.append(
                 AutoAlert(
                     alert_id=generate_alert_id(
@@ -942,6 +966,10 @@ def detect_gamma_blast(
                     trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
                     target_level=target_premium,
                     stop_loss=sl_premium,
+                    tactical_sl=sl_premium,
+                    structural_spot_sl=structural_spot_sl_ce,
+                    underlying_sl=structural_spot_sl_ce,
+                    disaster_stop_floor=disaster_stop_ce,
                     no_chase_boundary=no_chase_ce,
                     strike=strike,
                     option_type="CE",
@@ -960,6 +988,10 @@ def detect_gamma_blast(
                     in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
                     else "FNO_STOCK",
                     metrics={
+                        "structural_spot_sl": structural_spot_sl_ce,
+                        "underlying_sl": structural_spot_sl_ce,
+                        "spot_invalidation_anchor": structural_spot_sl_ce,
+                        "tactical_sl": sl_premium,
                         "strike": strike,
                         "oi": oi,
                         "oi_change": oi_change,
@@ -1040,9 +1072,15 @@ def detect_gamma_blast(
                         "expiry_date": exp_date,
                         "expiry_type": exp_type,
                         "underlying_spot": f"₹{spot:,.1f}",
-                        "recommended_entry": f"₹{opt_ltp:,.2f} (OTE Pullback: {entry_range_ce})"
-                        if opt_ltp
-                        else "Market",
+                        "recommended_entry": (
+                            f"LIMIT @ {entry_range_ce} (OTE Pullback) or STOP-LIMIT > ₹{no_chase_ce:,.1f}"
+                            if not is_ignited
+                            else (
+                                f"₹{opt_ltp:,.2f} (OTE Pullback: {entry_range_ce})"
+                                if opt_ltp
+                                else "Market"
+                            )
+                        ),
                         "entry_range": entry_range_ce,
                         "no_chase": f"DO NOT CHASE above ₹{no_chase_ce}",
                         "target_0_5": f"₹{opt_plan['t0_5_premium']:,.2f}"
@@ -1063,15 +1101,22 @@ def detect_gamma_blast(
                         if t3_premium
                         else f"₹{round(target_premium * 2.5, 2):,.2f}",
                         "stop_loss": f"₹{sl_premium:,.2f}",
+                        "tactical_sl": sl_premium,
+                        "structural_spot_sl": structural_spot_sl_ce,
+                        "spot_invalidation_anchor": structural_spot_sl_ce,
+                        "underlying_sl": structural_spot_sl_ce,
                         "execution_trigger": f"ABOVE_₹{opt_ltp:,.1f}_ON_1M_CLOSE"
                         if opt_ltp
                         else "ON_TRIGGER",
                         "confirmation_rule": "1_MIN_CANDLE_CLOSE_MANDATORY",
                         "execution_notes": (
-                            f"Wait for confirmed 1-min candle close above ₹{opt_ltp:,.1f} before market entry. "
-                            "Do not buy on unconfirmed spike wick."
-                            if opt_ltp
-                            else "Wait for candle confirmation."
+                            f"COILING DISCIPLINE: Consolidation pre-breakout. Do NOT buy market at CMP. Stage LIMIT order in OTE zone ({entry_range_ce}) on pullback retest, or STOP-LIMIT above range high (₹{no_chase_ce:,.1f}) on breakout."
+                            if not is_ignited
+                            else (
+                                f"Wait for confirmed 1-min candle close above ₹{opt_ltp:,.1f} before market entry. Do not buy on unconfirmed spike wick."
+                                if opt_ltp
+                                else "Wait for candle confirmation."
+                            )
                         ),
                         "risk_reward": rr_str,
                         "net_risk_reward": net_rr_ce,
@@ -1094,12 +1139,19 @@ def detect_gamma_blast(
             )
 
     # ── Analyze PUT Gamma Blast (Bearish Downside Panic) ───────
+    # Prioritize liquid ATM / Near-ATM strikes: Sort by distance to spot, then by turnover volume
+    pe_contracts.sort(
+        key=lambda c_cand: (
+            abs(float(getattr(c_cand, "strike", 0.0) or 0.0) - spot),
+            -int(getattr(c_cand, "volume", 0) or 0),
+        )
+    )
     for c in pe_contracts:
         strike = getattr(c, "strike", 0.0)
         strike_diff_pct = ((strike - spot) / spot) * 100.0
-        # Delta-Gated Sweet-Spot Filter: Indices demand ATM/Near-ATM (<= 0.6%), equities allow up to 1.2%
-        max_put_otm = 0.6 if is_index else 1.2
-        max_put_itm = 0.6 if is_index else 0.8
+        # Delta-Gated Sweet-Spot Filter: Indices demand ATM/Near-ATM (<= 0.25%), equities allow up to 1.2%
+        max_put_otm = 0.35 if is_index else 1.2
+        max_put_itm = 0.25 if is_index else 0.8
         if not (-max_put_otm <= strike_diff_pct <= max_put_itm):
             continue
 
@@ -1671,6 +1723,23 @@ def detect_gamma_blast(
                 else f"Book 50% at T1 (₹{target_premium:,.2f}), move SL to Cost."
             )
 
+            clean_und = canonical_alert_symbol(underlying or "")
+            index_spot_fallback = {
+                "SENSEX": 160.0,
+                "BANKEX": 150.0,
+                "BANKNIFTY": 110.0,
+                "FINNIFTY": 45.0,
+                "MIDCPNIFTY": 28.0,
+                "NIFTY": 50.0,
+            }.get(clean_und, max(1.0, round(spot * 0.005, 1)))
+
+            structural_spot_sl_pe = (
+                float(getattr(tp, "invalidation_stop", 0.0) or 0.0)
+                if tp and getattr(tp, "invalidation_stop", None)
+                else round(spot + index_spot_fallback, 1)
+            )
+            disaster_stop_pe = round(opt_ltp * 0.68, 1) if opt_ltp else None
+
             alerts.append(
                 AutoAlert(
                     alert_id=generate_alert_id(
@@ -1689,6 +1758,10 @@ def detect_gamma_blast(
                     trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
                     target_level=target_premium,
                     stop_loss=sl_premium,
+                    tactical_sl=sl_premium,
+                    structural_spot_sl=structural_spot_sl_pe,
+                    underlying_sl=structural_spot_sl_pe,
+                    disaster_stop_floor=disaster_stop_pe,
                     no_chase_boundary=no_chase_pe,
                     strike=strike,
                     option_type="PE",
@@ -1707,6 +1780,10 @@ def detect_gamma_blast(
                     in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
                     else "FNO_STOCK",
                     metrics={
+                        "structural_spot_sl": structural_spot_sl_pe,
+                        "underlying_sl": structural_spot_sl_pe,
+                        "spot_invalidation_anchor": structural_spot_sl_pe,
+                        "tactical_sl": sl_premium,
                         "strike": strike,
                         "oi": oi,
                         "oi_change": oi_change,
@@ -1789,9 +1866,15 @@ def detect_gamma_blast(
                         "expiry_date": exp_date,
                         "expiry_type": exp_type,
                         "underlying_spot": f"₹{spot:,.1f}",
-                        "recommended_entry": f"₹{opt_ltp:,.2f} (OTE Pullback: {entry_range_pe})"
-                        if opt_ltp
-                        else "Market",
+                        "recommended_entry": (
+                            f"LIMIT @ {entry_range_pe} (OTE Pullback) or STOP-LIMIT < ₹{no_chase_pe:,.1f}"
+                            if not is_ignited
+                            else (
+                                f"₹{opt_ltp:,.2f} (OTE Pullback: {entry_range_pe})"
+                                if opt_ltp
+                                else "Market"
+                            )
+                        ),
                         "entry_range": entry_range_pe,
                         "no_chase": f"DO NOT CHASE above ₹{no_chase_pe}",
                         "target_0_5": f"₹{opt_plan['t0_5_premium']:,.2f}"
@@ -1812,15 +1895,22 @@ def detect_gamma_blast(
                         if t3_premium
                         else f"₹{round(target_premium * 2.5, 2):,.2f}",
                         "stop_loss": f"₹{sl_premium:,.2f}",
+                        "tactical_sl": sl_premium,
+                        "structural_spot_sl": structural_spot_sl_pe,
+                        "spot_invalidation_anchor": structural_spot_sl_pe,
+                        "underlying_sl": structural_spot_sl_pe,
                         "execution_trigger": f"ABOVE_₹{opt_ltp:,.1f}_ON_1M_CLOSE"
                         if opt_ltp
                         else "ON_TRIGGER",
                         "confirmation_rule": "1_MIN_CANDLE_CLOSE_MANDATORY",
                         "execution_notes": (
-                            f"Wait for confirmed 1-min candle close above ₹{opt_ltp:,.1f} before market entry. "
-                            "Do not buy on unconfirmed spike wick."
-                            if opt_ltp
-                            else "Wait for candle confirmation."
+                            f"COILING DISCIPLINE: Consolidation pre-breakout. Do NOT sell/buy market at CMP. Stage LIMIT order in OTE zone ({entry_range_pe}) on pullback retest, or STOP-LIMIT below range low (₹{no_chase_pe:,.1f}) on breakdown."
+                            if not is_ignited
+                            else (
+                                f"Wait for confirmed 1-min candle close above ₹{opt_ltp:,.1f} before market entry. Do not buy on unconfirmed spike wick."
+                                if opt_ltp
+                                else "Wait for candle confirmation."
+                            )
                         ),
                         "risk_reward": rr_str,
                         "net_risk_reward": net_rr_pe,

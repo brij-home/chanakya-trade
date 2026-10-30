@@ -41,6 +41,7 @@ def _is_fyers_sdk_available() -> bool:
     if _FYERS_APIV3_AVAILABLE is None:
         try:
             import fyers_apiv3  # noqa: F401
+
             _FYERS_APIV3_AVAILABLE = True
         except ImportError:
             _FYERS_APIV3_AVAILABLE = False

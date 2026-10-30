@@ -185,6 +185,7 @@ def detect_pre_inflection_dryup(
             headline=headline,
             summary=summary,
             ltp=ltp,
+            underlying_spot=ltp,
             trigger_level=fair_value,
             target_level=target_1,
             stop_loss=sl,

@@ -34,7 +34,6 @@ from engine.alert_identity import (
     canonical_alert_symbol,
 )
 from engine.alert_model import AutoAlert
-from engine.dynamic_risk import resolve_price_tier
 from market.instruments import format_strike
 
 logger = logging.getLogger("chanakya.detectors.trend_day_continuation")
@@ -314,18 +313,10 @@ def detect_trend_day_pullback(
             logger.debug(f"[TrendContinuation] TBT depth check skipped for {clean_sym}: {e_tbt}")
 
     # ── Stop Loss & Multi-Target Geometry (Structural Invalidation & Asymmetric R:R) ──
-    tier = resolve_price_tier(ltp)
-    abs_min_floor = tier.abs_min_risk_pts
+    # Dynamic Brownian noise floor & Stop Loss calibration (Invariant 38 SSOT)
+    from engine.dynamic_risk import get_dynamic_noise_floor
 
-    if is_index:
-        idx_floors = {
-            "NIFTY": 18.0,
-            "BANKNIFTY": 45.0,
-            "FINNIFTY": 20.0,
-            "MIDCPNIFTY": 14.0,
-            "SENSEX": 60.0,
-        }
-        abs_min_floor = max(abs_min_floor, idx_floors.get(clean_sym, 18.0))
+    abs_min_floor = get_dynamic_noise_floor(clean_sym, ltp=ltp, atr_5m=atr_5m, multiplier=1.20)
 
     if is_bull_pullback:
         # Structural Invalidation: Pullback swing low or 20-EMA support floor

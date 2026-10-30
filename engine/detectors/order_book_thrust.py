@@ -200,6 +200,7 @@ def detect_order_book_thrust(ctx: DetectionContext) -> list[AutoAlert]:
                             + (" | ⚡ Ask Resistance Fled (Bluff Cleared)." if fleeing_ask else "")
                         ),
                         ltp=curr_p,
+                        underlying_spot=curr_p,
                         trigger_level=curr_p,
                         target_level=t1,
                         stop_loss=sl,
@@ -305,6 +306,7 @@ def detect_order_book_thrust(ctx: DetectionContext) -> list[AutoAlert]:
                             + (" | ⚡ Bid Floor Fled (Rug-Pull Confirmed)." if fleeing_bid else "")
                         ),
                         ltp=curr_p,
+                        underlying_spot=curr_p,
                         trigger_level=curr_p,
                         target_level=t1,
                         stop_loss=sl,

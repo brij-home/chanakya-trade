@@ -18,7 +18,6 @@ Regression and institutional invariant tests for:
 """
 
 from datetime import datetime
-from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 import pytest
 
@@ -29,8 +28,16 @@ from bot.alert_templates import render_auto_alert
 IST = ZoneInfo("Asia/Kolkata")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_daily_levels(monkeypatch):
+    """Ensure Gamma Blast moneyness and strike selection unit tests are not suppressed by daily levels on disk."""
+    monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda sym, **kwargs: None)
+
+
 class MockOptionItem:
-    def __init__(self, strike, opt_type, last_price, oi=25000, oi_change=47900, volume=65000, pchange=15.0):
+    def __init__(
+        self, strike, opt_type, last_price, oi=25000, oi_change=47900, volume=65000, pchange=15.0
+    ):
         self.strike = float(strike)
         self.option_type = opt_type
         self.last_price = float(last_price)
@@ -57,9 +64,11 @@ def test_gamma_blast_blocks_deep_itm_and_prioritizes_atm():
 
     chain = [
         MockOptionItem(74100.0, "CE", 791.60, oi=12000, oi_change=47900, volume=70000),  # Deep ITM
-        MockOptionItem(74400.0, "CE", 540.0, oi=35000, oi_change=52000, volume=85000),   # 1-strike ITM
+        MockOptionItem(
+            74400.0, "CE", 540.0, oi=35000, oi_change=52000, volume=85000
+        ),  # 1-strike ITM
         MockOptionItem(74500.0, "CE", 470.0, oi=50000, oi_change=65000, volume=120000),  # ATM
-        MockOptionItem(75200.0, "CE", 120.0, oi=10000, oi_change=20000, volume=40000),   # Far OTM
+        MockOptionItem(75200.0, "CE", 120.0, oi=10000, oi_change=20000, volume=40000),  # Far OTM
     ]
 
     alerts = detect_gamma_blast(
@@ -74,12 +83,16 @@ def test_gamma_blast_blocks_deep_itm_and_prioritizes_atm():
 
     # None of the generated alerts should be the 4-strike deep ITM 74100 CE
     alert_strikes = [a.strike for a in alerts]
-    assert 74100.0 not in alert_strikes, "74100 CE (deep ITM) must be filtered out by moneyness boundary"
+    assert 74100.0 not in alert_strikes, (
+        "74100 CE (deep ITM) must be filtered out by moneyness boundary"
+    )
     assert 75200.0 not in alert_strikes, "75200 CE (far OTM) must be filtered out"
 
     # The highest priority alert must be ATM (74500) or Near-ATM (74400)
     primary_strike = alerts[0].strike
-    assert primary_strike in (74500.0, 74400.0), f"Expected ATM (74500) or Near-ATM (74400), got {primary_strike}"
+    assert primary_strike in (74500.0, 74400.0), (
+        f"Expected ATM (74500) or Near-ATM (74400), got {primary_strike}"
+    )
 
 
 def test_gamma_blast_wires_structural_spot_sl_and_candle_close():
@@ -146,9 +159,7 @@ def test_index_minimum_stop_distance_floor_in_trade_plan():
         timeframe="INTRADAY",
     )
     stop_dist_bn = tp_bn.entry_price - tp_bn.invalidation_stop
-    assert stop_dist_bn >= 110.0, (
-        f"BANKNIFTY stop distance {stop_dist_bn} must be >= 110.0"
-    )
+    assert stop_dist_bn >= 110.0, f"BANKNIFTY stop distance {stop_dist_bn} must be >= 110.0"
 
     # 3. NIFTY
     tp_nifty = calculate_trade_plan(
@@ -158,9 +169,7 @@ def test_index_minimum_stop_distance_floor_in_trade_plan():
         timeframe="INTRADAY",
     )
     stop_dist_nifty = tp_nifty.entry_price - tp_nifty.invalidation_stop
-    assert stop_dist_nifty >= 50.0, (
-        f"NIFTY stop distance {stop_dist_nifty} must be >= 50.0"
-    )
+    assert stop_dist_nifty >= 50.0, f"NIFTY stop distance {stop_dist_nifty} must be >= 50.0"
 
 
 def test_high_premium_index_option_execution_plan_volatility_floor():

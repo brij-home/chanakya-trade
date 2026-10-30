@@ -51,7 +51,9 @@ def detect_learned_pattern_coiling(
             )
             return None
 
-        res = pattern_learning_engine.evaluate_candidate(symbol=symbol, df=df, chain=None)
+        res = pattern_learning_engine.evaluate_candidate(
+            symbol=symbol, df=df, chain=None, ltp=ltp, allow_network=False
+        )
         if res.is_explosive_candidate:
             now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
@@ -150,6 +152,7 @@ def detect_learned_pattern_coiling(
                 headline=headline,
                 summary=summary,
                 ltp=ltp,
+                underlying_spot=ltp,
                 trigger_level=ltp,
                 target_level=t1,
                 stop_loss=sl,

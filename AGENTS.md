@@ -7,7 +7,7 @@
 
 <!-- TOC -->
 - [1. Project Overview & Component Map](#1-project-overview--component-map)
-- [2. Safety & Trading Guardrails (34 Core Invariants)](#2-safety--trading-guardrails-34-core-invariants)
+- [2. Safety & Trading Guardrails (38 Core Invariants)](#2-safety--trading-guardrails-38-core-invariants)
 - [3. LLM Model Hierarchy & Multi-Key Resilience](#3-llm-model-hierarchy--multi-key-resilience)
 - [4. Environment & Common Commands](#4-environment--common-commands)
 - [5. On-Demand Skills Directory](#5-on-demand-skills-directory)
@@ -35,7 +35,7 @@
 
 ---
 
-## 2. Safety & Trading Guardrails (34 Core Invariants)
+## 2. Safety & Trading Guardrails (38 Core Invariants)
 
 > **⚠️ Never commit `.env` — see [`config/credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) for secure token management.**
 
@@ -233,6 +233,14 @@
      - `BANKNIFTY`, `MIDCPNIFTY`, `FINNIFTY`, `BANKEX`, and single-stock equities offer **strictly MONTHLY** options (last Thursday/Wednesday of the month).
    - NEVER refer to, simulate, or apply 0DTE logic (afternoon theta cliff, breakeven lock, midday theta trap) on Monday, Tuesday, or Wednesday (unless it is the final monthly settlement day).
    - Mon–Wed trading sessions have ZERO weekly 0DTE index expiries; options traded on those days are monthly contracts with standard monthly Greeks and wider strike spacing.
+
+38. **Universal Dynamic Volatility & Invalidation Calibration (Zero Hardcoded Index Dictionaries & Zero Arbitrary Option Stops)**:
+    - **Structural Anchor Priority**: The primary invalidation stop-loss (SL) MUST be anchored to deterministic market structure on the underlying asset chart (SMC Order Block boundary, Fractal Swing Low/High, CPR boundary, or Institutional Writing Wall).
+    - **Zero Hardcoded Index Point Dictionaries**: Hardcoding ad-hoc index dictionaries (e.g. `index_min_stop_floor = {'NIFTY': 50.0, 'BANKNIFTY': 110.0}` or `idx_opt_floor`) is strictly prohibited. Microstructure noise floors MUST be resolved dynamically via `engine.dynamic_risk.get_dynamic_noise_floor` or `resolve_price_tier(ltp).abs_min_risk_pts` combined with realized 5m ATR (`1.25 × ATR_5m`) or Brownian square-root-of-time daily volatility (`sqrt(5/375) × Daily_ATR`).
+    - **Zero Static Option Percentage Stops**: Option exit levels MUST NOT be clamped to arbitrary percentages (e.g. static `-18%` or `-22%`), which distorts risk across different moneyness and days-to-expiry (DTE). Option stops MUST be derived from the underlying structural spot stop via second-order Taylor expansion (`ΔP ≈ Δ·ΔS + ½·Γ·ΔS² - Θ·Δt`).
+    - **Position Sizing as Capital Governor**: Never artificially squeeze the stop-loss distance to fit a trade into a retail account. Always scale position size (`shares` or `lots` via `engine.position_sizer.calculate_position_size`) downward to match the account's fixed risk mandate.
+    - **Shift-Left Invariant Guard**: Enforced statically via `tests/test_anti_pattern_and_hardcoding_invariants.py`.
+
 
 ---
 

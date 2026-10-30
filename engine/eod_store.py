@@ -1644,14 +1644,14 @@ def _download_chunk_yfinance(
 
     try:
         from analysis.universe import CORPORATE_ALIASES
-          except Exception as e:
-          logger.error(
-              f"[eod_store] CRITICAL: Cannot import CORPORATE_ALIASES from "
-              f"analysis.universe: {e}. "
-              "Corporate merger/demerger alias resolution DISABLED for this batch. "
-              "Fix the export in analysis/universe.py.",
-              exc_info=True,
-          )
+    except Exception as e:
+        logger.error(
+            f"[eod_store] CRITICAL: Cannot import CORPORATE_ALIASES from "
+            f"analysis.universe: {e}. "
+            "Corporate merger/demerger alias resolution DISABLED for this batch. "
+            "Fix the export in analysis/universe.py.",
+            exc_info=True,
+        )
         CORPORATE_ALIASES = {}
 
     ticker_to_syms: dict[str, list[str]] = {}

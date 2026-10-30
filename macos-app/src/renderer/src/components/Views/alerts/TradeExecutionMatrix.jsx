@@ -119,11 +119,29 @@ export function TradeExecutionMatrix({
       }
     }
 
-    // Economics
-    const netDebit = hedgedSpread.net_debit ?? hedgedSpread.net_cashflow ?? hedgedSpread.capital_required ?? (
-      buyLeg?.premium !== null && buyLeg?.premium !== undefined && sellLeg?.premium !== null && sellLeg?.premium !== undefined
-        ? Math.max(0.1, Math.round((buyLeg.premium - sellLeg.premium) * 100) / 100)
-        : null
+    // Economics — per-contract (per-unit) netDebit is the canonical display value.
+    // net_debit_per_unit is now exposed by DefinedRiskSpread.to_dict().
+    // net_cashflow is lot-level (per_unit × lot_size) — never display as "/ contract".
+    const lotSize = alert?.lot_size || hedgedSpread.lot_size || optPlan?.lot_size || null
+    const _lotSz = lotSize || 1
+    const netDebit = (
+      // prefer explicit per-unit field (added in Fix 3)
+      hedgedSpread.net_debit_per_unit
+        // if both leg premiums are known, direct calculation is the most accurate per-contract debit
+        ?? (buyLeg?.premium != null && sellLeg?.premium != null
+            ? Math.max(0.1, Math.round(Math.abs(buyLeg.premium - sellLeg.premium) * 100) / 100)
+            : null)
+        // derive per-unit from lot-level cashflow when lot_size is known
+        ?? (hedgedSpread.net_cashflow != null && lotSize
+            ? Math.round((hedgedSpread.net_cashflow / _lotSz) * 100) / 100
+            : null)
+        // legacy lot-level fallbacks (scale down by lotSize if lot-level total was passed)
+        ?? (hedgedSpread.net_debit != null && lotSize && hedgedSpread.net_debit > 50 && _lotSz > 1
+            ? Math.round((hedgedSpread.net_debit / _lotSz) * 100) / 100
+            : hedgedSpread.net_debit)
+        ?? (hedgedSpread.capital_required != null && lotSize && hedgedSpread.capital_required > 50 && _lotSz > 1
+            ? Math.round((hedgedSpread.capital_required / _lotSz) * 100) / 100
+            : hedgedSpread.capital_required)
     )
     const maxProfit = hedgedSpread.max_profit_pts ?? hedgedSpread.max_profit ?? (
       buyLeg?.strike && sellLeg?.strike && netDebit
@@ -135,17 +153,19 @@ export function TradeExecutionMatrix({
         ? `1:${hedgedSpread.risk_reward_ratio}`
         : (netDebit && maxProfit ? `1:${(maxProfit / netDebit).toFixed(1)}` : '1:2.5')
     )
-    const breakeven = hedgedSpread.breakeven_point ?? hedgedSpread.breakeven_spot ?? (
+    // Breakeven from server is in option-strike space (meaningful only when strikes are realistic).
+    // Suppress it for index options where strike domain > 10000 to avoid misleading values.
+    const _rawBreakeven = hedgedSpread.breakeven_point ?? hedgedSpread.breakeven_spot ?? (
       buyLeg?.strike && netDebit
         ? (isBull ? buyLeg.strike + netDebit : buyLeg.strike - netDebit)
         : null
     )
-    const lotSize = alert?.lot_size || hedgedSpread.lot_size || optPlan?.lot_size || null
-    const maxLoss = hedgedSpread.max_loss ?? (
-      netDebit && lotSize
-        ? Math.round(netDebit * lotSize)
-        : null
-    )
+    // Only surface breakeven when it's in a sensible range relative to the long leg strike
+    const breakeven = (_rawBreakeven && buyLeg?.strike && _rawBreakeven > 0 && _rawBreakeven < buyLeg.strike * 1.5)
+      ? _rawBreakeven
+      : null
+    const maxLoss = hedgedSpread.max_loss
+        ?? (netDebit && lotSize ? Math.round(netDebit * _lotSz) : null)
     const spreadName = hedgedSpread.spread_name || (
       hedgedSpread.strategy_name ? hedgedSpread.strategy_name.replace(/_/g, ' ') : (isBull ? 'Bull Call Spread' : 'Bear Put Spread')
     )
@@ -708,7 +728,7 @@ export function TradeExecutionMatrix({
                 <div className="text-base sm:text-lg font-black text-amber-200 tracking-wide flex items-baseline gap-1.5">
                   <span className="font-bold">Net Debit:</span>
                   <span>₹{formatNum(hedgedSpreadData.netDebit)}</span>
-                  <span className="text-[10px] text-amber-300/70 font-normal">/ share</span>
+                  <span className="text-[10px] text-amber-300/70 font-normal">/ contract</span>
                 </div>
                 {hedgedSpreadData.maxLoss !== null && (
                   <div className="text-[10px] text-amber-300/90 truncate mt-0.5 font-mono">

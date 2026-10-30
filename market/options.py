@@ -789,10 +789,19 @@ def get_options_snapshot(
                 with _SNAPSHOT_LOCK:
                     _store_in_snapshot_cache(cache_key, res, now_ts)
                 return res
+    except ImportError as exc:
+        logger.info(
+            "[market.options] Tier 1 broker options SDK not installed, using Tier 2 fallback: %s",
+            exc,
+        )
     except Exception as exc:
-        import logging
-
-        logging.warning("[market.options] Tier 1 primary broker options fetch failed: %s", exc)
+        if "not installed" in str(exc).lower():
+            logger.info(
+                "[market.options] Tier 1 broker options SDK not available, using Tier 2 fallback: %s",
+                exc,
+            )
+        else:
+            logger.warning("[market.options] Tier 1 primary broker options fetch failed: %s", exc)
 
     # Tier 2: Upgraded NSE Scraper v3 (Delayed Fallback)
     try:

@@ -11,7 +11,6 @@ Verifies:
   4. Zero un-canonical or legacy aliases in SECTOR_TAXONOMY, THEMATIC_PRESETS, and STOCK_SECTOR_MAP
 """
 
-import pytest
 from market.instruments import resolve_corporate_alias, canonical_symbol
 from market.indices import INDEX_HEAVYWEIGHTS
 from engine.hbcm import HBCM_CONSTITUENTS
@@ -55,7 +54,9 @@ def test_colloquial_and_commercial_alias_resolution():
     }
     for raw, expected in cases.items():
         resolved = resolve_corporate_alias(raw)
-        assert resolved == expected, f"resolve_corporate_alias({raw}) expected {expected}, got {resolved}"
+        assert resolved == expected, (
+            f"resolve_corporate_alias({raw}) expected {expected}, got {resolved}"
+        )
 
 
 def test_canonical_symbol_normalization_across_venues_and_formats():
@@ -86,34 +87,71 @@ def test_canonical_symbol_normalization_across_venues_and_formats():
     }
     for raw, expected in cases.items():
         normalized = canonical_symbol(raw)
-        assert normalized == expected, f"canonical_symbol({raw}) expected {expected}, got {normalized}"
+        assert normalized == expected, (
+            f"canonical_symbol({raw}) expected {expected}, got {normalized}"
+        )
 
 
 def test_index_heavyweights_purity():
     """Verify INDEX_HEAVYWEIGHTS contains only canonical tickers (e.g. INFY, never INFOSYS)."""
-    disallowed = {"INFOSYS", "ZOMATO", "BAJAJFINANCE", "HUL", "AIRTEL", "CENTURYTEX", "JUPITERWAG", "CEINFO"}
+    disallowed = {
+        "INFOSYS",
+        "ZOMATO",
+        "BAJAJFINANCE",
+        "HUL",
+        "AIRTEL",
+        "CENTURYTEX",
+        "JUPITERWAG",
+        "CEINFO",
+    }
     for idx_name, syms in INDEX_HEAVYWEIGHTS.items():
         for s in syms:
-            assert s not in disallowed, f"Disallowed alias {s} found in INDEX_HEAVYWEIGHTS[{idx_name}]"
+            assert s not in disallowed, (
+                f"Disallowed alias {s} found in INDEX_HEAVYWEIGHTS[{idx_name}]"
+            )
             # Must match its own canonical resolution
-            assert canonical_symbol(s) == s, f"Symbol {s} in INDEX_HEAVYWEIGHTS[{idx_name}] is not in canonical form"
+            assert canonical_symbol(s) == s, (
+                f"Symbol {s} in INDEX_HEAVYWEIGHTS[{idx_name}] is not in canonical form"
+            )
 
 
 def test_hbcm_constituents_purity():
     """Verify HBCM_CONSTITUENTS contains strictly canonical symbols."""
-    disallowed = {"INFOSYS", "ZOMATO", "BAJAJFINANCE", "HUL", "AIRTEL", "CENTURYTEX", "JUPITERWAG", "CEINFO"}
+    disallowed = {
+        "INFOSYS",
+        "ZOMATO",
+        "BAJAJFINANCE",
+        "HUL",
+        "AIRTEL",
+        "CENTURYTEX",
+        "JUPITERWAG",
+        "CEINFO",
+    }
     for idx_name, items in HBCM_CONSTITUENTS.items():
         for item in items:
             s = item["symbol"]
-            assert s not in disallowed, f"Disallowed alias {s} found in HBCM_CONSTITUENTS[{idx_name}]"
-            assert canonical_symbol(s) == s, f"Symbol {s} in HBCM_CONSTITUENTS[{idx_name}] is not canonical"
+            assert s not in disallowed, (
+                f"Disallowed alias {s} found in HBCM_CONSTITUENTS[{idx_name}]"
+            )
+            assert canonical_symbol(s) == s, (
+                f"Symbol {s} in HBCM_CONSTITUENTS[{idx_name}] is not canonical"
+            )
 
 
 def test_universe_and_sector_taxonomy_purity():
     """Verify SECTOR_TAXONOMY, THEMATIC_PRESETS, and STOCK_SECTOR_MAP have zero legacy un-canonical symbols."""
     disallowed = {
-        "INFOSYS", "ZOMATO", "CENTURYTEX", "UNOINDA", "CEINFO",
-        "SWANENERGY", "JUPITERWAG", "KALPATPOWR", "HITACHI", "GSHIP", "KBL"
+        "INFOSYS",
+        "ZOMATO",
+        "CENTURYTEX",
+        "UNOINDA",
+        "CEINFO",
+        "SWANENERGY",
+        "JUPITERWAG",
+        "KALPATPOWR",
+        "HITACHI",
+        "GSHIP",
+        "KBL",
     }
 
     # 1. SECTOR_TAXONOMY
@@ -126,9 +164,10 @@ def test_universe_and_sector_taxonomy_purity():
     for preset_name, data in THEMATIC_PRESETS.items():
         syms = data.get("symbols", [])
         for s in syms:
-            assert s not in disallowed, f"Disallowed alias {s} found in THEMATIC_PRESETS[{preset_name}]"
+            assert s not in disallowed, (
+                f"Disallowed alias {s} found in THEMATIC_PRESETS[{preset_name}]"
+            )
 
     # 3. STOCK_SECTOR_MAP
     for s in STOCK_SECTOR_MAP:
         assert s not in disallowed, f"Disallowed alias {s} found in STOCK_SECTOR_MAP"
-

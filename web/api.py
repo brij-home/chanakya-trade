@@ -57,18 +57,9 @@ from pathlib import Path
 
 logger = logging.getLogger("chanakya.web.api")
 
-# Fix Windows charmap / cp1252 codec errors for unicode console prints
-if sys.platform == "win32":
-    if sys.stdout and hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception as e_suppressed:
-            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-    if sys.stderr and hasattr(sys.stderr, "reconfigure"):
-        try:
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception as e_suppressed:
-            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+from config.encoding import fix_windows_console
+
+fix_windows_console()
 
 from fastapi import FastAPI, HTTPException, Request as _Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse

@@ -271,6 +271,19 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         pass
 
     try:
+        from engine.daily_levels import clear_daily_levels_cache
+
+        clear_daily_levels_cache()
+    except Exception:
+        pass
+    try:
+        from engine.trade_plan import clear_trade_plan_cache
+
+        clear_trade_plan_cache()
+    except Exception:
+        pass
+
+    try:
         from engine.detector_circuit_breaker import detector_circuit_breaker
 
         detector_circuit_breaker.reset_all()
@@ -316,6 +329,12 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
             from engine.index_velocity import clear_velocity_cache
 
             clear_velocity_cache()
+        except Exception:
+            pass
+        try:
+            from engine.daily_levels import clear_daily_levels_cache
+
+            clear_daily_levels_cache()
         except Exception:
             pass
 

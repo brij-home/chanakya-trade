@@ -2973,6 +2973,7 @@ def test_offmarket_intraday_suppressed_while_swing_allowed(tmp_path, monkeypatch
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
 
     from engine.alert_scrutiny import ScrutinyResult, alert_scrutiny_auditor
+
     monkeypatch.setattr(
         alert_scrutiny_auditor,
         "scrutinize_alert",
@@ -2982,7 +2983,12 @@ def test_offmarket_intraday_suppressed_while_swing_allowed(tmp_path, monkeypatch
             logic_confirmation="Valid swing setup",
             trap_risk_warning="",
             actionable_guidance="Valid trade",
-            sanctity_matrix={"level_coherence": True, "rr_valid": True, "risk_within_bounds": True, "no_chase": True},
+            sanctity_matrix={
+                "level_coherence": True,
+                "rr_valid": True,
+                "risk_within_bounds": True,
+                "no_chase": True,
+            },
             auditor_model="TEST_AUDITOR",
             audited_at="2026-09-10 20:00:00 IST",
         ),

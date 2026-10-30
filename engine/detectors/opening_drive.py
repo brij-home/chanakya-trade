@@ -353,18 +353,11 @@ def detect_opening_drive(
     # ── Minimum Stop-Loss Distance Floor (1.2x ATR / 20.5 pts) ───────────
     # Prevents Brownian noise micro-whipsaws on tight 1st 5-minute bar openings.
     # Calibrated index floors: Nifty 20.5 pts, BankNifty 55.0 pts, FinNifty 25.0 pts, MidcpNifty 16.0 pts, Sensex 75.0 pts.
+    # Dynamic Brownian noise floor & Stop Loss calibration (Invariant 38 SSOT)
     atr_5m = _calculate_5m_atr(df_5m)
-    atr_floor = round(1.20 * atr_5m, 2) if atr_5m > 0 else 0.0
-    index_min_floors = {
-        "NIFTY": 20.5,
-        "BANKNIFTY": 55.0,
-        "FINNIFTY": 25.0,
-        "MIDCPNIFTY": 16.0,
-        "SENSEX": 75.0,
-        "BANKEX": 75.0,
-    }
-    base_floor = index_min_floors.get(clean_sym, round(ltp * 0.0035, 2))
-    min_sl_floor = max(base_floor, atr_floor)
+    from engine.dynamic_risk import get_dynamic_noise_floor
+
+    min_sl_floor = get_dynamic_noise_floor(clean_sym, ltp=ltp, atr_5m=atr_5m, multiplier=1.20)
 
     # Stop Loss is strictly anchored to the opening drive extreme + 0.15% noise buffer
     # with minimum distance floor of 1.2x ATR (20.5 pts for Nifty) enforced.

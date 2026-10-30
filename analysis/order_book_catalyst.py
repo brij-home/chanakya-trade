@@ -153,7 +153,7 @@ ORDER_BOOK_TITANS_LEDGER: dict[str, dict[str, Any]] = {
         "ttm_revenue_cr": 20000.0,
         "market_cap_cr": 24000.0,
     },
-    "KALPATPOWR": {
+    "KPIL": {
         "name": "Kalpataru Projects",
         "sector": "Infrastructure & T&D",
         "order_book_cr": 58000.0,

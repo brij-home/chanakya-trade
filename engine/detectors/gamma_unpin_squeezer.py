@@ -234,6 +234,7 @@ def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
                         f"Selected {strike_p:.0f} CE @ ₹{premium:,.2f} for explosive gamma expansion."
                     ),
                     ltp=premium,
+                    underlying_spot=spot,
                     trigger_level=premium,
                     target_level=opt_t1,
                     stop_loss=opt_sl,
@@ -363,6 +364,7 @@ def detect_0dte_gamma_unpin(ctx: DetectionContext) -> list[AutoAlert]:
                         f"Selected {strike_p:.0f} PE @ ₹{premium:,.2f} for rapid gamma acceleration."
                     ),
                     ltp=premium,
+                    underlying_spot=spot,
                     trigger_level=premium,
                     target_level=opt_t1,
                     stop_loss=opt_sl,

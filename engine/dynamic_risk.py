@@ -113,6 +113,38 @@ def resolve_price_tier(price: float) -> PriceTierRule:
     return PRICE_TIER_RULES[-1]
 
 
+def get_dynamic_noise_floor(
+    symbol: str,
+    ltp: float,
+    atr_5m: float | None = None,
+    daily_atr: float | None = None,
+    multiplier: float = 1.25,
+) -> float:
+    """
+    Universal Dynamic Noise Floor SSOT (Invariant 38).
+
+    Eliminates ad-hoc local dictionaries like {'NIFTY': 20.5, 'BANKNIFTY': 55.0}.
+    Computes a mathematically grounded minimum noise buffer that scales with:
+      1. Realized 5m ATR (if available, k * ATR_5m).
+      2. Brownian-diffused daily ATR (sqrt(5/375) * Daily_ATR * k).
+      3. Price tier minimum risk floor (resolve_price_tier).
+    """
+    p_tier = resolve_price_tier(ltp)
+    base_abs_min = p_tier.abs_min_risk_pts
+
+    if atr_5m and atr_5m > 0:
+        return max(base_abs_min, round(multiplier * float(atr_5m), 2))
+
+    if daily_atr and daily_atr > 0:
+        bar_vol = float(daily_atr) * 0.1154
+        return max(base_abs_min, round(multiplier * bar_vol, 2))
+
+    clean = canonical_alert_symbol(symbol)
+    is_idx = clean in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+    pct_floor = 0.0010 if is_idx else 0.0020
+    return max(base_abs_min, round(ltp * pct_floor, 2))
+
+
 # =============================================================================
 # 2. TIER 3: SECTOR & BETA VOLATILITY PROFILES
 # =============================================================================

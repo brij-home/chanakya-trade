@@ -303,3 +303,196 @@ class TestSectorConcurrencyAndTelegramCard:
         assert "NIFTY 24600 CE" in msg
         assert "-75%" in msg
         assert "Risk Frozen" in msg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regression tests for Fix 2 (2026-10-30): hedge spread spot resolution bug
+# Invariant: build_defined_risk_spread MUST produce realistic SENSEX-scale strikes
+#            when primary_strike is provided; MUST NOT produce phantom 680/660 strikes
+#            when the option premium (~660) was mistakenly used as spot_price.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestHedgeSpreadSpotResolutionRegression:
+    """
+    Regression guard: SMT_SWEEP SENSEX alert with underlying_spot=None but
+    metrics.spot_at_sweep=74132 MUST produce a hedge spread with strikes > 70000.
+
+    Background (RCA 2026-10-30):
+        alert.underlying_spot was None for SMT_SWEEP alerts.
+        auto_alert_engine fell back to alert.ltp = 660.35 (option premium).
+        build_defined_risk_spread received spot_price=660 -> atm_strike=660 ->
+        built a phantom 680/660 PE spread completely disconnected from reality.
+    """
+
+    def test_bear_put_spread_anchors_to_primary_strike(self):
+        """
+        When primary_strike is provided, buy_strike must equal primary_strike.
+        The sell_strike must be 2 steps below (for SENSEX: 2 * 100 = 200 below).
+        BS premiums for SENSEX-scale strikes must be > 0.
+        """
+        from engine.defined_risk_spreads import build_defined_risk_spread
+
+        spread = build_defined_risk_spread(
+            underlying="SENSEX",
+            spot_price=74132.0,  # correct index spot
+            strategy="BEAR_PUT_SPREAD",
+            primary_strike=74200.0,  # alert's actual option strike
+            primary_premium=593.8,  # alert's actual market premium
+        )
+
+        assert spread is not None, "Spread must be constructed"
+        legs = spread.legs
+        buy_leg = next((l for l in legs if l.side == "BUY"), None)
+        sell_leg = next((l for l in legs if l.side == "SELL"), None)
+
+        assert buy_leg is not None, "Must have a BUY leg"
+        assert sell_leg is not None, "Must have a SELL leg"
+
+        # Strike sanity: both must be SENSEX-scale (> 70000), not option-premium-scale
+        assert buy_leg.strike > 70000, (
+            f"Buy strike {buy_leg.strike} is not SENSEX-scale — "
+            f"spot proxy contamination detected (phantom 680 PE bug)"
+        )
+        assert sell_leg.strike > 70000, (
+            f"Sell strike {sell_leg.strike} is not SENSEX-scale — phantom 660 PE bug detected"
+        )
+
+        # Buy leg must be anchored to the provided primary_strike
+        assert buy_leg.strike == 74200.0, (
+            f"Expected buy_strike=74200 (alert's actual strike), got {buy_leg.strike}"
+        )
+
+        # Buy leg premium must equal primary_premium (real market value, not BS estimate)
+        assert buy_leg.premium == 593.8, (
+            f"Expected buy_prem=593.8 (from alert.entry_price), got {buy_leg.premium}"
+        )
+
+        # Sell strike must be below buy strike by exactly 2 steps (SENSEX step=100)
+        assert buy_leg.strike - sell_leg.strike == 200.0, (
+            f"Strike width should be 2*100=200, got {buy_leg.strike - sell_leg.strike}"
+        )
+
+        # Sell premium must be a plausible BS value (not 0 or > buy_prem)
+        assert 0 < sell_leg.premium < 593.8, f"Sell leg premium {sell_leg.premium} out of bounds"
+
+    def test_bear_put_spread_phantom_strike_regression(self):
+        """
+        When spot_price is the OPTION PREMIUM (bug: ~660) instead of actual SENSEX (~74132),
+        WITHOUT primary_strike anchor, the resulting ATM strike is ~660 (phantom).
+        This test documents the old broken behavior and asserts the fix works:
+        now the spot guard (spot_p < 1000) in auto_alert_engine prevents this call
+        from ever reaching build_defined_risk_spread.
+
+        Here we test build_defined_risk_spread directly to confirm that the function
+        CAN still handle it (it has no guard itself — the guard is upstream), and that
+        with primary_strike provided, the result is anchored regardless of spot_price.
+        """
+        from engine.defined_risk_spreads import build_defined_risk_spread
+
+        # Old broken call — spot_price is option LTP, no primary_strike
+        broken_spread = build_defined_risk_spread(
+            underlying="SENSEX",
+            spot_price=660.35,  # was alert.ltp — option premium, NOT index spot
+            strategy="BEAR_PUT_SPREAD",
+            # no primary_strike → falls back to atm computed from 660 = phantom 660
+        )
+        buy_leg_broken = next((l for l in broken_spread.legs if l.side == "BUY"), None)
+        # Confirm the phantom strike is indeed low (this is the OLD broken result)
+        assert buy_leg_broken.strike < 1000, (
+            "Old phantom behavior expected: strike should be ~660 without fix"
+        )
+
+        # Fixed call — spot_price is real, primary_strike is the alert's actual strike
+        fixed_spread = build_defined_risk_spread(
+            underlying="SENSEX",
+            spot_price=74132.0,
+            strategy="BEAR_PUT_SPREAD",
+            primary_strike=74200.0,
+            primary_premium=593.8,
+        )
+        buy_leg_fixed = next((l for l in fixed_spread.legs if l.side == "BUY"), None)
+        assert buy_leg_fixed.strike > 70000, (
+            f"Fixed call must produce SENSEX-scale strikes, got {buy_leg_fixed.strike}"
+        )
+
+    def test_to_dict_exposes_net_debit_per_unit(self):
+        """
+        DefinedRiskSpread.to_dict() must include net_debit_per_unit for correct
+        frontend per-contract display. Previously only net_cashflow (lot-level) was exposed,
+        causing the '/ share' label to show the lot-total value.
+        """
+        from engine.defined_risk_spreads import build_defined_risk_spread
+
+        spread = build_defined_risk_spread(
+            underlying="SENSEX",
+            spot_price=74132.0,
+            strategy="BEAR_PUT_SPREAD",
+            primary_strike=74200.0,
+            primary_premium=593.8,
+            lot_size=20,
+        )
+        d = spread.to_dict()
+
+        assert "net_debit_per_unit" in d, (
+            "to_dict() must expose net_debit_per_unit for frontend per-contract display"
+        )
+        lot_sz = d["lot_size"]
+        expected_per_unit = round(d["net_cashflow"] / max(1, lot_sz), 2)
+        assert d["net_debit_per_unit"] == expected_per_unit, (
+            f"net_debit_per_unit mismatch: got {d['net_debit_per_unit']}, "
+            f"expected {expected_per_unit} (cashflow={d['net_cashflow']}/lot={lot_sz})"
+        )
+
+        # Per-unit value must be dramatically smaller than lot-level cashflow
+        assert d["net_debit_per_unit"] < d["net_cashflow"], (
+            "Per-unit debit must be < lot-level cashflow (lot_size > 1)"
+        )
+
+    def test_spot_guard_skips_spread_when_spot_too_low(self):
+        """
+        Validate the guard logic: spot_p < 1000 must not produce a realistic spread.
+        The function itself has no guard (guard is in auto_alert_engine), but this
+        test verifies the output would be obviously wrong — confirming why the upstream
+        guard is necessary and must not be removed.
+        """
+        from engine.defined_risk_spreads import build_defined_risk_spread
+
+        # Simulate the old bug: ltp=660 used as spot
+        phantom = build_defined_risk_spread(
+            underlying="SENSEX",
+            spot_price=660.0,
+            strategy="BEAR_PUT_SPREAD",
+        )
+        d = phantom.to_dict()
+        buy_leg = next((l for l in phantom.legs if l.side == "BUY"), None)
+
+        # Document: strikes are phantom low — this is WRONG output
+        assert buy_leg.strike < 1000, "Expected phantom low strike from wrong spot"
+        # And the net_cashflow is unrealistically small
+        assert abs(d["net_cashflow"]) < 500, (
+            "Expected tiny cashflow from phantom strike — confirms guard is needed upstream"
+        )
+
+    def test_bull_call_spread_unaffected_by_primary_strike_none(self):
+        """
+        Existing BULL_CALL_SPREAD path with no primary_strike must still work
+        correctly (no regression in CE paths).
+        """
+        from engine.defined_risk_spreads import build_defined_risk_spread
+
+        spread = build_defined_risk_spread(
+            underlying="NIFTY",
+            spot_price=24500.0,
+            strategy="BULL_CALL_SPREAD",
+            # primary_strike=None (default) — uses ATM from spot
+        )
+        assert spread is not None
+        d = spread.to_dict()
+        assert d["strategy_name"] == "BULL_CALL_SPREAD"
+        assert d["sentiment"] == "BULLISH"
+        assert "net_debit_per_unit" in d
+
+        buy_leg = next((l for l in spread.legs if l.side == "BUY"), None)
+        # ATM should be near 24500 (NIFTY step=50 for 15k-30k range)
+        assert 24400 <= buy_leg.strike <= 24600

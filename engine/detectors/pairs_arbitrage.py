@@ -58,6 +58,7 @@ def detect_pairs_arbitrage(
 
         try:
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
                 _fut = _pool.submit(analyze_pair, matched_pair[0], matched_pair[1])
                 try:
@@ -68,7 +69,8 @@ def detect_pairs_arbitrage(
                     logger.warning(
                         "[pairs_arbitrage] analyze_pair(%s, %s) exceeded 8s timeout "
                         "-- skipping this cycle",
-                        matched_pair[0], matched_pair[1],
+                        matched_pair[0],
+                        matched_pair[1],
                     )
                     return None
         except Exception as exc:

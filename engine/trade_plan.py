@@ -213,6 +213,11 @@ _TRADE_PLAN_CACHE: dict[str, tuple[float, TradePlan]] = {}
 _TRADE_PLAN_TTL = 180.0  # 3 minutes cache for historical structural plan
 
 
+def clear_trade_plan_cache() -> None:
+    """Evict all cached trade plans from RAM. Hermetic test isolation."""
+    _TRADE_PLAN_CACHE.clear()
+
+
 def calculate_trade_plan(
     symbol: str,
     direction: str = "BUY",
@@ -236,8 +241,11 @@ def calculate_trade_plan(
     is_long = canonical_dir == "LONG"
 
     # Fast in-memory cache lookup when external df is not provided
+    ref_key = ref_dt.isoformat() if ref_dt is not None else "live"
     if df is None and spot > 0:
-        cache_key = f"{clean_sym}:{canonical_dir}:{round(spot, 0)}:{timeframe}:{has_active_blast}"
+        cache_key = (
+            f"{clean_sym}:{canonical_dir}:{round(spot, 0)}:{timeframe}:{has_active_blast}:{ref_key}"
+        )
         now_ts = time.time()
         if cache_key in _TRADE_PLAN_CACHE:
             ts, cached_plan = _TRADE_PLAN_CACHE[cache_key]
@@ -418,8 +426,8 @@ def calculate_trade_plan(
 
         if is_index:
             effective_atr = 0.20 * atr
-            min_stop_mult = 0.20
-            max_stop_mult = 0.65
+            min_stop_mult = 1.00
+            max_stop_mult = 3.00
             # Target ceilings scale dynamically with remaining session volatility diffusion
             max_t1_atr = 0.25 * atr * session_decay_factor
             max_t2_atr = 0.45 * atr * session_decay_factor
@@ -501,16 +509,6 @@ def calculate_trade_plan(
             else (price_tier.abs_min_risk_pts * 2.0),
             min_stop_mult * effective_atr,
         )
-        if is_index and tf == "INTRADAY":
-            index_min_stop_floor = {
-                "NIFTY": 50.0,
-                "BANKNIFTY": 110.0,
-                "FINNIFTY": 45.0,
-                "MIDCPNIFTY": 28.0,
-                "SENSEX": 160.0,
-                "BANKEX": 150.0,
-            }.get(clean_sym, 45.0)
-            min_stop_distance = max(min_stop_distance, index_min_stop_floor)
 
         if candidates:
             # Pick the highest valid support anchor that is below LTP with reasonable risk
@@ -578,16 +576,6 @@ def calculate_trade_plan(
             else (price_tier.abs_min_risk_pts * 2.0),
             min_stop_mult * effective_atr,
         )
-        if is_index and tf == "INTRADAY":
-            index_min_stop_floor = {
-                "NIFTY": 50.0,
-                "BANKNIFTY": 110.0,
-                "FINNIFTY": 45.0,
-                "MIDCPNIFTY": 28.0,
-                "SENSEX": 160.0,
-                "BANKEX": 150.0,
-            }.get(clean_sym, 45.0)
-            min_stop_distance = max(min_stop_distance, index_min_stop_floor)
 
         if candidates:
             valid_candidates = [c for c in candidates if c[0] > ltp]
@@ -691,9 +679,9 @@ def calculate_trade_plan(
             t3_rationale = t2_rationale
             target_2 = target_1
             t2_rationale = t1_rationale
-            target_1 = ltp + max(
-                stop_distance_pts * 1.2,
-                min(max(stop_distance_pts * 1.6, 0.35 * effective_atr), max_t1_atr),
+            target_1 = ltp + min(
+                max_t1_atr,
+                max(stop_distance_pts * 1.2, 0.35 * effective_atr),
             )
             t1_rationale = f"{tf} Scale-Out Target (1.6× R / {max_t1_atr / atr:.2f}× Daily ATR)"
             if target_2 <= target_1 + (stop_distance_pts * 0.8):
@@ -717,6 +705,9 @@ def calculate_trade_plan(
                 ),
             )
             t2_rationale = f"{tf} Session Expansion Target ({max_t2_atr / atr:.2f}× Daily ATR)"
+
+        if target_2 <= target_1:
+            target_2 = target_1 + max(price_tier.abs_min_risk_pts, stop_distance_pts * 0.5)
 
         t1_distance_pts = target_1 - ltp
         t2_distance_pts = target_2 - ltp
@@ -807,9 +798,9 @@ def calculate_trade_plan(
             t3_rationale = t2_rationale
             target_2 = target_1
             t2_rationale = t1_rationale
-            target_1 = ltp - max(
-                stop_distance_pts * 1.2,
-                min(max(stop_distance_pts * 1.6, 0.35 * effective_atr), max_t1_atr),
+            target_1 = ltp - min(
+                max_t1_atr,
+                max(stop_distance_pts * 1.2, 0.35 * effective_atr),
             )
             t1_rationale = (
                 f"{tf} Breakdown Scale-Out Target (1.6× R / {max_t1_atr / atr:.2f}× Daily ATR)"
@@ -846,6 +837,9 @@ def calculate_trade_plan(
             t2_rationale = (
                 f"{tf} Breakdown Session Expansion Target ({max_t2_atr / atr:.2f}× Daily ATR)"
             )
+
+        if target_2 >= target_1:
+            target_2 = target_1 - max(price_tier.abs_min_risk_pts, stop_distance_pts * 0.5)
 
         # Asset floor invariant: prices cannot fall to or below zero
         is_geom_broken = False
@@ -1204,7 +1198,10 @@ def calculate_trade_plan(
     )
 
     if df is None and ltp > 0:
-        cache_key = f"{clean_sym}:{canonical_dir}:{round(ltp, 0)}:{timeframe}:{has_active_blast}"
+        ref_key = ref_dt.isoformat() if ref_dt is not None else "live"
+        cache_key = (
+            f"{clean_sym}:{canonical_dir}:{round(ltp, 0)}:{timeframe}:{has_active_blast}:{ref_key}"
+        )
         _TRADE_PLAN_CACHE[cache_key] = (time.time(), res)
         if len(_TRADE_PLAN_CACHE) > 100:
             cutoff = time.time() - _TRADE_PLAN_TTL
@@ -1370,20 +1367,18 @@ def calculate_option_execution_plan(
         if sl_prem < disciplined_sl_floor:
             sl_prem = min(disciplined_sl_floor, max_allowed_sl)
 
-        # Institutional Index Option Minimum Volatility Floor:
-        # Prevents sub-ATR noise traps on volatile index options
+        # Institutional Dynamic Option Volatility Floor:
+        # Prevents sub-ATR noise traps on volatile index options without hardcoding ticker tables.
+        # Volatility ratio scales with nominal option premium tier and instrument segment.
         if is_index_contract and option_ltp >= 80.0:
-            if "SENSEX" in clean_contract or "BANKEX" in clean_contract:
-                idx_opt_floor = max(80.0, round(option_ltp * 0.18, 1))
-            elif "BANKNIFTY" in clean_contract:
-                idx_opt_floor = max(35.0, round(option_ltp * 0.16, 1))
-            elif "FINNIFTY" in clean_contract or "MIDCPNIFTY" in clean_contract:
-                idx_opt_floor = max(20.0, round(option_ltp * 0.15, 1))
-            else:
-                idx_opt_floor = max(15.0, round(option_ltp * 0.15, 1))
+            opt_tier = resolve_price_tier(option_ltp)
+            vol_ratio = 0.18 if option_ltp >= 500.0 else (0.16 if option_ltp >= 250.0 else 0.15)
+            min_opt_noise_pts = max(
+                opt_tier.min_opt_premium * 3.0, round(option_ltp * vol_ratio, 1)
+            )
 
             effective_sl_floor = max(
-                round(option_ltp - idx_opt_floor, 2), round(option_ltp * 0.72, 2)
+                round(option_ltp - min_opt_noise_pts, 2), round(option_ltp * 0.72, 2)
             )
             if sl_prem > effective_sl_floor:
                 sl_prem = effective_sl_floor

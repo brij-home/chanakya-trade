@@ -515,12 +515,12 @@ def _yf_sector_fallback(sector_keys: list[str]) -> list[IndexSnapshot]:
 # ── Index Heavyweight Locomotives Mapping ──────────────────────
 
 INDEX_HEAVYWEIGHTS: dict[str, list[str]] = {
-    "NIFTY": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFOSYS", "TCS"],
-    "NIFTY 50": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFOSYS", "TCS"],
+    "NIFTY": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS"],
+    "NIFTY 50": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS"],
     "BANKNIFTY": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"],
     "NIFTY BANK": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"],
     "FINNIFTY": ["HDFCBANK", "ICICIBANK", "BAJFINANCE", "KOTAKBANK", "AXISBANK"],
-    "SENSEX": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFOSYS", "TCS"],
+    "SENSEX": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS"],
     "BANKEX": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"],
     "MIDCPNIFTY": ["PERSISTENT", "FEDERALBNK", "COFORGE", "DIXON", "MAXHEALTH"],
 }

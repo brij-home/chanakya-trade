@@ -1385,6 +1385,7 @@ class PatternLearningEngine:
         chain: Optional[list[Any]] = None,
         exchange: str = "NSE",
         is_historical_blast: bool = False,
+        allow_network: bool = False,
     ) -> dict[str, Any]:
         """
         Extracts pre-blast quantitative features from market history and options chain.
@@ -1395,11 +1396,18 @@ class PatternLearningEngine:
 
         if df is None or len(df) < 15:
             try:
-                from market.history import get_ohlcv
+                from engine.eod_store import get_eod_df
 
-                df = get_ohlcv(clean_sym, exchange=exchange, interval="day", days=60)
+                df = get_eod_df(clean_sym, days=60)
             except Exception:
                 df = None
+            if (df is None or len(df) < 15) and allow_network:
+                try:
+                    from market.history import get_ohlcv
+
+                    df = get_ohlcv(clean_sym, exchange=exchange, interval="day", days=60)
+                except Exception:
+                    df = None
 
         if df is None or len(df) < 15:
             return {}
@@ -1438,7 +1446,7 @@ class PatternLearningEngine:
 
         # 3. Call OI Unwinding in options chain (only query for F&O instruments with active coiling or volume dry-up)
         ce_unwind_pct = 0.0
-        if chain is None and (prior_vol_ratio <= 0.45 or squeeze_bars >= 2):
+        if chain is None and allow_network and (prior_vol_ratio <= 0.45 or squeeze_bars >= 2):
             try:
                 from engine.position_sizer import get_lot_size
 
@@ -1494,13 +1502,26 @@ class PatternLearningEngine:
             round(float(np.max(highs[-5:])), 2) if len(highs) >= 5 else round(float(closes[-1]), 2)
         )
 
-        # 7. Minervini SEPA Fundamentals
+        # 7. Minervini SEPA Fundamentals (fast local check, zero network blocking in scanner loops)
         sepa_qual = False
         try:
-            from analysis.fundamental import analyse
+            from analysis.fundamental import _fund_cache, _fund_cache_lock
 
-            snap = analyse(clean_sym, fast=True)
-            sepa_qual = bool(getattr(snap, "sepa_qualified", False))
+            with _fund_cache_lock:
+                cached_snap = _fund_cache.get(clean_sym)
+            if cached_snap is not None:
+                sepa_qual = bool(getattr(cached_snap[1], "sepa_qualified", False))
+            else:
+                from engine.eod_store import get_cached_fundamentals
+
+                cached_fund = get_cached_fundamentals(clean_sym, max_age_days=30)
+                if cached_fund and "sepa_qualified" in cached_fund:
+                    sepa_qual = bool(cached_fund["sepa_qualified"])
+                elif allow_network:
+                    from analysis.fundamental import analyse
+
+                    snap = analyse(clean_sym, fast=True)
+                    sepa_qual = bool(getattr(snap, "sepa_qualified", False))
         except Exception as e_suppressed:
             logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -1655,6 +1676,9 @@ class PatternLearningEngine:
         symbol: str,
         df: Optional[pd.DataFrame] = None,
         chain: Optional[list[Any]] = None,
+        ltp: Optional[float] = None,
+        vwap: Optional[float] = None,
+        allow_network: bool = False,
     ) -> PatternMatchResult:
         """
         Evaluates an active watchlist candidate against learned archetypes using dynamic factor weights.
@@ -1664,17 +1688,22 @@ class PatternLearningEngine:
 
         # Check Symbol Invalidation Lockout (prevents knife-catching after stop-loss breach)
         # Adaptively checks if current price has structurally reclaimed above failed level and VWAP
-        ltp_val = None
-        vwap_val = None
-        try:
-            from market.quotes import get_quote
+        ltp_val = float(ltp) if ltp is not None and float(ltp) > 0 else None
+        vwap_val = float(vwap) if vwap is not None and float(vwap) > 0 else None
+        if (ltp_val is None or vwap_val is None) and allow_network:
+            try:
+                from market.quotes import get_quote
 
-            q = get_quote(f"NSE:{clean_sym}")
-            if q:
-                ltp_val = float(q.ltp or 0.0)
-                vwap_val = float(getattr(q, "vwap", 0.0) or 0.0)
-        except Exception as e_suppressed:
-            logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
+                q = get_quote(f"NSE:{clean_sym}")
+                if q:
+                    if ltp_val is None:
+                        ltp_val = float(q.ltp or 0.0)
+                    if vwap_val is None:
+                        vwap_val = float(getattr(q, "vwap", 0.0) or 0.0)
+            except Exception as e_suppressed:
+                logger.debug(
+                    f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}"
+                )
 
         if (ltp_val is None or ltp_val <= 0) and df is not None and len(df) > 0:
             try:
@@ -1702,7 +1731,7 @@ class PatternLearningEngine:
             )
 
         features = self.extract_pre_blast_features(
-            clean_sym, df=df, chain=chain, is_historical_blast=False
+            clean_sym, df=df, chain=chain, is_historical_blast=False, allow_network=allow_network
         )
 
         if not features:
@@ -1722,20 +1751,11 @@ class PatternLearningEngine:
 
         # Check Intraday VWAP alignment (Knife-catching prevention)
         # If stock is trading below intraday VWAP, apply a penalty
-        try:
-            from market.quotes import get_quote
-
-            q = get_quote(f"NSE:{clean_sym}")
-            if q and getattr(q, "vwap", None) and q.vwap > 0:
-                vwap_val = float(q.vwap)
-                ltp_val = float(q.ltp or 0.0)
-                if ltp_val > 0 and ltp_val < vwap_val:
-                    score -= 25
-                    matched_factors.append(
-                        f"⚠️ Intraday price (₹{ltp_val:,.1f}) is below VWAP (₹{vwap_val:,.1f}) — Knife-catching risk penalty applied"
-                    )
-        except Exception as e_suppressed:
-            logger.debug(f"[engine.learning_engine] Non-fatal exception suppressed: {e_suppressed}")
+        if ltp_val and vwap_val and vwap_val > 0 and ltp_val < vwap_val:
+            score -= 25
+            matched_factors.append(
+                f"⚠️ Intraday price (₹{ltp_val:,.1f}) is below VWAP (₹{vwap_val:,.1f}) — Knife-catching risk penalty applied"
+            )
 
         # Weights from calibrated dictionary
         w_vol = self._factor_weights.get("volume_dry_up", 25)

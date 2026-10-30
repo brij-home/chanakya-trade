@@ -191,20 +191,34 @@ Generates dynamic ATR trade tickets: Entry, Stop-Loss (1.2×ATR), Target 1 (2R),
 
 ---
 
-## 10. Dynamic ATR Trade Level Calibration
+## 10. Dynamic ATR Trade Level Calibration & Universal Invalidation SSOT
 
-When generating automated trade tickets:
-- **ATR Bounds**: Stop-loss bounded by 1.0×–1.2×ATR. Anchored to unmitigated OB boundaries.
-- **SMC OTE**: Entry targets 50% Mean Threshold of active Order Block.
-- **Directional Integrity**: `LONG` → Entry at Demand OTE, Stop below base. `SHORT` → Entry at Supply OTE, Stop above base.
-- **Timeline Horizons**:
+When generating automated trade plans or execution tickets (Invariant 38):
 
-| Timeframe | Holding Period |
-| :--- | :--- |
-| 5m / 15m | 1–3 Trading Sessions (Intraday Swing) |
-| 1h | 2–5 Trading Days (Swing Pivot) |
-| 1D / Daily | 5–15 Trading Days (Positional Markup) |
-| 1W / Weekly | 3–8 Weeks (Trend Continuation) |
+### The 4-Pillar Universal Dynamic Model:
+1. **Pillar 1: Structural Invalidation Anchor (The "Why")**:
+   - The stop-loss is never an arbitrary number or fixed percentage. It is anchored to the exact underlying price level where the thesis is broken:
+     - `LONG`: `min(Demand OB Bottom, Fractal Swing Low, Put OI Writing Wall) - Noise Buffer`
+     - `SHORT`: `max(Supply OB Top, Fractal Swing High, Call OI Writing Wall) + Noise Buffer`
+2. **Pillar 2: Universal Microstructure Noise Floor (No Hardcoded Dictionaries)**:
+   - Call `engine.dynamic_risk.get_dynamic_noise_floor(symbol, ltp, atr_5m)`:
+     - Scales with realized 5m ATR (`1.25 × ATR_5m`) or Brownian square-root-of-time daily volatility (`sqrt(5/375) × Daily_ATR`).
+     - Bounded by `resolve_price_tier(ltp).abs_min_risk_pts`.
+     - Zero hardcoded index dictionaries (`{'NIFTY': 50}`).
+3. **Pillar 3: Derivative Greek Translation (Taylor Expansion)**:
+   - Map spot invalidation to option premium:
+     $$\Delta P \approx \Delta \cdot \Delta S + \frac{1}{2}\Gamma \cdot (\Delta S)^2 - \Theta \cdot \Delta t$$
+   - Never apply arbitrary percentage stops (e.g. static `-18%` or `-22%`), which distort risk across moneyness and DTE.
+4. **Pillar 4: Volatility Position Sizing as Capital Governor**:
+   - If market volatility requires a wide stop, do NOT squeeze the stop. Scale down lots via `engine.position_sizer.calculate_position_size`:
+     $$\text{Quantity (Lots)} = \max\left(1, \left\lfloor \frac{\text{Capital} \times \text{Risk\%} \times \text{VIX\_mult}}{(\text{LTP}_{\text{opt}} - \text{SL}_{\text{opt}}) \times \text{Lot Size}} \right\rfloor\right)$$
+
+| Timeframe | Holding Period | Volatility Budget |
+| :--- | :--- | :--- |
+| 5m / 15m | 1–3 Trading Sessions (Intraday Swing) | $0.35\times - 1.50\times$ Daily ATR (Brownian $\sqrt{t}$) |
+| 1h | 2–5 Trading Days (Swing Pivot) | $0.80\times - 2.20\times$ Daily ATR |
+| 1D / Daily | 5–15 Trading Days (Positional Markup) | $1.20\times - 3.50\times$ Daily ATR |
+| 1W / Weekly | 3–8 Weeks (Trend Continuation) | $1.80\times - 5.00\times$ Daily ATR |
 
 ---
 

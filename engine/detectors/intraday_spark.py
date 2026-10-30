@@ -822,6 +822,7 @@ def detect_intraday_mover_sparks(
             headline=headline,
             summary=summary,
             ltp=ltp,
+            underlying_spot=ltp,
             trigger_level=ltp,
             target_level=t1_price,
             stop_loss=sl_price,

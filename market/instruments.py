@@ -291,6 +291,26 @@ STANDARD_LOT_SIZES: dict[str, int] = {
 
 # Canonical Corporate Restructuring, Demerger, and Renaming Aliases (October 2026 Master)
 CORPORATE_ALIASES: dict[str, str] = {
+    # Commercial & Colloquial Aliases to Official Exchange Tickers
+    "INFOSYS": "INFY",  # Infosys Ltd
+    "BAJAJFINANCE": "BAJFINANCE",  # Bajaj Finance Ltd
+    "BAJAJFINSERV": "BAJFINSV",  # Bajaj Finserv Ltd
+    "HUL": "HINDUNILVR",  # Hindustan Unilever Ltd
+    "AIRTEL": "BHARTIARTL",  # Bharti Airtel Ltd
+    "BHARTI": "BHARTIARTL",
+    "ULTRATECH": "ULTRACEMCO",  # UltraTech Cement Ltd
+    "ULTRATECHCEMENT": "ULTRACEMCO",
+    "EICHER": "EICHERMOT",  # Eicher Motors Ltd
+    "EICHERMOTORS": "EICHERMOT",
+    "HERO": "HEROMOTOCO",  # Hero MotoCorp Ltd
+    "HEROHONDA": "HEROMOTOCO",
+    "ASIANPAINTS": "ASIANPAINT",  # Asian Paints Ltd
+    "DRREDDYS": "DRREDDY",  # Dr. Reddy's Laboratories
+    "APOLLOHOSPITALS": "APOLLOHOSP",  # Apollo Hospitals Enterprise
+    "TATACONSUMER": "TATACONSUM",  # Tata Consumer Products
+    "MM": "M&M",  # Mahindra & Mahindra
+    "M_M": "M&M",
+    # Corporate Restructuring, Demerger, and Renaming Aliases
     "TATAMOTORS": "TMPV",  # Demerged into TMPV (PV) & TMCV (CV)
     "ZOMATO": "ETERNAL",  # Rebranded to Eternal Ltd
     "CENTURYTEX": "ABREL",  # Aditya Birla Real Estate
@@ -417,6 +437,9 @@ _INDEX_CANONICAL_MAP: dict[str, str] = {
     "INDIAVIX": "INDIAVIX",
     "BSE SENSEX": "SENSEX",
     "BSE BANKEX": "BANKEX",
+    "NSEI": "NIFTY",
+    "NSEBANK": "BANKNIFTY",
+    "BSESN": "SENSEX",
 }
 
 

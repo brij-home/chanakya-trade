@@ -8169,13 +8169,6 @@
     "listing_date": "16-MAR-2007"
   },
   {
-    "symbol": "LASA",
-    "name": "Lasa Supergenerics Limited",
-    "series": "EQ",
-    "isin": "INE670X01014",
-    "listing_date": "21-SEP-2017"
-  },
-  {
     "symbol": "LASERPOWER",
     "name": "Laser Power & Infra Limited",
     "series": "EQ",
@@ -12628,13 +12621,6 @@
     "listing_date": "17-AUG-2026"
   },
   {
-    "symbol": "SELMC",
-    "name": "SEL Manufacturing Company Limited",
-    "series": "EQ",
-    "isin": "INE105I01020",
-    "listing_date": "26-OCT-2021"
-  },
-  {
     "symbol": "SEMAC",
     "name": "Semac Construction Limited",
     "series": "EQ",
@@ -13438,13 +13424,6 @@
     "series": "EQ",
     "isin": "INE970N01027",
     "listing_date": "10-JAN-2017"
-  },
-  {
-    "symbol": "SPELS",
-    "name": "SPEL Semiconductor Limited",
-    "series": "EQ",
-    "isin": "INE252A01019",
-    "listing_date": "17-AUG-2026"
   },
   {
     "symbol": "SPENCERS",

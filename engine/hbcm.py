@@ -237,14 +237,22 @@ def evaluate_hbcm(
     bearish_symbols: list[str] = []
     neutral_symbols: list[str] = []
 
+    from market.instruments import resolve_corporate_alias
+
     for sym in symbols:
-        alias_sym = "INFOSYS" if sym == "INFY" else ("INFY" if sym == "INFOSYS" else None)
+        canon_sym = resolve_corporate_alias(sym)
         q = (
             quotes_map.get(sym)
+            or quotes_map.get(canon_sym)
             or quotes_map.get(f"NSE:{sym}")
-            or (quotes_map.get(alias_sym) if alias_sym else None)
-            or (quotes_map.get(f"NSE:{alias_sym}") if alias_sym else None)
+            or quotes_map.get(f"NSE:{canon_sym}")
         )
+        if not q and quotes_map:
+            for k, val in quotes_map.items():
+                clean_k = k.split(":")[-1].replace("-EQ", "").strip().upper()
+                if resolve_corporate_alias(clean_k) == canon_sym:
+                    q = val
+                    break
         w_pct = weights_map.get(sym, 0.0)
 
         ltp = 0.0
@@ -260,9 +268,7 @@ def evaluate_hbcm(
             try:
                 from market.quotes import get_computed_vwap
 
-                c_vwap = get_computed_vwap(sym) or (
-                    get_computed_vwap(alias_sym) if alias_sym else None
-                )
+                c_vwap = get_computed_vwap(sym) or get_computed_vwap(canon_sym)
                 if c_vwap and c_vwap > 0:
                     vwap = float(c_vwap)
             except Exception as e_suppressed:
@@ -272,9 +278,18 @@ def evaluate_hbcm(
         c_5m = None
         o_5m = None
         if mock_5m_candles:
-            c_data = mock_5m_candles.get(sym) or (
-                mock_5m_candles.get(alias_sym) if alias_sym else None
+            c_data = (
+                mock_5m_candles.get(sym)
+                or mock_5m_candles.get(canon_sym)
+                or mock_5m_candles.get(f"NSE:{sym}")
+                or mock_5m_candles.get(f"NSE:{canon_sym}")
             )
+            if not c_data and mock_5m_candles:
+                for mk, mval in mock_5m_candles.items():
+                    clean_mk = mk.split(":")[-1].replace("-EQ", "").strip().upper()
+                    if resolve_corporate_alias(clean_mk) == canon_sym:
+                        c_data = mval
+                        break
             if c_data:
                 c_5m = c_data.get("close")
                 o_5m = c_data.get("open")
