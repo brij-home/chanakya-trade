@@ -2877,12 +2877,16 @@ def render_fno_alert(
         rr_num = float(rr_match.group(0)) if rr_match else 2.5
     except Exception:
         rr_num = 2.5
+    rr_raw = str(d.risk_reward or "1:3.2").strip()
+    rr_clean = re.sub(r"\s*R:?R\s*$", "", rr_raw, flags=re.IGNORECASE).strip()
+    rr_display = f"{rr_clean} R:R"
     t1_r_label = "1.8R" if rr_num >= 3.0 else "1.5R"
     t2_r_label = "3.2R" if rr_num >= 3.0 else "2.5R"
 
     opt_cmp_entry = f" (Opt CMP: ₹{d.premium:,.2f})" if d.premium else ""
     lot_beside_p = f" (Lot: {d.lot_size})" if d.lot_size else ""
     lot_str = f" | <b>Lot:</b> {d.lot_size}" if d.lot_size else ""
+    lot_rr_str = lot_str if not lot_beside_p else ""
     lot_num = int(d.lot_size) if (d.lot_size and str(d.lot_size).isdigit()) else 0
     opt_risk_pts = max(0.0, d.premium - d.stop_loss) if (d.premium and d.stop_loss) else 0.0
     risk_inr_str = (
@@ -2957,7 +2961,7 @@ def render_fno_alert(
             if (d.target_1 and d.target_2 and d.target_2 > d.target_1)
             else "\n"
         )
-        + f"• <b>R:R:</b> <b>{d.risk_reward} R:R</b>{lot_str}{no_chase_str}{fno_hedge_line}\n"
+        + f"• <b>R:R:</b> <b>{rr_display}</b>{lot_rr_str}{no_chase_str}{fno_hedge_line}\n"
         f"💡 <b>Reason:</b> {d.trigger_reason} · {d.vol_oi:.1f}x Vol/OI (Imbalance: {d.imbalance:.1f}x)\n"
         f"📋 <b>Playbook:</b> <i>{d.profit_rule}</i>"
         f"{conv_badge}\n"
