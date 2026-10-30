@@ -651,12 +651,26 @@ def detect_index_put_setup(
                     else 0.0
                 )
 
-                if l5 > 0 and spot <= l5 * 1.0010:
+                _is_l5_expansion = bool(
+                    (
+                        is_breakdown_momentum
+                        or is_explosive_momentum
+                        or _is_opening_displacement
+                        or _has_structural_bear_reversal
+                    )
+                    and (effective_vwap and spot < effective_vwap * 0.999)
+                )
+                if l5 > 0 and spot <= l5 * 1.0010 and not _is_l5_expansion:
                     logger.info(
                         f"[IndexPutSetup] Camarilla L5 Floor Exhaustion: Spot ₹{spot:,.1f} reached/breached Camarilla L5 ₹{l5:,.1f}. "
                         f"Selloff statistically exhausted. Suppressing long put setup."
                     )
                     return []
+                elif l5 > 0 and spot <= l5 * 1.0010 and _is_l5_expansion:
+                    logger.debug(
+                        f"[IndexPutSetup] Camarilla L5 Floor Expansion: Spot ₹{spot:,.1f} broke below L5 ₹{l5:,.1f} "
+                        f"with confirmed downward momentum holding below VWAP. Allowing trend continuation."
+                    )
                 if atr > 0 and day_high > 0:
                     down_move = day_high - spot
                     if down_move >= (1.15 * atr):

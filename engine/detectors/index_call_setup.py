@@ -174,6 +174,14 @@ def detect_index_call_setup(
             and spot > day_low * 1.001
         )
         or (vwap and vwap > 0 and spot >= vwap and _bounce_from_low_pct >= 0.10)
+        or (
+            vwap
+            and vwap > 0
+            and spot >= (vwap * 1.0015)
+            and prev_close
+            and prev_close > 0
+            and ((spot - prev_close) / prev_close * 100.0 >= 0.20)
+        )
     )
     _breadth_bypassed = _spot_above_open_escape or _has_structural_reversal
 
@@ -653,12 +661,26 @@ def detect_index_call_setup(
                     else 0.0
                 )
 
-                if h5 > 0 and spot >= h5 * 0.9990:
+                _is_h5_expansion = bool(
+                    (
+                        is_breakout_momentum
+                        or is_explosive_momentum
+                        or _is_opening_displacement
+                        or _has_structural_reversal
+                    )
+                    and (effective_vwap and spot > effective_vwap * 1.001)
+                )
+                if h5 > 0 and spot >= h5 * 0.9990 and not _is_h5_expansion:
                     logger.info(
                         f"[IndexCallSetup] Camarilla H5 Ceiling Exhaustion: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ₹{h5:,.1f}. "
                         f"Rally statistically exhausted. Suppressing long call setup."
                     )
                     return []
+                elif h5 > 0 and spot >= h5 * 0.9990 and _is_h5_expansion:
+                    logger.debug(
+                        f"[IndexCallSetup] Camarilla H5 Blue Sky Expansion: Spot ₹{spot:,.1f} broke above H5 ₹{h5:,.1f} "
+                        f"with confirmed momentum holding above VWAP. Allowing trend continuation."
+                    )
                 if atr > 0 and day_low > 0:
                     up_move = spot - day_low
                     if up_move >= (1.15 * atr):

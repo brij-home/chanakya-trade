@@ -13133,13 +13133,13 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
         stock_candidates: list[AutoAlert] = []
-        targets = self._get_prioritized_targets(max_targets=40)
-
+        # Full-universe in-memory screening for Opening Drive (Open == Low / Open == High)
+        all_syms = list(dict.fromkeys(self._watched_indices + list(self.watched_equities)))
         if quotes_map is None:
-            quotes_map = self._get_cycle_quotes(targets)
+            quotes_map = self._get_cycle_quotes(all_syms)
 
         eval_drive_targets: list[tuple[str, str, float, Any, Any, Any, Any]] = []
-        for sym in targets:
+        for sym in all_syms:
             try:
                 exch = self._resolve_index_exchange(sym)
                 lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
