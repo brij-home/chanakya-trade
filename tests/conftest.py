@@ -126,6 +126,7 @@ def _isolate_fyers_rate_gate_and_circuit_breaker():
 # 3. Institutional zero-network quarantine:
 # Defensively isolate test sessions from unmocked external network connections.
 # Any attempt to connect to a non-loopback host raises RuntimeError unless marked with @pytest.mark.network.
+socket.setdefaulttimeout(15.0)
 _orig_socket_connect = socket.socket.connect
 _PROCESS_ALLOW_NETWORK = False
 _ALLOWED_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}

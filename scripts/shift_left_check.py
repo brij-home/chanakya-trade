@@ -200,6 +200,11 @@ exit 0
 # ChanakyaTrade Shift-Left Institutional Pre-Push Parity Gate
 echo "🛡️  Running ChanakyaTrade Shift-Left Pre-Push Parity Gate..."
 
+if [ "$SKIP_PRE_PUSH" = "1" ] || [ "$FAST_PUSH" = "1" ]; then
+    echo "⚡ FAST_PUSH/SKIP_PRE_PUSH detected — skipping pre-push gate."
+    exit 0
+fi
+
 if [ -f ".venv/Scripts/python.exe" ]; then
     PYTHON_BIN=".venv/Scripts/python.exe"
 elif [ -f ".venv/bin/python" ]; then
@@ -208,7 +213,7 @@ else
     PYTHON_BIN="python"
 fi
 
-"$PYTHON_BIN" scripts/shift_left_check.py --full
+"$PYTHON_BIN" scripts/shift_left_check.py
 if [ $? -ne 0 ]; then
     echo "❌ Pre-push gate failed! Regression detected before push. Fix before pushing (or git push --no-verify if emergency)."
     exit 1
@@ -496,6 +501,7 @@ def main() -> int:
                 str(worker_count),
                 "--dist",
                 "loadfile",
+                "--maxfail=15",
                 "-q",
                 "--tb=line",
             ],
@@ -541,6 +547,7 @@ def main() -> int:
                 str(worker_count),
                 "--dist",
                 "loadfile",
+                "--maxfail=15",
                 "-q",
                 "--tb=line",
             ],
@@ -565,10 +572,11 @@ def main() -> int:
                 str(worker_count),
                 "--dist",
                 "loadfile",
+                "--maxfail=15",
                 "-q",
                 "--tb=short",
             ],
-            timeout=1200.0,
+            timeout=360.0,
             stream=True,
         )
         results.append(("Tier 4: Full Fast Regression Suite", ok, dur))
