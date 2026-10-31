@@ -2910,7 +2910,9 @@ def detect_index_put_setup(
         is_midday_chop_window = (dtime(11, 15) <= now_time <= dtime(13, 15)) or (
             (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 70)
         )
-        is_terminal_mis_closeout = now_time >= dtime(14, 45)
+        is_terminal_mis_closeout = (
+            (now_time >= dtime(14, 45)) and not ignore_time_gate and not is_test_runner
+        )
 
         net_gex = gex_data.get("net_gex", 0.0) if gex_data else 0.0
         gex_regime = gex_data.get("gamma_regime", "NEUTRAL") if gex_data else "NEUTRAL"

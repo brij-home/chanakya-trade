@@ -256,14 +256,14 @@ def is_valid_ws_symbol(symbol: str) -> bool:
     return True
 
 
-def get_active_index_options_grid(num_strikes_per_side: int = 8) -> list[str]:
+def get_active_index_options_grid(
+    num_strikes_per_side: int = 8, ref_time: Optional[datetime] = None
+) -> list[str]:
     """
     Generate active Index Options contracts for NIFTY, BANKNIFTY, MIDCPNIFTY, SENSEX, and FINNIFTY.
     Generates ATM ± num_strikes_per_side strikes for each index (~170 contracts).
     """
-    from datetime import datetime
-
-    now = datetime.now()
+    now = ref_time or datetime.now()
     today = now.date()
     from market.instruments import _calc_monthly_expiry_date
 
