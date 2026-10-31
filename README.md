@@ -41,6 +41,11 @@ python -m web.api
 python scripts/validate_all.py --fast
 ```
 
+## Agent & IDE Guides
+
+- [AGENTS.md](AGENTS.md) — Operational handbook, architectural invariants, and safety guidelines for AI agents.
+- [CODEX.md](CODEX.md) — Local development, execution runbook, and guardrails for OpenAI / ChatGPT Codex IDE.
+
 ## Note
 
 Personal research repository. Not financial advice or an investment recommendation.
