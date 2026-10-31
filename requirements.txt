@@ -2,7 +2,7 @@
 # Optional broker SDKs (install only for the broker you explicitly use):
 # kiteconnect>=5.2.1        # Zerodha Kite Connect
 httpx>=0.28.0               # Groww REST API + general HTTP
-fyers-apiv3>=3.1.16         # Fyers broker (official SDK)
+# fyers-apiv3>=3.1.16         # Fyers broker (optional: pip install -e '.[fyers]')
 # websocket-client>=1.8.0  # Shoonya WebSocket streaming (optional)
 
 # ── AI Brain ─────────────────────────────────────────────────
