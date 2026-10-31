@@ -209,7 +209,20 @@ class PatternLearningEngine:
         if p.exists():
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
-                self._outcomes = [PatternTradeOutcome(**d) for d in data if isinstance(d, dict)]
+                loaded: list[PatternTradeOutcome] = []
+                seen_ids: set[str] = set()
+                for d in data:
+                    if isinstance(d, dict):
+                        # Canonicalize legacy INVALIDATED_ prefixes
+                        if "archetype" in d and str(d["archetype"]).startswith("INVALIDATED_"):
+                            d["archetype"] = str(d["archetype"]).replace("INVALIDATED_", "")
+                        aid = d.get("alert_id")
+                        if aid:
+                            if aid in seen_ids:
+                                continue
+                            seen_ids.add(aid)
+                        loaded.append(PatternTradeOutcome(**d))
+                self._outcomes = loaded
             except Exception as e:
                 logger.debug(f"[PatternLearningEngine] Failed to load outcomes: {e}")
                 self._outcomes = []
@@ -315,23 +328,36 @@ class PatternLearningEngine:
         """
         Records the real-world or paper outcome of an alert.
         Used to continuously refine factor weights and archetype reliability.
+        Deduplicates in-place by alert_id to prevent inflated outcomes (Rule 16 & Rule 17).
         """
         clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+        canonical_archetype = archetype.replace("INVALIDATED_", "").strip()
         rec = PatternTradeOutcome(
             alert_id=alert_id,
             symbol=clean_sym,
-            archetype=archetype,
+            archetype=canonical_archetype,
             entry_price=round(entry_price, 2),
             exit_price=round(exit_price, 2),
             outcome=outcome,
             realized_rr=round(realized_rr, 2),
             factors_present=factors_present or [],
         )
-        self._outcomes.append(rec)
+
+        # Deduplication Guard (Rule 16 & Rule 17):
+        # Update existing outcome in-place if alert_id is already recorded
+        existing_idx = next(
+            (i for i, o in enumerate(self._outcomes) if o.alert_id == alert_id),
+            None,
+        )
+        if existing_idx is not None:
+            self._outcomes[existing_idx] = rec
+        else:
+            self._outcomes.append(rec)
+
         self._save_outcomes()
         self._recalculate_factor_weights()
         logger.info(
-            f"[PatternLearningEngine] Recorded outcome for {clean_sym}: {outcome} (Realized R:R: {realized_rr:.2f})"
+            f"[PatternLearningEngine] Recorded outcome for {clean_sym} ({canonical_archetype}): {outcome} (Realized R:R: {realized_rr:.2f})"
         )
         return rec
 
@@ -1353,7 +1379,7 @@ class PatternLearningEngine:
         self.record_trade_outcome(
             alert_id=alert_id,
             symbol=clean_sym,
-            archetype=f"INVALIDATED_{alert_type}",
+            archetype=alert_type,
             entry_price=entry_price,
             exit_price=exit_price,
             outcome="STOPPED_OUT",

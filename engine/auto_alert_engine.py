@@ -12931,24 +12931,43 @@ class AutoAlertEngine:
                     if close_px and close_px > 0:
                         a.ltp = close_px
 
-                        # Calculate PnL and R-multiple
+                        # Calculate PnL and R-multiple with Defensive Coordinate Sanity (Invariants 10 & 16)
                         if a.trigger_level and a.trigger_level > 0:
+                            is_opt = bool(
+                                getattr(a, "option_type", None)
+                                or getattr(a, "contract_symbol", None)
+                            )
+                            effective_close = close_px
+                            if is_opt and a.trigger_level > 0 and close_px > 3.5 * a.trigger_level:
+                                logger.warning(
+                                    f"[AutoAlertEngine] Options coordinate bleed detected for {a.symbol} ({a.alert_id}): "
+                                    f"close_px={close_px} exceeds 3.5x trigger_level={a.trigger_level}. Clamping close_px."
+                                )
+                                effective_close = float(a.trigger_level)
+
                             if a.direction in ("BULLISH", "LONG", "BUY"):
                                 a.pnl_pct = round(
-                                    ((close_px - a.trigger_level) / a.trigger_level) * 100, 2
+                                    ((effective_close - a.trigger_level) / a.trigger_level) * 100, 2
                                 )
                                 risk = abs(a.trigger_level - a.stop_loss) if a.stop_loss else 1.0
-                                a.r_multiple = round(
-                                    (close_px - a.trigger_level) / max(0.01, risk), 2
+                                calc_r = round(
+                                    (effective_close - a.trigger_level) / max(0.01, risk), 2
                                 )
                             else:
                                 a.pnl_pct = round(
-                                    ((a.trigger_level - close_px) / a.trigger_level) * 100, 2
+                                    ((a.trigger_level - effective_close) / a.trigger_level) * 100, 2
                                 )
                                 risk = abs(a.stop_loss - a.trigger_level) if a.stop_loss else 1.0
-                                a.r_multiple = round(
-                                    (a.trigger_level - close_px) / max(0.01, risk), 2
+                                calc_r = round(
+                                    (a.trigger_level - effective_close) / max(0.01, risk), 2
                                 )
+
+                            # Defensive boundary guard against wild R-multiple spikes (Rule 10 & 16)
+                            if calc_r > 10.0:
+                                calc_r = 4.0 if getattr(a, "achieved_milestones", None) else 0.0
+                            elif calc_r < -4.0:
+                                calc_r = -1.0
+                            a.r_multiple = calc_r
 
                         # High-Water Mark Milestone Progression
                         if a.direction in ("BULLISH", "LONG", "BUY"):

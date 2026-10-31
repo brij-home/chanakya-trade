@@ -302,3 +302,43 @@ def test_morning_reversal_zone_and_midday_pullback_runway_exemption():
             os.environ["FORCE_RUNWAY_CHECK"] = orig_force
         else:
             del os.environ["FORCE_RUNWAY_CHECK"]
+
+
+def test_trend_day_pullback_index_regime_gate(monkeypatch):
+    """Verifies that counter-trend pullbacks are suppressed when benchmark index trades counter to setup."""
+    from brokers.base import Quote
+    import market.quotes
+
+    df_bull = _generate_synthetic_trend_df("BULLISH")
+    ltp_bull = float(df_bull["close"].iloc[-1])
+    dt = df_bull.index[-1]
+
+    # Case 1: Stock is Bullish, but NIFTY 50 is below VWAP (bearish market)
+    monkeypatch.setattr(
+        market.quotes,
+        "get_quote",
+        lambda sym: {
+            "NSE:NIFTY 50": Quote(symbol="NSE:NIFTY 50", last_price=24200.0, vwap=24350.0)
+        },
+    )
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("CHANAKYA_TESTING", "0")
+
+    alert = detect_trend_day_pullback(
+        "RELIANCE", df_bull, ltp=ltp_bull, now_dt=dt, segment="EQUITY"
+    )
+    assert alert is None, "Bullish continuation should be suppressed when NIFTY 50 is below VWAP"
+
+    # Case 2: Stock is Bullish, and NIFTY 50 is above VWAP (bullish market)
+    monkeypatch.setattr(
+        market.quotes,
+        "get_quote",
+        lambda sym: {
+            "NSE:NIFTY 50": Quote(symbol="NSE:NIFTY 50", last_price=24400.0, vwap=24350.0)
+        },
+    )
+    alert = detect_trend_day_pullback(
+        "RELIANCE", df_bull, ltp=ltp_bull, now_dt=dt, segment="EQUITY"
+    )
+    assert alert is not None, "Bullish continuation should trigger when NIFTY 50 is above VWAP"
+    assert alert.direction == "BULLISH"

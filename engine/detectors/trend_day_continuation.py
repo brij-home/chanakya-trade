@@ -232,6 +232,50 @@ def detect_trend_day_pullback(
 
     direction = "BULLISH" if is_bull_pullback else "BEARISH"
 
+    # ── Benchmark Index Regime Gate (Institutional Market Alignment) ─────────
+    # Prevents counter-trend traps: do not buy pullbacks when the benchmark index
+    # is trading below its session VWAP (bearish market), and vice-versa.
+    if not is_index and not is_test_env:
+        try:
+            from market.quotes import get_quote
+
+            is_bank = "BANK" in clean_sym or clean_sym in (
+                "SBIN",
+                "KOTAKBANK",
+                "ICICIBANK",
+                "HDFCBANK",
+                "AXISBANK",
+                "INDUSINDBK",
+                "BANDHANBNK",
+                "FEDERALBNK",
+            )
+            idx_probe_sym = "NSE:NIFTY BANK" if is_bank else "NSE:NIFTY 50"
+            idx_probe = get_quote(idx_probe_sym)
+            iq = idx_probe.get(idx_probe_sym) or idx_probe.get(idx_probe_sym.replace("NSE:", ""))
+            if not iq and is_bank:
+                idx_probe = get_quote("NSE:NIFTY 50")
+                iq = idx_probe.get("NSE:NIFTY 50") or idx_probe.get("NIFTY 50")
+            if iq:
+                i_ltp = float(getattr(iq, "last_price", 0.0) or 0.0)
+                i_vwap = float(getattr(iq, "vwap", 0.0) or 0.0)
+                if i_vwap > 0 and i_ltp > 0:
+                    if is_bull_pullback and i_ltp < i_vwap:
+                        logger.debug(
+                            f"[TrendContinuation] Suppressed Bullish Continuation on {symbol}: "
+                            f"{idx_probe_sym} ({i_ltp:.1f}) below VWAP ({i_vwap:.1f}) - counter-trend trap"
+                        )
+                        return None
+                    elif is_bear_pullback and i_ltp > i_vwap:
+                        logger.debug(
+                            f"[TrendContinuation] Suppressed Bearish Continuation on {symbol}: "
+                            f"{idx_probe_sym} ({i_ltp:.1f}) above VWAP ({i_vwap:.1f}) - counter-trend trap"
+                        )
+                        return None
+        except Exception as e_idx_regime:
+            logger.debug(
+                f"[TrendContinuation] Index regime gate non-fatal check bypassed: {e_idx_regime}"
+            )
+
     # ── Central Pivot Range (CPR) & Camarilla Levels Gate ─────────────
     cpr_data: dict = {}
     is_narrow_cpr = False

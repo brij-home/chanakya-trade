@@ -27,6 +27,51 @@ from engine.learning_engine import pattern_learning_engine
 
 logger = logging.getLogger("engine.alert_postmortem_runner")
 
+PROFIT_TARGET_MILESTONES = {
+    "T0_5",
+    "T0.5",
+    "T1",
+    "T2",
+    "T3",
+    "TARGET",
+    "RUNNER_EXIT",
+    "RUNNER",
+    "PROFIT",
+    "DE_RISK",
+    "BREAKEVEN_LOCKED",
+    "SPREAD_PROFIT_70",
+}
+
+WINNING_STAGES = {
+    "COMPLETED",
+    "RUNNER_EXIT",
+    "T0_5_ACHIEVED",
+    "T1_ACHIEVED",
+    "T2_ACHIEVED",
+    "TARGET_ACHIEVED",
+    "SPREAD_PROFIT_70",
+}
+
+
+def is_target_or_profit_achieved(alert: Any, r_val: float = 0.0) -> bool:
+    """
+    Evaluates whether an alert achieved a profitable milestone, target exit, or runner scale.
+    Guarantees that T0.5 scale-outs, runner exits, and profit milestones are recognized as wins
+    rather than being discarded as unfulfilled setups.
+    """
+    milestones = getattr(alert, "achieved_milestones", []) or []
+    for m in milestones:
+        m_str = str(m).upper()
+        if any(tm in m_str for tm in PROFIT_TARGET_MILESTONES):
+            return True
+    stage = str(getattr(alert, "stage", "") or "").upper()
+    if stage in WINNING_STAGES:
+        return True
+    target_st = str(getattr(alert, "target_status", "") or "").upper()
+    if any(tm in target_st for tm in PROFIT_TARGET_MILESTONES):
+        return True
+    return r_val >= 0.35
+
 
 def generate_session_scorecard(
     today_alerts: list[Any],
@@ -73,9 +118,8 @@ def generate_session_scorecard(
 
         is_inv = getattr(alert, "is_invalidated", False)
         milestones = getattr(alert, "achieved_milestones", []) or []
-        t1_reached = any("T1" in str(m) for m in milestones) or any(
-            "TARGET" in str(m) for m in milestones
-        )
+        target_hit = is_target_or_profit_achieved(alert)
+        t1_reached = target_hit
 
         has_triggered = getattr(alert, "has_triggered", True)
         is_disqualified = (
@@ -122,9 +166,9 @@ def generate_session_scorecard(
             r_val = round(((cur - entry) if is_bull else (entry - cur)) / max(0.01, risk), 2)
 
         # Scorecard Calibration Invariant:
-        # If an alert has no achieved milestones and is not invalidated, any report of R > 0.5
+        # If an alert has no achieved profit milestones/winning stages and is not invalidated, any report of R > 0.5
         # is a phantom/unreached target projection. Clamp R to 0.0 so it is properly categorized as unfulfilled/flat.
-        if not t1_reached and not is_inv and r_val > 0.5:
+        if not target_hit and not is_inv and len(milestones) == 0 and r_val > 0.5:
             logger.warning(
                 f"[Scorecard] Integrity Invariant Clamping: Alert {sym} ({getattr(alert, 'alert_id', '')}) "
                 f"has 0 achieved milestones and is not invalidated, but reports R={r_val:.2f}R. Clamping R to 0.0."
@@ -499,11 +543,12 @@ def run_eod_alert_postmortems(
         if not has_triggered or is_disqualified:
             continue
 
-        # We conduct post-mortem if the alert was invalidated, or if it expired/closed without hitting T1
+        # We conduct post-mortem if the alert was invalidated, or if it expired/closed without hitting any profit milestone
+        target_hit = is_target_or_profit_achieved(alert)
         needs_postmortem = (
             is_invalidated
-            or (not t1_reached and is_expired)
-            or (not is_multi_session and not t1_reached)
+            or (not target_hit and is_expired)
+            or (not is_multi_session and not target_hit and not has_triggered)
         )
         if not needs_postmortem:
             continue
