@@ -22,6 +22,9 @@ import numpy as np
 
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
+from engine.options_hedging import (
+    audit_stock_option_liquidity_spread,
+)
 
 from engine.alert_identity import canonical_alert_symbol
 from market.instruments import format_strike
@@ -505,11 +508,55 @@ def detect_options_momentum_breakouts(
                 if vol_oi < min_vol_oi or vol < min_contracts:
                     continue
 
+                # 0DTE Afternoon Theta Decay Acceleration Guard (post 13:00 IST):
+                # Strictly veto naked OTM strikes (Delta < 0.48) on expiry day to avoid the Hero-or-Zero trap
+                is_0dte = False
+                if expiry_date:
+                    try:
+                        exp_str = str(expiry_date).split("T")[0].strip()
+                        exp_d = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                        is_0dte = exp_d == now_dt.date()
+                    except Exception as e_suppressed:
+                        logger.debug(
+                            f"[engine.detectors.options_momentum] Non-fatal exception suppressed: {e_suppressed}"
+                        )
+                if (
+                    is_idx
+                    and is_0dte
+                    and now_dt.time() >= datetime.strptime("13:00", "%H:%M").time()
+                ):
+                    is_otm = (opt_type == "CE" and strike > spot) or (
+                        opt_type == "PE" and strike < spot
+                    )
+                    if is_otm:
+                        logger.debug(
+                            f"[OptionsBreakout] Vetoed naked 0DTE OTM {contract_sym} post-13:00 IST to prevent theta trap."
+                        )
+                        continue
+
                 bid = getattr(c, "bid", None)
                 ask = getattr(c, "ask", None)
-                max_spread_mult = 1.30 if is_idx else 1.15
-                if bid and ask and bid > 0 and ask > 0 and ask > (bid * max_spread_mult):
-                    continue
+                if (
+                    not is_idx
+                    and bid is not None
+                    and ask is not None
+                    and (float(bid or 0) > 0 or float(ask or 0) > 0)
+                ):
+                    liq_audit_scan = audit_stock_option_liquidity_spread(
+                        symbol=contract_sym,
+                        bid=float(bid or 0.0),
+                        ask=float(ask or 0.0),
+                        max_spread_pct=0.045,
+                    )
+                    if not liq_audit_scan["is_acceptable"]:
+                        logger.debug(
+                            f"[OptionsBreakout] Vetoed illiquid stock option {contract_sym}: {liq_audit_scan['warning']}"
+                        )
+                        continue
+                else:
+                    max_spread_mult = 1.30 if is_idx else 1.15
+                    if bid and ask and bid > 0 and ask > 0 and ask > (bid * max_spread_mult):
+                        continue
 
                 is_physical_expiry_week = False
                 if not is_idx and expiry_date:
@@ -1233,7 +1280,24 @@ def detect_options_momentum_breakouts(
                 sfr = 0.0
                 is_wide_spread = False
                 midpoint_price = opt_ltp
-                if best_bid > 0 and best_ask > 0 and opt_ltp > 0:
+                liq_audit = None
+                if not is_idx and best_bid > 0 and best_ask > 0:
+                    liq_audit = audit_stock_option_liquidity_spread(
+                        symbol=contract_sym,
+                        bid=best_bid,
+                        ask=best_ask,
+                        max_spread_pct=0.045,
+                    )
+                    if not liq_audit["is_acceptable"]:
+                        logger.debug(
+                            f"[OptionsBreakout] Rejected stock option {contract_sym} on secondary depth check: {liq_audit['warning']}"
+                        )
+                        continue
+                    sfr = liq_audit["spread_pct"]
+                    midpoint_price = liq_audit["midpoint"]
+                    if liq_audit["status"] == "CAUTION_MIDPOINT":
+                        is_wide_spread = True
+                elif best_bid > 0 and best_ask > 0 and opt_ltp > 0:
                     sfr = round(((best_ask - best_bid) / opt_ltp) * 100.0, 2)
                     midpoint_price = round((best_bid + best_ask) / 2.0, 2)
                     if sfr >= 3.0:
@@ -1249,7 +1313,13 @@ def detect_options_momentum_breakouts(
                     if (tp and tp.invalidation_stop > 0)
                     else ""
                 )
-                if is_wide_spread:
+                if liq_audit and liq_audit.get("status") == "CAUTION_MIDPOINT":
+                    when_to_buy_str = (
+                        f"LIMIT MIDPOINT ORDER MANDATORY: Best bid ₹{best_bid:,.2f} / Best ask ₹{best_ask:,.2f} "
+                        f"(Spread {sfr:.1f}% > 4.5%). Limit order strictly pegged to Midpoint "
+                        f"₹{midpoint_price:,.2f} enforced to eliminate immediate bid-ask slippage."
+                    )
+                elif is_wide_spread:
                     when_to_buy_str = (
                         f"LIMIT ORDER ONLY: Best bid ₹{best_bid:,.2f} / Best ask ₹{best_ask:,.2f} (Spread {sfr:.1f}%). "
                         f"Enter via Limit Order at midpoint ₹{midpoint_price:,.2f} to eliminate -{sfr / 2.0:.1f}% immediate market slippage."
@@ -1414,6 +1484,7 @@ def detect_options_momentum_breakouts(
                         "india_vix": vix_val,
                         "is_high_iv_risk": is_high_iv_risk,
                         "is_gamma_squeeze": is_gamma_squeeze,
+                        "liquidity_spread_audit": liq_audit,
                         "nifty_change_pct": nifty_change,
                         "nifty_below_vwap": nifty_below_vwap,
                         "nifty_regime": (

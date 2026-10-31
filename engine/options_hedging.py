@@ -26,7 +26,7 @@ import re
 logger = logging.getLogger("engine.options_hedging")
 
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, time as dtime
 from typing import Any, Optional
 
@@ -50,6 +50,157 @@ class SpreadEvaluationResult:
     spot_price: float
     short_strike: float
     roll_plan: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class VIXStrategyRegime:
+    """Institutional Volatility Regime for Options Strategy Selection."""
+
+    regime: str  # "ULTRA_LOW_IV" | "NORMAL_IV" | "INFLATED_IV" | "TAIL_RISK"
+    vix: float
+    mandate_spread: bool
+    preferred_moneyness: str  # "DEEP_ITM" | "ATM_OR_1ITM" | "SPREAD_MANDATORY"
+    delta_target_long: float
+    description: str
+
+
+def classify_vix_strategy_regime(vix: Optional[float] = None) -> VIXStrategyRegime:
+    """
+    Classifies India VIX into institutional options strategy regimes.
+
+    1. ULTRA_LOW_IV (VIX < 12.0):
+       Extrinsic premium is cheap; IV crush risk is negligible.
+       Elevate to Deep ITM (Delta ~0.65-0.70) as synthetic futures with near-zero theta drag.
+       Spreads discouraged for trend momentum because short leg caps the runner (+300-400% moves).
+    2. NORMAL_IV (12.0 <= VIX <= 17.5):
+       Optimal institutional risk budget. Standard ATM or 1-strike ITM (Delta ~0.50-0.60).
+       Spreads mandated during midday theta grind (11:15-13:15 IST) or on wide CPR.
+    3. INFLATED_IV (17.5 < VIX <= 25.0):
+       Extrinsic premium is heavily inflated. Post-breakout IV crush causes naked options to bleed.
+       MANDATE DEFINED-RISK SPREAD across all hours (morning & afternoon).
+    4. TAIL_RISK (VIX > 25.0):
+       Extreme event/volatility hazard. Mandatory defined-risk spreads with 50% position sizing haircut.
+    """
+    current_vix = vix
+    if current_vix is None or current_vix <= 0:
+        try:
+            from market.indices import get_vix
+
+            current_vix = float(get_vix() or 14.0)
+        except Exception:
+            current_vix = 14.0
+
+    if current_vix < 12.0:
+        return VIXStrategyRegime(
+            regime="ULTRA_LOW_IV",
+            vix=round(current_vix, 2),
+            mandate_spread=False,
+            preferred_moneyness="DEEP_ITM",
+            delta_target_long=0.68,
+            description="Ultra-low IV: Option premiums underpriced. Prioritize Deep ITM (Delta ~0.65-0.70) as synthetic futures with near-zero theta drag.",
+        )
+    if current_vix <= 17.5:
+        return VIXStrategyRegime(
+            regime="NORMAL_IV",
+            vix=round(current_vix, 2),
+            mandate_spread=False,
+            preferred_moneyness="ATM_OR_1ITM",
+            delta_target_long=0.55,
+            description="Optimal IV environment: Standard ATM / 1-ITM strike selection. Spreads mandated during midday theta grind (11:15-13:15 IST) or on wide CPR.",
+        )
+    if current_vix <= 25.0:
+        return VIXStrategyRegime(
+            regime="INFLATED_IV",
+            vix=round(current_vix, 2),
+            mandate_spread=True,
+            preferred_moneyness="SPREAD_MANDATORY",
+            delta_target_long=0.50,
+            description="Inflated IV: High extrinsic decay and IV crush hazard. Defined-risk spreads strictly mandated across all hours to protect capital.",
+        )
+    return VIXStrategyRegime(
+        regime="TAIL_RISK",
+        vix=round(current_vix, 2),
+        mandate_spread=True,
+        preferred_moneyness="SPREAD_MANDATORY",
+        delta_target_long=0.45,
+        description="Tail Risk IV (>25.0): Extreme volatility hazard. Mandatory defined-risk spreads with 50% position sizing haircut.",
+    )
+
+
+def audit_stock_option_liquidity_spread(
+    symbol: str,
+    bid: float,
+    ask: float,
+    max_spread_pct: float = 0.045,  # 4.5% max bid-ask spread
+) -> dict[str, Any]:
+    """
+    Audits single-stock options orderbook bid-ask spread to prevent severe execution slippage.
+
+    In Indian F&O equity options, illiquid strikes frequently trade with 10%–25% bid-ask spreads.
+    Entering market orders or naive limit orders surrenders edge immediately upon fill.
+
+    Enforcement:
+      - If spread_pct <= 4.5%: PASS, standard limit or market-permitted execution.
+      - If 4.5% < spread_pct <= 10.0%: WIDE_SPREAD_SLIPPAGE_HAZARD. Enforces LIMIT order strictly pegged to Midpoint.
+      - If spread_pct > 10.0%: ILLIQUID_CONTRACT_REJECT. Hard-vetoed to protect capital.
+    """
+    b = float(bid or 0.0)
+    a = float(ask or 0.0)
+
+    if b <= 0 or a <= 0:
+        return {
+            "symbol": symbol,
+            "status": "UNAVAILABLE",
+            "is_acceptable": False,
+            "bid": b,
+            "ask": a,
+            "midpoint": max(b, a),
+            "spread_pct": 0.0,
+            "recommended_order_type": "LIMIT",
+            "warning": "Missing bid or ask quote in depth; enforce Limit Order.",
+        }
+
+    midpoint = round((b + a) / 2.0, 2)
+    spread_pts = round(a - b, 2)
+    spread_pct = round((spread_pts / max(0.05, midpoint)) * 100.0, 2)
+
+    if spread_pct > 10.0:
+        return {
+            "symbol": symbol,
+            "status": "REJECT",
+            "is_acceptable": False,
+            "bid": b,
+            "ask": a,
+            "midpoint": midpoint,
+            "spread_pct": spread_pct,
+            "recommended_order_type": "LIMIT_MIDPOINT",
+            "warning": f"Extreme illiquid bid-ask spread ({spread_pct:.1f}% > 10.0%). Contract rejected to prevent execution ruin.",
+        }
+
+    if spread_pct > (max_spread_pct * 100.0):
+        return {
+            "symbol": symbol,
+            "status": "CAUTION_MIDPOINT",
+            "is_acceptable": True,
+            "bid": b,
+            "ask": a,
+            "midpoint": midpoint,
+            "spread_pct": spread_pct,
+            "recommended_order_type": "LIMIT_MIDPOINT",
+            "warning": f"Wide bid-ask spread ({spread_pct:.1f}% > 4.5%). Limit order strictly pegged to Midpoint ₹{midpoint:.2f} enforced.",
+        }
+
+    return {
+        "symbol": symbol,
+        "status": "PASS",
+        "is_acceptable": True,
+        "bid": b,
+        "ask": a,
+        "midpoint": midpoint,
+        "spread_pct": spread_pct,
+        "recommended_order_type": "LIMIT",
+        "warning": None,
+    }
 
 
 def get_optimal_expiry_recommendation(
@@ -245,6 +396,8 @@ def get_0dte_intraday_phase(
             "guidance": "Standard multi-day expiry cycle. Normal Greeks evolution.",
             "volatility_multiplier": 1.0,
             "time_in_phase_pct": 0.0,
+            "veto_naked_otm": False,
+            "allowed_moneyness": "ANY",
         }
 
     # Market hours check
@@ -257,6 +410,8 @@ def get_0dte_intraday_phase(
             "guidance": "Market is closed. Prep levels for next session.",
             "volatility_multiplier": 1.0,
             "time_in_phase_pct": 0.0,
+            "veto_naked_otm": False,
+            "allowed_moneyness": "NONE",
         }
 
     if now_time < dtime(11, 0):
@@ -271,6 +426,8 @@ def get_0dte_intraday_phase(
             "guidance": "High velocity opening momentum. Vega and delta expansion dominate. Favor Route A (Naked Convexity) on high-conviction breakout levels. Avoid premature OTM short sells.",
             "volatility_multiplier": 1.35,
             "time_in_phase_pct": pct,
+            "veto_naked_otm": False,
+            "allowed_moneyness": "ANY",
         }
 
     if now_time < dtime(13, 30):
@@ -285,6 +442,8 @@ def get_0dte_intraday_phase(
             "guidance": "Consolidation and aggressive intraday theta decay. Pure naked buying risks rapid decay in chop. Favor Route B (Dynamic Spread) to harvest short premium or sit out.",
             "volatility_multiplier": 0.85,
             "time_in_phase_pct": pct,
+            "veto_naked_otm": False,
+            "allowed_moneyness": "SPREAD_OR_ATM",
         }
 
     if now_time < dtime(15, 0):
@@ -299,6 +458,8 @@ def get_0dte_intraday_phase(
             "guidance": "0DTE Gamma Squeeze window. Unwinding of dealer gamma walls. Asymmetric R:R (1:5+) for close ATM/OTM options on high-velocity breaks. Extreme blowout risk for naked option sellers.",
             "volatility_multiplier": 1.80,
             "time_in_phase_pct": pct,
+            "veto_naked_otm": True,
+            "allowed_moneyness": "ATM_OR_ITM_ONLY",
         }
 
     # 15:00 - 15:30 (30 mins)
@@ -312,6 +473,8 @@ def get_0dte_intraday_phase(
         "guidance": "Expiry final auction window. Delta and gamma collapse into intrinsic cash value. Square off winning spreads and harvest remaining residual gains. No new naked entries.",
         "volatility_multiplier": 0.50,
         "time_in_phase_pct": pct,
+        "veto_naked_otm": True,
+        "allowed_moneyness": "SQUARE_OFF_ONLY",
     }
 
 
@@ -535,11 +698,12 @@ def build_defined_risk_hedge_plan(
         except Exception:
             current_vix = 14.0
 
+    vix_strategy = classify_vix_strategy_regime(current_vix)
     is_low_vix_range = current_vix < 13.0
     is_midday_chop = (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 65)
     is_chop_regime = is_midday_chop or is_low_vix_range or (vel_score < 55)
     is_explosive = vel_score >= 75
-    is_high_iv = current_vix > 16.5
+    is_high_iv = vix_strategy.mandate_spread or current_vix > 16.5
 
     # 3. Determine strike interval & calibrated spread width
     if is_sensex:
@@ -860,7 +1024,9 @@ def build_defined_risk_hedge_plan(
 
     # Preferred Vehicle & Asymmetry Routing
     debit_rr_warning = ""
-    if not is_idx and is_poor_rr:
+    if vix_strategy.mandate_spread:
+        pref_veh = "SPREAD_ONLY"
+    elif not is_idx and is_poor_rr:
         debit_rr_warning = (
             f"⚠️ DEBIT SPREAD R:R DEGRADED (1:{rr_spread:.1f}, Net Debit {int(debit_ratio * 100)}% of width). "
             f"Auto-promoted 1x2 Ratio Spread for Zero-Downside / Net Credit entry."
@@ -891,6 +1057,8 @@ def build_defined_risk_hedge_plan(
 
     # Assemble comprehensive execution guidance
     guidance_parts = []
+    if vix_strategy.mandate_spread:
+        guidance_parts.append(f"⚠️ {vix_strategy.description}")
     if is_midday_chop:
         guidance_parts.append("⚠️ MIDDAY CHOP WINDOW: Execute Hedged Spread to avoid theta decay.")
     if debit_rr_warning:
@@ -943,6 +1111,8 @@ def build_defined_risk_hedge_plan(
         "max_profit": max_profit,
         "breakeven_spot": be_spot,
         "risk_reward": f"1:{rr_spread:.1f}",
+        "vix_regime": vix_strategy.regime,
+        "vix_strategy_regime": asdict(vix_strategy),
         "debit_ratio": debit_ratio,
         "is_poor_rr": is_poor_rr,
         "debit_rr_warning": debit_rr_warning or None,

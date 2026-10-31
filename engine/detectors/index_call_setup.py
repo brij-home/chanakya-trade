@@ -31,6 +31,7 @@ from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_identity import get_session_phase_slot
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
+from engine.options_hedging import classify_vix_strategy_regime
 from market.instruments import format_strike
 
 logger = logging.getLogger(__name__)
@@ -444,6 +445,15 @@ def detect_index_call_setup(
         clean_sym in ("SENSEX", "BSX") and now_dt.weekday() == 4
     )
 
+    vix_val = None
+    try:
+        from market.indices import get_vix
+
+        vix_val = get_vix()
+    except Exception as e_vix:
+        logger.debug(f"[IndexCallSetup] VIX lookup failed: {e_vix}")
+    vix_regime_info = classify_vix_strategy_regime(vix_val)
+
     # Sort by optimal Institutional Moneyness, Delta Torque & Liquidity (ATM / 1-Strike ITM Priority)
     def _contract_score(c: Any) -> float:
         lp = float(getattr(c, "last_price", 0.0) or 0.0)
@@ -496,14 +506,25 @@ def detect_index_call_setup(
             ideal_prem = 100.0 if clean_sym == "NIFTY" else 240.0
         prem_dist = abs(lp - ideal_prem) / ideal_prem if lp > 0 else 2.0
 
-        # 0DTE Penny Option Lottery Filter (Institutional EV Invariant):
+        # Ultra-Low IV Calibration: Under VIX < 12.0, extrinsic premium is underpriced and theta drag is negligible.
+        # Elevate Deep ITM (Delta ~0.65-0.70) as synthetic futures runners for uncapped convexity.
+        if (
+            vix_regime_info.regime == "ULTRA_LOW_IV"
+            and c_strike < spot
+            and dist_pts <= (step_val * 2.2)
+        ):
+            moneyness_bonus += 18.0
+
+        # 0DTE Penny Option Lottery Filter & Afternoon Theta Acceleration Guard:
         # On 0DTE, OTM options under ₹35 (Nifty) or ₹80 (Sensex/Bank Nifty) face 95%+ probability of total zero expiry.
-        # Penalize heavily to prevent selecting low-delta lottery traps.
+        # Post-13:00 IST on 0DTE, naked OTM options decay non-linearly (t^-1/2); strictly veto them.
         penny_trap_penalty = 0.0
         if is_0dte_today and c_strike > spot:
             min_floor = 35.0 if clean_sym == "NIFTY" else 80.0
             if lp < min_floor:
                 penny_trap_penalty = 150.0
+            if curr_time >= dtime(13, 0):
+                penny_trap_penalty += 300.0
 
         return (
             moneyness_bonus
@@ -923,23 +944,24 @@ def detect_index_call_setup(
         logger.debug(f"[IndexCallSetup] Heavyweights check bypassed: {e_hw}")
 
     # ── Optimization 2b: Low-VIX (< 13.0) Range-Bound Regime Filter ──
-    vix_val = None
-    try:
-        from market.indices import get_vix
+    if vix_val is None:
+        try:
+            from market.indices import get_vix
 
-        vix_val = get_vix()
-    except Exception as e_suppressed:
-        logger.debug(
-            f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
-        )
+            vix_val = get_vix()
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+            )
+        vix_regime_info = classify_vix_strategy_regime(vix_val)
+
     is_low_vix_range = bool(
-        vix_val
-        and 0 < vix_val < 13.0
+        vix_regime_info.regime == "ULTRA_LOW_IV"
         and effective_vwap > 0
         and abs((spot - effective_vwap) / effective_vwap * 100.0) < 0.35
         and not is_explosive_momentum
     )
-    is_high_iv_risk = bool(vix_val is not None and vix_val >= 18.0)
+    is_high_iv_risk = bool(vix_regime_info.mandate_spread)
 
     # ── Opposing Supply Barrier Check (Headroom Sanity & Bull Trap Prevention) ───
     # If spot is right underneath Previous Day High or Day High, buying CE collides directly
@@ -3064,16 +3086,16 @@ def detect_index_call_setup(
         # 0DTE Late Session Expiration: Post 13:30 IST on expiry day, naked options face catastrophic terminal theta collapse.
         is_0dte_late_session = is_0dte and (now_time >= dtime(13, 30))
 
-        if is_low_vix_range:
+        if vix_regime_info.mandate_spread:
             pref_veh = "SPREAD_ONLY"
-            spread_guidance = (
-                "⚠️ LOW-VIX RANGE-BOUND REGIME (India VIX < 13.0): Naked CE prohibited due to accelerated theta decay; "
-                "execute defined-risk Bull Call Spread only."
-            )
+            spread_guidance = f"⚠️ {vix_regime_info.description}"
+        elif is_low_vix_range:
+            pref_veh = "DEEP_ITM_OR_SPREAD"
+            spread_guidance = f"ℹ️ {vix_regime_info.description}"
         elif is_high_iv_risk:
             pref_veh = "SPREAD_ONLY"
             spread_guidance = (
-                f"⚠️ HIGH-VIX REGIME (India VIX {vix_val:.1f} >= 18.0): High IV crush risk on naked options; "
+                f"⚠️ HIGH-VIX REGIME (India VIX {vix_val:.1f} >= 17.5): High IV crush risk on naked options; "
                 "execute defined-risk Bull Call Spread or Deep ITM only."
             )
         elif is_0dte_late_session:
@@ -3170,7 +3192,7 @@ def detect_index_call_setup(
         is_long_dated_monthly = dte_days >= 8
         is_spread_mandated = bool(
             (
-                is_low_vix_range
+                vix_regime_info.mandate_spread
                 or is_high_iv_risk
                 or is_midday_chop_window
                 or is_0dte_midday_trap

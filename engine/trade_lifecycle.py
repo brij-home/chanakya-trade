@@ -632,13 +632,15 @@ def apply_autonomous_breakeven_lock(
     target_1: Optional[float] = None,
     position_type: str = "LONG",
     cost_buffer_pct: float = 0.002,  # 0.20% to cover STT, GST, Exchange & Brokerage charges
+    is_option: Optional[bool] = None,
+    option_wick_buffer_pct: float = 0.025,  # 2.5% volatility buffer to defend against wick stop-hunting
     actor: str = "AUTONOMOUS_LIFECYCLE",
 ) -> dict[str, Any]:
     """
     Autonomous Breakeven Locking Engine (Advisor & Automated Protection Mode):
     When Target 1 (+1.8R to +2.0R) is achieved, automatically ratchets resting stop-loss
-    orders to Breakeven (+ transactional cost buffer) without requiring manual trader
-    intervention, guaranteeing a risk-free position ('Free-Roll').
+    orders to Breakeven (+ transactional cost buffer or volatility wick cushion for options)
+    without requiring manual trader intervention, guaranteeing a risk-free position ('Free-Roll').
 
     Returns structured status dictionary with details of ratcheted orders.
     """
@@ -668,8 +670,15 @@ def apply_autonomous_breakeven_lock(
             "ratcheted_orders_count": 0,
         }
 
-    # Calculate Breakeven Stop Level (+ buffer for costs)
-    if is_long:
+    # Calculate Breakeven Stop Level (+ buffer for costs or option volatility wick cushion)
+    is_opt = is_option if is_option is not None else symbol.upper().endswith(("CE", "PE"))
+    if is_opt:
+        # Volatility Wick Defense:
+        # High-beta options routinely re-test entry levels by 2-3% on 1-second noise wicks.
+        # Since 50% was already banked at Target 1 (+30% to +40%), setting the runner stop
+        # with a 2.5% buffer preserves a +15% net trade profit while defending against false stop-runs.
+        breakeven_sl = round(entry_price * (1.0 - option_wick_buffer_pct), 2)
+    elif is_long:
         breakeven_sl = round(entry_price * (1.0 + cost_buffer_pct), 2)
     else:
         breakeven_sl = round(entry_price * (1.0 - cost_buffer_pct), 2)
