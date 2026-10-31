@@ -148,6 +148,7 @@ class AlertScrutinyAuditor:
             "risk_within_bounds": False,
             "no_chase": False,
             "order_book_sanctity_valid": True,
+            "trap_invalidation_clean": True,
         }
 
         # Bypass strict sanity for simulation/test alerts only when non-live and not in test runner
@@ -4551,6 +4552,55 @@ class AlertScrutinyAuditor:
                     f"Option premium liquidation veto (premium velocity {float(prem_vel):.1f} pts/min)",
                     flags,
                 )
+
+        # ── 15. Institutional Adversarial Trap Invalidator Gate ─────────
+        try:
+            from engine.trap_invalidator import audit_trade_for_traps
+            from engine.daily_levels import daily_levels_store
+
+            dl = daily_levels_store.get_levels(clean_sym)
+            trap_audit = audit_trade_for_traps(
+                symbol=clean_sym,
+                direction=direction,
+                entry_price=entry_anchor,
+                stop_loss=sl,
+                target_1=t1,
+                daily_levels=dl,
+                is_0dte=bool(metrics.get("is_0dte", False)),
+            )
+            if trap_audit.is_trap and trap_audit.severity == "CRITICAL_INVALIDATION":
+                # If collision is structural but setup is an explosive momentum breakout (RVOL >= 1.8x),
+                # institutional flow punches through the barrier rather than bouncing off it.
+                rvol_val = (
+                    float(metrics.get("rvol", 0.0) or 0.0) if isinstance(metrics, dict) else 0.0
+                )
+                is_spark_or_breakout = (
+                    "SPARK" in atype
+                    or "BREAKOUT" in atype
+                    or "BREAKDOWN" in atype
+                    or "ORB" in atype
+                )
+                if (
+                    trap_audit.primary_trap_type == "RESISTANCE_COLLISION"
+                    and is_spark_or_breakout
+                    and rvol_val >= 1.8
+                ):
+                    flags["adversarial_trap_warning"] = True
+                    if isinstance(metrics, dict):
+                        metrics["trap_audit"] = trap_audit.to_dict()
+                else:
+                    flags["trap_invalidation_clean"] = False
+                    return (
+                        False,
+                        f"Adversarial Trap Invalidator Veto: {trap_audit.falsification_evidence}",
+                        flags,
+                    )
+            elif trap_audit.is_trap:
+                flags["adversarial_trap_warning"] = True
+                if isinstance(metrics, dict):
+                    metrics["trap_audit"] = trap_audit.to_dict()
+        except Exception as e_trap:
+            logger.debug(f"[AlertScrutiny] Adversarial trap audit bypassed: {e_trap}")
 
         return True, "", flags
 

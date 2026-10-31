@@ -31,11 +31,43 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
 logger = logging.getLogger("chanakya.analysis.order_flow")
+
+
+import math
+import pandas as pd
+
+
+@dataclass
+class VPINResult:
+    """Volume-Synchronized Probability of Toxicity (VPIN) metrics."""
+
+    symbol: str
+    vpin: float  # 0.0 to 1.0
+    toxicity_regime: (
+        str  # "LOW_TOXICITY" | "MODERATE_TOXICITY" | "HIGH_TOXICITY" | "EXTREME_TOXICITY"
+    )
+    bucket_size: float  # Volume per bucket V
+    num_buckets: int  # N buckets evaluated
+    directional_bias: str  # "BUY_DOMINATED" | "SELL_DOMINATED" | "BALANCED"
+    adverse_selection_risk: float  # 0.0 to 1.0 (risk to passive limit orders)
+    summary: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "vpin": round(self.vpin, 4),
+            "toxicity_regime": self.toxicity_regime,
+            "bucket_size": round(self.bucket_size, 1),
+            "num_buckets": self.num_buckets,
+            "directional_bias": self.directional_bias,
+            "adverse_selection_risk": round(self.adverse_selection_risk, 2),
+            "summary": self.summary,
+        }
 
 
 @dataclass
@@ -62,6 +94,8 @@ class OrderFlowSnapshot:
     absorption_detected: bool
     conviction_score: int  # 0 to 100
     recommendation: str
+    vpin: float = 0.50
+    toxicity_regime: str = "MODERATE_TOXICITY"
     cvd_series: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -86,6 +120,141 @@ class OrderFlowSnapshot:
             "recommendation": self.recommendation,
             "cvd_series": self.cvd_series,
         }
+
+
+def compute_vpin(
+    symbol: str,
+    df_bars: Optional[pd.DataFrame] = None,
+    num_buckets: int = 20,
+    volume_per_bucket: Optional[float] = None,
+) -> VPINResult:
+    """
+    Computes Volume-Synchronized Probability of Toxicity (VPIN) using Bulk Volume Classification (BVC).
+    Easley, Lopez de Prado, O'Hara (2012).
+
+    Measures the frequency and intensity of informed traders hitting bids or lifting asks:
+      - VPIN < 0.40: LOW_TOXICITY (balanced flow, safe for limit orders)
+      - 0.40 <= VPIN <= 0.65: MODERATE_TOXICITY (normal intraday flow)
+      - 0.65 < VPIN <= 0.80: HIGH_TOXICITY (informed institutional flow; breakout expansion favored)
+      - VPIN > 0.80: EXTREME_TOXICITY (extreme adverse selection; market maker step-aside danger)
+    """
+    clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").replace(".NS", "").strip()
+    if df_bars is None or len(df_bars) < 5:
+        return VPINResult(
+            symbol=clean_sym,
+            vpin=0.50,
+            toxicity_regime="MODERATE_TOXICITY",
+            bucket_size=0.0,
+            num_buckets=0,
+            directional_bias="BALANCED",
+            adverse_selection_risk=0.50,
+            summary="Insufficient volume bars for VPIN toxicity computation.",
+        )
+
+    col_c = "close" if "close" in df_bars.columns else "Close"
+    col_v = "volume" if "volume" in df_bars.columns else "Volume"
+
+    closes = df_bars[col_c].astype(float).values
+    volumes = df_bars[col_v].astype(float).values
+
+    # 1. Price Changes & Standard Deviation
+    delta_p = np.diff(closes, prepend=closes[0])
+    sigma_dp = float(np.std(delta_p))
+    if sigma_dp <= 1e-6:
+        sigma_dp = 1.0
+
+    # 2. Bulk Volume Classification (BVC) using Standard Normal CDF
+    z = delta_p / sigma_dp
+    frac_buy = np.array([0.5 * (1.0 + math.erf(float(val) / math.sqrt(2.0))) for val in z])
+    buy_vol = volumes * frac_buy
+    sell_vol = volumes * (1.0 - frac_buy)
+
+    total_vol = float(np.sum(volumes))
+    if total_vol <= 0:
+        return VPINResult(
+            symbol=clean_sym,
+            vpin=0.50,
+            toxicity_regime="MODERATE_TOXICITY",
+            bucket_size=0.0,
+            num_buckets=0,
+            directional_bias="BALANCED",
+            adverse_selection_risk=0.50,
+            summary="Zero traded volume recorded.",
+        )
+
+    n_buckets = max(5, min(num_buckets, 50))
+    v_bucket = (
+        float(volume_per_bucket)
+        if volume_per_bucket and volume_per_bucket > 0
+        else (total_vol / n_buckets)
+    )
+    if v_bucket <= 0:
+        v_bucket = 1000.0
+
+    # 3. Synchronize Volume into Equal-Size Buckets
+    bucket_imbalances = []
+    curr_b_vol = 0.0
+    curr_s_vol = 0.0
+    curr_rem = v_bucket
+
+    for b_v, s_v, v in zip(buy_vol, sell_vol, volumes):
+        rem_v = v
+        while rem_v > 0:
+            take = min(rem_v, curr_rem)
+            frac = take / max(1.0, v)
+            curr_b_vol += b_v * frac
+            curr_s_vol += s_v * frac
+            rem_v -= take
+            curr_rem -= take
+
+            if curr_rem <= 1e-4:
+                bucket_imbalances.append(abs(curr_b_vol - curr_s_vol))
+                curr_b_vol = 0.0
+                curr_s_vol = 0.0
+                curr_rem = v_bucket
+
+    if not bucket_imbalances:
+        bucket_imbalances.append(abs(np.sum(buy_vol) - np.sum(sell_vol)))
+
+    # 4. Compute VPIN = Sum(|V_b - V_s|) / (N * V_bucket)
+    eval_buckets = bucket_imbalances[-n_buckets:]
+    vpin_val = float(np.sum(eval_buckets) / (len(eval_buckets) * v_bucket))
+    vpin_val = max(0.0, min(1.0, round(vpin_val, 4)))
+
+    # 5. Regime Classification
+    if vpin_val < 0.40:
+        regime = "LOW_TOXICITY"
+    elif vpin_val <= 0.65:
+        regime = "MODERATE_TOXICITY"
+    elif vpin_val <= 0.80:
+        regime = "HIGH_TOXICITY"
+    else:
+        regime = "EXTREME_TOXICITY"
+
+    net_delta = float(np.sum(buy_vol) - np.sum(sell_vol))
+    if net_delta > total_vol * 0.15:
+        bias = "BUY_DOMINATED"
+    elif net_delta < -total_vol * 0.15:
+        bias = "SELL_DOMINATED"
+    else:
+        bias = "BALANCED"
+
+    adverse_risk = round(vpin_val, 2)
+    summary = (
+        f"VPIN Toxicity: {vpin_val:.2%} ({regime}). Flow Bias: {bias}. "
+        f"Adverse selection risk to resting limit orders: {adverse_risk:.0%}."
+    )
+
+    return VPINResult(
+        symbol=clean_sym,
+        vpin=vpin_val,
+        toxicity_regime=regime,
+        bucket_size=round(v_bucket, 1),
+        num_buckets=len(eval_buckets),
+        directional_bias=bias,
+        adverse_selection_risk=adverse_risk,
+        summary=summary,
+    )
 
 
 def analyze_order_flow(
