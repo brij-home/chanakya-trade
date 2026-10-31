@@ -1409,12 +1409,12 @@ def detect_index_call_setup(
         drop_from_day_high_pct = (
             ((day_high - spot) / max(1.0, day_high)) * 100.0 if (day_high and day_high > 0) else 0.0
         )
-        is_dead_cat_bounce = is_below_vwap and drop_from_day_high_pct >= 0.25
+        is_dead_cat_bounce = is_below_vwap and drop_from_day_high_pct >= 0.85
 
         if is_below_vwap:
             is_valid_dl_bounce = (
                 not is_dead_cat_bounce
-                and (0.12 <= dl_bounce_pct <= 0.60)
+                and (0.18 <= dl_bounce_pct <= 0.60)
                 and (has_candle_bounce or ce_receptive)
                 and (
                     not is_5m_bear_trend
