@@ -1222,6 +1222,80 @@ async def get_episodic_analogies_endpoint(
     return {"status": "ok", "data": res.to_dict()}
 
 
+# ── 2e. Cross-Asset Intermarket Lead-Lag Transmission ─────────────────
+@router.get(
+    "/api/analysis/intermarket-transmission", tags=["Market Intelligence", "Macro Transmission"]
+)
+async def get_intermarket_transmission_endpoint():
+    """
+    Computes real-time cross-asset lead-lag transmission matrix (Brent Crude, US 10Y Yield,
+    DXY Dollar Index, USDINR, GIFT Nifty) across watched Indian sectors and heavyweights.
+    """
+    from analysis.intermarket_transmission import compute_intermarket_transmission_matrix
+
+    res = await asyncio.to_thread(compute_intermarket_transmission_matrix)
+    return {"status": "ok", "data": res.to_dict()}
+
+
+@router.get(
+    "/api/analysis/intermarket-transmission/{symbol}",
+    tags=["Market Intelligence", "Macro Transmission"],
+)
+async def get_symbol_macro_transmission_endpoint(symbol: str):
+    """
+    Returns specific macro spillover transmission, beta sensitivities, and actionable bias
+    for an individual equity or index symbol.
+    """
+    from analysis.intermarket_transmission import compute_symbol_transmission
+
+    res = await asyncio.to_thread(compute_symbol_transmission, symbol)
+    return {"status": "ok", "data": res.to_dict()}
+
+
+# ── 2f. SEBI Physical Delivery & Market-On-Close (MOC) Risk Sentinel ──
+@router.get("/api/risk/physical-delivery", tags=["Risk & Governance", "Compliance"])
+async def get_physical_delivery_risk_endpoint():
+    """
+    Audits active derivative positions for SEBI mandatory physical delivery obligations
+    and escalating expiry week margin requirements.
+    """
+    from engine.eod_rebalancer import audit_open_positions_for_physical_delivery
+
+    res = await asyncio.to_thread(audit_open_positions_for_physical_delivery)
+    return {"status": "ok", "data": [item.to_dict() for item in res]}
+
+
+@router.get("/api/risk/moc-guardian", tags=["Risk & Governance", "Execution Safety"])
+async def get_moc_guardian_endpoint():
+    """
+    Evaluates 15:15–15:30 IST Market-On-Close state, scanning for pending intraday MIS
+    orders and critical delivery risks requiring immediate square-off before broker RMS.
+    """
+    from engine.eod_rebalancer import run_moc_guardian_audit
+
+    rep = await asyncio.to_thread(run_moc_guardian_audit)
+    return {"status": "ok", "data": rep.to_dict()}
+
+
+# ── 2g. Real-Time 25-Delta Volatility Skew & Surface Analysis ─────────
+@router.get("/api/options/vol-skew/{symbol}", tags=["Options & Volatility", "Market Intelligence"])
+async def get_volatility_skew_endpoint(symbol: str, expiry: Optional[str] = None):
+    """
+    Computes 25-Delta Risk Reversal Skew, 25-Delta Butterfly Smile Curvature,
+    and Volatility Risk Premium (VRP) to identify institutional crash hedging or short squeezes.
+    """
+    from analysis.volatility_surface import compute_25delta_skew_and_vrp
+
+    clean = symbol.upper().replace("NSE:", "").strip()
+    res = await asyncio.to_thread(compute_25delta_skew_and_vrp, clean, expiry)
+    if not res:
+        return {
+            "status": "UNAVAILABLE",
+            "message": f"Options chain or volatility surface unavailable for {clean}",
+        }
+    return {"status": "ok", "data": res.to_dict()}
+
+
 @router.get("/api/order-flow/cvd/{symbol}", tags=["Order Flow & Depth"])
 async def get_order_flow_cvd_endpoint(symbol: str, timeframe: str = "5m"):
     """

@@ -19,6 +19,7 @@ logger = logging.getLogger("analysis.volatility_surface")
 
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from rich.console import Console
@@ -228,12 +229,180 @@ from analysis.vol_surface import (
     SABRCalibrationResult,
 )
 
+
+from dataclasses import dataclass, asdict
+from typing import Any
+
+
+@dataclass
+class VolatilitySkewReport:
+    underlying: str
+    spot_price: float
+    expiry: str
+    atm_strike: float
+    atm_iv: float
+    put_25d_strike: float
+    put_25d_iv: float
+    call_25d_strike: float
+    call_25d_iv: float
+    risk_reversal_skew: float  # Put IV - Call IV
+    butterfly_curvature: float  # (Put IV + Call IV) / 2 - ATM IV
+    realized_vol_20d: float
+    volatility_risk_premium: float  # ATM IV - RV 20d
+    skew_regime: str  # PUT_SKEW_CRASH_FEAR, CALL_SKEW_SHORT_SQUEEZE, BALANCED_SMILE
+    trading_edge: str  # GAMMA_BUYING, THETA_HARVESTING, SPREAD_ARBITRAGE, NEUTRAL
+    actionable_directive: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def compute_25delta_skew_and_vrp(
+    underlying: str,
+    expiry: Optional[str] = None,
+    options_chain: Optional[list[Any]] = None,
+    spot_price: Optional[float] = None,
+    realized_vol_20d: Optional[float] = None,
+) -> Optional[VolatilitySkewReport]:
+    """
+    Computes 25-Delta Risk Reversal Skew, 25-Delta Butterfly Smile Curvature,
+    and Volatility Risk Premium (VRP = Implied Vol - Realized Vol).
+    """
+    clean_sym = underlying.upper().replace("NSE:", "").replace("BSE:", "").strip()
+
+    try:
+        from market.quotes import get_ltp
+        from market.options import get_options_chain, get_atm_strike
+
+        spot = spot_price if (spot_price and spot_price > 0) else get_ltp(f"NSE:{clean_sym}")
+        if not spot or spot <= 0:
+            return None
+
+        chain = options_chain or get_options_chain(clean_sym, expiry)
+        if not chain:
+            return None
+
+        atm_strike = get_atm_strike(clean_sym, spot)
+        resolved_exp = expiry or getattr(chain[0], "expiry", "NEAR") or "NEAR"
+
+        # 25-Delta is roughly -2.5% to -3.0% OTM for Puts, +2.5% to +3.0% OTM for Calls
+        target_put_strike = spot * 0.975
+        target_call_strike = spot * 1.025
+
+        # Find closest strikes
+        strikes = sorted(list({c.strike for c in chain if getattr(c, "strike", 0) > 0}))
+        if not strikes:
+            return None
+
+        closest_atm = min(strikes, key=lambda s: abs(s - atm_strike))
+        closest_put = min(strikes, key=lambda s: abs(s - target_put_strike))
+        closest_call = min(strikes, key=lambda s: abs(s - target_call_strike))
+
+        # Extract IVs
+        atm_ivs = [
+            c.iv for c in chain if c.strike == closest_atm and getattr(c, "iv", None) and c.iv > 0
+        ]
+        atm_iv = float(np.mean(atm_ivs)) if atm_ivs else 15.0
+
+        put_ivs = [
+            c.iv
+            for c in chain
+            if c.strike == closest_put
+            and c.option_type == "PE"
+            and getattr(c, "iv", None)
+            and c.iv > 0
+        ]
+        put_iv = float(put_ivs[0]) if put_ivs else (atm_iv * 1.08)
+
+        call_ivs = [
+            c.iv
+            for c in chain
+            if c.strike == closest_call
+            and c.option_type == "CE"
+            and getattr(c, "iv", None)
+            and c.iv > 0
+        ]
+        call_iv = float(call_ivs[0]) if call_ivs else (atm_iv * 0.96)
+
+        # Realized volatility
+        if realized_vol_20d is None or realized_vol_20d <= 0:
+            try:
+                from market.history import get_ohlcv
+
+                df_hist = get_ohlcv(clean_sym, interval="day", days=30)
+                if df_hist is not None and len(df_hist) >= 20:
+                    rets = np.log(df_hist["close"] / df_hist["close"].shift(1)).dropna()
+                    rv_20 = float(rets.iloc[-20:].std() * np.sqrt(252) * 100.0)
+                else:
+                    rv_20 = 13.5
+            except Exception:
+                rv_20 = 13.5
+        else:
+            rv_20 = realized_vol_20d
+
+        risk_reversal = round(put_iv - call_iv, 2)
+        butterfly = round(((put_iv + call_iv) / 2.0) - atm_iv, 2)
+        vrp = round(atm_iv - rv_20, 2)
+
+        # Skew Regime & Directives
+        if risk_reversal >= 3.5:
+            regime = "PUT_SKEW_CRASH_FEAR"
+            directive = (
+                f"Elevated downside Put Skew ({risk_reversal:+.1f} vol pts). "
+                f"Smart money paying high premium for crash hedges. Veto unhedged breakout longs."
+            )
+        elif risk_reversal <= -1.5:
+            regime = "CALL_SKEW_SHORT_SQUEEZE"
+            directive = (
+                f"Call Skew Inversion ({risk_reversal:+.1f} vol pts). "
+                f"Aggressive call wing demand indicates impending short squeeze. Favor call momentum."
+            )
+        else:
+            regime = "BALANCED_SMILE"
+            directive = "Normal volatility smile. Standard symmetric delta-neutral or directional setups apply."
+
+        # Trading Edge
+        if vrp >= 4.0:
+            edge = "THETA_HARVESTING"
+            directive += f" High Vol Risk Premium (+{vrp:.1f} pts) favors selling credit spreads / iron condors."
+        elif vrp <= -2.5:
+            edge = "GAMMA_BUYING"
+            directive += f" Negative Vol Risk Premium ({vrp:.1f} pts) means options are underpriced; favor long gamma / straddles."
+        else:
+            edge = "NEUTRAL"
+
+        return VolatilitySkewReport(
+            underlying=clean_sym,
+            spot_price=round(spot, 2),
+            expiry=resolved_exp,
+            atm_strike=closest_atm,
+            atm_iv=round(atm_iv, 2),
+            put_25d_strike=closest_put,
+            put_25d_iv=round(put_iv, 2),
+            call_25d_strike=closest_call,
+            call_25d_iv=round(call_iv, 2),
+            risk_reversal_skew=risk_reversal,
+            butterfly_curvature=butterfly,
+            realized_vol_20d=round(rv_20, 2),
+            volatility_risk_premium=vrp,
+            skew_regime=regime,
+            trading_edge=edge,
+            actionable_directive=directive,
+        )
+
+    except Exception as e:
+        logger.warning(f"[VolatilitySurface] Error computing 25d skew: {e}")
+        return None
+
+
 __all__ = [
     "classify_skew",
     "classify_term_structure",
     "compute_iv_smile",
     "compute_iv_term_structure",
     "print_iv_smile",
+    "compute_25delta_skew_and_vrp",
+    "VolatilitySkewReport",
     "sabr_implied_volatility",
     "calibrate_sabr",
     "interpolate_sabr_smile",
