@@ -2225,7 +2225,7 @@ class AutoAlertEngine:
                         active_same_dir.metrics["is_apex_confluence"] = True
                         active_same_dir.metrics["conviction_tier"] = "APEX_CONFLUENCE"
                         boosted_conf = min(
-                            92, max(active_same_dir.confidence, alert.confidence) + 10
+                            98, max(active_same_dir.confidence, alert.confidence) + 10
                         )
                         active_same_dir.confidence = boosted_conf
 

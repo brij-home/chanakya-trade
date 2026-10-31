@@ -143,6 +143,15 @@ def _load_calibrated_coilers() -> list[str]:
         from pathlib import Path
 
         cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        if not cal_path.exists():
+            repo_cal = (
+                Path(__file__).resolve().parent.parent
+                / "data"
+                / "calibration"
+                / "index_calibration.json"
+            )
+            if repo_cal.exists():
+                cal_path = repo_cal
         if cal_path.exists():
             with open(cal_path, "r", encoding="utf-8") as f:
                 data = json.load(f)

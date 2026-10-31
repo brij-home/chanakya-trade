@@ -548,7 +548,7 @@ def run_eod_alert_postmortems(
         needs_postmortem = (
             is_invalidated
             or (not target_hit and is_expired)
-            or (not is_multi_session and not target_hit and not has_triggered)
+            or (not is_multi_session and not target_hit)
         )
         if not needs_postmortem:
             continue

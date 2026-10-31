@@ -175,6 +175,22 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 @pytest.fixture(autouse=True)
 def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    try:
+        home_cal = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        repo_cal = (
+            Path(__file__).resolve().parent.parent
+            / "data"
+            / "calibration"
+            / "index_calibration.json"
+        )
+        if not home_cal.exists() and repo_cal.exists():
+            home_cal.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+
+            shutil.copy2(repo_cal, home_cal)
+    except Exception:
+        pass
+
     """Ensure no unit test accidentally inherits live AI credentials or makes live LLM calls."""
     global _PROCESS_ALLOW_NETWORK
     _PROCESS_ALLOW_NETWORK = "network" in request.keywords

@@ -345,6 +345,7 @@ def test_tbt_connect_off_market_standby():
     with (
         patch.object(mgr, "_get_auth_token", return_value="MOCK:AUTH_TOKEN"),
         patch("market.fyers_tbt_manager.get_market_session", return_value="OFF_MARKET"),
+        patch("market.fyers_tbt_manager._is_fyers_sdk_available", return_value=True),
     ):
         mgr._workers = []
         mgr._connect()

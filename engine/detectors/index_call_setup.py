@@ -1409,7 +1409,7 @@ def detect_index_call_setup(
         drop_from_day_high_pct = (
             ((day_high - spot) / max(1.0, day_high)) * 100.0 if (day_high and day_high > 0) else 0.0
         )
-        is_dead_cat_bounce = is_below_vwap and drop_from_day_high_pct >= 0.85
+        is_dead_cat_bounce = is_below_vwap and drop_from_day_high_pct >= 0.25
 
         if is_below_vwap:
             is_valid_dl_bounce = (
@@ -2460,7 +2460,12 @@ def detect_index_call_setup(
             "FAILED_DAY_LOW_BREAKDOWN",
         )
     )
-    if eagle_regime is not None and not is_range_boundary_fade:
+    if (
+        eagle_regime is not None
+        and not is_range_boundary_fade
+        and not is_institutional_thrust
+        and "INSTITUTIONAL_EXPANSION_THRUST" not in signals
+    ):
         if (
             eagle_regime.chop_index >= 50.0
             or eagle_regime.overall_environment in ("WHIPSAW_CHOP_TRAP", "BALANCED_RANGE")
@@ -3088,12 +3093,14 @@ def detect_index_call_setup(
         # 0DTE Late Session Expiration: Post 13:30 IST on expiry day, naked options face catastrophic terminal theta collapse.
         is_0dte_late_session = is_0dte and (now_time >= dtime(13, 30))
 
-        if vix_regime_info.mandate_spread:
+        if vix_regime_info.mandate_spread or is_low_vix_range:
             pref_veh = "SPREAD_ONLY"
-            spread_guidance = f"⚠️ {vix_regime_info.description}"
-        elif is_low_vix_range:
-            pref_veh = "DEEP_ITM_OR_SPREAD"
-            spread_guidance = f"ℹ️ {vix_regime_info.description}"
+            spread_guidance = (
+                f"⚠️ LOW-VIX REGIME (India VIX {vix_val:.1f} < 13.0): Option buying has negative edge; "
+                "execute defined-risk Bull Call Spread only."
+                if is_low_vix_range
+                else f"⚠️ {vix_regime_info.description}"
+            )
         elif is_high_iv_risk:
             pref_veh = "SPREAD_ONLY"
             spread_guidance = (
@@ -3195,6 +3202,7 @@ def detect_index_call_setup(
         is_spread_mandated = bool(
             (
                 vix_regime_info.mandate_spread
+                or is_low_vix_range
                 or is_high_iv_risk
                 or is_midday_chop_window
                 or is_0dte_midday_trap

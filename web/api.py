@@ -3943,6 +3943,15 @@ async def get_coiling_squeezes():
         from pathlib import Path
 
         cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        if not cal_path.exists():
+            repo_cal = (
+                Path(__file__).resolve().parent.parent
+                / "data"
+                / "calibration"
+                / "index_calibration.json"
+            )
+            if repo_cal.exists():
+                cal_path = repo_cal
         squeezes = []
         gen_at = None
         if cal_path.exists():
@@ -3972,6 +3981,15 @@ async def get_calibration_metrics():
         from pathlib import Path
 
         cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        if not cal_path.exists():
+            repo_cal = (
+                Path(__file__).resolve().parent.parent
+                / "data"
+                / "calibration"
+                / "index_calibration.json"
+            )
+            if repo_cal.exists():
+                cal_path = repo_cal
         if not cal_path.exists():
             return {"status": "UNAVAILABLE", "message": "Calibration file not found"}
         with open(cal_path, "r", encoding="utf-8") as f:
