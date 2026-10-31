@@ -1296,6 +1296,45 @@ async def get_volatility_skew_endpoint(symbol: str, expiry: Optional[str] = None
     return {"status": "ok", "data": res.to_dict()}
 
 
+# ── 2h. Episodic Memory Quarter-Kelly Optimal Position Sizing ────────
+@router.post("/api/risk/position-size/episodic-kelly", tags=["Risk & Governance", "Capital Sizing"])
+async def post_episodic_kelly_position_size_endpoint(req: dict[str, Any]):
+    """
+    Computes Quarter-Kelly optimal position sizing grounded in Episodic Memory empirical win rates.
+    """
+    from engine.position_sizer import calculate_episodic_kelly_position_size
+
+    symbol = str(req.get("symbol", "NIFTY"))
+    direction = str(req.get("direction", "BULLISH"))
+    entry_price = float(req.get("entry_price", 0.0) or 100.0)
+    stop_loss = float(req.get("stop_loss", 0.0) or (entry_price * 0.98))
+    target_price = float(req.get("target_price", 0.0)) if req.get("target_price") else None
+    capital = float(req.get("capital", 100000.0) or 100000.0)
+    day_archetype = str(req.get("day_archetype", "NORMAL_DAY"))
+    vix_regime = str(req.get("vix_regime", "NORMAL_IV"))
+    vpin_regime = str(req.get("vpin_regime", "LOW_TOXICITY"))
+    max_risk_pct = float(req.get("max_risk_pct", 1.5) or 1.5)
+    is_fno = bool(req.get("is_fno", False))
+    alert_type = str(req.get("alert_type", "MOMENTUM"))
+
+    res = await asyncio.to_thread(
+        calculate_episodic_kelly_position_size,
+        symbol=symbol,
+        direction=direction,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        target_price=target_price,
+        capital=capital,
+        day_archetype=day_archetype,
+        vix_regime=vix_regime,
+        vpin_regime=vpin_regime,
+        max_risk_pct=max_risk_pct,
+        is_fno=is_fno,
+        alert_type=alert_type,
+    )
+    return {"status": "ok", "data": res.to_dict()}
+
+
 @router.get("/api/order-flow/cvd/{symbol}", tags=["Order Flow & Depth"])
 async def get_order_flow_cvd_endpoint(symbol: str, timeframe: str = "5m"):
     """
