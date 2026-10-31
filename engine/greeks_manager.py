@@ -614,12 +614,29 @@ def black_scholes_price_and_greeks(
     vega = (S * sqrt_T * pdf_d1) / 100.0  # per 1% change in IV
     theta_daily = theta_annual / 365.0
 
+    # Second-Order Cross Greeks (Vanna & Charm)
+    vanna = -(pdf_d1 * d2) / (sigma * 100.0)  # per 1% change in IV
+    charm_drift = r / sigma_sqrt_T
+    charm_annual = pdf_d1 * (
+        d2 / (2.0 * T) - charm_drift if is_call else d2 / (2.0 * T) + charm_drift
+    )
+    charm_daily = charm_annual / 365.0
+
+    is_otm = (S < K * 0.985) if is_call else (S > K * 1.015)
+    charm_decay_risk = is_otm and abs(charm_daily) >= 0.01
+    vanna_collapse_risk = is_otm and vanna > 0.005
+
     return {
         "price": max(0.05, round(price, 2)),
         "delta": round(delta, 4),
         "gamma": round(gamma, 6),
         "theta": round(theta_daily, 2),
         "vega": round(vega, 2),
+        "vanna": round(vanna, 6),
+        "charm": round(charm_daily, 6),
+        "is_otm": is_otm,
+        "charm_decay_risk": charm_decay_risk,
+        "vanna_collapse_risk": vanna_collapse_risk,
         "d1": round(d1, 4),
         "d2": round(d2, 4),
     }

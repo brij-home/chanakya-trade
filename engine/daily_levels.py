@@ -1463,3 +1463,254 @@ try:
     register_trim_callback(clear_daily_levels_cache)
 except Exception as e_suppressed:
     logger.debug(f"[engine.daily_levels] Memory guard registration suppressed: {e_suppressed}")
+
+
+@dataclass
+class InitialBalanceData:
+    """Market Profile Initial Balance (IB) Quantification & Dalton Day Archetype."""
+
+    ib_high: float
+    ib_low: float
+    ib_range_pts: float
+    ib_range_pct: float
+    ib_midpoint: float
+    day_archetype: str  # "TREND_DAY" | "NORMAL_DAY" | "NORMAL_VARIATION_DAY" | "FORMING"
+    extension_status: str  # "INSIDE_IB" | "IBH_EXPANSION" | "IBL_EXPANSION" | "IBH_SWING_FAILURE" | "IBL_SWING_FAILURE" | "UNAVAILABLE"
+    extension_target_1: float
+    extension_target_2: float
+    fade_recommendation: Optional[str]
+    is_ib_complete: bool  # True post 10:15 IST (12x 5m bars)
+    avg_ib_range: float
+    relative_ib_ratio: float
+    summary: str
+
+
+def calculate_initial_balance(
+    df_5m: Optional[pd.DataFrame],
+    session_date: Optional[str] = None,
+    atr_14: Optional[float] = None,
+    current_spot: Optional[float] = None,
+) -> InitialBalanceData:
+    """
+    Computes Dalton Market Profile Initial Balance (IB: 09:15-10:15 IST) and classifies Day Archetype.
+
+    Initial Balance represents the opening discovery range. The relationship between IB Range and
+    historical ATR dictates statistical breakout expectancy:
+      - TREND_DAY (IB Range < 0.65x avg): Narrow coil. Directional expansion outside IB favored.
+      - NORMAL_DAY (IB Range > 1.25x avg): Wide discovery. 80% of volume stays inside IB; fade extremes to POC.
+      - NORMAL_VARIATION_DAY (0.65x to 1.25x avg): Moderate 1.5x-2.0x extension in afternoon.
+      - SWING FAILURE PATTERN (SFP / 2B Reversal): Pierces IB extreme by <= 0.40%, fails to accept,
+        and closes back inside balance -> generates high R:R mean-reversion counter-setup.
+    """
+    if df_5m is None or len(df_5m) == 0:
+        return InitialBalanceData(
+            ib_high=0.0,
+            ib_low=0.0,
+            ib_range_pts=0.0,
+            ib_range_pct=0.0,
+            ib_midpoint=0.0,
+            day_archetype="FORMING",
+            extension_status="UNAVAILABLE",
+            extension_target_1=0.0,
+            extension_target_2=0.0,
+            fade_recommendation=None,
+            is_ib_complete=False,
+            avg_ib_range=0.0,
+            relative_ib_ratio=1.0,
+            summary="Market data unavailable for Initial Balance computation.",
+        )
+
+    col_h = "high" if "high" in df_5m.columns else "High"
+    col_l = "low" if "low" in df_5m.columns else "Low"
+    col_c = "close" if "close" in df_5m.columns else "Close"
+
+    # Normalize to DatetimeIndex
+    df_work = df_5m.copy()
+    if not isinstance(df_work.index, pd.DatetimeIndex):
+        ts_col = next(
+            (c for c in ("timestamp", "datetime", "date", "Date") if c in df_work.columns), None
+        )
+        if ts_col:
+            df_work.index = pd.to_datetime(df_work[ts_col])
+
+    idx = df_work.index
+    if isinstance(idx, pd.DatetimeIndex):
+        if idx.tz is not None:
+            idx_ist = idx.tz_convert(IST)
+        else:
+            idx_ist = idx.tz_localize(IST)
+    else:
+        idx_ist = idx
+
+    if session_date:
+        sess_mask = [str(t.date()) == str(session_date) for t in idx_ist]
+        df_sess = df_work.iloc[sess_mask]
+        idx_sess = idx_ist[sess_mask]
+    else:
+        latest_date = idx_ist[-1].date()
+        sess_mask = [t.date() == latest_date for t in idx_ist]
+        df_sess = df_work.iloc[sess_mask]
+        idx_sess = idx_ist[sess_mask]
+
+    if len(df_sess) == 0:
+        return InitialBalanceData(
+            ib_high=0.0,
+            ib_low=0.0,
+            ib_range_pts=0.0,
+            ib_range_pct=0.0,
+            ib_midpoint=0.0,
+            day_archetype="FORMING",
+            extension_status="UNAVAILABLE",
+            extension_target_1=0.0,
+            extension_target_2=0.0,
+            fade_recommendation=None,
+            is_ib_complete=False,
+            avg_ib_range=0.0,
+            relative_ib_ratio=1.0,
+            summary="No session candles found for Initial Balance computation.",
+        )
+
+    from datetime import time as dtime
+
+    # IB Window: 09:15 to 10:15 IST (first 12x 5m candles)
+    ib_mask = [(t.time() >= dtime(9, 15) and t.time() < dtime(10, 15)) for t in idx_sess]
+    df_ib = df_sess.iloc[ib_mask]
+
+    is_complete = len(df_ib) >= 12 or any(t.time() >= dtime(10, 15) for t in idx_sess)
+
+    if len(df_ib) == 0:
+        first_h = float(df_sess[col_h].iloc[0])
+        first_l = float(df_sess[col_l].iloc[0])
+        return InitialBalanceData(
+            ib_high=first_h,
+            ib_low=first_l,
+            ib_range_pts=round(first_h - first_l, 2),
+            ib_range_pct=0.0,
+            ib_midpoint=round((first_h + first_l) / 2.0, 2),
+            day_archetype="FORMING",
+            extension_status="INSIDE_IB",
+            extension_target_1=first_h,
+            extension_target_2=first_l,
+            fade_recommendation=None,
+            is_ib_complete=False,
+            avg_ib_range=0.0,
+            relative_ib_ratio=1.0,
+            summary="Initial Balance forming (pre-10:15 IST).",
+        )
+
+    ib_high = float(df_ib[col_h].max())
+    ib_low = float(df_ib[col_l].min())
+    ib_range_pts = round(max(0.1, ib_high - ib_low), 2)
+    ib_midpoint = round((ib_high + ib_low) / 2.0, 2)
+    ib_range_pct = round((ib_range_pts / max(1.0, ib_midpoint)) * 100.0, 3)
+
+    # Benchmark average IB range (~42% of 14-day ATR)
+    if atr_14 and atr_14 > 0:
+        avg_ib_range = round(atr_14 * 0.42, 2)
+    else:
+        avg_ib_range = ib_range_pts
+
+    rel_ratio = round(ib_range_pts / max(1.0, avg_ib_range), 2)
+
+    if not is_complete:
+        archetype = "FORMING"
+    elif rel_ratio < 0.65:
+        archetype = "TREND_DAY"
+    elif rel_ratio > 1.25:
+        archetype = "NORMAL_DAY"
+    else:
+        archetype = "NORMAL_VARIATION_DAY"
+
+    spot = float(current_spot if (current_spot and current_spot > 0) else df_sess[col_c].iloc[-1])
+
+    # Evaluate post-IB candles for Extension vs SFP
+    post_ib_mask = [t.time() >= dtime(10, 15) for t in idx_sess]
+    df_post_ib = df_sess.iloc[post_ib_mask]
+
+    status = "INSIDE_IB"
+    t1 = ib_high if spot < ib_midpoint else ib_low
+    t2 = ib_midpoint
+    fade_rec = None
+
+    if len(df_post_ib) > 0 and is_complete:
+        post_h = float(df_post_ib[col_h].max())
+        post_l = float(df_post_ib[col_l].min())
+        recent_c = float(df_post_ib[col_c].iloc[-1])
+
+        # 1. Check Swing Failure Pattern (SFP) / 2B Reversal
+        # Bearish SFP: Swept above IB High (<= +0.45%) and closed back below IB High
+        if (
+            post_h > ib_high
+            and ((post_h - ib_high) / ib_high) <= 0.0045
+            and recent_c < ib_high
+            and spot < ib_high
+        ):
+            status = "IBH_SWING_FAILURE"
+            t1 = ib_midpoint
+            t2 = ib_low
+            fade_rec = (
+                f"BEARISH SFP FAKEOUT: Spot swept IB High (₹{post_h:,.1f} > ₹{ib_high:,.1f}) but failed to accept. "
+                f"Fade back into balance targeting IB Midpoint ₹{ib_midpoint:,.1f} and IB Low ₹{ib_low:,.1f}."
+            )
+        # Bullish SFP: Swept below IB Low (<= -0.45%) and closed back above IB Low
+        elif (
+            post_l < ib_low
+            and ((ib_low - post_l) / ib_low) <= 0.0045
+            and recent_c > ib_low
+            and spot > ib_low
+        ):
+            status = "IBL_SWING_FAILURE"
+            t1 = ib_midpoint
+            t2 = ib_high
+            fade_rec = (
+                f"BULLISH SFP BEAR TRAP: Spot swept IB Low (₹{post_l:,.1f} < ₹{ib_low:,.1f}) but failed to accept. "
+                f"Fade back into balance targeting IB Midpoint ₹{ib_midpoint:,.1f} and IB High ₹{ib_high:,.1f}."
+            )
+        # 2. Confirmed Directional Expansion (Two consecutive 5m closes outside IB)
+        elif (
+            len(df_post_ib) >= 2
+            and (df_post_ib[col_c].iloc[-2:] > ib_high).all()
+            and spot >= ib_high
+        ):
+            status = "IBH_EXPANSION"
+            t1 = round(ib_high + 0.50 * ib_range_pts, 2)
+            t2 = round(ib_high + 1.00 * ib_range_pts, 2)
+            fade_rec = (
+                f"BULLISH TREND EXPANSION: 2 consecutive closes accepted above IB High (₹{ib_high:,.1f}). "
+                f"Trend Day runner targeting 1.5x IB ₹{t1:,.1f} and 2.0x IB ₹{t2:,.1f}."
+            )
+        elif (
+            len(df_post_ib) >= 2 and (df_post_ib[col_c].iloc[-2:] < ib_low).all() and spot <= ib_low
+        ):
+            status = "IBL_EXPANSION"
+            t1 = round(ib_low - 0.50 * ib_range_pts, 2)
+            t2 = round(ib_low - 1.00 * ib_range_pts, 2)
+            fade_rec = (
+                f"BEARISH TREND EXPANSION: 2 consecutive closes accepted below IB Low (₹{ib_low:,.1f}). "
+                f"Trend Day breakdown targeting 1.5x IB ₹{t1:,.1f} and 2.0x IB ₹{t2:,.1f}."
+            )
+        else:
+            status = "INSIDE_IB"
+            fade_rec = f"INSIDE BALANCE: Spot ₹{spot:,.1f} oscillating within IB [₹{ib_low:,.1f} – ₹{ib_high:,.1f}]."
+
+    summary = (
+        f"Initial Balance: High ₹{ib_high:,.1f} | Low ₹{ib_low:,.1f} | Range {ib_range_pts:,.1f} pts ({ib_range_pct:.2f}%). "
+        f"Archetype: {archetype} (Ratio {rel_ratio:.2f}x). Status: {status}."
+    )
+
+    return InitialBalanceData(
+        ib_high=ib_high,
+        ib_low=ib_low,
+        ib_range_pts=ib_range_pts,
+        ib_range_pct=ib_range_pct,
+        ib_midpoint=ib_midpoint,
+        day_archetype=archetype,
+        extension_status=status,
+        extension_target_1=t1,
+        extension_target_2=t2,
+        fade_recommendation=fade_rec,
+        is_ib_complete=is_complete,
+        avg_ib_range=avg_ib_range,
+        relative_ib_ratio=rel_ratio,
+        summary=summary,
+    )

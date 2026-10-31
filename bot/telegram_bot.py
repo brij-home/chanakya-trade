@@ -347,6 +347,7 @@ async def cmd_start(update, context) -> None:
             "/unmute — enable audible chime alerts\n"
             "/memory — recent analyses\n"
             "/pnl — portfolio P&L\n"
+            "/flatten — 1-click emergency square-off all positions & cancel orders\n"
             "/help — this message\n\n"
             "Alerts will be pushed here automatically."
         )
@@ -2488,6 +2489,35 @@ async def cmd_unmute(update, context) -> None:
         await update.message.reply_text(msg, parse_mode="HTML")
 
 
+async def cmd_flatten(update, context) -> None:
+    """Handle /flatten — 1-Click Emergency Flatten All Positions & Order Cancellation."""
+    try:
+        from engine.order_lifecycle import emergency_flatten_all_positions
+
+        result = emergency_flatten_all_positions(
+            actor="TELEGRAM_BOT",
+            reason="TELEGRAM_EMERGENCY_FLATTEN",
+        )
+        status = result.get("status", "UNKNOWN")
+        cancelled = result.get("cancelled_orders_count", 0)
+        flattened = result.get("flattened_positions_count", 0)
+        msg = result.get("message", "Emergency flatten completed.")
+
+        reply = (
+            f"🚨 <b>EMERGENCY FLATTEN EXECUTED</b>\n\n"
+            f"• <b>Status:</b> {status}\n"
+            f"• <b>Cancelled Orders:</b> {cancelled}\n"
+            f"• <b>Flattened Positions:</b> {flattened}\n"
+            f"• <b>Circuit Breaker:</b> 60-Minute Cooling-Off Active\n\n"
+            f"<i>{msg}</i>"
+        )
+    except Exception as e:
+        reply = f"🚨 <b>Flatten All Failed:</b> {e}"
+
+    if update and update.message:
+        await update.message.reply_text(reply, parse_mode="HTML")
+
+
 async def handle_alert_callback(update, context) -> None:
     """Handle 1-tap mobile interactive actions: Execute Live, Paper Trade, Dismiss."""
     query = update.callback_query
@@ -3323,6 +3353,8 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("ping_all", _track_command(cmd_ping_all)))
     app.add_handler(CommandHandler("memory", _track_command(cmd_memory)))
     app.add_handler(CommandHandler("pnl", _track_command(cmd_pnl)))
+    app.add_handler(CommandHandler("flatten", _track_command(cmd_flatten)))
+    app.add_handler(CommandHandler("flattenall", _track_command(cmd_flatten)))
     app.add_handler(CallbackQueryHandler(_track_command(handle_alert_callback)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _track_command(cmd_unknown)))
 

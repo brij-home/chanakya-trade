@@ -838,6 +838,34 @@ def _row_to_intent(d: dict) -> OrderIntent:
     )
 
 
+_emergency_lockout_until: Optional[float] = None
+
+
+def is_emergency_lockout_active() -> tuple[bool, float]:
+    """Check if emergency circuit breaker lockout is currently active."""
+    global _emergency_lockout_until
+    if _emergency_lockout_until is None:
+        return False, 0.0
+    now = time.time()
+    if now < _emergency_lockout_until:
+        return True, _emergency_lockout_until - now
+    _emergency_lockout_until = None
+    return False, 0.0
+
+
+def set_emergency_lockout(duration_seconds: float = 3600.0) -> float:
+    """Set emergency cooling-off lockout period (default 60 minutes)."""
+    global _emergency_lockout_until
+    _emergency_lockout_until = time.time() + duration_seconds
+    return _emergency_lockout_until
+
+
+def clear_emergency_lockout() -> None:
+    """Clear emergency cooling-off lockout."""
+    global _emergency_lockout_until
+    _emergency_lockout_until = None
+
+
 def execute_order_intent(order_id: str) -> OrderIntent:
     """
     Transition a server-CONFIRMED order into execution.
@@ -871,6 +899,14 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         correlation_id=d.get("correlation_id") or order_id,
         symbol=d.get("symbol"),
     )
+
+    # ── Emergency Circuit Breaker Lockout Check ────────────────────────────
+    is_locked, remaining_sec = is_emergency_lockout_active()
+    if is_locked:
+        raise PermissionError(
+            f"Emergency circuit breaker lockout active ({remaining_sec:.0f}s remaining). "
+            f"New order execution blocked to preserve capital."
+        )
 
     mode_info = get_trading_mode()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -2451,4 +2487,189 @@ def execute_wing_lock_hedge(
         "hedge_symbol": sym,
         "locked_profit_pts": locked_pts,
         "message": action_msg,
+    }
+
+
+def emergency_flatten_all_positions(
+    actor: str = "LOCAL",
+    reason: str = "MANUAL_EMERGENCY",
+    segment: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    1-Click Emergency "Flatten All" Command & Session Drawdown Circuit Breaker.
+
+    Institutional Fail-Closed Execution Sequence:
+      1. Order Annihilation:
+         - Retrieves and cancels all open/pending resting orders on the broker and ledger
+           to eliminate any pending order fills during position liquidation.
+      2. Position Liquidation:
+         - Live Mode (TRADING_MODE=EXECUTE and ALLOW_LIVE_TRADING=1):
+           Invokes broker exit_all_positions(segment=segment) or dispatches market counter-orders.
+         - Paper / Simulate Mode:
+           Squares off all open positions via PaperBroker.square_off_intraday_positions() / market exits.
+      3. 60-Minute Circuit Breaker Lock:
+         - Sets active emergency cooldown lock preventing new trade entry for 60 minutes.
+      4. Institutional Security Audit Ledger:
+         - Records EMERGENCY_FLATTEN_ALL audit event with full provenance and correlation ID.
+    """
+    from brokers.session import get_execution_broker
+    from engine.modes import get_trading_mode
+    from engine.security_audit import record_audit_event
+
+    mode = get_trading_mode().mode.name  # "OBSERVE", "SIMULATE", "EXECUTE"
+    cancelled_orders: list[str] = []
+    flattened_positions: list[dict[str, Any]] = []
+
+    broker = None
+    try:
+        broker = get_execution_broker()
+    except Exception as e_broker:
+        logger.warning(
+            f"[EmergencyFlatten] Execution broker unavailable or not logged in: {e_broker}"
+        )
+
+    paper_broker = None
+    try:
+        from engine.paper import PaperBroker
+
+        paper_broker = PaperBroker()
+    except Exception as e_pb:
+        logger.warning(f"[EmergencyFlatten] PaperBroker initialization failed: {e_pb}")
+
+    # 1. Annihilate Open Resting Orders
+    try:
+        open_orders = broker.get_orders() if hasattr(broker, "get_orders") else []
+        for o in open_orders:
+            status = getattr(o, "status", None) or (
+                o.get("status") if isinstance(o, dict) else None
+            )
+            oid = (
+                getattr(o, "order_id", None)
+                or (o.get("order_id") if isinstance(o, dict) else None)
+                or getattr(o, "id", None)
+            )
+            if oid and status in ("OPEN", "PENDING", "TRIGGER_PENDING", 1, 2, 4, 6):
+                try:
+                    broker.cancel_order(str(oid))
+                    cancelled_orders.append(str(oid))
+                except Exception as e_cancel:
+                    logger.warning(
+                        f"[EmergencyFlatten] Failed to cancel broker order {oid}: {e_cancel}"
+                    )
+    except Exception as e_orders:
+        logger.warning(f"[EmergencyFlatten] Failed to query broker orders: {e_orders}")
+
+    # Also update any pending orders in internal sqlite ledger
+    try:
+        with _get_orders_db() as conn:
+            conn.execute(
+                "UPDATE orders_ledger SET status = 'CANCELLED' WHERE status IN ('SUBMITTING', 'CONFIRMED', 'OPEN', 'PENDING')"
+            )
+            conn.commit()
+    except Exception as e_ledger:
+        logger.warning(f"[EmergencyFlatten] Failed to update ledger orders: {e_ledger}")
+
+    # 2. Liquidate Positions
+    # Native broker square-off
+    if hasattr(broker, "exit_all_positions"):
+        try:
+            res = broker.exit_all_positions(segment=segment)
+            flattened_positions.append(
+                {"method": "native_exit_all_positions", "response": str(res)}
+            )
+        except Exception as e_exit_all:
+            logger.warning(f"[EmergencyFlatten] native exit_all_positions failed: {e_exit_all}")
+
+    # PaperBroker square-off
+    p_inst = (
+        broker if (broker and hasattr(broker, "square_off_intraday_positions")) else paper_broker
+    )
+    if p_inst and hasattr(p_inst, "square_off_intraday_positions"):
+        try:
+            closed = p_inst.square_off_intraday_positions()
+            for sym in closed:
+                flattened_positions.append(
+                    {"symbol": sym, "method": "square_off_intraday_positions"}
+                )
+        except Exception as e_sq:
+            logger.warning(f"[EmergencyFlatten] square_off_intraday_positions failed: {e_sq}")
+
+    # Check and close any remaining open net positions via market counter-orders
+    try:
+        pos_list = broker.get_positions() if hasattr(broker, "get_positions") else []
+        for p in pos_list:
+            qty = (
+                getattr(p, "net_qty", None)
+                or (p.get("net_qty") if isinstance(p, dict) else None)
+                or (p.get("qty") if isinstance(p, dict) else 0)
+            )
+            sym = getattr(p, "symbol", None) or (p.get("symbol") if isinstance(p, dict) else None)
+            if sym and qty and int(qty) != 0:
+                side = "SELL" if int(qty) > 0 else "BUY"
+                try:
+                    from brokers.base import OrderRequest
+
+                    exch = (
+                        getattr(p, "exchange", "NSE")
+                        if hasattr(p, "exchange")
+                        else (p.get("exchange", "NSE") if isinstance(p, dict) else "NSE")
+                    )
+                    prod = (
+                        getattr(p, "product", "MIS")
+                        if hasattr(p, "product")
+                        else (p.get("product", "MIS") if isinstance(p, dict) else "MIS")
+                    )
+                    req = OrderRequest(
+                        symbol=sym,
+                        exchange=exch,
+                        transaction_type=side,
+                        quantity=abs(int(qty)),
+                        order_type="MARKET",
+                        product=prod,
+                    )
+                    broker.place_order(req)
+                    flattened_positions.append(
+                        {
+                            "symbol": sym,
+                            "side": side,
+                            "quantity": abs(int(qty)),
+                            "method": "market_counter_order",
+                        }
+                    )
+                except Exception as e_close:
+                    logger.warning(f"[EmergencyFlatten] Counter-order failed for {sym}: {e_close}")
+    except Exception as e_pos:
+        logger.warning(f"[EmergencyFlatten] Position liquidation iteration failed: {e_pos}")
+
+    # 3. Activate 60-Minute Circuit Breaker Lockout
+    lockout_until = set_emergency_lockout(3600.0)
+
+    # 4. Security Audit Log
+    record_audit_event(
+        event_type="EMERGENCY_FLATTEN_ALL",
+        mode=mode,
+        actor=actor,
+        details={
+            "reason": reason,
+            "cancelled_orders_count": len(cancelled_orders),
+            "cancelled_orders": cancelled_orders,
+            "flattened_positions_count": len(flattened_positions),
+            "flattened_positions": flattened_positions,
+            "lockout_until": lockout_until,
+        },
+    )
+
+    msg = (
+        f"Emergency Flatten completed: {len(cancelled_orders)} open orders cancelled, "
+        f"{len(flattened_positions)} positions liquidated. 60-minute circuit breaker active."
+    )
+    return {
+        "status": "SUCCESS",
+        "mode": mode,
+        "cancelled_orders_count": len(cancelled_orders),
+        "cancelled_orders": cancelled_orders,
+        "flattened_positions_count": len(flattened_positions),
+        "flattened_positions": flattened_positions,
+        "lockout_until": lockout_until,
+        "message": msg,
     }

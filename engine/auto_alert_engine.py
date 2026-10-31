@@ -11954,6 +11954,63 @@ class AutoAlertEngine:
 
         return found
 
+    def scan_initial_balance_setups(
+        self, quotes_map: Optional[dict[str, Any]] = None
+    ) -> list[AutoAlert]:
+        """
+        Scans liquid indices and Tier-1 equities for Dalton Market Profile Initial Balance (IB)
+        and Swing Failure Pattern (SFP / 2B Reversals) setups.
+        """
+        import concurrent.futures
+        from engine.detectors.initial_balance import detect_initial_balance_setups
+        from market.history import get_ohlcv
+
+        found: list[AutoAlert] = []
+        targets = ["NIFTY", "BANKNIFTY", "FINNIFTY"] + [
+            s for s in self.watched_equities[:8] if s not in ("NIFTY", "BANKNIFTY", "FINNIFTY")
+        ]
+
+        def _evaluate_sym(sym: str) -> list[AutoAlert]:
+            try:
+                ltp = 0.0
+                if quotes_map:
+                    q = quotes_map.get(f"NSE:{sym}") or quotes_map.get(sym)
+                    if q and hasattr(q, "last_price") and q.last_price > 0:
+                        ltp = float(q.last_price)
+                df = get_ohlcv(sym, exchange="NSE", interval="5m", days=3)
+                if df is None or len(df) < 6:
+                    return []
+                if ltp <= 0:
+                    ltp = float(df["close"].iloc[-1])
+                return detect_initial_balance_setups(
+                    symbol=sym,
+                    spot=ltp,
+                    df_5m=df,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[AutoAlertEngine] scan_initial_balance_setups error for {sym}: {e}"
+                )
+                return []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(_evaluate_sym, sym) for sym in targets]
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    res = fut.result()
+                    if res:
+                        found.extend(res)
+                except Exception as e:
+                    logger.warning(f"[AutoAlertEngine] ThreadPool error in initial balance: {e}")
+
+        # Ingest alerts
+        ingested = []
+        for a in found:
+            ing = self.ingest_alert(a)
+            if ing:
+                ingested.append(ing)
+        return ingested
+
     def scan_turtle_soup_sweeps(
         self, quotes_map: Optional[dict[str, Any]] = None
     ) -> list[AutoAlert]:
@@ -15501,6 +15558,13 @@ class AutoAlertEngine:
         if self._should_run_detector("trend_pullback", 45.0):
             tasks.append(
                 ("trend_pullback", lambda: self.scan_trend_day_pullbacks(quotes_map=quotes_map))
+            )
+        if self._should_run_detector("initial_balance", 60.0):
+            tasks.append(
+                (
+                    "initial_balance",
+                    lambda: self.scan_initial_balance_setups(quotes_map=quotes_map),
+                )
             )
         if self._should_run_detector("turtle_soup", 60.0):
             tasks.append(

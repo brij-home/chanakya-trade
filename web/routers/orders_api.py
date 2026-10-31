@@ -58,6 +58,13 @@ class OrderPreviewRequest(BaseModel):
         return normalized
 
 
+class FlattenAllRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    reason: str = "MANUAL_EMERGENCY"
+    segment: Optional[str] = None
+
+
 class OrderExecuteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -527,5 +534,31 @@ async def api_alert_wing_lock(alert_id: str, request: Request):
     except ValueError as exc:
         status_code = 404 if "not found" in str(exc).lower() else 400
         raise HTTPException(status_code, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+
+@router.post("/api/orders/flatten-all")
+async def api_orders_flatten_all(request: Request, req: Optional[FlattenAllRequest] = None):
+    """1-Click Emergency Flatten All Positions & Annihilate Resting Orders."""
+    from engine.order_lifecycle import emergency_flatten_all_positions
+
+    actor = "LOCAL"
+    if request and hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
+
+    reason = req.reason if req else "MANUAL_EMERGENCY"
+    segment = req.segment if req else None
+
+    try:
+        res = await asyncio.to_thread(
+            emergency_flatten_all_positions,
+            actor=actor,
+            reason=reason,
+            segment=segment,
+        )
+        return JSONResponse(res)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
