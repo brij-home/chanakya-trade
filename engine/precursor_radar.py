@@ -136,6 +136,32 @@ class PrecursorCandidate:
         return asdict(self)
 
 
+def _load_calibrated_coilers() -> list[str]:
+    """Loads empirical TTM Squeeze coiling symbols calibrated from historical 95-day dataset."""
+    try:
+        import json
+        from pathlib import Path
+
+        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        if not cal_path.exists():
+            repo_cal = (
+                Path(__file__).resolve().parent.parent
+                / "data"
+                / "calibration"
+                / "index_calibration.json"
+            )
+            if repo_cal.exists():
+                cal_path = repo_cal
+        if cal_path.exists():
+            with open(cal_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            squeezes = data.get("fno_coiling_squeezes", [])
+            return [s["symbol"] for s in squeezes if "symbol" in s and s.get("bars", 0) >= 8]
+    except Exception as e:
+        logger.debug(f"[PrecursorRadar] Could not load calibrated coilers: {e}")
+    return []
+
+
 class PrecursorRadarScanner:
     """
     Scans the liquid universe across F&O, Non-F&O cash equities, and Indices
@@ -210,7 +236,7 @@ class PrecursorRadarScanner:
             "HINDUNILVR",
             "ITC",
             "NESTLEIND",
-            "ZOMATO",
+            "ETERNAL",
             "CHOLAFIN",
             "FEDERALBNK",
             "AUBANK",
@@ -260,7 +286,7 @@ class PrecursorRadarScanner:
             "SCI",
             "ELECON",
             "TRITURBINE",
-            "KBL",
+            "KIRLOSBROS",
             "KIRLOSENG",
             "VOLTAMP",
             "SCHNEIDER",
@@ -281,6 +307,11 @@ class PrecursorRadarScanner:
             "SOL",
             "BNB",
         ]
+
+        calibrated_coilers = _load_calibrated_coilers()
+        if calibrated_coilers:
+            # Prioritize calibrated coiling stocks at the front of the universe
+            fno_universe = list(dict.fromkeys(calibrated_coilers + fno_universe))
 
         if seg == "INDEX":
             return index_universe

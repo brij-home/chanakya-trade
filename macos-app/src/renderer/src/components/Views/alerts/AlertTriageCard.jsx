@@ -200,12 +200,12 @@ export const AlertTriageCard = memo(function AlertTriageCard({
             className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-indigo-500/20 text-indigo-300 border border-indigo-500/40"
             title="Defined-Risk Mandate · Conviction 70–79% or elevated IV · Mandates vertical spread to eliminate naked exposure"
           >
-            🛡️ SPREAD
+            🛡️ HEDGE PLAN
           </span>
         )}
 
         {/* Hedged Spread Execution Mandate */}
-        {executionMandate === 'HEDGED_SPREAD_MANDATORY' && (
+        {executionMandate === 'HEDGED_SPREAD_MANDATORY' && convictionTier !== 'DEFINED_RISK_ONLY' && (
           <span
             className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-rose-500/25 text-rose-300 border border-rose-500/50"
             title={plan.sector_concurrency_warning || plan.trap_warning || 'Hedge Mandate · Elevated gamma event or sector chop · Vertical spread required to neutralize theta decay'}
@@ -343,7 +343,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
             className="text-[10px] px-1.5 py-0.5 rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap"
             title={alert.metrics?.liquidity_warning || 'Wide Bid-Ask Spread · Bid-ask spread exceeds 2% · Limit execution strictly enforced'}
           >
-            ⚠️ SPREAD
+            ⚠️ WIDE B/A
           </span>
         )}
 
@@ -367,7 +367,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
       <div className="flex items-center justify-between gap-1.5 pt-2 border-t border-border/30 text-[11px] font-mono flex-wrap">
         <div className="flex items-center gap-2 flex-wrap">
           {entryNum && <span className="text-gold font-bold">Entry {currSym}{fmtP(entryNum)}</span>}
-          {(alert.entry_range || alert.optimal_entry_range) && (
+          {(alert.entry_range || alert.optimal_entry_range) && (alert.entry_range || alert.optimal_entry_range) !== fmtP(entryNum) && (
             <span
               className="text-[10px] font-mono font-bold text-amber-300 bg-amber-500/15 px-1.5 py-0.5 rounded border border-amber-500/35 whitespace-nowrap"
               title="Optimal Trade Entry (OTE) pullback range"

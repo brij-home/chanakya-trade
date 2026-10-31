@@ -62,7 +62,7 @@ def test_orb_stabilization_suppresses_early_morning_whipsaw(tmp_path, monkeypatc
         "NSE:MAZDOCK": DummyQuote(
             symbol="NSE:MAZDOCK",
             last_price=3950.0,
-            change_pct=-2.3,
+            change_pct=-1.5,
             volume=200000,
             vwap=3980.0,
         )
@@ -101,6 +101,7 @@ def test_orb_stabilization_suppresses_early_morning_whipsaw(tmp_path, monkeypatc
     # Disable test override flag so the real time gate is active
     monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("DEPLOY_MODE", raising=False)
 
     sparks = eng.scan_intraday_mover_sparks()
     mazdock_spark = next((s for s in sparks if "MAZDOCK" in s.symbol), None)

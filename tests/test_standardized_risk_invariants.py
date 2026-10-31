@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from engine.dynamic_risk import resolve_price_tier
+from engine.dynamic_risk import resolve_price_tier, get_dynamic_noise_floor
 from engine.trade_plan import calculate_trade_plan
 from engine.asymmetric_radar import _enforce_monotonic_trade_levels
 from engine.detectors.circuit import detect_circuit_proximity
@@ -243,3 +243,33 @@ def test_squeeze_breakout_sub_100_risk_scaling():
             assert stop_dist < 1.0, (
                 f"Squeeze breakout stop_dist {stop_dist} should scale for sub-100 stock"
             )
+
+
+def test_get_dynamic_noise_floor_universal_scaling():
+    """
+    Invariant 38 Guard: get_dynamic_noise_floor must scale dynamically across
+    index underlyings, high-ticket equities, and sub-100 micro equities without hardcoding.
+    """
+    # 1. NIFTY at 25,000 with 5m ATR of 18.0 pts (tier floor of 25.0 protects against too-narrow noise)
+    floor_nifty = get_dynamic_noise_floor("NIFTY", ltp=25000.0, atr_5m=18.0)
+    assert floor_nifty == 25.00  # max(25.0 tier floor, 1.25 * 18.0 = 22.5)
+
+    # 1b. NIFTY with expanding ATR (30.0 pts)
+    floor_nifty_exp = get_dynamic_noise_floor("NIFTY", ltp=25000.0, atr_5m=30.0)
+    assert floor_nifty_exp == 37.50  # 1.25 * 30.0
+
+    # 2. BANKNIFTY at 52,000 without ATR (fallback to 0.10% index floor)
+    floor_bn = get_dynamic_noise_floor("BANKNIFTY", ltp=52000.0)
+    assert floor_bn == 52.0  # 52000 * 0.0010
+
+    # 3. SENSEX at 75,000 with Daily ATR of 900.0 pts
+    floor_sensex = get_dynamic_noise_floor("SENSEX", ltp=75000.0, daily_atr=900.0)
+    assert floor_sensex == round(1.25 * (900.0 * 0.1154), 2)  # ~129.82 pts
+
+    # 4. Sub-100 stock (SUZLON @ 38.50)
+    floor_suzlon = get_dynamic_noise_floor("SUZLON", ltp=38.50)
+    assert floor_suzlon == 0.10  # Enforces sub-100 price tier minimum
+
+    # 5. Heavyweight equity (RELIANCE @ 1,300)
+    floor_rel = get_dynamic_noise_floor("RELIANCE", ltp=1300.0)
+    assert floor_rel == 2.60  # 1300 * 0.0020 (exceeds tier min of 2.0)

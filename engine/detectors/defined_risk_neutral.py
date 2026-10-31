@@ -240,6 +240,7 @@ def detect_defined_risk_neutral(
         headline=headline,
         summary=summary,
         ltp=ltp,
+        underlying_spot=ltp,
         trigger_level=ltp,
         target_level=round(upper_be, 2),
         stop_loss=round(lower_be, 2),

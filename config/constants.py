@@ -73,6 +73,14 @@ SENSEX_LOT_SIZE: int = 20
 BANKEX_LOT_SIZE: int = 30
 
 
+# ── Session Focus & Workload Prioritization ────────────────────────────────────
+
+#: Default operational focus mode during live trading sessions.
+#: 'FNO_PRIORITY': Dedicate 100% of pipeline & broker API bandwidth to Index & Liquid Stock F&O
+#:                 during live equity hours (09:15 - 15:30 IST); suppress cash circuits/incubations/crypto.
+#: 'BALANCED': Standard multi-asset operation across all segments.
+SESSION_FOCUS_MODE: str = "FNO_PRIORITY"
+
 # ── Alert & Analysis TTLs ─────────────────────────────────────────────────────
 
 #: Default analysis cache TTL in seconds (15 minutes)

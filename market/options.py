@@ -789,10 +789,19 @@ def get_options_snapshot(
                 with _SNAPSHOT_LOCK:
                     _store_in_snapshot_cache(cache_key, res, now_ts)
                 return res
+    except ImportError as exc:
+        logger.info(
+            "[market.options] Tier 1 broker options SDK not installed, using Tier 2 fallback: %s",
+            exc,
+        )
     except Exception as exc:
-        import logging
-
-        logging.warning("[market.options] Tier 1 primary broker options fetch failed: %s", exc)
+        if "not installed" in str(exc).lower():
+            logger.info(
+                "[market.options] Tier 1 broker options SDK not available, using Tier 2 fallback: %s",
+                exc,
+            )
+        else:
+            logger.warning("[market.options] Tier 1 primary broker options fetch failed: %s", exc)
 
     # Tier 2: Upgraded NSE Scraper v3 (Delayed Fallback)
     try:
@@ -1288,12 +1297,23 @@ def audit_option_liquidity(
 
     is_liquid = status in ("OPTIMAL", "MODERATE")
 
+    midpoint_price = round((bid + ask) / 2.0, 2) if (bid > 0 and ask > 0) else ref_price
+    slippage_guard_passed = bool(is_liquid and (spread_pct is None or spread_pct <= 1.8))
+    recommended_order_type = (
+        "LIMIT_MIDPOINT" if (spread_pct is not None and spread_pct > 0.8) else "LIMIT_OR_MARKET"
+    )
+    smart_limit_entry = midpoint_price
+
     return {
         "is_liquid": is_liquid,
         "liquidity_status": status,
         "bid_ask_spread_pct": spread_pct,
         "best_bid": bid,
         "best_ask": ask,
+        "midpoint_price": midpoint_price,
+        "smart_limit_entry": smart_limit_entry,
+        "slippage_guard_passed": slippage_guard_passed,
+        "recommended_order_type": recommended_order_type,
         "oi": oi,
         "volume": volume,
         "slippage_risk": risk,
@@ -1356,8 +1376,11 @@ def compute_chain_gex(
             resolved_lot = 1
 
     strike_gex: dict[float, float] = defaultdict(float)
+    strike_dex: dict[float, float] = defaultdict(float)
     total_call_gex = 0.0
     total_put_gex = 0.0
+    total_call_dex = 0.0
+    total_put_dex = 0.0
     analyzed_count = 0
     now = datetime.now(timezone.utc)
 
@@ -1413,12 +1436,25 @@ def compute_chain_gex(
         # Notional Rupee Gamma Exposure
         notional_gamma = gamma_val * (spot**2) * 0.01 * oi * resolved_lot
 
+        # Analytical Black-Scholes Dealer Delta Exposure (DEX in Crores)
+        try:
+            cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
+            delta_val = cdf_d1 if opt_type == "CE" else (cdf_d1 - 1.0)
+            dealer_delta = -delta_val if opt_type == "CE" else (1.0 - delta_val)
+            dex_cr = (dealer_delta * spot * oi * resolved_lot) / 1e7
+        except Exception:
+            dex_cr = 0.0
+
         if opt_type == "CE":
             total_call_gex += notional_gamma
             strike_gex[strike] += notional_gamma
+            total_call_dex += dex_cr
+            strike_dex[strike] += dex_cr
         else:
             total_put_gex += notional_gamma
             strike_gex[strike] -= notional_gamma
+            total_put_dex += dex_cr
+            strike_dex[strike] += dex_cr
 
         analyzed_count += 1
 
@@ -1437,6 +1473,23 @@ def compute_chain_gex(
 
     is_acceleration = net_gex < 0 or (net_gex >= 0 and spot < flip_strike)
 
+    net_dex = total_call_dex + total_put_dex
+    dex_regime = (
+        "DEALER_NET_LONG_DELTA"
+        if net_dex > 25.0
+        else ("DEALER_NET_SHORT_DELTA" if net_dex < -25.0 else "DEALER_DELTA_NEUTRAL")
+    )
+
+    # Compute DEX Neutral Strike (where cumulative dealer delta crosses zero)
+    sorted_dex_strikes = sorted(strike_dex.keys())
+    cum_dex = 0.0
+    dex_neutral_strike = spot
+    for s in sorted_dex_strikes:
+        cum_dex += strike_dex[s]
+        if cum_dex >= 0:
+            dex_neutral_strike = s
+            break
+
     return {
         "net_gex": round(net_gex, 2),
         "call_gex": round(total_call_gex, 2),
@@ -1444,5 +1497,123 @@ def compute_chain_gex(
         "gamma_regime": regime,
         "gex_flip_strike": round(flip_strike, 2),
         "is_acceleration_zone": bool(is_acceleration),
+        "net_dex": round(net_dex, 2),
+        "call_dex": round(total_call_dex, 2),
+        "put_dex": round(total_put_dex, 2),
+        "dex_regime": dex_regime,
+        "dex_neutral_strike": round(dex_neutral_strike, 2),
         "contracts_analyzed": analyzed_count,
+    }
+
+
+def compute_options_iv_skew(
+    chain: list[Any],
+    spot: float,
+    underlying: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Computes real-time Options IV Skew across Call vs Put surface:
+      1. ATM Strike & ATM Call/Put IV Spread (Call IV - Put IV).
+      2. OTM Wing Skew (+/- 2 strikes from ATM).
+      3. Skew Regime:
+         - 'INSTITUTIONAL_CALL_SQUEEZE': Call IV > Put IV + 1.8% (Institutions bidding upside calls).
+         - 'DOWNSIDE_CRASH_PANIC': Put IV > Call IV + 3.5% (Heavy downside crash protection).
+         - 'BALANCED_SYMMETRIC': Normal distribution.
+      4. Spread Pricing Edge: Indicates whether Call or Put debit/credit spreads are quantitatively underpriced.
+    """
+    if not chain or spot <= 0:
+        return {
+            "status": "UNAVAILABLE",
+            "atm_strike": 0.0,
+            "atm_call_iv": 0.0,
+            "atm_put_iv": 0.0,
+            "atm_skew": 0.0,
+            "regime": "BALANCED_SYMMETRIC",
+            "spread_pricing_edge": "Normal symmetric pricing",
+        }
+
+    clean_und = (
+        (underlying or "")
+        .replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .strip()
+        .upper()
+    )
+
+    if clean_und in ("BANKNIFTY", "SENSEX", "BANKEX"):
+        step = 100.0
+    elif clean_und in ("NIFTY", "FINNIFTY"):
+        step = 50.0
+    elif clean_und == "MIDCPNIFTY":
+        step = 25.0
+    else:
+        step = 50.0 if spot >= 2500 else (20.0 if spot >= 1000 else 10.0)
+
+    atm_strike = round(spot / step) * step
+
+    calls = {
+        float(getattr(c, "strike", 0.0)): c for c in chain if getattr(c, "option_type", "") == "CE"
+    }
+    puts = {
+        float(getattr(c, "strike", 0.0)): c for c in chain if getattr(c, "option_type", "") == "PE"
+    }
+
+    atm_c = calls.get(atm_strike)
+    atm_p = puts.get(atm_strike)
+
+    atm_c_iv = float(getattr(atm_c, "iv", 0.0) or 0.0)
+    atm_p_iv = float(getattr(atm_p, "iv", 0.0) or 0.0)
+
+    if atm_c_iv <= 0:
+        nearby_c = [
+            c for c in chain if getattr(c, "option_type", "") == "CE" and getattr(c, "iv", 0.0)
+        ]
+        if nearby_c:
+            nearby_c.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
+            atm_c_iv = float(getattr(nearby_c[0], "iv", 0.0) or 0.0)
+
+    if atm_p_iv <= 0:
+        nearby_p = [
+            c for c in chain if getattr(c, "option_type", "") == "PE" and getattr(c, "iv", 0.0)
+        ]
+        if nearby_p:
+            nearby_p.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
+            atm_p_iv = float(getattr(nearby_p[0], "iv", 0.0) or 0.0)
+
+    atm_skew = round(atm_c_iv - atm_p_iv, 2) if (atm_c_iv > 0 and atm_p_iv > 0) else 0.0
+
+    otm_c_strike = atm_strike + (step * 2)
+    otm_p_strike = max(step, atm_strike - (step * 2))
+    otm_c = calls.get(otm_c_strike)
+    otm_p = puts.get(otm_p_strike)
+    otm_c_iv = float(getattr(otm_c, "iv", 0.0) or 0.0)
+    otm_p_iv = float(getattr(otm_p, "iv", 0.0) or 0.0)
+    wing_skew = round(otm_c_iv - otm_p_iv, 2) if (otm_c_iv > 0 and otm_p_iv > 0) else 0.0
+
+    if atm_skew >= 1.8:
+        regime = "INSTITUTIONAL_CALL_SQUEEZE"
+        edge = "Bull Call Spreads underpriced: expensive OTM call leg funds cheap ATM call."
+    elif atm_skew <= -3.5:
+        regime = "DOWNSIDE_CRASH_PANIC"
+        edge = (
+            "Bear Put Spreads / 1x2 Ratio Spreads underpriced: expensive OTM put leg funds trade."
+        )
+    else:
+        regime = "BALANCED_SYMMETRIC"
+        edge = "Symmetric balanced pricing across options surface."
+
+    return {
+        "status": "ACTIVE",
+        "atm_strike": atm_strike,
+        "atm_call_iv": atm_c_iv,
+        "atm_put_iv": atm_p_iv,
+        "atm_skew": atm_skew,
+        "otm_call_iv": otm_c_iv,
+        "otm_put_iv": otm_p_iv,
+        "wing_skew": wing_skew,
+        "regime": regime,
+        "spread_pricing_edge": edge,
+        "is_call_skew_elevated": atm_skew >= 1.8,
+        "is_put_skew_elevated": atm_skew <= -3.5,
     }

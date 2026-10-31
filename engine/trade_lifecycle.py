@@ -97,6 +97,13 @@ class PositionLifecycleReport:
     position_mode: str = "SWING"  # "SWING" | "STAGE_2_COMPOUNDER" | "GENERATIONAL"
     pyramid_signal: Optional[dict[str, Any]] = None
 
+    # Continuous In-Flight MAE / MFE Analytics & Trade Postmortem Metrics
+    peak_mfe_pts: float = 0.0
+    peak_mfe_r: float = 0.0
+    peak_mae_pts: float = 0.0
+    peak_mae_r: float = 0.0
+    execution_efficiency_ratio: float = 0.0
+
     summary: str = ""
     diagnostic_bullet_points: list[str] = field(default_factory=list)
 
@@ -105,6 +112,57 @@ class PositionLifecycleReport:
 
 
 # ── Position Lifecycle Auditor ──────────────────────────────────
+
+
+def compute_trade_excursion(
+    entry_price: float,
+    initial_stop_loss: float,
+    high_watermark: float,
+    low_watermark: float,
+    current_ltp: float,
+    position_type: str = "LONG",
+) -> dict[str, float]:
+    """
+    Computes Maximum Favorable Excursion (MFE), Maximum Adverse Excursion (MAE),
+    and Execution Efficiency Ratio (EER).
+
+    - MFE measures the highest unrealized profit (best potential exit) achieved by the trade.
+    - MAE measures the deepest unrealized drawdown (worst pain point) suffered before recovery/exit.
+    - EER (Execution Efficiency Ratio) = Current PnL / Peak MFE (bounded in [0.0, 1.0]).
+      A high EER (> 0.70) signifies disciplined institutional harvesting at peak momentum.
+      A low EER (< 0.30) reveals round-tripping gains back into the market.
+    """
+    is_long = position_type.upper() in ("LONG", "BUY")
+    initial_risk = max(0.01, abs(entry_price - initial_stop_loss))
+
+    if is_long:
+        peak_favorable = max(entry_price, high_watermark, current_ltp)
+        peak_adverse = min(entry_price, low_watermark, current_ltp)
+        mfe_pts = max(0.0, peak_favorable - entry_price)
+        mae_pts = max(0.0, entry_price - peak_adverse)
+        current_pnl = current_ltp - entry_price
+    else:
+        peak_favorable = min(entry_price, low_watermark, current_ltp)
+        peak_adverse = max(entry_price, high_watermark, current_ltp)
+        mfe_pts = max(0.0, entry_price - peak_favorable)
+        mae_pts = max(0.0, peak_adverse - entry_price)
+        current_pnl = entry_price - current_ltp
+
+    mfe_r = mfe_pts / initial_risk
+    mae_r = mae_pts / initial_risk
+
+    if mfe_pts > 0:
+        eer = max(0.0, min(1.0, current_pnl / mfe_pts))
+    else:
+        eer = 1.0 if current_pnl >= 0 else 0.0
+
+    return {
+        "mfe_pts": round(mfe_pts, 2),
+        "mfe_r": round(mfe_r, 2),
+        "mae_pts": round(mae_pts, 2),
+        "mae_r": round(mae_r, 2),
+        "execution_efficiency_ratio": round(eer, 4),
+    }
 
 
 def audit_position_lifecycle(
@@ -121,6 +179,8 @@ def audit_position_lifecycle(
     *,
     is_0dte: bool = False,
     current_hour: Optional[int] = None,
+    high_watermark: Optional[float] = None,
+    low_watermark: Optional[float] = None,
 ) -> PositionLifecycleReport:
     """
     Audits an open trade's health and dynamically calibrates trailing stops based on the position mode:
@@ -602,6 +662,17 @@ def audit_position_lifecycle(
 
     summary = f"[{pos_mode}] {symbol} Health: {health_status} (Score: {health_score}/100, Payoff: {r_multiple:+.2f}R / {pnl_pct:+.2f}%). Recommended Stop: ₹{recommended_stop:.2f} ({stop_method})."
 
+    hw = high_watermark if high_watermark is not None else highest_price
+    lw = low_watermark if low_watermark is not None else lowest_price
+    excursion = compute_trade_excursion(
+        entry_price=entry_price,
+        initial_stop_loss=initial_stop_loss,
+        high_watermark=hw,
+        low_watermark=lw,
+        current_ltp=ltp,
+        position_type=position_type,
+    )
+
     return PositionLifecycleReport(
         symbol=symbol,
         ltp=round(ltp, 2),
@@ -619,6 +690,11 @@ def audit_position_lifecycle(
         trailing_stops=trailing_stops,
         position_mode=pos_mode,
         pyramid_signal=pyramid_signal,
+        peak_mfe_pts=excursion["mfe_pts"],
+        peak_mfe_r=excursion["mfe_r"],
+        peak_mae_pts=excursion["mae_pts"],
+        peak_mae_r=excursion["mae_r"],
+        execution_efficiency_ratio=excursion["execution_efficiency_ratio"],
         summary=summary,
         diagnostic_bullet_points=diagnostics,
     )
@@ -632,13 +708,15 @@ def apply_autonomous_breakeven_lock(
     target_1: Optional[float] = None,
     position_type: str = "LONG",
     cost_buffer_pct: float = 0.002,  # 0.20% to cover STT, GST, Exchange & Brokerage charges
+    is_option: Optional[bool] = None,
+    option_wick_buffer_pct: float = 0.025,  # 2.5% volatility buffer to defend against wick stop-hunting
     actor: str = "AUTONOMOUS_LIFECYCLE",
 ) -> dict[str, Any]:
     """
     Autonomous Breakeven Locking Engine (Advisor & Automated Protection Mode):
     When Target 1 (+1.8R to +2.0R) is achieved, automatically ratchets resting stop-loss
-    orders to Breakeven (+ transactional cost buffer) without requiring manual trader
-    intervention, guaranteeing a risk-free position ('Free-Roll').
+    orders to Breakeven (+ transactional cost buffer or volatility wick cushion for options)
+    without requiring manual trader intervention, guaranteeing a risk-free position ('Free-Roll').
 
     Returns structured status dictionary with details of ratcheted orders.
     """
@@ -668,8 +746,15 @@ def apply_autonomous_breakeven_lock(
             "ratcheted_orders_count": 0,
         }
 
-    # Calculate Breakeven Stop Level (+ buffer for costs)
-    if is_long:
+    # Calculate Breakeven Stop Level (+ buffer for costs or option volatility wick cushion)
+    is_opt = is_option if is_option is not None else symbol.upper().endswith(("CE", "PE"))
+    if is_opt:
+        # Volatility Wick Defense:
+        # High-beta options routinely re-test entry levels by 2-3% on 1-second noise wicks.
+        # Since 50% was already banked at Target 1 (+30% to +40%), setting the runner stop
+        # with a 2.5% buffer preserves a +15% net trade profit while defending against false stop-runs.
+        breakeven_sl = round(entry_price * (1.0 - option_wick_buffer_pct), 2)
+    elif is_long:
         breakeven_sl = round(entry_price * (1.0 + cost_buffer_pct), 2)
     else:
         breakeven_sl = round(entry_price * (1.0 - cost_buffer_pct), 2)

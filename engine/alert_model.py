@@ -2316,8 +2316,67 @@ class AutoAlert:
             return str(plan["execution_style_mandate"])
         return None
 
+    def generate_dual_blueprints(self) -> dict[str, Any]:
+        """
+        Generates dual institutional execution blueprints:
+          1. Predatory Limit Retest (Recommended): Enters at OTE pullback (61.8% retest),
+             minimizes risk denominator R, and achieves R:R >= 1:3.0.
+          2. Momentum Market Ignition (Alternative): Enters on immediate bar close above trigger,
+             wider swing stop, R:R ~ 1:2.0.
+        """
+        ep = float(self.entry_price or self.ltp or 100.0)
+        sl = float(self.stop_loss or (ep * 0.98 if "BULL" in self.direction else ep * 1.02))
+        t1 = float(self.target_1 or (ep * 1.04 if "BULL" in self.direction else ep * 0.96))
+        t2 = float(self.target_2 or (ep * 1.08 if "BULL" in self.direction else ep * 0.92))
+
+        risk_pts = max(0.1, abs(ep - sl))
+        is_bull = self.direction in ("BULLISH", "BUY", "LONG")
+
+        # Predatory Limit Blueprint: pullback discount (38.2% of risk) with tight structural stop
+        limit_discount = round(risk_pts * 0.382, 2)
+        predatory_entry = round(ep - limit_discount if is_bull else ep + limit_discount, 2)
+        predatory_sl = round(sl, 2)
+        predatory_risk = max(0.1, abs(predatory_entry - predatory_sl))
+        predatory_reward = abs(t1 - predatory_entry)
+        predatory_rr = round(predatory_reward / predatory_risk, 2) if predatory_risk > 0 else 3.5
+
+        # Momentum Market Blueprint: enters at current trigger/LTP with standard swing stop
+        market_entry = round(ep, 2)
+        market_sl = round(sl, 2)
+        market_risk = risk_pts
+        market_reward = abs(t1 - market_entry)
+        market_rr = round(market_reward / market_risk, 2) if market_risk > 0 else 2.0
+
+        return {
+            "predatory_limit": {
+                "label": "🎯 Predatory Limit Retest (Recommended)",
+                "order_type": "LIMIT",
+                "entry_price": predatory_entry,
+                "stop_loss": predatory_sl,
+                "target_1": round(t1, 2),
+                "target_2": round(t2, 2),
+                "risk_distance_pts": round(predatory_risk, 2),
+                "risk_reward": f"1:{predatory_rr:.1f}",
+                "execution_tag": "RECOMMENDED_PREDATORY",
+                "rationale": "Resting limit order at OTE pullback zone. Maximizes R:R asymmetry and eliminates retail chasing slippage.",
+            },
+            "momentum_market": {
+                "label": "⚡ Momentum Market Ignition (Alternative)",
+                "order_type": "MARKET",
+                "entry_price": market_entry,
+                "stop_loss": market_sl,
+                "target_1": round(t1, 2),
+                "target_2": round(t2, 2),
+                "risk_distance_pts": round(market_risk, 2),
+                "risk_reward": f"1:{market_rr:.1f}",
+                "execution_tag": "ALTERNATIVE_MOMENTUM",
+                "rationale": "Immediate execution upon confirmation. Higher execution certainty but absorbs breakout slippage.",
+            },
+        }
+
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
+        d["dual_blueprints"] = self.generate_dual_blueprints()
         d["status"] = self.stage
         d["scrutiny"] = (
             (self.metrics or {}).get("scrutiny") if isinstance(self.metrics, dict) else None

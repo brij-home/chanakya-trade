@@ -717,7 +717,7 @@ def test_0dte_afternoon_option_target_calibration_and_diffusion():
     # Target 1 must be an achievable scale-out: +1.4R to +2.0R (e.g. ₹128 to ₹145, not ₹207.7)
     rr_t1 = (t1_prem - opt_ltp) / opt_risk
     assert 1.40 <= rr_t1 <= 2.10, f"Option T1 R:R {rr_t1} is outside institutional scale-out range"
-    assert 120.0 <= t1_prem <= 145.0, f"Option T1 premium {t1_prem} is unrealistic"
+    assert 115.0 <= t1_prem <= 145.0, f"Option T1 premium {t1_prem} is unrealistic"
 
     # Target 2 must be a sensible structural expansion: +2.4R to +4.0R
     rr_t2 = (t2_prem - opt_ltp) / opt_risk

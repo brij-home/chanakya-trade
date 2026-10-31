@@ -217,6 +217,13 @@ def detect_intraday_mover_sparks(
         min_neg_chg = -0.22 if seg == "INDEX" else -0.80
         min_rvol = 1.35 if seg == "INDEX" else 1.50
 
+        # Adaptive Trend-Day RVOL Floor:
+        # On quiet institutional trend days, leaders move steadily on 1.15x-1.30x RVOL.
+        # If stock demonstrates significant directional expansion (|chg| >= 1.80%),
+        # allow institutional markup/markdown at 1.15x RVOL instead of requiring retail frenzy volume.
+        if seg != "INDEX" and abs(chg) >= 1.80:
+            min_rvol = 1.15
+
         # Session Time Gates
         is_test_env = (os.environ.get("CHANAKYA_TESTING") == "1") or (
             "PYTEST_CURRENT_TEST" in os.environ
@@ -230,7 +237,9 @@ def detect_intraday_mover_sparks(
                 current_dt = datetime.now(IST)
             time_hm = current_dt.hour * 60 + current_dt.minute
             if 555 <= time_hm < 570 and seg != "INDEX":
-                continue
+                # In opening 15m (09:15-09:30), allow verified explosive runners (|chg| >= 2.0% and rvol >= 2.0x)
+                if abs(chg) < 2.0 or rvol < 2.0:
+                    continue
             if 570 <= time_hm < 585:
                 min_rvol = max(min_rvol, 2.0)
                 if seg != "INDEX" and abs(chg) < 1.20:
@@ -320,6 +329,27 @@ def detect_intraday_mover_sparks(
                 logger.debug(
                     f"[engine.detectors.intraday_spark] Non-fatal exception suppressed: {e_suppressed}"
                 )
+
+        # Gate 31: Institutional Index Tide & Regime Alignment Gate
+        if seg != "INDEX":
+            try:
+                from engine.market_regime_gate import evaluate_index_tide_gate
+
+                tide_gate = evaluate_index_tide_gate(
+                    symbol=clean_sym,
+                    direction="BULLISH" if is_bullish else "BEARISH",
+                    ltp=ltp,
+                    rvol=rvol,
+                    change_pct=chg,
+                    quotes_map=quotes_map,
+                )
+                if tide_gate.is_vetoed:
+                    logger.info(
+                        f"[IntradaySpark] Suppressed spark on {clean_sym}: {tide_gate.veto_reason}"
+                    )
+                    continue
+            except Exception as e_tide:
+                logger.debug(f"[IntradaySpark] Index tide check skipped for {clean_sym}: {e_tide}")
 
         is_mock_spark = (
             type(q).__name__ == "MagicMock"
@@ -822,6 +852,7 @@ def detect_intraday_mover_sparks(
             headline=headline,
             summary=summary,
             ltp=ltp,
+            underlying_spot=ltp,
             trigger_level=ltp,
             target_level=t1_price,
             stop_loss=sl_price,

@@ -23,7 +23,7 @@ import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -138,6 +138,205 @@ def bs_delta(
         moneyness = (spot - strike) / max(1.0, (spot * iv * math.sqrt(effective_dte / 365.0)))
         approx = 1.0 / (1.0 + math.exp(-1.7 * moneyness))
         return round(approx if option_type.upper() == "CE" else approx - 1.0, 4)
+
+
+def _std_norm_pdf(x: float) -> float:
+    """Standard normal probability density function (PDF)."""
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def bs_gamma(
+    spot: float,
+    strike: float,
+    dte: int | float,
+    iv: float,
+    rate: float = RISK_FREE_RATE,
+) -> float:
+    """
+    Compute Black-Scholes option gamma (rate of change of delta per 1 pt move in underlying).
+    Identical for calls and puts.
+    """
+    if iv <= 0 or spot <= 0 or strike <= 0:
+        return 0.0
+    effective_dte = 5.0 if dte < 0 else (0.5 if dte == 0 else float(dte))
+    try:
+        T = max(1e-4, effective_dte / 365.0)
+        sqrt_T = math.sqrt(T)
+        d1 = (math.log(spot / strike) + (rate + 0.5 * iv**2) * T) / (iv * sqrt_T)
+        pdf_d1 = _std_norm_pdf(d1)
+        gamma = pdf_d1 / (spot * iv * sqrt_T)
+        return round(gamma, 6)
+    except Exception:
+        return 0.0
+
+
+def bs_vega(
+    spot: float,
+    strike: float,
+    dte: int | float,
+    iv: float,
+    rate: float = RISK_FREE_RATE,
+) -> float:
+    """
+    Compute Black-Scholes option vega (rupee price change per 1% change in IV).
+    Identical for calls and puts.
+    """
+    if iv <= 0 or spot <= 0 or strike <= 0:
+        return 0.0
+    effective_dte = 5.0 if dte < 0 else (0.5 if dte == 0 else float(dte))
+    try:
+        T = max(1e-4, effective_dte / 365.0)
+        sqrt_T = math.sqrt(T)
+        d1 = (math.log(spot / strike) + (rate + 0.5 * iv**2) * T) / (iv * sqrt_T)
+        pdf_d1 = _std_norm_pdf(d1)
+        vega_1pct = (spot * sqrt_T * pdf_d1) / 100.0
+        return round(vega_1pct, 4)
+    except Exception:
+        return 0.0
+
+
+def bs_theta(
+    spot: float,
+    strike: float,
+    dte: int | float,
+    iv: float,
+    option_type: str,
+    rate: float = RISK_FREE_RATE,
+) -> float:
+    """
+    Compute Black-Scholes 1-day calendar theta decay (in rupee points per share per day).
+    Always negative for long options.
+    """
+    if iv <= 0 or spot <= 0 or strike <= 0:
+        return 0.0
+    effective_dte = 5.0 if dte < 0 else (0.5 if dte == 0 else float(dte))
+    try:
+        T = max(1e-4, effective_dte / 365.0)
+        sqrt_T = math.sqrt(T)
+        d1 = (math.log(spot / strike) + (rate + 0.5 * iv**2) * T) / (iv * sqrt_T)
+        d2 = d1 - iv * sqrt_T
+        pdf_d1 = _std_norm_pdf(d1)
+        discount = math.exp(-rate * T)
+
+        term1 = -(spot * pdf_d1 * iv) / (2.0 * sqrt_T)
+        if option_type.upper() in ("CE", "CALL", "C"):
+            theta_annual = term1 - rate * strike * discount * _std_norm_cdf(d2)
+        else:
+            theta_annual = term1 + rate * strike * discount * _std_norm_cdf(-d2)
+        return round(theta_annual / 365.0, 4)
+    except Exception:
+        return 0.0
+
+
+def bs_vanna(
+    spot: float,
+    strike: float,
+    dte: int | float,
+    iv: float,
+    rate: float = RISK_FREE_RATE,
+) -> float:
+    """
+    Compute Black-Scholes Vanna: d(Delta)/d(IV) = d(Vega)/d(Spot).
+    Measures sensitivity of delta to a 1% shift in IV (or delta drift under IV crush).
+    For OTM call (d2 < 0): vanna > 0, so IV drop reduces delta towards 0.
+    """
+    if iv <= 0 or spot <= 0 or strike <= 0:
+        return 0.0
+    effective_dte = 5.0 if dte < 0 else (0.5 if dte == 0 else float(dte))
+    try:
+        T = max(1e-4, effective_dte / 365.0)
+        sqrt_T = math.sqrt(T)
+        d1 = (math.log(spot / strike) + (rate + 0.5 * iv**2) * T) / (iv * sqrt_T)
+        d2 = d1 - iv * sqrt_T
+        pdf_d1 = _std_norm_pdf(d1)
+        vanna_1pct = -(pdf_d1 * d2) / (iv * 100.0)
+        return round(vanna_1pct, 6)
+    except Exception:
+        return 0.0
+
+
+def bs_charm(
+    spot: float,
+    strike: float,
+    dte: int | float,
+    iv: float,
+    option_type: str,
+    rate: float = RISK_FREE_RATE,
+) -> float:
+    """
+    Compute Black-Scholes Charm (delta decay per day: d(Delta)/dt).
+    Measures how much delta bleeds each day toward 0 (for OTM) or 1.0 (for ITM) solely due to passage of time.
+    """
+    if iv <= 0 or spot <= 0 or strike <= 0:
+        return 0.0
+    effective_dte = 5.0 if dte < 0 else (0.5 if dte == 0 else float(dte))
+    try:
+        T = max(1e-4, effective_dte / 365.0)
+        sqrt_T = math.sqrt(T)
+        d1 = (math.log(spot / strike) + (rate + 0.5 * iv**2) * T) / (iv * sqrt_T)
+        d2 = d1 - iv * sqrt_T
+        pdf_d1 = _std_norm_pdf(d1)
+
+        is_call = option_type.upper() in ("CE", "CALL", "C")
+        drift_term = rate / (iv * sqrt_T)
+        if is_call:
+            charm_annual = pdf_d1 * (d2 / (2.0 * T) - drift_term)
+        else:
+            charm_annual = pdf_d1 * (d2 / (2.0 * T) + drift_term)
+        return round(charm_annual / 365.0, 6)
+    except Exception:
+        return 0.0
+
+
+def bs_all_greeks(
+    spot: float,
+    strike: float,
+    dte: int | float,
+    iv: float,
+    option_type: str,
+    rate: float = RISK_FREE_RATE,
+) -> dict[str, Any]:
+    """
+    Comprehensive First- and Second-Order Black-Scholes Greeks Engine:
+      - Price, Delta, Gamma, Vega (1% IV), Theta (daily)
+      - Second-Order Cross Greeks: Vanna (1% IV), Charm (daily delta decay)
+      - Risk Guard Advisory Flags:
+          * charm_decay_risk: True if OTM option loses >0.010 delta/day purely from time
+          * vanna_collapse_risk: True if delta drops sharply under post-open IV crush
+    """
+    int_dte = int(dte) if isinstance(dte, (int, float)) else 1
+    prem = bs_premium(spot, strike, int_dte, iv, option_type, rate)
+    delta = bs_delta(spot, strike, int_dte, iv, option_type, rate)
+    gamma = bs_gamma(spot, strike, dte, iv, rate)
+    vega = bs_vega(spot, strike, dte, iv, rate)
+    theta = bs_theta(spot, strike, dte, iv, option_type, rate)
+    vanna = bs_vanna(spot, strike, dte, iv, rate)
+    charm = bs_charm(spot, strike, dte, iv, option_type, rate)
+
+    is_call = option_type.upper() in ("CE", "CALL", "C")
+    moneyness = (spot / strike) if is_call else (strike / spot)
+    is_otm = moneyness < 0.985
+
+    charm_decay_risk = is_otm and abs(charm) >= 0.01
+    vanna_collapse_risk = is_otm and vanna > 0.005
+
+    return {
+        "premium": prem,
+        "delta": delta,
+        "gamma": gamma,
+        "vega": vega,
+        "theta": theta,
+        "vanna": vanna,
+        "charm": charm,
+        "is_otm": is_otm,
+        "charm_decay_risk": charm_decay_risk,
+        "vanna_collapse_risk": vanna_collapse_risk,
+        "risk_advisory": (
+            "HIGH CHARM / VANNA DECAY: Holding OTM contract faces rapid delta collapse from time decay & IV crush."
+            if (charm_decay_risk or vanna_collapse_risk)
+            else "ACCEPTABLE GREEKS PROFILE"
+        ),
+    }
 
 
 # ── Data Models ──────────────────────────────────────────────

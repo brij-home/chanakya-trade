@@ -27,6 +27,51 @@ from engine.learning_engine import pattern_learning_engine
 
 logger = logging.getLogger("engine.alert_postmortem_runner")
 
+PROFIT_TARGET_MILESTONES = {
+    "T0_5",
+    "T0.5",
+    "T1",
+    "T2",
+    "T3",
+    "TARGET",
+    "RUNNER_EXIT",
+    "RUNNER",
+    "PROFIT",
+    "DE_RISK",
+    "BREAKEVEN_LOCKED",
+    "SPREAD_PROFIT_70",
+}
+
+WINNING_STAGES = {
+    "COMPLETED",
+    "RUNNER_EXIT",
+    "T0_5_ACHIEVED",
+    "T1_ACHIEVED",
+    "T2_ACHIEVED",
+    "TARGET_ACHIEVED",
+    "SPREAD_PROFIT_70",
+}
+
+
+def is_target_or_profit_achieved(alert: Any, r_val: float = 0.0) -> bool:
+    """
+    Evaluates whether an alert achieved a profitable milestone, target exit, or runner scale.
+    Guarantees that T0.5 scale-outs, runner exits, and profit milestones are recognized as wins
+    rather than being discarded as unfulfilled setups.
+    """
+    milestones = getattr(alert, "achieved_milestones", []) or []
+    for m in milestones:
+        m_str = str(m).upper()
+        if any(tm in m_str for tm in PROFIT_TARGET_MILESTONES):
+            return True
+    stage = str(getattr(alert, "stage", "") or "").upper()
+    if stage in WINNING_STAGES:
+        return True
+    target_st = str(getattr(alert, "target_status", "") or "").upper()
+    if any(tm in target_st for tm in PROFIT_TARGET_MILESTONES):
+        return True
+    return r_val >= 0.35
+
 
 def generate_session_scorecard(
     today_alerts: list[Any],
@@ -73,9 +118,8 @@ def generate_session_scorecard(
 
         is_inv = getattr(alert, "is_invalidated", False)
         milestones = getattr(alert, "achieved_milestones", []) or []
-        t1_reached = any("T1" in str(m) for m in milestones) or any(
-            "TARGET" in str(m) for m in milestones
-        )
+        target_hit = is_target_or_profit_achieved(alert)
+        t1_reached = target_hit
 
         has_triggered = getattr(alert, "has_triggered", True)
         is_disqualified = (
@@ -122,9 +166,9 @@ def generate_session_scorecard(
             r_val = round(((cur - entry) if is_bull else (entry - cur)) / max(0.01, risk), 2)
 
         # Scorecard Calibration Invariant:
-        # If an alert has no achieved milestones and is not invalidated, any report of R > 0.5
+        # If an alert has no achieved profit milestones/winning stages and is not invalidated, any report of R > 0.5
         # is a phantom/unreached target projection. Clamp R to 0.0 so it is properly categorized as unfulfilled/flat.
-        if not t1_reached and not is_inv and r_val > 0.5:
+        if not target_hit and not is_inv and len(milestones) == 0 and r_val > 0.5:
             logger.warning(
                 f"[Scorecard] Integrity Invariant Clamping: Alert {sym} ({getattr(alert, 'alert_id', '')}) "
                 f"has 0 achieved milestones and is not invalidated, but reports R={r_val:.2f}R. Clamping R to 0.0."
@@ -499,11 +543,12 @@ def run_eod_alert_postmortems(
         if not has_triggered or is_disqualified:
             continue
 
-        # We conduct post-mortem if the alert was invalidated, or if it expired/closed without hitting T1
+        # We conduct post-mortem if the alert was invalidated, or if it expired/closed without hitting any profit milestone
+        target_hit = is_target_or_profit_achieved(alert)
         needs_postmortem = (
             is_invalidated
-            or (not t1_reached and is_expired)
-            or (not is_multi_session and not t1_reached)
+            or (not target_hit and is_expired)
+            or (not is_multi_session and not target_hit)
         )
         if not needs_postmortem:
             continue
@@ -599,5 +644,135 @@ def run_eod_alert_postmortems(
             )
     except Exception as exc:
         logger.warning(f"[AlertPostMortem] Mover learning error: {exc}")
+
+    # 5. Continuous Experience Replay: Ingest all evaluated session setups into Episodic Trade Memory Store
+    episodic_ingested = 0
+    try:
+        from engine.episodic_memory import get_episodic_memory_store, TradeEpisode
+        from engine.daily_levels import daily_levels_store
+
+        mem_store = get_episodic_memory_store()
+        for alert in today_alerts:
+            alert_id = getattr(alert, "alert_id", "") or str(getattr(alert, "id", ""))
+            clean_sym = (
+                str(getattr(alert, "symbol", "") or "")
+                .replace("NSE:", "")
+                .replace("BSE:", "")
+                .strip()
+            )
+            has_trig = getattr(alert, "has_triggered", True)
+            is_dq = (
+                getattr(alert, "target_status", "")
+                in ("SETUP_DISQUALIFIED", "DISQUALIFIED", "SUPERSEDED")
+                or getattr(alert, "stage", "") in ("CANCELLED", "SETUP_DISQUALIFIED", "SUPERSEDED")
+                or getattr(alert, "is_disqualified", False)
+            )
+            if not has_trig or is_dq or not clean_sym:
+                continue
+
+            entry_p = float(
+                getattr(alert, "entry_price", 0.0)
+                or getattr(alert, "trigger_level", 0.0)
+                or getattr(alert, "ltp", 0.0)
+                or 0.0
+            )
+            sl_p = float(getattr(alert, "stop_loss", 0.0) or 0.0)
+            t1_p = float(
+                getattr(alert, "target_level", 0.0) or getattr(alert, "target_1", 0.0) or 0.0
+            )
+            if entry_p <= 0:
+                continue
+
+            cur_p = float(getattr(alert, "ltp", 0.0) or entry_p)
+            is_inv = getattr(alert, "is_invalidated", False)
+            if is_inv and sl_p > 0:
+                cur_p = sl_p
+
+            direction = str(getattr(alert, "direction", "BULLISH")).upper()
+            is_long = (
+                direction in ("BULLISH", "LONG", "BUY") or getattr(alert, "option_type", "") == "CE"
+            )
+            risk = abs(entry_p - sl_p) if sl_p > 0 and sl_p != entry_p else (entry_p * 0.015)
+            realized_r = round(
+                ((cur_p - entry_p) if is_long else (entry_p - cur_p)) / max(0.01, risk),
+                2,
+            )
+
+            milestones = getattr(alert, "achieved_milestones", []) or []
+            t1_reached = any("T1" in str(m) for m in milestones) or any(
+                "TARGET" in str(m) for m in milestones
+            )
+
+            if t1_reached or realized_r > 0.3:
+                outcome_str = "WIN"
+            elif is_inv or realized_r < -0.3:
+                outcome_str = "LOSS"
+            else:
+                outcome_str = "BREAKEVEN"
+
+            mfe_r = float(getattr(alert, "peak_mfe_r", 0.0) or 0.0)
+            mae_r = float(getattr(alert, "peak_mae_r", 0.0) or 0.0)
+            if mfe_r == 0.0 and outcome_str == "WIN":
+                mfe_r = max(1.5, realized_r)
+            if mae_r == 0.0 and outcome_str == "LOSS":
+                mae_r = max(1.0, abs(realized_r))
+
+            if outcome_str == "WIN" and mae_r <= 0.30:
+                grade = "A+"
+                lesson = "Institutional sniper execution: clean momentum expansion with minimal adverse excursion."
+            elif outcome_str == "WIN":
+                grade = "A"
+                lesson = "Target achieved according to trade blueprint. Adhered to profit milestone scaling."
+            elif outcome_str == "BREAKEVEN":
+                grade = "B"
+                lesson = "Capital preserved in range contraction session; trailing breakeven lock prevented loss."
+            elif outcome_str == "LOSS" and realized_r >= -1.05:
+                grade = "C"
+                lesson = "Disciplined risk gate stop-loss respected. Invalidation caught cleanly."
+            else:
+                grade = "F"
+                lesson = "Adverse excursion exceeded tolerance or trade slipped past stop boundary."
+
+            dl = daily_levels_store.get_levels(clean_sym)
+            day_arch = getattr(dl, "day_archetype", "NORMAL_DAY") if dl else "NORMAL_DAY"
+
+            pnl_pts = round(cur_p - entry_p if is_long else entry_p - cur_p, 2)
+            pnl_pct = round((pnl_pts / entry_p) * 100.0, 2) if entry_p > 0 else 0.0
+            eer = round(max(0.0, min(1.0, realized_r / max(0.01, mfe_r))), 4) if mfe_r > 0 else 0.0
+            exit_reason = (
+                "T1_HIT"
+                if outcome_str == "WIN"
+                else ("STOPPED_OUT" if outcome_str == "LOSS" else "BREAKEVEN_EXIT")
+            )
+
+            episode = TradeEpisode(
+                episode_id=alert_id,
+                session_date=today_date,
+                symbol=clean_sym,
+                direction=direction,
+                entry_price=entry_p,
+                exit_price=cur_p,
+                stop_loss=sl_p,
+                target_1=t1_p,
+                pnl_pts=pnl_pts,
+                pnl_pct=pnl_pct,
+                r_multiple=realized_r,
+                mfe_r=round(mfe_r, 2),
+                mae_r=round(mae_r, 2),
+                execution_efficiency=eer,
+                vix_regime=str(getattr(alert, "regime", "NORMAL_IV") or "NORMAL_IV"),
+                day_archetype=day_arch,
+                vpin_regime=str(getattr(alert, "vpin_regime", "LOW_TOXICITY")),
+                holding_duration_mins=float(getattr(alert, "holding_duration_mins", 45) or 45),
+                exit_reason=exit_reason,
+                win_loss=outcome_str,
+                narrative=f"[{grade}] {lesson}",
+            )
+            mem_store.record_episode(episode)
+            episodic_ingested += 1
+    except Exception as e_mem:
+        logger.warning(f"[AlertPostMortem] Episodic trade memory ingestion degraded: {e_mem}")
+
+    report["episodic_memories_ingested"] = episodic_ingested
 
     return report

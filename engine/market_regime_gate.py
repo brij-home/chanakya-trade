@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -336,3 +336,186 @@ def build_spread_recommendation(
             "naked_alternative": "Buy ATM %s" % opt_type,
             "mandate_reason": "Low VIX regime - prefer defined-risk spread.",
         }
+
+
+# ─── Gate 31: Institutional Index Tide & Regime Alignment Gate ───────────────
+
+
+@dataclass
+class IndexTideGateResult:
+    """Institutional evaluation of equity setup alignment against benchmark index tide."""
+
+    is_vetoed: bool = False
+    veto_reason: Optional[str] = None
+    benchmark_symbol: str = "NIFTY"
+    benchmark_ltp: float = 0.0
+    benchmark_vwap: float = 0.0
+    benchmark_change_pct: float = 0.0
+    is_decoupled: bool = False
+
+
+_index_tide_lock = threading.Lock()
+_index_tide_cache: dict[str, tuple[float, Any]] = {}
+_INDEX_TIDE_TTL: float = 30.0
+
+BANKING_SYMBOLS = frozenset(
+    {
+        "HDFCBANK",
+        "ICICIBANK",
+        "SBIN",
+        "AXISBANK",
+        "KOTAKBANK",
+        "BANKBARODA",
+        "PNB",
+        "FEDERALBNK",
+        "INDUSINDBK",
+        "AUBANK",
+        "BANDHANBNK",
+        "IDFCFIRSTB",
+        "CANBK",
+    }
+)
+
+INDEX_EXCLUSIONS = frozenset(
+    {
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "SENSEX",
+        "BANKEX",
+        "NIFTYNXT50",
+    }
+)
+
+
+def clear_index_tide_cache() -> None:
+    """Clear benchmark index tide cache. Used in conftest test isolation."""
+    global _index_tide_cache
+    with _index_tide_lock:
+        _index_tide_cache.clear()
+
+
+def evaluate_index_tide_gate(
+    symbol: str,
+    direction: str,
+    ltp: float = 0.0,
+    rvol: float = 1.0,
+    change_pct: float = 0.0,
+    quotes_map: Optional[dict[str, Any]] = None,
+) -> IndexTideGateResult:
+    """
+    Gate 31: Institutional Index Tide & Regime Alignment Gate.
+    Vetoes non-decoupled equity setups that fight directly against the prevailing benchmark tide:
+      1. Vetoes BEARISH equity breakdowns when the benchmark index is advancing above VWAP.
+      2. Vetoes BULLISH equity breakouts when the benchmark index is liquidating below VWAP.
+
+    Exemption (Invariant 10/22): Stocks with explosive volume (RVOL >= 2.5x) or major price moves
+    (|change_pct| >= 2.5%) are recognized as genuine decoupled movers and exempted from index tide vetoes.
+    """
+    from engine.alert_identity import canonical_alert_symbol
+
+    clean_sym = canonical_alert_symbol(symbol)
+    if clean_sym in INDEX_EXCLUSIONS:
+        return IndexTideGateResult()
+
+    # Outlier Decoupling Exemption: Explosive volume or major catalyst breakout
+    is_decoupled = (rvol >= 2.50) or (abs(change_pct) >= 2.50)
+    if is_decoupled:
+        return IndexTideGateResult(is_decoupled=True)
+
+    # Determine primary benchmark
+    bench_sym = "BANKNIFTY" if clean_sym in BANKING_SYMBOLS else "NIFTY"
+    canonical_dir = direction.upper()
+
+    now = time.time()
+    bench_q = None
+
+    # Check caller-provided quotes map first
+    if quotes_map:
+        bench_q = (
+            quotes_map.get(bench_sym)
+            or quotes_map.get(f"NSE:{bench_sym}")
+            or quotes_map.get(f"NSE:{bench_sym}50-INDEX")
+            or quotes_map.get(f"NSE:{bench_sym}-INDEX")
+            or quotes_map.get("NSE:NIFTY 50")
+            or quotes_map.get("NSE:NIFTY BANK")
+        )
+
+    # Fast in-memory cache lookup
+    if bench_q is None:
+        with _index_tide_lock:
+            cached_item = _index_tide_cache.get(bench_sym)
+            if cached_item and (now - cached_item[0] < _INDEX_TIDE_TTL):
+                bench_q = cached_item[1]
+
+    # Live query fallback
+    if bench_q is None:
+        try:
+            from market.quotes import get_quote
+
+            query_sym = "NSE:NIFTYBANK-INDEX" if bench_sym == "BANKNIFTY" else "NSE:NIFTY50-INDEX"
+            q_res = get_quote([query_sym])
+            bench_q = q_res.get(query_sym) or next(iter(q_res.values()), None)
+            if bench_q:
+                with _index_tide_lock:
+                    _index_tide_cache[bench_sym] = (now, bench_q)
+        except Exception as e_quote:
+            logger.debug(f"[IndexTideGate] Benchmark quote query error for {bench_sym}: {e_quote}")
+
+    if not bench_q:
+        return IndexTideGateResult(benchmark_symbol=bench_sym)
+
+    b_ltp = float(getattr(bench_q, "last_price", 0.0) or getattr(bench_q, "ltp", 0.0) or 0.0)
+    b_vwap = float(getattr(bench_q, "vwap", 0.0) or 0.0)
+    b_chg = float(getattr(bench_q, "change_pct", 0.0) or getattr(bench_q, "pchange", 0.0) or 0.0)
+
+    if b_ltp <= 0:
+        return IndexTideGateResult(benchmark_symbol=bench_sym)
+
+    # 1. BEARISH Setup into Bullish Benchmark Tide Check
+    if canonical_dir in ("BEARISH", "SELL", "SHORT"):
+        # Benchmark is advancing with positive change and holding firmly above VWAP
+        is_bench_bullish = (b_chg >= 0.25) and (b_vwap > 0 and b_ltp >= b_vwap * 1.0010)
+        if is_bench_bullish:
+            reason = (
+                f"Index Tide Veto: Benchmark {bench_sym} is advancing (+{b_chg:.2f}%, above VWAP ₹{b_vwap:,.1f}); "
+                f"non-decoupled breakdown on {clean_sym} (RVOL {rvol:.1f}x) suppressed to avoid beta-drag stopout."
+            )
+            return IndexTideGateResult(
+                is_vetoed=True,
+                veto_reason=reason,
+                benchmark_symbol=bench_sym,
+                benchmark_ltp=b_ltp,
+                benchmark_vwap=b_vwap,
+                benchmark_change_pct=b_chg,
+                is_decoupled=False,
+            )
+
+    # 2. BULLISH Setup into Bearish Benchmark Tide Check
+    elif canonical_dir in ("BULLISH", "BUY", "LONG"):
+        # Benchmark is liquidating with negative change and trading firmly below VWAP
+        is_bench_bearish = (b_chg <= -0.35) and (b_vwap > 0 and b_ltp <= b_vwap * 0.9990)
+        if is_bench_bearish:
+            reason = (
+                f"Index Tide Veto: Benchmark {bench_sym} is falling ({b_chg:.2f}%, below VWAP ₹{b_vwap:,.1f}); "
+                f"non-decoupled breakout on {clean_sym} (RVOL {rvol:.1f}x) suppressed to avoid beta-drag stopout."
+            )
+            return IndexTideGateResult(
+                is_vetoed=True,
+                veto_reason=reason,
+                benchmark_symbol=bench_sym,
+                benchmark_ltp=b_ltp,
+                benchmark_vwap=b_vwap,
+                benchmark_change_pct=b_chg,
+                is_decoupled=False,
+            )
+
+    return IndexTideGateResult(
+        is_vetoed=False,
+        benchmark_symbol=bench_sym,
+        benchmark_ltp=b_ltp,
+        benchmark_vwap=b_vwap,
+        benchmark_change_pct=b_chg,
+        is_decoupled=is_decoupled,
+    )

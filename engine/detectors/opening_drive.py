@@ -217,6 +217,30 @@ def detect_opening_drive(
             hw_bulls = hw_posture.get("bull_count", 0)
             hw_bears = hw_posture.get("bear_count", 0)
             if hw_total > 0:
+                # BankNifty Dual-Locomotive Alignment: HDFCBANK (~28%) + ICICIBANK (~23%) = >51% of index.
+                # An opening drive CANNOT succeed if the top 2 banks are actively diverging or opposing!
+                if clean_sym in ("BANKNIFTY", "NIFTY BANK", "BANKEX"):
+                    hw_by_sym = {h.get("symbol"): h for h in active_hw if isinstance(h, dict)}
+                    hdfc_h = hw_by_sym.get("HDFCBANK")
+                    icici_h = hw_by_sym.get("ICICIBANK")
+                    if hdfc_h and icici_h:
+                        if is_bull_drive and (
+                            hdfc_h.get("is_bearish") or icici_h.get("is_bearish")
+                        ):
+                            logger.info(
+                                f"[OpeningDrive] Suppressed bullish drive on {clean_sym}: Dual locomotive opposing "
+                                f"(HDFCBANK: {hdfc_h.get('change_pct'):+.2f}%, ICICIBANK: {icici_h.get('change_pct'):+.2f}%)."
+                            )
+                            return None
+                        if is_bear_drive and (
+                            hdfc_h.get("is_bullish") or icici_h.get("is_bullish")
+                        ):
+                            logger.info(
+                                f"[OpeningDrive] Suppressed bearish drive on {clean_sym}: Dual locomotive opposing "
+                                f"(HDFCBANK: {hdfc_h.get('change_pct'):+.2f}%, ICICIBANK: {icici_h.get('change_pct'):+.2f}%)."
+                            )
+                            return None
+
                 if is_bull_drive and (
                     hw_bulls == 0 or hw_posture.get("all_bearish") or hw_bears > hw_bulls
                 ):
@@ -353,18 +377,11 @@ def detect_opening_drive(
     # ── Minimum Stop-Loss Distance Floor (1.2x ATR / 20.5 pts) ───────────
     # Prevents Brownian noise micro-whipsaws on tight 1st 5-minute bar openings.
     # Calibrated index floors: Nifty 20.5 pts, BankNifty 55.0 pts, FinNifty 25.0 pts, MidcpNifty 16.0 pts, Sensex 75.0 pts.
+    # Dynamic Brownian noise floor & Stop Loss calibration (Invariant 38 SSOT)
     atr_5m = _calculate_5m_atr(df_5m)
-    atr_floor = round(1.20 * atr_5m, 2) if atr_5m > 0 else 0.0
-    index_min_floors = {
-        "NIFTY": 20.5,
-        "BANKNIFTY": 55.0,
-        "FINNIFTY": 25.0,
-        "MIDCPNIFTY": 16.0,
-        "SENSEX": 75.0,
-        "BANKEX": 75.0,
-    }
-    base_floor = index_min_floors.get(clean_sym, round(ltp * 0.0035, 2))
-    min_sl_floor = max(base_floor, atr_floor)
+    from engine.dynamic_risk import get_dynamic_noise_floor
+
+    min_sl_floor = get_dynamic_noise_floor(clean_sym, ltp=ltp, atr_5m=atr_5m, multiplier=1.20)
 
     # Stop Loss is strictly anchored to the opening drive extreme + 0.15% noise buffer
     # with minimum distance floor of 1.2x ATR (20.5 pts for Nifty) enforced.
@@ -482,8 +499,12 @@ def detect_opening_drive(
         "target_3": f"₹{opt_runner:,.1f}" if (has_opt and opt_runner) else f"₹{t3_price:,.1f}",
         "runner_target": f"₹{opt_runner:,.1f}" if (has_opt and opt_runner) else f"₹{t3_price:,.1f}",
         "entry_type": "LIMIT_ON_PULLBACK",
-        "optimal_entry_limit": bar_open,
-        "retest_entry": bar_open,
+        "optimal_entry_limit": round(bar_open + 0.382 * max(0.1, bar_high - bar_open), 2)
+        if is_bull_drive
+        else round(bar_open - 0.382 * max(0.1, bar_open - bar_low), 2),
+        "retest_entry": round(bar_open + 0.382 * max(0.1, bar_high - bar_open), 2)
+        if is_bull_drive
+        else round(bar_open - 0.382 * max(0.1, bar_open - bar_low), 2),
         "no_chase_boundary": f"₹{opt_no_chase:,.1f}" if has_opt else f"₹{resolved_no_chase:,.1f}",
         "spot_no_chase_boundary": f"₹{resolved_no_chase:,.1f}",
         "risk_reward": rr_str,

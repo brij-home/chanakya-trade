@@ -175,6 +175,22 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 @pytest.fixture(autouse=True)
 def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    try:
+        home_cal = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        repo_cal = (
+            Path(__file__).resolve().parent.parent
+            / "data"
+            / "calibration"
+            / "index_calibration.json"
+        )
+        if not home_cal.exists() and repo_cal.exists():
+            home_cal.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+
+            shutil.copy2(repo_cal, home_cal)
+    except Exception:
+        pass
+
     """Ensure no unit test accidentally inherits live AI credentials or makes live LLM calls."""
     global _PROCESS_ALLOW_NETWORK
     _PROCESS_ALLOW_NETWORK = "network" in request.keywords
@@ -271,6 +287,31 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         pass
 
     try:
+        from engine.daily_levels import clear_daily_levels_cache
+
+        clear_daily_levels_cache()
+    except Exception:
+        pass
+    try:
+        from engine.trade_plan import clear_trade_plan_cache
+
+        clear_trade_plan_cache()
+    except Exception:
+        pass
+    try:
+        from engine.market_regime_gate import clear_index_tide_cache
+
+        clear_index_tide_cache()
+    except Exception:
+        pass
+    try:
+        from engine.thematic_peer_sympathy import thematic_sympathy_engine
+
+        thematic_sympathy_engine.clear_sympathy_session_state()
+    except Exception:
+        pass
+
+    try:
         from engine.detector_circuit_breaker import detector_circuit_breaker
 
         detector_circuit_breaker.reset_all()
@@ -316,6 +357,12 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
             from engine.index_velocity import clear_velocity_cache
 
             clear_velocity_cache()
+        except Exception:
+            pass
+        try:
+            from engine.daily_levels import clear_daily_levels_cache
+
+            clear_daily_levels_cache()
         except Exception:
             pass
 

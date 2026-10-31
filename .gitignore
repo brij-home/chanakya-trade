@@ -60,6 +60,7 @@ ENV/
 .cache/
 /data/*
 !/data/universes/
+!/data/calibration/
 
 # ── Logs ─────────────────────────────────────────────────────
 *.log

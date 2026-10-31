@@ -57,18 +57,9 @@ from pathlib import Path
 
 logger = logging.getLogger("chanakya.web.api")
 
-# Fix Windows charmap / cp1252 codec errors for unicode console prints
-if sys.platform == "win32":
-    if sys.stdout and hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception as e_suppressed:
-            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
-    if sys.stderr and hasattr(sys.stderr, "reconfigure"):
-        try:
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception as e_suppressed:
-            logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+from config.encoding import fix_windows_console
+
+fix_windows_console()
 
 from fastapi import FastAPI, HTTPException, Request as _Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
@@ -3938,6 +3929,121 @@ async def get_stock_profile(symbol: str):
         profile = get_stock_segment_profile(symbol)
         return {"status": "success", "data": profile}
     except Exception as exc:
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/scanners/coiling-squeezes", tags=["Scanners", "Quant"])
+async def get_coiling_squeezes():
+    """
+    Get top compressed F&O setups coiled in Bollinger-Keltner TTM Squeeze,
+    calibrated from 95-day historical dataset and live intraday metrics.
+    """
+    try:
+        import json
+        from pathlib import Path
+
+        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        if not cal_path.exists():
+            repo_cal = (
+                Path(__file__).resolve().parent.parent
+                / "data"
+                / "calibration"
+                / "index_calibration.json"
+            )
+            if repo_cal.exists():
+                cal_path = repo_cal
+        squeezes = []
+        gen_at = None
+        if cal_path.exists():
+            with open(cal_path, "r", encoding="utf-8") as f:
+                cal_data = json.load(f)
+            squeezes = cal_data.get("fno_coiling_squeezes", [])
+            gen_at = cal_data.get("generated_at")
+        return {
+            "status": "success",
+            "total_coiling": len(squeezes),
+            "candidates": squeezes,
+            "generated_at": gen_at,
+        }
+    except Exception as exc:
+        logger.error(f"[API] Failed to get coiling squeezes: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/calibration/metrics", tags=["Observability", "Quant"])
+async def get_calibration_metrics():
+    """
+    Get empirical 95-day historical calibration metrics including
+    TOD volume profiles, CPR geometry distributions, ADRs, and 5m ATRs.
+    """
+    try:
+        import json
+        from pathlib import Path
+
+        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        if not cal_path.exists():
+            repo_cal = (
+                Path(__file__).resolve().parent.parent
+                / "data"
+                / "calibration"
+                / "index_calibration.json"
+            )
+            if repo_cal.exists():
+                cal_path = repo_cal
+        if not cal_path.exists():
+            return {"status": "UNAVAILABLE", "message": "Calibration file not found"}
+        with open(cal_path, "r", encoding="utf-8") as f:
+            cal_data = json.load(f)
+        return {
+            "status": "success",
+            "version": cal_data.get("version"),
+            "generated_at": cal_data.get("generated_at"),
+            "provenance": cal_data.get("provenance"),
+            "indices": cal_data.get("indices"),
+            "fno_stock_count": len(cal_data.get("fno_stocks", {})),
+            "coiling_squeezes_count": len(cal_data.get("fno_coiling_squeezes", [])),
+        }
+    except Exception as exc:
+        logger.error(f"[API] Failed to get calibration metrics: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/calibration/run", tags=["Maintenance", "Quant"])
+async def trigger_calibration(force: bool = False):
+    """
+    Trigger 95-day Fyers walk-forward historical model calibration in background.
+    Fits TOD volume accumulation curve, CPR width percentiles, ADR, and TTM Squeeze compression.
+    """
+    try:
+        from engine.calibration_runner import calibration_runner
+
+        started, msg = calibration_runner.trigger_calibration_async(force=force)
+        return {
+            "status": "RUNNING" if started else "BUSY",
+            "message": msg,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.error(f"[API] Failed to trigger calibration: {exc}", exc_info=True)
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/calibration/status", tags=["Observability", "Quant"])
+async def get_calibration_status():
+    """
+    Get live progress state and latest execution report for model calibration.
+    """
+    try:
+        from engine.calibration_runner import calibration_runner
+
+        status = calibration_runner.get_status()
+        return {
+            "status": "success",
+            "data": status.to_dict(),
+            "is_stale": calibration_runner.is_calibration_stale(),
+        }
+    except Exception as exc:
+        logger.error(f"[API] Failed to get calibration status: {exc}", exc_info=True)
         raise _HTTPException(status_code=500, detail=str(exc))
 
 

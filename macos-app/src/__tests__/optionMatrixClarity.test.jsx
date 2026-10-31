@@ -113,6 +113,63 @@ describe('Option Matrix & Derivative Clarity (BankNifty PE Buy)', () => {
     expect(screen.getByText(/Max Capital Risk/i)).toBeDefined()
     expect(screen.getAllByText(/Theta Decay Offset/i).length).toBeGreaterThanOrEqual(1)
   })
+
+  it('correctly extracts model-calculated SL and targets for SMT_SWEEP option alerts without falling back to 65% / 160% heuristics', () => {
+    const sensexSmtAlert = {
+      alert_id: 'aa-smt-sweep-sensex-pe-20261030',
+      alert_type: 'SMT_SWEEP',
+      stage: 'IGNITED',
+      symbol: 'SENSEX',
+      exchange: 'BFO',
+      segment: 'FNO_INDEX',
+      direction: 'BEARISH',
+      headline: '🎯 [SMT REVERSAL] SMT INTER-INDEX DIVERGENCE: SENSEX 74200 PE @ ₹678.9',
+      summary: 'Institutional liquidity sweep detected at Day High (₹74,304.9). Invalidation anchor pegged strictly above swing high at ₹74,324.9.',
+      ltp: 593.8,
+      entry_price: 678.85,
+      trigger_level: 675.5,
+      stop_loss: 556.7,
+      target_level: 923.1,
+      target_1: 923.1,
+      target_2: 1167.4,
+      strike: 74200.0,
+      option_type: 'PE',
+      contract_symbol: 'BSE:SENSEX26N0574200PE',
+      underlying_spot: 74132.12,
+      actionable_plan: {
+        action: 'BUY_PUT_OR_BEAR_SPREAD',
+        instrument_type: 'OPTION',
+        entry_zone: '₹678.9 (Retest or Stop-Limit ₹675.5)',
+        stop_loss: '₹556.7 (Spot invalidation ₹74,324.9)',
+        target_1: '₹923.1',
+        target_2: '₹1,167.4 (Spot Low ₹74,099.3)',
+        target_3: '₹1,472.8 (Runner Extension)',
+        no_chase_boundary: '₹709.3',
+      },
+    }
+
+    const lifecycle = resolveAlertLifecycle(sensexSmtAlert, {
+      liveSpot: { ltp: 74132.12 },
+      liveContract: { ltp: 593.8 },
+    })
+
+    expect(lifecycle.isDerivative).toBe(true)
+    expect(lifecycle.levels.entry).toBe(678.85)
+    // Stop loss MUST be the detector model SL (556.7), NOT the 65% fallback (386.0)
+    expect(lifecycle.levels.sl).toBe(556.7)
+    expect(lifecycle.levels.sl).not.toBe(386.0)
+    // Target 1 MUST be the detector model T1 (923.1), NOT the 160% fallback (950.1)
+    expect(lifecycle.levels.t1).toBe(923.1)
+    expect(lifecycle.levels.t1).not.toBe(950.1)
+    // Target 2 MUST be the detector model T2 (1167.4), NOT the fallback (1163.8)
+    expect(lifecycle.levels.t2).toBe(1167.4)
+    expect(lifecycle.levels.t2).not.toBe(1163.8)
+    // Target 3 MUST be the detector model T3 (1472.8), NOT the 250% fallback (1484.5)
+    expect(lifecycle.levels.t3).toBe(1472.8)
+    expect(lifecycle.levels.t3).not.toBe(1484.5)
+    // No-chase limit must be option-denominated (709.3)
+    expect(lifecycle.levels.no_chase_boundary).toBe(709.3)
+  })
 })
 
 

@@ -36,6 +36,7 @@ from engine.detectors.gamma_unpin_squeezer import (
     GammaUnpinSqueezerDetector,
 )
 from engine.detectors.trend_day_continuation import detect_trend_day_pullback
+from engine.detectors.initial_balance import detect_initial_balance_setups
 
 from engine.detection_context import (
     BaseDetector,
@@ -54,6 +55,7 @@ __all__ = [
     "build_detection_context",
     "detector_registry",
     "detect_trend_day_pullback",
+    "detect_initial_balance_setups",
     "detect_gamma_blast",
     "detect_index_call_setup",
     "detect_index_put_setup",

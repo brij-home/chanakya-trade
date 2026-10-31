@@ -21,11 +21,12 @@ Provides:
 
 from __future__ import annotations
 import logging
+import re
 
 logger = logging.getLogger("engine.options_hedging")
 
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, time as dtime
 from typing import Any, Optional
 
@@ -48,6 +49,158 @@ class SpreadEvaluationResult:
     pnl_pct: float
     spot_price: float
     short_strike: float
+    roll_plan: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class VIXStrategyRegime:
+    """Institutional Volatility Regime for Options Strategy Selection."""
+
+    regime: str  # "ULTRA_LOW_IV" | "NORMAL_IV" | "INFLATED_IV" | "TAIL_RISK"
+    vix: float
+    mandate_spread: bool
+    preferred_moneyness: str  # "DEEP_ITM" | "ATM_OR_1ITM" | "SPREAD_MANDATORY"
+    delta_target_long: float
+    description: str
+
+
+def classify_vix_strategy_regime(vix: Optional[float] = None) -> VIXStrategyRegime:
+    """
+    Classifies India VIX into institutional options strategy regimes.
+
+    1. ULTRA_LOW_IV (VIX < 12.0):
+       Extrinsic premium is cheap; IV crush risk is negligible.
+       Elevate to Deep ITM (Delta ~0.65-0.70) as synthetic futures with near-zero theta drag.
+       Spreads discouraged for trend momentum because short leg caps the runner (+300-400% moves).
+    2. NORMAL_IV (12.0 <= VIX <= 17.5):
+       Optimal institutional risk budget. Standard ATM or 1-strike ITM (Delta ~0.50-0.60).
+       Spreads mandated during midday theta grind (11:15-13:15 IST) or on wide CPR.
+    3. INFLATED_IV (17.5 < VIX <= 25.0):
+       Extrinsic premium is heavily inflated. Post-breakout IV crush causes naked options to bleed.
+       MANDATE DEFINED-RISK SPREAD across all hours (morning & afternoon).
+    4. TAIL_RISK (VIX > 25.0):
+       Extreme event/volatility hazard. Mandatory defined-risk spreads with 50% position sizing haircut.
+    """
+    current_vix = vix
+    if current_vix is None or current_vix <= 0:
+        try:
+            from market.indices import get_vix
+
+            current_vix = float(get_vix() or 14.0)
+        except Exception:
+            current_vix = 14.0
+
+    if current_vix < 12.0:
+        return VIXStrategyRegime(
+            regime="ULTRA_LOW_IV",
+            vix=round(current_vix, 2),
+            mandate_spread=False,
+            preferred_moneyness="DEEP_ITM",
+            delta_target_long=0.68,
+            description="Ultra-low IV: Option premiums underpriced. Prioritize Deep ITM (Delta ~0.65-0.70) as synthetic futures with near-zero theta drag.",
+        )
+    if current_vix <= 17.5:
+        return VIXStrategyRegime(
+            regime="NORMAL_IV",
+            vix=round(current_vix, 2),
+            mandate_spread=False,
+            preferred_moneyness="ATM_OR_1ITM",
+            delta_target_long=0.55,
+            description="Optimal IV environment: Standard ATM / 1-ITM strike selection. Spreads mandated during midday theta grind (11:15-13:15 IST) or on wide CPR.",
+        )
+    if current_vix <= 25.0:
+        return VIXStrategyRegime(
+            regime="INFLATED_IV",
+            vix=round(current_vix, 2),
+            mandate_spread=True,
+            preferred_moneyness="SPREAD_MANDATORY",
+            delta_target_long=0.50,
+            description="Inflated IV: High extrinsic decay and IV crush hazard. Defined-risk spreads strictly mandated across all hours to protect capital.",
+        )
+    return VIXStrategyRegime(
+        regime="TAIL_RISK",
+        vix=round(current_vix, 2),
+        mandate_spread=True,
+        preferred_moneyness="SPREAD_MANDATORY",
+        delta_target_long=0.45,
+        description="Tail Risk IV (>25.0): Extreme volatility hazard. Mandatory defined-risk spreads with 50% position sizing haircut.",
+    )
+
+
+def audit_stock_option_liquidity_spread(
+    symbol: str,
+    bid: float,
+    ask: float,
+    max_spread_pct: float = 0.045,  # 4.5% max bid-ask spread
+) -> dict[str, Any]:
+    """
+    Audits single-stock options orderbook bid-ask spread to prevent severe execution slippage.
+
+    In Indian F&O equity options, illiquid strikes frequently trade with 10%–25% bid-ask spreads.
+    Entering market orders or naive limit orders surrenders edge immediately upon fill.
+
+    Enforcement:
+      - If spread_pct <= 4.5%: PASS, standard limit or market-permitted execution.
+      - If 4.5% < spread_pct <= 10.0%: WIDE_SPREAD_SLIPPAGE_HAZARD. Enforces LIMIT order strictly pegged to Midpoint.
+      - If spread_pct > 10.0%: ILLIQUID_CONTRACT_REJECT. Hard-vetoed to protect capital.
+    """
+    b = float(bid or 0.0)
+    a = float(ask or 0.0)
+
+    if b <= 0 or a <= 0:
+        return {
+            "symbol": symbol,
+            "status": "UNAVAILABLE",
+            "is_acceptable": False,
+            "bid": b,
+            "ask": a,
+            "midpoint": max(b, a),
+            "spread_pct": 0.0,
+            "recommended_order_type": "LIMIT",
+            "warning": "Missing bid or ask quote in depth; enforce Limit Order.",
+        }
+
+    midpoint = round((b + a) / 2.0, 2)
+    spread_pts = round(a - b, 2)
+    spread_pct = round((spread_pts / max(0.05, midpoint)) * 100.0, 2)
+
+    if spread_pct > 10.0:
+        return {
+            "symbol": symbol,
+            "status": "REJECT",
+            "is_acceptable": False,
+            "bid": b,
+            "ask": a,
+            "midpoint": midpoint,
+            "spread_pct": spread_pct,
+            "recommended_order_type": "LIMIT_MIDPOINT",
+            "warning": f"Extreme illiquid bid-ask spread ({spread_pct:.1f}% > 10.0%). Contract rejected to prevent execution ruin.",
+        }
+
+    if spread_pct > (max_spread_pct * 100.0):
+        return {
+            "symbol": symbol,
+            "status": "CAUTION_MIDPOINT",
+            "is_acceptable": True,
+            "bid": b,
+            "ask": a,
+            "midpoint": midpoint,
+            "spread_pct": spread_pct,
+            "recommended_order_type": "LIMIT_MIDPOINT",
+            "warning": f"Wide bid-ask spread ({spread_pct:.1f}% > 4.5%). Limit order strictly pegged to Midpoint ₹{midpoint:.2f} enforced.",
+        }
+
+    return {
+        "symbol": symbol,
+        "status": "PASS",
+        "is_acceptable": True,
+        "bid": b,
+        "ask": a,
+        "midpoint": midpoint,
+        "spread_pct": spread_pct,
+        "recommended_order_type": "LIMIT",
+        "warning": None,
+    }
 
 
 def get_optimal_expiry_recommendation(
@@ -55,18 +208,62 @@ def get_optimal_expiry_recommendation(
     now_dt: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """
-    Evaluates whether current day/time warrants trading the Current Weekly vs Next Weekly expiry.
-    Protects positions from the Wednesday/Thursday post-13:00 IST Theta Cliff.
+    Evaluates optimal contract expiry cycle recommendation.
+    - For Weekly Benchmark Indices (NIFTY 50 on Thursday, SENSEX on Friday):
+      Protects positions from the post-13:15 IST 0DTE Theta Cliff.
+    - For Stock Options and Monthly-Only Indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, Stocks):
+      Enforces SEBI Physical Delivery Protection: routes to NEXT_MONTHLY during the final 4 days
+      of the monthly settlement cycle to avoid 100% margin surcharges and assignment risks.
     """
     now = now_dt or datetime.now(IST)
     weekday = now.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
     now_time = now.time()
 
-    is_wed_afternoon = weekday == 2 and now_time >= dtime(13, 0)
-    is_thu_expiry_day = weekday == 3
+    clean_sym = (
+        (symbol or "")
+        .replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("NIFTY 50", "NIFTY")
+        .replace("NIFTY BANK", "BANKNIFTY")
+        .strip()
+        .upper()
+    )
+
+    is_weekly_index = clean_sym in ("NIFTY", "SENSEX")
+
+    # 1. Single-Stock and Monthly-Only Index Physical Settlement Checks
+    if not is_weekly_index:
+        try:
+            from engine.alert_expiry import is_monthly_physical_expiry_week
+
+            if is_monthly_physical_expiry_week(symbol=clean_sym, ref_dt=now):
+                return {
+                    "preferred_expiry": "NEXT_MONTHLY",
+                    "warning": "⚠️ SEBI PHYSICAL SETTLEMENT SURGE: Expiring stock/monthly derivatives enter mandatory 100% delivery margin. Route all positions to NEXT MONTHLY expiry.",
+                    "reason": "SEBI_PHYSICAL_SETTLEMENT_WEEK",
+                }
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.options_hedging] Physical settlement check error: {e_suppressed}"
+            )
+
+        return {
+            "preferred_expiry": "CURRENT_MONTHLY",
+            "warning": None,
+            "reason": "NORMAL_MONTHLY_CYCLE",
+        }
+
+    # 2. Benchmark Weekly Index Expiries (NIFTY on Thursday, SENSEX on Friday)
+    is_expiry_day = (clean_sym == "NIFTY" and weekday == 3) or (
+        clean_sym == "SENSEX" and weekday == 4
+    )
+    is_pre_expiry_eve = (clean_sym == "NIFTY" and weekday == 2 and now_time >= dtime(13, 0)) or (
+        clean_sym == "SENSEX" and weekday == 3 and now_time >= dtime(13, 0)
+    )
     is_fri_weekend_eve = weekday == 4 and now_time >= dtime(14, 0)
 
-    if is_thu_expiry_day:
+    if is_expiry_day:
         if now_time >= dtime(13, 15):
             return {
                 "preferred_expiry": "NEXT_WEEKLY",
@@ -79,11 +276,11 @@ def get_optimal_expiry_recommendation(
                 "warning": "⚡ EXPIRY DAY MORNING: Fast morning scalp viable; for swing holds, select Next Weekly.",
                 "reason": "EXPIRY_DAY_MORNING",
             }
-    elif is_wed_afternoon:
+    elif is_pre_expiry_eve:
         return {
             "preferred_expiry": "NEXT_WEEKLY",
             "warning": "⏳ PRE-EXPIRY DECAY ACCELERATION: Next Weekly contract provides ~5x more theta runway and avoids pin risk.",
-            "reason": "WEDNESDAY_PRE_EXPIRY",
+            "reason": "WEDNESDAY_PRE_EXPIRY" if weekday == 2 else "PRE_EXPIRY_AFTERNOON",
         }
     elif is_fri_weekend_eve:
         return {
@@ -96,6 +293,188 @@ def get_optimal_expiry_recommendation(
         "preferred_expiry": "CURRENT_WEEKLY",
         "warning": None,
         "reason": "NORMAL_SESSION",
+    }
+
+
+def get_0dte_intraday_phase(
+    symbol: str,
+    now_dt: Optional[datetime] = None,
+    contract_symbol: Optional[str] = None,
+    expiry_date: Optional[str] = None,
+    dte: Optional[int] = None,
+) -> dict[str, Any]:
+    """
+    Evaluates the 0DTE Intraday Phase for Indian Index / Stock Options.
+
+    SEBI Index Derivatives Regulatory Framework (Effective Nov 2024):
+      - Exchanges provide derivative contracts for ONLY ONE benchmark index with weekly expiry:
+        • NSE: NIFTY 50 (Weekly Expiry on Thursday). Weekly contracts on BANKNIFTY, FINNIFTY, MIDCPNIFTY are DISCONTINUED.
+        • BSE: SENSEX (Weekly Expiry on Friday). Weekly contracts on BANKEX are DISCONTINUED.
+      - All other indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX) and single-stock options trade strictly MONTHLY expiries (last Thursday of the month).
+      - Monday, Tuesday, and Wednesday have ZERO index weekly expiries.
+
+    Deterministic 0DTE Verification (Rules 10, 11, 20, 22):
+      1. If `dte` is provided, `is_0dte = (dte == 0)`.
+      2. If `expiry_date` or `contract_symbol` is provided, compare contract expiration date against current session date.
+      3. If only `symbol` is provided:
+         - NIFTY is 0DTE on Thursdays (weekday == 3).
+         - SENSEX is 0DTE on Fridays (weekday == 4).
+         - BANKNIFTY, FINNIFTY, MIDCPNIFTY, and Stock F&O are 0DTE ONLY on their monthly expiry date (last Thursday of the month), NEVER every Mon/Tue/Wed.
+
+    Intraday Clock Phases (IST):
+      1. MORNING_EXPANSION (09:15 - 11:00):
+         High velocity opening momentum. Vega and delta expansion dominate. Favor Route A (Naked Convexity)
+         on high-conviction breakout levels. Avoid premature OTM short sells.
+      2. MIDDAY_THETA_GRIND (11:00 - 13:30):
+         Consolidation and aggressive intraday theta decay. Pure naked buying risks rapid decay in chop.
+         Favor Route B (Dynamic Spread) to harvest short premium or sit out.
+      3. AFTERNOON_GAMMA_SQUEEZE (13:30 - 15:00):
+         0DTE Gamma Squeeze window. Unwinding of dealer gamma walls. Asymmetric R:R (1:5+) for close ATM/OTM options
+         on high-velocity breaks. Extreme blowout risk for naked option sellers.
+      4. TERMINAL_CLOSING (15:00 - 15:30):
+         Expiry final auction window. Delta and gamma collapse into intrinsic cash value.
+         Square off winning spreads and harvest remaining residual gains. No new naked entries.
+      5. OFF_MARKET:
+         Outside 09:15-15:30 IST.
+    """
+    now = now_dt or datetime.now(IST)
+    now_date = now.date()
+    weekday = now.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
+    now_time = now.time()
+
+    clean_sym = (
+        (symbol or "")
+        .replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("NIFTY 50", "NIFTY")
+        .replace("NIFTY BANK", "BANKNIFTY")
+        .strip()
+        .upper()
+    )
+
+    # 1. Authoritative contract-level DTE check
+    is_0dte = False
+    if dte is not None:
+        is_0dte = bool(dte == 0)
+    elif expiry_date or contract_symbol:
+        try:
+            from engine.alert_expiry import is_0dte_expiry, extract_contract_expiry_date
+
+            if expiry_date:
+                is_0dte = bool(is_0dte_expiry(expiry_date, ref_dt=now))
+            if not is_0dte and contract_symbol:
+                exp_d = extract_contract_expiry_date(contract_symbol)
+                if exp_d:
+                    is_0dte = bool(exp_d == now_date)
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.options_hedging] 0DTE contract resolution exception: {e_suppressed}"
+            )
+    else:
+        # 2. General ticker fallback under SEBI single-benchmark weekly regime:
+        if clean_sym in ("NIFTY", "NIFTY50") and weekday == 3:
+            is_0dte = True
+        elif clean_sym in ("SENSEX", "BSX") and weekday == 4:
+            is_0dte = True
+        else:
+            # BANKNIFTY, FINNIFTY, MIDCPNIFTY, and Stock F&O are 0DTE ONLY on their monthly expiry day
+            try:
+                from engine.alert_expiry import get_last_thursday_of_month
+
+                last_thu = get_last_thursday_of_month(now_date.year, now_date.month)
+                is_0dte = bool(now_date == last_thu and weekday == 3)
+            except Exception:
+                is_0dte = False
+
+    if not is_0dte:
+        return {
+            "symbol": clean_sym,
+            "is_0dte": False,
+            "phase": "NON_0DTE_NORMAL",
+            "tactical_bias": "REGIME_DEPENDENT",
+            "guidance": "Standard multi-day expiry cycle. Normal Greeks evolution.",
+            "volatility_multiplier": 1.0,
+            "time_in_phase_pct": 0.0,
+            "veto_naked_otm": False,
+            "allowed_moneyness": "ANY",
+        }
+
+    # Market hours check
+    if now_time < dtime(9, 15) or now_time >= dtime(15, 30):
+        return {
+            "symbol": clean_sym,
+            "is_0dte": True,
+            "phase": "OFF_MARKET",
+            "tactical_bias": "PREMARKET_POSTMARKET",
+            "guidance": "Market is closed. Prep levels for next session.",
+            "volatility_multiplier": 1.0,
+            "time_in_phase_pct": 0.0,
+            "veto_naked_otm": False,
+            "allowed_moneyness": "NONE",
+        }
+
+    if now_time < dtime(11, 0):
+        # 09:15 - 11:00 (105 mins)
+        elapsed = (now_time.hour * 60 + now_time.minute) - (9 * 60 + 15)
+        pct = round(min(100.0, max(0.0, (elapsed / 105.0) * 100.0)), 1)
+        return {
+            "symbol": clean_sym,
+            "is_0dte": True,
+            "phase": "MORNING_EXPANSION",
+            "tactical_bias": "NAKED_FAVORED",
+            "guidance": "High velocity opening momentum. Vega and delta expansion dominate. Favor Route A (Naked Convexity) on high-conviction breakout levels. Avoid premature OTM short sells.",
+            "volatility_multiplier": 1.35,
+            "time_in_phase_pct": pct,
+            "veto_naked_otm": False,
+            "allowed_moneyness": "ANY",
+        }
+
+    if now_time < dtime(13, 30):
+        # 11:00 - 13:30 (150 mins)
+        elapsed = (now_time.hour * 60 + now_time.minute) - (11 * 60)
+        pct = round(min(100.0, max(0.0, (elapsed / 150.0) * 100.0)), 1)
+        return {
+            "symbol": clean_sym,
+            "is_0dte": True,
+            "phase": "MIDDAY_THETA_GRIND",
+            "tactical_bias": "SPREAD_FAVORED",
+            "guidance": "Consolidation and aggressive intraday theta decay. Pure naked buying risks rapid decay in chop. Favor Route B (Dynamic Spread) to harvest short premium or sit out.",
+            "volatility_multiplier": 0.85,
+            "time_in_phase_pct": pct,
+            "veto_naked_otm": False,
+            "allowed_moneyness": "SPREAD_OR_ATM",
+        }
+
+    if now_time < dtime(15, 0):
+        # 13:30 - 15:00 (90 mins)
+        elapsed = (now_time.hour * 60 + now_time.minute) - (13 * 60 + 30)
+        pct = round(min(100.0, max(0.0, (elapsed / 90.0) * 100.0)), 1)
+        return {
+            "symbol": clean_sym,
+            "is_0dte": True,
+            "phase": "AFTERNOON_GAMMA_SQUEEZE",
+            "tactical_bias": "GAMMA_SNIPER",
+            "guidance": "0DTE Gamma Squeeze window. Unwinding of dealer gamma walls. Asymmetric R:R (1:5+) for close ATM/OTM options on high-velocity breaks. Extreme blowout risk for naked option sellers.",
+            "volatility_multiplier": 1.80,
+            "time_in_phase_pct": pct,
+            "veto_naked_otm": True,
+            "allowed_moneyness": "ATM_OR_ITM_ONLY",
+        }
+
+    # 15:00 - 15:30 (30 mins)
+    elapsed = (now_time.hour * 60 + now_time.minute) - (15 * 60)
+    pct = round(min(100.0, max(0.0, (elapsed / 30.0) * 100.0)), 1)
+    return {
+        "symbol": clean_sym,
+        "is_0dte": True,
+        "phase": "TERMINAL_CLOSING",
+        "tactical_bias": "SQUARE_OFF",
+        "guidance": "Expiry final auction window. Delta and gamma collapse into intrinsic cash value. Square off winning spreads and harvest remaining residual gains. No new naked entries.",
+        "volatility_multiplier": 0.50,
+        "time_in_phase_pct": pct,
+        "veto_naked_otm": True,
+        "allowed_moneyness": "SQUARE_OFF_ONLY",
     }
 
 
@@ -268,6 +647,7 @@ def build_defined_risk_hedge_plan(
     spread_width: Optional[float] = None,
     asymmetric_r_r: bool = False,
     expiry_date: Optional[str] = None,
+    target_level: Optional[float] = None,
 ) -> Optional[dict[str, Any]]:
     """
     Constructs an institutional defined-risk hedge plan for any option signal.
@@ -318,11 +698,12 @@ def build_defined_risk_hedge_plan(
         except Exception:
             current_vix = 14.0
 
+    vix_strategy = classify_vix_strategy_regime(current_vix)
     is_low_vix_range = current_vix < 13.0
     is_midday_chop = (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 65)
     is_chop_regime = is_midday_chop or is_low_vix_range or (vel_score < 55)
     is_explosive = vel_score >= 75
-    is_high_iv = current_vix > 16.5
+    is_high_iv = vix_strategy.mandate_spread or current_vix > 16.5
 
     # 3. Determine strike interval & calibrated spread width
     if is_sensex:
@@ -392,6 +773,20 @@ def build_defined_risk_hedge_plan(
             adaptive_regime_desc = f"TREND CONTINUATION ({int(width)} pt width)"
 
     is_bullish = str(direction).upper() in ("BULLISH", "LONG", "BUY") or opt_type == "CE"
+
+    # 3.5 Dynamic Runway Principle: Level-Anchored Short Leg Calibration
+    # If a verified target resistance/support level is provided, dynamically anchor
+    # the short strike to sit at or beyond that level to maximize the long leg's runway.
+    if target_level is not None and float(target_level) > 0:
+        ref_price = strike if strike > 0 else spot
+        target_dist = abs(float(target_level) - ref_price)
+        if target_dist >= step:
+            level_anchored_width = max(step, round(target_dist / step) * step)
+            if level_anchored_width > width:
+                width = level_anchored_width
+                adaptive_regime_desc = (
+                    f"LEVEL-ANCHORED RUNWAY ({int(width)} pt width to ₹{float(target_level):,.1f})"
+                )
 
     # Evaluate Macro Market Breadth alignment for spread selection
     mb = None
@@ -629,7 +1024,9 @@ def build_defined_risk_hedge_plan(
 
     # Preferred Vehicle & Asymmetry Routing
     debit_rr_warning = ""
-    if not is_idx and is_poor_rr:
+    if vix_strategy.mandate_spread:
+        pref_veh = "SPREAD_ONLY"
+    elif not is_idx and is_poor_rr:
         debit_rr_warning = (
             f"⚠️ DEBIT SPREAD R:R DEGRADED (1:{rr_spread:.1f}, Net Debit {int(debit_ratio * 100)}% of width). "
             f"Auto-promoted 1x2 Ratio Spread for Zero-Downside / Net Credit entry."
@@ -660,6 +1057,8 @@ def build_defined_risk_hedge_plan(
 
     # Assemble comprehensive execution guidance
     guidance_parts = []
+    if vix_strategy.mandate_spread:
+        guidance_parts.append(f"⚠️ {vix_strategy.description}")
     if is_midday_chop:
         guidance_parts.append("⚠️ MIDDAY CHOP WINDOW: Execute Hedged Spread to avoid theta decay.")
     if debit_rr_warning:
@@ -712,6 +1111,8 @@ def build_defined_risk_hedge_plan(
         "max_profit": max_profit,
         "breakeven_spot": be_spot,
         "risk_reward": f"1:{rr_spread:.1f}",
+        "vix_regime": vix_strategy.regime,
+        "vix_strategy_regime": asdict(vix_strategy),
         "debit_ratio": debit_ratio,
         "is_poor_rr": is_poor_rr,
         "debit_rr_warning": debit_rr_warning or None,
@@ -730,6 +1131,300 @@ def build_defined_risk_hedge_plan(
         "ratio_spread_1x2": ratio_plan,
         "expiry_recommendation": expiry_rec,
         "expiry_date": expiry_date,
+        "target_level": target_level,
+        "regime_verdict": (
+            "MARKET_FAVORS_NAKED"
+            if (is_explosive and not is_high_iv and not is_chop_regime and not is_counter_trend)
+            else (
+                "HEDGE_RECOMMENDED"
+                if (is_chop_regime or is_high_iv or is_counter_trend)
+                else "DYNAMIC_SPREAD_OPTIMAL"
+            )
+        ),
+        "route_a_guidance": "High convexity: Buy Naked Option with 1R strict SL to capture 100% uncapped gamma acceleration.",
+        "route_b_guidance": f"Defined-Risk spread ({adaptive_regime_desc}): Zero theta bleed, capped downside loss of ₹{max_loss:,.0f}.",
+    }
+
+
+def evaluate_naked_option_free_roll(
+    alert: Any,
+    current_ltp: float,
+    chain: Optional[list[Any]] = None,
+    spot_price: float = 0.0,
+) -> dict[str, Any]:
+    """
+    Evaluates whether an active naked long option trade can be dynamically converted
+    into a 100% Capital Risk-Free (Free-Roll) Bull Call / Bear Put Spread.
+
+    Trigger Criteria:
+      1. Naked option has appreciated >= 40% from entry premium (or Target 1 achieved).
+      2. An OTM strike candidate exists where selling 1 lot generates credit >= initial debit paid
+         (locking guaranteed profit + unlimited upside up to short strike!), OR
+         selling higher OTM leg locks in zero downside capital risk while allowing runners.
+    """
+    if not alert or current_ltp <= 0:
+        return {"eligible": False, "action": "HOLD_NAKED", "reason": "Invalid alert or quote"}
+
+    # Resolve entry premium
+    entry_p = float(
+        getattr(alert, "entry_price", None)
+        or (getattr(alert, "metrics", {}) or {}).get("entry_premium")
+        or (getattr(alert, "actionable_plan", {}) or {}).get("entry_premium")
+        or 0.0
+    )
+    if entry_p <= 0:
+        entry_p = (
+            float(getattr(alert, "stop_loss", 0.0) or 0.0) / 0.7
+            if getattr(alert, "stop_loss", 0.0)
+            else 0.0
+        )
+
+    if entry_p <= 0:
+        return {"eligible": False, "action": "HOLD_NAKED", "reason": "No entry premium baseline"}
+
+    pnl_pts = round(current_ltp - entry_p, 2)
+    pnl_pct = round((pnl_pts / entry_p) * 100.0, 1)
+
+    is_t1 = bool(
+        getattr(alert, "is_t1_achieved", False)
+        or "TARGET_1" in (getattr(alert, "achieved_milestones", None) or [])
+    )
+
+    if pnl_pct < 40.0 and not is_t1:
+        return {
+            "eligible": False,
+            "action": "HOLD_NAKED",
+            "reason": f"P&L (+{pnl_pct:.1f}%) below 40% free-roll conversion threshold.",
+            "pnl_pct": pnl_pct,
+            "entry_premium": entry_p,
+            "current_premium": current_ltp,
+        }
+
+    # Resolve option details: strike & type
+    c_sym = str(getattr(alert, "contract_symbol", "") or getattr(alert, "contract", "") or "")
+    m_strike = re.search(r"(\d{4,6})(CE|PE)", c_sym.upper())
+    if m_strike:
+        long_strike = float(m_strike.group(1))
+        opt_type = m_strike.group(2)
+    else:
+        long_strike = float(getattr(alert, "strike", 0.0) or 0.0)
+        opt_type = "CE" if (getattr(alert, "direction", "BULLISH") == "BULLISH") else "PE"
+
+    raw_sym = str(getattr(alert, "symbol", "") or "NIFTY")
+    clean_und = (
+        raw_sym.replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("NIFTY 50", "NIFTY")
+        .replace("NIFTY BANK", "BANKNIFTY")
+        .strip()
+        .upper()
+    )
+
+    if clean_und in ("BANKNIFTY", "SENSEX", "BANKEX"):
+        step = 100.0
+    elif clean_und in ("NIFTY", "FINNIFTY"):
+        step = 50.0
+    elif clean_und == "MIDCPNIFTY":
+        step = 25.0
+    else:
+        step = 50.0 if spot_price >= 2500 else (20.0 if spot_price >= 1000 else 10.0)
+
+    if long_strike <= 0:
+        long_strike = round((spot_price if spot_price > 0 else 24000.0) / step) * step
+
+    # Target candidate short strike
+    if opt_type == "CE":
+        min_short_strike = long_strike + (step * 2)
+        if spot_price > 0 and spot_price > min_short_strike:
+            candidate_strike = round((spot_price + step) / step) * step
+        else:
+            candidate_strike = min_short_strike
+    else:
+        min_short_strike = max(step, long_strike - (step * 2))
+        if spot_price > 0 and spot_price < min_short_strike:
+            candidate_strike = max(step, round((spot_price - step) / step) * step)
+        else:
+            candidate_strike = min_short_strike
+
+    # Estimate or look up short credit
+    credit_prem = 0.0
+    if chain:
+        matched = [
+            c
+            for c in chain
+            if getattr(c, "strike", None) == candidate_strike
+            and getattr(c, "option_type", None) == opt_type
+        ]
+        if matched:
+            credit_prem = float(
+                getattr(matched[0], "last_price", 0.0) or getattr(matched[0], "ltp", 0.0) or 0.0
+            )
+
+    if credit_prem <= 0:
+        credit_prem = round(max(entry_p * 0.70, current_ltp * 0.45), 2)
+
+    net_locked_profit_pts = round(credit_prem - entry_p, 2)
+    spread_width = abs(candidate_strike - long_strike)
+    max_upside_profit_pts = round(spread_width + net_locked_profit_pts, 2)
+
+    risk_free = net_locked_profit_pts >= 0.0
+    risk_desc = "100% CAPITAL RISK-FREE (FREE-ROLL)" if risk_free else "DE-RISKED SPREAD"
+
+    rec = (
+        f"Sell {clean_und} {candidate_strike:,.0f} {opt_type} @ ~₹{credit_prem:,.1f}. "
+        f"Net cash flow: {'+' if net_locked_profit_pts >= 0 else ''}₹{net_locked_profit_pts:,.1f}/sh locked. "
+        f"Max payoff: ₹{max_upside_profit_pts:,.1f}/sh. Zero downside risk."
+    )
+
+    return {
+        "eligible": True,
+        "action": "CONVERT_TO_FREE_ROLL",
+        "reason": f"Naked option is up +{pnl_pct:.1f}% (+₹{pnl_pts:,.1f}/sh). Convert into Free-Roll Spread.",
+        "pnl_pct": pnl_pct,
+        "entry_premium": entry_p,
+        "current_premium": current_ltp,
+        "long_strike": long_strike,
+        "short_strike_candidate": candidate_strike,
+        "option_type": opt_type,
+        "estimated_credit_collected": credit_prem,
+        "net_locked_profit_pts": net_locked_profit_pts,
+        "spread_width": spread_width,
+        "max_upside_profit_pts": max_upside_profit_pts,
+        "risk_profile": risk_desc,
+        "is_guaranteed_profit": risk_free,
+        "recommendation": rec,
+    }
+
+
+def evaluate_short_strike_roll_plan(
+    alert: Any,
+    current_spot: float,
+    chain: Optional[list[Any]] = None,
+) -> dict[str, Any]:
+    """
+    Evaluates whether the short strike leg in an active defined-risk spread should be:
+      1. BOUGHT BACK (80% Take-Profit): Short leg premium has decayed >= 80% (gamma/theta risk no longer worth keeping).
+         Action: Buy back short leg to unlock unhedged, unlimited upside on the runner long leg!
+      2. ROLLED OTM (Delta Wall Defense): Spot has approached or breached the short strike ceiling.
+         Action: Roll short strike further OTM to prevent profit capping during strong trend days.
+      3. MAINTAINED: Spread is operating within normal boundaries.
+    """
+    plan = getattr(alert, "actionable_plan", None) or {}
+    hedge_plan = plan.get("hedge_plan") or (
+        alert.metrics.get("hedge_plan")
+        if isinstance(getattr(alert, "metrics", None), dict)
+        else None
+    )
+    if not hedge_plan or not isinstance(hedge_plan, dict):
+        return {
+            "action": "MAINTAIN_CURRENT_SPREAD",
+            "reason": "No hedge plan present in alert.",
+            "recommendation": "Hold current position.",
+        }
+
+    buy_strike = float(hedge_plan.get("buy_strike", 0.0) or 0.0)
+    sell_strike = float(hedge_plan.get("sell_strike", 0.0) or 0.0)
+    width = float(hedge_plan.get("strike_width", 0.0) or abs(sell_strike - buy_strike))
+    is_bullish = hedge_plan.get("sentiment") == "BULLISH"
+    legs = hedge_plan.get("legs", [])
+    short_entry_prem = float(legs[1].get("premium", 0.0) or 0.0) if len(legs) >= 2 else 0.0
+
+    raw_sym = str(getattr(alert, "symbol", "") or "NIFTY")
+    clean_und = (
+        raw_sym.replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("NIFTY 50", "NIFTY")
+        .replace("NIFTY BANK", "BANKNIFTY")
+        .strip()
+        .upper()
+    )
+
+    if clean_und in ("BANKNIFTY", "SENSEX", "BANKEX"):
+        step = 100.0
+    elif clean_und in ("NIFTY", "FINNIFTY"):
+        step = 50.0
+    elif clean_und == "MIDCPNIFTY":
+        step = 25.0
+    else:
+        step = 50.0 if current_spot >= 2500 else (20.0 if current_spot >= 1000 else 10.0)
+
+    # 1. Check Short Leg Theta Decay (80% Take-Profit Rule)
+    short_current_prem = None
+    if chain and sell_strike > 0:
+        opt_type = "CE" if is_bullish else "PE"
+        matched = [
+            c
+            for c in chain
+            if getattr(c, "strike", None) == sell_strike
+            and getattr(c, "option_type", None) == opt_type
+        ]
+        if matched:
+            short_current_prem = float(
+                getattr(matched[0], "last_price", 0.0) or getattr(matched[0], "ltp", 0.0) or 0.0
+            )
+
+    if short_current_prem is None and short_entry_prem > 0 and current_spot > 0:
+        if is_bullish and current_spot < buy_strike:
+            short_current_prem = max(0.5, round(short_entry_prem * 0.15, 2))
+        elif not is_bullish and current_spot > buy_strike:
+            short_current_prem = max(0.5, round(short_entry_prem * 0.15, 2))
+
+    if short_current_prem is not None and short_entry_prem > 0:
+        decay_pct = round(((short_entry_prem - short_current_prem) / short_entry_prem) * 100.0, 1)
+        if decay_pct >= 80.0:
+            return {
+                "action": "BUY_BACK_SHORT_LEG_80_PCT_DECAY",
+                "short_strike": sell_strike,
+                "short_entry_premium": short_entry_prem,
+                "short_current_premium": short_current_prem,
+                "decay_pct": decay_pct,
+                "reason": (
+                    f"Short strike ₹{sell_strike:,.0f} has decayed {decay_pct:.1f}% (trading @ ₹{short_current_prem:,.1f} vs entry ₹{short_entry_prem:,.1f}). "
+                    f"Negligible premium remaining; gamma/tail risk exceeds reward."
+                ),
+                "recommendation": (
+                    f"BUY TO CLOSE short {clean_und} ₹{sell_strike:,.0f} @ ~₹{short_current_prem:,.1f}. "
+                    f"Leave long {buy_strike:,.0f} leg running unhedged with zero risk of capped gains!"
+                ),
+            }
+
+    # 2. Check Short Strike Wall Approach (Delta Cap Roll)
+    is_approaching_wall = False
+    if sell_strike > 0 and current_spot > 0 and width > 0:
+        if is_bullish:
+            is_approaching_wall = current_spot >= (sell_strike - (0.25 * width))
+        else:
+            is_approaching_wall = current_spot <= (sell_strike + (0.25 * width))
+
+    if is_approaching_wall and sell_strike > 0:
+        candidate_roll_strike = sell_strike + step if is_bullish else max(step, sell_strike - step)
+        extra_runway = abs(candidate_roll_strike - sell_strike)
+        opt_type = "CE" if is_bullish else "PE"
+
+        return {
+            "action": "ROLL_SHORT_STRIKE_OTM",
+            "current_short_strike": sell_strike,
+            "candidate_roll_strike": candidate_roll_strike,
+            "additional_runway_pts": extra_runway,
+            "spot_price": current_spot,
+            "reason": (
+                f"Spot ₹{current_spot:,.1f} is pressing within 25% of Short Strike Wall (₹{sell_strike:,.0f}). "
+                f"Current spread delta is flattening near ~0."
+            ),
+            "recommendation": (
+                f"ROLL SHORT LEG: Buy to close ₹{sell_strike:,.0f} {opt_type} and sell ₹{candidate_roll_strike:,.0f} {opt_type} "
+                f"to unlock +{extra_runway:,.0f} pts of additional upside runway."
+            ),
+        }
+
+    return {
+        "action": "MAINTAIN_CURRENT_SPREAD",
+        "short_strike": sell_strike,
+        "spot_price": current_spot,
+        "reason": "Spread delta and theta decay progressing within normal bounds.",
+        "recommendation": "Hold position according to defined-risk parameters.",
     }
 
 
@@ -799,6 +1494,8 @@ def evaluate_spread_in_flight(
 
     if spot <= 0:
         return None
+
+    roll_plan = evaluate_short_strike_roll_plan(alert, current_spot=spot)
 
     # Entry spot baseline: prefer explicit entry_spot, fallback to buy_strike if synthetic test mock
     has_explicit_entry = bool(hedge_plan.get("entry_spot") or getattr(alert, "entry_spot", None))
@@ -891,6 +1588,7 @@ def evaluate_spread_in_flight(
             pnl_pct=pnl_pct,
             spot_price=spot,
             short_strike=sell_strike,
+            roll_plan=roll_plan,
         )
 
     # Trigger B: 70% Max Profit Target Captured
@@ -913,6 +1611,7 @@ def evaluate_spread_in_flight(
             pnl_pct=pnl_pct,
             spot_price=spot,
             short_strike=sell_strike,
+            roll_plan=roll_plan,
         )
 
     # Trigger C: Spread Free-Roll Unlocked (+40% to +50% progress towards max profit)
@@ -935,6 +1634,7 @@ def evaluate_spread_in_flight(
             pnl_pct=pnl_pct,
             spot_price=spot,
             short_strike=sell_strike,
+            roll_plan=roll_plan,
         )
 
     # Trigger D: 50% Debit Erosion Stop Loss
@@ -957,6 +1657,150 @@ def evaluate_spread_in_flight(
             pnl_pct=pnl_pct,
             spot_price=spot,
             short_strike=sell_strike,
+            roll_plan=roll_plan,
         )
 
     return None
+
+
+# ── Benchmark Heavyweight Correlation Shield ──────────────────────────────
+
+NIFTY_HEAVYWEIGHTS: dict[str, float] = {
+    "RELIANCE": 0.095,
+    "HDFCBANK": 0.115,
+    "ICICIBANK": 0.082,
+    "INFY": 0.058,
+    "TCS": 0.042,
+    "ITC": 0.038,
+    "LT": 0.036,
+    "AXISBANK": 0.033,
+    "KOTAKBANK": 0.030,
+    "BHARTIARTL": 0.032,
+    "SBIN": 0.028,
+}
+
+BANKNIFTY_HEAVYWEIGHTS: dict[str, float] = {
+    "HDFCBANK": 0.28,
+    "ICICIBANK": 0.23,
+    "AXISBANK": 0.11,
+    "KOTAKBANK": 0.10,
+    "SBIN": 0.09,
+    "INDUSINDBK": 0.05,
+    "FEDERALBNK": 0.03,
+    "PNB": 0.025,
+}
+
+
+def audit_heavyweight_correlation_shield(
+    symbol: str,
+    direction: str = "BULLISH",
+    active_alerts: Optional[list[Any]] = None,
+    open_positions: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """
+    Evaluates whether entering a directional stock option (e.g. RELIANCE CE or HDFCBANK CE)
+    creates an unhedged double-leveraged correlated exposure with an active Index derivative.
+
+    Institutional Invariant:
+      If a trader holds/targets an active long NIFTY or BANKNIFTY call/put, concurrent naked
+      calls/puts on its heavyweights (e.g. RELIANCE, HDFCBANK) introduce correlated double-leverage.
+      A sudden index reversal inflicts simultaneous compounding losses on both positions.
+
+    Enforcement:
+      - Mandatory Defined-Risk Spread (HEDGED_SPREAD_MANDATORY) on the stock option.
+      - 50% position sizing haircut.
+    """
+    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").replace("NFO:", "").strip()
+    norm_dir = "BULLISH" if direction.upper() in ("BULLISH", "BUY", "LONG", "CE") else "BEARISH"
+
+    correlated_index = None
+    weight_pct = 0.0
+
+    if clean_sym in BANKNIFTY_HEAVYWEIGHTS:
+        correlated_index = "BANKNIFTY"
+        weight_pct = round(BANKNIFTY_HEAVYWEIGHTS[clean_sym] * 100.0, 1)
+    elif clean_sym in NIFTY_HEAVYWEIGHTS:
+        correlated_index = "NIFTY"
+        weight_pct = round(NIFTY_HEAVYWEIGHTS[clean_sym] * 100.0, 1)
+
+    if not correlated_index:
+        return {
+            "shield_triggered": False,
+            "symbol": clean_sym,
+            "direction": norm_dir,
+            "correlated_index": None,
+            "weight_pct": 0.0,
+            "enforcement": "STANDARD_SIZING",
+            "haircut_multiplier": 1.0,
+            "warning": None,
+        }
+
+    has_active_index_exposure = False
+    active_sources: list[str] = []
+
+    if active_alerts:
+        for a in active_alerts:
+            a_sym = str(
+                (a.get("symbol", "") if isinstance(a, dict) else getattr(a, "symbol", "")) or ""
+            ).upper()
+            if correlated_index in a_sym or (correlated_index == "NIFTY" and "NIFTY 50" in a_sym):
+                raw_dir = (
+                    a.get("direction", "BULLISH")
+                    if isinstance(a, dict)
+                    else getattr(a, "direction", "BULLISH")
+                )
+                a_dir = (
+                    "BULLISH"
+                    if str(raw_dir or "BULLISH").upper() in ("BULLISH", "BUY", "LONG", "CE")
+                    else "BEARISH"
+                )
+                is_inv = (
+                    a.get("is_invalidated", False)
+                    if isinstance(a, dict)
+                    else getattr(a, "is_invalidated", False)
+                )
+                if a_dir == norm_dir and not is_inv:
+                    has_active_index_exposure = True
+                    alt_id = (
+                        a.get("alert_id", a_sym)
+                        if isinstance(a, dict)
+                        else getattr(a, "alert_id", a_sym)
+                    )
+                    active_sources.append(f"Alert {alt_id}")
+                    break
+
+    if not has_active_index_exposure and open_positions:
+        for pos_sym, pos_data in open_positions.items():
+            pos_upper = str(pos_sym).upper()
+            if correlated_index in pos_upper:
+                has_active_index_exposure = True
+                active_sources.append(f"Position {pos_sym}")
+                break
+
+    if has_active_index_exposure:
+        warning_msg = (
+            f"Active {correlated_index} {norm_dir} exposure detected (~{weight_pct:.1f}% weight in {clean_sym}). "
+            f"Concurrent naked {clean_sym} option creates double-leveraged correlated ruin risk. "
+            "Defined-risk spread (HEDGED_SPREAD) strictly mandated with 50% position haircut."
+        )
+        return {
+            "shield_triggered": True,
+            "symbol": clean_sym,
+            "direction": norm_dir,
+            "correlated_index": correlated_index,
+            "weight_pct": weight_pct,
+            "enforcement": "HEDGED_SPREAD_MANDATORY",
+            "haircut_multiplier": 0.50,
+            "warning": warning_msg,
+        }
+
+    return {
+        "shield_triggered": False,
+        "symbol": clean_sym,
+        "direction": norm_dir,
+        "correlated_index": correlated_index,
+        "weight_pct": weight_pct,
+        "enforcement": "STANDARD_SIZING",
+        "haircut_multiplier": 1.0,
+        "warning": None,
+    }

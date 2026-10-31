@@ -76,11 +76,18 @@ class DefinedRiskSpread:
             "spot_price": round(self.spot_price, 2),
             "lot_size": self.lot_size,
             "net_cashflow": round(self.net_debit_or_credit, 2),
+            "net_debit_per_unit": round(self.net_debit_or_credit / max(1, self.lot_size), 2),
             "flow_type": "NET_DEBIT" if self.net_debit_or_credit > 0 else "NET_CREDIT",
             "max_profit": round(self.max_profit, 2),
             "max_loss": round(self.max_loss, 2),
             "risk_reward_ratio": round(self.risk_reward_ratio, 2),
             "breakeven_points": [round(b, 2) for b in self.breakeven_points],
+            # spot_move_to_profit: index pts underlying must move from current spot
+            # for spread to reach full profit at expiry.
+            # BEAR_PUT_SPREAD: negative = spot must FALL by this many pts.
+            "spot_move_to_profit": round(
+                (self.breakeven_points[0] - self.spot_price) if self.breakeven_points else 0.0, 1
+            ),
             "capital_required": round(self.capital_required, 2),
             "sentiment": self.sentiment,
             "thesis": self.thesis,
@@ -119,9 +126,18 @@ def build_defined_risk_spread(
     dte: int = 7,
     lot_size: Optional[int] = None,
     num_lots: int = 1,
+    primary_strike: Optional[float] = None,
+    primary_premium: Optional[float] = None,
 ) -> DefinedRiskSpread:
     """
     Construct a defined-risk hedged options spread with mathematical payout constraints.
+
+    Args:
+        primary_strike: When provided, anchors the long leg to the alert's actual option
+            strike instead of computing ATM from spot. Prevents phantom strike generation
+            when alert.ltp (option premium) was mistakenly used as spot_price in legacy code.
+        primary_premium: Actual market premium for the primary (long) leg. When provided,
+            used directly instead of the Black-Scholes estimate, giving realistic cashflow.
     """
     sym = underlying.upper()
     lots = lot_size or _get_lot_size(sym)
@@ -171,10 +187,16 @@ def build_defined_risk_spread(
 
     elif strategy == "BEAR_PUT_SPREAD":
         sentiment = "BEARISH"
-        buy_strike = atm_strike
-        sell_strike = atm_strike - (2 * step)
+        # Anchor long leg to alert's actual strike when available (prevents phantom ATM from spot)
+        buy_strike = primary_strike if primary_strike and primary_strike > 0 else atm_strike
+        sell_strike = buy_strike - (2 * step)
 
-        buy_prem = bs_premium(spot, buy_strike, dte, iv, "PE")
+        # Use real market premium for long leg when provided; BS estimate for hedge leg
+        buy_prem = (
+            float(primary_premium)
+            if primary_premium and primary_premium > 0
+            else bs_premium(spot, buy_strike, dte, iv, "PE")
+        )
         sell_prem = bs_premium(spot, sell_strike, dte, iv, "PE")
 
         legs.append(SpreadLeg(sym, "PE", buy_strike, "BUY", buy_prem, lots, total_qty, dte))
@@ -189,7 +211,11 @@ def build_defined_risk_spread(
         rr = round(max_profit / max_loss, 2) if max_loss > 0 else 0.0
         breakevens = [buy_strike - net_debit_per_unit]
         capital = max_loss
-        thesis = f"Moderately Bearish: Buy ATM {buy_strike:.0f} PE & Sell OTM {sell_strike:.0f} PE. Defined downside play with reduced premium outlay."
+        _anchor_note = " [Anchored to alert strike]" if primary_strike else ""
+        thesis = (
+            f"Moderately Bearish: Buy {buy_strike:.0f} PE & Sell OTM {sell_strike:.0f} PE."
+            f" Defined downside play with reduced premium outlay.{_anchor_note}"
+        )
 
     elif strategy == "BULL_PUT_SPREAD":
         sentiment = "BULLISH"

@@ -838,6 +838,34 @@ def _row_to_intent(d: dict) -> OrderIntent:
     )
 
 
+_emergency_lockout_until: Optional[float] = None
+
+
+def is_emergency_lockout_active() -> tuple[bool, float]:
+    """Check if emergency circuit breaker lockout is currently active."""
+    global _emergency_lockout_until
+    if _emergency_lockout_until is None:
+        return False, 0.0
+    now = time.time()
+    if now < _emergency_lockout_until:
+        return True, _emergency_lockout_until - now
+    _emergency_lockout_until = None
+    return False, 0.0
+
+
+def set_emergency_lockout(duration_seconds: float = 3600.0) -> float:
+    """Set emergency cooling-off lockout period (default 60 minutes)."""
+    global _emergency_lockout_until
+    _emergency_lockout_until = time.time() + duration_seconds
+    return _emergency_lockout_until
+
+
+def clear_emergency_lockout() -> None:
+    """Clear emergency cooling-off lockout."""
+    global _emergency_lockout_until
+    _emergency_lockout_until = None
+
+
 def execute_order_intent(order_id: str) -> OrderIntent:
     """
     Transition a server-CONFIRMED order into execution.
@@ -871,6 +899,14 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         correlation_id=d.get("correlation_id") or order_id,
         symbol=d.get("symbol"),
     )
+
+    # ── Emergency Circuit Breaker Lockout Check ────────────────────────────
+    is_locked, remaining_sec = is_emergency_lockout_active()
+    if is_locked:
+        raise PermissionError(
+            f"Emergency circuit breaker lockout active ({remaining_sec:.0f}s remaining). "
+            f"New order execution blocked to preserve capital."
+        )
 
     mode_info = get_trading_mode()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -1594,13 +1630,31 @@ def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
     if len(order_ids) == 1:
         return [execute_order_intent(order_ids[0])]
 
+    _init_orders_db()
+
+    # Institutional Spread Leg Sequencing Invariant:
+    # BUY legs MUST strictly execute before SELL legs so the long hedge is registered
+    # with broker RMS, providing ~70%+ margin relief and preventing false naked margin rejections.
+    with _get_orders_db() as conn:
+        conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in order_ids)
+        rows = conn.execute(
+            f"SELECT order_id, side FROM orders_ledger WHERE order_id IN ({placeholders})",
+            order_ids,
+        ).fetchall()
+        side_map = {r["order_id"]: str(r["side"]).upper() for r in rows}
+        sorted_order_ids = sorted(
+            order_ids,
+            key=lambda oid: 0 if side_map.get(oid) == "BUY" else 1,
+        )
+
     mode_info = get_trading_mode()
     now_iso = datetime.now(timezone.utc).isoformat()
 
     # If in OBSERVE or SIMULATE mode, execute sequentially via execute_order_intent
     # (paper execution maintains accurate sequential fill sequence and balances)
     if not mode_info.is_execute:
-        return [execute_order_intent(oid) for oid in order_ids]
+        return [execute_order_intent(oid) for oid in sorted_order_ids]
 
     # Live Execution Mode
     from engine.modes import assert_live_execution_allowed
@@ -1621,15 +1675,13 @@ def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
 
     # Fall back to sequential execution if adapter does not support basket placement
     if not hasattr(live_broker, "place_basket_orders"):
-        return [execute_order_intent(oid) for oid in order_ids]
+        return [execute_order_intent(oid) for oid in sorted_order_ids]
 
-    _init_orders_db()
-
-    # Step 1: Load and pre-validate all orders from ledger
+    # Step 1: Load and pre-validate all orders from ledger in strictly sorted BUY-first sequence
     loaded_orders: list[dict[str, Any]] = []
     with _get_orders_db() as conn:
         conn.row_factory = sqlite3.Row
-        for oid in order_ids:
+        for oid in sorted_order_ids:
             cursor = conn.execute("SELECT * FROM orders_ledger WHERE order_id = ?", (oid,))
             row = cursor.fetchone()
             if not row:
@@ -2299,4 +2351,325 @@ def sync_execution_orders() -> dict[str, Any]:
         "ledger_orders_updated": changed,
         "unknown_broker_orders": unknown_broker_orders,
         "synced_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def execute_wing_lock_hedge(
+    alert_id: str,
+    limit_price: Optional[float] = None,
+    quantity: Optional[int] = None,
+    actor: str = "LOCAL",
+) -> dict[str, Any]:
+    """
+    1-Click Fyers / Paper Multi-Leg Execution Bridge for Free-Roll Wing Lock.
+
+    Transitions a +48% / T1 in-profit naked option setup into an institutional
+    Free-Roll Spread by shorting the OTM wing candidate, locking guaranteed profit
+    while retaining zero downside risk.
+    """
+    from engine.auto_alert_engine import get_auto_alert_engine
+    from engine.security_audit import record_audit_event
+
+    a_engine = get_auto_alert_engine()
+    alert = (
+        a_engine.get_alert_by_id(alert_id)
+        if hasattr(a_engine, "get_alert_by_id")
+        else a_engine.get_alert(alert_id)
+    )
+    if not alert:
+        raise ValueError(f"Alert '{alert_id}' not found.")
+
+    plan = alert.actionable_plan or {}
+    hedge_ticket = plan.get("hedge_ticket")
+    free_roll = plan.get("free_roll_plan") or (
+        alert.metrics.get("free_roll_conversion") if alert.metrics else None
+    )
+
+    if not hedge_ticket and not free_roll:
+        raise ValueError(f"Alert '{alert_id}' has no eligible Free-Roll hedge ticket or plan.")
+
+    # Resolve hedge contract symbol
+    sym = hedge_ticket.get("symbol") if hedge_ticket else None
+    if not sym and free_roll:
+        u_sym = alert.symbol
+        c_strike = free_roll.get("short_strike_candidate", 0)
+        c_opt = free_roll.get("option_type", "")
+        sym = f"{u_sym}{c_strike:,.0f}{c_opt}".replace(",", "")
+
+    if not sym:
+        raise ValueError(f"Could not determine hedge contract symbol for alert '{alert_id}'.")
+
+    # Resolve quantity & price
+    qty = int(
+        quantity
+        or (hedge_ticket.get("shares") if hedge_ticket else None)
+        or getattr(alert, "shares", 0)
+        or getattr(alert, "lot_size", 1)
+    )
+    side = str(hedge_ticket.get("action", "SELL") if hedge_ticket else "SELL").upper()
+    raw_px = float(
+        limit_price
+        or (hedge_ticket.get("limit_price") if hedge_ticket else None)
+        or (free_roll.get("estimated_credit_collected") if free_roll else 0.0)
+        or 10.0
+    )
+    px = round(max(0.05, raw_px), 2)
+    order_type = str(hedge_ticket.get("order_type", "LIMIT") if hedge_ticket else "LIMIT")
+
+    # Step 1: Preview Order Intent
+    preview = preview_order_intent(
+        symbol=sym,
+        side=side,  # type: ignore
+        quantity=qty,
+        price=px,
+        order_type=order_type,  # type: ignore
+        product="MIS",
+    )
+
+    # Step 2: Confirm Order Intent
+    confirmed = confirm_order_intent(preview.order_id, preview.preview_hash)
+
+    # Step 3: Execute Order Intent
+    executed = execute_order_intent(confirmed.order_id)
+
+    # Step 4: Update Alert State & Audit Trail
+    if not alert.metrics:
+        alert.metrics = {}
+    alert.metrics["free_roll_locked"] = True
+
+    if not alert.actionable_plan:
+        alert.actionable_plan = {}
+    alert.actionable_plan["free_roll_active"] = True
+    alert.actionable_plan["wing_lock_executed"] = True
+    alert.actionable_plan["wing_lock_order_id"] = executed.order_id
+    alert.actionable_plan["wing_lock_fill_price"] = executed.price or px
+    alert.actionable_plan["wing_lock_status"] = executed.status
+
+    locked_pts = float(
+        getattr(alert, "locked_profit_pts", 0.0)
+        or (free_roll.get("net_locked_profit_pts", 0.0) if free_roll else 0.0)
+    )
+    action_msg = (
+        f"Wing Lock Executed: Sold {sym} qty={qty} @ ₹{px:.1f} "
+        f"(Order: {executed.order_id}) locking ₹{locked_pts:.1f} profit."
+    )
+
+    if hasattr(alert, "record_audit"):
+        alert.record_audit(
+            event_type="WING_LOCK_EXECUTED",
+            message=action_msg,
+            actor=actor,
+        )
+
+    # Persist updated alert in AutoAlertEngine
+    a_engine.record_alert(alert)
+
+    # Record Security Audit
+    record_audit_event(
+        event_type="WING_LOCK_HEDGE_EXECUTED",
+        mode=executed.mode,
+        actor=actor,
+        details={
+            "alert_id": alert_id,
+            "order_id": executed.order_id,
+            "symbol": sym,
+            "quantity": qty,
+            "price": px,
+            "status": executed.status,
+            "locked_profit_pts": locked_pts,
+        },
+    )
+
+    return {
+        "status": "SUCCESS",
+        "alert_id": alert_id,
+        "order": executed.to_dict(),
+        "hedge_symbol": sym,
+        "locked_profit_pts": locked_pts,
+        "message": action_msg,
+    }
+
+
+def emergency_flatten_all_positions(
+    actor: str = "LOCAL",
+    reason: str = "MANUAL_EMERGENCY",
+    segment: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    1-Click Emergency "Flatten All" Command & Session Drawdown Circuit Breaker.
+
+    Institutional Fail-Closed Execution Sequence:
+      1. Order Annihilation:
+         - Retrieves and cancels all open/pending resting orders on the broker and ledger
+           to eliminate any pending order fills during position liquidation.
+      2. Position Liquidation:
+         - Live Mode (TRADING_MODE=EXECUTE and ALLOW_LIVE_TRADING=1):
+           Invokes broker exit_all_positions(segment=segment) or dispatches market counter-orders.
+         - Paper / Simulate Mode:
+           Squares off all open positions via PaperBroker.square_off_intraday_positions() / market exits.
+      3. 60-Minute Circuit Breaker Lock:
+         - Sets active emergency cooldown lock preventing new trade entry for 60 minutes.
+      4. Institutional Security Audit Ledger:
+         - Records EMERGENCY_FLATTEN_ALL audit event with full provenance and correlation ID.
+    """
+    from brokers.session import get_execution_broker
+    from engine.modes import get_trading_mode
+    from engine.security_audit import record_audit_event
+
+    mode = get_trading_mode().mode.name  # "OBSERVE", "SIMULATE", "EXECUTE"
+    cancelled_orders: list[str] = []
+    flattened_positions: list[dict[str, Any]] = []
+
+    broker = None
+    try:
+        broker = get_execution_broker()
+    except Exception as e_broker:
+        logger.warning(
+            f"[EmergencyFlatten] Execution broker unavailable or not logged in: {e_broker}"
+        )
+
+    paper_broker = None
+    try:
+        from engine.paper import PaperBroker
+
+        paper_broker = PaperBroker()
+    except Exception as e_pb:
+        logger.warning(f"[EmergencyFlatten] PaperBroker initialization failed: {e_pb}")
+
+    # 1. Annihilate Open Resting Orders
+    try:
+        open_orders = broker.get_orders() if hasattr(broker, "get_orders") else []
+        for o in open_orders:
+            status = getattr(o, "status", None) or (
+                o.get("status") if isinstance(o, dict) else None
+            )
+            oid = (
+                getattr(o, "order_id", None)
+                or (o.get("order_id") if isinstance(o, dict) else None)
+                or getattr(o, "id", None)
+            )
+            if oid and status in ("OPEN", "PENDING", "TRIGGER_PENDING", 1, 2, 4, 6):
+                try:
+                    broker.cancel_order(str(oid))
+                    cancelled_orders.append(str(oid))
+                except Exception as e_cancel:
+                    logger.warning(
+                        f"[EmergencyFlatten] Failed to cancel broker order {oid}: {e_cancel}"
+                    )
+    except Exception as e_orders:
+        logger.warning(f"[EmergencyFlatten] Failed to query broker orders: {e_orders}")
+
+    # Also update any pending orders in internal sqlite ledger
+    try:
+        with _get_orders_db() as conn:
+            conn.execute(
+                "UPDATE orders_ledger SET status = 'CANCELLED' WHERE status IN ('SUBMITTING', 'CONFIRMED', 'OPEN', 'PENDING')"
+            )
+            conn.commit()
+    except Exception as e_ledger:
+        logger.warning(f"[EmergencyFlatten] Failed to update ledger orders: {e_ledger}")
+
+    # 2. Liquidate Positions
+    # Native broker square-off
+    if hasattr(broker, "exit_all_positions"):
+        try:
+            res = broker.exit_all_positions(segment=segment)
+            flattened_positions.append(
+                {"method": "native_exit_all_positions", "response": str(res)}
+            )
+        except Exception as e_exit_all:
+            logger.warning(f"[EmergencyFlatten] native exit_all_positions failed: {e_exit_all}")
+
+    # PaperBroker square-off
+    p_inst = (
+        broker if (broker and hasattr(broker, "square_off_intraday_positions")) else paper_broker
+    )
+    if p_inst and hasattr(p_inst, "square_off_intraday_positions"):
+        try:
+            closed = p_inst.square_off_intraday_positions()
+            for sym in closed:
+                flattened_positions.append(
+                    {"symbol": sym, "method": "square_off_intraday_positions"}
+                )
+        except Exception as e_sq:
+            logger.warning(f"[EmergencyFlatten] square_off_intraday_positions failed: {e_sq}")
+
+    # Check and close any remaining open net positions via market counter-orders
+    try:
+        pos_list = broker.get_positions() if hasattr(broker, "get_positions") else []
+        for p in pos_list:
+            qty = (
+                getattr(p, "net_qty", None)
+                or (p.get("net_qty") if isinstance(p, dict) else None)
+                or (p.get("qty") if isinstance(p, dict) else 0)
+            )
+            sym = getattr(p, "symbol", None) or (p.get("symbol") if isinstance(p, dict) else None)
+            if sym and qty and int(qty) != 0:
+                side = "SELL" if int(qty) > 0 else "BUY"
+                try:
+                    from brokers.base import OrderRequest
+
+                    exch = (
+                        getattr(p, "exchange", "NSE")
+                        if hasattr(p, "exchange")
+                        else (p.get("exchange", "NSE") if isinstance(p, dict) else "NSE")
+                    )
+                    prod = (
+                        getattr(p, "product", "MIS")
+                        if hasattr(p, "product")
+                        else (p.get("product", "MIS") if isinstance(p, dict) else "MIS")
+                    )
+                    req = OrderRequest(
+                        symbol=sym,
+                        exchange=exch,
+                        transaction_type=side,
+                        quantity=abs(int(qty)),
+                        order_type="MARKET",
+                        product=prod,
+                    )
+                    broker.place_order(req)
+                    flattened_positions.append(
+                        {
+                            "symbol": sym,
+                            "side": side,
+                            "quantity": abs(int(qty)),
+                            "method": "market_counter_order",
+                        }
+                    )
+                except Exception as e_close:
+                    logger.warning(f"[EmergencyFlatten] Counter-order failed for {sym}: {e_close}")
+    except Exception as e_pos:
+        logger.warning(f"[EmergencyFlatten] Position liquidation iteration failed: {e_pos}")
+
+    # 3. Activate 60-Minute Circuit Breaker Lockout
+    lockout_until = set_emergency_lockout(3600.0)
+
+    # 4. Security Audit Log
+    record_audit_event(
+        event_type="EMERGENCY_FLATTEN_ALL",
+        mode=mode,
+        actor=actor,
+        details={
+            "reason": reason,
+            "cancelled_orders_count": len(cancelled_orders),
+            "cancelled_orders": cancelled_orders,
+            "flattened_positions_count": len(flattened_positions),
+            "flattened_positions": flattened_positions,
+            "lockout_until": lockout_until,
+        },
+    )
+
+    msg = (
+        f"Emergency Flatten completed: {len(cancelled_orders)} open orders cancelled, "
+        f"{len(flattened_positions)} positions liquidated. 60-minute circuit breaker active."
+    )
+    return {
+        "status": "SUCCESS",
+        "mode": mode,
+        "cancelled_orders_count": len(cancelled_orders),
+        "cancelled_orders": cancelled_orders,
+        "flattened_positions_count": len(flattened_positions),
+        "flattened_positions": flattened_positions,
+        "lockout_until": lockout_until,
+        "message": msg,
     }

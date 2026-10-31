@@ -162,6 +162,7 @@ def detect_currency_breakouts(
             headline=headline,
             summary=summary,
             ltp=ltp,
+            underlying_spot=ltp,
             trigger_level=ltp,
             target_level=t1_price,
             stop_loss=sl_price,

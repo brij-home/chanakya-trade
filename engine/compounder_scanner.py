@@ -196,7 +196,7 @@ class CompounderScanner:
                     "PREMIERENE",
                     "WAAREEENER",
                     "ZENTEC",
-                    "SWANENERGY",
+                    "SWANCORP",
                 ]
             )
 

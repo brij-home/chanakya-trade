@@ -346,9 +346,17 @@ def run_preflight(verbose: bool = True) -> PreflightReport:
             os.environ.get("MSTOCK_API_KEY") and os.environ.get("MSTOCK_CLIENT_CODE")
         ):
             active_configured.append("mstock (Mirae Asset)")
-        # Fyers (Planned primary data feed)
+        # Fyers (Primary real-time data feed & options chain)
         if _has_valid_token("fyers.json") or os.environ.get("FYERS_APP_ID"):
-            active_configured.append("fyers (Data API)")
+            import importlib.util
+
+            fyers_sdk_installed = importlib.util.find_spec("fyers_apiv3") is not None
+            tag = (
+                "Data API"
+                if fyers_sdk_installed
+                else "Data API - SDK MISSING: pip install fyers-apiv3"
+            )
+            active_configured.append(f"fyers ({tag})")
         # Stoxkart (Planned standby/failover)
         if _has_valid_token("stoxkart.json") or os.environ.get("STOXKART_API_KEY"):
             active_configured.append("stoxkart (SMC Global)")

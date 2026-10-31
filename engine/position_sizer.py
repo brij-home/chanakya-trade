@@ -861,6 +861,8 @@ def generate_execution_ticket(
     order_type: str = "LIMIT",
     conviction_tier: Optional[str] = None,
     execution_friction_badge: Optional[str] = None,
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     Builds a capital-calibrated, ready-to-execute institutional order ticket.
@@ -894,9 +896,22 @@ def generate_execution_ticket(
 
     side = "BUY" if direction.upper() in ("BULLISH", "BUY", "LONG") else "SELL"
 
-    # Strict Limit Mandate: wide bid-ask spread or option orders mandate LIMIT orders
+    # Strict Limit & Midpoint Enforcer for F&O derivatives
+    is_opt = (
+        is_fno
+        or any(token in clean_sym for token in ("CE", "PE", "CALL", "PUT"))
+        or (alert_type and "OPTION" in alert_type.upper())
+    )
     final_order_type = order_type
     ticket_notes = res.notes
+    final_limit_price = round(entry_price, 2)
+    midpoint_price = None
+
+    if is_opt and str(final_order_type).upper() == "MARKET":
+        final_order_type = "LIMIT"
+        f_note = "Market order prohibited on F&O options; converted to LIMIT"
+        ticket_notes = f"{ticket_notes} | {f_note}" if ticket_notes else f_note
+
     if execution_friction_badge and (
         "STRICT LIMIT" in execution_friction_badge.upper()
         or "WIDE SPREAD" in execution_friction_badge.upper()
@@ -904,6 +919,18 @@ def generate_execution_ticket(
         final_order_type = "LIMIT"
         f_note = "Strict LIMIT order enforced due to wide bid-ask spread"
         ticket_notes = f"{ticket_notes} | {f_note}" if ticket_notes else f_note
+
+    if bid is not None and ask is not None and bid > 0 and ask > 0:
+        midpoint_price = round((bid + ask) / 2.0, 2)
+        spread_pct = round(((ask - bid) / ask) * 100.0, 2)
+        if spread_pct > 1.8 or is_opt:
+            final_order_type = "LIMIT"
+            final_limit_price = midpoint_price
+            f_note = f"Pegged to midpoint limit ₹{midpoint_price:,.2f} ({spread_pct:.1f}% B/A spread) to eliminate slippage"
+            ticket_notes = f"{ticket_notes} | {f_note}" if ticket_notes else f_note
+
+    # Tick-size quantization (0.05 standard NSE/NFO)
+    final_limit_price = round(round(final_limit_price / 0.05) * 0.05, 2)
 
     # Generate Smart Order Router (SOR) execution plan
     from engine.smart_order_router import build_smart_execution_plan
@@ -920,7 +947,10 @@ def generate_execution_ticket(
         "symbol": clean_sym,
         "side": side,
         "order_type": final_order_type,
-        "limit_price": round(entry_price, 2),
+        "limit_price": final_limit_price,
+        "bid": bid,
+        "ask": ask,
+        "midpoint_price": midpoint_price,
         "shares": res.shares,
         "lots": res.lots,
         "lot_size": res.lot_size,
@@ -984,3 +1014,167 @@ def calibrate_off_number_stop(
 
 
 # ── Hierarchical Dynamic Risk Scaling Re-exports ─────────────────────────────
+
+
+# ── Episodic Memory Quarter-Kelly Optimal Position Sizer ─────────────────────
+
+
+@dataclass
+class EpisodicKellySizingResult:
+    symbol: str
+    direction: str
+    allocated_shares: int
+    allocated_lots: int
+    lot_size: int
+    risk_inr: float
+    risk_pct_of_capital: float
+    capital_allocated_inr: float
+    raw_kelly_fraction: float
+    quarter_kelly_multiplier: float
+    empirical_win_rate_pct: float
+    empirical_avg_mfe_r: float
+    empirical_avg_mae_r: float
+    sample_size: int
+    confidence_calibration: str
+    heuristic_guidance: str
+    base_result: PositionSizeResult
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "direction": self.direction,
+            "allocated_shares": self.allocated_shares,
+            "allocated_lots": self.allocated_lots,
+            "lot_size": self.lot_size,
+            "risk_inr": self.risk_inr,
+            "risk_pct_of_capital": self.risk_pct_of_capital,
+            "capital_allocated_inr": self.capital_allocated_inr,
+            "kelly_fraction": self.raw_kelly_fraction,
+            "kelly_multiplier": self.quarter_kelly_multiplier,
+            "empirical_win_rate_pct": self.empirical_win_rate_pct,
+            "empirical_avg_mfe_r": self.empirical_avg_mfe_r,
+            "empirical_avg_mae_r": self.empirical_avg_mae_r,
+            "sample_size": self.sample_size,
+            "confidence_calibration": self.confidence_calibration,
+            "heuristic_guidance": self.heuristic_guidance,
+            "base_position_size": self.base_result.as_dict(),
+        }
+
+
+def calculate_episodic_kelly_position_size(
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    stop_loss: float,
+    target_price: Optional[float] = None,
+    capital: float = 100000.0,
+    day_archetype: str = "NORMAL_DAY",
+    vix_regime: str = "NORMAL_IV",
+    vpin_regime: str = "LOW_TOXICITY",
+    max_risk_pct: float = 1.5,
+    is_fno: bool = False,
+    alert_type: str = "MOMENTUM",
+) -> EpisodicKellySizingResult:
+    """
+    Computes Kelly-Optimal position sizing grounded in Episodic Memory empirical win rates.
+    Applies Quarter-Kelly calibration to prevent ruin and scale capital intelligently.
+    """
+    clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    norm_dir = "BULLISH" if direction.upper() in ("BULLISH", "BUY", "LONG", "CE") else "BEARISH"
+
+    sample_size = 0
+    win_rate = 55.0
+    avg_mfe = 2.0
+    avg_mae = 0.8
+    calib = "NEUTRAL_CALIBRATION"
+    heuristic = "Standard baseline volatility risk-parity allocation."
+
+    try:
+        from engine.episodic_memory import get_episodic_memory_store
+
+        store = get_episodic_memory_store()
+        analogies = store.query_analogous_episodes(
+            symbol=clean_sym,
+            direction=norm_dir,
+            vix_regime=vix_regime,
+            day_archetype=day_archetype,
+            vpin_regime=vpin_regime,
+            top_k=8,
+        )
+        sample_size = analogies.sample_size
+        if sample_size >= 3:
+            win_rate = analogies.win_rate_pct
+            avg_mfe = max(0.5, analogies.avg_mfe_r)
+            avg_mae = max(0.2, analogies.avg_mae_r)
+            calib = analogies.confidence_calibration
+            heuristic = analogies.heuristic_recommendation
+    except Exception as e_mem:
+        logger.debug(f"[PositionSizer] Episodic memory query bypassed: {e_mem}")
+
+    p = win_rate / 100.0
+    b = avg_mfe / avg_mae if avg_mae > 0 else 1.8
+
+    # Raw Kelly Fraction: f* = (p * b - (1 - p)) / b
+    if b > 0:
+        raw_kelly = (p * b - (1.0 - p)) / b
+    else:
+        raw_kelly = 0.10
+
+    # Institutional Quarter-Kelly dampener
+    if sample_size >= 3:
+        if raw_kelly <= 0 or p < 0.40 or calib == "HIGH_MAE_DRAWDOWN_PRONE":
+            quarter_kelly = 0.35  # Capital preservation throttle
+        elif p >= 0.75 and avg_mfe >= 2.0:
+            quarter_kelly = min(1.50, max(1.15, raw_kelly * 2.0))  # Conviction scale-up
+        else:
+            quarter_kelly = max(0.50, min(1.20, raw_kelly * 1.5))
+    else:
+        quarter_kelly = 1.0  # Neutral baseline when sample size < 3
+
+    base = calculate_position_size_for_alert(
+        alert_type=alert_type,
+        symbol=clean_sym,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        capital=capital,
+        target_price=target_price,
+        max_risk_pct=max_risk_pct,
+        win_rate=p,
+        profit_factor=round(b, 2),
+        is_fno=is_fno,
+    )
+
+    if is_fno and base.lots > 0:
+        raw_adj_lots = base.lots * quarter_kelly
+        adj_lots = (
+            max(1, int(raw_adj_lots)) if quarter_kelly >= 0.50 else max(1, round(raw_adj_lots))
+        )
+        adj_shares = adj_lots * base.lot_size
+    else:
+        adj_shares = max(1, int(base.shares * quarter_kelly))
+        adj_lots = max(1, int(adj_shares / max(1, base.lot_size))) if base.lot_size > 1 else 0
+
+    stop_dist = max(0.01, abs(entry_price - stop_loss))
+    adj_risk = round(adj_shares * stop_dist, 2)
+    adj_risk_pct = round((adj_risk / capital) * 100.0, 2) if capital > 0 else 0.0
+    adj_cap = round(adj_shares * entry_price, 2)
+
+    return EpisodicKellySizingResult(
+        symbol=clean_sym,
+        direction=norm_dir,
+        allocated_shares=adj_shares,
+        allocated_lots=adj_lots,
+        lot_size=base.lot_size,
+        risk_inr=adj_risk,
+        risk_pct_of_capital=adj_risk_pct,
+        capital_allocated_inr=adj_cap,
+        raw_kelly_fraction=round(raw_kelly, 4),
+        quarter_kelly_multiplier=round(quarter_kelly, 2),
+        empirical_win_rate_pct=round(win_rate, 1),
+        empirical_avg_mfe_r=round(avg_mfe, 2),
+        empirical_avg_mae_r=round(avg_mae, 2),
+        sample_size=sample_size,
+        confidence_calibration=calib,
+        heuristic_guidance=heuristic,
+        base_result=base,
+    )

@@ -211,6 +211,7 @@ def detect_order_flow_divergence(ctx: DetectionContext) -> list[AutoAlert]:
                     f"(divergence ratio {cvd_divergence_ratio:.2f}x). Institutional absorption detected."
                 ),
                 ltp=curr_p,
+                underlying_spot=curr_p,
                 trigger_level=curr_p,
                 target_level=t1,
                 stop_loss=sl,
@@ -271,6 +272,7 @@ def detect_order_flow_divergence(ctx: DetectionContext) -> list[AutoAlert]:
                     "Smart money distribution into retail breakout buying detected."
                 ),
                 ltp=curr_p,
+                underlying_spot=curr_p,
                 trigger_level=curr_p,
                 target_level=t1,
                 stop_loss=sl,

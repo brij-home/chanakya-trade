@@ -68,7 +68,7 @@ function Resolve-Python {
     # Conventional per-user and machine installation locations.
     foreach ($base in @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
         if (-not $base) { continue }
-        foreach ($version in @("Python313", "Python312", "Python311")) {
+        foreach ($version in @("Python312", "Python311", "Python313")) {
             $candidates.Add((Join-Path $base "Programs\Python\$version\python.exe"))
             $candidates.Add((Join-Path $base "Python\$version\python.exe"))
         }
@@ -103,7 +103,7 @@ function Test-Venv([switch]$RequireDevTools) {
         & $VenvPython -c "import sys; import pip; print(sys.executable)" 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) { return $false }
         if ($RequireDevTools) {
-            & $VenvPython -c "import pytest, pytest_mock, xdist, ruff; import brokers, engine" 2>$null
+            & $VenvPython -c "import pytest, pytest_mock, xdist, ruff, fyers_apiv3; import brokers, engine" 2>$null
             if ($LASTEXITCODE -ne 0) { return $false }
         }
         return $true

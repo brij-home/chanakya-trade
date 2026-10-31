@@ -25,6 +25,30 @@ logger = logging.getLogger("config.encoding")
 import sys
 
 
+def silence_3rd_party_deprecation_noise() -> None:
+    """
+    Suppresses internal pandas deprecation warnings injected by 3rd-party libraries
+    (specifically yfinance's forced DeprecationWarning filter and inplace=True warnings).
+    Prevents megabytes of warning spam in subprocess stderr buffers without suppressing
+    application warnings.
+    """
+    import warnings
+
+    try:
+        import yfinance  # noqa: F401
+    except ImportError:
+        pass
+
+    try:
+        import pandas as pd
+
+        if hasattr(pd, "errors") and hasattr(pd.errors, "Pandas4Warning"):
+            warnings.filterwarnings("ignore", category=pd.errors.Pandas4Warning)
+            warnings.filterwarnings("ignore", category=pd.errors.PandasDeprecationWarning)
+    except Exception:
+        pass
+
+
 def fix_windows_console() -> None:
     """
     Reconfigure stdout/stderr to UTF-8 on Windows to prevent cp1252 / charmap
@@ -33,6 +57,7 @@ def fix_windows_console() -> None:
     Safe to call multiple times — idempotent.
     Call once at entrypoint startup (app/main.py, web/api.py).
     """
+    silence_3rd_party_deprecation_noise()
     if sys.platform != "win32":
         return
     for stream in (sys.stdout, sys.stderr):

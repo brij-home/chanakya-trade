@@ -336,18 +336,11 @@ def detect_afternoon_thrust(
         stage = "IGNITED" if is_ignited else "PRIMED"
 
     # Dynamic Brownian noise floor & Stop Loss calibration
+    # Dynamic Brownian noise floor & Stop Loss calibration (Invariant 38 SSOT)
     atr_5m = _calculate_5m_atr(df_5m)
-    atr_floor = round(1.20 * atr_5m, 2) if atr_5m > 0 else 0.0
-    index_min_floors = {
-        "NIFTY": 20.5,
-        "BANKNIFTY": 55.0,
-        "FINNIFTY": 25.0,
-        "MIDCPNIFTY": 16.0,
-        "SENSEX": 75.0,
-        "BANKEX": 75.0,
-    }
-    base_floor = index_min_floors.get(clean_sym, round(ltp * 0.0035, 2))
-    min_sl_floor = max(base_floor, atr_floor)
+    from engine.dynamic_risk import get_dynamic_noise_floor
+
+    min_sl_floor = get_dynamic_noise_floor(clean_sym, ltp=ltp, atr_5m=atr_5m, multiplier=1.20)
 
     if is_bull_thrust:
         # Anchor stop below midday consolidation low or VWAP support floor

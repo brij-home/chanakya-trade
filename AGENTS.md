@@ -7,7 +7,7 @@
 
 <!-- TOC -->
 - [1. Project Overview & Component Map](#1-project-overview--component-map)
-- [2. Safety & Trading Guardrails (34 Core Invariants)](#2-safety--trading-guardrails-34-core-invariants)
+- [2. Safety & Trading Guardrails (38 Core Invariants)](#2-safety--trading-guardrails-38-core-invariants)
 - [3. LLM Model Hierarchy & Multi-Key Resilience](#3-llm-model-hierarchy--multi-key-resilience)
 - [4. Environment & Common Commands](#4-environment--common-commands)
 - [5. On-Demand Skills Directory](#5-on-demand-skills-directory)
@@ -35,7 +35,7 @@
 
 ---
 
-## 2. Safety & Trading Guardrails (34 Core Invariants)
+## 2. Safety & Trading Guardrails (44 Core Invariants)
 
 > **⚠️ Never commit `.env` — see [`config/credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) for secure token management.**
 
@@ -233,6 +233,51 @@
      - `BANKNIFTY`, `MIDCPNIFTY`, `FINNIFTY`, `BANKEX`, and single-stock equities offer **strictly MONTHLY** options (last Thursday/Wednesday of the month).
    - NEVER refer to, simulate, or apply 0DTE logic (afternoon theta cliff, breakeven lock, midday theta trap) on Monday, Tuesday, or Wednesday (unless it is the final monthly settlement day).
    - Mon–Wed trading sessions have ZERO weekly 0DTE index expiries; options traded on those days are monthly contracts with standard monthly Greeks and wider strike spacing.
+
+38. **Universal Dynamic Volatility & Invalidation Calibration (Zero Hardcoded Index Dictionaries & Zero Arbitrary Option Stops)**:
+    - **Structural Anchor Priority**: The primary invalidation stop-loss (SL) MUST be anchored to deterministic market structure on the underlying asset chart (SMC Order Block boundary, Fractal Swing Low/High, CPR boundary, or Institutional Writing Wall).
+    - **Zero Hardcoded Index Point Dictionaries**: Hardcoding ad-hoc index dictionaries (e.g. `index_min_stop_floor = {'NIFTY': 50.0, 'BANKNIFTY': 110.0}` or `idx_opt_floor`) is strictly prohibited. Microstructure noise floors MUST be resolved dynamically via `engine.dynamic_risk.get_dynamic_noise_floor` or `resolve_price_tier(ltp).abs_min_risk_pts` combined with realized 5m ATR (`1.25 × ATR_5m`) or Brownian square-root-of-time daily volatility (`sqrt(5/375) × Daily_ATR`).
+    - **Zero Static Option Percentage Stops**: Option exit levels MUST NOT be clamped to arbitrary percentages (e.g. static `-18%` or `-22%`), which distorts risk across different moneyness and days-to-expiry (DTE). Option stops MUST be derived from the underlying structural spot stop via second-order Taylor expansion (`ΔP ≈ Δ·ΔS + ½·Γ·ΔS² - Θ·Δt`).
+    - **Position Sizing as Capital Governor**: Never artificially squeeze the stop-loss distance to fit a trade into a retail account. Always scale position size (`shares` or `lots` via `engine.position_sizer.calculate_position_size`) downward to match the account's fixed risk mandate.
+    - **Shift-Left Invariant Guard**: Enforced statically via `tests/test_anti_pattern_and_hardcoding_invariants.py`.
+
+39. **Microstructure Order Flow Toxicity (VPIN) & Informed Execution Guard**:
+    - Volume-Synchronized Probability of Toxicity (`analysis/order_flow.compute_vpin`) must govern all momentum breakout entries. Session volume is partitioned into equal volume buckets ($V_{\text{bucket}}$), signed via standard normal CDF on standardized price returns.
+    - When $\text{VPIN} \ge 0.70$ (`EXTREME_TOXICITY`), informed institutional flow is aggressively liquidating or initiating toxic flow; market chasing is strictly prohibited (demote to limit retest or veto).
+    - Setup execution tact MUST adapt based on toxicity: `LOW_TOXICITY` allows aggressive trend riding, while `HIGH_TOXICITY` enforces tight limit entry discount boundaries.
+
+40. **Adversarial Red-Teaming Trap Invalidation Gate (Zero Retail SFP & Barrier Collisions)**:
+    - Every trade setup MUST survive the 4-point adversarial falsification audit in `engine/trap_invalidator.py`:
+      1. *Dry Volume Breakout Trap*: RVOL $< 0.85\times$ 20-MA volume indicates retail exhaustion lacking institutional sponsorship $\implies$ Demote to limit pullback retest.
+      2. *Swing Failure Rejection Wick (SFP Trap)*: Upper/lower rejection wick $\ge 50\%$ of candle range signals institutional absorption $\implies$ Immediate Hard Veto (`CRITICAL_INVALIDATION`).
+      3. *Structural Resistance Collision*: Less than $0.5R$ headroom to key overhead barriers (CPR Top Central, PDH, PDL, or Camarilla H4/L4) $\implies$ Hard Veto, UNLESS backed by verified explosive institutional momentum ($\text{RVOL} \ge 1.8\times$).
+      4. *0DTE Expiry OI Pinning Wall Trap*: High balanced Call & Put OI within $\pm 0.35\%$ of spot indicates market maker delta-neutral pinning $\implies$ Demote breakout to limit retest.
+
+41. **Closed-Loop Episodic Experience Replay & Continuous Postmortem Invariant**:
+    - The terminal operates as a self-improving algorithmic system. Every evaluated or closed session trade (winners, scratches, and losses) MUST be persisted into the `EpisodicTradeMemoryStore` (`data/memory/trade_episodes.db`).
+    - Every episode MUST record Execution Efficiency Ratio ($\text{EER} = \text{PnL}_R / \text{MFE}_R$), peak MFE, peak MAE, holding duration, and postmortem grade (`A+`, `A`, `B`, `C`, `F`) with regime-conditioned lessons.
+    - Setup scrutiny and planning MUST query historical analogies via `query_analogous_episodes(...)` to calibrate win rate, expected drawdown, and tactical execution before risking capital.
+
+42. **Cross-Asset Intermarket Lead-Lag Transmission Invariant**:
+    - Sector setups must cross-reference real-time global macro drivers (`analysis/intermarket_transmission.py`):
+      1. *Brent Crude Spikes* ($\ge +1.5\%$): Transmit severe negative headwinds ($-80$ to $-100$ score) to OMCs (`BPCL`, `HPCL`, `IOC`) and Paints (`ASIANPAINT`, `BERGEPAINT`) with a 10–15 min lead-lag window, while transmitting bullish tailwinds to Upstream (`ONGC`, `OIL`).
+      2. *US 10Y Yield Surges* ($\ge +2.0\%$): Transmit PE multiple compression headwinds to IT Services (`TCS`, `INFY`, `HCLTECH`).
+      3. *GIFT Nifty Basis Momentum*: Leads Nifty 50 Cash index by 3–8 minutes.
+      4. *DXY / USDINR*: Strong dollar depresses metals (`TATASTEEL`, `JSWSTEEL`), while weak rupee boosts IT and Pharma exporters.
+    - Long setups colliding into severe macro headwinds (score $\le -60$) must be suppressed or held for limit confirmation.
+
+43. **SEBI Mandatory Physical Delivery & 15:15 MOC Guardian Compliance Invariant**:
+    - Per SEBI regulations, all stock options (NFO single-stock derivatives) expiring In-The-Money (ITM) require mandatory physical delivery of shares. Cash settlement applies ONLY to Index options (`NIFTY`, `BANKNIFTY`, `FINNIFTY`, `SENSEX`).
+    - In expiry week ($T-4$ to $T-0$), physical delivery margin escalates from 20% to 100% of the entire stock lot value.
+    - The engine MUST audit all open stock derivative positions via `engine.eod_rebalancer.audit_open_positions_for_physical_delivery`. Any ITM stock option within 1 day of expiry must be closed or rolled over to the next month before 15:15 IST to prevent broker RMS penalty liquidation.
+    - Market-On-Close (MOC) Guardian at 15:15–15:30 IST verifies pending intraday MIS orders to ensure clean pre-cutoff execution.
+
+44. **Real-Time Options Volatility Surface & 25-Delta IV Skew Invariant**:
+    - Real-time options analysis must evaluate the 25-Delta Risk Reversal Skew ($\text{IV}_{25\Delta \text{Put}} - \text{IV}_{25\Delta \text{Call}}$), 25-Delta Butterfly Smile Curvature, and Volatility Risk Premium ($\text{VRP} = \text{ATM IV} - \text{HV}_{20\text{d}}$).
+    - A Put Skew steepening $\ge +3.5$ vol pts signifies institutional downside crash protection demand (`PUT_SKEW_CRASH_FEAR`); unhedged breakout longs must be vetoed.
+    - Call Skew Inversion ($\le -1.5$ vol pts) signals panic short covering / call-wing squeeze.
+    - $\text{VRP} \ge +4.0$ vol pts dictates theta harvesting / credit spread regimes, while $\text{VRP} \le -2.5$ dictates directional gamma breakout regimes.
+
 
 ---
 

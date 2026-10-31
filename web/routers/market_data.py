@@ -1128,6 +1128,213 @@ async def post_options_gex_endpoint(req: dict[str, Any]):
 
 
 # ── 2. Order Flow & Cumulative Volume Delta (CVD) Divergence ───────────────
+
+
+# ── 2b. Microstructure Order Flow Toxicity (VPIN) ───────────────────────────
+@router.get("/api/order-flow/vpin/{symbol}", tags=["Order Flow & Depth", "Market Microstructure"])
+async def get_order_flow_vpin_endpoint(symbol: str, num_buckets: int = 20):
+    """
+    Computes Volume-Synchronized Probability of Toxicity (VPIN) using Bulk Volume Classification.
+    Measures informed aggressive institutional order flow and adverse selection risk.
+    """
+    from analysis.order_flow import compute_vpin
+    from market.history import get_historical_data
+
+    clean = symbol.upper().replace("NSE:", "").replace(".NS", "").strip()
+    df = await asyncio.to_thread(get_historical_data, clean, "5m", 3)
+    res = await asyncio.to_thread(compute_vpin, clean, df, num_buckets)
+    return {"status": "ok", "data": res.to_dict()}
+
+
+# ── 2c. Test-Time Reasoning Trajectory Simulator (Agentic MCTS) ────────────
+@router.get("/api/analysis/trajectories", tags=["Market Intelligence", "Scenario Simulation"])
+async def get_trajectory_simulation_endpoint(
+    symbol: str,
+    direction: str = "LONG",
+    spot: float = 0.0,
+    entry: float = 0.0,
+    sl: float = 0.0,
+    t1: float = 0.0,
+    t2: Optional[float] = None,
+    vix: float = 14.5,
+    vpin: float = 0.50,
+    archetype: str = "NORMAL_DAY",
+    rvol: float = 1.0,
+):
+    """
+    Simulates multi-branch forward price trajectories (Expansion, Pullback/Retest, SFP Trap)
+    over 15m, 30m, and 60m horizons to compute expected payoff (EV).
+    """
+    from analysis.trajectory_search import simulate_trade_trajectories
+    from market.quotes import get_ltp
+
+    clean = symbol.upper().replace("NSE:", "").replace(".NS", "").strip()
+    current_spot = spot if spot > 0 else float(get_ltp(clean) or 24500.0)
+    entry_px = entry if entry > 0 else current_spot
+    sl_px = (
+        sl if sl > 0 else (entry_px * 0.995 if direction.upper() == "LONG" else entry_px * 1.005)
+    )
+    t1_px = t1 if t1 > 0 else (entry_px * 1.01 if direction.upper() == "LONG" else entry_px * 0.99)
+
+    res = await asyncio.to_thread(
+        simulate_trade_trajectories,
+        symbol=clean,
+        direction=direction,
+        spot=current_spot,
+        entry_price=entry_px,
+        stop_loss=sl_px,
+        target_1=t1_px,
+        target_2=t2,
+        vix=vix,
+        vpin=vpin,
+        day_archetype=archetype,
+        rvol=rvol,
+    )
+    return {"status": "ok", "data": res.to_dict()}
+
+
+# ── 2d. Episodic Trade Memory & Historical Analogies ─────────────────────────
+@router.get("/api/memory/episodes/analogies", tags=["Market Intelligence", "Episodic Memory"])
+async def get_episodic_analogies_endpoint(
+    symbol: str,
+    direction: str = "LONG",
+    vix_regime: str = "NORMAL_IV",
+    day_archetype: str = "NORMAL_DAY",
+    vpin_regime: str = "MODERATE_TOXICITY",
+    top_k: int = 5,
+):
+    """
+    Retrieves top K most analogous historical market setups from Episodic Trade Memory
+    and surfaces empirical win rates, average MFE/MAE drawdowns, and actionable lessons.
+    """
+    from engine.episodic_memory import get_episodic_memory_store
+
+    store = get_episodic_memory_store()
+    res = await asyncio.to_thread(
+        store.query_analogous_episodes,
+        symbol=symbol,
+        direction=direction,
+        vix_regime=vix_regime,
+        day_archetype=day_archetype,
+        vpin_regime=vpin_regime,
+        top_k=top_k,
+    )
+    return {"status": "ok", "data": res.to_dict()}
+
+
+# ── 2e. Cross-Asset Intermarket Lead-Lag Transmission ─────────────────
+@router.get(
+    "/api/analysis/intermarket-transmission", tags=["Market Intelligence", "Macro Transmission"]
+)
+async def get_intermarket_transmission_endpoint():
+    """
+    Computes real-time cross-asset lead-lag transmission matrix (Brent Crude, US 10Y Yield,
+    DXY Dollar Index, USDINR, GIFT Nifty) across watched Indian sectors and heavyweights.
+    """
+    from analysis.intermarket_transmission import compute_intermarket_transmission_matrix
+
+    res = await asyncio.to_thread(compute_intermarket_transmission_matrix)
+    return {"status": "ok", "data": res.to_dict()}
+
+
+@router.get(
+    "/api/analysis/intermarket-transmission/{symbol}",
+    tags=["Market Intelligence", "Macro Transmission"],
+)
+async def get_symbol_macro_transmission_endpoint(symbol: str):
+    """
+    Returns specific macro spillover transmission, beta sensitivities, and actionable bias
+    for an individual equity or index symbol.
+    """
+    from analysis.intermarket_transmission import compute_symbol_transmission
+
+    res = await asyncio.to_thread(compute_symbol_transmission, symbol)
+    return {"status": "ok", "data": res.to_dict()}
+
+
+# ── 2f. SEBI Physical Delivery & Market-On-Close (MOC) Risk Sentinel ──
+@router.get("/api/risk/physical-delivery", tags=["Risk & Governance", "Compliance"])
+async def get_physical_delivery_risk_endpoint():
+    """
+    Audits active derivative positions for SEBI mandatory physical delivery obligations
+    and escalating expiry week margin requirements.
+    """
+    from engine.eod_rebalancer import audit_open_positions_for_physical_delivery
+
+    res = await asyncio.to_thread(audit_open_positions_for_physical_delivery)
+    return {"status": "ok", "data": [item.to_dict() for item in res]}
+
+
+@router.get("/api/risk/moc-guardian", tags=["Risk & Governance", "Execution Safety"])
+async def get_moc_guardian_endpoint():
+    """
+    Evaluates 15:15–15:30 IST Market-On-Close state, scanning for pending intraday MIS
+    orders and critical delivery risks requiring immediate square-off before broker RMS.
+    """
+    from engine.eod_rebalancer import run_moc_guardian_audit
+
+    rep = await asyncio.to_thread(run_moc_guardian_audit)
+    return {"status": "ok", "data": rep.to_dict()}
+
+
+# ── 2g. Real-Time 25-Delta Volatility Skew & Surface Analysis ─────────
+@router.get("/api/options/vol-skew/{symbol}", tags=["Options & Volatility", "Market Intelligence"])
+async def get_volatility_skew_endpoint(symbol: str, expiry: Optional[str] = None):
+    """
+    Computes 25-Delta Risk Reversal Skew, 25-Delta Butterfly Smile Curvature,
+    and Volatility Risk Premium (VRP) to identify institutional crash hedging or short squeezes.
+    """
+    from analysis.volatility_surface import compute_25delta_skew_and_vrp
+
+    clean = symbol.upper().replace("NSE:", "").strip()
+    res = await asyncio.to_thread(compute_25delta_skew_and_vrp, clean, expiry)
+    if not res:
+        return {
+            "status": "UNAVAILABLE",
+            "message": f"Options chain or volatility surface unavailable for {clean}",
+        }
+    return {"status": "ok", "data": res.to_dict()}
+
+
+# ── 2h. Episodic Memory Quarter-Kelly Optimal Position Sizing ────────
+@router.post("/api/risk/position-size/episodic-kelly", tags=["Risk & Governance", "Capital Sizing"])
+async def post_episodic_kelly_position_size_endpoint(req: dict[str, Any]):
+    """
+    Computes Quarter-Kelly optimal position sizing grounded in Episodic Memory empirical win rates.
+    """
+    from engine.position_sizer import calculate_episodic_kelly_position_size
+
+    symbol = str(req.get("symbol", "NIFTY"))
+    direction = str(req.get("direction", "BULLISH"))
+    entry_price = float(req.get("entry_price", 0.0) or 100.0)
+    stop_loss = float(req.get("stop_loss", 0.0) or (entry_price * 0.98))
+    target_price = float(req.get("target_price", 0.0)) if req.get("target_price") else None
+    capital = float(req.get("capital", 100000.0) or 100000.0)
+    day_archetype = str(req.get("day_archetype", "NORMAL_DAY"))
+    vix_regime = str(req.get("vix_regime", "NORMAL_IV"))
+    vpin_regime = str(req.get("vpin_regime", "LOW_TOXICITY"))
+    max_risk_pct = float(req.get("max_risk_pct", 1.5) or 1.5)
+    is_fno = bool(req.get("is_fno", False))
+    alert_type = str(req.get("alert_type", "MOMENTUM"))
+
+    res = await asyncio.to_thread(
+        calculate_episodic_kelly_position_size,
+        symbol=symbol,
+        direction=direction,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        target_price=target_price,
+        capital=capital,
+        day_archetype=day_archetype,
+        vix_regime=vix_regime,
+        vpin_regime=vpin_regime,
+        max_risk_pct=max_risk_pct,
+        is_fno=is_fno,
+        alert_type=alert_type,
+    )
+    return {"status": "ok", "data": res.to_dict()}
+
+
 @router.get("/api/order-flow/cvd/{symbol}", tags=["Order Flow & Depth"])
 async def get_order_flow_cvd_endpoint(symbol: str, timeframe: str = "5m"):
     """

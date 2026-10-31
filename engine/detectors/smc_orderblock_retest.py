@@ -201,6 +201,15 @@ def detect_smc_orderblock_retest(
     if atr <= 0:
         atr = ltp * 0.015  # 1.5% daily range proxy
 
+    change_pct = 0.0
+    if df is not None and len(df) >= 2:
+        try:
+            prev_c = float(df["close"].iloc[-2]) if "close" in df.columns else float(df.iloc[-2, 3])
+            if prev_c > 0:
+                change_pct = round((ltp - prev_c) / prev_c * 100.0, 2)
+        except Exception:
+            change_pct = 0.0
+
     # ── 4. Call SMC Market Structure Engine ───────────────────────────────────
     try:
         from analysis.market_structure import analyze_market_structure
@@ -246,6 +255,32 @@ def detect_smc_orderblock_retest(
         # Quality gate: Tier-1 and Tier-2 only
         tier = getattr(ob, "quality_tier", "TIER_3_WEAK")
         if tier not in ("TIER_1_PRIME", "TIER_2_VALID"):
+            continue
+
+        # Mitigation Counter: skip if already mitigated or tested >= 2 times
+        if getattr(ob, "mitigated", False) or not getattr(ob, "is_unmitigated", True):
+            continue
+        test_cnt = getattr(ob, "test_count", 0)
+        if test_cnt >= 2:
+            logger.debug(
+                f"[SMC_OB] {clean_sym} Demand OB suppressed: already tested {test_cnt} times (absorption exhausted)"
+            )
+            continue
+
+        # Gate 31: Institutional Index Tide Gate
+        from engine.market_regime_gate import evaluate_index_tide_gate
+
+        tide_res = evaluate_index_tide_gate(
+            clean_sym,
+            direction="BULLISH",
+            ltp=ltp,
+            rvol=rvol if rvol is not None else 1.0,
+            change_pct=change_pct,
+        )
+        if tide_res.is_vetoed:
+            logger.info(
+                f"[SMC_OB] {clean_sym} Demand OB suppressed by Index Tide Gate: {tide_res.veto_reason}"
+            )
             continue
 
         # RVOL: quiet absorption, not capitulation selling into the block
@@ -331,6 +366,7 @@ def detect_smc_orderblock_retest(
             headline=headline,
             summary=summary,
             ltp=ltp,
+            underlying_spot=ltp,
             trigger_level=entry_price,
             stop_loss=stop_loss,
             target_level=t1,
@@ -404,6 +440,32 @@ def detect_smc_orderblock_retest(
 
         tier = getattr(ob, "quality_tier", "TIER_3_WEAK")
         if tier not in ("TIER_1_PRIME", "TIER_2_VALID"):
+            continue
+
+        # Mitigation Counter: skip if already mitigated or tested >= 2 times
+        if getattr(ob, "mitigated", False) or not getattr(ob, "is_unmitigated", True):
+            continue
+        test_cnt = getattr(ob, "test_count", 0)
+        if test_cnt >= 2:
+            logger.debug(
+                f"[SMC_OB] {clean_sym} Supply OB suppressed: already tested {test_cnt} times (absorption exhausted)"
+            )
+            continue
+
+        # Gate 31: Institutional Index Tide Gate
+        from engine.market_regime_gate import evaluate_index_tide_gate
+
+        tide_res = evaluate_index_tide_gate(
+            clean_sym,
+            direction="BEARISH",
+            ltp=ltp,
+            rvol=rvol if rvol is not None else 1.0,
+            change_pct=change_pct,
+        )
+        if tide_res.is_vetoed:
+            logger.info(
+                f"[SMC_OB] {clean_sym} Supply OB suppressed by Index Tide Gate: {tide_res.veto_reason}"
+            )
             continue
 
         if rvol is not None and rvol > 1.8:
@@ -487,6 +549,7 @@ def detect_smc_orderblock_retest(
             headline=headline,
             summary=summary,
             ltp=ltp,
+            underlying_spot=ltp,
             trigger_level=entry_price,
             stop_loss=stop_loss,
             target_level=t1,

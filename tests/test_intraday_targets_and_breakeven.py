@@ -52,13 +52,13 @@ def test_intraday_index_option_targets_are_feasible():
 
     # 2. Risk must be disciplined on expensive index options (max ~18% drawdown, not -28%)
     opt_drawdown = (972.2 - sl_prem) / 972.2
-    assert opt_drawdown <= 0.18, (
+    assert round(opt_drawdown, 4) <= 0.18, (
         f"Intraday index option drawdown {opt_drawdown:.1%} is excessively wide"
     )
 
     # 3. T1 gain must be reachable in 1 intraday wave (+8% to +20%, NOT +30% or +50%)
     t1_gain_pct = (t1_prem - 972.2) / 972.2
-    assert 0.08 <= t1_gain_pct <= 0.20, (
+    assert 0.08 <= round(t1_gain_pct, 4) <= 0.20, (
         f"T1 gain {t1_gain_pct:.1%} must be feasible intraday (+8% to +20%)"
     )
 

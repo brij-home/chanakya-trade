@@ -329,6 +329,8 @@ async def cmd_start(update, context) -> None:
             "/movers — daily top gainers & losers forensic autopsy\n"
             "/precursors — high-conviction coiling setups before breakout\n"
             "/dryup [FNO|ALL] — pre-inflection volume dry-up & fair-value accumulation (anti-FOMO, 1:4+ R:R)\n"
+            "/squeeze [N] — top F&O stocks coiled in TTM Squeeze for explosive expansion\n"
+            "/recalibrate — trigger 95-day historical model calibration in background\n"
             "/asymmetric — scan low risk : big reward setups (1:3+ R:R)\n"
             "/scan [UNIVERSE] — scan top liquid/F&O list for breakouts & gamma blasts\n"
             "/radar — quick market radar on today's top liquid setups\n"
@@ -345,6 +347,7 @@ async def cmd_start(update, context) -> None:
             "/unmute — enable audible chime alerts\n"
             "/memory — recent analyses\n"
             "/pnl — portfolio P&L\n"
+            "/flatten — 1-click emergency square-off all positions & cancel orders\n"
             "/help — this message\n\n"
             "Alerts will be pushed here automatically."
         )
@@ -1624,6 +1627,99 @@ async def cmd_dryup(update, context) -> None:
         await update.message.reply_text(f"Dry-up scan failed: {e}")
 
 
+async def cmd_recalibrate(update, context) -> None:
+    """Handle /recalibrate — Triggers 95-day historical model calibration in background."""
+    from engine.calibration_runner import calibration_runner
+
+    force = bool(context.args and context.args[0].lower() in ("force", "true", "1"))
+    started, msg = calibration_runner.trigger_calibration_async(force=force)
+
+    if started:
+        await update.message.reply_text(
+            "⚙️ <b>Walk-Forward Model Calibration Started</b>\n\n"
+            f"<i>{msg}</i>\n"
+            "• Syncing 90-day 1m & 5m bars for NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX\n"
+            "• Fitting 75-slot Time-of-Day (TOD) Volume Accumulation U-Curves\n"
+            "• Calibrating CPR geometry percentiles (p25, p50, p75) & ADR distributions\n"
+            "• Scanning 219 F&O stocks for active TTM Squeeze compression\n\n"
+            "<i>Use /squeeze to inspect updated results upon completion.</i>",
+            parse_mode="HTML",
+        )
+    else:
+        st = calibration_runner.get_status()
+        await update.message.reply_text(
+            f"⚠️ <b>Calibration Busy / Already Running</b>\n\n"
+            f"Current state: <code>{st.state}</code> (started at: {st.started_at or 'recently'})\n"
+            f"Last run: <code>{st.last_run or 'N/A'}</code>\n"
+            "<i>Please wait for the current cycle to complete.</i>",
+            parse_mode="HTML",
+        )
+
+
+async def cmd_squeeze(update, context) -> None:
+    """Handle /squeeze or /coilers [top_n] — Displays top compressed F&O setups coiling for explosive breakout."""
+    top_n = 8
+    if context.args:
+        try:
+            top_n = min(20, max(1, int(context.args[0])))
+        except ValueError:
+            top_n = 8
+
+    await update.message.reply_text(
+        "🗜️ <b>Fetching Calibrated TTM Squeeze Coilers...</b>\n"
+        "<i>Scanning Bollinger Bands compression inside Keltner Channels across 219 F&O stocks...</i>",
+        parse_mode="HTML",
+    )
+
+    def _get_squeeze_summary() -> str:
+        import json
+        from pathlib import Path
+
+        cal_path = Path.home() / ".trading_platform" / "calibration" / "index_calibration.json"
+        if not cal_path.exists():
+            return "⚠️ <b>Calibration data not found.</b> Run <code>scripts/calibrate_fyers_historical_models.py</code> first."
+        try:
+            with open(cal_path, "r", encoding="utf-8") as f:
+                cal_data = json.load(f)
+            squeezes = cal_data.get("fno_coiling_squeezes", [])
+            if not squeezes:
+                return "🛡️ <b>No active coiling squeezes detected across F&O stocks.</b>"
+
+            top_coilers = squeezes[:top_n]
+            lines = [
+                f"🗜️ <b>TOP COILING SQUEEZE RADAR — {len(top_coilers)} SETUPS</b>",
+                "<i>Stocks coiled in high compression primed for volatility expansion:</i>\n",
+            ]
+            for idx, c in enumerate(top_coilers, 1):
+                sym = c.get("symbol", "")
+                bars = c.get("bars", 0)
+                momentum = c.get("momentum", "COILING")
+                adr = c.get("adr_pct", 0.0)
+                atr_5m = c.get("atr_5m_pts", 0.0)
+                icon = "🔥" if bars >= 25 else "⚡"
+                lines.append(
+                    f"{icon} <b>{idx}. {sym}</b> — ⏱️ <b>{bars} bars coiled</b>\n"
+                    f"   📊 <b>Bias:</b> <code>{momentum}</code> | <b>ADR:</b> {adr:.2f}%\n"
+                    f"   🛑 <b>5m ATR:</b> ₹{atr_5m:.2f} (Minimum noise stop anchor)\n"
+                )
+            lines.append(
+                "<i>Execution Rule: Wait for opening volume surge (RVOL ≥ 1.5x) or ORB break before entry.</i>"
+            )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ Error loading squeeze data: {e}"
+
+    try:
+        loop = asyncio.get_running_loop()
+        res_text = await asyncio.wait_for(
+            loop.run_in_executor(None, _get_squeeze_summary),
+            timeout=20,
+        )
+        await update.message.reply_text(res_text, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Squeeze query failed: {e}")
+
+
 async def cmd_asymmetric(update, context) -> None:
     """Handle /asymmetric [type] — Scans for low risk : big reward asymmetric opportunities (1:3+ R:R)."""
     filter_arg = context.args[0].upper() if context.args else "ALL"
@@ -2391,6 +2487,35 @@ async def cmd_unmute(update, context) -> None:
         msg = f"⚠️ Could not unmute audio: {e}"
     if update and update.message:
         await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_flatten(update, context) -> None:
+    """Handle /flatten — 1-Click Emergency Flatten All Positions & Order Cancellation."""
+    try:
+        from engine.order_lifecycle import emergency_flatten_all_positions
+
+        result = emergency_flatten_all_positions(
+            actor="TELEGRAM_BOT",
+            reason="TELEGRAM_EMERGENCY_FLATTEN",
+        )
+        status = result.get("status", "UNKNOWN")
+        cancelled = result.get("cancelled_orders_count", 0)
+        flattened = result.get("flattened_positions_count", 0)
+        msg = result.get("message", "Emergency flatten completed.")
+
+        reply = (
+            f"🚨 <b>EMERGENCY FLATTEN EXECUTED</b>\n\n"
+            f"• <b>Status:</b> {status}\n"
+            f"• <b>Cancelled Orders:</b> {cancelled}\n"
+            f"• <b>Flattened Positions:</b> {flattened}\n"
+            f"• <b>Circuit Breaker:</b> 60-Minute Cooling-Off Active\n\n"
+            f"<i>{msg}</i>"
+        )
+    except Exception as e:
+        reply = f"🚨 <b>Flatten All Failed:</b> {e}"
+
+    if update and update.message:
+        await update.message.reply_text(reply, parse_mode="HTML")
 
 
 async def handle_alert_callback(update, context) -> None:
@@ -3206,6 +3331,10 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("dryup", _track_command(cmd_dryup)))
     app.add_handler(CommandHandler("preinflection", _track_command(cmd_dryup)))
     app.add_handler(CommandHandler("pre_inflection", _track_command(cmd_dryup)))
+    app.add_handler(CommandHandler("squeeze", _track_command(cmd_squeeze)))
+    app.add_handler(CommandHandler("coilers", _track_command(cmd_squeeze)))
+    app.add_handler(CommandHandler("recalibrate", _track_command(cmd_recalibrate)))
+    app.add_handler(CommandHandler("calibrate", _track_command(cmd_recalibrate)))
     app.add_handler(CommandHandler("asymmetric", _track_command(cmd_asymmetric)))
     app.add_handler(CommandHandler("opps", _track_command(cmd_asymmetric)))
     app.add_handler(CommandHandler("scan", _track_command(cmd_scan)))
@@ -3224,6 +3353,8 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("ping_all", _track_command(cmd_ping_all)))
     app.add_handler(CommandHandler("memory", _track_command(cmd_memory)))
     app.add_handler(CommandHandler("pnl", _track_command(cmd_pnl)))
+    app.add_handler(CommandHandler("flatten", _track_command(cmd_flatten)))
+    app.add_handler(CommandHandler("flattenall", _track_command(cmd_flatten)))
     app.add_handler(CallbackQueryHandler(_track_command(handle_alert_callback)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _track_command(cmd_unknown)))
 

@@ -723,8 +723,19 @@ def test_benchmark_lead_lag_divergence_allows_decoupled_secondary_put(monkeypatc
         evaluated_symbols.append(underlying)
         return [mock_pe_alert]
 
+    from types import SimpleNamespace
+    from engine.daily_levels import clear_daily_levels_cache
+
+    clear_daily_levels_cache()
+
     monkeypatch.setattr("engine.auto_alert_engine.detect_index_put_setup", mock_detect)
     monkeypatch.setattr("market.options.get_options_chain", lambda sym: [{"dummy": 1}])
+    monkeypatch.setattr(
+        "engine.daily_levels.get_daily_levels",
+        lambda sym: SimpleNamespace(
+            pdh=56550.0, pdl=56180.0, pdc=56200.0, pwh=57000.0, pwl=55000.0, cpr={}, camarilla={}
+        ),
+    )
     monkeypatch.setattr(engine, "record_alert", lambda a: True)
     monkeypatch.setenv("ENFORCE_TEST_REGIME", "1")
 
@@ -1030,7 +1041,7 @@ def test_rca_day_high_headroom_and_severe_rejection():
         chain=chain,
         vwap=74700.0,
         day_high=75000.0,
-        day_low=74500.0,
+        day_low=74590.0,
         ohlcv_5m=df_stable,
         ignore_time_gate=False,
     )
@@ -1305,7 +1316,7 @@ def test_rca_pwh_rejection_distance_bound_and_adr_exhaustion(monkeypatch):
         chain=chain_active,
         vwap=74600.0,
         day_high=74770.0,
-        day_low=74500.0,
+        day_low=74590.0,
         prev_day_high=74950.0,
         prev_day_low=74200.0,
         prev_week_high=74778.8,
@@ -1891,12 +1902,34 @@ def test_rca_orb_requires_verified_volume_expansion():
 
 
 # ── 40. Unified Market Intelligence Packet Provenance & Completeness ─────────
-def test_rca_market_intelligence_packet_provenance():
+def test_rca_market_intelligence_packet_provenance(monkeypatch):
     """Verify get_market_intelligence returns complete packet with multi-timeframe levels, RVOL, CVD, and fail-closed."""
     from engine.intraday_microstructure import get_market_intelligence
+    from types import SimpleNamespace
+
+    dl_mock = SimpleNamespace(
+        pdh=25150.0,
+        pdl=24950.0,
+        pdc=25000.0,
+        pdo=25010.0,
+        pwh=25300.0,
+        pwl=24800.0,
+        pwc=25100.0,
+        pmh=25500.0,
+        pml=24500.0,
+        pmc=25200.0,
+        spot=25050.0,
+        atr_14=250.0,
+        cpr={"pivot": 25033.0, "tc": 25066.0, "bc": 25000.0},
+        camarilla={"h4": 25100.0, "h3": 25060.0, "l3": 24940.0, "l4": 24900.0},
+    )
+    monkeypatch.setattr(
+        "engine.intraday_microstructure.get_daily_levels",
+        lambda sym: dl_mock if sym == "NIFTY" else None,
+    )
 
     # Query benchmark NIFTY
-    pkt = get_market_intelligence("NIFTY")
+    pkt = get_market_intelligence("NIFTY", ltp=25050.0, vwap=25030.0)
     assert pkt is not None, "Benchmark NIFTY intelligence packet must be resolvable"
     assert pkt.is_complete, "Packet must be complete (PDH > 0, PDL > 0, PDC > 0, LTP > 0)"
     assert pkt.pwh > 0, "PWH must be positive"

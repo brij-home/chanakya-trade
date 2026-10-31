@@ -31,6 +31,7 @@ from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_identity import get_session_phase_slot
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
+from engine.options_hedging import classify_vix_strategy_regime
 from market.instruments import format_strike
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,14 @@ def detect_index_call_setup(
             and spot > day_low * 1.001
         )
         or (vwap and vwap > 0 and spot >= vwap and _bounce_from_low_pct >= 0.10)
+        or (
+            vwap
+            and vwap > 0
+            and spot >= (vwap * 1.0015)
+            and prev_close
+            and prev_close > 0
+            and ((spot - prev_close) / prev_close * 100.0 >= 0.20)
+        )
     )
     _breadth_bypassed = _spot_above_open_escape or _has_structural_reversal
 
@@ -432,6 +441,19 @@ def detect_index_call_setup(
         else (100.0 if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX") else 50.0)
     )
 
+    is_0dte_today = (clean_sym == "NIFTY" and now_dt.weekday() == 3) or (
+        clean_sym in ("SENSEX", "BSX") and now_dt.weekday() == 4
+    )
+
+    vix_val = None
+    try:
+        from market.indices import get_vix
+
+        vix_val = get_vix()
+    except Exception as e_vix:
+        logger.debug(f"[IndexCallSetup] VIX lookup failed: {e_vix}")
+    vix_regime_info = classify_vix_strategy_regime(vix_val)
+
     # Sort by optimal Institutional Moneyness, Delta Torque & Liquidity (ATM / 1-Strike ITM Priority)
     def _contract_score(c: Any) -> float:
         lp = float(getattr(c, "last_price", 0.0) or 0.0)
@@ -483,12 +505,34 @@ def detect_index_call_setup(
         else:  # NIFTY, BANKNIFTY
             ideal_prem = 100.0 if clean_sym == "NIFTY" else 240.0
         prem_dist = abs(lp - ideal_prem) / ideal_prem if lp > 0 else 2.0
+
+        # Ultra-Low IV Calibration: Under VIX < 12.0, extrinsic premium is underpriced and theta drag is negligible.
+        # Elevate Deep ITM (Delta ~0.65-0.70) as synthetic futures runners for uncapped convexity.
+        if (
+            vix_regime_info.regime == "ULTRA_LOW_IV"
+            and c_strike < spot
+            and dist_pts <= (step_val * 2.2)
+        ):
+            moneyness_bonus += 18.0
+
+        # 0DTE Penny Option Lottery Filter & Afternoon Theta Acceleration Guard:
+        # On 0DTE, OTM options under ₹35 (Nifty) or ₹80 (Sensex/Bank Nifty) face 95%+ probability of total zero expiry.
+        # Post-13:00 IST on 0DTE, naked OTM options decay non-linearly (t^-1/2); strictly veto them.
+        penny_trap_penalty = 0.0
+        if is_0dte_today and c_strike > spot:
+            min_floor = 35.0 if clean_sym == "NIFTY" else 80.0
+            if lp < min_floor:
+                penny_trap_penalty = 150.0
+            if curr_time >= dtime(13, 0):
+                penny_trap_penalty += 300.0
+
         return (
             moneyness_bonus
             + (vol_oi * 10.0)
             + (min(10.0, vol / 500.0))
             - (dist_pct * 600.0)
             - (prem_dist * 5.0)
+            - penny_trap_penalty
         )
 
     ce_contracts.sort(key=_contract_score, reverse=True)
@@ -653,12 +697,26 @@ def detect_index_call_setup(
                     else 0.0
                 )
 
-                if h5 > 0 and spot >= h5 * 0.9990:
+                _is_h5_expansion = bool(
+                    (
+                        is_breakout_momentum
+                        or is_explosive_momentum
+                        or _is_opening_displacement
+                        or _has_structural_reversal
+                    )
+                    and (effective_vwap and spot > effective_vwap * 1.001)
+                )
+                if h5 > 0 and spot >= h5 * 0.9990 and not _is_h5_expansion:
                     logger.info(
                         f"[IndexCallSetup] Camarilla H5 Ceiling Exhaustion: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ₹{h5:,.1f}. "
                         f"Rally statistically exhausted. Suppressing long call setup."
                     )
                     return []
+                elif h5 > 0 and spot >= h5 * 0.9990 and _is_h5_expansion:
+                    logger.debug(
+                        f"[IndexCallSetup] Camarilla H5 Blue Sky Expansion: Spot ₹{spot:,.1f} broke above H5 ₹{h5:,.1f} "
+                        f"with confirmed momentum holding above VWAP. Allowing trend continuation."
+                    )
                 if atr > 0 and day_low > 0:
                     up_move = spot - day_low
                     if up_move >= (1.15 * atr):
@@ -886,23 +944,24 @@ def detect_index_call_setup(
         logger.debug(f"[IndexCallSetup] Heavyweights check bypassed: {e_hw}")
 
     # ── Optimization 2b: Low-VIX (< 13.0) Range-Bound Regime Filter ──
-    vix_val = None
-    try:
-        from market.indices import get_vix
+    if vix_val is None:
+        try:
+            from market.indices import get_vix
 
-        vix_val = get_vix()
-    except Exception as e_suppressed:
-        logger.debug(
-            f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
-        )
+            vix_val = get_vix()
+        except Exception as e_suppressed:
+            logger.debug(
+                f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
+            )
+        vix_regime_info = classify_vix_strategy_regime(vix_val)
+
     is_low_vix_range = bool(
-        vix_val
-        and 0 < vix_val < 13.0
+        vix_regime_info.regime == "ULTRA_LOW_IV"
         and effective_vwap > 0
         and abs((spot - effective_vwap) / effective_vwap * 100.0) < 0.35
         and not is_explosive_momentum
     )
-    is_high_iv_risk = bool(vix_val is not None and vix_val >= 18.0)
+    is_high_iv_risk = bool(vix_regime_info.mandate_spread)
 
     # ── Opposing Supply Barrier Check (Headroom Sanity & Bull Trap Prevention) ───
     # If spot is right underneath Previous Day High or Day High, buying CE collides directly
@@ -1356,9 +1415,17 @@ def detect_index_call_setup(
             is_valid_dl_bounce = (
                 not is_dead_cat_bounce
                 and (0.18 <= dl_bounce_pct <= 0.60)
-                and has_candle_bounce
-                and ce_receptive
-                and (not is_5m_bear_trend or cand_ce_vol_oi >= 2.0)
+                and (has_candle_bounce or ce_receptive)
+                and (
+                    not is_5m_bear_trend
+                    or cand_ce_vol_oi >= 1.2
+                    or (
+                        active_ohlcv is not None
+                        and len(active_ohlcv) >= 1
+                        and float(active_ohlcv.iloc[-1].get("close", 0))
+                        > float(active_ohlcv.iloc[-1].get("open", 0))
+                    )
+                )
             )
         else:
             # Above VWAP: 0.10% to 0.50% bounce is valid support defense
@@ -1636,9 +1703,9 @@ def detect_index_call_setup(
                 ):
                     try:
                         min_oversold = (
-                            0.55
+                            0.45
                             if clean_sym in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX")
-                            else 0.35
+                            else 0.30
                         )
                         day_low_ext = (
                             ((effective_vwap - (day_low or spot)) / effective_vwap * 100.0)
@@ -1651,7 +1718,7 @@ def detect_index_call_setup(
                             else 0.0
                         )
 
-                        if day_low_ext >= min_oversold and spot_bounce >= 0.25:
+                        if day_low_ext >= min_oversold and spot_bounce >= 0.20:
                             b_curr = active_ohlcv.iloc[-1]
                             b_prev = active_ohlcv.iloc[-2]
                             curr_c = float(b_curr[col_c])
@@ -1889,8 +1956,31 @@ def detect_index_call_setup(
             and not is_5m_bear_trend
             and (spot >= (effective_vwap * 0.998) if effective_vwap > 0 else True)
         ):
+            # Check for Supply Rejection / Pullback off Day High:
+            # If price reached Day High recently and is now actively falling away from Day High with red candles,
+            # this is a rejection pullback, NOT a breakout setup!
+            is_rejecting_from_high = False
+            if active_ohlcv is not None and len(active_ohlcv) >= 2:
+                try:
+                    col_h = "high" if "high" in active_ohlcv.columns else "High"
+                    col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                    col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                    recent_high = float(active_ohlcv[col_h].iloc[-6:].max())
+                    latest_c = float(active_ohlcv[col_c].iloc[-1])
+                    latest_o = float(active_ohlcv[col_o].iloc[-1])
+                    if abs(recent_high - day_high) / max(1.0, day_high) <= 0.0010:
+                        if (latest_c < recent_high * 0.9992) and (latest_c <= latest_o):
+                            is_rejecting_from_high = True
+                except Exception as _e_rej:
+                    logger.debug(f"[IndexCallSetup] Day high rejection check failed: {_e_rej}")
+
+            if is_rejecting_from_high:
+                logger.info(
+                    f"[IndexCallSetup] Suppressed DAY_HIGH_PROXIMITY on {clean_sym}: "
+                    f"Price actively pulling back from Day High ₹{day_high:,.1f} (Supply Rejection)."
+                )
             # Day High Proximity Surveillance (STAGE_PRIMED)
-            if (
+            elif (
                 "DAY_HIGH_PROXIMITY" not in signals
                 and "DAY_HIGH_BREAKOUT" not in signals
                 and "CAMARILLA_H4_PROXIMITY" not in signals
@@ -2026,9 +2116,11 @@ def detect_index_call_setup(
     # Bypasses is_5m_bear_trend and gives high-conviction early entry at major capitulation bottoms.
     if day_low and day_low > 0 and not is_opening_buffer and "ACCUMULATION_BOTTOM" not in signals:
         spot_at_dl_pct = (spot - day_low) / max(1.0, spot) * 100.0  # distance above day low
+        min_accum_oversold_pct = 0.22 if clean_sym == "NIFTY" else 0.25
         vwap_oversold = bool(
-            effective_vwap > 0 and spot < effective_vwap * 0.990
-        )  # >= 1.0% below VWAP
+            effective_vwap > 0
+            and ((effective_vwap - spot) / effective_vwap * 100.0) >= min_accum_oversold_pct
+        )  # >= 0.22%-0.25% below VWAP (realistic index session extreme)
 
         has_accumulation_bar = False
         _accum_bar_tags: dict[str, Any] = {}
@@ -2225,7 +2317,6 @@ def detect_index_call_setup(
                 "DAY_HIGH_BREAKOUT",
                 "CAMARILLA_H4_BREAKOUT",
                 "DOUBLE_BOTTOM_BREAKOUT",
-                "VWAP_BREAKOUT",
             }
             has_qualifying_setup = bool(
                 is_institutional_thrust
@@ -2334,17 +2425,53 @@ def detect_index_call_setup(
         confidence += 5
     elif prem_vel >= 10.0:
         confidence += 3
-    # Narrow CPR Breakout Confluence Boost
-    if is_narrow_cpr and (
-        "DAY_HIGH_BREAKOUT" in signals
-        or "DAY_HIGH_PROXIMITY" in signals
-        or "CAMARILLA_H4_BREAKOUT" in signals
-        or "CAMARILLA_H4_PROXIMITY" in signals
-        or is_institutional_thrust
+    # Narrow CPR Breakout Confluence Boost:
+    # Only award when spot is above or near CPR Bottom (not trading 1000 pts below value).
+    cpr_allows_bullish_expansion = bool(cpr_bottom <= 0 or spot >= (cpr_bottom * 0.992))
+    if (
+        is_narrow_cpr
+        and cpr_allows_bullish_expansion
+        and (
+            "DAY_HIGH_BREAKOUT" in signals
+            or "DAY_HIGH_PROXIMITY" in signals
+            or "CAMARILLA_H4_BREAKOUT" in signals
+            or "CAMARILLA_H4_PROXIMITY" in signals
+            or is_institutional_thrust
+        )
     ):
         confidence += 6
 
-    confidence = min(98, confidence)
+    confidence = min(92, confidence)
+
+    # Chop / Balanced Range Confidence Dampener:
+    # In choppy non-trending regimes, breakout continuation setups have negative edge; damp confidence <= 78%.
+    # EXEMPTION: Mean-reversion & structural boundary fades thrive at range edges; do not penalize them for low ADX.
+    is_range_boundary_fade = any(
+        s in signals
+        for s in (
+            "DISTRIBUTION_TOP",
+            "ACCUMULATION_BOTTOM",
+            "LONG_UNWINDING_FLUSH",
+            "SHORT_SQUEEZE_UNWIND",
+            "SUPPLY_ZONE_SWEEP",
+            "DEMAND_ZONE_SWEEP",
+            "INTRADAY_CAPITULATION_REVERSAL",
+            "FAILED_DAY_HIGH_BREAKOUT",
+            "FAILED_DAY_LOW_BREAKDOWN",
+        )
+    )
+    if (
+        eagle_regime is not None
+        and not is_range_boundary_fade
+        and not is_institutional_thrust
+        and "INSTITUTIONAL_EXPANSION_THRUST" not in signals
+    ):
+        if (
+            eagle_regime.chop_index >= 50.0
+            or eagle_regime.overall_environment in ("WHIPSAW_CHOP_TRAP", "BALANCED_RANGE")
+            or eagle_regime.adx_14 < 22.0
+        ):
+            confidence = min(78, max(50, confidence - 10))
 
     # Single-signal unconfirmed guard: if only 1 signal and without explosive momentum, cap at 72%
     # (Exempt PRIMED proximity surveillance setups which require >= 85 confidence for advance heads-up dispatch)
@@ -2443,7 +2570,9 @@ def detect_index_call_setup(
             effective_min_risk = (
                 min(opt_ltp * 0.35, min_intraday_opt_risk)
                 if opt_ltp < 80.0
-                else min_intraday_opt_risk
+                else min(
+                    max_intraday_opt_risk, max(min_intraday_opt_risk, round(opt_ltp * 0.10, 1))
+                )
             )
             if calc_risk < effective_min_risk:
                 calc_risk = effective_min_risk
@@ -2813,7 +2942,7 @@ def detect_index_call_setup(
         min_spread_width = 100.0 if is_chop_regime else (200.0 if is_explosive_momentum else 150.0)
         regime_note = "ADAPTIVE SPREAD"
 
-    # DTE and Volatility for Delta / Greeks evaluation
+    # DTE, 0DTE Phase and Options IV Skew evaluation
     dte = 7
     try:
         from engine.alert_expiry import get_expiry_metadata
@@ -2825,6 +2954,21 @@ def detect_index_call_setup(
         logger.debug(
             f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
         )
+
+    from engine.options_hedging import get_0dte_intraday_phase
+    from market.options import compute_options_iv_skew
+
+    zero_dte_phase = get_0dte_intraday_phase(
+        clean_sym,
+        now_dt=now_dt,
+        contract_symbol=contract_sym,
+        expiry_date=exp_date,
+        dte=dte,
+    )
+    iv_skew = compute_options_iv_skew(chain, spot, clean_sym)
+    from market.options import compute_chain_gex
+
+    gex_data = compute_chain_gex(chain, spot, underlying=clean_sym, lot_size=lot_sz)
 
     iv_val = max(0.10, (vix_val / 100.0) if vix_val else 0.14)
     from engine.options_backtest import bs_delta
@@ -2914,7 +3058,18 @@ def detect_index_call_setup(
         rr_spread = round(max_profit / max(1.0, max_loss), 2)
 
         now_time = now_dt.time()
-        is_midday_chop_window = (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 70)
+        is_midday_chop_window = (dtime(11, 15) <= now_time <= dtime(13, 15)) or (
+            (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 70)
+        )
+        is_terminal_mis_closeout = (
+            (now_time >= dtime(14, 45)) and not ignore_time_gate and not is_test_runner
+        )
+
+        net_gex = gex_data.get("net_gex", 0.0) if gex_data else 0.0
+        gex_regime = gex_data.get("gamma_regime", "NEUTRAL") if gex_data else "NEUTRAL"
+        gex_flip = gex_data.get("gex_flip_strike", 0.0) if gex_data else 0.0
+        is_dealer_long_gamma_pin = (gex_regime == "POSITIVE_GAMMA_PIN") and (net_gex > 0)
+        is_dealer_short_gamma_accel = gex_regime == "NEGATIVE_GAMMA_ACCELERATION"
 
         # 0DTE Expiry Check:
         is_0dte = False
@@ -2938,16 +3093,18 @@ def detect_index_call_setup(
         # 0DTE Late Session Expiration: Post 13:30 IST on expiry day, naked options face catastrophic terminal theta collapse.
         is_0dte_late_session = is_0dte and (now_time >= dtime(13, 30))
 
-        if is_low_vix_range:
+        if vix_regime_info.mandate_spread or is_low_vix_range:
             pref_veh = "SPREAD_ONLY"
             spread_guidance = (
-                "⚠️ LOW-VIX RANGE-BOUND REGIME (India VIX < 13.0): Naked CE prohibited due to accelerated theta decay; "
+                f"⚠️ LOW-VIX REGIME (India VIX {vix_val:.1f} < 13.0): Option buying has negative edge; "
                 "execute defined-risk Bull Call Spread only."
+                if is_low_vix_range
+                else f"⚠️ {vix_regime_info.description}"
             )
         elif is_high_iv_risk:
             pref_veh = "SPREAD_ONLY"
             spread_guidance = (
-                f"⚠️ HIGH-VIX REGIME (India VIX {vix_val:.1f} >= 18.0): High IV crush risk on naked options; "
+                f"⚠️ HIGH-VIX REGIME (India VIX {vix_val:.1f} >= 17.5): High IV crush risk on naked options; "
                 "execute defined-risk Bull Call Spread or Deep ITM only."
             )
         elif is_0dte_late_session:
@@ -2962,9 +3119,24 @@ def detect_index_call_setup(
                 "⚠️ 0DTE MIDDAY THETA TRAP (11:30–14:00 IST): Naked option buying strictly prohibited on expiry day; "
                 "execute defined-risk Bull Call Spread only to eliminate theta bleed."
             )
+        elif is_dealer_long_gamma_pin and (
+            abs(spot - gex_flip) / max(1.0, spot) < 0.0075
+            or abs(spot - strike) / max(1.0, spot) < 0.0075
+        ):
+            pref_veh = "SPREAD_ONLY"
+            spread_guidance = (
+                f"⚠️ POSITIVE DEALER GAMMA PIN (Net GEX +₹{net_gex / 1e7:,.1f} Cr): Dealers hedging counter-trend; index pinned near {gex_flip:,.0f}. "
+                "Naked calls suffer heavy theta decay; Bull Call Spread required."
+            )
         elif is_midday_chop_window:
             pref_veh = "HEDGED_SPREAD"
-            spread_guidance = "⚠️ MIDDAY CHOP WINDOW: Execute Bull Call Spread to avoid theta decay."
+            spread_guidance = "⚠️ MIDDAY CHOP WINDOW (11:15–13:15 IST): Execute Bull Call Spread to avoid theta decay."
+        elif is_dealer_short_gamma_accel and spot >= gex_flip:
+            pref_veh = "NAKED_OPTION_OR_SPREAD"
+            spread_guidance = (
+                f"🚀 NEGATIVE DEALER GAMMA ACCELERATION (Net GEX -₹{abs(net_gex) / 1e7:,.1f} Cr): Dealers short gamma above {gex_flip:,.0f}; "
+                "pro-trend dealer hedging fuels explosive upside convexity."
+            )
         else:
             pref_veh = "NAKED_OPTION_OR_SPREAD"
             spread_guidance = "High Momentum: Fast scalpers can trade Naked CE; for defined risk, trade Bull Call Spread."
@@ -3029,18 +3201,27 @@ def detect_index_call_setup(
         is_long_dated_monthly = dte_days >= 8
         is_spread_mandated = bool(
             (
-                is_low_vix_range
+                vix_regime_info.mandate_spread
+                or is_low_vix_range
                 or is_high_iv_risk
                 or is_midday_chop_window
                 or is_0dte_midday_trap
                 or is_0dte_late_session
                 or is_call_wall_collision
                 or is_long_dated_monthly
+                or (is_dealer_long_gamma_pin and pref_veh == "SPREAD_ONLY")
             )
             and hedge_plan is not None
         )
 
     # ── Optimal Trade Entry (OTE) & No-Chase Guard ───────────────
+    if is_terminal_mis_closeout and not is_spread_mandated:
+        logger.info(
+            f"[IndexCallSetup] Suppressed intraday naked CE on {clean_sym}: "
+            "Terminal Closeout Phase post 14:45 IST (MIS Auto Square-Off threshold)."
+        )
+        return []
+
     if (
         is_low_vix_range or is_0dte_midday_trap or is_0dte_late_session or is_call_wall_collision
     ) and not hedge_plan:
@@ -3163,6 +3344,55 @@ def detect_index_call_setup(
         exec_trigger_str = f"ABOVE_₹{opt_ltp:,.1f}_ON_1M_CLOSE" if opt_ltp else "ON_TRIGGER"
         conf_rule_str = "1_MIN_CANDLE_CLOSE_MANDATORY"
         exec_notes_str = f"Enter on confirmation above ₹{opt_ltp:,.1f}."
+
+    # ── Dual-Blueprint Execution: Naked Convexity vs Dynamic Adaptive Spread ─
+    # 0DTE Cheap Option Gate: On 0DTE, options under ₹35 (Nifty) or ₹80 (Sensex/Bank Nifty) cannot be recommended naked
+    is_0dte_penny_trap = bool(
+        zero_dte_phase.get("is_0dte") and opt_ltp < (35.0 if clean_sym == "NIFTY" else 80.0)
+    )
+
+    regime_verdict = (
+        "MARKET_FAVORS_NAKED"
+        if (is_explosive_momentum or vel_score >= 70)
+        and not (is_chop_regime or is_0dte_midday_trap or is_high_iv_risk or is_0dte_penny_trap)
+        else "HEDGE_RECOMMENDED"
+    )
+
+    route_a_naked = {
+        "route": "ROUTE_A_NAKED",
+        "title": "Route A: Naked High Convexity",
+        "contract": contract_sym,
+        "strike": strike,
+        "option_type": "CE",
+        "recommended_entry": opt_ltp,
+        "entry_range": entry_range_str,
+        "stop_loss": sl_premium,
+        "target_1": t1_premium,
+        "target_2": t2_premium,
+        "target_moonshot": t3_premium,
+        "risk_reward": rr_str,
+        "max_loss_rupees": max_loss_rupees,
+        "convexity": "100% Uncapped Gamma Acceleration",
+        "is_favored": bool(regime_verdict == "MARKET_FAVORS_NAKED"),
+        "execution_guidance": "High Convexity: Fast scalpers & trend riders execute Naked with strict 1R stop loss to capture 100% gamma acceleration.",
+    }
+
+    route_b_spread = {
+        "route": "ROUTE_B_SPREAD",
+        "title": "Route B: Dynamic Adaptive Spread",
+        "strategy": (hedge_plan or {}).get("strategy", "BULL_CALL_SPREAD"),
+        "description": (hedge_plan or {}).get("description", ""),
+        "buy_leg": (hedge_plan or {}).get("buy_leg", ""),
+        "sell_leg": (hedge_plan or {}).get("sell_leg", ""),
+        "strike_width": (hedge_plan or {}).get("strike_width", actual_width),
+        "adaptive_regime": (hedge_plan or {}).get("adaptive_regime", regime_note),
+        "net_debit_per_share": (hedge_plan or {}).get("net_debit_per_share", 0.0),
+        "max_loss_rupees": (hedge_plan or {}).get("max_loss", 0.0),
+        "max_profit_rupees": (hedge_plan or {}).get("max_profit", 0.0),
+        "risk_reward": (hedge_plan or {}).get("risk_reward", ""),
+        "is_favored": bool(regime_verdict != "MARKET_FAVORS_NAKED"),
+        "execution_guidance": "Defined Risk Defense: Execute Hedged Spread to eliminate theta bleed and cap downside risk.",
+    }
 
     alert = AutoAlert(
         alert_id=generate_alert_id(
@@ -3303,6 +3533,11 @@ def detect_index_call_setup(
             "eagle_regime": eagle_regime.to_dict() if eagle_regime else None,
             "tiger_mandate": tiger_mandate.to_dict() if tiger_mandate else None,
             "sniper_plan": sniper_plan.to_dict() if sniper_plan else None,
+            "regime_verdict": regime_verdict,
+            "route_a_naked": route_a_naked,
+            "route_b_spread": route_b_spread,
+            "zero_dte_phase": zero_dte_phase,
+            "iv_skew": iv_skew,
         },
         actionable_plan={
             "action": act_verb,
@@ -3410,6 +3645,11 @@ def detect_index_call_setup(
                 "t2_premium": t2_premium,
                 "lot_size": lot_sz,
             },
+            "regime_verdict": regime_verdict,
+            "route_a_naked": route_a_naked,
+            "route_b_spread": route_b_spread,
+            "zero_dte_phase": zero_dte_phase,
+            "iv_skew": iv_skew,
         },
     )
     alert.structural_spot_sl = underlying_spot_sl

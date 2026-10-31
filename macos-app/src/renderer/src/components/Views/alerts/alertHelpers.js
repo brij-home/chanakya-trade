@@ -729,85 +729,135 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   const tradePlan = plan.trade_plan || {}
   const optPlan = plan.option_plan || null
 
+  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
+  const rawContract = alert.contract_symbol || optPlan?.contract_symbol || plan.option_contract || ''
+  const optType = alert.option_type || optPlan?.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
+
+  const effectiveSpot = (spotNum && Number(spotNum) > 0)
+    ? Number(spotNum)
+    : (alert.underlying_spot && Number(alert.underlying_spot) > 0)
+    ? Number(alert.underlying_spot)
+    : (alert.metrics?.spot && Number(alert.metrics?.spot) > 0)
+    ? Number(alert.metrics?.spot)
+    : null
+
+  const parseCleanNumber = (val) => {
+    if (val == null) return null
+    if (typeof val === 'number') return isNaN(val) ? null : val
+    const str = String(val).trim()
+    const m = str.replace(/,/g, '').match(/[-+]?[0-9]+(?:\.[0-9]+)?/)
+    if (!m) return null
+    const num = Number(m[0])
+    return isNaN(num) ? null : num
+  }
+
+  const isSpotScale = (val) => {
+    if (val == null || isNaN(val) || val <= 0) return false
+    if (effectiveSpot && effectiveSpot > 0 && Math.abs(val - effectiveSpot) / effectiveSpot < 0.35) return true
+    if ((cleanSym.includes('NIFTY') || cleanSym.includes('SENSEX') || cleanSym.includes('BANKEX')) && val > 3000) return true
+    if (effectiveSpot && effectiveSpot > 0 && val > effectiveSpot * 0.5) return true
+    return false
+  }
+
   let entry = null
   const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE'
   if (isDerivative) {
-    if (optPlan?.entry_premium && Number(optPlan.entry_premium) > 0) {
-      entry = Number(optPlan.entry_premium)
-    } else if (plan.option_entry && Number(String(plan.option_entry).replace(/[^0-9.-]/g, '')) > 0) {
-      entry = Number(String(plan.option_entry).replace(/[^0-9.-]/g, ''))
-    } else if (alert.option_premium && Number(alert.option_premium) > 0) {
-      entry = Number(String(alert.option_premium).replace(/[^0-9.-]/g, ''))
-    } else if (plan.recommended_entry && Number(String(plan.recommended_entry).replace(/[^0-9.-]/g, '')) > 0 && !alert.underlying_spot) {
-      entry = Number(String(plan.recommended_entry).replace(/[^0-9.-]/g, ''))
-    } else if (isPureOption && alert.ltp && Number(alert.ltp) > 0) {
-      entry = Number(String(alert.ltp).replace(/[^0-9.-]/g, ''))
-    } else if (optLtpNum && optLtpNum > 0) {
+    if (optPlan?.entry_premium && parseCleanNumber(optPlan.entry_premium) > 0) {
+      entry = parseCleanNumber(optPlan.entry_premium)
+    } else if (plan.option_entry && parseCleanNumber(plan.option_entry) > 0) {
+      entry = parseCleanNumber(plan.option_entry)
+    } else if (alert.initial_entry_premium && parseCleanNumber(alert.initial_entry_premium) > 0) {
+      entry = parseCleanNumber(alert.initial_entry_premium)
+    } else if (alert.entry_price && parseCleanNumber(alert.entry_price) > 0 && !isSpotScale(parseCleanNumber(alert.entry_price))) {
+      entry = parseCleanNumber(alert.entry_price)
+    } else if (alert.trigger_level && parseCleanNumber(alert.trigger_level) > 0 && !isSpotScale(parseCleanNumber(alert.trigger_level))) {
+      entry = parseCleanNumber(alert.trigger_level)
+    } else if (plan.recommended_entry && parseCleanNumber(plan.recommended_entry) > 0 && !alert.underlying_spot && !isSpotScale(parseCleanNumber(plan.recommended_entry))) {
+      entry = parseCleanNumber(plan.recommended_entry)
+    } else if (plan.entry_zone && parseCleanNumber(plan.entry_zone) > 0 && !isSpotScale(parseCleanNumber(plan.entry_zone))) {
+      entry = parseCleanNumber(plan.entry_zone)
+    } else if (alert.option_premium && parseCleanNumber(alert.option_premium) > 0 && !isSpotScale(parseCleanNumber(alert.option_premium))) {
+      entry = parseCleanNumber(alert.option_premium)
+    } else if (isPureOption && alert.ltp && parseCleanNumber(alert.ltp) > 0 && !isSpotScale(parseCleanNumber(alert.ltp))) {
+      entry = parseCleanNumber(alert.ltp)
+    } else if (optLtpNum && optLtpNum > 0 && !isSpotScale(optLtpNum)) {
       entry = optLtpNum
     }
   } else {
     if (tradePlan.entry_price) {
-      entry = Number(tradePlan.entry_price)
+      entry = parseCleanNumber(tradePlan.entry_price)
     } else if (plan.spot_entry) {
-      entry = Number(String(plan.spot_entry).replace(/[^0-9.-]/g, ''))
+      entry = parseCleanNumber(plan.spot_entry)
     } else if (alert.trigger_level) {
-      entry = Number(String(alert.trigger_level).replace(/[^0-9.-]/g, ''))
+      entry = parseCleanNumber(alert.trigger_level)
+    } else if (alert.entry_price) {
+      entry = parseCleanNumber(alert.entry_price)
     } else if (alert.ltp) {
-      entry = Number(String(alert.ltp).replace(/[^0-9.-]/g, ''))
-    } else if (spotNum) {
-      entry = spotNum
+      entry = parseCleanNumber(alert.ltp)
+    } else if (effectiveSpot) {
+      entry = effectiveSpot
     }
   }
   if (!entry || isNaN(entry) || entry <= 0) {
-    entry = isDerivative ? (optLtpNum || null) : (spotNum || null)
+    entry = isDerivative ? (optLtpNum || null) : (effectiveSpot || null)
   }
 
   let sl = null
   if (isDerivative) {
-    if (optPlan?.sl_premium) {
-      sl = Number(optPlan.sl_premium)
-    } else if (plan.option_sl) {
-      sl = Number(String(plan.option_sl).replace(/[^0-9.-]/g, ''))
-    } else if (alert.option_stop_loss) {
-      sl = Number(String(alert.option_stop_loss).replace(/[^0-9.-]/g, ''))
-    } else if (alert.stop_loss && (alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE')) {
-      sl = Number(String(alert.stop_loss).replace(/[^0-9.-]/g, ''))
+    if (optPlan?.sl_premium && parseCleanNumber(optPlan.sl_premium) > 0) {
+      sl = parseCleanNumber(optPlan.sl_premium)
+    } else if (plan.option_sl && parseCleanNumber(plan.option_sl) > 0) {
+      sl = parseCleanNumber(plan.option_sl)
+    } else if (alert.option_stop_loss && parseCleanNumber(alert.option_stop_loss) > 0) {
+      sl = parseCleanNumber(alert.option_stop_loss)
+    } else if (plan.stop_loss && parseCleanNumber(plan.stop_loss) > 0 && !isSpotScale(parseCleanNumber(plan.stop_loss))) {
+      sl = parseCleanNumber(plan.stop_loss)
+    } else if (alert.stop_loss && parseCleanNumber(alert.stop_loss) > 0 && !isSpotScale(parseCleanNumber(alert.stop_loss))) {
+      sl = parseCleanNumber(alert.stop_loss)
     }
   } else {
     if (tradePlan.invalidation_stop) {
-      sl = Number(tradePlan.invalidation_stop)
+      sl = parseCleanNumber(tradePlan.invalidation_stop)
     } else if (plan.spot_stop_loss) {
-      sl = Number(String(plan.spot_stop_loss).replace(/[^0-9.-]/g, ''))
+      sl = parseCleanNumber(plan.spot_stop_loss)
     } else if (alert.stop_loss) {
-      sl = Number(String(alert.stop_loss).replace(/[^0-9.-]/g, ''))
+      sl = parseCleanNumber(alert.stop_loss)
     }
   }
   if ((!sl || isNaN(sl) || sl <= 0) && entry) {
-    sl = isDerivative ? Math.max(1, entry * 0.65) : isBull ? entry * 0.985 : entry * 1.015
+    sl = isDerivative ? Math.max(1, entry * 0.80) : isBull ? entry * 0.985 : entry * 1.015
   }
 
   let t1 = null
   if (isDerivative) {
-    if (optPlan?.t1_premium) {
-      t1 = Number(optPlan.t1_premium)
+    if (optPlan?.t1_premium && parseCleanNumber(optPlan.t1_premium) > 0) {
+      t1 = parseCleanNumber(optPlan.t1_premium)
     } else if (plan.option_target_1 || plan.option_target) {
-      t1 = Number(String(plan.option_target_1 || plan.option_target).replace(/[^0-9.-]/g, ''))
+      t1 = parseCleanNumber(plan.option_target_1 || plan.option_target)
     } else if (alert.option_target_1 || alert.option_target) {
-      t1 = Number(String(alert.option_target_1 || alert.option_target).replace(/[^0-9.-]/g, ''))
-    } else if (alert.target_level && (alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE')) {
-      t1 = Number(String(alert.target_level).replace(/[^0-9.-]/g, ''))
+      t1 = parseCleanNumber(alert.option_target_1 || alert.option_target)
+    } else if (optPlan?.target_1 && parseCleanNumber(optPlan.target_1) > 0 && !isSpotScale(parseCleanNumber(optPlan.target_1))) {
+      t1 = parseCleanNumber(optPlan.target_1)
+    } else if (plan.target_1 && parseCleanNumber(plan.target_1) > 0 && !isSpotScale(parseCleanNumber(plan.target_1))) {
+      t1 = parseCleanNumber(plan.target_1)
+    } else if (alert.target_1 && parseCleanNumber(alert.target_1) > 0 && !isSpotScale(parseCleanNumber(alert.target_1))) {
+      t1 = parseCleanNumber(alert.target_1)
+    } else if (alert.target_level && parseCleanNumber(alert.target_level) > 0 && !isSpotScale(parseCleanNumber(alert.target_level))) {
+      t1 = parseCleanNumber(alert.target_level)
     }
   } else {
     if (tradePlan.target_1) {
-      t1 = Number(tradePlan.target_1)
+      t1 = parseCleanNumber(tradePlan.target_1)
     } else if (plan.spot_target_1 || plan.spot_target) {
-      t1 = Number(String(plan.spot_target_1 || plan.spot_target).replace(/[^0-9.-]/g, ''))
+      t1 = parseCleanNumber(plan.spot_target_1 || plan.spot_target)
+    } else if (alert.target_1) {
+      t1 = parseCleanNumber(alert.target_1)
     } else if (alert.target_level) {
-      t1 = Number(String(alert.target_level).replace(/[^0-9.-]/g, ''))
+      t1 = parseCleanNumber(alert.target_level)
     }
   }
   if ((!t1 || isNaN(t1) || t1 <= 0) && entry) {
-    t1 = isDerivative ? entry * 1.6 : isBull ? entry * 1.03 : entry * 0.97
+    t1 = isDerivative ? entry * 1.35 : isBull ? entry * 1.03 : entry * 0.97
   }
 
   let t2 = null
@@ -823,13 +873,25 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   }
   const isUpwardPayoff = isDerivative ? !isOptionSell : isBull
   if (isDerivative) {
-    if (optPlan?.t2_premium) {
-      t2 = Number(optPlan.t2_premium)
-    } else if (alert.option_target_2) {
-      t2 = Number(String(alert.option_target_2).replace(/[^0-9.-]/g, ''))
+    if (optPlan?.t2_premium && parseCleanNumber(optPlan.t2_premium) > 0) {
+      t2 = parseCleanNumber(optPlan.t2_premium)
+    } else if (plan.option_target_2 && parseCleanNumber(plan.option_target_2) > 0) {
+      t2 = parseCleanNumber(plan.option_target_2)
+    } else if (alert.option_target_2 && parseCleanNumber(alert.option_target_2) > 0) {
+      t2 = parseCleanNumber(alert.option_target_2)
+    } else if (optPlan?.target_2 && parseCleanNumber(optPlan.target_2) > 0 && !isSpotScale(parseCleanNumber(optPlan.target_2))) {
+      t2 = parseCleanNumber(optPlan.target_2)
+    } else if (plan.target_2 && parseCleanNumber(plan.target_2) > 0 && !isSpotScale(parseCleanNumber(plan.target_2))) {
+      t2 = parseCleanNumber(plan.target_2)
+    } else if (alert.target_2 && parseCleanNumber(alert.target_2) > 0 && !isSpotScale(parseCleanNumber(alert.target_2))) {
+      t2 = parseCleanNumber(alert.target_2)
     }
   } else if (tradePlan.target_2) {
-    t2 = Number(tradePlan.target_2)
+    t2 = parseCleanNumber(tradePlan.target_2)
+  } else if (plan.spot_target_2) {
+    t2 = parseCleanNumber(plan.spot_target_2)
+  } else if (alert.target_2) {
+    t2 = parseCleanNumber(alert.target_2)
   }
   if ((!t2 || isNaN(t2) || t2 <= 0) && t1 && entry) {
     const spread1 = Math.abs(t1 - entry)
@@ -838,16 +900,30 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
 
   let t3 = null
   if (isDerivative) {
-    if (optPlan?.t3_premium) {
-      t3 = Number(optPlan.t3_premium)
+    if (optPlan?.t3_premium && parseCleanNumber(optPlan.t3_premium) > 0) {
+      t3 = parseCleanNumber(optPlan.t3_premium)
+    } else if (plan.option_target_3 && parseCleanNumber(plan.option_target_3) > 0) {
+      t3 = parseCleanNumber(plan.option_target_3)
+    } else if (alert.option_target_3 && parseCleanNumber(alert.option_target_3) > 0) {
+      t3 = parseCleanNumber(alert.option_target_3)
+    } else if (optPlan?.target_3 && parseCleanNumber(optPlan.target_3) > 0 && !isSpotScale(parseCleanNumber(optPlan.target_3))) {
+      t3 = parseCleanNumber(optPlan.target_3)
+    } else if (plan.target_3 && parseCleanNumber(plan.target_3) > 0 && !isSpotScale(parseCleanNumber(plan.target_3))) {
+      t3 = parseCleanNumber(plan.target_3)
+    } else if (alert.target_3 && parseCleanNumber(alert.target_3) > 0 && !isSpotScale(parseCleanNumber(alert.target_3))) {
+      t3 = parseCleanNumber(alert.target_3)
     }
   } else if (tradePlan.target_3 && Number(tradePlan.target_3) > 0) {
-    t3 = Number(tradePlan.target_3)
+    t3 = parseCleanNumber(tradePlan.target_3)
+  } else if (plan.spot_target_3) {
+    t3 = parseCleanNumber(plan.spot_target_3)
+  } else if (alert.target_3) {
+    t3 = parseCleanNumber(alert.target_3)
   }
   if ((!t3 || isNaN(t3) || t3 <= 0) && t2 && entry) {
     const spread2 = Math.abs(t2 - entry)
     t3 = isDerivative
-      ? (isOptionSell ? entry * 0.2 : entry * 2.5)
+      ? (isOptionSell ? entry * 0.2 : entry * 2.0)
       : isBull
       ? t2 + spread2 * 0.8
       : t2 - spread2 * 0.8
@@ -885,11 +961,13 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   // and re-derive the option premium execution ceiling.
   let rawNoChase = null
   if (optPlan?.no_chase_boundary != null) {
-    rawNoChase = Number(String(optPlan.no_chase_boundary).replace(/[^0-9.-]/g, ''))
+    rawNoChase = parseCleanNumber(optPlan.no_chase_boundary)
   } else if (tradePlan.no_chase_boundary != null) {
-    rawNoChase = Number(String(tradePlan.no_chase_boundary).replace(/[^0-9.-]/g, ''))
+    rawNoChase = parseCleanNumber(tradePlan.no_chase_boundary)
+  } else if (plan.no_chase_boundary != null) {
+    rawNoChase = parseCleanNumber(plan.no_chase_boundary)
   } else if (alert.no_chase_boundary != null) {
-    rawNoChase = Number(String(alert.no_chase_boundary).replace(/[^0-9.-]/g, ''))
+    rawNoChase = parseCleanNumber(alert.no_chase_boundary)
   }
   if (rawNoChase !== null && (isNaN(rawNoChase) || rawNoChase <= 0)) {
     rawNoChase = null
