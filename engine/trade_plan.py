@@ -1299,12 +1299,14 @@ def calculate_option_execution_plan(
     try:
         from analysis.options import compute_greeks
 
+        ref_dt_val = ref_dt or getattr(trade_plan, "ref_dt", None)
         greeks = compute_greeks(
             spot=entry_spot,
             strike=strike,
             expiry=expiry,
             option_type=option_type,
             ltp=option_ltp,
+            as_of=ref_dt_val,
         )
         delta = greeks.delta
         gamma = greeks.gamma

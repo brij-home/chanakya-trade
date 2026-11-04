@@ -15,6 +15,7 @@ logger = logging.getLogger("analysis.options")
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
@@ -119,21 +120,24 @@ def _dte_days(expiry_str: str) -> int:
     return max(0, (exp - today_ist).days)
 
 
-def _dte_years(expiry_str: str) -> float:
+def _dte_years(expiry_str: str, as_of: Optional[datetime] = None) -> float:
     """
     Days to expiry as fraction of year with intraday time-to-close resolution for 0-DTE.
     On expiry day (delta == 0), calculates fraction of trading day remaining until 15:30 IST.
     For expired contracts (delta < 0), returns 0.0.
     """
     from datetime import datetime, date, time as dtime
-    from config.constants import now_ist
+    from config.constants import now_ist, IST
 
     try:
         exp = datetime.strptime(expiry_str, "%Y-%m-%d").date()
     except ValueError:
         exp = date.fromisoformat(expiry_str[:10])
 
-    curr_ist = now_ist()
+    if as_of is not None:
+        curr_ist = as_of.astimezone(IST) if hasattr(as_of, "astimezone") else as_of
+    else:
+        curr_ist = now_ist()
     today_ist = curr_ist.date()
     delta_days = (exp - today_ist).days
 
@@ -174,12 +178,13 @@ def compute_greeks(
     option_type: str,
     ltp: float,
     rate: float = RISK_FREE_RATE,
+    as_of: Optional[datetime] = None,
 ) -> Greeks:
     """
     Compute full Greeks for a single options contract.
     Falls back to analytical approximations if py_vollib unavailable.
     """
-    t = _dte_years(expiry)
+    t = _dte_years(expiry, as_of=as_of)
     flag = _flag(option_type)
 
     if PY_VOLLIB_AVAILABLE and ltp > 0.01:

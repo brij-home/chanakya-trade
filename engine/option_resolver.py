@@ -447,6 +447,7 @@ def resolve_option_contract(
         opt_t3 = round(opt_ltp * 2.80, 2)
         t1_ceiling = round(opt_ltp * 1.90, 2)
         t2_ceiling = round(opt_ltp * 2.90, 2)
+        t3_ceiling = round(opt_ltp * 4.00, 2)
         exec_trig = f"ABOVE_₹{opt_ltp:,.1f}_ON_1M_CLOSE"
         conf_rule = "1_MIN_CANDLE_CLOSE_MANDATORY"
         exec_notes = (
@@ -526,8 +527,6 @@ def resolve_option_contract(
             f"[ESTIMATE - RESEARCH ONLY] Modeled option levels (live chain unavailable; assumed VIX={vix_val:.1f}). "
             f"Not verified for execution. {exec_notes}"
         )
-        exec_trig = f"RESEARCH_ESTIMATE_₹{opt_ltp:,.1f}"
-        conf_rule = "RESEARCH_ONLY_UNVERIFIED"
 
     opt_exp = getattr(chosen_contract, "expiry", None) if chosen_contract else None
 

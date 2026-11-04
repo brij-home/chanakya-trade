@@ -395,6 +395,19 @@ def get_lot_size(symbol: str) -> int:
     contract_like = body.endswith(("CE", "PE", "FUT")) and any(char.isdigit() for char in body)
     if contract_like:
         try:
+            import market.symbol_master as symbol_master
+
+            sym_info = symbol_master.get_symbol_info(raw)
+            if not sym_info and ":" not in raw:
+                sym_info = symbol_master.get_symbol_info(f"NFO:{raw}")
+            if sym_info:
+                lot = sym_info.get("minLotSize") or sym_info.get("lot_size")
+                if lot and int(lot) > 0:
+                    return int(lot)
+        except Exception as e_sym:
+            logger.debug("[engine.position_sizer] symbol_master lookup failed: %s", e_sym)
+
+        try:
             from market.contract_selection import resolve_active_contract
 
             res = resolve_active_contract(raw, require_fresh=True)

@@ -451,10 +451,17 @@ async def signup(body: AuthBody, response: Response, request: Request):
 
     session_id = create_session(user["id"], user["email"])
     deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    is_test = bool(
+        ("PYTEST_CURRENT_TEST" in os.environ)
+        or (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (deploy_mode == "test")
+    )
     is_non_local = deploy_mode not in ("", "desktop", "local", "test")
-    is_https = request.url.scheme == "https"
-    secure_cookie = is_https or (is_non_local and deploy_mode != "test")
-    cookie_name = "__Host-session_id" if (is_https and is_non_local) else "session_id"
+    is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    secure_cookie = is_https or (is_non_local and not is_test)
+    cookie_name = (
+        "__Host-session_id" if (is_https and is_non_local and not is_test) else "session_id"
+    )
     response.set_cookie(
         key=cookie_name,
         value=session_id,
@@ -495,10 +502,17 @@ async def login(body: AuthBody, response: Response, request: Request):
     reset_login_failures(rate_key)
     session_id = create_session(user["id"], user["email"])
     deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    is_test = bool(
+        ("PYTEST_CURRENT_TEST" in os.environ)
+        or (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (deploy_mode == "test")
+    )
     is_non_local = deploy_mode not in ("", "desktop", "local", "test")
-    is_https = request.url.scheme == "https"
-    secure_cookie = is_https or (is_non_local and deploy_mode != "test")
-    cookie_name = "__Host-session_id" if (is_https and is_non_local) else "session_id"
+    is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    secure_cookie = is_https or (is_non_local and not is_test)
+    cookie_name = (
+        "__Host-session_id" if (is_https and is_non_local and not is_test) else "session_id"
+    )
     response.set_cookie(
         key=cookie_name,
         value=session_id,

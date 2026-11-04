@@ -43,6 +43,7 @@ import numpy as np
 
 logger = logging.getLogger("engine.auto_alert_engine")
 from config.constants import IST, SESSION_FOCUS_MODE
+from config.discovery_policy import discovery_desk, get_discovery_policy
 
 
 from engine.storage.alert_repository import (
@@ -574,22 +575,22 @@ class AutoAlertEngine:
     @property
     def watched_crypto(self) -> list[str]:
         """Returns liquid 24x7 Crypto pairs for continuous monitoring."""
-        return list(self._watched_crypto)
+        return list(getattr(self, "_watched_crypto", []))
 
     @property
     def watched_commodities(self) -> list[str]:
         """Returns liquid MCX commodity symbols for evening monitoring."""
-        return list(self._watched_commodities)
+        return list(getattr(self, "_watched_commodities", []))
 
     @property
     def watched_currencies(self) -> list[str]:
         """Returns liquid Currency CDS pairs for post-equity monitoring."""
-        return list(self._watched_currencies)
+        return list(getattr(self, "_watched_currencies", []))
 
     @property
     def watched_multibaggers(self) -> list[str]:
         """Returns broad universe of high-growth compounders and multibagger candidates."""
-        return list(self._watched_multibaggers)
+        return list(getattr(self, "_watched_multibaggers", []))
 
     @property
     def watched_equities(self) -> list[str]:
@@ -1327,7 +1328,42 @@ class AutoAlertEngine:
         Public entrypoint for recording alerts.
         Enforces multithreaded concurrency guard to prevent simultaneous opposing
         evaluations and duplicate in-flight processing for the same underlying asset.
+
+        Breakout detectors evaluated under strict gates:
+        - STAGE_1_TO_2_EXPANSION
+        - PATTERN_COILING
+        - ORB_PRIMED
+        - INDEX_MICRO_SCALP
+        - ORB_BREAKDOWN
         """
+        policy = get_discovery_policy()
+        if policy.fno_only:
+            is_fno = False
+            ex = str(getattr(alert, "exchange", "") or "").upper()
+            if ex in ("NFO", "BFO"):
+                is_fno = True
+            elif ex in ("NSE", "BSE"):
+                has_contract = bool(
+                    getattr(alert, "contract_symbol", None)
+                    or getattr(alert, "option_type", None)
+                    or getattr(alert, "derivative_type", None)
+                )
+                seg = str(getattr(alert, "segment", "") or "").upper()
+                if has_contract or seg in ("FNO", "FNO_INDEX", "FNO_STOCK"):
+                    is_fno = True
+            if not is_fno:
+                if hasattr(alert, "record_audit"):
+                    alert.record_audit(
+                        "FOCUS_FILTERED",
+                        f"Alert excluded under FNO_ONLY focus policy: exchange={ex}",
+                        actor="DISCOVERY_POLICY",
+                    )
+                logger.debug(
+                    "[AutoAlertEngine] Alert %s excluded by discovery policy FNO_ONLY",
+                    getattr(alert, "alert_id", "unknown"),
+                )
+                return False
+
         clean_target = self._clean_sym(alert.symbol)
         now = time.time()
         with getattr(self, "_evaluating_symbols_lock", threading.Lock()):
@@ -1944,20 +1980,41 @@ class AutoAlertEngine:
 
             ep_val = float(alert.trigger_level or alert.entry_price or alert.ltp or 0.0)
             sl_val = float(alert.stop_loss or 0.0)
-            if ep_val > 0 and sl_val > 0 and ep_val != sl_val:
-                opt_prem = getattr(alert, "option_premium", None)
-                is_opt_flag = bool(
-                    alert.alert_type in ("OPTIONS_MOMENTUM", "OPTION_WRITE")
-                    or (alert.alert_type == "GAMMA_BLAST" and alert.option_type)
-                    or (alert.exchange or "").upper() == "NFO"
-                    or (
-                        opt_prem is not None
-                        and abs(ep_val - float(opt_prem)) < max(1.0, float(opt_prem) * 0.15)
-                    )
+            opt_prem = getattr(alert, "option_premium", None)
+            is_opt_flag = bool(
+                alert.alert_type in ("OPTIONS_MOMENTUM", "OPTION_WRITE")
+                or (alert.alert_type == "GAMMA_BLAST" and alert.option_type)
+                or (alert.exchange or "").upper() in ("NFO", "BFO")
+                or (
+                    opt_prem is not None
+                    and abs(ep_val - float(opt_prem)) < max(1.0, float(opt_prem) * 0.15)
                 )
-                is_fno_sym = is_fno_symbol(clean_target)
+            )
+            is_fno_sym = is_fno_symbol(clean_target)
+            is_fno_scope = (
+                str(getattr(alert, "exchange", "") or "").upper() in ("NFO", "BFO")
+                or str(getattr(alert, "segment", "") or "").upper()
+                in ("FNO", "FNO_STOCK", "FNO_INDEX")
+                or is_opt_flag
+            )
+            exact_contract = getattr(alert, "contract_symbol", None) or (
+                alert.actionable_plan.get("contract")
+                if isinstance(alert.actionable_plan, dict)
+                else None
+            )
+
+            if is_fno_scope and not exact_contract:
+                if alert.actionable_plan is not None and isinstance(alert.actionable_plan, dict):
+                    alert.actionable_plan["lot_size"] = 0
+                    alert.actionable_plan["recommended_lots"] = 0
+                    alert.actionable_plan["recommended_shares"] = 0
+                    alert.actionable_plan["sizing_status"] = "UNAVAILABLE_EXACT_CONTRACT"
+            elif ep_val > 0 and sl_val > 0 and ep_val != sl_val:
+                sizing_target = (
+                    exact_contract if (is_fno_scope and exact_contract) else clean_target
+                )
                 sizing_res = calculate_position_size(
-                    symbol=clean_target,
+                    symbol=sizing_target,
                     entry_price=ep_val,
                     stop_loss=sl_val,
                     target_price=float(alert.target_level or (ep_val * 1.05)),
@@ -1968,15 +2025,10 @@ class AutoAlertEngine:
                     and alert.actionable_plan is not None
                     and isinstance(alert.actionable_plan, dict)
                 ):
-                    fno_lots = get_lot_size(clean_target) if (is_opt_flag or is_fno_sym) else 1
+                    fno_lots = get_lot_size(sizing_target) if (is_opt_flag or is_fno_sym) else 1
                     alert.actionable_plan.setdefault("lot_size", fno_lots)
-                    alert.actionable_plan.setdefault(
-                        "recommended_lots",
-                        max(1, sizing_res.lots) if (is_opt_flag or is_fno_sym) else 1,
-                    )
-                    alert.actionable_plan.setdefault(
-                        "recommended_shares", max(1, sizing_res.shares)
-                    )
+                    alert.actionable_plan.setdefault("recommended_lots", sizing_res.lots)
+                    alert.actionable_plan.setdefault("recommended_shares", sizing_res.shares)
                     alert.actionable_plan.setdefault(
                         "capital_at_risk",
                         f"₹{sizing_res.risk_amount:,.0f} ({sizing_res.risk_pct:.1f}% risk)",
@@ -2673,22 +2725,55 @@ class AutoAlertEngine:
                         max_sector_leaders = 2
 
                         if len(active_sector_leaders) >= max_sector_leaders:
-                            logger.info(
-                                f"[AutoAlertEngine] 🛑 SECTOR CLUSTER HELD for {clean_target}: "
-                                f"Sector '{sec_name}' already at max capacity ({len(active_sector_leaders)} active: "
-                                f"{[a.symbol for a in active_sector_leaders]}). "
-                                f"Suppressed to prevent correlated portfolio cluster risk (Capacity {max_sector_leaders})."
-                            )
-                            if hasattr(alert, "record_audit"):
-                                alert.record_audit(
-                                    "SECTOR_CLUSTER_HELD",
-                                    f"Sector '{sec_name}' at max capacity ({len(active_sector_leaders)} active: {[a.symbol for a in active_sector_leaders]})",
-                                    actor="SECTOR_GOVERNOR",
-                                    details={
-                                        "active_leaders": [a.symbol for a in active_sector_leaders]
-                                    },
+                            has_actionable_plan = bool(
+                                alert.actionable_plan
+                                and isinstance(alert.actionable_plan, dict)
+                                and (
+                                    alert.actionable_plan.get("recommended_entry")
+                                    or alert.actionable_plan.get("entry_range")
+                                    or alert.actionable_plan.get("stop_loss")
                                 )
-                            return False
+                            )
+                            if not has_actionable_plan:
+                                logger.info(
+                                    f"[AutoAlertEngine] 🛑 SECTOR CLUSTER HELD for {clean_target}: "
+                                    f"Sector '{sec_name}' already at max capacity ({len(active_sector_leaders)} active: "
+                                    f"{[a.symbol for a in active_sector_leaders]}). "
+                                    f"Suppressed to prevent correlated portfolio cluster risk (Capacity {max_sector_leaders})."
+                                )
+                                if hasattr(alert, "record_audit"):
+                                    alert.record_audit(
+                                        "SECTOR_CLUSTER_HELD",
+                                        f"Sector '{sec_name}' at max capacity ({len(active_sector_leaders)} active: {[a.symbol for a in active_sector_leaders]})",
+                                        actor="SECTOR_GOVERNOR",
+                                        details={
+                                            "active_leaders": [
+                                                a.symbol for a in active_sector_leaders
+                                            ]
+                                        },
+                                    )
+                                return False
+                            else:
+                                if isinstance(alert.metrics, dict):
+                                    alert.metrics["sector_cluster_cap_reached"] = True
+                                    alert.metrics["sector_concurrency_count"] = len(
+                                        active_sector_leaders
+                                    )
+                                    alert.metrics["sector_concurrency_note"] = (
+                                        f"Sector cluster limit reached ({sec_name}: {len(active_sector_leaders)} active). "
+                                        f"Defined-risk hedge/spread recommended."
+                                    )
+                                alert.actionable_plan["sector_concurrency_warning"] = (
+                                    f"Sector cluster limit reached ({sec_name}: {len(active_sector_leaders)} active). "
+                                    f"Defined-risk hedge/spread recommended."
+                                )
+                                alert.actionable_plan["execution_style_mandate"] = (
+                                    "HEDGED_SPREAD_MANDATORY"
+                                )
+                                logger.info(
+                                    f"[AutoAlertEngine] ⚠️ Sector concurrency limit for {sec_name} reached "
+                                    f"({len(active_sector_leaders)} active). Defined-risk hedge attached."
+                                )
                         elif len(active_sector_leaders) == 1:
                             logger.info(
                                 f"[AutoAlertEngine] 🤝 Sector Concurrency: Allowed concurrent leader {clean_target} "
@@ -12087,6 +12172,7 @@ class AutoAlertEngine:
 
         return found
 
+    @discovery_desk("CASH")
     def scan_circuits(self, quotes_map: Optional[dict[str, Any]] = None) -> list[AutoAlert]:
         """Scans watched equities for Upper Circuit proximity."""
         if quotes_map is None:
@@ -12571,6 +12657,7 @@ class AutoAlertEngine:
 
         return found
 
+    @discovery_desk("CASH")
     def scan_pairs_arbitrage(self, quotes_map: Optional[dict[str, Any]] = None) -> list[AutoAlert]:
         """
         Scans institutional cointegrated equity pairs for statistical mispricing
@@ -12998,6 +13085,7 @@ class AutoAlertEngine:
         self._cached_pre_inflection = (now_ts, found)
         return found
 
+    @discovery_desk("CASH")
     def scan_incubation_triggers(
         self, quotes_map: Optional[dict[str, Any]] = None
     ) -> list[AutoAlert]:
@@ -13049,6 +13137,7 @@ class AutoAlertEngine:
             logger.debug(f"[AutoAlertEngine] Incubation trigger scan error: {e}")
         return found
 
+    @discovery_desk("CASH")
     def scan_multibagger_compounders(
         self,
         universe: Optional[list[str]] = None,
@@ -13075,6 +13164,7 @@ class AutoAlertEngine:
             logger.debug(f"[AutoAlertEngine] Multibagger scan error: {e}")
         return found
 
+    @discovery_desk("CASH")
     def scan_swing_inflections(
         self,
         universe: str = "nifty_total_market",
@@ -16333,6 +16423,7 @@ class AutoAlertEngine:
 
         return results
 
+    @discovery_desk("COMMODITY")
     def scan_commodities_now(self, targets: Optional[list[str]] = None) -> list[AutoAlert]:
         """
         Scans liquid MCX commodities (Crude Oil, Gold, Silver, Natural Gas, Copper, Zinc)
@@ -16353,6 +16444,7 @@ class AutoAlertEngine:
 
         return found
 
+    @discovery_desk("CURRENCY")
     def scan_currency_now(self) -> list[AutoAlert]:
         """
         Scans liquid Currency pairs (USDINR, EURINR, GBPINR) for post-equity breakouts.
@@ -16779,6 +16871,9 @@ class AutoAlertEngine:
                     )
 
         # 2. Impulse Velocity / Sudden Volatility Spike Detection
+        if get_discovery_policy().fno_only:
+            return
+
         history = self._crypto_tick_history[clean_sym]
         history.append((now_ts, ltp))
         if history:
@@ -16796,6 +16891,7 @@ class AutoAlertEngine:
                         target=self._scan_single_crypto_symbol, args=(clean_sym,), daemon=True
                     ).start()
 
+    @discovery_desk("CRYPTO")
     def _scan_single_crypto_symbol(self, sym: str) -> list[AutoAlert]:
         """Scans a single crypto symbol for Squeeze, SMC Momentum, and Options Volatility."""
         from engine.detectors.crypto import detect_single_crypto_symbol
@@ -16807,6 +16903,7 @@ class AutoAlertEngine:
                 found.append(a)
         return found
 
+    @discovery_desk("CRYPTO")
     def scan_crypto_now(self) -> list[AutoAlert]:
         """
         24x7 Real-Time Autonomous Crypto Market Alert Scanner.
@@ -16852,6 +16949,15 @@ class AutoAlertEngine:
         """
         results: list[AutoAlert] = []
         seg = (segment or "AUTO").upper()
+
+        policy = get_discovery_policy()
+        if policy.fno_only:
+            session = get_current_ist_session()
+            if not session.get("equity_nfo"):
+                return []
+            if seg in ("EQUITY", "NFO", "ALL", "AUTO"):
+                return self.scan_equity_nfo_now()
+            return []
 
         if seg == "ALL":
             results.extend(self.scan_equity_nfo_now())
