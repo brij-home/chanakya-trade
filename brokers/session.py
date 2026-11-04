@@ -918,7 +918,7 @@ def _recreate_broker_from_token(key: str):
 
             if TOKEN_FILE.exists():
                 b = StoxkartAPI()
-                if b.is_authenticated:
+                if b.is_authenticated():
                     return b
         elif key == "shoonya":
             from brokers.shoonya import ShoonyaAPI, TOKEN_FILE

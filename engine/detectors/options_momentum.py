@@ -1359,23 +1359,24 @@ def detect_options_momentum_breakouts(
                     if (not is_idx and is_extreme_catalyst and not sector_tailwind_bonus)
                     else ""
                 )
-                if opt_type == "PE":
-                    from bot.alert_templates import format_contract_display
+                from bot.alert_templates import format_contract_display
 
-                    contract_clean = format_contract_display(contract_sym)
-                    contract_clean = re.sub(
-                        r"^(?:NSE|BSE|NFO|MCX|CDS|BFO):", "", contract_clean, flags=re.IGNORECASE
-                    ).strip()
-                    sec_cat = f"{sec_badge}{cat_badge}".strip()
-                    sec_cat_str = f" · {sec_cat}" if sec_cat else ""
-                    headline = f"🔴 {contract_clean} @ ₹{opt_ltp:,.1f}{lot_tag}{sec_cat_str} (Vol/OI {vol_oi}x)"
+                contract_clean = format_contract_display(contract_sym)
+                contract_clean = re.sub(
+                    r"^(?:NSE|BSE|NFO|MCX|CDS|BFO):", "", contract_clean, flags=re.IGNORECASE
+                ).strip()
+                sec_cat = f"{sec_badge}{cat_badge}".strip()
+                sec_cat_str = f" · {sec_cat}" if sec_cat else ""
+
+                if opt_type == "PE":
+                    headline = f"🔴 {contract_clean} PUT SURGE @ ₹{opt_ltp:,.1f}{lot_tag}{sec_cat_str} (Vol/OI {vol_oi}x)"
                     summary = (
                         f"Institutional Put surge in {clean_sym} {format_strike(strike)} PE. "
                         f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
                         f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}{high_vix_tag}"
                     )
                 else:
-                    headline = f"🟢 {contract_clean} @ ₹{opt_ltp:,.1f}{lot_tag}{sec_cat_str} (Vol/OI {vol_oi}x)"
+                    headline = f"🟢 {contract_clean} CALL BREAKOUT @ ₹{opt_ltp:,.1f}{lot_tag}{sec_cat_str} (Vol/OI {vol_oi}x)"
                     summary = (
                         f"Institutional Call surge in {clean_sym} {format_strike(strike)} CE. "
                         f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "

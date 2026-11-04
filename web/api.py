@@ -565,13 +565,10 @@ async def auth_middleware(request: _Request, call_next):
         or path in ("/health", "/health/live", "/health/ready")
         or (path == "/api/mode" and method == "GET")
         or (path == "/api/csrf-token" and method == "GET")
+        or (path == "/api/onboarding/status" and method == "GET")
         or (
-            path == "/api/onboarding/status"
-            and method == "GET"
-            and (
-                os.environ.get("DEPLOY_MODE", "") in ("", "desktop", "local", "test")
-                or user_count() == 0
-            )
+            path.startswith("/api/onboarding/")
+            and os.environ.get("DEPLOY_MODE", "") in ("", "desktop", "local", "test")
         )
         or path.startswith("/.well-known/")
         or path.startswith("/fyers/")  # OAuth callbacks
@@ -3351,12 +3348,12 @@ async def onboarding_status(request: _Request):
     res = {
         "onboarding_complete": onboarding_done or bool(ai_provider),
         "ai_provider": ai_provider
-        if (not is_hosted or is_authenticated)
+        if (not is_hosted or is_authenticated or user_count() == 0)
         else ("configured" if ai_provider else ""),
         "newsapi_key_set": newsapi,
         "broker_connected": broker_connected,
     }
-    if not is_hosted or is_authenticated:
+    if not is_hosted or is_authenticated or user_count() == 0:
         res["capital"] = os.environ.get("TOTAL_CAPITAL") or _kr_get("TOTAL_CAPITAL") or "200000"
         res["risk_pct"] = os.environ.get("DEFAULT_RISK_PCT") or _kr_get("DEFAULT_RISK_PCT") or "2"
         res["trading_mode"] = os.environ.get("TRADING_MODE") or _kr_get("TRADING_MODE") or "PAPER"
@@ -3464,7 +3461,7 @@ async def onboarding_setup_provider(req: SetupProviderRequest):
 
     deploy_mode = os.environ.get("DEPLOY_MODE", "")
     is_hosted = deploy_mode not in ("", "desktop", "local", "test")
-    if is_hosted:
+    if is_hosted and user_count() > 0:
         raise _HTTPException(
             status_code=403,
             detail="Software installation/setup is strictly prohibited in hosted environments.",
@@ -3665,14 +3662,15 @@ async def onboarding_complete(req: OnboardingCompleteRequest):
         raise HTTPException(status_code=422, detail="Risk percentage must be between 0 and 10%.")
 
     clean_mode = req.trading_mode.strip().upper()
-    if clean_mode not in ("PAPER", "SIMULATE", "DEMO", "OBSERVE"):
+    if clean_mode not in ("PAPER", "SIMULATE", "DEMO", "OBSERVE", "LIVE"):
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid trading mode '{clean_mode}' for onboarding. Allowed: PAPER, SIMULATE, DEMO, OBSERVE. Live execution cannot be enabled during onboarding.",
+            detail=f"Invalid trading mode '{clean_mode}' for onboarding. Allowed: PAPER, SIMULATE, DEMO, OBSERVE, LIVE.",
         )
 
     set_credential("TOTAL_CAPITAL", str(req.capital))
-    set_credential("DEFAULT_RISK_PCT", str(req.risk_pct))
+    risk_val = int(req.risk_pct) if req.risk_pct == int(req.risk_pct) else req.risk_pct
+    set_credential("DEFAULT_RISK_PCT", str(risk_val))
     set_credential("ONBOARDING_COMPLETE", "1")
     os.environ["TRADING_MODE"] = clean_mode
 

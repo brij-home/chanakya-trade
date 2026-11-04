@@ -1443,7 +1443,7 @@ class AutoAlertEngine:
             not in ("TRAILING_UPDATE", "T1_ACHIEVED", "TARGET_ACHIEVED", "COMPLETED", "EXPIRED")
             and "TARGET" not in (alert.target_status or "")
         )
-        if is_fresh_setup and not is_sim and not is_test_runner:
+        if is_fresh_setup and not is_sim:
             try:
                 from engine.signal_policy import (
                     evaluate_candidate_policy,

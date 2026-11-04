@@ -130,7 +130,8 @@ def test_order_lifecycle_freeze_slicing_flow(tmp_path, monkeypatch, published_fr
     """Verify end-to-end preview and execution with automatic freeze slicing in Paper mode."""
     test_paper_file = tmp_path / "paper_portfolio.json"
     monkeypatch.setattr("engine.paper.get_paper_file", lambda: test_paper_file)
-    monkeypatch.setenv("TOTAL_CAPITAL", "50000000")
+    monkeypatch.setenv("TOTAL_CAPITAL", "100000000")
+    monkeypatch.setenv("MAX_ORDER_NOTIONAL", "100000000")
 
     # Preview 56 valid NIFTY lots; the fixture limit requires three suggested child orders.
     preview = preview_order_intent(

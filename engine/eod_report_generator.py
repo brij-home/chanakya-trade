@@ -2211,10 +2211,24 @@ class EODReportGenerator:
 
             # Compute theoretical points & risk
             risk = abs(entry - sl) if abs(entry - sl) > 0.001 else 1.0
+            # If invalidated due to velocity time-stop / stagnation scratch (not a stop loss hit),
+            # exit occurs at market price (ltp), not at the full stop-loss.
+            is_scratch_exit = bool(
+                target_status in ("STAGNATION_SCRATCH", "TIME_STOP_EXIT")
+                or stage in ("STAGNATION_EXIT", "TIME_STOP_EXIT")
+                or "velocity stagnation" in lower_inv
+                or "stagnation scratch" in lower_inv
+                or "velocity time-stop" in lower_inv
+                or "time-stop expired" in lower_inv
+                or "scratched early" in lower_inv
+                or "velocity stagnation" in str(a.get("archive_reason", "")).lower()
+                or "stagnation scratch" in str(a.get("archive_reason", "")).lower()
+            )
+            is_sl_hit = is_inv and not is_scratch_exit
             if is_long:
-                gain_pts = (ltp - entry) if not is_inv else (sl - entry)
+                gain_pts = (ltp - entry) if not is_sl_hit else (sl - entry)
             else:
-                gain_pts = (entry - ltp) if not is_inv else (entry - sl)
+                gain_pts = (entry - ltp) if not is_sl_hit else (entry - sl)
             gain_pct = (gain_pts / entry * 100.0) if entry > 0 else 0.0
             r_mult = gain_pts / risk if risk > 0 else 0.0
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, time as dtime
 from typing import Literal, Optional
@@ -122,7 +123,9 @@ def evaluate_session_runway(
     )
     seg_upper = str(segment or "").upper().strip()
     sym_upper = str(symbol or "").upper().strip()
-    is_opt = seg_upper in ("OPTIONS", "OPT") or sym_upper.endswith(("CE", "PE"))
+    is_opt = seg_upper in ("OPTIONS", "OPT", "FNO_OPTION", "FNO_OPT") or (
+        seg_upper != "EQUITY" and bool(re.search(r"(?:\d|[\s_-])(?:CE|PE)$", sym_upper))
+    )
     is_idx_sym = (seg_upper in ("FNO_INDEX", "INDEX")) or any(
         idx in sym_upper
         for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")

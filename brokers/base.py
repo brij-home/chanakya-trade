@@ -20,7 +20,9 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 
-def save_secure_token(token_file: Path | str, content: str) -> None:
+def save_secure_token(
+    token_file: Path | str, content: str, encoding: str = "utf-8", **kwargs: Any
+) -> None:
     """Save broker token file with restricted 0600 permissions (BRK-12)."""
     p = Path(token_file)
     p.parent.mkdir(parents=True, exist_ok=True)

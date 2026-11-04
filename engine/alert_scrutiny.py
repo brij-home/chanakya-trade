@@ -973,7 +973,10 @@ class AlertScrutinyAuditor:
                             or (metrics_d or {}).get("pdh_sweep")
                             or (metrics_d or {}).get("turtle_soup")
                         )
-                        is_pullback = getattr(alert, "is_pullback_or_absorption", False)
+                        is_pullback_attr = getattr(alert, "is_pullback_or_absorption", False)
+                        is_pullback = is_pullback_attr is True or (
+                            isinstance(is_pullback_attr, bool) and is_pullback_attr
+                        )
                         if not is_pullback:
                             try:
                                 from engine.alert_model import is_pullback_or_absorption_setup
@@ -2647,7 +2650,10 @@ class AlertScrutinyAuditor:
                 if rvol is not None:
                     try:
                         rvol_f = float(rvol)
-                        is_pullback = getattr(alert, "is_pullback_or_absorption", False)
+                        is_pullback_attr = getattr(alert, "is_pullback_or_absorption", False)
+                        is_pullback = is_pullback_attr is True or (
+                            isinstance(is_pullback_attr, bool) and is_pullback_attr
+                        )
                         if not is_pullback:
                             try:
                                 from engine.alert_model import is_pullback_or_absorption_setup
@@ -3954,12 +3960,25 @@ class AlertScrutinyAuditor:
 
         # 21. Circuit Limit Headroom Gate (Cash Equities & Price Bands):
         # Disallow setups where price is boxed in by upper or lower circuit limit, truncating R:R.
-        upper_circuit = float(
-            metrics_dict.get("upper_circuit") or getattr(alert, "upper_circuit", 0.0) or 0.0
-        )
-        lower_circuit = float(
-            metrics_dict.get("lower_circuit") or getattr(alert, "lower_circuit", 0.0) or 0.0
-        )
+        uc_raw = metrics_dict.get("upper_circuit")
+        if uc_raw is None:
+            alert_uc = getattr(alert, "upper_circuit", None)
+            if isinstance(alert_uc, (int, float, str)):
+                uc_raw = alert_uc
+        try:
+            upper_circuit = float(uc_raw or 0.0)
+        except (ValueError, TypeError):
+            upper_circuit = 0.0
+
+        lc_raw = metrics_dict.get("lower_circuit")
+        if lc_raw is None:
+            alert_lc = getattr(alert, "lower_circuit", None)
+            if isinstance(alert_lc, (int, float, str)):
+                lc_raw = alert_lc
+        try:
+            lower_circuit = float(lc_raw or 0.0)
+        except (ValueError, TypeError):
+            lower_circuit = 0.0
 
         if not is_option_premium_levels and ltp > 0:
             if (direction in ("BULLISH", "LONG", "BUY")) and upper_circuit > 0:

@@ -353,23 +353,13 @@ def classify_alert_segment(alert: Any) -> str:
         contract and contract != clean_sym and any(x in contract for x in ("CE", "PE", "FUT"))
     )
 
-    from engine.position_sizer import is_fno_symbol
-
     is_stock_fno = bool(
         is_fut
         or is_option
         or is_deriv_alt
         or has_deriv_contract
         or (exch == "NFO" and (has_deriv_contract or is_fut or is_option))
-        or seg in ("FNO", "FNO_STOCK", "STOCK_FNO", "FNO_STOCKS")
-        or (
-            is_fno_symbol(clean_sym)
-            and (
-                alt_type == "ASYMMETRIC_OPPORTUNITY"
-                or bool(plan_opt)
-                or seg in ("FNO", "FNO_STOCK", "STOCK_FNO", "FNO_STOCKS")
-            )
-        )
+        or seg in ("FNO_STOCK", "STOCK_FNO", "FNO_STOCKS")
     )
 
     if is_stock_fno:

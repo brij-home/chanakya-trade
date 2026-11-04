@@ -89,7 +89,9 @@ def test_production_vertical_slice_veto_flow(clean_engine):
     assert not any(e["alert_id"] == veto_alert.alert_id for e in pending)
 
 
-def test_production_vertical_slice_acceptance_flow(clean_engine, tmp_path):
+def test_production_vertical_slice_acceptance_flow(clean_engine, tmp_path, monkeypatch):
+    monkeypatch.setattr("market.calendar.is_market_open", lambda exchange=None: True)
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda exchange=None: True)
     engine, store, repo = clean_engine
 
     # 1. Create a well-formed confirmed option candidate with verified volume & OI
