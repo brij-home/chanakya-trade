@@ -146,7 +146,17 @@ def test_index_micro_scalp_timing_at_09_16_15_and_apex_compliance():
     ref_dt = datetime(2026, 10, 9, 9, 16, 15, tzinfo=IST)
 
     class DummyContract:
-        def __init__(self, sym, strike, opt_type, ltp, oi=10000, volume=5000, pchange=15.0):
+        def __init__(
+            self,
+            sym,
+            strike,
+            opt_type,
+            ltp,
+            oi=10000,
+            volume=5000,
+            pchange=15.0,
+            expiry="2026-11-26",
+        ):
             self.symbol = sym
             self.strike = strike
             self.option_type = opt_type
@@ -156,6 +166,7 @@ def test_index_micro_scalp_timing_at_09_16_15_and_apex_compliance():
             self.volume = volume
             self.pchange = pchange
             self.change_pct = pchange
+            self.expiry = expiry
 
     chain = [
         DummyContract("NIFTY 25000 CE", 25000, "CE", 120.0),

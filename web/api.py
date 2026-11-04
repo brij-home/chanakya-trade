@@ -1449,25 +1449,30 @@ async def get_system_health_hub(
     else:
         overall_status = "HEALTHY"
 
-    return JSONResponse(
-        {
-            "overall_status": overall_status,
-            "incident_counts": incident_counts,
-            "active_incident_counts": active_counts,
-            "circuit_breaker": cb_diag,
-            "rate_gate": rate_gate_diag,
-            "tbt": tbt_diag,
-            "websocket": ws_diag,
-            "brokers": broker_statuses,
-            "provider_health": provider_health,
-            "slo_report": slo_report,
-            "telemetry_summary": telem_summary,
-            "incidents": incidents,
-            "memory": mem_status,
-            "storage": storage_bd.to_dict(),
-            "code_provenance": code_prov_dict,
-            "as_of": datetime.now(timezone.utc).isoformat(),
-        }
+    from starlette.responses import Response
+
+    payload = {
+        "overall_status": overall_status,
+        "incident_counts": incident_counts,
+        "active_incident_counts": active_counts,
+        "circuit_breaker": cb_diag,
+        "rate_gate": rate_gate_diag,
+        "tbt": tbt_diag,
+        "websocket": ws_diag,
+        "brokers": broker_statuses,
+        "provider_health": provider_health,
+        "slo_report": slo_report,
+        "telemetry_summary": telem_summary,
+        "incidents": incidents,
+        "memory": mem_status,
+        "storage": storage_bd.to_dict() if hasattr(storage_bd, "to_dict") else storage_bd,
+        "code_provenance": code_prov_dict,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+    return Response(
+        content=json.dumps(payload, default=str),
+        media_type="application/json",
+        status_code=200,
     )
 
 

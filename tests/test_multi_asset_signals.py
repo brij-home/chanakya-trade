@@ -264,7 +264,7 @@ def test_commodity_target_hierarchy_monotonicity():
 def test_auto_alert_engine_option_enrichment_signature():
     """Verify AutoAlertEngine calls resolve_option_contract with correct signature."""
     from datetime import datetime, timezone
-    from unittest.mock import patch
+    from unittest.mock import patch, MagicMock
     from engine.auto_alert_engine import AutoAlertEngine
     from market.options import OptionsContract
 
@@ -319,6 +319,10 @@ def test_auto_alert_engine_option_enrichment_signature():
             return_value=([c1], 25000.0, ["2026-11-26"], mock_source),
         ),
         patch("analysis.regime_governor._fresh_live_vix", return_value=15.3),
+        patch(
+            "market.contract_selection.resolve_active_contract",
+            return_value=MagicMock(is_valid=True, contract=c1),
+        ),
     ):
         engine._enrich_fno_contract_if_applicable(test_alert)
 
