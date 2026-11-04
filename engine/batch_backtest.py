@@ -85,20 +85,18 @@ class NSECharges:
         quantity: int,
         exit_price: float,
     ) -> float:
-        """Total charges for a delivery (CNC) round-trip trade."""
+        """Total charges for a delivery (CNC) round-trip trade using authoritative engine.charges."""
         if quantity <= 0 or (entry_price <= 0 and exit_price <= 0):
             return 0.0
-        buy_value = entry_price * quantity
-        sell_value = exit_price * quantity
+        from engine.charges import calculate_transaction_charges
 
-        brokerage = cls.BROKERAGE_PER_ORDER * 2  # entry + exit
-        stt = sell_value * cls.STT_DELIVERY_SELL_PCT
-        exchange = (buy_value + sell_value) * cls.EXCHANGE_TXN_PCT
-        sebi = (buy_value + sell_value) * cls.SEBI_PCT
-        stamp = buy_value * cls.STAMP_DELIVERY_BUY_PCT
-        gst = (brokerage + exchange + sebi) * cls.GST_RATE
-
-        return round(brokerage + stt + exchange + sebi + stamp + gst, 2)
+        buy = calculate_transaction_charges(
+            price=entry_price, quantity=quantity, segment="EQUITY_DELIVERY", side="BUY"
+        )
+        sell = calculate_transaction_charges(
+            price=exit_price, quantity=quantity, segment="EQUITY_DELIVERY", side="SELL"
+        )
+        return round(float(buy.total_charges + sell.total_charges), 2)
 
     @classmethod
     def intraday_charges(
@@ -107,20 +105,18 @@ class NSECharges:
         quantity: int,
         exit_price: float,
     ) -> float:
-        """Total charges for an intraday (MIS) round-trip trade."""
+        """Total charges for an intraday (MIS) round-trip trade using authoritative engine.charges."""
         if quantity <= 0 or (entry_price <= 0 and exit_price <= 0):
             return 0.0
-        buy_value = entry_price * quantity
-        sell_value = exit_price * quantity
+        from engine.charges import calculate_transaction_charges
 
-        brokerage = cls.BROKERAGE_PER_ORDER * 2
-        stt = sell_value * cls.STT_INTRADAY_PCT
-        exchange = (buy_value + sell_value) * cls.EXCHANGE_TXN_PCT
-        sebi = (buy_value + sell_value) * cls.SEBI_PCT
-        stamp = buy_value * cls.STAMP_INTRADAY_BUY_PCT
-        gst = (brokerage + exchange + sebi) * cls.GST_RATE
-
-        return round(brokerage + stt + exchange + sebi + stamp + gst, 2)
+        buy = calculate_transaction_charges(
+            price=entry_price, quantity=quantity, segment="EQUITY_INTRADAY", side="BUY"
+        )
+        sell = calculate_transaction_charges(
+            price=exit_price, quantity=quantity, segment="EQUITY_INTRADAY", side="SELL"
+        )
+        return round(float(buy.total_charges + sell.total_charges), 2)
 
 
 # -- Result Dataclasses -------------------------------------------------------

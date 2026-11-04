@@ -28,15 +28,19 @@ class TradingMode(str, Enum):
 
     @classmethod
     def from_str(cls, value: str | None) -> TradingMode:
-        """Parse mode from string with fail-safe default to SIMULATE."""
+        """Parse a known mode; only an unset value defaults to SIMULATE."""
         if not value:
             return cls.SIMULATE
         v = value.strip().upper()
-        if v in ("OBSERVE", "READONLY", "READ_ONLY"):
+        if v in ("OBSERVE", "DEMO", "READONLY", "READ_ONLY"):
             return cls.OBSERVE
+        if v in ("SIMULATE", "PAPER"):
+            return cls.SIMULATE
         if v in ("EXECUTE", "LIVE"):
             return cls.EXECUTE
-        return cls.SIMULATE
+        raise ValueError(
+            f"Unknown TRADING_MODE {value!r}; expected OBSERVE, SIMULATE/PAPER, or EXECUTE/LIVE."
+        )
 
 
 from dataclasses import dataclass
@@ -109,7 +113,9 @@ def assert_live_execution_allowed(account_id: str | None = None) -> None:
 
     Requires:
       1. TRADING_MODE=EXECUTE or TRADING_MODE=LIVE
-      2. Server flag ALLOW_LIVE_TRADING=1 or explicit confirmation
+      2. Server flag ALLOW_LIVE_TRADING=1
+      3. LIVE_EXECUTION_QUALIFIED=1 after account, fill-ledger, recovery and
+         broker acceptance criteria have passed owner-controlled qualification.
     """
     mode = get_current_mode()
     if mode != TradingMode.EXECUTE:
@@ -123,3 +129,20 @@ def assert_live_execution_allowed(account_id: str | None = None) -> None:
         raise PermissionError(
             "Live broker order blocked: ALLOW_LIVE_TRADING server feature flag is not enabled."
         )
+
+    if os.environ.get("LIVE_EXECUTION_QUALIFIED", "0").strip() != "1":
+        raise PermissionError(
+            "Live broker order blocked: the deployment has not passed live-execution qualification. "
+            "Set LIVE_EXECUTION_QUALIFIED=1 only after owner acceptance of the required controls. "
+            "Account-scoped execution facts, unknown-attempt recovery, protective-fill lifecycle, "
+            "and broker acceptance criteria are still required."
+        )
+
+    # Account allowlist verification (SEC-14)
+    allowed_accounts_str = os.environ.get("LIVE_EXECUTION_ALLOWED_ACCOUNTS", "").strip()
+    if allowed_accounts_str:
+        allowed_accounts = {acc.strip() for acc in allowed_accounts_str.split(",") if acc.strip()}
+        if not account_id or account_id not in allowed_accounts:
+            raise PermissionError(
+                f"Live broker order blocked: account '{account_id}' is not in LIVE_EXECUTION_ALLOWED_ACCOUNTS."
+            )

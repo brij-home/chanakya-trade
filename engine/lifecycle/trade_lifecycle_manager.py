@@ -508,7 +508,7 @@ class TradeLifecycleManager:
                     },
                 )
 
-        env_tag = "[TEST]" if (alert.environment == "TEST" or not alert.is_live) else "[REAL/LIVE]"
+        env_tag = "[TEST]" if (alert.environment == "TEST" or not alert.is_live) else "[LIVE]"
         is_crypto = (
             getattr(alert, "exchange", "").upper() in ("BINANCE", "CRYPTO", "DERIBIT")
             or "CRYPTO" in getattr(alert, "alert_type", "").upper()
@@ -562,26 +562,45 @@ class TradeLifecycleManager:
                             f"[TradeLifecycleManager] Could not ratchet broker SL for {alert.symbol}: {e_ratchet}"
                         )
 
+                # A target milestone is an observation, not a completed trade
+                # result. Record only a terminal final-target path, and let the
+                # evidence gate reject partial-scale alerts without fill data.
+                if eval_res.new_milestone == "TARGET_ACHIEVED" and not eval_res.should_trail:
+                    try:
+                        from engine.alert_outcomes import (
+                            calculate_terminal_forward_outcome,
+                            record_terminal_forward_outcome,
+                        )
+
+                        terminal_outcome = calculate_terminal_forward_outcome(alert, cur_quote_ltp)
+                        record_terminal_forward_outcome(
+                            alert, terminal_outcome, event="FINAL_TARGET"
+                        )
+                    except Exception as e_outcome:
+                        logger.error(
+                            "[TradeLifecycleManager] Could not process terminal forward outcome "
+                            "for %s: %s",
+                            alert.alert_id,
+                            e_outcome,
+                            exc_info=True,
+                        )
+
                 try:
                     from engine.learning_engine import pattern_learning_engine
 
                     outcome_map = {
-                        "T0_5_ACHIEVED": ("WIN_T0_5", 1.0),
-                        "T1_ACHIEVED": ("WIN_T1", 2.0),
-                        "T2_ACHIEVED": ("WIN_T2", 3.5),
-                        "TARGET_ACHIEVED": (
-                            "WIN_TARGET",
-                            max(2.5, float(eval_res.r_multiple or 4.0)),
-                        ),
-                        "BREAKEVEN_LOCKED": ("BREAKEVEN", 0.0),
-                        "DE_RISK_0_5R": ("DE_RISK", 0.5),
-                        "TRAIL_POST_SWEEP": ("SWEEP_TRAIL", 0.0),
-                        "COMPRESS_STALL_RISK": ("STALL_COMPRESS", 0.0),
-                        "TIME_STOP_SCRATCH": ("TIME_STOP_SCRATCH", 0.0),
+                        "T0_5_ACHIEVED": "WIN_T0_5",
+                        "T1_ACHIEVED": "WIN_T1",
+                        "T2_ACHIEVED": "WIN_T2",
+                        "TARGET_ACHIEVED": "WIN_TARGET",
+                        "BREAKEVEN_LOCKED": "BREAKEVEN",
+                        "DE_RISK_0_5R": "DE_RISK",
+                        "TRAIL_POST_SWEEP": "SWEEP_TRAIL",
+                        "COMPRESS_STALL_RISK": "STALL_COMPRESS",
+                        "TIME_STOP_SCRATCH": "TIME_STOP_SCRATCH",
                     }
-                    outcome_str, r_mult = outcome_map.get(
-                        eval_res.new_milestone, ("WIN_TARGET", 2.0)
-                    )
+                    outcome_str = outcome_map.get(eval_res.new_milestone, "WIN_TARGET")
+                    observed_r = float(eval_res.r_multiple or 0.0)
                     is_opt_trade = (
                         is_alert_option_premium_level(alert)
                         or (alert.actionable_plan or {}).get("instrument_type") == "OPTION"
@@ -616,26 +635,9 @@ class TradeLifecycleManager:
                         entry_price=trade_entry,
                         exit_price=float(cur_disp_p),
                         outcome=outcome_str,
-                        realized_rr=float(r_mult),
+                        realized_rr=observed_r,
                         factors_present=m_factors,
                     )
-                    try:
-                        from engine.detector_circuit_breaker import detector_circuit_breaker
-
-                        cb_outcome = (
-                            "WIN" if (outcome_str.startswith("WIN") or r_mult > 0) else "LOSS"
-                        )
-                        detector_circuit_breaker.record_outcome(
-                            alert_id=alert.alert_id,
-                            symbol=alert.symbol,
-                            alert_type=alert.alert_type,
-                            outcome=cb_outcome,
-                            realized_r=float(r_mult),
-                        )
-                    except Exception as e_cb:
-                        logger.debug(
-                            f"[TradeLifecycleManager] Error recording outcome to detector circuit breaker: {e_cb}"
-                        )
                 except Exception as e_learn:
                     logger.debug(
                         f"[TradeLifecycleManager] Error recording milestone outcome to learning engine: {e_learn}"

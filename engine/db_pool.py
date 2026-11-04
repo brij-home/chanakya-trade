@@ -105,6 +105,10 @@ class SQLiteConnectionPool:
 
         try:
             yield conn
+        except BaseException:
+            if conn is not None and conn.in_transaction:
+                conn.rollback()
+            raise
         finally:
             if conn is not None:
                 if self._closed:
@@ -128,6 +132,18 @@ class SQLiteConnectionPool:
                             )
                         with self._lock:
                             self._created = max(0, self._created - 1)
+
+    @contextmanager
+    def transaction(self):
+        """Serialized writer transaction; never span network calls."""
+        with self.acquire() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
     def close(self) -> None:
         """Close all connections in the pool and mark the pool as closed."""

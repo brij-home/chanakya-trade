@@ -49,6 +49,20 @@ def init_db() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id  TEXT PRIMARY KEY,
+            user_id     INTEGER NOT NULL,
+            email       TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            expires_at  TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at)")
     conn.commit()
     conn.close()
 
@@ -229,19 +243,39 @@ def verify_user(email: str, password: str) -> dict | None:
 
 _login_attempts: dict[str, list[float]] = {}
 MAX_LOGIN_ATTEMPTS = 5
+MAX_IP_LOGIN_ATTEMPTS = 15
 LOGIN_WINDOW_SECONDS = 60.0
 
 
-def check_rate_limit(key: str) -> bool:
-    """Check if the key (IP or email) is within allowed login attempt limits."""
+def check_rate_limit(key: str, ip: str | None = None) -> bool:
+    """Check if the key (IP:email) and client IP are within allowed login limits."""
     import time
 
     now = time.time()
+    # Prune memory if cache exceeds 1000 keys
+    if len(_login_attempts) > 1000:
+        stale_keys = [
+            k for k, v in _login_attempts.items() if not v or now - v[-1] > LOGIN_WINDOW_SECONDS
+        ]
+        for sk in stale_keys:
+            _login_attempts.pop(sk, None)
+
+    # Check key-specific attempts
     attempts = _login_attempts.get(key, [])
-    # Filter attempts within window
     recent = [t for t in attempts if now - t < LOGIN_WINDOW_SECONDS]
     _login_attempts[key] = recent
-    return len(recent) < MAX_LOGIN_ATTEMPTS
+    if len(recent) >= MAX_LOGIN_ATTEMPTS:
+        return False
+
+    # Check IP-wide attempts if provided
+    if ip and ip != "unknown":
+        ip_attempts = _login_attempts.get(f"ip:{ip}", [])
+        recent_ip = [t for t in ip_attempts if now - t < LOGIN_WINDOW_SECONDS]
+        _login_attempts[f"ip:{ip}"] = recent_ip
+        if len(recent_ip) >= MAX_IP_LOGIN_ATTEMPTS:
+            return False
+
+    return True
 
 
 def record_login_failure(key: str) -> None:
@@ -258,35 +292,103 @@ def reset_login_failures(key: str) -> None:
     _login_attempts.pop(key, None)
 
 
-# ── Session store with TTL & Expiration ─────────────────────────
+# ── Sidecar Token (Local Desktop Authenticity) ──────────────────
+
+_SIDECAR_TOKEN: str | None = None
+
+
+def get_sidecar_token() -> str | None:
+    """Return the active local sidecar token from SIDECAR_TOKEN environment variable, if explicitly configured."""
+    global _SIDECAR_TOKEN
+    if _SIDECAR_TOKEN is not None:
+        return _SIDECAR_TOKEN
+
+    env_tok = os.environ.get("SIDECAR_TOKEN")
+    if env_tok:
+        _SIDECAR_TOKEN = env_tok.strip()
+        return _SIDECAR_TOKEN
+
+    return None
+
+
+# ── Session store with SQLite persistence, TTL & Per-user Caps ─
 
 _sessions: dict[str, dict] = {}
+MAX_USER_SESSIONS = 5
 
 
 def create_session(user_id: int, email: str, ttl_seconds: int = SESSION_TTL_SECONDS) -> str:
-    """Generate a secure random session ID with expiration."""
+    """Generate a secure random session ID with expiration, enforcing per-user caps."""
     from datetime import timedelta
-
-    if len(_sessions) >= 1000:
-        oldest_key = next(iter(_sessions))
-        _sessions.pop(oldest_key, None)
 
     session_id = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=ttl_seconds)
 
-    _sessions[session_id] = {
+    session_data = {
         "user_id": user_id,
         "email": email,
         "created_at": now.isoformat(),
         "expires_at": expires_at.isoformat(),
     }
+
+    # Persist to SQLite with per-user session cap (prevents cross-user eviction)
+    try:
+        conn = _get_conn()
+        try:
+            # Enforce max 5 sessions per user: delete excess oldest sessions for this user
+            conn.execute(
+                """
+                DELETE FROM sessions WHERE user_id = ? AND session_id NOT IN (
+                    SELECT session_id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
+                )
+                """,
+                (user_id, user_id, MAX_USER_SESSIONS - 1),
+            )
+            conn.execute(
+                "INSERT INTO sessions (session_id, user_id, email, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    user_id,
+                    email,
+                    session_data["created_at"],
+                    session_data["expires_at"],
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e_sql:
+        logger.debug(f"[web.auth] SQLite session persistence non-fatal: {e_sql}")
+
+    _sessions[session_id] = session_data
     return session_id
 
 
 def get_session(session_id: str) -> dict | None:
     """Return active session dict or None if expired/not found."""
     session = _sessions.get(session_id)
+    if not session:
+        # Check SQLite persistent store
+        try:
+            conn = _get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT user_id, email, created_at, expires_at FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row:
+                    session = {
+                        "user_id": row["user_id"],
+                        "email": row["email"],
+                        "created_at": row["created_at"],
+                        "expires_at": row["expires_at"],
+                    }
+            finally:
+                conn.close()
+        except Exception as e_sql:
+            logger.debug(f"[web.auth] SQLite session lookup non-fatal: {e_sql}")
+
     if not session:
         return None
 
@@ -301,12 +403,22 @@ def get_session(session_id: str) -> dict | None:
         except Exception as e_suppressed:
             logger.debug(f"[web.auth] Non-fatal exception suppressed: {e_suppressed}")
 
+    _sessions[session_id] = session
     return session
 
 
 def delete_session(session_id: str) -> None:
-    """Remove a session."""
+    """Remove a session from cache and SQLite."""
     _sessions.pop(session_id, None)
+    try:
+        conn = _get_conn()
+        try:
+            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e_del:
+        logger.debug(f"[web.auth] SQLite session delete non-fatal: {e_del}")
 
 
 # ── FastAPI router ───────────────────────────────────────────────
@@ -338,13 +450,28 @@ async def signup(body: AuthBody, response: Response, request: Request):
         raise HTTPException(400, str(e))
 
     session_id = create_session(user["id"], user["email"])
+    deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    is_non_local = deploy_mode not in ("", "desktop", "local", "test")
+    is_https = request.url.scheme == "https"
+    secure_cookie = is_https or (is_non_local and deploy_mode != "test")
+    cookie_name = "__Host-session_id" if (is_https and is_non_local) else "session_id"
     response.set_cookie(
-        key="session_id",
+        key=cookie_name,
         value=session_id,
         httponly=True,
+        secure=secure_cookie,
         samesite="lax",
         max_age=SESSION_TTL_SECONDS,
     )
+    if cookie_name != "session_id":
+        response.set_cookie(
+            key="session_id",
+            value=session_id,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="lax",
+            max_age=SESSION_TTL_SECONDS,
+        )
     return {"ok": True, "email": user["email"]}
 
 
@@ -367,30 +494,46 @@ async def login(body: AuthBody, response: Response, request: Request):
 
     reset_login_failures(rate_key)
     session_id = create_session(user["id"], user["email"])
+    deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    is_non_local = deploy_mode not in ("", "desktop", "local", "test")
+    is_https = request.url.scheme == "https"
+    secure_cookie = is_https or (is_non_local and deploy_mode != "test")
+    cookie_name = "__Host-session_id" if (is_https and is_non_local) else "session_id"
     response.set_cookie(
-        key="session_id",
+        key=cookie_name,
         value=session_id,
         httponly=True,
+        secure=secure_cookie,
         samesite="lax",
         max_age=SESSION_TTL_SECONDS,
     )
+    if cookie_name != "session_id":
+        response.set_cookie(
+            key="session_id",
+            value=session_id,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="lax",
+            max_age=SESSION_TTL_SECONDS,
+        )
     return {"ok": True, "email": user["email"]}
 
 
 @auth_router.post("/logout")
 async def logout(request: Request, response: Response):
     """Delete session and clear cookie."""
-    session_id = request.cookies.get("session_id")
+    session_id = request.cookies.get("__Host-session_id") or request.cookies.get("session_id")
     if session_id:
         delete_session(session_id)
     response.delete_cookie("session_id")
+    response.delete_cookie("__Host-session_id")
     return {"ok": True}
 
 
 @auth_router.get("/me")
 async def me(request: Request):
     """Return current user info from session cookie."""
-    session_id = request.cookies.get("session_id")
+    session_id = request.cookies.get("__Host-session_id") or request.cookies.get("session_id")
     if not session_id:
         raise HTTPException(401, "Not authenticated")
     session = get_session(session_id)
@@ -404,7 +547,7 @@ async def me(request: Request):
 
 async def require_auth(request: Request) -> dict:
     """Dependency that checks for valid session cookie."""
-    session_id = request.cookies.get("session_id")
+    session_id = request.cookies.get("__Host-session_id") or request.cookies.get("session_id")
     if not session_id:
         raise HTTPException(401, "Not authenticated")
     session = get_session(session_id)

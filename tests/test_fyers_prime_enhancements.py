@@ -121,6 +121,117 @@ def test_fyers_expired_fno_contract_resilience(monkeypatch):
     assert rows_expired == []
 
 
+def test_expired_fno_prime_history_parses_optional_columns_by_name(monkeypatch):
+    api = FyersAPI(app_id="TEST-100", secret_key="test_secret")
+    api._access_token = "mock_token"
+    epoch = int(datetime(2025, 1, 2, 9, 20).timestamp())
+    payloads = []
+
+    class MockFyersClient:
+        def fno_historical_data(self, payload):
+            payloads.append(payload)
+            return {
+                "s": "ok",
+                "greeks_at": "candle_close",
+                "columns": [
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "open_interest",
+                    "iv",
+                    "delta",
+                    "gamma",
+                    "theta",
+                    "vega",
+                ],
+                "candles": [[epoch, 100, 105, 99, 103, 1200, 35000, None, 0.42, 0.03, -2.1, 1.4]],
+            }
+
+    monkeypatch.setattr(api, "_get_fyers", lambda: MockFyersClient())
+    monkeypatch.setattr("brokers.fyers._fyers_rate_limiter.acquire", lambda **kwargs: True)
+
+    rows = api.get_expired_fno_history(
+        "NIFTY25JAN22000CE",
+        exchange="NFO",
+        interval="5minute",
+        from_date=datetime(2025, 1, 2),
+        to_date=datetime(2025, 1, 2),
+    )
+
+    assert len(payloads) == 1
+    assert payloads[0]["symbol"] == "NSE:NIFTY25JAN22000CE"
+    assert payloads[0]["resolution"] == "5"
+    assert payloads[0]["include_oi"] == 1
+    assert payloads[0]["include_greeks"] == 1
+    assert rows[0]["open_interest"] == 35000.0
+    assert rows[0]["implied_volatility"] is None
+    assert rows[0]["delta"] == 0.42
+    assert rows[0]["historical_greeks_status"] == "PARTIAL"
+    assert rows[0]["implied_volatility_unit"] == "PERCENT"
+    assert rows[0]["open_interest_status"] == "AVAILABLE"
+    assert rows[0]["data_provenance"] == "FYERS_EXPIRED_FNO_HISTORICAL"
+    assert rows[0]["greeks_at"] == "candle_close"
+
+
+def test_expired_fno_seconds_limit_and_chunked_range(monkeypatch):
+    api = FyersAPI(app_id="TEST-100", secret_key="test_secret")
+    api._access_token = "mock_token"
+    requests = []
+
+    class MockFyersClient:
+        def fno_historical_data(self, payload):
+            requests.append(payload)
+            return {"s": "no_data", "columns": [], "candles": []}
+
+    monkeypatch.setattr(api, "_get_fyers", lambda: MockFyersClient())
+    monkeypatch.setattr("brokers.fyers._fyers_rate_limiter.acquire", lambda **kwargs: True)
+
+    api.get_expired_fno_history(
+        "NIFTY25JAN22000CE",
+        interval="5s",
+        from_date=datetime(2025, 1, 1),
+        to_date=datetime(2025, 4, 10),
+    )
+    assert len(requests) == 4
+    assert all(request["resolution"] == "5S" for request in requests)
+    assert all(
+        (
+            datetime.strptime(request["range_to"], "%Y-%m-%d")
+            - datetime.strptime(request["range_from"], "%Y-%m-%d")
+        ).days
+        < 25
+        for request in requests
+    )
+
+
+def test_expired_fno_future_never_requests_option_greeks(monkeypatch):
+    api = FyersAPI(app_id="TEST-100", secret_key="test_secret")
+    api._access_token = "mock_token"
+    captured = []
+
+    class MockFyersClient:
+        def fno_historical_data(self, payload):
+            captured.append(payload)
+            return {"s": "no_data", "columns": [], "candles": []}
+
+    monkeypatch.setattr(api, "_get_fyers", lambda: MockFyersClient())
+    monkeypatch.setattr("brokers.fyers._fyers_rate_limiter.acquire", lambda **kwargs: True)
+
+    api.get_expired_fno_history(
+        "RELIANCE26NOVFUT",
+        exchange="NFO",
+        interval="day",
+        from_date=datetime(2025, 1, 1),
+        to_date=datetime(2025, 1, 1),
+    )
+    assert captured[0]["symbol"] == "NSE:RELIANCE26NOVFUT"
+    assert captured[0]["include_oi"] == 1
+    assert captured[0]["include_greeks"] == 0
+
+
 def test_market_history_seconds_integration(monkeypatch):
     """Verify market.history.get_ohlcv integrates seconds resolutions with lookback clamping."""
     assert "5s" in INTERVAL_MAP

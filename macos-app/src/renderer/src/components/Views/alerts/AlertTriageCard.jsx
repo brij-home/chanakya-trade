@@ -73,6 +73,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
   const isProfitable = liveReturn?.isProfitable || false
 
   const expiryInfo = useMemo(() => formatExpiryDetails(alert), [alert])
+  const fmt = (v) => v !== null && v !== undefined && !isNaN(v) ? Number(v).toLocaleString('en-IN', { maximumFractionDigits: 1 }) : '—'
   const fmtP = (v) => v !== null && v !== undefined && !isNaN(v) ? (Number(v) >= 500 ? Number(v).toFixed(1) : Number(v).toFixed(2)) : '—'
   const conviction = alert.confidence || 85
   const convictionTier = alert.metrics?.conviction_tier || plan.conviction_tier || null
@@ -110,14 +111,16 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           )}
           {optType && !isFuture && (
             <span className={`text-[10px] px-1.5 py-0.5 rounded font-black uppercase tracking-wider ${
-              optType === 'CE' ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/40' : 'bg-rose-500/25 text-rose-300 border border-rose-500/40'
+              optType === 'CE'
+                ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-500/25 dark:text-emerald-300 dark:border-emerald-500/40'
+                : 'bg-rose-100 text-rose-800 border border-rose-300 dark:bg-rose-500/25 dark:text-rose-300 dark:border-rose-500/40'
             }`}>{optType}</span>
           )}
 
           <span className={`text-[10px] font-black px-2 py-0.5 rounded border tracking-wide ${
-            isBull ? 'text-emerald-300 bg-emerald-500/20 border-emerald-500/40' :
-            isNeutral ? 'text-purple-300 bg-purple-500/20 border-purple-500/40' :
-            'text-rose-300 bg-rose-500/20 border-rose-500/40'
+            isBull ? 'text-emerald-800 bg-emerald-100 border-emerald-300 dark:text-emerald-300 dark:bg-emerald-500/20 dark:border-emerald-500/40' :
+            isNeutral ? 'text-purple-800 bg-purple-100 border-purple-300 dark:text-purple-300 dark:bg-purple-500/20 dark:border-purple-500/40' :
+            'text-rose-800 bg-rose-100 border-rose-300 dark:text-rose-300 dark:bg-rose-500/20 dark:border-rose-500/40'
           }`}>
             {isBull ? '▲ LONG' : isNeutral ? '◆ NEUTRAL' : '▼ SHORT'}
           </span>
@@ -127,8 +130,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
             <span
               className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold whitespace-nowrap border ${
                 expiryInfo.isWeekly
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                  : 'bg-blue-500/20 text-blue-300 border-blue-500/40'
+                  ? 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40'
+                  : 'bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-500/20 dark:text-blue-300 dark:border-blue-500/40'
               }`}
               title={`Contract Expiry: ${expiryInfo.formatted || expiryInfo.fullDisplay} · Institutional Derivative Cycle · Monitor theta decay & rollover windows`}
             >
@@ -167,8 +170,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           {liveReturnPct !== null && (
             <span className={`px-2 py-1 rounded text-[11px] font-black font-mono border whitespace-nowrap shadow-sm ${
               isProfitable
-                ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/50'
-                : 'bg-rose-500/25 text-rose-300 border-rose-500/50'
+                ? 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-500/25 dark:text-emerald-300 dark:border-emerald-500/50'
+                : 'bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-500/25 dark:text-rose-300 dark:border-rose-500/50'
             }`}>
               {isProfitable ? '+' : ''}{liveReturnPct}%
             </span>
@@ -181,7 +184,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
         {/* Conviction Tier Badge */}
         {convictionTier === 'APEX_CONFLUENCE' && (
           <span
-            className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-amber-500/25 text-amber-300 border border-amber-500/50 shadow-sm"
+            className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-500/25 dark:text-amber-300 dark:border-amber-500/50 shadow-sm"
             title="Apex Confluence · Technical, volume, and smart money momentum align with >=90% conviction · Full position sizing eligible"
           >
             💎 APEX
@@ -189,7 +192,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
         )}
         {convictionTier === 'HIGH_CONVICTION' && (
           <span
-            className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+            className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/40"
             title="High Conviction · Conviction 80–89% with confirmed order flow · Standard trade allocation permitted"
           >
             ⚡ HIGH
@@ -197,7 +200,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
         )}
         {convictionTier === 'DEFINED_RISK_ONLY' && (
           <span
-            className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-indigo-500/20 text-indigo-300 border border-indigo-500/40"
+            className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-indigo-100 text-indigo-800 border border-indigo-300 dark:bg-indigo-500/20 dark:text-indigo-300 dark:border-indigo-500/40"
             title="Defined-Risk Mandate · Conviction 70–79% or elevated IV · Mandates vertical spread to eliminate naked exposure"
           >
             🛡️ HEDGE PLAN
@@ -207,7 +210,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
         {/* Hedged Spread Execution Mandate */}
         {executionMandate === 'HEDGED_SPREAD_MANDATORY' && convictionTier !== 'DEFINED_RISK_ONLY' && (
           <span
-            className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-rose-500/25 text-rose-300 border border-rose-500/50"
+            className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-rose-100 text-rose-800 border border-rose-300 dark:bg-rose-500/25 dark:text-rose-300 dark:border-rose-500/50"
             title={plan.sector_concurrency_warning || plan.trap_warning || 'Hedge Mandate · Elevated gamma event or sector chop · Vertical spread required to neutralize theta decay'}
           >
             🛡️ HEDGE MANDATE
@@ -304,6 +307,10 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           <span className="text-[10px] px-1.5 py-0.5 rounded font-black bg-sky-500/20 text-sky-300 border border-sky-500/40 whitespace-nowrap flex items-center gap-1" title="Telegram Push Dispatched · Broadcasted to registered institutional channel · Full trade plan synchronized">
             <span>📱</span><span>TG SENT</span>
           </span>
+        ) : alert.telegram_delivery_status === 'HELD_RADAR' || (alert.telegram_suppression_reason && (alert.telegram_suppression_reason.includes('HELD_RADAR') || alert.telegram_suppression_reason.includes('Early warning') || alert.telegram_suppression_reason.includes('coiling') || alert.telegram_suppression_reason.includes('ORB_PRIMED'))) ? (
+          <span className="text-[10px] px-1.5 py-0.5 rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap flex items-center gap-1 cursor-help" title={`👀 Held on Radar awaiting breakout ignition: ${alert.telegram_suppression_reason || 'Awaiting breakout confirmation'}`}>
+            <span>👀</span><span>RADAR (AWAITING IGNITION)</span>
+          </span>
         ) : alert.telegram_suppression_reason ? (
           <span className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 whitespace-nowrap flex items-center gap-1 cursor-help" title={`Telegram Push Held: ${alert.telegram_suppression_reason}`}>
             <span>📱</span><span>TG HELD</span>
@@ -359,7 +366,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
       </div>
 
       {/* Row 3: Headline / Thesis */}
-      <p className="text-[12px] text-zinc-300 line-clamp-2 font-sans leading-snug" title={alert.headline || alert.summary}>
+      <p className="text-[12px] text-slate-700 dark:text-zinc-300 line-clamp-2 font-sans leading-snug" title={alert.headline || alert.summary}>
         {alert.headline || alert.summary}
       </p>
 
@@ -369,7 +376,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           {entryNum && <span className="text-gold font-bold">Entry {currSym}{fmtP(entryNum)}</span>}
           {(alert.entry_range || alert.optimal_entry_range) && (alert.entry_range || alert.optimal_entry_range) !== fmtP(entryNum) && (
             <span
-              className="text-[10px] font-mono font-bold text-amber-300 bg-amber-500/15 px-1.5 py-0.5 rounded border border-amber-500/35 whitespace-nowrap"
+              className="text-[10px] font-mono font-bold text-amber-800 bg-amber-100 border border-amber-300 dark:text-amber-300 dark:bg-amber-500/15 dark:border-amber-500/35 px-1.5 py-0.5 rounded whitespace-nowrap"
               title="Optimal Trade Entry (OTE) pullback range"
             >
               OTE {alert.entry_range || alert.optimal_entry_range}
@@ -377,7 +384,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           )}
           {(levels?.no_chase_boundary || alert.no_chase_boundary) && (
             <span
-              className="text-[10px] font-mono font-bold text-rose-300 bg-rose-500/15 px-1.5 py-0.5 rounded border border-rose-500/35 whitespace-nowrap"
+              className="text-[10px] font-mono font-bold text-rose-800 bg-rose-100 border border-rose-300 dark:text-rose-300 dark:bg-rose-500/15 dark:border-rose-500/35 px-1.5 py-0.5 rounded whitespace-nowrap"
               title={
                 levels?.spot_no_chase_boundary
                   ? `No-Chase Option Limit: Entries above ${currSym}${fmtP(levels.no_chase_boundary)} disqualify setup · Spot Max: ${currSym}${fmt(levels.spot_no_chase_boundary)}`
@@ -388,27 +395,27 @@ export const AlertTriageCard = memo(function AlertTriageCard({
             </span>
           )}
           {slNum && (
-            <span className={`font-bold px-1.5 py-0.5 rounded ${isSLHit ? 'bg-rose-500/25 text-rose-300 border border-rose-500/50' : 'text-rose-400'}`}>
+            <span className={`font-bold px-1.5 py-0.5 rounded ${isSLHit ? 'bg-rose-100 text-rose-800 border border-rose-400 dark:bg-rose-500/25 dark:text-rose-300 dark:border-rose-500/50' : 'text-rose-700 dark:text-rose-400'}`}>
               {isSLHit ? '🛑 SL ' : 'SL '}{currSym}{fmtP(slNum)}
             </span>
           )}
           {t1Num && (
-            <span className={`font-bold px-1.5 py-0.5 rounded ${isT1Hit ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/50' : 'text-emerald-400'}`}>
+            <span className={`font-bold px-1.5 py-0.5 rounded ${isT1Hit ? 'bg-emerald-100 text-emerald-800 border border-emerald-400 dark:bg-emerald-500/25 dark:text-emerald-300 dark:border-emerald-500/50' : 'text-emerald-800 dark:text-emerald-400'}`}>
               {isT1Hit ? '✅ T1 ' : 'T1 '}{currSym}{fmtP(t1Num)}
             </span>
           )}
           {t2Num && (
-            <span className={`font-bold px-1.5 py-0.5 rounded ${isT2Hit ? 'bg-cyan-500/25 text-cyan-200 border border-cyan-500/50' : 'text-cyan-400'}`}>
+            <span className={`font-bold px-1.5 py-0.5 rounded ${isT2Hit ? 'bg-cyan-100 text-cyan-800 border border-cyan-400 dark:bg-cyan-500/25 dark:text-cyan-200 dark:border-cyan-500/50' : 'text-cyan-800 dark:text-cyan-400'}`}>
               {isT2Hit ? '✅ T2 ' : 'T2 '}{currSym}{fmtP(t2Num)}
             </span>
           )}
           {t3Num && (
-            <span className={`font-bold px-1.5 py-0.5 rounded ${isT3Hit ? 'bg-purple-500/25 text-purple-200 border border-purple-500/50' : 'text-purple-400'}`}>
+            <span className={`font-bold px-1.5 py-0.5 rounded ${isT3Hit ? 'bg-purple-100 text-purple-800 border border-purple-400 dark:bg-purple-500/25 dark:text-purple-200 dark:border-purple-500/50' : 'text-purple-800 dark:text-purple-400'}`}>
               {isT3Hit ? '✅ Runner ' : 'Runner '}{currSym}{fmtP(t3Num)}
             </span>
           )}
           {alert.trailing_stop && (
-            <span className="font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+            <span className="font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40">
               Trail SL {currSym}{fmtP(alert.trailing_stop)}
             </span>
           )}
@@ -419,12 +426,12 @@ export const AlertTriageCard = memo(function AlertTriageCard({
         <div className="flex items-center gap-1.5 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => onTrade(alert)}
-            className="btn btn-xs text-[10px] px-2.5 py-1 font-bold text-emerald-300 hover:text-emerald-100 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 hover:border-emerald-500/60 transition-all rounded shadow-sm"
+            className="btn btn-xs text-[10px] px-2.5 py-1 font-bold text-slate-950 bg-emerald-500 hover:bg-emerald-400 border border-emerald-400/80 dark:text-emerald-300 dark:hover:text-emerald-100 dark:bg-emerald-500/20 dark:hover:bg-emerald-500/30 dark:border-emerald-500/40 transition-all rounded shadow-sm"
             title="1-Click Trade: Open pre-populated Order Ticket"
           >⚡ Trade</button>
           <button
             onClick={() => onSendTelegram(alert)}
-            className="btn btn-xs text-[10px] px-2 py-1 font-bold text-sky-300 hover:text-sky-100 bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 transition-all rounded"
+            className="btn btn-xs text-[10px] px-2 py-1 font-bold text-sky-800 hover:text-sky-950 bg-sky-100 hover:bg-sky-200 border border-sky-300 dark:text-sky-300 dark:hover:text-sky-100 dark:bg-sky-500/15 dark:hover:bg-sky-500/25 dark:border-sky-500/40 transition-all rounded"
             title="Dispatch Alert to Telegram"
           >↗ TG</button>
           {onDismiss && (

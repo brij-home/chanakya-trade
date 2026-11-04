@@ -354,6 +354,7 @@ class OptionsLeg:
     lot_size: int = 1
     lots: int = 1
     pnl: float = 0.0
+    charges: float = 0.0
     provenance: str = "SYNTHETIC_BLACK_SCHOLES"
     symbol: str = ""
 
@@ -370,6 +371,7 @@ class OptionsTrade:
     combined_pnl: float
     combined_pnl_pct: float  # % return on margin/premium deployed
     hold_days: int
+    charges: float = 0.0
     strategy_name: str = ""
     data_provenance: str = "SYNTHETIC_BLACK_SCHOLES"
 
@@ -399,6 +401,7 @@ class OptionsBacktestResult:
     equity_curve: list[float] = field(default_factory=list)
     data_provenance: str = "SYNTHETIC_BLACK_SCHOLES"
     real_fno_candle_count: int = 0
+    execution_model: str = "DAILY_CLOSE_RESEARCH_ONLY: no intraday bid/ask, queue position, latency, partial-fill, or market-impact model"
 
     def print_summary(self) -> None:
         ret_style = "green" if self.total_pnl >= 0 else "red"
@@ -407,6 +410,7 @@ class OptionsBacktestResult:
             f"  Underlying     : {self.underlying}",
             f"  Period         : {self.start_date} → {self.end_date}",
             f"  Data Source    : {self.data_provenance} ({self.real_fno_candle_count} real bars)",
+            f"  Execution      : {self.execution_model}",
             "",
             "  [bold]Returns[/bold]",
             f"  Total P&L      : [{ret_style}]₹{self.total_pnl:,.0f}[/{ret_style}]",
@@ -736,15 +740,22 @@ class ShortStrangleStrategy(OptionsStrategy):
 # ── Expiry Calendar ──────────────────────────────────────────
 
 
-def _get_weekly_expiries(start: date, end: date) -> list[date]:
-    """Generate Thursday expiry dates (NSE weekly expiry = Thursday)."""
+def _get_expiries(underlying: str, start: date, end: date) -> list[date]:
+    """Generate effective-dated, holiday-adjusted expiries for this underlying."""
+    from market.calendar import get_active_derivative_expiry
+
     expiries = []
     current = start
     while current <= end:
-        if current.weekday() == 3:  # Thursday
+        if get_active_derivative_expiry(underlying, ref_date=current) == current:
             expiries.append(current)
         current += timedelta(days=1)
     return expiries
+
+
+def _get_weekly_expiries(start: date, end: date) -> list[date]:
+    """Backward-compatible NIFTY expiry helper; holidays can shift the weekday."""
+    return _get_expiries("NIFTY", start, end)
 
 
 def _nearest_expiry(dt: date, expiries: list[date]) -> Optional[date]:
@@ -755,8 +766,8 @@ def _nearest_expiry(dt: date, expiries: list[date]) -> Optional[date]:
     return None
 
 
-def _round_strike(spot: float, step: float = 50.0) -> float:
-    """Round to nearest strike step (NIFTY=50, BANKNIFTY=100)."""
+def _round_strike(spot: float, step: float) -> float:
+    """Round to the canonical instrument-master strike interval."""
     return round(spot / step) * step
 
 
@@ -766,15 +777,6 @@ def _round_strike(spot: float, step: float = 50.0) -> float:
 from market.instruments import STANDARD_LOT_SIZES
 
 LOT_SIZES = STANDARD_LOT_SIZES
-
-STRIKE_STEPS = {
-    "NIFTY": 50,
-    "NIFTY50": 50,
-    "NIFTY 50": 50,
-    "BANKNIFTY": 100,
-    "NIFTY BANK": 100,
-    "FINNIFTY": 50,
-}
 
 
 class OptionsBacktester:
@@ -793,6 +795,9 @@ class OptionsBacktester:
         lot_size: Optional[int] = None,
         strike_step: Optional[float] = None,
         use_real_fno: bool = True,
+        conservative_fills: bool = False,
+        slippage_bps: float = 25.0,
+        clock: Optional[Any] = None,
     ) -> None:
         self.underlying = underlying.upper()
         self.period = period
@@ -802,6 +807,9 @@ class OptionsBacktester:
 
         self.strike_step = strike_step or get_strike_step(self.underlying)
         self.use_real_fno = use_real_fno
+        self.conservative_fills = conservative_fills
+        self.slippage_bps = slippage_bps
+        self.clock = clock
         self._spot_data: Optional[pd.DataFrame] = None
         self._vix_data: Optional[pd.DataFrame] = None
         self._option_candles_cache: dict[str, pd.DataFrame] = {}
@@ -814,55 +822,11 @@ class OptionsBacktester:
         option_type: str,
     ) -> list[str]:
         """
-        Builds candidate exchange/Fyers option symbols for historical contract lookups.
-        Examples for NIFTY 24500 CE on 2024-10-31 (monthly):
-          - NSE:NIFTY24OCT24500CE
-          - NFO:NIFTY24OCT24500CE
-        Examples for weekly expiry e.g. 2024-10-17:
-          - NSE:NIFTY24O1724500CE
+        Build only the canonical broker symbol for the listed contract expiry.
         """
-        clean_u = (
-            underlying.upper()
-            .replace("NSE:", "")
-            .replace("NFO:", "")
-            .replace("BSE:", "")
-            .replace("-INDEX", "")
-            .replace(" ", "")
-            .replace("_", "")
-        )
-        if clean_u in ("NIFTY50", "NIFTY_50"):
-            clean_u = "NIFTY"
-        elif clean_u in ("NIFTYBANK", "BANK_NIFTY"):
-            clean_u = "BANKNIFTY"
+        from brokers.fyers import format_fyers_option_symbol
 
-        yy = expiry.strftime("%y")
-        mmm = expiry.strftime("%b").upper()
-        dd = expiry.strftime("%d")
-        strike_str = f"{int(strike)}" if strike == int(strike) else f"{strike:.1f}"
-        opt = option_type.upper()
-
-        monthly_sym = f"NSE:{clean_u}{yy}{mmm}{strike_str}{opt}"
-        monthly_nfo = f"NFO:{clean_u}{yy}{mmm}{strike_str}{opt}"
-
-        month_chars = {
-            1: "1",
-            2: "2",
-            3: "3",
-            4: "4",
-            5: "5",
-            6: "6",
-            7: "7",
-            8: "8",
-            9: "9",
-            10: "O",
-            11: "N",
-            12: "D",
-        }
-        m_char = month_chars.get(expiry.month, mmm[0])
-        weekly_fyers = f"NSE:{clean_u}{yy}{m_char}{dd}{strike_str}{opt}"
-        weekly_fyers_nfo = f"NFO:{clean_u}{yy}{m_char}{dd}{strike_str}{opt}"
-
-        return [monthly_sym, weekly_fyers, monthly_nfo, weekly_fyers_nfo]
+        return [format_fyers_option_symbol(underlying, expiry, strike, option_type)]
 
     def _resolve_option_premium(
         self,
@@ -917,7 +881,7 @@ class OptionsBacktester:
                                         df_parsed["date_norm"] = pd.to_datetime(
                                             df_parsed["date"]
                                         ).dt.date
-                                        df_parsed.set_index("date_norm", inplace=True)
+                                        df_parsed = df_parsed.set_index("date_norm")
                                         self._option_candles_cache[sym] = df_parsed
                                         df_opt = df_parsed
                     except Exception as e_broker:
@@ -963,6 +927,13 @@ class OptionsBacktester:
         if self._spot_data.empty:
             raise RuntimeError(f"No historical data for {self.underlying}")
 
+        if self.clock is not None:
+            now_dt = self.clock.now() if callable(getattr(self.clock, "now", None)) else self.clock
+            now_ts = pd.Timestamp(now_dt)
+            if hasattr(now_ts, "tz") and now_ts.tz is not None:
+                now_ts = now_ts.tz_localize(None)
+            self._spot_data = self._spot_data.loc[self._spot_data.index <= now_ts]
+
         # VIX data (India VIX from yfinance)
         try:
             self._vix_data = get_ohlcv("INDIA VIX", days=days)
@@ -990,7 +961,8 @@ class OptionsBacktester:
 
         spot_df = self._spot_data
         dates = spot_df.index
-        expiries = _get_weekly_expiries(
+        expiries = _get_expiries(
+            self.underlying,
             dates[0].date() if hasattr(dates[0], "date") else dates[0],
             dates[-1].date() if hasattr(dates[-1], "date") else dates[-1],
         )
@@ -999,6 +971,7 @@ class OptionsBacktester:
         trades: list[OptionsTrade] = []
         equity = [capital]
         real_fno_candle_count = 0
+        priced_observation_count = 0
 
         # Position state
         in_position = False
@@ -1016,7 +989,14 @@ class OptionsBacktester:
 
             # Find nearest expiry
             nearest_exp = _nearest_expiry(dt_date, expiries)
-            dte = (nearest_exp - dt_date).days if nearest_exp else 30
+            if nearest_exp is None:
+                if in_position:
+                    raise RuntimeError(
+                        f"Open {self.underlying} option position has no canonical expiry on {dt_date}"
+                    )
+                equity.append(capital)
+                continue
+            dte = (nearest_exp - dt_date).days
 
             if not in_position:
                 # Check entry
@@ -1039,16 +1019,27 @@ class OptionsBacktester:
                             spot,
                             nearest_exp,
                         )
+                        priced_observation_count += 1
                         if prov == "REAL_EXPIRED_FNO":
                             real_fno_candle_count += 1
+
+                        eff_prem = premium
+                        if self.conservative_fills:
+                            slip_mult = (
+                                1.0 + (self.slippage_bps / 10000.0)
+                                if spec["transaction"] == "BUY"
+                                else max(0.0, 1.0 - (self.slippage_bps / 10000.0))
+                            )
+                            eff_prem = round(premium * slip_mult, 2)
+
                         sign = 1 if spec["transaction"] == "BUY" else -1
-                        entry_premium_total += sign * premium * self.lot_size
+                        entry_premium_total += sign * eff_prem * self.lot_size
 
                         active_legs.append(
                             {
                                 **spec,
                                 "strike": strike,
-                                "entry_premium": premium,
+                                "entry_premium": eff_prem,
                                 "provenance": prov,
                                 "symbol": leg_sym,
                             }
@@ -1101,14 +1092,46 @@ class OptionsBacktester:
                             spot,
                             nearest_exp,
                         )
+                        priced_observation_count += 1
                         if exit_prov == "REAL_EXPIRED_FNO":
                             trade_provenance = "REAL_EXPIRED_FNO"
                             real_fno_candle_count += 1
                         elif leg.get("provenance") == "REAL_EXPIRED_FNO":
                             trade_provenance = "REAL_EXPIRED_FNO"
 
+                        eff_exit_prem = exit_prem
+                        if self.conservative_fills:
+                            # Closing leg: long sells (downward slip), short buys (upward slip)
+                            slip_mult = (
+                                max(0.0, 1.0 - (self.slippage_bps / 10000.0))
+                                if leg["transaction"] == "BUY"
+                                else 1.0 + (self.slippage_bps / 10000.0)
+                            )
+                            eff_exit_prem = round(exit_prem * slip_mult, 2)
+
                         sign = 1 if leg["transaction"] == "BUY" else -1
-                        leg_pnl = sign * (exit_prem - leg["entry_premium"]) * self.lot_size
+                        from engine.charges import calculate_transaction_charges
+
+                        qty = self.lot_size
+                        entry_chg = calculate_transaction_charges(
+                            price=max(0.05, float(leg["entry_premium"])),
+                            quantity=qty,
+                            segment="FNO_OPTIONS",
+                            side=leg["transaction"],
+                        )
+                        exit_side = "SELL" if leg["transaction"] == "BUY" else "BUY"
+                        exit_chg = calculate_transaction_charges(
+                            price=max(0.05, float(eff_exit_prem)),
+                            quantity=qty,
+                            segment="FNO_OPTIONS",
+                            side=exit_side,
+                        )
+                        leg_charges = round(
+                            float(entry_chg.total_charges + exit_chg.total_charges), 2
+                        )
+                        leg_pnl = (
+                            sign * (eff_exit_prem - leg["entry_premium"]) * qty
+                        ) - leg_charges
 
                         trade_legs.append(
                             OptionsLeg(
@@ -1116,9 +1139,11 @@ class OptionsBacktester:
                                 transaction=leg["transaction"],
                                 strike=leg["strike"],
                                 entry_premium=round(leg["entry_premium"], 2),
-                                exit_premium=round(exit_prem, 2),
+                                exit_premium=round(eff_exit_prem, 2),
                                 lot_size=self.lot_size,
+                                lots=1,
                                 pnl=round(leg_pnl, 2),
+                                charges=leg_charges,
                                 provenance=leg.get("provenance", "SYNTHETIC_BLACK_SCHOLES"),
                                 symbol=leg.get("symbol", ""),
                             )
@@ -1172,7 +1197,11 @@ class OptionsBacktester:
         max_dd = float(dd.min()) if not dd.empty else 0
 
         overall_provenance = (
-            "REAL_EXPIRED_FNO" if real_fno_candle_count > 0 else "SYNTHETIC_BLACK_SCHOLES"
+            "REAL_EXPIRED_FNO"
+            if real_fno_candle_count > 0 and real_fno_candle_count == priced_observation_count
+            else (
+                "MIXED_REAL_AND_MODELED" if real_fno_candle_count > 0 else "SYNTHETIC_BLACK_SCHOLES"
+            )
         )
 
         return OptionsBacktestResult(

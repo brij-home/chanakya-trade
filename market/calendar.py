@@ -14,6 +14,8 @@ Key Capabilities:
 """
 
 from __future__ import annotations
+from market.rule_schedule import derivative_close, expiry_weekday
+
 
 import json
 import logging
@@ -611,8 +613,8 @@ def get_nearest_weekly_expiry(
     """
     Get the nearest upcoming weekly contract expiry date.
     Per SEBI Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136:
-      - NSE: NIFTY options expire weekly on Thursdays.
-      - BSE: SENSEX options expire weekly on Fridays.
+      - NSE: NIFTY options expire weekly on Tuesdays.
+      - BSE: SENSEX options expire weekly on Thursdays.
       - BANKNIFTY, MIDCPNIFTY, FINNIFTY, and Equities offer strictly monthly contracts.
         For these underlyings, automatically resolves to nearest monthly expiry.
     """
@@ -634,19 +636,21 @@ def get_nearest_weekly_expiry(
     if not is_bse_weekly and not is_nse_weekly:
         return get_nearest_monthly_expiry(clean, ref_date=cur_date, ref_time=cur_time)
 
-    target_weekday = 4 if is_bse_weekly else 3
+    target_weekday = expiry_weekday("BSE" if is_bse_weekly else "NSE", cur_date)
     exch = "BSE" if is_bse_weekly else "NFO"
 
     days_ahead = (target_weekday - cur_date.weekday()) % 7
     # If today is expiry day, but market has already closed (>= 15:30 IST), roll to next week
-    if days_ahead == 0 and cur_time and cur_time >= dtime(15, 30):
+    if days_ahead == 0 and cur_time and cur_time >= derivative_close(cur_date, expiring_index=True):
         days_ahead = 7
 
     candidate = cur_date + timedelta(days=days_ahead)
     adj = get_adjusted_expiry_date(candidate, exch)
 
     # If adjusted holiday roll pushed candidate to before today (or past closed hours), advance by 1 week
-    if adj < cur_date or (adj == cur_date and cur_time and cur_time >= dtime(15, 30)):
+    if adj < cur_date or (
+        adj == cur_date and cur_time and cur_time >= derivative_close(cur_date, expiring_index=True)
+    ):
         candidate += timedelta(days=7)
         adj = get_adjusted_expiry_date(candidate, exch)
 
@@ -660,12 +664,10 @@ def get_nearest_monthly_expiry(
 ) -> date:
     """
     Get the nearest upcoming monthly contract expiry date (Futures & Monthly Options).
-    - NSE / NFO: Last Thursday of the month.
-    - BSE / BFO: Last Friday of the month.
+    - NSE / NFO: Effective-dated monthly expiry from market.rule_schedule.
+    - BSE / BFO: Effective-dated monthly expiry from market.rule_schedule.
     If the current month's expiry date has passed (or is today post-15:30 IST), rolls forward to next month.
     """
-    from calendar import monthrange
-
     cur_date = ref_date or datetime.now(IST).date()
     cur_time = ref_time
     if cur_time is None and ref_date is None:
@@ -676,24 +678,29 @@ def get_nearest_monthly_expiry(
 
     clean = canonical_symbol(underlying)
 
-    is_bse = clean in ("SENSEX", "BANKEX")
-    target_weekday = 4 if is_bse else 3
-    exch = "BSE" if is_bse else "NFO"
-
-    def _calc_month_last(yr: int, mo: int) -> date:
-        _, num_days = monthrange(yr, mo)
-        d = date(yr, mo, num_days)
-        while d.weekday() != target_weekday:
-            d -= timedelta(days=1)
-        return get_adjusted_expiry_date(d, exch)
-
-    adj = _calc_month_last(cur_date.year, cur_date.month)
-    if adj < cur_date or (adj == cur_date and cur_time and cur_time >= dtime(15, 30)):
+    adj = get_monthly_expiry_for_month(clean, cur_date.year, cur_date.month)
+    if adj < cur_date or (
+        adj == cur_date and cur_time and cur_time >= derivative_close(cur_date, expiring_index=True)
+    ):
         next_mo = cur_date.month + 1 if cur_date.month < 12 else 1
         next_yr = cur_date.year if cur_date.month < 12 else cur_date.year + 1
-        adj = _calc_month_last(next_yr, next_mo)
+        adj = get_monthly_expiry_for_month(clean, next_yr, next_mo)
 
     return adj
+
+
+def get_monthly_expiry_for_month(underlying: str, year: int, month: int) -> date:
+    """Resolve a calendar month's monthly derivative expiry using effective rules and holidays."""
+    from calendar import monthrange
+
+    clean = canonical_symbol(underlying)
+    is_bse = clean in ("SENSEX", "BANKEX")
+    exchange = "BSE" if is_bse else "NSE"
+    _, num_days = monthrange(year, month)
+    last_day = date(year, month, num_days)
+    target_weekday = expiry_weekday(exchange, last_day)
+    candidate = last_day - timedelta(days=(last_day.weekday() - target_weekday) % 7)
+    return get_adjusted_expiry_date(candidate, "BSE" if is_bse else "NFO")
 
 
 def get_active_derivative_expiry(

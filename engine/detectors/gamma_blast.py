@@ -502,7 +502,7 @@ def detect_gamma_blast(
 
         if is_phys_week and not is_index:
             # Under SEBI regulations, single-stock derivatives are physically settled. In the final
-            # 4 trading days before the last Thursday, near-month stock options face 100% full-value
+            # Near listed stock expiry, near-month stock options face elevated physical-settlement
             # margin surges and severe gamma/theta collapse. Strictly veto all near-month stock options.
             logger.debug(
                 f"[GammaBlast CE] Strictly vetoed {contract_sym}: Near-month stock option in SEBI physical delivery expiry week"
@@ -1025,7 +1025,7 @@ def detect_gamma_blast(
                         "wall_breakout": is_ce_wall_breakout,
                         "physical_settlement_week": is_phys_week,
                         "physical_settlement_warning": (
-                            "⚠️ SEBI Physical Delivery Expiry Week: STAGGERED MARGIN SURGE (25%->100% full lot cash value). INTRADAY SCALP ONLY — MANDATORY EXIT BY 15:00 IST."
+                            "Physical settlement risk is elevated near listed stock expiry. Verify current exchange margin and do not carry without required account-level protection."
                             if is_phys_week
                             else None
                         ),
@@ -1288,7 +1288,7 @@ def detect_gamma_blast(
 
         if is_phys_week and not is_index:
             # Under SEBI regulations, single-stock derivatives are physically settled. In the final
-            # 4 trading days before the last Thursday, near-month stock options face 100% full-value
+            # Near listed stock expiry, near-month stock options face elevated physical-settlement
             # margin surges and severe gamma/theta collapse. Strictly veto all near-month stock options.
             logger.debug(
                 f"[GammaBlast PE] Strictly vetoed {contract_sym}: Near-month stock option in SEBI physical delivery expiry week"
@@ -1819,7 +1819,7 @@ def detect_gamma_blast(
                         "wall_breakout": is_pe_wall_breakout,
                         "physical_settlement_week": is_phys_week,
                         "physical_settlement_warning": (
-                            "⚠️ SEBI Physical Delivery Expiry Week: STAGGERED MARGIN SURGE (25%->100% full lot cash value). INTRADAY SCALP ONLY — MANDATORY EXIT BY 15:00 IST."
+                            "Physical settlement risk is elevated near listed stock expiry. Verify current exchange margin and do not carry without required account-level protection."
                             if is_phys_week
                             else None
                         ),

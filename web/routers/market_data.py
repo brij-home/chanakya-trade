@@ -12,13 +12,27 @@ import asyncio
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+import os
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 import json
 from market.instruments import canonical_symbol
 
 logger = logging.getLogger("chanakya.web.routers.market_data")
 router = APIRouter(tags=["Market Intelligence", "Market Data"])
+
+
+def _reject_unmanaged_broker_mutation(operation: str) -> None:
+    """Keep legacy broker-specific mutations outside the order authority disabled."""
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"{operation} is disabled because this broker-specific route bypasses the "
+            "previewed order lifecycle and its durable reconciliation ledger. Use the "
+            "central OMS for supported orders; manage existing broker-side triggers "
+            "in the broker app and reconcile their status."
+        ),
+    )
 
 
 @router.get("/api/market/participant-oi")
@@ -550,116 +564,43 @@ async def get_fyers_gtt_orders_endpoint():
 
 @router.post("/api/fyers/gtt", tags=["Fyers Advanced"])
 async def place_fyers_gtt_order_endpoint(req: dict):
-    """Place a 1-year valid GTT trigger order on Fyers servers."""
-    from brokers.session import get_execution_broker
-
-    brk = get_execution_broker()
-    if not brk or not hasattr(brk, "place_gtt_order"):
-        return {"status": "error", "error": "Execution broker does not support GTT orders"}
-
-    symbol = req.get("symbol", "")
-    qty = int(req.get("qty", req.get("quantity", 1)))
-    raw_side = str(req.get("side", 1)).upper()
-    side = 1 if raw_side in ("1", "BUY") else -1
-    trigger_price = float(req.get("trigger_price", req.get("triggerPrice", 0.0)))
-    limit_price = float(req.get("limit_price", req.get("limitPrice", trigger_price)))
-    product = req.get("product", req.get("productType", "CNC"))
-
-    res = await asyncio.to_thread(
-        brk.place_gtt_order,
-        symbol=symbol,
-        qty=qty,
-        side=side,
-        trigger_price=trigger_price,
-        limit_price=limit_price,
-        product=product,
-    )
-    resp_dict = res if isinstance(res, dict) else {}
-    return {
-        **resp_dict,
-        "status": "ok" if (not isinstance(res, dict) or res.get("s", "ok") == "ok") else "error",
-        "response": res,
-    }
+    """Block untracked broker-side GTT creation."""
+    _reject_unmanaged_broker_mutation("Direct GTT placement")
 
 
 @router.delete("/api/fyers/gtt/{order_id}", tags=["Fyers Advanced"])
 async def cancel_fyers_gtt_order_endpoint(order_id: str):
-    """Cancel a server-held GTT order."""
-    from brokers.session import get_execution_broker
-
-    brk = get_execution_broker()
-    if brk and hasattr(brk, "cancel_gtt_order"):
-        ok = await asyncio.to_thread(brk.cancel_gtt_order, order_id)
-        return {"status": "ok" if ok else "error", "cancelled": ok}
-    return {"status": "error", "error": "Execution broker does not support GTT orders"}
+    """Block GTT cancellation until its protection/entry lifecycle is tracked."""
+    _reject_unmanaged_broker_mutation(f"Direct GTT cancellation for {order_id}")
 
 
 @router.post("/api/fyers/smart-trail", tags=["Fyers Advanced"])
 async def place_fyers_smart_trail_endpoint(req: dict):
-    """Place an exchange-managed Smart Trailing Stop Loss order."""
-    from brokers.session import get_execution_broker
-
-    brk = get_execution_broker()
-    if not brk or not hasattr(brk, "create_smart_trailing_order"):
-        return {
-            "status": "error",
-            "error": "Execution broker does not support smart trailing orders",
-        }
-
-    symbol = req.get("symbol", "")
-    qty = int(req.get("qty", 1))
-    raw_side = str(req.get("side", -1)).upper()
-    side = 1 if raw_side in ("1", "BUY") else -1
-    stop_price = float(req.get("stop_price", 0.0))
-    trail_amount = float(req.get("trail_amount", 1.0))
-    limit_price = float(req.get("limit_price")) if req.get("limit_price") else None
-    product = req.get("product", "INTRADAY")
-
-    res = await asyncio.to_thread(
-        brk.create_smart_trailing_order,
-        symbol=symbol,
-        qty=qty,
-        side=side,
-        stop_price=stop_price,
-        trail_amount=trail_amount,
-        limit_price=limit_price,
-        product=product,
-    )
-    return {
-        "status": "ok" if (isinstance(res, dict) and res.get("s") == "ok") else "error",
-        "response": res,
-    }
+    """Block broker-specific trailing orders until the OMS tracks their lifecycle."""
+    _reject_unmanaged_broker_mutation("Direct smart-trailing order placement")
 
 
 @router.post("/api/fyers/exit-all", tags=["Fyers Advanced"])
 @router.post("/api/fyers/panic-exit", tags=["Fyers Advanced"])
 async def fyers_panic_exit_endpoint(req: Optional[dict] = None):
-    """1-Click Emergency Position Square-Off across all segments or specific segment."""
-    from brokers.session import get_execution_broker
-
-    brk = get_execution_broker()
-    if not brk or not hasattr(brk, "exit_all_positions"):
-        return {"status": "error", "error": "Execution broker does not support bulk emergency exit"}
+    """Route panic exit through the audited central emergency coordinator."""
+    from engine.order_lifecycle import emergency_flatten_all_positions
 
     segment = req.get("segment") if req else None
-    res = await asyncio.to_thread(brk.exit_all_positions, segment=segment)
-    resp_dict = res if isinstance(res, dict) else {}
-    return {
-        **resp_dict,
-        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
-        "response": res,
-    }
+    try:
+        return await asyncio.to_thread(
+            emergency_flatten_all_positions,
+            actor="FYERS_ADVANCED_API",
+            reason="USER_PANIC_EXIT",
+            segment=segment,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.patch("/api/fyers/orders/{order_id}", tags=["Fyers Advanced"])
 async def patch_fyers_order_endpoint(order_id: str, req: dict):
-    """Modify an active pending order without losing queue priority."""
-    from brokers.session import get_execution_broker
-
-    brk = get_execution_broker()
-    if not brk or not hasattr(brk, "modify_order"):
-        return {"status": "error", "error": "Broker does not support order modification"}
-
+    """Modify only orders that already exist in the central OMS ledger."""
     price = float(req["price"]) if "price" in req and req["price"] is not None else None
     qty = int(req["qty"]) if "qty" in req and req["qty"] is not None else None
     trigger_price = (
@@ -668,20 +609,29 @@ async def patch_fyers_order_endpoint(order_id: str, req: dict):
         else None
     )
     order_type = req.get("order_type")
+    if order_type is not None:
+        raise HTTPException(422, "Changing order type is not supported by the central OMS.")
 
-    res = await asyncio.to_thread(
-        brk.modify_order,
-        order_id=order_id,
-        price=price,
-        qty=qty,
-        trigger_price=trigger_price,
-        order_type=order_type,
-    )
+    from engine.order_lifecycle import modify_order_intent
+
+    try:
+        res = await asyncio.to_thread(
+            modify_order_intent,
+            order_id,
+            new_price=price,
+            new_quantity=qty,
+            new_trigger_price=trigger_price,
+            actor="FYERS_ADVANCED_API",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
-        "status": "ok" if res.status == "OPEN" else "error",
-        "order_id": res.order_id,
-        "broker_status": res.status,
-        "message": res.message,
+        "status": "ok",
+        "order": res.to_dict(),
     }
 
 
@@ -715,27 +665,8 @@ async def get_fyers_screener_endpoint(
 
 @router.post("/api/fyers/multileg", tags=["Fyers Advanced"])
 async def place_fyers_multileg_endpoint(req: dict):
-    """Place atomic multi-leg option strategy (2L or 3L) with zero legging risk."""
-    from brokers.session import get_execution_broker
-
-    brk = get_execution_broker()
-    if not brk or not hasattr(brk, "place_multileg_order"):
-        return {"status": "error", "error": "Execution broker does not support multileg orders"}
-
-    order_type = req.get("order_type", "2L")
-    legs = req.get("legs", [])
-    product = req.get("product", "INTRADAY")
-
-    if not legs or len(legs) < 2:
-        return {"status": "error", "error": "At least 2 legs required for multileg order"}
-
-    res = await asyncio.to_thread(
-        brk.place_multileg_order,
-        order_type=order_type,
-        legs=legs,
-        product=product,
-    )
-    return {"status": "ok", "response": res}
+    """Block untracked broker baskets; broker support does not imply atomic fills."""
+    _reject_unmanaged_broker_mutation("Direct multi-leg order placement")
 
 
 @router.get("/api/fyers/alerts", tags=["Fyers Advanced"])
@@ -819,110 +750,26 @@ async def get_fyers_sector_heatmap_endpoint():
 
 @router.post("/api/fyers/positions/attach-legs", tags=["Fyers Advanced"])
 async def attach_fyers_position_legs_endpoint(req: dict):
-    """Attach or update server-managed TP/SL bracket legs directly to an open position."""
-    from brokers.session import get_execution_broker
-
-    brk = get_execution_broker()
-    if not brk or not hasattr(brk, "attach_position_legs"):
-        return {
-            "status": "error",
-            "error": "Execution broker does not support attaching position legs",
-        }
-
-    pos_id = req.get("position_id") or req.get("positionId")
-    if not pos_id:
-        return {"status": "error", "error": "position_id is required"}
-
-    res = await asyncio.to_thread(
-        brk.attach_position_legs,
-        position_id=pos_id,
-        take_profit=req.get("take_profit") or req.get("takeProfit"),
-        stop_loss=req.get("stop_loss") or req.get("stopLoss"),
-        leg_type=int(req.get("leg_type", req.get("legType", 1))),
-        qty=req.get("qty"),
-    )
-    return {
-        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
-        "response": res,
-    }
+    """Block unattached protection changes until position-to-order linkage exists."""
+    _reject_unmanaged_broker_mutation("Direct position bracket modification")
 
 
 @router.post("/api/fyers/positions/convert", tags=["Fyers Advanced"])
 async def convert_fyers_position_endpoint(req: dict):
-    """Convert an open position product type (e.g. INTRADAY to MARGIN or CNC)."""
-    from brokers.session import get_execution_broker
-
-    brk = get_execution_broker()
-    if not brk or not hasattr(brk, "convert_position"):
-        return {"status": "error", "error": "Execution broker does not support position conversion"}
-
-    symbol = req.get("symbol", "")
-    position_side = int(req.get("position_side", req.get("positionSide", 1)))
-    convert_qty = int(req.get("convert_qty", req.get("convertQty", 1)))
-    convert_from = req.get("convert_from", req.get("convertFrom", "INTRADAY"))
-    convert_to = req.get("convert_to", req.get("convertTo", "MARGIN"))
-
-    res = await asyncio.to_thread(
-        brk.convert_position,
-        symbol=symbol,
-        position_side=position_side,
-        convert_qty=convert_qty,
-        convert_from=convert_from,
-        convert_to=convert_to,
-    )
-    return {
-        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
-        "response": res,
-    }
+    """Block account product conversion until account-scoped lifecycle tracking exists."""
+    _reject_unmanaged_broker_mutation("Direct position product conversion")
 
 
 @router.post("/api/fyers/smart-orders/limit", tags=["Fyers Advanced"])
 async def place_fyers_smart_limit_endpoint(req: dict):
-    """Place a timed Smart Limit Order managed on Fyers servers."""
-    from brokers.session import get_execution_broker
-
-    brk = get_execution_broker()
-    if not brk or not hasattr(brk, "create_smart_order_limit"):
-        return {"status": "error", "error": "Execution broker does not support smart limit orders"}
-
-    res = await asyncio.to_thread(
-        brk.create_smart_order_limit,
-        symbol=req.get("symbol", ""),
-        qty=int(req.get("qty", 1)),
-        side=int(req.get("side", 1)),
-        limit_price=float(req.get("limit_price", req.get("limitPrice", 0.0))),
-        product=req.get("product", "INTRADAY"),
-    )
-    return {
-        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
-        "response": res,
-    }
+    """Block broker-hosted orders that cannot be reconciled by the central OMS."""
+    _reject_unmanaged_broker_mutation("Direct smart-limit order placement")
 
 
 @router.post("/api/fyers/smart-orders/step", tags=["Fyers Advanced"])
 async def place_fyers_smart_step_endpoint(req: dict):
-    """Place a ladder step accumulation order managed on Fyers servers."""
-    from brokers.session import get_execution_broker
-
-    brk = get_execution_broker()
-    if not brk or not hasattr(brk, "create_smart_order_step"):
-        return {"status": "error", "error": "Execution broker does not support smart step orders"}
-
-    res = await asyncio.to_thread(
-        brk.create_smart_order_step,
-        symbol=req.get("symbol", ""),
-        qty=int(req.get("qty", 1)),
-        side=int(req.get("side", 1)),
-        avg_qty=int(req.get("avg_qty", req.get("avgqty", 1))),
-        avg_diff=float(req.get("avg_diff", req.get("avgdiff", 1.0))),
-        direction=int(req.get("direction", 1)),
-        order_type=int(req.get("order_type", req.get("orderType", 1))),
-        product=req.get("product", "INTRADAY"),
-    )
-    return {
-        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
-        "response": res,
-    }
+    """Block broker-hosted accumulation orders until child order tracking exists."""
+    _reject_unmanaged_broker_mutation("Direct smart-step order placement")
 
 
 @router.get("/api/fyers/smart-exit/triggers", tags=["Fyers Advanced"])
@@ -939,24 +786,8 @@ async def get_fyers_smartexit_triggers_endpoint():
 
 @router.post("/api/fyers/smart-exit/triggers", tags=["Fyers Advanced"])
 async def create_fyers_smartexit_trigger_endpoint(req: dict):
-    """Create a server-side Smart Exit trigger (profit protection or trailing exit)."""
-    from brokers.session import get_execution_broker
-
-    brk = get_execution_broker()
-    if not brk or not hasattr(brk, "create_smartexit_trigger"):
-        return {"status": "error", "error": "Execution broker does not support smart exit triggers"}
-
-    res = await asyncio.to_thread(
-        brk.create_smartexit_trigger,
-        name=req.get("name", "SmartExit"),
-        strategy_type=int(req.get("strategy_type", req.get("type", 2))),
-        profit_rate=req.get("profit_rate", req.get("profitRate")),
-        loss_rate=req.get("loss_rate", req.get("lossRate")),
-    )
-    return {
-        "status": "ok" if (isinstance(res, dict) and res.get("s", "ok") == "ok") else "error",
-        "response": res,
-    }
+    """Block unlinked broker-side exit triggers until open positions are tracked."""
+    _reject_unmanaged_broker_mutation("Direct smart-exit trigger creation")
 
 
 # ── Fyers Post-Trade Accounting & Auditing ────────────────────
@@ -1069,12 +900,43 @@ async def get_fyers_ledger_endpoint(
 
 @router.post("/api/fyers/postback", tags=["Fyers Advanced", "Webhooks"])
 @router.post("/fyers/postback", tags=["Fyers Advanced", "Webhooks"])
-async def fyers_postback_webhook_endpoint(payload: dict[str, Any]):
+async def fyers_postback_webhook_endpoint(request: Request):
     """
     Webhook postback receiver for real-time Fyers order and trade status updates.
+    Validates HMAC-SHA256 signature against FYERS_SECRET_KEY / FYERS_WEBHOOK_SECRET.
     Broadcasts state transitions to web SSE event bus and logs incoming execution data.
     """
     from web.sse import event_bus
+    import hashlib
+    import hmac
+    import json
+    from fastapi import HTTPException
+
+    raw_body = await request.body()
+    secret = os.environ.get("FYERS_SECRET_KEY", "") or os.environ.get("FYERS_WEBHOOK_SECRET", "")
+    signature = (
+        request.headers.get("X-Fyers-Signature")
+        or request.headers.get("X-Signature")
+        or request.query_params.get("signature", "")
+    )
+    deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    is_hosted = deploy_mode not in ("", "desktop", "local", "test")
+
+    if secret:
+        expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+        if not signature or not hmac.compare_digest(signature, expected):
+            raise HTTPException(
+                status_code=401, detail="Invalid or missing Fyers webhook signature"
+            )
+    elif is_hosted:
+        raise HTTPException(
+            status_code=403, detail="Webhook signature verification required in hosted deployments"
+        )
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
     try:
         order_info = payload.get("order", payload)

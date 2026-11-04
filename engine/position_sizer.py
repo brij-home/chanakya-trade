@@ -13,6 +13,7 @@ Includes Indian market lot-size rounding for F&O underlying derivatives.
 
 from __future__ import annotations
 import logging
+import math
 
 logger = logging.getLogger("engine.position_sizer")
 
@@ -145,6 +146,9 @@ class PositionSizeResult:
     sizing_model: str
     notes: str = ""
     market_impact: Optional[MarketImpactEstimate] = None
+    status: str = "CALCULATED"
+    capital_basis: str = "EXPLICIT_BUDGET"
+    reason: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         d = {
@@ -162,6 +166,9 @@ class PositionSizeResult:
             "r_multiple": round(self.r_multiple, 2),
             "sizing_model": self.sizing_model,
             "notes": self.notes,
+            "status": self.status,
+            "capital_basis": self.capital_basis,
+            "reason": self.reason,
         }
         if self.market_impact:
             d["market_impact"] = self.market_impact.as_dict()
@@ -259,12 +266,12 @@ def is_physical_delivery_fno(symbol: str) -> bool:
 def check_sebi_physical_settlement_risk(
     symbol: str,
     dte: Optional[int] = None,
-    capital: float = 100000.0,
+    capital: Optional[float] = None,
     price: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     Evaluates SEBI physical settlement delivery risk for single-stock derivatives in expiry week (DTE <= 4).
-    Mandates 100% margin delivery coverage or warns against holding overnight to prevent auction penalties.
+    Uses a conservative full-delivery-value capital check for stock derivatives; missing inputs block the risk decision.
     """
     if not is_physical_delivery_fno(symbol):
         return {
@@ -275,7 +282,25 @@ def check_sebi_physical_settlement_risk(
             "required_delivery_capital": 0.0,
         }
 
-    if dte is None or dte > 4:
+    if dte is None:
+        return {
+            "applicable": True,
+            "blocked": True,
+            "requires_full_margin": True,
+            "status": "UNAVAILABLE",
+            "warning": f"Physical settlement risk for {symbol} is unavailable because contract DTE is missing.",
+            "required_delivery_capital": None,
+        }
+    if dte < 0:
+        return {
+            "applicable": True,
+            "blocked": True,
+            "requires_full_margin": True,
+            "status": "EXPIRED_CONTRACT",
+            "warning": f"Physical settlement check refused for {symbol}: contract expiry is in the past.",
+            "required_delivery_capital": None,
+        }
+    if dte > 4:
         return {
             "applicable": True,
             "blocked": False,
@@ -284,21 +309,60 @@ def check_sebi_physical_settlement_risk(
             "required_delivery_capital": 0.0,
         }
 
+    try:
+        current_price = float(price) if price is not None else 0.0
+    except (TypeError, ValueError):
+        current_price = 0.0
+    if not math.isfinite(current_price) or current_price <= 0:
+        return {
+            "applicable": True,
+            "blocked": True,
+            "requires_full_margin": True,
+            "status": "UNAVAILABLE",
+            "warning": f"Physical settlement risk for {symbol} is unavailable because a verified underlying price is missing.",
+            "required_delivery_capital": None,
+        }
+    try:
+        available_capital = float(capital) if capital is not None else 0.0
+    except (TypeError, ValueError):
+        available_capital = 0.0
+    if not math.isfinite(available_capital) or available_capital <= 0:
+        return {
+            "applicable": True,
+            "blocked": True,
+            "requires_full_margin": True,
+            "status": "UNAVAILABLE",
+            "warning": f"Physical settlement risk for {symbol} is unavailable because account capital is missing.",
+            "required_delivery_capital": None,
+        }
+
     lot_size = get_lot_size(symbol)
-    current_price = price or 100.0
+    if lot_size <= 0:
+        return {
+            "applicable": True,
+            "blocked": True,
+            "requires_full_margin": True,
+            "status": "UNAVAILABLE",
+            "warning": (
+                f"Physical settlement risk for {symbol} is unavailable because the exact "
+                "contract lot size is not verified in the current exchange master."
+            ),
+            "required_delivery_capital": None,
+        }
     required_capital = lot_size * current_price
 
-    has_full_margin = capital >= required_capital
+    has_full_margin = available_capital >= required_capital
     if not has_full_margin:
         warning_msg = (
             f"SEBI Physical Delivery Risk: '{symbol}' is a single-stock derivative expiring in {dte} day(s). "
-            f"Holding to expiry requires 100% physical delivery margin (₹{required_capital:,.2f}), but account "
-            f"capital is ₹{capital:,.2f}. Prohibiting new overnight position without full delivery margin."
+            f"The conservative full-delivery-value check is ₹{required_capital:,.2f}, but account "
+            f"capital is ₹{available_capital:,.2f}. Prohibiting new overnight position without full delivery margin."
         )
         return {
             "applicable": True,
             "blocked": True,
             "requires_full_margin": True,
+            "status": "BLOCKED",
             "warning": warning_msg,
             "required_delivery_capital": required_capital,
         }
@@ -311,15 +375,43 @@ def check_sebi_physical_settlement_risk(
         "applicable": True,
         "blocked": False,
         "requires_full_margin": True,
+        "status": "AVAILABLE",
         "warning": warning_msg,
         "required_delivery_capital": required_capital,
     }
 
 
 def get_lot_size(symbol: str) -> int:
-    """Get the standard lot size for a stock/index/future/option (1 for cash equity)."""
+    """Resolve exact derivative lot size from the instrument master when available.
+
+    The static underlying map is retained for research sizing and cash instruments,
+    but an exact option/future contract must use its own active master row because
+    lot sizes can change across contract transitions.
+    """
     if not symbol:
         return 1
+    raw = str(symbol).strip()
+    body = raw.split(":", 1)[-1].upper()
+    contract_like = body.endswith(("CE", "PE", "FUT")) and any(char.isdigit() for char in body)
+    if contract_like:
+        try:
+            from market.contract_selection import resolve_active_contract
+
+            res = resolve_active_contract(raw, require_fresh=True)
+            if res.is_valid and res.contract:
+                return res.contract.lot_size
+            logger.warning(
+                "[engine.position_sizer] Exact contract has no valid active listed master lot: %s (%s)",
+                raw,
+                res.rejection_reason,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[engine.position_sizer] Current contract lot lookup degraded for %s: %s",
+                raw,
+                exc,
+            )
+        return 0
     # 1. Check verified contract master first if available
     try:
         from market.instrument_master import get_verified_contract
@@ -338,20 +430,67 @@ def get_lot_size(symbol: str) -> int:
     return 1
 
 
+def resolve_payoff_orientation(
+    payoff_type: str = "LONG_ASSET",
+    direction: Optional[str] = None,
+    symbol: str = "",
+) -> str:
+    """
+    Resolve whether the position coordinate orientation is LONG or SHORT.
+
+    A bought option (whether Call or Put) is LONG premium (stop < entry < target).
+    A sold option (whether Call or Put) is SHORT premium (target < entry < stop).
+    An underlying asset follows directional exposure (Bullish=LONG, Bearish=SHORT).
+    """
+    p_up = str(payoff_type or "").upper().strip()
+    d_up = str(direction or "").upper().strip()
+    s_up = str(symbol or "").upper().split(":", 1)[-1].strip()
+
+    if p_up in ("LONG_OPTION", "BUY_OPTION", "OPTION_BUYER", "DEBIT_SPREAD", "LONG_SPREAD"):
+        return "LONG"
+    if p_up in ("SHORT_OPTION", "SELL_OPTION", "OPTION_SELLER", "CREDIT_SPREAD", "SHORT_SPREAD"):
+        return "SHORT"
+    if p_up in ("SHORT_ASSET", "EQUITY_SHORT", "FUTURES_SHORT"):
+        return "SHORT"
+
+    # Contract ticker heuristics if payoff_type was left as default
+    is_opt = s_up.endswith(("CE", "PE")) and any(c.isdigit() for c in s_up)
+    if is_opt:
+        if d_up in ("BEARISH", "SELL", "SHORT") and s_up.endswith("PE"):
+            return "LONG"
+        if d_up in ("BULLISH", "BUY", "LONG") and s_up.endswith("CE"):
+            return "LONG"
+
+    # If direction is bearish/sell on underlying asset, it is a SHORT position
+    if d_up in ("BEARISH", "SELL", "SHORT"):
+        return "SHORT"
+
+    if p_up in ("LONG_ASSET", "EQUITY_LONG", "FUTURES_LONG"):
+        return "LONG"
+
+    return "LONG"
+
+
 def calculate_position_size(
     symbol: str,
     entry_price: float,
     stop_loss: float,
-    capital: float = 100000.0,
+    capital: Optional[float] = None,
     target_price: Optional[float] = None,
     max_risk_pct: float = 1.5,  # Risk max 1.5% of total capital
     max_capital_pct: Optional[float] = 20.0,  # Max % capital in single stock
     atr: Optional[float] = None,
     sizing_model: str = "atr_volatility",
-    win_rate: float = 0.55,
-    profit_factor: float = 1.8,
+    win_rate: Optional[float] = None,
+    profit_factor: Optional[float] = None,
     is_fno: bool = False,
     vix: Optional[float] = None,
+    direction: Optional[str] = None,
+    is_research: bool = False,
+    account_snapshot: Optional[dict[str, Any]] = None,
+    payoff_type: str = "LONG_ASSET",
+    margin_required_per_lot: Optional[float] = None,
+    max_risk_rupees: Optional[float] = None,
 ) -> PositionSizeResult:
     """
     Calculate optimal position size based on institutional risk parameters.
@@ -374,27 +513,274 @@ def calculate_position_size(
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
 
     # Auto-detect indices as F&O derivatives
-    if is_fno or clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
-        lot_size = get_lot_size(clean_sym)
+    raw_body = str(symbol or "").upper().split(":", 1)[-1]
+    is_derivative_contract = raw_body.endswith(("CE", "PE", "FUT")) and any(
+        char.isdigit() for char in raw_body
+    )
+    if (
+        is_fno
+        or clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+        or is_derivative_contract
+    ):
+        lot_size = get_lot_size(symbol)
     else:
         lot_size = 1
 
-    if entry_price <= 0:
+    if entry_price <= 0 or not math.isfinite(entry_price):
+        if not is_research:
+            return PositionSizeResult(
+                symbol=clean_sym,
+                shares=0,
+                lots=0,
+                lot_size=lot_size,
+                capital_allocated=0.0,
+                capital_pct=0.0,
+                risk_amount=0.0,
+                risk_pct=0.0,
+                entry_price=0.0,
+                stop_loss=stop_loss,
+                target_price=target_price or 0.0,
+                r_multiple=0.0,
+                sizing_model=sizing_model,
+                notes="Non-positive or non-finite entry price",
+                status="BLOCKED_INVALID_PRICE",
+                capital_basis="UNAVAILABLE",
+                reason="Non-positive or non-finite entry price",
+            )
         entry_price = 100.0
 
-    # Stop distance calculation
-    if stop_loss <= 0 or stop_loss >= entry_price:
-        stop_loss = round(entry_price * 0.98, 2)
+    # Resolve capital basis and budget
+    capital_basis = "EXPLICIT_BUDGET"
+    if account_snapshot and isinstance(account_snapshot, dict):
+        curr = str(account_snapshot.get("currency") or "INR").upper().strip()
+        if curr not in ("INR", "RS", "₹"):
+            return PositionSizeResult(
+                symbol=clean_sym,
+                shares=0,
+                lots=0,
+                lot_size=lot_size,
+                capital_allocated=0.0,
+                capital_pct=0.0,
+                risk_amount=0.0,
+                risk_pct=0.0,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                target_price=target_price or entry_price,
+                r_multiple=0.0,
+                sizing_model=sizing_model,
+                notes=f"Unsupported account currency: {curr}",
+                status="BLOCKED_INVALID_CURRENCY",
+                capital_basis="UNAVAILABLE",
+                reason=f"Unsupported account currency: {curr}",
+            )
+        avail = account_snapshot.get("available_balance")
+        if avail is None:
+            avail = account_snapshot.get("net_cash")
+        try:
+            avail_f = float(avail) if avail is not None else 0.0
+        except (TypeError, ValueError):
+            avail_f = 0.0
+        if avail_f > 0 and math.isfinite(avail_f):
+            capital = avail_f
+            capital_basis = "ACCOUNT_SNAPSHOT"
+        else:
+            return PositionSizeResult(
+                symbol=clean_sym,
+                shares=0,
+                lots=0,
+                lot_size=lot_size,
+                capital_allocated=0.0,
+                capital_pct=0.0,
+                risk_amount=0.0,
+                risk_pct=0.0,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                target_price=target_price or entry_price,
+                r_multiple=0.0,
+                sizing_model=sizing_model,
+                notes="Account snapshot has zero or unverified available capital",
+                status="BLOCKED_MISSING_CAPITAL",
+                capital_basis="UNAVAILABLE",
+                reason="Account snapshot has zero or unverified available capital",
+            )
+    elif capital is None:
+        if not is_research:
+            return PositionSizeResult(
+                symbol=clean_sym,
+                shares=0,
+                lots=0,
+                lot_size=lot_size,
+                capital_allocated=0.0,
+                capital_pct=0.0,
+                risk_amount=0.0,
+                risk_pct=0.0,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                target_price=target_price or entry_price,
+                r_multiple=0.0,
+                sizing_model=sizing_model,
+                notes="Mandatory trading capital budget missing for actionable order",
+                status="BLOCKED_MISSING_CAPITAL",
+                capital_basis="UNAVAILABLE",
+                reason="Mandatory trading capital budget missing for actionable order",
+            )
+        capital = 100000.0
+        capital_basis = "HYPOTHETICAL_RESEARCH"
 
-    stop_distance = abs(entry_price - stop_loss)
-    if stop_distance <= 0:
-        stop_distance = entry_price * 0.01
+    if capital <= 0 or not math.isfinite(capital):
+        return PositionSizeResult(
+            symbol=clean_sym,
+            shares=0,
+            lots=0,
+            lot_size=lot_size,
+            capital_allocated=0.0,
+            capital_pct=0.0,
+            risk_amount=0.0,
+            risk_pct=0.0,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            target_price=target_price or entry_price,
+            r_multiple=0.0,
+            sizing_model=sizing_model,
+            notes="Missing or non-positive capital budget",
+            status="BLOCKED_MISSING_CAPITAL",
+            capital_basis="UNAVAILABLE",
+            reason="Missing or non-positive capital budget",
+        )
 
-    # Default 2R target if omitted
-    if target_price is None or target_price <= entry_price:
-        target_price = round(entry_price + (stop_distance * 2.0), 2)
+    # Resolve coordinate orientation: Long vs Short instrument payoff
+    orientation = resolve_payoff_orientation(
+        payoff_type=payoff_type, direction=direction, symbol=symbol
+    )
 
-    r_multiple = (target_price - entry_price) / stop_distance if stop_distance > 0 else 2.0
+    if orientation == "LONG":
+        if stop_loss <= 0 or stop_loss >= entry_price or not math.isfinite(stop_loss):
+            if not is_research:
+                return PositionSizeResult(
+                    symbol=clean_sym,
+                    shares=0,
+                    lots=0,
+                    lot_size=lot_size,
+                    capital_allocated=0.0,
+                    capital_pct=0.0,
+                    risk_amount=0.0,
+                    risk_pct=0.0,
+                    entry_price=entry_price,
+                    stop_loss=stop_loss,
+                    target_price=target_price or entry_price,
+                    r_multiple=0.0,
+                    sizing_model=sizing_model,
+                    notes=f"Invalid long stop-loss {stop_loss}: must be strictly below entry {entry_price}",
+                    status="BLOCKED_INVALID_ANCHORS",
+                    capital_basis=capital_basis,
+                    reason=f"Invalid long stop-loss {stop_loss}: must be strictly below entry {entry_price}",
+                )
+            stop_loss = round(entry_price * 0.98, 2)
+
+        stop_distance = max(entry_price * 0.001, entry_price - stop_loss)
+        if target_price is not None:
+            if target_price <= entry_price or not math.isfinite(target_price):
+                if not is_research:
+                    return PositionSizeResult(
+                        symbol=clean_sym,
+                        shares=0,
+                        lots=0,
+                        lot_size=lot_size,
+                        capital_allocated=0.0,
+                        capital_pct=0.0,
+                        risk_amount=0.0,
+                        risk_pct=0.0,
+                        entry_price=entry_price,
+                        stop_loss=stop_loss,
+                        target_price=target_price,
+                        r_multiple=0.0,
+                        sizing_model=sizing_model,
+                        notes=f"Invalid long target {target_price}: must be strictly above entry {entry_price}",
+                        status="BLOCKED_INVALID_ANCHORS",
+                        capital_basis=capital_basis,
+                        reason=f"Invalid long target {target_price}: must be strictly above entry {entry_price}",
+                    )
+                target_price = round(entry_price + (stop_distance * 2.0), 2)
+        else:
+            target_price = round(entry_price + (stop_distance * 2.0), 2)
+
+        r_multiple = (target_price - entry_price) / stop_distance if stop_distance > 0 else 2.0
+
+    else:
+        if stop_loss <= 0 or stop_loss <= entry_price or not math.isfinite(stop_loss):
+            if not is_research:
+                return PositionSizeResult(
+                    symbol=clean_sym,
+                    shares=0,
+                    lots=0,
+                    lot_size=lot_size,
+                    capital_allocated=0.0,
+                    capital_pct=0.0,
+                    risk_amount=0.0,
+                    risk_pct=0.0,
+                    entry_price=entry_price,
+                    stop_loss=stop_loss,
+                    target_price=target_price or entry_price,
+                    r_multiple=0.0,
+                    sizing_model=sizing_model,
+                    notes=f"Invalid short stop-loss {stop_loss}: must be strictly above entry {entry_price}",
+                    status="BLOCKED_INVALID_ANCHORS",
+                    capital_basis=capital_basis,
+                    reason=f"Invalid short stop-loss {stop_loss}: must be strictly above entry {entry_price}",
+                )
+            stop_loss = round(entry_price * 1.02, 2)
+
+        stop_distance = max(entry_price * 0.001, stop_loss - entry_price)
+        if target_price is not None:
+            if target_price >= entry_price or target_price <= 0 or not math.isfinite(target_price):
+                if not is_research:
+                    return PositionSizeResult(
+                        symbol=clean_sym,
+                        shares=0,
+                        lots=0,
+                        lot_size=lot_size,
+                        capital_allocated=0.0,
+                        capital_pct=0.0,
+                        risk_amount=0.0,
+                        risk_pct=0.0,
+                        entry_price=entry_price,
+                        stop_loss=stop_loss,
+                        target_price=target_price,
+                        r_multiple=0.0,
+                        sizing_model=sizing_model,
+                        notes=f"Invalid short target {target_price}: must be strictly below entry {entry_price}",
+                        status="BLOCKED_INVALID_ANCHORS",
+                        capital_basis=capital_basis,
+                        reason=f"Invalid short target {target_price}: must be strictly below entry {entry_price}",
+                    )
+                target_price = round(entry_price - (stop_distance * 2.0), 2)
+        else:
+            target_price = round(entry_price - (stop_distance * 2.0), 2)
+
+        r_multiple = (entry_price - target_price) / stop_distance if stop_distance > 0 else 2.0
+
+    # Short option sizing check: requires margin and bounded-risk evidence
+    if payoff_type == "SHORT_OPTION":
+        if margin_required_per_lot is None or margin_required_per_lot <= 0:
+            return PositionSizeResult(
+                symbol=clean_sym,
+                shares=0,
+                lots=0,
+                lot_size=lot_size,
+                capital_allocated=0.0,
+                capital_pct=0.0,
+                risk_amount=0.0,
+                risk_pct=0.0,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                target_price=target_price,
+                r_multiple=r_multiple,
+                sizing_model=sizing_model,
+                notes="Short option sizing requires margin and bounded-risk evidence",
+                status="BLOCKED_UNBOUNDED_RISK",
+                capital_basis=capital_basis,
+                reason="Short option sizing requires margin and bounded-risk evidence",
+            )
 
     # India VIX Volatility Regime Scaling
     effective_risk_pct = max_risk_pct
@@ -446,7 +832,14 @@ def calculate_position_size(
         logger.debug(f"[engine.position_sizer] Non-fatal exception suppressed: {e_suppressed}")
 
     # Dollar risk budget
-    risk_budget = capital * (effective_risk_pct / 100.0)
+    risk_budget = capital * (effective_risk_pct / 100.0) if capital else (max_risk_rupees or 1000.0)
+    if max_risk_rupees is not None and max_risk_rupees > 0:
+        vix_factor = (effective_risk_pct / max_risk_pct) if max_risk_pct > 0 else 1.0
+        capped_rupees = max_risk_rupees * vix_factor
+        if capital:
+            risk_budget = min(risk_budget, capped_rupees)
+        else:
+            risk_budget = capped_rupees
 
     # 1. Compute Raw Shares based on chosen model
     if sizing_model == "atr_volatility":
@@ -456,14 +849,24 @@ def calculate_position_size(
         notes = f"Sized using ATR Volatility Parity ({vol_stop:.1f} pts risk per share).{vix_note}"
 
     elif sizing_model == "half_kelly":
-        b = max(1.0, profit_factor)
-        p = max(0.1, min(0.9, win_rate))
+        if win_rate is None or profit_factor is None:
+            raise ValueError(
+                "sizing_model='half_kelly' requires empirical win_rate and profit_factor; static defaults are prohibited."
+            )
+        b = max(0.01, profit_factor)
+        p = max(0.0, min(1.0, win_rate))
         full_kelly = (p * b - (1.0 - p)) / b
-        cap_fraction = (max_capital_pct / 100.0) if max_capital_pct else 0.20
-        half_kelly_frac = max(0.02, min(cap_fraction, full_kelly * 0.5))
-        allocated = capital * half_kelly_frac
-        raw_shares = int(allocated / entry_price)
-        notes = f"Sized via Half-Kelly ({half_kelly_frac * 100:.1f}% capital allocation for {p * 100:.0f}% win-rate).{vix_note}"
+        if full_kelly <= 0:
+            half_kelly_frac = 0.0
+            allocated = 0.0
+            raw_shares = 0
+            notes = f"Sized via Half-Kelly: Non-positive edge ({full_kelly:.3f}) — zero capital allocated.{vix_note}"
+        else:
+            cap_fraction = (max_capital_pct / 100.0) if max_capital_pct else 0.20
+            half_kelly_frac = min(cap_fraction, full_kelly * 0.5)
+            allocated = capital * half_kelly_frac
+            raw_shares = int(allocated / entry_price)
+            notes = f"Sized via Half-Kelly ({half_kelly_frac * 100:.1f}% capital allocation for {p * 100:.0f}% win-rate).{vix_note}"
 
     else:  # fixed_fractional
         raw_shares = int(risk_budget / stop_distance)
@@ -478,15 +881,29 @@ def calculate_position_size(
         shares = raw_shares
 
     # 3. Lot-size rounding if derivative
-    if lot_size > 1:
+    if is_derivative_contract and lot_size <= 0:
+        shares = 0
+        lots = 0
+        notes += (
+            " [UNAVAILABLE_CONTRACT_MASTER: Exact derivative lot size is not verified; "
+            "no executable quantity is authorized.]"
+        )
+    elif lot_size > 1:
         lots = shares // lot_size
         shares = lots * lot_size
-        if shares == 0 and capital >= (entry_price * lot_size):
-            lots = 1
-            shares = lot_size
+        if lots == 0:
+            one_lot_risk = lot_size * stop_distance
+            one_lot_capital = lot_size * entry_price
+            notes += (
+                " [ZERO_LOT_RISK_BUDGET: No order size is authorized; one lot would risk "
+                f"₹{one_lot_risk:,.2f} against a ₹{risk_budget:,.2f} risk budget and require "
+                f"₹{one_lot_capital:,.2f} capital before margin.]"
+            )
     else:
-        shares = max(1, shares)
-        lots = 1
+        # Do not force a minimum share when the configured risk budget rounds
+        # below one share. Zero is a valid, non-executable sizing result.
+        shares = max(0, shares)
+        lots = shares
 
     capital_allocated = shares * entry_price
     capital_pct = (capital_allocated / capital) * 100.0 if capital > 0 else 0.0
@@ -505,6 +922,18 @@ def calculate_position_size(
     if impact.impact_tier == "HIGH_IMPACT_SLICING_REQUIRED":
         notes += f" [{impact.recommendation}]"
 
+    status = "CALCULATED" if not is_research else "RESEARCH_ONLY"
+    reason = None
+    if is_derivative_contract and lot_size <= 0:
+        status = "UNAVAILABLE_CONTRACT_MASTER"
+        reason = "Exact derivative lot size is not verified in active master"
+    elif lot_size > 1 and lots == 0:
+        status = "ZERO_LOT_RISK_BUDGET"
+        reason = f"Risk budget ₹{risk_budget:,.2f} insufficient for 1 lot"
+    elif shares == 0:
+        status = "ZERO_QUANTITY_RISK_BUDGET"
+        reason = f"Risk budget ₹{risk_budget:,.2f} insufficient for 1 share"
+
     return PositionSizeResult(
         symbol=clean_sym,
         shares=shares,
@@ -521,6 +950,9 @@ def calculate_position_size(
         sizing_model=sizing_model,
         notes=notes,
         market_impact=impact,
+        status=status,
+        capital_basis=capital_basis,
+        reason=reason,
     )
 
 
@@ -619,11 +1051,12 @@ def calculate_volatility_risk_parity_size(
         is_fno=is_fno,
     )
 
-    # 7. Apply detector-specific conviction lot scaling if provided
+    # 7. Apply detector-specific conviction lot scaling if provided. A dampener
+    # may reduce the result to zero; it must not reintroduce a minimum lot.
     if alert_type and result.lot_size > 1 and result.lots >= 1:
         mult = get_detector_lot_multiplier(alert_type)
         if mult != 1.0:
-            adj_lots = max(1, int(round(result.lots * mult)))
+            adj_lots = max(0, int(round(result.lots * mult)))
             adj_shares = adj_lots * result.lot_size
             adj_capital = adj_shares * result.entry_price
             adj_risk = adj_shares * abs(result.entry_price - result.stop_loss)
@@ -641,7 +1074,10 @@ def calculate_volatility_risk_parity_size(
                 target_price=result.target_price,
                 r_multiple=result.r_multiple,
                 sizing_model="atr_volatility",
-                notes=f"{result.notes} [Detector '{alert_type}' {mult:.2f}x sizing applied: {adj_lots} lots]",
+                notes=(
+                    f"{result.notes} [Detector '{alert_type}' {mult:.2f}x sizing applied: "
+                    f"{adj_lots} lots; no minimum lot is forced.]"
+                ),
             )
 
     vol_pct = (atr / entry_price) * 100.0
@@ -654,7 +1090,7 @@ def calculate_volatility_risk_parity_size(
 # detectors receive a 1.25x lot premium; low-conviction counter-trend detectors are
 # dampened to 0.5x to preserve positive expected-value across the portfolio.
 # These multipliers are applied AFTER standard lot-size rounding so F&O contract
-# integrity is always maintained (always a whole number of lots ≥ 1).
+# integrity is always maintained. A zero-lot result remains non-executable.
 
 _DETECTOR_LOT_MULTIPLIERS: dict[str, float] = {
     # ── High-Conviction: 1.25× premium ──────────────────────────────────────
@@ -727,20 +1163,26 @@ def calculate_position_size_for_alert(
     symbol: str,
     entry_price: float,
     stop_loss: float,
-    capital: float = 100000.0,
+    capital: Optional[float] = None,
     target_price: Optional[float] = None,
     max_risk_pct: float = 1.5,
     max_capital_pct: Optional[float] = 20.0,
     atr: Optional[float] = None,
     sizing_model: str = "atr_volatility",
-    win_rate: float = 0.55,
-    profit_factor: float = 1.8,
+    win_rate: Optional[float] = None,
+    profit_factor: Optional[float] = None,
     is_fno: bool = False,
     vix: Optional[float] = None,
     conviction_tier: Optional[str] = None,
     is_physical_expiry_week: bool = False,
     cheetah_mandate: Optional[str] = None,
     strike_clock_zone: Optional[str] = None,
+    direction: Optional[str] = None,
+    is_research: bool = False,
+    account_snapshot: Optional[dict[str, Any]] = None,
+    payoff_type: str = "LONG_ASSET",
+    margin_required_per_lot: Optional[float] = None,
+    max_risk_rupees: Optional[float] = None,
 ) -> PositionSizeResult:
     """
     Detector-aware and conviction-tier-calibrated position sizing.
@@ -769,6 +1211,12 @@ def calculate_position_size_for_alert(
         profit_factor=profit_factor,
         is_fno=is_fno,
         vix=vix,
+        direction=direction,
+        is_research=is_research,
+        account_snapshot=account_snapshot,
+        payoff_type=payoff_type,
+        margin_required_per_lot=margin_required_per_lot,
+        max_risk_rupees=max_risk_rupees,
     )
 
     # 2. Resolve combined detector, conviction tier, cheetah regime & strike clock multiplier
@@ -802,12 +1250,32 @@ def calculate_position_size_for_alert(
         physical_discount_applied = True
 
     # 4. No adjustment needed for standard multiplier (1.0×)
-    if combined_multiplier == 1.0 or base.lots <= 0:
+    if combined_multiplier == 1.0:
+        return base
+    if base.lots <= 0:
+        if combined_multiplier != 1.0:
+            base.notes = (
+                f"{base.notes} | [Sizing modifier {conviction_tier or alert_type}: "
+                f"{combined_multiplier:.2f}x; risk budget remains zero lots, "
+                "so no minimum lot is forced.]"
+            )
+        if physical_discount_applied:
+            base.notes = (
+                f"{base.notes} | [SEBI Physical Settlement] 50% lot discount applied; "
+                "risk budget already sizes to zero lots."
+            )
         return base
 
     # 4. Apply combined multiplier to lots (always round down to whole contracts)
     raw_lots = base.lots * combined_multiplier
-    adjusted_lots = max(1, int(raw_lots))  # Never go below 1 lot
+    adjusted_lots = max(0, int(raw_lots))  # Zero lots when the risk budget cannot fund one lot
+
+    # Bound by exact rupee risk cap if specified
+    if max_risk_rupees is not None and max_risk_rupees > 0:
+        stop_dist = abs(base.entry_price - base.stop_loss)
+        if base.lot_size > 0 and stop_dist > 0:
+            max_allowed_lots = int(max_risk_rupees / (base.lot_size * stop_dist))
+            adjusted_lots = min(adjusted_lots, max_allowed_lots)
 
     # 5. Recompute derived fields from adjusted lots
     adjusted_shares = adjusted_lots * base.lot_size
@@ -863,35 +1331,70 @@ def generate_execution_ticket(
     execution_friction_badge: Optional[str] = None,
     bid: Optional[float] = None,
     ask: Optional[float] = None,
+    segment: str | None = None,
 ) -> dict[str, Any]:
     """
-    Builds a capital-calibrated, ready-to-execute institutional order ticket.
-    Translates raw quantitative alert price levels into an actionable order payload
-    with lot-size quantization, max INR risk cap, and 1-click execution support.
+    Builds a capital-calibrated order draft. It is executable only when the risk
+    budget funds a positive canonical quantity and a master-backed routing plan exists.
     """
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    raw_symbol = str(symbol or "").strip()
+    clean_sym = raw_symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+
+    # An actionable ticket must contain explicit, directionally valid levels.
+    # The research sizing helper retains its historical convenience defaults,
+    # but those defaults must never be promoted to an execution ticket.
+    if not math.isfinite(float(entry_price)) or entry_price <= 0:
+        raise ValueError("A finite positive entry price is required for an execution ticket")
+    if not math.isfinite(float(stop_loss)) or stop_loss <= 0:
+        raise ValueError(
+            "A finite positive structural stop-loss is required for an execution ticket"
+        )
+    if target_price is None or not math.isfinite(float(target_price)) or target_price <= 0:
+        raise ValueError("An explicit finite positive target is required for an execution ticket")
+    is_bullish = direction.upper() in ("BULLISH", "BUY", "LONG")
+    if (is_bullish and not (stop_loss < entry_price < target_price)) or (
+        not is_bullish and not (target_price < entry_price < stop_loss)
+    ):
+        raise ValueError("Entry, stop-loss and target are not directionally coherent")
+
+    # Execution sizing must use a current exact contract master row; the
+    # underlying static research map cannot authorize an order ticket.
+    raw_body = raw_symbol.split(":", 1)[-1].upper()
+    contract_like = raw_body.endswith(("CE", "PE", "FUT")) and any(
+        char.isdigit() for char in raw_body
+    )
+    if contract_like:
+        from market.symbol_master import get_symbol_info
+
+        contract_info = get_symbol_info(raw_symbol, require_fresh=True)
+        try:
+            canonical_lot_size = int((contract_info or {}).get("minLotSize", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Current contract lot size is invalid for {raw_symbol}") from exc
+        if canonical_lot_size <= 0:
+            raise RuntimeError(f"Current contract lot size is unavailable for {raw_symbol}")
 
     if alert_type:
         res = calculate_position_size_for_alert(
-            symbol=clean_sym,
+            symbol=raw_symbol,
             entry_price=entry_price,
             stop_loss=stop_loss,
             alert_type=alert_type,
             capital=capital,
             target_price=target_price,
             max_risk_pct=max_risk_pct,
-            is_fno=is_fno,
+            is_fno=is_fno or contract_like,
             conviction_tier=conviction_tier,
         )
     else:
         res = calculate_position_size(
-            symbol=clean_sym,
+            symbol=raw_symbol,
             entry_price=entry_price,
             stop_loss=stop_loss,
             capital=capital,
             target_price=target_price,
             max_risk_pct=max_risk_pct,
-            is_fno=is_fno,
+            is_fno=is_fno or contract_like,
         )
 
     side = "BUY" if direction.upper() in ("BULLISH", "BUY", "LONG") else "SELL"
@@ -932,16 +1435,32 @@ def generate_execution_ticket(
     # Tick-size quantization (0.05 standard NSE/NFO)
     final_limit_price = round(round(final_limit_price / 0.05) * 0.05, 2)
 
-    # Generate Smart Order Router (SOR) execution plan
-    from engine.smart_order_router import build_smart_execution_plan
+    # A zero-lot result is a blocked sizing outcome, never a forced minimum
+    # order. Keep the setup visible for review without creating an executable
+    # SOR plan. Preserve the caller's exchange-qualified symbol for master lookup.
+    execution_status = "READY"
+    sor_payload: dict[str, Any] | None = None
+    auto_submit_ready = True
+    if res.shares <= 0 or res.lots <= 0:
+        execution_status = "BLOCKED_RISK_BUDGET"
+        auto_submit_ready = False
+        ticket_notes = (
+            f"{ticket_notes} | Order blocked: risk budget cannot fund one canonical share/lot."
+            if ticket_notes
+            else "Order blocked: risk budget cannot fund one canonical share/lot."
+        )
+    else:
+        from engine.smart_order_router import build_smart_execution_plan
 
-    sor_plan = build_smart_execution_plan(
-        symbol=clean_sym,
-        side=side,
-        total_quantity=res.shares,
-        ltp=entry_price,
-        lot_size=res.lot_size,
-    )
+        sor_plan = build_smart_execution_plan(
+            symbol=raw_symbol,
+            side=side,
+            total_quantity=res.shares,
+            ltp=entry_price,
+            lot_size=res.lot_size,
+            segment=segment,
+        )
+        sor_payload = sor_plan.to_dict()
 
     return {
         "symbol": clean_sym,
@@ -962,8 +1481,9 @@ def generate_execution_ticket(
         "risk_pct": round(res.risk_pct, 2),
         "risk_reward_ratio": round(res.r_multiple, 2),
         "sizing_model": res.sizing_model,
-        "auto_submit_ready": True,
-        "smart_routing": sor_plan.to_dict(),
+        "execution_status": execution_status,
+        "auto_submit_ready": auto_submit_ready,
+        "smart_routing": sor_payload,
         "notes": ticket_notes,
         "conviction_tier": conviction_tier,
         "execution_friction_badge": execution_friction_badge,
@@ -1144,15 +1664,15 @@ def calculate_episodic_kelly_position_size(
         is_fno=is_fno,
     )
 
-    if is_fno and base.lots > 0:
+    if is_fno:
         raw_adj_lots = base.lots * quarter_kelly
         adj_lots = (
-            max(1, int(raw_adj_lots)) if quarter_kelly >= 0.50 else max(1, round(raw_adj_lots))
+            max(0, int(raw_adj_lots)) if quarter_kelly >= 0.50 else max(0, round(raw_adj_lots))
         )
         adj_shares = adj_lots * base.lot_size
     else:
-        adj_shares = max(1, int(base.shares * quarter_kelly))
-        adj_lots = max(1, int(adj_shares / max(1, base.lot_size))) if base.lot_size > 1 else 0
+        adj_shares = max(0, int(base.shares * quarter_kelly))
+        adj_lots = int(adj_shares / max(1, base.lot_size)) if base.lot_size > 1 else adj_shares
 
     stop_dist = max(0.01, abs(entry_price - stop_loss))
     adj_risk = round(adj_shares * stop_dist, 2)

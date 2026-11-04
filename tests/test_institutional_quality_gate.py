@@ -312,8 +312,8 @@ class TestFreeRollProtocolAndEngineIntegration:
 
     def test_sebi_physical_settlement_week_vetoes_near_month_stock_derivative(self):
         """Verify quality gate strictly vetoes near-month stock options in monthly expiry week."""
-        # 2026-09-24 is last Thursday of Sept 2026. Ref date: 2026-09-22 (DTE=2, settlement week)
-        ref_dt = datetime(2026, 9, 22, 10, 0, tzinfo=IST)
+        # September 2026 monthly expiry is Tuesday 29 September; DTE=4 is inside the conservative review window.
+        ref_dt = datetime(2026, 9, 25, 10, 0, tzinfo=IST)
         alert = AutoAlert(
             alert_id="RELIANCE-PHYS-TRAP-01",
             alert_type="OPTIONS_MOMENTUM",
@@ -322,7 +322,7 @@ class TestFreeRollProtocolAndEngineIntegration:
             headline="Reliance Near Month Call",
             summary="Expiring stock option in physical settlement week",
             ltp=45.0,
-            symbol="RELIANCE",
+            symbol="NSE:RELIANCE-EQ",
             direction="BULLISH",
             trigger_level=45.0,
             stop_loss=35.0,
@@ -330,7 +330,7 @@ class TestFreeRollProtocolAndEngineIntegration:
             strike=3000.0,
             option_type="CE",
             contract_symbol="RELIANCE26SEP3000CE",
-            expiry_date="2026-09-24",
+            expiry_date="2026-09-29",
             segment="FNO_STOCK",
             confidence=85,
             environment="LIVE",
@@ -343,8 +343,8 @@ class TestFreeRollProtocolAndEngineIntegration:
 
     def test_sebi_physical_settlement_week_allows_next_month_stock_derivative(self):
         """Verify quality gate allows stock options correctly routed to next month expiry."""
-        # Ref date: 2026-09-22 (settlement week for Sept), but contract is Oct (2026-10-29)
-        ref_dt = datetime(2026, 9, 22, 10, 0, tzinfo=IST)
+        # Ref date: 2026-09-25 (settlement review window for Sept), contract is October monthly expiry.
+        ref_dt = datetime(2026, 9, 25, 10, 0, tzinfo=IST)
         alert = AutoAlert(
             alert_id="RELIANCE-NEXT-MONTH-01",
             alert_type="OPTIONS_MOMENTUM",
@@ -361,7 +361,7 @@ class TestFreeRollProtocolAndEngineIntegration:
             strike=3000.0,
             option_type="CE",
             contract_symbol="RELIANCE26OCT3000CE",
-            expiry_date="2026-10-29",
+            expiry_date="2026-10-27",
             segment="FNO_STOCK",
             confidence=85,
             environment="LIVE",
@@ -472,7 +472,7 @@ class TestFreeRollProtocolAndEngineIntegration:
         assert "DEFINED_RISK_ONLY" in tier3_res.notes
 
         ticket = generate_execution_ticket(
-            symbol="RELIANCE",
+            symbol="NSE:RELIANCE-EQ",
             entry_price=3000.0,
             stop_loss=2950.0,
             target_price=3120.0,
@@ -489,26 +489,30 @@ class TestFreeRollProtocolAndEngineIntegration:
             check_monthly_physical_settlement_status,
         )
 
-        # 2026-09-24 is last Thursday of Sept 2026
-        # Tuesday 2026-09-22: DTE=2 -> Monthly physical settlement week
-        tue_dt = datetime(2026, 9, 22, 11, 0, tzinfo=IST)
-        assert is_monthly_physical_expiry_week(symbol="RELIANCE", ref_dt=tue_dt) is True
-        assert is_monthly_physical_expiry_week(symbol="NIFTY", ref_dt=tue_dt) is False
+        # NSE monthly stock expiry is Tuesday 2026-09-29 under the effective
+        # schedule; Friday 2026-09-25 is four calendar days before expiry.
+        expiry_week_dt = datetime(2026, 9, 25, 11, 0, tzinfo=IST)
+        assert is_monthly_physical_expiry_week(symbol="RELIANCE", ref_dt=expiry_week_dt) is True
+        assert is_monthly_physical_expiry_week(symbol="NIFTY", ref_dt=expiry_week_dt) is False
 
-        is_wk, dte = check_monthly_physical_settlement_status(symbol="RELIANCE", ref_dt=tue_dt)
+        is_wk, dte = check_monthly_physical_settlement_status(
+            symbol="RELIANCE", ref_dt=expiry_week_dt
+        )
         assert is_wk is True
-        assert dte == 2
+        assert dte == 4
 
-        is_wk_idx, _ = check_monthly_physical_settlement_status(symbol="NIFTY", ref_dt=tue_dt)
+        is_wk_idx, _ = check_monthly_physical_settlement_status(
+            symbol="NIFTY", ref_dt=expiry_week_dt
+        )
         assert is_wk_idx is False
 
-        # Mid-month: Thursday 2026-09-10 (DTE=14) -> Not expiry week
+        # Mid-month: Thursday 2026-09-10 (DTE=19) -> Not expiry week
         mid_dt = datetime(2026, 9, 10, 11, 0, tzinfo=IST)
         assert is_monthly_physical_expiry_week(symbol="RELIANCE", ref_dt=mid_dt) is False
 
     def test_quality_gate_vetoes_unrouted_stock_derivative_during_expiry_week(self):
         """Verify quality gate vetoes F&O stock derivative without next-month routing during settlement week."""
-        tue_dt = datetime(2026, 9, 22, 11, 0, tzinfo=IST)
+        expiry_week_dt = datetime(2026, 9, 25, 11, 0, tzinfo=IST)
         alert = AutoAlert(
             alert_id="TCS-EXPIRY-UNROUTED-01",
             alert_type="OPTIONS_MOMENTUM",
@@ -529,7 +533,7 @@ class TestFreeRollProtocolAndEngineIntegration:
             environment="LIVE",
             is_live=True,
         )
-        verdict = evaluate_institutional_quality_gate(alert, ref_dt=tue_dt)
+        verdict = evaluate_institutional_quality_gate(alert, ref_dt=expiry_week_dt)
         assert verdict.is_vetoed is True
         assert "SEBI Physical Settlement Week Trap" in verdict.veto_reason
         assert verdict.conviction_tier == "REJECTED"

@@ -138,13 +138,14 @@ def test_tier2_scrutiny_smt_divergence_gate(monkeypatch):
         summary="Test breakout",
         ltp=25000.0,
         trigger_level=25000.0,
-        target_level=25150.0,
+        target_level=25240.0,
         stop_loss=24920.0,
         metrics={
             "spot": 25000.0,
             "vwap": 24950.0,
-            "day_high": 25000.0,
+            "day_high": 24950.0,
             "day_low": 24800.0,
+            "rvol": 2.0,
         },
     )
 

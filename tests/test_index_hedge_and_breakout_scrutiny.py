@@ -72,7 +72,7 @@ def _make_dummy_ohlcv(
             }
         )
     df = pd.DataFrame(records)
-    df.set_index("datetime", inplace=True)
+    df = df.set_index("datetime")
     return df
 
 
@@ -424,7 +424,7 @@ def test_market_breadth_sanity_veto_call_spreads_in_broad_decline(monkeypatch):
         is_live=True,
         environment="LIVE",
         segment="FNO_INDEX",
-        metrics={"enforce_breadth": True},
+        metrics={"enforce_breadth": True, "volume": 10000, "oi": 25000},
     )
 
     ok, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(call_alert)
@@ -452,7 +452,7 @@ def test_market_breadth_sanity_veto_call_spreads_in_broad_decline(monkeypatch):
         is_live=True,
         environment="LIVE",
         segment="FNO_INDEX",
-        metrics={"enforce_breadth": True},
+        metrics={"enforce_breadth": True, "volume": 10000, "oi": 25000},
     )
 
     ok_put, reason_put, flags_put = alert_scrutiny_auditor.verify_tier1_sanity(put_alert)

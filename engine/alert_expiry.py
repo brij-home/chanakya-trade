@@ -15,37 +15,43 @@ from market.instruments import canonical_symbol, parse_derivative_contract
 
 
 def classify_expiry_type(expiry_str: Optional[str], symbol: Optional[str] = None) -> str:
-    """
-    Classifies an Indian market option contract expiry into 'WEEKLY' or 'MONTHLY'.
-    - Single-stock equities in NSE/BSE only have monthly options.
-    - Under SEBI single-benchmark index derivative regulations (effective Nov 2024):
-      Only NIFTY 50 (NSE, Thursday) and SENSEX (BSE, Friday) offer weekly options.
-      All other indices (MIDCPNIFTY, BANKNIFTY, FINNIFTY, BANKEX) trade strictly MONTHLY expiries.
-    """
-    _WEEKLY_INDEX_SYMBOLS = frozenset({"NIFTY", "SENSEX"})
+    """Classify a contract using the effective-dated exchange calendar and holidays."""
     if not expiry_str:
         return "MONTHLY"
     try:
-        dt = None
+        parsed = None
         for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
             try:
-                dt = datetime.strptime(expiry_str.strip(), fmt)
+                parsed = datetime.strptime(expiry_str.strip(), fmt).date()
                 break
             except ValueError:
                 continue
-        if not dt:
-            return "MONTHLY"
-        sym = canonical_symbol(symbol)
-        # Only NIFTY and SENSEX support weekly contracts
-        if sym not in _WEEKLY_INDEX_SYMBOLS:
+        if parsed is None:
             return "MONTHLY"
 
-        # Monthly determination: if adding 7 days falls in the NEXT calendar month,
-        # this IS the last / monthly expiry of the series.
-        if (dt + timedelta(days=7)).month != dt.month:
+        symbol_key = canonical_symbol(symbol)
+        if symbol_key not in {"NIFTY", "SENSEX"}:
             return "MONTHLY"
-        return "WEEKLY"
-    except Exception:
+
+        from market.calendar import (
+            expiry_weekday,
+            get_adjusted_expiry_date,
+            get_monthly_expiry_for_month,
+        )
+
+        exchange = "BSE" if symbol_key == "SENSEX" else "NSE"
+        if parsed == get_monthly_expiry_for_month(symbol_key, parsed.year, parsed.month):
+            return "MONTHLY"
+        target_weekday = expiry_weekday(exchange, parsed)
+        exchange_code = "BSE" if exchange == "BSE" else "NFO"
+        for offset in range(-6, 7):
+            candidate = parsed + timedelta(days=offset)
+            if candidate.weekday() == target_weekday:
+                if get_adjusted_expiry_date(candidate, exchange_code) == parsed:
+                    return "WEEKLY"
+        return "MONTHLY"
+    except Exception as exc:
+        logger.warning("Expiry classification failed for %s on %s: %s", symbol, expiry_str, exc)
         return "MONTHLY"
 
 
@@ -75,13 +81,9 @@ def get_expiry_metadata(
             try:
                 dt = datetime.strptime(parsed_c.expiry_date, "%Y-%m-%d").date()
                 if not expiry_type:
-                    clean_und = canonical_symbol(symbol or parsed_c.underlying)
-                    if clean_und in ("NIFTY", "SENSEX"):
-                        expiry_type = (
-                            "MONTHLY" if (dt + timedelta(days=7)).month != dt.month else "WEEKLY"
-                        )
-                    else:
-                        expiry_type = "MONTHLY"
+                    expiry_type = classify_expiry_type(
+                        dt.strftime("%Y-%m-%d"), symbol or parsed_c.underlying
+                    )
             except Exception as e_p:
                 logger.debug(
                     f"[engine.alert_expiry] parse_derivative_contract date conversion error: {e_p}"
@@ -101,21 +103,7 @@ def get_expiry_metadata(
             try:
                 dt = date(int(yyyy_str), int(mm_str), int(dd_str))
                 if not expiry_type:
-                    clean_und = (
-                        (symbol or "")
-                        .upper()
-                        .replace("MCX:", "")
-                        .replace("NFO:", "")
-                        .replace("NSE:", "")
-                        .strip()
-                    )
-                    is_weekly_idx = clean_und in ("NIFTY", "SENSEX")
-                    if is_weekly_idx:
-                        expiry_type = (
-                            "MONTHLY" if (dt + timedelta(days=7)).month != dt.month else "WEEKLY"
-                        )
-                    else:
-                        expiry_type = "MONTHLY"
+                    expiry_type = classify_expiry_type(dt.strftime("%Y-%m-%d"), symbol)
             except ValueError:
                 dt = None
 
@@ -199,7 +187,7 @@ def get_expiry_metadata(
                             )
                     if not dt:
                         try:
-                            dt = get_last_thursday_of_month(yr, m_idx)
+                            dt = get_monthly_contract_expiry(yr, m_idx)
                             if not expiry_type:
                                 expiry_type = "MONTHLY"
                         except Exception as e_suppressed:
@@ -562,16 +550,16 @@ def is_monthly_physical_expiry_week(
     available_expiries: Optional[list[str]] = None,
 ) -> bool:
     """
-    Returns True if a single-stock derivative is in the final 4 trading days of its monthly physical
-    settlement expiry week (Monday through Thursday before the last Thursday of the month),
-    where SEBI margin requirements surge 300%-500% (100% full stock lot value) and liquidity collapses.
+    Returns True if a single-stock derivative is within four calendar days of
+    its listed/effective-dated monthly expiry. Stock derivatives are physically
+    settled; use actual listed expiries when available.
 
     - Indices (NIFTY, BANKNIFTY, etc.) are cash settled by SEBI and are strictly exempt.
     - Single-stock options & futures:
       - If expiry_str is provided: returns True if DTE <= 4 to that expiry.
       - If available_expiries is provided: finds nearest expiry >= today; returns True if DTE <= 4.
       - If symbol is provided: checks available expiries from broker; returns True if DTE <= 4.
-      - Calendar fallback: returns True if current date is within 4 days of month-end or last Thursday.
+      - Calendar fallback: uses the effective-dated NFO monthly schedule and holiday adjustment.
     """
     clean_sym = canonical_symbol(symbol)
     is_idx = clean_sym in (
@@ -643,18 +631,12 @@ def is_monthly_physical_expiry_week(
         except Exception as e_suppressed:
             logger.debug(f"[engine.alert_expiry] Non-fatal exception suppressed: {e_suppressed}")
 
-    # 4. Calendar fallback to monthly last Thursday
-    this_month_last_thu = get_last_thursday_of_month(now_d.year, now_d.month)
-    if now_d > this_month_last_thu:
-        # Check if we are still within the same calendar month
-        import calendar
-
-        _, last_day_num = calendar.monthrange(now_d.year, now_d.month)
-        days_left_in_month = last_day_num - now_d.day
-        if days_left_in_month <= 4:
-            return True
-        return False
-    dte = (this_month_last_thu - now_d).days
+    # 4. Effective-dated calendar fallback using the canonical NFO schedule
+    this_month_expiry = get_monthly_contract_expiry(now_d.year, now_d.month)
+    if now_d > this_month_expiry:
+        next_expiry = get_next_monthly_expiry_date(ref_dt)
+        return 0 <= (next_expiry - now_d).days <= 4
+    dte = (this_month_expiry - now_d).days
     return 0 <= dte <= 4
 
 
@@ -663,42 +645,31 @@ def check_monthly_physical_settlement_status(
     ref_dt: Optional[datetime] = None,
 ) -> tuple[bool, int]:
     """
-    Convenience helper returning (is_settlement_week, dte_days).
-    dte_days is the days remaining until the active month's last Thursday.
+    Convenience helper returning (is_settlement_week, dte_days) based on the
+    canonical effective-dated NFO monthly expiry calendar.
     """
     now_d = (ref_dt or datetime.now(IST)).date()
     clean_sym = canonical_symbol(symbol)
     if clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
         return (False, 999)
 
-    this_month_last_thu = get_last_thursday_of_month(now_d.year, now_d.month)
-    if now_d > this_month_last_thu:
-        next_thu = get_next_monthly_expiry_date(ref_dt)
-        dte = (next_thu - now_d).days
-        return (False, dte)
-
-    dte = (this_month_last_thu - now_d).days
-    is_exp_wk = 0 <= dte <= 4
-    return (is_exp_wk, dte)
+    expiry = get_monthly_contract_expiry(now_d.year, now_d.month)
+    if now_d > expiry:
+        expiry = get_next_monthly_expiry_date(ref_dt)
+    dte = (expiry - now_d).days
+    return (0 <= dte <= 4, dte)
 
 
 def get_last_thursday_of_month(year: int, month: int) -> "date":
     """
-    Calculates the last Thursday of a given month (canonical NSE/BSE monthly derivatives expiry).
+    Compatibility name retained for callers; returns the canonical NFO monthly expiry.
     """
-    import calendar
-    from datetime import date as ddate
-
-    _, last_day = calendar.monthrange(year, month)
-    d = ddate(year, month, last_day)
-    # weekday(): 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
-    offset = (d.weekday() - 3) % 7
-    return d - timedelta(days=offset)
+    return get_monthly_contract_expiry(year, month)
 
 
 def get_next_monthly_expiry_date(ref_dt: Optional[datetime] = None) -> "date":
     """
-    Returns the last Thursday of the subsequent month (Next-Month Expiry).
+    Returns the canonical monthly expiry of the subsequent month.
     Used during monthly settlement week to route stock options and stock futures
     into the next series, bypassing SEBI physical delivery margin surges and gamma crush.
     """
@@ -709,7 +680,7 @@ def get_next_monthly_expiry_date(ref_dt: Optional[datetime] = None) -> "date":
     else:
         next_year = now_d.year
         next_month = now_d.month + 1
-    return get_last_thursday_of_month(next_year, next_month)
+    return get_monthly_contract_expiry(next_year, next_month)
 
 
 def resolve_recommended_derivative_expiry(
@@ -758,8 +729,8 @@ def resolve_recommended_derivative_expiry(
                 break
 
     if not near_exp_d:
-        # Default to current month's last Thursday
-        near_exp_d = get_last_thursday_of_month(now_d.year, now_d.month)
+        # Default to the canonical current-month exchange expiry.
+        near_exp_d = get_monthly_contract_expiry(now_d.year, now_d.month)
         if near_exp_d < now_d:
             near_exp_d = get_next_monthly_expiry_date(now_dt)
 
@@ -800,8 +771,8 @@ def resolve_recommended_derivative_expiry(
             "is_next_month_routed": True,
             "series": "NEXT_MONTH",
             "reason": (
-                f"SEBI Physical Settlement Week (DTE={dte}): Near-month {inst_label} carry staggered delivery "
-                f"margin risk (25%->100% full stock value). Automatically routed to Next-Month series."
+                f"SEBI Physical Settlement Week (DTE={dte}): Near-month {inst_label} carry delivery "
+                f"margin and settlement risk. Automatically routed to Next-Month series."
             ),
             "margin_risk": "PROTECTED",
             "badge": "🎯 NEXT-MONTH ROLLOVER",
@@ -863,15 +834,11 @@ def extract_contract_expiry_date(contract_symbol: str) -> Optional[date]:
         }
         if mon_str in month_map:
             try:
-                import calendar
-
                 yr = 2000 + int(yr_str)
                 mo = month_map[mon_str]
-                last_day = calendar.monthrange(yr, mo)[1]
-                d = date(yr, mo, last_day)
-                while d.weekday() != 3 and d.day > 1:
-                    d -= timedelta(days=1)
-                return d
+                from market.calendar import get_monthly_expiry_for_month
+
+                return get_monthly_expiry_for_month(csym, yr, mo)
             except Exception as e_parse:
                 logger.debug("Failed parsing monthly expiry date for %s: %s", csym, e_parse)
 
@@ -909,3 +876,10 @@ def purge_expired_option_contracts(
     """Filter out expired derivative contract symbols from active monitoring universe."""
     today = current_date or datetime.now(IST).date()
     return [s for s in symbols if not is_contract_expired(s, today)]
+
+
+def get_monthly_contract_expiry(year: int, month: int):
+    from market.rule_schedule import monthly_expiry
+    from market.calendar import get_adjusted_expiry_date
+
+    return get_adjusted_expiry_date(monthly_expiry(year, month), "NFO")

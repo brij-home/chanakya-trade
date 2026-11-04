@@ -390,3 +390,13 @@ class TestFormatEnsemble:
         sig = ensemble_signal(_flat())
         text = format_ensemble(sig)
         assert "Signal Ensemble" in text
+
+    def test_ensemble_uncalibrated_score_and_provenance(self):
+        sig = ensemble_signal(_trending_up(200))
+        assert hasattr(sig, "ensemble_score")
+        assert hasattr(sig, "is_calibrated")
+        assert sig.is_calibrated is False
+        assert hasattr(sig, "feature_families")
+        assert isinstance(sig.feature_families, dict)
+        assert "trend" in sig.feature_families
+        assert sig.ensemble_score == round(sig.bull_score - sig.bear_score, 3)

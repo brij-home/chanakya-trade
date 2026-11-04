@@ -6,6 +6,8 @@ description: >-
   semantics for all execution code in chanakya-trade.
 ---
 
+> **Current safety contract (31 October 2026):** Read `docs/SAFETY_CONTRACTS.md` before any change. It supersedes older weekday, STT, session, synthetic-data and one-lot-floor examples in this document. All AI tools/providers must preserve the behavioral release tests in `tests/test_verified_market_safety.py`. Market-rule changes require a primary source and effective date; never change tests merely to preserve an obsolete assumption.
+
 # Live Trading Execution Runbook
 
 > ⚠️ **MANDATORY**: Read this skill IN FULL before modifying any file in `engine/order_lifecycle.py`, `engine/trade_executor.py`, `engine/oms.py`, `engine/pilot_safety.py`, `engine/pretrade.py`, or any broker `place_order()` path.
@@ -61,7 +63,8 @@ Every `execute_order_intent()` call MUST follow this exact order. Any short-circ
 
 ```python
 # engine/order_lifecycle.py — required call sequence
-assert_live_execution_allowed()   # checks TRADING_MODE + ALLOW_LIVE_TRADING
+assert_live_execution_allowed()   # checks EXECUTE + ALLOW_LIVE_TRADING + owner qualification
+supported_order_shape_guard()    # blocks untracked live baskets/slices/protective GTT
 pilot_safety_gate()               # behavioral flags: TILT_LOCKOUT, DAILY_LOSS_CAP
 validate_pretrade(order)          # STT/GST checks, margin, position limits
 # Write SUBMITTING to ledger (atomic) before any broker network call
@@ -71,8 +74,17 @@ result = get_execution_broker().place_order(order)
 ```
 
 ### `assert_live_execution_allowed()`
-- Raises `PermissionError` if `TRADING_MODE != "EXECUTE"` OR `ALLOW_LIVE_TRADING != "1"`
+- Raises `PermissionError` unless `TRADING_MODE == "EXECUTE"`, `ALLOW_LIVE_TRADING=1`, and the owner has explicitly qualified the deployment with `LIVE_EXECUTION_QUALIFIED=1`.
+- The qualification flag must remain unset until account-scoped execution facts, unknown-attempt recovery, fill-driven protection, and broker acceptance criteria are complete. AI tools must never set it.
 - File: `engine/order_lifecycle.py`
+
+### Unsupported live order shapes
+- Live multi-order baskets remain blocked until each child order, partial fill, and partial-basket recovery is durably tracked. Broker basket submission is not portfolio-level atomicity.
+- Live freeze-limit slicing remains blocked until parent/child IDs, fills, restart recovery, and safe retries are implemented.
+- Live automatic protective GTT entries remain blocked until activation, rejection, cancellation, and fill events are monitored and reconciled.
+- Provider-specific Fyers endpoints for GTT, smart, multileg, and position mutations must not submit directly. Supported modifications require a central OMS `order_id`; unsupported shapes return a conflict. Panic-exit routes through the audited emergency coordinator and stays pending until reconciliation confirms broker positions.
+- These checks occur before the atomic `CONFIRMED -> SUBMITTING` transition. If a live gate rejects an intent before network I/O, it remains `CONFIRMED` and may be reviewed or canceled; it must not appear as an in-flight broker request.
+- Paper execution retains its supported sequential slicing and bracket simulation.
 
 ### `pilot_safety_gate()`
 - Checks behavioral risk flags: loss streak >= 3, pyramiding into losers, daily loss cap

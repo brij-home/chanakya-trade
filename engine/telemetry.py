@@ -117,6 +117,22 @@ def derive_priority(event_type: str, component: str, severity: str, reason: str)
             "OPTIONS-CHAIN-V3",
             "PROTOCOLERROR",
             "REMOTE DISCONNECTED",
+            "PROVIDER CALL EXCEEDED",
+            "DEADLINE (ALERT-SCRUTINY)",
+            "LLM CALL EXCEEDED",
+            "FAST-LLM UNAVAILABLE",
+            "SCAN CYCLE TIMEOUT",
+            "SKIPPING HEDGE SPREAD",
+            "EXACT CONTRACT HAS NO VALID ACTIVE LISTED MASTER LOT",
+            "STRIKE CLOCK DISPATCH FAILED",
+            "COULD NOT FIND LIQUID OTM HEDGE",
+            "CAPACITY EXHAUSTED",
+            "DISCARDED PHANTOM DIRTY TICK",
+            "PHANTOM DIRTY TICK",
+            "SILENCE WATCHDOG",
+            "PACKET FREEZE DETECTED",
+            "PROACTIVELY DROPPED INVALID SYMBOL",
+            "EXECUTING FORCED MULTI-SOCKET POOL RECONNECT",
         )
     ):
         return "P3"
@@ -771,6 +787,12 @@ class TelemetryLogHandler(logging.Handler):
                         "OPTIONS-CHAIN-V3",
                         "PROTOCOLERROR",
                         "REMOTE DISCONNECTED",
+                        "DISCARDED PHANTOM DIRTY TICK",
+                        "PHANTOM DIRTY TICK",
+                        "SILENCE WATCHDOG",
+                        "PACKET FREEZE DETECTED",
+                        "PROACTIVELY DROPPED INVALID SYMBOL",
+                        "EXECUTING FORCED MULTI-SOCKET POOL RECONNECT",
                     )
                 ):
                     severity = "INFO"

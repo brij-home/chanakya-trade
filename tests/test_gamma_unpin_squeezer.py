@@ -117,7 +117,7 @@ def test_gamma_unpin_bullish_squeeze(synthetic_nifty_chain):
 
 def test_gamma_unpin_bearish_flush():
     """
-    When SENSEX breaks down below Zero-Gamma Flip strike on Friday expiry afternoon,
+    When SENSEX breaks down below Zero-Gamma Flip strike on its listed Thursday expiry afternoon,
     detector fires Bearish 0DTE Gamma Flush.
     """
     sensex_chain = [
@@ -215,3 +215,25 @@ def test_gamma_unpin_registered_in_detector_registry():
     assert det is not None
     assert det.detector_slug == "0dte_gamma_unpin"
     assert "FNO_INDEX" in det.supported_segments
+
+
+def test_auto_alert_engine_scan_0dte_gamma_unpin(synthetic_nifty_chain):
+    """Verify AutoAlertEngine.scan_0dte_gamma_unpin runs and records unpin alerts."""
+    from engine.auto_alert_engine import AutoAlertEngine
+
+    engine = AutoAlertEngine()
+    quotes_map = {
+        "NSE:NIFTY": {"last_price": 25160.0, "vwap": 25120.0, "volume": 1000000},
+        "BSE:SENSEX": {"last_price": 80000.0, "vwap": 80000.0, "volume": 500000},
+    }
+    chains_map = {
+        "NIFTY": synthetic_nifty_chain,
+        "SENSEX": [],
+    }
+
+    alerts = engine.scan_0dte_gamma_unpin(quotes_map=quotes_map, chains_map=chains_map)
+    assert len(alerts) >= 1
+    a = alerts[0]
+    assert a.alert_type == "0DTE_GAMMA_UNPIN_SQUEEZE"
+    assert a.symbol == "NIFTY"
+    assert a.actionable_plan.get("instrument_type") == "OPTION"

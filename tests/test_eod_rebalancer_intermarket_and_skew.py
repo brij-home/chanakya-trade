@@ -65,8 +65,8 @@ class DummyOptionContract:
 
 
 # ── 1. Experience Replay (Postmortem -> Episodic Memory) ───────
-def test_postmortem_to_episodic_memory_ingestion(tmp_path, monkeypatch):
-    """Verifies that run_eod_alert_postmortems automatically records TradeEpisodes."""
+def test_postmortem_does_not_create_unverified_episodic_trade_memory(tmp_path, monkeypatch):
+    """Alert milestones alone cannot be promoted to verified account trade episodes."""
     db_file = tmp_path / "test_episodes_eod.db"
     mem_store = EpisodicTradeMemoryStore(db_path=db_file)
     monkeypatch.setattr("engine.episodic_memory.get_episodic_memory_store", lambda: mem_store)
@@ -96,12 +96,12 @@ def test_postmortem_to_episodic_memory_ingestion(tmp_path, monkeypatch):
     report = run_eod_alert_postmortems(auto_engine=DummyAutoEngine(), force=True)
 
     assert report["status"] == "COMPLETED"
-    assert report["episodic_memories_ingested"] >= 2
+    assert report["episodic_memories_ingested"] == 0
 
     # Query episodic memory
     analogies = mem_store.query_analogous_episodes(symbol="TATAMOTORS", direction="BULLISH")
-    assert analogies.sample_size >= 1
-    assert any(ep["symbol"] == "TATAMOTORS" for ep in analogies.analogous_episodes)
+    assert analogies.sample_size == 0
+    assert analogies.analogous_episodes == []
 
 
 # ── 2. Intermarket Lead-Lag Transmission ────────────────────────

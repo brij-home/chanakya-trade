@@ -1,22 +1,18 @@
 """
 engine/trade_executor.py
 ────────────────────────
-Execute trade plans against any connected broker — paper or live.
+Execute a trade plan through the simulated OMS. Real broker placement from
+this legacy CLI helper is intentionally disabled.
 
 After `analyze RELIANCE` generates trade plans, the user runs:
     execute                  → neutral risk plan
     execute aggressive       → aggressive plan
     execute conservative     → conservative plan
 
-Live mode (Fyers or any real broker connected):
-  - Shows the full order before sending
-  - Requires explicit "yes" confirmation
-  - Respects TRADING_MODE=PAPER env override (refuses live execution)
-  - Auto-creates SL and target alerts after execution
-
-Paper mode (Mock/Demo broker):
-  - No confirmation needed — no real money at stake
-  - Same output format so behaviour is identical
+SIMULATE mode:
+  - Persists preview, confirmation and result through engine.order_lifecycle
+  - Ignores any connected broker passed by a legacy caller
+  - Refuses OBSERVE and EXECUTE modes
 
 Usage:
     from engine.trade_executor import execute_trade_plan
@@ -31,10 +27,8 @@ import os
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
-from rich.table import Table
 
-from brokers.base import BrokerAPI, OrderRequest
+from brokers.base import BrokerAPI
 
 logger = logging.getLogger("engine.trade_executor")
 console = Console()
@@ -206,8 +200,11 @@ def _is_paper(broker: BrokerAPI) -> bool:
     try:
         profile = broker.get_profile()
         return profile.broker.upper() in ("PAPER", "MOCK", "DEMO")
-    except Exception:
-        return True  # fail safe
+    except Exception as exc:
+        logger.warning(
+            "[engine.trade_executor] Broker identity unavailable; treating as non-paper: %s", exc
+        )
+        return False
 
 
 def _trading_mode_override() -> str:
@@ -223,61 +220,14 @@ def is_live_execution_allowed(broker: BrokerAPI) -> bool:
     """
     if _is_paper(broker):
         return False
-    if _trading_mode_override() == "PAPER":
+    try:
+        from engine.modes import assert_live_execution_allowed
+
+        assert_live_execution_allowed()
+    except (PermissionError, ValueError) as exc:
+        logger.info("[engine.trade_executor] Live path not qualified: %s", exc)
         return False
     return True
-
-
-# ── Confirmation prompt ────────────────────────────────────────
-
-
-def _show_order_preview(plan, broker: BrokerAPI) -> None:
-    """Print a clear summary of what is about to be sent to the broker."""
-    try:
-        profile = broker.get_profile()
-        broker_name = profile.broker
-    except Exception:
-        broker_name = "Unknown"
-
-    table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
-    table.add_column("Leg")
-    table.add_column("Action")
-    table.add_column("Instrument")
-    table.add_column("Qty", justify="right")
-    table.add_column("Type")
-    table.add_column("Price", justify="right")
-
-    for i, leg in enumerate(plan.entry_orders, 1):
-        price_str = f"₹{leg.price:,.2f}" if leg.price else "MARKET"
-        table.add_row(
-            str(i),
-            f"[{'green' if leg.action == 'BUY' else 'red'}]{leg.action}[/]",
-            leg.instrument,
-            str(leg.quantity),
-            leg.order_type,
-            price_str,
-        )
-
-    ep = plan.exit_plan
-    console.print()
-    console.print(
-        Panel(
-            f"  Strategy : {plan.strategy_name}\n"
-            f"  Symbol   : {plan.symbol}\n"
-            f"  Broker   : [bold]{broker_name}[/bold]\n"
-            f"  Orders   : {len(plan.entry_orders)}\n"
-            + (
-                f"  Stop-Loss: ₹{ep.stop_loss:,.2f} ({ep.stop_loss_pct:+.1f}%)\n"
-                f"  Target 1 : ₹{ep.target_1:,.2f} ({ep.target_1_pct:+.1f}%)"
-                if ep
-                else ""
-            ),
-            title="[bold red]⚠  LIVE ORDER PREVIEW[/bold red]",
-            border_style="red",
-        )
-    )
-    console.print(table)
-    console.print()
 
 
 # ── Core executor ─────────────────────────────────────────────
@@ -291,10 +241,8 @@ def execute_trade_plan(
     """
     Execute a TradePlan by placing orders with the broker.
 
-    For live brokers: shows full order preview and requires explicit
-    confirmation before sending anything to the exchange.
-
-    For paper brokers: executes immediately with no confirmation.
+    Legacy CLI submission is limited to SIMULATE and routes through the
+    shared order lifecycle. Real broker execution is disabled in this path.
 
     Args:
         plan:               TradePlan from engine/trader.py
@@ -310,53 +258,33 @@ def execute_trade_plan(
         console.print("[dim]No trade plan to execute (verdict was HOLD).[/dim]")
         return []
 
-    live = is_live_execution_allowed(broker)
+    # Keep the compatibility parameters, but never let a passed live broker or
+    # skip_confirmation flag change the central mode/order authority.
+    _ = broker, skip_confirmation
 
-    # ── Live execution gate: Crystal-Clear Double Confirmation ─────────────────
-    if live and not skip_confirmation:
-        _show_order_preview(plan, broker)
-        b_name = getattr(broker.get_profile(), "broker", "Connected Broker")
-        console.print(
-            Panel(
-                f"[bold red]🚨 REAL BROKER ORDER TRANSMISSION[/bold red]\n\n"
-                f"You are about to transmit real financial orders to broker: [bold yellow]{b_name}[/bold yellow]\n"
-                f"• Target Symbol: [bold white]{plan.symbol}[/bold white]\n"
-                f"• Strategy: [bold cyan]{plan.strategy_name}[/bold cyan]\n"
-                f"• Order Count: [bold]{len(plan.entry_orders)} order(s)[/bold]\n"
-                f"• Capital Mode: [bold red]LIVE (Real money will be utilized)[/bold red]\n\n"
-                f"[yellow]⚠ Please review all order legs, prices, and quantities above before confirming.[/yellow]",
-                title="[bold red]Double Confirmation — Step 1 of 2[/bold red]",
-                border_style="red",
-            )
-        )
-        step1 = Confirm.ask(
-            "[bold yellow]Step 1: Have you verified the order parameters above and wish to proceed?[/bold yellow]",
-            default=False,
-        )
-        if not step1:
-            console.print("[dim]Execution cancelled at Step 1.[/dim]")
-            return []
+    from engine.modes import get_trading_mode
 
-        console.print(
-            "\n[bold red]⚠ FINAL DOUBLE-CONFIRMATION (Step 2 of 2):[/bold red]\n"
-            f"Type [bold green]CONFIRM[/bold green] to immediately transmit orders to [bold yellow]{b_name}[/bold yellow], or any other key to abort:"
+    mode_info = get_trading_mode()
+    if mode_info.mode.name != "SIMULATE":
+        message = (
+            "Direct CLI broker placement is disabled. This command only submits through the "
+            "simulated OMS; use the authenticated order ticket for live order workflows."
         )
-        step2 = Prompt.ask("  Double Confirmation", default="CANCEL")
-        if step2.strip().upper() != "CONFIRM":
-            console.print(
-                "[dim]Execution cancelled: Did not match 'CONFIRM'. No orders were sent.[/dim]"
-            )
-            return []
+        console.print(f"[bold red]{message}[/bold red]")
+        return [
+            {
+                "symbol": leg.instrument,
+                "action": leg.action,
+                "quantity": leg.quantity,
+                "status": "BLOCKED",
+                "message": message,
+                "mode": mode_info.mode.name,
+            }
+            for leg in plan.entry_orders
+        ]
 
-    # ── Paper override warning ────────────────────────────────
-    if not live and not _is_paper(broker):
-        console.print(
-            "[yellow]  TRADING_MODE=PAPER is set — executing as paper trade "
-            "even though a live broker is connected.[/yellow]"
-        )
-
-    mode_label = "LIVE" if live else "PAPER"
-    mode_style = "bold red" if live else "bold green"
+    mode_label = "SIMULATE"
+    mode_style = "bold green"
 
     console.print()
     console.print(
@@ -364,7 +292,7 @@ def execute_trade_plan(
             f"  [{mode_style}]{mode_label}[/{mode_style}]  {plan.strategy_name} on {plan.symbol}\n"
             f"  Orders: {len(plan.entry_orders)}",
             title=f"[{mode_style}]Order Execution[/{mode_style}]",
-            border_style="red" if live else "green",
+            border_style="green",
         )
     )
 
@@ -372,14 +300,21 @@ def execute_trade_plan(
     for i, leg in enumerate(plan.entry_orders, 1):
         try:
             # ── Hard risk limit check ─────────────────────────
+            order_symbol = leg.instrument.split()[0]
+            reference_price = float(leg.price or 0.0)
+            if reference_price <= 0:
+                from market.quotes import get_ltp
+
+                reference_price = float(get_ltp(f"{leg.exchange}:{order_symbol}") or 0.0)
+
             try:
                 from engine.risk_limits import risk_limits, RiskLimitError as _RLE
 
                 risk_limits.check(
-                    symbol=leg.instrument.split()[0],
+                    symbol=order_symbol,
                     action=leg.action,
                     quantity=leg.quantity,
-                    price=leg.price or 0.0,
+                    price=reference_price,
                 )
             except _RLE as _rle:
                 console.print(f"\n  [bold red]🛑 RISK LIMIT BLOCKED:[/bold red] {_rle}")
@@ -394,86 +329,40 @@ def execute_trade_plan(
                     }
                 )
                 continue
+            from engine.order_lifecycle import submit_simulated_order_intent
 
-            order_req = OrderRequest(
-                symbol=leg.instrument.split()[0],
-                exchange=leg.exchange,
-                transaction_type=leg.action,
+            response = submit_simulated_order_intent(
+                symbol=order_symbol,
+                side=leg.action,
                 quantity=leg.quantity,
+                price=reference_price,
                 order_type=leg.order_type,
                 product=leg.product,
-                price=leg.price,
                 trigger_price=leg.trigger_price,
-                tag=leg.tag or f"plan_{plan.symbol}",
             )
+            if response.status == "FILLED_PAPER":
+                try:
+                    from engine.risk_limits import risk_limits as _rl
 
-            response = broker.place_order(order_req)
-            # Record trade for risk tracking
-            try:
-                from engine.risk_limits import risk_limits as _rl
-
-                _rl.record_trade(
-                    symbol=leg.instrument.split()[0],
-                    action=leg.action,
-                    quantity=leg.quantity,
-                    price=leg.price or 0.0,
-                )
-            except Exception as e_suppressed:
-                logger.debug(
-                    f"[engine.trade_executor] Non-fatal exception suppressed: {e_suppressed}"
-                )
-            status_style = "green" if response.status in ("COMPLETE", "OPEN") else "red"
+                    _rl.record_trade(
+                        symbol=order_symbol,
+                        action=leg.action,
+                        quantity=leg.quantity,
+                        price=reference_price,
+                    )
+                except Exception as e_suppressed:
+                    logger.warning(
+                        "[engine.trade_executor] Risk-limit outcome recording failed for %s: %s",
+                        order_symbol,
+                        e_suppressed,
+                    )
+            status_style = "green" if response.status in ("FILLED_PAPER", "OPEN") else "red"
 
             console.print(
                 f"  [{i}] {leg.action} {leg.quantity} {leg.instrument} "
                 f"({leg.order_type}) → [{status_style}]{response.status}[/{status_style}] "
-                f"(ID: {response.order_id})"
+                f"(OMS ID: {response.order_id})"
             )
-
-            # Record immutable audit event for institutional traceability (Invariant 20)
-            try:
-                from engine.security_audit import record_audit_event
-
-                mode_audit = "EXECUTE" if live else "SIMULATE"
-                record_audit_event(
-                    event_type="CLI_ORDER_EXECUTED",
-                    mode=mode_audit,
-                    actor="CLI_TRADE_EXECUTOR",
-                    details={
-                        "order_id": response.order_id,
-                        "symbol": leg.instrument,
-                        "action": leg.action,
-                        "quantity": leg.quantity,
-                        "order_type": leg.order_type,
-                        "status": response.status,
-                        "message": response.message,
-                        "strategy": plan.strategy_name,
-                    },
-                )
-            except Exception as _e_audit:
-                logger.debug(f"[TradeExecutor] Security audit record skipped: {_e_audit}")
-
-            # Append tamper-evident order lifecycle event in orders.db
-            try:
-                from engine.order_lifecycle import _record_order_event
-
-                _record_order_event(
-                    order_id=response.order_id,
-                    event_type="ORDER_PLACED",
-                    broker_name=getattr(broker.get_profile(), "broker", "Connected Broker")
-                    if hasattr(broker, "get_profile")
-                    else "Broker",
-                    broker_order_id=response.order_id,
-                    payload={
-                        "symbol": leg.instrument,
-                        "action": leg.action,
-                        "quantity": leg.quantity,
-                        "status": response.status,
-                        "strategy": plan.strategy_name,
-                    },
-                )
-            except Exception as _e_evt:
-                logger.debug(f"[TradeExecutor] Order lifecycle event skipped: {_e_evt}")
 
             results.append(
                 {
@@ -482,7 +371,7 @@ def execute_trade_plan(
                     "action": leg.action,
                     "quantity": leg.quantity,
                     "status": response.status,
-                    "message": response.message,
+                    "message": response.rejection_reason,
                     "mode": mode_label,
                 }
             )

@@ -37,6 +37,12 @@ os.environ["CHANAKYA_EOD_DB_PATH"] = str(_TEST_DATA_DIR / "test_eod_bars.db")
 os.environ["CHANAKYA_TESTING"] = "1"
 os.environ["ALLOW_MANUAL_TELEGRAM_DISPATCH"] = "1"
 os.environ["TRADING_MODE"] = "PAPER"
+# Legacy multi-asset suites use an explicit research profile rather than inheriting
+# the owner's deployment scope. Dedicated policy tests exercise production defaults.
+os.environ["SESSION_FOCUS_MODE"] = "BALANCED"
+# Live execution qualification is owner-controlled and must never be enabled by
+# a global test fixture. Live-path tests should replace the gate with a test seam.
+os.environ.pop("LIVE_EXECUTION_QUALIFIED", None)
 # Test runs must not inherit deployment authentication policy from a developer's
 # local .env file. Individual auth tests explicitly opt into self-hosted mode
 # with monkeypatch, while the rest of the suite exercises endpoints without a
@@ -78,6 +84,21 @@ def _ensure_chanakya_testing_env():
     os.environ["CHANAKYA_TESTING"] = "1"
     yield
     os.environ["CHANAKYA_TESTING"] = "1"
+
+
+@pytest.fixture(autouse=True)
+def _supply_test_vix_fixture(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    """
+    Supply explicit test India VIX fixture across synthetic suites.
+    Preserves raw production missing-data handling in designated regime and negative suites.
+    """
+    exempt_modules = {
+        "tests.test_regime_governor",
+        "tests.test_fno_enrichment_negative_invariants",
+    }
+    if request.module.__name__ in exempt_modules or request.node.get_closest_marker("no_vix_mock"):
+        return
+    monkeypatch.setattr("analysis.regime_governor._fresh_live_vix", lambda: 15.0)
 
 
 @pytest.fixture(autouse=True)
@@ -646,6 +667,12 @@ def reset_auto_alert_engine_pacing():
                     auto_alert_engine._hourly_telegram_dispatches[k].clear()
                 auto_alert_engine._hourly_index_directional.clear()
                 auto_alert_engine._hourly_fno_stock_directional.clear()
+                try:
+                    from engine.sqlite_store import alert_sqlite_store
+
+                    alert_sqlite_store.clear()
+                except Exception:
+                    pass
         except Exception:
             pass
         try:

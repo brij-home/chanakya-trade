@@ -143,7 +143,8 @@ def test_emergency_flatten_all_and_circuit_breaker():
     assert is_emergency_lockout_active()[0] is False
 
     res = emergency_flatten_all_positions(actor="TEST_RUNNER", reason="SAFETY_VERIFICATION")
-    assert res["status"] == "SUCCESS"
+    assert res["status"] == "PENDING_RECONCILIATION"
+    assert res.get("broker_flat_confirmed") is not True
     assert "cancelled_orders_count" in res
     assert "flattened_positions_count" in res
 

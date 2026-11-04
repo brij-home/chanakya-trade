@@ -103,7 +103,9 @@ function Test-Venv([switch]$RequireDevTools) {
         & $VenvPython -c "import sys; import pip; print(sys.executable)" 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) { return $false }
         if ($RequireDevTools) {
-            & $VenvPython -c "import pytest, pytest_mock, xdist, ruff, fyers_apiv3; import brokers, engine" 2>$null
+            # Core development readiness must match the .[dev] profile that is
+            # installed below. Optional broker SDKs have separate qualification.
+            & $VenvPython -c "import pytest, pytest_mock, xdist, ruff; import brokers, engine" 2>$null
             if ($LASTEXITCODE -ne 0) { return $false }
         }
         return $true

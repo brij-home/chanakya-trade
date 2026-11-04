@@ -833,8 +833,7 @@ class TraderAgent:
 
         # Shares from risk
         shares = int(risk_amount / sl_distance)
-        if shares <= 0:
-            shares = 1
+        shares = max(0, shares)
 
         # Cap at profile's max position %
         max_capital = self.capital * (self.profile.max_position_pct / 100)
@@ -845,7 +844,7 @@ class TraderAgent:
         if strategy["instrument"] in ("OPTIONS", "FUTURES"):
             lot = LOT_SIZES.get(strategy.get("_symbol", ""), 1)
             if lot > 1:
-                lots = max(1, shares // lot)
+                lots = shares // lot
                 shares = lots * lot
 
         capital_deployed = shares * ltp
@@ -878,11 +877,13 @@ class TraderAgent:
         """Build the actual order legs."""
         shares = sizing["shares"]
         orders = []
+        if shares <= 0:
+            return orders
 
         if strategy["instrument"] == "EQUITY":
             product = "CNC" if strategy["timeframe"] == "POSITIONAL" else "MIS"
 
-            if strategy.get("scale_in") and support and support < ltp:
+            if strategy.get("scale_in") and support and support < ltp and shares >= 2:
                 # Split: 50% market, 50% limit at support
                 half = shares // 2
                 orders.append(
@@ -923,7 +924,9 @@ class TraderAgent:
 
         elif strategy["instrument"] == "OPTIONS":
             lot = LOT_SIZES.get(symbol, 1)
-            lots = max(1, shares // lot) if lot > 1 else 1
+            lots = shares // lot if lot > 1 else shares
+            if lots <= 0:
+                return orders
             qty = lots * lot
 
             orders.append(

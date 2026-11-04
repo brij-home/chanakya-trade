@@ -206,7 +206,14 @@ class TestMaxPainProximity:
 
     def test_spot_at_max_pain_mid_week(self):
         f = _score_max_pain_proximity(23500.0, max_pain=23500.0)
-        assert f.score >= 5  # Near max pain = low volatility zone
+        assert f.score == 5
+        assert f.signal == "NEUTRAL"
+
+    def test_distance_from_max_pain_does_not_create_directional_edge(self):
+        f = _score_max_pain_proximity(24000.0, max_pain=22000.0)
+        assert f.score == 5
+        assert f.signal == "NEUTRAL"
+        assert "no directional edge" in f.detail
 
     def test_axis_is_price(self):
         f = _score_max_pain_proximity(23500.0, max_pain=23500.0)

@@ -218,7 +218,7 @@ if [ $? -ne 0 ]; then
     echo "❌ Pre-push gate failed! Regression detected before push. Fix before pushing (or git push --no-verify if emergency)."
     exit 1
 fi
-echo "✅ Pre-push verification passed! Remote CI parity guaranteed."
+echo "✅ Pre-push verification passed."
 exit 0
 """
     pre_push_hook.write_text(pre_push_script, encoding="utf-8")
@@ -422,6 +422,30 @@ def main() -> int:
     # ── Tier 2 & 3 Test Suites Definition ────────────────────────────────────
     invariant_suites = [
         (
+            "Verified Market Safety Contracts",
+            "tests/test_verified_market_safety.py",
+        ),
+        (
+            "Operational Mode Authenticity & Server Authority",
+            "tests/test_modes.py",
+        ),
+        (
+            "Preflight Mode Truth & Safe Defaults",
+            "tests/test_preflight_mode_truth.py",
+        ),
+        (
+            "CSRF, Session & Web Security Invariants",
+            "tests/test_csrf_and_security.py",
+        ),
+        (
+            "Central Risk Limits & Notional Evaluation",
+            "tests/test_risk_limits.py",
+        ),
+        (
+            "Pretrade Fail-Closed Verification",
+            "tests/test_pretrade_fail_closed.py",
+        ),
+        (
             "Alert Identity & Deduplication Invariants (Rule 17)",
             "tests/test_alert_identity_invariants.py",
         ),
@@ -437,7 +461,38 @@ def main() -> int:
             "Fail-Closed Order Execution & OMS Safety Boundary (Rule 6)",
             "tests/test_order_lifecycle.py",
         ),
-        ("Live OMS Paper/Live Double-Submit Protection", "tests/test_live_oms_p3b.py"),
+        (
+            "Live OMS Paper/Live Double-Submit Protection",
+            "tests/test_live_oms_p3b.py",
+        ),
+        (
+            "Order Gate Ordering & Unknown Freeze Recovery",
+            "tests/test_order_gate_ordering.py",
+        ),
+        (
+            "Reconciliation Contract Truthfulness",
+            "tests/test_reconciliation_contract.py",
+        ),
+        (
+            "Tool Permission Gate Enforcement",
+            "tests/test_tool_permissions.py",
+        ),
+        (
+            "Telegram Authorization & Emergency Flatten Gate",
+            "tests/test_telegram_authorization.py",
+        ),
+        (
+            "Sessions, CSRF & Postback Invariants",
+            "tests/test_sessions_csrf_and_postbacks.py",
+        ),
+        (
+            "OAuth Callback Hardening Invariants",
+            "tests/test_oauth_callback_hardening.py",
+        ),
+        (
+            "P1 & P2 Security, Broker & Execution Invariants (2026-11-03)",
+            "tests/test_p1_p2_fixes_regression.py",
+        ),
     ]
     invariant_files = [f for _, f in invariant_suites]
 

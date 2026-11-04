@@ -668,30 +668,34 @@ def _cmd_run(args: list[str]) -> None:
         if paper_mode and latest_signal == 1:
             console.print(f"\n[bold]Paper trading: BUY {symbol}[/bold]")
             try:
-                from brokers.session import get_broker
-                from brokers.base import OrderRequest
+                from engine.modes import get_trading_mode
 
-                broker = get_broker()
-                if broker:
+                if get_trading_mode().mode.name == "SIMULATE":
                     capital = float(os.environ.get("TOTAL_CAPITAL", "200000"))
                     risk_pct = float(os.environ.get("DEFAULT_RISK_PCT", "2"))
-                    quantity = max(1, int((capital * risk_pct / 100) / latest_price))
+                    quantity = int((capital * risk_pct / 100) / latest_price)
+                    if quantity <= 0:
+                        raise ValueError(
+                            "Risk budget does not fund even one share; no order submitted."
+                        )
+                    from engine.order_lifecycle import submit_simulated_order_intent
 
-                    req = OrderRequest(
-                        symbol=f"NSE:{symbol}-EQ",
-                        exchange="NSE",
-                        transaction_type="BUY",
+                    resp = submit_simulated_order_intent(
+                        symbol=symbol,
+                        side="BUY",
                         quantity=quantity,
+                        price=latest_price,
                         order_type="MARKET",
                         product="CNC",
-                        tag=f"strategy:{name}",
                     )
-                    resp = broker.place_order(req)
                     console.print(
-                        f"  [green]Order placed:[/green] {resp.status} | Qty: {quantity} | ID: {resp.order_id}"
+                        f"  [green]Paper OMS order:[/green] {resp.status} | Qty: {quantity} | ID: {resp.order_id}"
                     )
                 else:
-                    console.print("[dim]No broker connected. Use [bold]login[/bold] first.[/dim]")
+                    console.print(
+                        "[yellow]This strategy command cannot place real broker orders. "
+                        "Use the authenticated order ticket for a live order.[/yellow]"
+                    )
             except Exception as e:
                 console.print(f"[red]Paper trade failed: {e}[/red]")
 

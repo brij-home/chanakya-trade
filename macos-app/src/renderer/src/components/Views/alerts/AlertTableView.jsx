@@ -1,6 +1,6 @@
 import React, { memo, useState, useMemo } from 'react'
 import { useLiveSpot } from './LiveSpotsContext'
-import { AUTO_TYPE_STYLE, formatExpiryDetails, resolveAlertLifecycle, isTestOrSimAlert } from './alertHelpers'
+import { getAlertStyle, AUTO_TYPE_STYLE, formatExpiryDetails, resolveAlertLifecycle, isTestOrSimAlert } from './alertHelpers'
 
 /**
  * Individual row in the institutional AlertTableView.
@@ -32,7 +32,7 @@ export const AlertTableRow = memo(function AlertTableRow({
   const liveContractByFull = useLiveSpot(rawContract && rawContract !== cleanContract ? rawContract : null)
   const liveContract = liveContractByClean ?? liveContractByFull
 
-  const style = AUTO_TYPE_STYLE[alert.alert_type] || AUTO_TYPE_STYLE.GAMMA_BLAST
+  const style = getAlertStyle(alert.alert_type)
 
   // Canonical Single Source of Truth Lifecycle Evaluation
   const lifecycle = useMemo(
@@ -66,6 +66,11 @@ export const AlertTableRow = memo(function AlertTableRow({
     isT3Hit,
     horizonInfo,
   } = lifecycle
+
+  const dirUpper = String(alert.direction || alert.metrics?.direction || '').toUpperCase()
+  const isMarketBear = dirUpper.includes('BEAR') || dirUpper.includes('SHORT') || alert.is_bear === true
+  const isMarketBull = dirUpper.includes('BULL') || dirUpper.includes('BUY') || alert.is_bull === true
+  const isEffectiveBull = isNeutral ? false : (isMarketBear ? false : (isMarketBull || isBull))
 
   const liveReturnPct = liveReturn?.pct || null
   const isProfitable = liveReturn?.isProfitable || false
@@ -127,13 +132,15 @@ export const AlertTableRow = memo(function AlertTableRow({
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="font-black text-sm text-text leading-none tracking-tight">{alert.symbol}</span>
               {strikeNum && !isFuture && (
-                <span className="text-[11px] font-black text-gold font-mono leading-none bg-gold/10 px-1.5 py-0.5 rounded border border-gold/30">
+                <span className="text-[11px] font-black text-amber-800 dark:text-gold font-mono leading-none bg-amber-50 dark:bg-gold/10 px-1.5 py-0.5 rounded border border-amber-200 dark:border-gold/30">
                   {currSym}{Number(strikeNum).toLocaleString(isCrypto ? 'en-US' : 'en-IN')}
                 </span>
               )}
               {optType && !isFuture && (
                 <span className={`text-[10px] px-1.5 py-0.5 rounded font-black uppercase ${
-                  optType === 'CE' ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/40' : 'bg-rose-500/25 text-rose-300 border border-rose-500/40'
+                  optType === 'CE'
+                    ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-500/25 dark:text-emerald-300 dark:border-emerald-500/40'
+                    : 'bg-rose-100 text-rose-800 border border-rose-300 dark:bg-rose-500/25 dark:text-rose-300 dark:border-rose-500/40'
                 }`}>{optType}</span>
               )}
             </div>
@@ -144,8 +151,8 @@ export const AlertTableRow = memo(function AlertTableRow({
                 <span
                   className={`text-[10px] font-mono px-1.5 py-px rounded font-bold whitespace-nowrap border ${
                     expiryInfo.isWeekly
-                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/35'
-                      : 'bg-blue-500/15 text-blue-300 border-blue-500/35'
+                      ? 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-500/15 dark:text-amber-300 dark:border-amber-500/35'
+                      : 'bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-500/15 dark:text-blue-300 dark:border-blue-500/35'
                   }`}
                   title={`Contract Expiry: ${expiryInfo.formatted || expiryInfo.fullDisplay} · Institutional Derivative Cycle`}
                 >
@@ -164,11 +171,13 @@ export const AlertTableRow = memo(function AlertTableRow({
         {/* Col 3: Bias / Direction */}
         <td className="py-2.5 px-3 whitespace-nowrap">
           <span className={`text-[10px] font-black px-2 py-1 rounded border tracking-wider inline-flex items-center gap-1 ${
-            isBull ? 'text-emerald-300 bg-emerald-500/20 border-emerald-500/40' :
-            isNeutral ? 'text-purple-300 bg-purple-500/20 border-purple-500/40' :
-            'text-rose-300 bg-rose-500/20 border-rose-500/40'
+            isEffectiveBull
+              ? 'text-emerald-800 bg-emerald-100 border-emerald-300 dark:text-emerald-300 dark:bg-emerald-500/20 dark:border-emerald-500/40' :
+            isNeutral
+              ? 'text-purple-800 bg-purple-100 border-purple-300 dark:text-purple-300 dark:bg-purple-500/20 dark:border-purple-500/40' :
+              'text-rose-800 bg-rose-100 border-rose-300 dark:text-rose-300 dark:bg-rose-500/20 dark:border-rose-500/40'
           }`}>
-            {isBull ? '▲ LONG' : isNeutral ? '◆ NEUTRAL' : '▼ SHORT'}
+            {isEffectiveBull ? '▲ LONG' : isNeutral ? '◆ NEUTRAL' : '▼ SHORT'}
           </span>
         </td>
 
@@ -177,18 +186,18 @@ export const AlertTableRow = memo(function AlertTableRow({
           <div className="flex items-center gap-2">
             <span className={`text-sm font-black font-mono leading-none ${
               isDerivative
-                ? (liveContract?.flash === 'up' ? 'text-emerald-400' : liveContract?.flash === 'down' ? 'text-rose-400' : 'text-gold')
-                : (liveSpot?.flash === 'up' ? 'text-emerald-400' : liveSpot?.flash === 'down' ? 'text-rose-400' : 'text-text')
+                ? (liveContract?.flash === 'up' ? 'text-emerald-600 dark:text-emerald-400' : liveContract?.flash === 'down' ? 'text-rose-600 dark:text-rose-400' : 'text-amber-800 dark:text-gold')
+                : (liveSpot?.flash === 'up' ? 'text-emerald-600 dark:text-emerald-400' : liveSpot?.flash === 'down' ? 'text-rose-600 dark:text-rose-400' : 'text-text')
             }`}>
               {currSym}{fmtP(currentPrice)}
-              {isDerivative && liveContract?.ltp ? <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse ml-1 align-middle" /> : null}
+              {isDerivative && liveContract?.ltp ? <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse ml-1 align-middle" /> : null}
             </span>
 
             {liveReturnPct !== null && (
               <span className={`px-2 py-0.5 rounded text-[11px] font-black font-mono border whitespace-nowrap ${
                 isProfitable
-                  ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/50'
-                  : 'bg-rose-500/25 text-rose-300 border-rose-500/50'
+                  ? 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-500/25 dark:text-emerald-300 dark:border-emerald-500/50'
+                  : 'bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-500/25 dark:text-rose-300 dark:border-rose-500/50'
               }`}>
                 {isProfitable ? '+' : ''}{liveReturnPct}%
               </span>
@@ -200,22 +209,34 @@ export const AlertTableRow = memo(function AlertTableRow({
         <td className="py-2.5 px-3 whitespace-nowrap font-mono tabular-nums text-[11px]">
           <div className="flex flex-col gap-1">
             <div className="flex items-center gap-2">
-              {entryNum && <span className="text-gold font-bold">Entry {currSym}{fmtP(entryNum)}</span>}
+              {entryNum && <span className="text-amber-800 dark:text-gold font-bold">Entry {currSym}{fmtP(entryNum)}</span>}
               {slNum && (
-                <span className={`font-bold px-1.5 py-0.5 rounded ${isSLHit ? 'bg-rose-500/25 text-rose-300 border border-rose-500/50' : 'text-rose-400'}`}>
+                <span className={`font-bold px-1.5 py-0.5 rounded ${
+                  isSLHit
+                    ? 'bg-rose-100 text-rose-800 border border-rose-300 dark:bg-rose-500/25 dark:text-rose-300 dark:border-rose-500/50'
+                    : 'text-rose-700 dark:text-rose-400'
+                }`}>
                   {isSLHit ? '🛑 SL ' : 'SL '}{currSym}{fmtP(slNum)}
                 </span>
               )}
             </div>
             <div className="flex items-center gap-2">
               {t1Num && (
-                <span className={`font-bold px-1.5 py-0.5 rounded ${isT1Hit ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/50' : 'text-emerald-400'}`}>
-                  {isT1Hit ? '✅ T1 ' : 'T1 '}{currSym}{fmtP(t1Num)}
+                <span className={`font-bold px-1.5 py-0.5 rounded ${
+                  isT1Hit
+                    ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-500/25 dark:text-emerald-300 dark:border-emerald-500/50'
+                    : 'text-emerald-700 dark:text-emerald-400'
+                }`}>
+                  {isT1Hit ? '🎯 T1 ' : 'T1 '}{currSym}{fmtP(t1Num)}
                 </span>
               )}
               {t2Num && (
-                <span className={`font-bold px-1.5 py-0.5 rounded ${isT2Hit ? 'bg-cyan-500/25 text-cyan-200 border border-cyan-500/50' : 'text-cyan-400'}`}>
-                  {isT2Hit ? '✅ T2 ' : 'T2 '}{currSym}{fmtP(t2Num)}
+                <span className={`font-bold px-1.5 py-0.5 rounded ${
+                  isT2Hit
+                    ? 'bg-cyan-100 text-cyan-800 border border-cyan-300 dark:bg-cyan-500/25 dark:text-cyan-200 dark:border-cyan-500/50'
+                    : 'text-cyan-700 dark:text-cyan-400'
+                }`}>
+                  {isT2Hit ? '🏁 T2 ' : 'T2 '}{currSym}{fmtP(t2Num)}
                 </span>
               )}
               {(alert.actionable_plan?.trade_plan?.rr_ratio || alert.metrics?.rr_ratio) && (
@@ -231,13 +252,13 @@ export const AlertTableRow = memo(function AlertTableRow({
         <td className="py-2.5 px-3 whitespace-nowrap">
           <div className="flex flex-col gap-1">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="font-bold text-[11px] text-zinc-200">
+              <span className="font-bold text-[11px] text-slate-900 dark:text-zinc-200">
                 {conviction}%
               </span>
 
               {convictionTier === 'APEX_CONFLUENCE' && (
                 <span
-                  className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-amber-500/25 text-amber-300 border border-amber-500/50 shadow-sm"
+                  className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-500/25 dark:text-amber-300 dark:border-amber-500/50 shadow-sm"
                   title="Apex Confluence · Technical, volume, and smart money momentum align with >=90% conviction · Full position sizing eligible"
                 >
                   💎 APEX
@@ -245,7 +266,7 @@ export const AlertTableRow = memo(function AlertTableRow({
               )}
               {convictionTier === 'HIGH_CONVICTION' && (
                 <span
-                  className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                  className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/40"
                   title="High Conviction · Conviction 80–89% with confirmed order flow · Standard trade allocation permitted"
                 >
                   ⚡ HIGH
@@ -253,7 +274,7 @@ export const AlertTableRow = memo(function AlertTableRow({
               )}
               {convictionTier === 'DEFINED_RISK_ONLY' && (
                 <span
-                  className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-indigo-500/20 text-indigo-300 border border-indigo-500/40"
+                  className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-indigo-100 text-indigo-800 border border-indigo-300 dark:bg-indigo-500/20 dark:text-indigo-300 dark:border-indigo-500/40"
                   title="Defined-Risk Mandate · Conviction 70–79% or elevated IV · Mandates vertical spread to eliminate naked exposure"
                 >
                   🛡️ SPREAD
@@ -265,7 +286,7 @@ export const AlertTableRow = memo(function AlertTableRow({
             <div className="flex items-center gap-1.5 flex-wrap">
               {confluenceAlignment === 'TRIPLE_HORIZON' && (
                 <span
-                  className="text-[10px] px-1.5 py-0.5 rounded font-black uppercase whitespace-nowrap bg-amber-500/25 text-amber-300 border border-amber-400/50"
+                  className="text-[10px] px-1.5 py-0.5 rounded font-black uppercase whitespace-nowrap bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-500/25 dark:text-amber-300 dark:border-amber-400/50"
                   title="Triple-Horizon Confluence · Intraday + Swing + Multibagger all mutually aligned in trend and volume structure"
                 >
                   👑 TRIPLE
@@ -288,7 +309,7 @@ export const AlertTableRow = memo(function AlertTableRow({
           <div className="flex items-center gap-1 flex-wrap">
             {gapRisk === 'GAP_OVER_SL' && (
               <span
-                className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-pulse"
+                className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-rose-100 text-rose-800 border border-rose-300 dark:bg-rose-500/25 dark:text-rose-300 dark:border-rose-500/50 animate-pulse"
                 title="Gap Over SL Sentinel · Opening price gapped beyond invalidation stop-loss · Setup disqualified"
               >
                 🛑 GAP OVER SL
@@ -296,7 +317,7 @@ export const AlertTableRow = memo(function AlertTableRow({
             )}
             {gapRisk === 'GAP_NO_CHASE' && (
               <span
-                className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-amber-500/25 text-amber-300 border border-amber-500/50"
+                className="text-[10px] px-2 py-0.5 rounded font-black uppercase whitespace-nowrap bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-500/25 dark:text-amber-300 dark:border-amber-500/50"
                 title="No-Chase Sentinel · Price exceeded entry threshold · Wait for retracement"
               >
                 ⚠️ NO CHASE
@@ -304,7 +325,7 @@ export const AlertTableRow = memo(function AlertTableRow({
             )}
             {stagnationWarning && (
               <span
-                className="text-[10px] px-1.5 py-0.5 rounded font-black uppercase whitespace-nowrap bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                className="text-[10px] px-1.5 py-0.5 rounded font-black uppercase whitespace-nowrap bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40"
                 title="Stagnation Sentinel · Consolidated in chop without reaching T1 (+2R) · Breakeven trailing stop active"
               >
                 ⏳ STAGNANT
@@ -312,7 +333,7 @@ export const AlertTableRow = memo(function AlertTableRow({
             )}
             {physicalRisk && (
               <span
-                className="text-[10px] px-1.5 py-0.5 rounded font-black uppercase whitespace-nowrap bg-rose-500/25 text-rose-300 border border-rose-500/50"
+                className="text-[10px] px-1.5 py-0.5 rounded font-black uppercase whitespace-nowrap bg-rose-100 text-rose-800 border border-rose-300 dark:bg-rose-500/25 dark:text-rose-300 dark:border-rose-500/50"
                 title="SEBI Physical Settlement Alert · In-the-money contract within 4 days of expiry · Escalating margin penalties"
               >
                 ⚠️ PHYSICAL
@@ -354,14 +375,14 @@ export const AlertTableRow = memo(function AlertTableRow({
           <div className="flex items-center justify-end gap-1.5">
             <button
               onClick={() => onTrade(alert)}
-              className="btn btn-xs text-[10px] px-2.5 py-1 font-bold text-emerald-300 hover:text-emerald-100 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 hover:border-emerald-500/60 transition-all rounded shadow-sm"
+              className="btn btn-xs text-[10px] px-2.5 py-1 font-bold text-emerald-800 dark:text-emerald-300 hover:text-emerald-950 dark:hover:text-emerald-100 bg-emerald-100 dark:bg-emerald-500/20 hover:bg-emerald-200 dark:hover:bg-emerald-500/30 border border-emerald-300 dark:border-emerald-500/40 hover:border-emerald-500 transition-all rounded shadow-sm"
               title="1-Click Trade: Open pre-populated Order Ticket"
             >⚡ Trade</button>
 
             {onSendTelegram && (
               <button
                 onClick={() => onSendTelegram(alert)}
-                className="btn btn-xs text-[10px] px-2 py-1 font-bold text-sky-300 hover:text-sky-100 bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 transition-all rounded"
+                className="btn btn-xs text-[10px] px-2 py-1 font-bold text-sky-800 dark:text-sky-300 hover:text-sky-950 dark:hover:text-sky-100 bg-sky-100 dark:bg-sky-500/15 hover:bg-sky-200 dark:hover:bg-sky-500/25 border border-sky-300 dark:border-sky-500/40 transition-all rounded"
                 title="Dispatch Alert to Telegram"
               >↗ TG</button>
             )}

@@ -1,0 +1,37 @@
+name: Verified market safety
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+jobs:
+  safety-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[dev]'
+      - run: python -m pytest tests/test_verified_market_safety.py tests/test_sebi_expiry_mandate_invariants.py tests/test_charges.py tests/test_options.py tests/test_options_iv_provenance.py tests/test_event_volatility.py -q
+        env:
+          CHANAKYA_TESTING: '1'
+          KEYRING_DISABLE: '1'
+      - run: >-
+          python -m pytest tests/test_modes.py tests/test_order_lifecycle.py
+          tests/test_live_oms_p3b.py tests/test_llm_deadline.py
+          tests/test_detector_circuit_breaker.py
+          tests/test_alert_outcomes.py tests/test_learning_engine.py
+          tests/test_untriggered_alert_lifecycle.py
+          tests/test_postmortem_vocabulary_and_learning_dedup.py
+          tests/test_predatory_pipeline_and_circuit_breaker.py
+          tests/test_alert_session_rca_invariants.py tests/test_fyers_endpoints.py
+          tests/test_fyers_advanced.py tests/test_fyers_depth_integrity.py
+          tests/test_listed_contract_selection.py tests/test_regime_reachability.py
+          tests/test_regime_governor.py tests/test_alert_scrutiny.py
+          tests/test_discovery_policy.py tests/test_ws_subscription_manager.py
+          tests/test_precursor_radar.py tests/test_asymmetric_radar.py
+          tests/test_crypto_stream.py tests/test_ticker_stream.py -q
+        env:
+          CHANAKYA_TESTING: '1'
+          KEYRING_DISABLE: '1'

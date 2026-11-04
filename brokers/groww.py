@@ -23,6 +23,7 @@ from urllib.parse import urlencode
 import httpx
 
 from .base import (
+    save_secure_token,
     BrokerAPI,
     Funds,
     Holding,
@@ -63,7 +64,7 @@ class GrowwAPI(BrokerAPI):
     def _save_token(self, data: dict) -> None:
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
         data["saved_at"] = datetime.now().isoformat()
-        TOKEN_FILE.write_text(json.dumps(data))
+        save_secure_token(TOKEN_FILE, json.dumps(data))
         self._token = data
 
     def _load_token(self) -> dict | None:

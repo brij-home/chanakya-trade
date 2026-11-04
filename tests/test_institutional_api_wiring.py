@@ -36,7 +36,7 @@ def test_api_smart_route_twap_and_vwap():
     resp_vwap = client.post(
         "/api/execution/smart-route",
         json={
-            "symbol": "RELIANCE",
+            "symbol": "NSE:RELIANCE-EQ",
             "side": "SELL",
             "quantity": 500,
             "ltp": 2900.0,

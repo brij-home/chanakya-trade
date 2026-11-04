@@ -628,7 +628,7 @@ def test_free_index_new_call_vs_update_number_header_disambiguation():
     rendered_new = render_free_index_alert(put_alert, in_market=True)
     # Must clearly declare NEW CALL in header
     assert "NEW CALL · INDEX PUT SETUP" in rendered_new
-    assert "🔴 <b>[REAL/LIVE] NEW CALL · INDEX PUT SETUP · OPTIONS MOMENTUM</b>" in rendered_new
+    assert "🔴 <b>[LIVE] NEW CALL · INDEX PUT SETUP · OPTIONS MOMENTUM</b>" in rendered_new
     assert "UPDATE #" not in rendered_new
 
     # 2. Subsequent Update - Milestone T1 HIT with update_number=1

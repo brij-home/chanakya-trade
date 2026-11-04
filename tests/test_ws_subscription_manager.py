@@ -61,13 +61,23 @@ def test_ws_subscription_manager_disk_restore_on_restart():
             mock_ws.subscribe.assert_called_once_with(desired)
 
 
-def test_ws_subscription_manager_seed_active_derivatives():
+def test_ws_subscription_manager_seed_active_derivatives(monkeypatch):
     from market.ws_subscription_manager import (
         WsSubscriptionManager,
         get_active_index_options_grid,
         get_active_commodity_grid,
     )
 
+    # Exercise registry seeding with an explicit selector result. Price/master
+    # eligibility and empty-feed cases have separate boundary tests.
+    monkeypatch.setattr(
+        "market.contract_selection.get_subscription_option_grid",
+        lambda underlying, **kwargs: [
+            f"{'BSE' if underlying in {'SENSEX', 'BANKEX'} else 'NSE'}:{underlying}26NOV{strike}{side}"
+            for strike in (25000, 25050, 25100)
+            for side in ("CE", "PE")
+        ],
+    )
     opt_grid = get_active_index_options_grid(num_strikes_per_side=4)
     assert len(opt_grid) > 0
     # Must include NIFTY, BANKNIFTY, MIDCPNIFTY, SENSEX
@@ -90,7 +100,7 @@ def test_ws_subscription_manager_seed_active_derivatives():
             mgr = WsSubscriptionManager(max_subscriptions=5000)
             mock_ws = MagicMock()
             seeded = mgr.seed_active_derivatives(ws_client=mock_ws)
-            assert len(seeded) > 50
+            assert set(opt_grid).issubset(seeded)
             desired = mgr.get_all_desired_subscriptions()
             # Verified that index options are now in desired subscriptions
             assert any("NIFTY" in s and ("CE" in s or "PE" in s) for s in desired)
@@ -108,11 +118,13 @@ def test_parse_contract_expiry_and_is_contract_expired():
 
     # 2. Monthly Options
     exp_m = parse_contract_expiry("NSE:NIFTY26OCT23000CE")
-    assert exp_m == date(2026, 10, 29)  # Last Thursday of Oct 2026
+    # NSE's September 2025 transition makes October 2026 monthly expiry Tuesday.
+    # Primary source: docs/SAFETY_CONTRACTS.md (NSE FAOP68685).
+    assert exp_m == date(2026, 10, 27)
 
     # 3. Futures
     exp_f = parse_contract_expiry("NSE:NIFTY26OCTFUT")
-    assert exp_f == date(2026, 10, 29)
+    assert exp_f == date(2026, 10, 27)
 
     # 4. Non-derivatives
     assert parse_contract_expiry("NSE:RELIANCE-EQ") is None

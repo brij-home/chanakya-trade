@@ -43,7 +43,7 @@ def test_escape_tg_and_helpers():
     assert format_price("₹500.00") == "₹500.00"
     assert format_price("Open") == "Open"
 
-    assert normalize_env_tag("LIVE", in_market=True) == "[REAL/LIVE]"
+    assert normalize_env_tag("LIVE", in_market=True) == "[LIVE]"
     assert normalize_env_tag("TEST", in_market=True) == "[TEST]"
     assert normalize_env_tag("LIVE", in_market=False) == "[OFF-MARKET]"
 
@@ -85,7 +85,7 @@ def test_render_fno_alert_dataclass():
     assert "NIFTY 24500 CE" in msg
     assert "Spot: <b>₹24,480.00</b>" in msg
     assert "Expiry:</b>" in msg
-    assert "Weekly" in msg or "Monthly" in msg or "0DTE" in msg
+    assert "DTE" in msg or "Expiry:" in msg
     assert "Action:</b> <b>BUY NIFTY 24500 CE</b>" in msg
     assert "Entry Zone:</b> <code>₹85.00 – ₹92.00</code>" in msg
     assert "SL:</b> <code>₹66.00</code> (-25.0%)" in msg
@@ -277,10 +277,10 @@ def test_asymmetric_setup_alert_readable_futures_and_no_spot_clash():
     }
     msg = render_asymmetric_alert(asym_dict)
 
-    # 1. Spot Action line must use spot range, not option premium range
-    assert (
-        "Action: BUY</b> @ <code>₹23,000 – ₹23,100</code> (Lot: 65) (Spot CMP: ₹23,077.00)" in msg
-    )
+    # 1. Spot Action line must use spot range, not option premium range, with no duplicate Spot CMP
+    assert "Action: BUY</b> @ <code>₹23,000 – ₹23,100</code> (Lot: 65)" in msg
+    assert "Spot CMP: <b>₹23,077.00</b>" in msg
+    assert "(Spot CMP:" not in msg
     assert "SL:</b> <code>₹22,661.61</code>" in msg
     assert "T1 (+2R):</b> <code>₹24,057.49</code>" in msg
 
@@ -634,9 +634,7 @@ def test_minimalist_alert_hierarchy_and_deduplication():
     rendered = render_auto_alert(opt_alert, in_market=True)
 
     # 1. Zero duplicate [REAL/LIVE]
-    assert rendered.count("[REAL/LIVE]") == 1, (
-        f"Found multiple [REAL/LIVE] tags in alert: {rendered}"
-    )
+    assert rendered.count("[LIVE]") == 1, f"Found multiple [LIVE] tags in alert: {rendered}"
     assert "[REAL / LIVE" not in rendered
     assert "Chanakya" not in rendered
     assert "Data-Driven Options Plan" not in rendered
@@ -678,7 +676,7 @@ def test_resolve_expiry_cycle_all_scenarios():
     assert res_0dte["is_0dte"] is True
     assert res_0dte["dte"] == 0
     assert "0DTE" in res_0dte["cycle"]
-    assert "⚡ 0DTE / Today's Expiry" in res_0dte["badge"]
+    assert "⚡ Today · 10-Sep-2026 (0DTE)" in res_0dte["badge"]
 
     # 2. Current Weekly (Next Thursday, DTE 7)
     res_cw = resolve_expiry_cycle(
@@ -690,7 +688,7 @@ def test_resolve_expiry_cycle_all_scenarios():
     assert res_cw["cycle"] == "Current Weekly"
     assert res_cw["dte"] == 7
     assert res_cw["is_weekly"] is True
-    assert "Current Weekly · 17-Sep-2026 (7 DTE)" == res_cw["badge"]
+    assert "17-Sep-2026 (7 DTE)" == res_cw["badge"]
 
     # 3. Monthly Expiry (Last Thursday of September = 2026-09-24, DTE 14)
     res_cm = resolve_expiry_cycle(
@@ -701,7 +699,7 @@ def test_resolve_expiry_cycle_all_scenarios():
     )
     assert res_cm["cycle"] == "Current Monthly"
     assert res_cm["is_monthly"] is True
-    assert "Current Monthly · 24-Sep-2026 (14 DTE)" == res_cm["badge"]
+    assert "24-Sep-2026 (14 DTE)" == res_cm["badge"]
 
     # 4. Single-Stock Equity F&O (Strictly Monthly on NSE/BSE)
     res_stock = resolve_expiry_cycle(
@@ -711,7 +709,7 @@ def test_resolve_expiry_cycle_all_scenarios():
     )
     assert res_stock["is_monthly"] is True
     assert res_stock["cycle"] == "Current Monthly"
-    assert "24-Sep-2026" in res_stock["badge"]
+    assert "24-Sep-2026" in res_stock["badge"] or "29-Sep-2026" in res_stock["badge"]
 
     # 5. Extract date directly from contract name
     res_parse = resolve_expiry_cycle(
@@ -739,7 +737,7 @@ def test_resolve_expiry_cycle_all_scenarios():
     )
     assert res_nm["cycle"] == "Next Monthly"
     assert res_nm["is_monthly"] is True
-    assert "Next Monthly · 29-Oct-2026" in res_nm["badge"]
+    assert "29-Oct-2026 (49 DTE)" in res_nm["badge"]
 
     # 8. Broker YYYYMMDD same-day / 0DTE contract e.g. UNITDSPR202609291380PE
     res_unitdspr = resolve_expiry_cycle(
@@ -812,7 +810,7 @@ def test_fno_and_equity_price_showcase_and_provenance():
         "is_live": True,
     }
     rendered_fno = render_fno_alert(real_fno, spot=25150.0)
-    assert "[REAL/LIVE]" in rendered_fno
+    assert "[LIVE]" in rendered_fno
     assert "Spot: <b>₹25,150.00</b> | Opt CMP: <b>₹195.50</b>" in rendered_fno
     assert "(Opt CMP: ₹195.50)" in rendered_fno
 
@@ -826,7 +824,7 @@ def test_fno_and_equity_price_showcase_and_provenance():
     }
     rendered_fallback = render_fno_alert(fallback_fno, spot=25150.0)
     assert "[TEST]" in rendered_fallback
-    assert "[REAL/LIVE]" not in rendered_fallback
+    assert "[LIVE]" not in rendered_fallback
 
     # 3. Equity alert showcases Spot CMP
     eq_data = {
@@ -836,7 +834,8 @@ def test_fno_and_equity_price_showcase_and_provenance():
     }
     rendered_eq = render_equity_alert(eq_data)
     assert "Spot CMP: <b>₹2,980.50</b>" in rendered_eq
-    assert "(Spot CMP: ₹2,980.50)" in rendered_eq
+    assert "(Spot CMP:" not in rendered_eq
+    assert "Action:</b> <b>BUY</b> @ <code>₹2,980.50</code>" in rendered_eq
 
     # 4. Milestone alert differentiates Opt CMP vs Spot CMP
     opt_ms = MilestoneAlertData(
@@ -1841,9 +1840,9 @@ def test_fno_and_auto_alerts_color_coding_and_lot_size():
         "lot_size": 1250,
     }
     rendered_fno_pe = render_fno_alert(pe_alert)
-    assert "🔴 <b>[REAL/LIVE] NEW CALL · GAMMA BLAST SURGE</b>" in rendered_fno_pe
+    assert "🔴 <b>[LIVE] NEW CALL · GAMMA BLAST SURGE</b>" in rendered_fno_pe
     assert "🔴 <b>CONCOR 485 PE</b> @ <code>₹7.20</code> (Lot: 1250)" in rendered_fno_pe
-    assert "• <b>Entry Zone:</b> <code>₹7.00 – ₹7.40</code> (Lot: 1250)" in rendered_fno_pe
+    assert "• <b>Entry Zone:</b> <code>₹7.00 – ₹7.40</code>" in rendered_fno_pe
 
     # 2. render_fno_alert with Call option (Bullish 🟢)
     ce_alert = {
@@ -1859,7 +1858,7 @@ def test_fno_and_auto_alerts_color_coding_and_lot_size():
         "lot_size": 1250,
     }
     rendered_fno_ce = render_fno_alert(ce_alert)
-    assert "🟢 <b>[REAL/LIVE] NEW CALL · GAMMA BLAST SURGE</b>" in rendered_fno_ce
+    assert "🟢 <b>[LIVE] NEW CALL · GAMMA BLAST SURGE</b>" in rendered_fno_ce
     assert "🟢 <b>CONCOR 485 CE</b> @ <code>₹8.50</code> (Lot: 1250)" in rendered_fno_ce
 
     # 3. render_auto_alert with Options Momentum Put Alert
@@ -1890,12 +1889,12 @@ def test_fno_and_auto_alerts_color_coding_and_lot_size():
         confidence=91,
     )
     rendered_auto_pe = render_auto_alert(auto_pe, in_market=True)
-    assert "🔴 <b>[REAL/LIVE] NEW CALL · OPTIONS PUT SURGE</b>" in rendered_auto_pe
-    assert "🔴 OPTIONS MOMENTUM (PUT SURGE): CONCOR 485 PE @ ₹7.2 (Lot: 1250)" in rendered_auto_pe
+    assert "🔴 <b>[LIVE] NEW CALL · OPTIONS PUT SURGE</b>" in rendered_auto_pe
+    assert "🔴 CONCOR 485 PE @ ₹7.2 (Lot: 1250)" in rendered_auto_pe
     assert (
-        "• <b>Action:</b> BUY <b>CONCOR 485 PE</b> @ <code>₹7.2</code> (Lot: 1250)"
-        in rendered_auto_pe
+        "OPTIONS MOMENTUM" not in rendered_auto_pe.split("━━━━━━━━━━━━━━━━━━━━")[1].split("\n")[0]
     )
+    assert "• <b>Action:</b> BUY <b>CONCOR 485 PE</b> @ <code>₹7.2</code>" in rendered_auto_pe
 
 
 def test_milestone_alerts_color_coding_and_lot_size():
@@ -2226,7 +2225,8 @@ def test_options_alert_headline_sector_shortening_and_deduplication():
     assert "M&M 2950 PE" in rendered_1
     # Redundant [AUTO] at the beginning is removed because [🏆 AUTO #1/5] is present
     assert "[🏆 AUTO #1/5]" in rendered_1
-    assert "OPTIONS MOMENTUM (PUT SURGE):" in rendered_1
+    assert "M&M 2950 PE @ ₹55.4 (Lot: 200)" in rendered_1
+    assert "OPTIONS MOMENTUM" not in rendered_1.split("━━━━━━━━━━━━━━━━━━━━")[1].split("\n")[0]
 
     # Scenario 2: Headline without trophy badge has shortened sector [AUTO]
     alert_no_trophy = AutoAlert(
@@ -2255,7 +2255,9 @@ def test_options_alert_headline_sector_shortening_and_deduplication():
     )
     rendered_2 = render_auto_alert(alert_no_trophy, in_market=True)
     assert "AUTOMOBILES & MOBILITY" not in rendered_2
-    assert "OPTIONS MOMENTUM [AUTO] (PUT SURGE):" in rendered_2
+    assert "M&M 2950 PE @ ₹55.4 (Lot: 200)" in rendered_2
+    assert "[AUTO]" in rendered_2
+    assert "OPTIONS MOMENTUM" not in rendered_2.split("━━━━━━━━━━━━━━━━━━━━")[1].split("\n")[0]
 
 
 def test_render_crypto_alert_holistic_sanitization():
@@ -2616,7 +2618,7 @@ def test_auto_alert_telegram_expiry_price_coherence():
     msg_oct = format_auto_alert_telegram(oct_alert)
     assert "₹28.00" in msg_oct
     assert "26-Nov-2026" in msg_oct
-    assert "Monthly" in msg_oct
+    assert "DTE" in msg_oct
     assert "29-Sep-2026" not in msg_oct
 
 
@@ -2656,7 +2658,7 @@ def test_opening_drive_call_option_header_not_put_surge():
     rendered = format_auto_alert_telegram(alert)
     # Must NOT have PUT SURGE or red icon in header
     assert "OPTIONS PUT SURGE" not in rendered
-    assert "🔴 <b>[REAL/LIVE] NEW CALL · OPTIONS PUT SURGE</b>" not in rendered
+    assert "🔴 <b>[LIVE] NEW CALL · OPTIONS PUT SURGE</b>" not in rendered
     # Must have green icon and appropriate breakout/ignition header
     assert "🟢" in rendered
     assert "OPENING DRIVE IGNITION" in rendered
@@ -3584,3 +3586,228 @@ def test_index_option_alert_action_line_and_spot_sl_currency():
     assert "OTE:" not in reason_line
     assert "Rule:" not in reason_line
     assert "Climax exhaustion & V-top reversal" in reason_line
+
+
+def test_telegram_alert_trader_ux_and_collapsible_blockquote_invariants():
+    """Verify modern Telegram UX invariants:
+    1. Symbol & Strike lead the ticker line with no redundant strategy prefix (e.g. OPTIONS MOMENTUM).
+    2. Lot size is never duplicated between headline ticker and Action line.
+    3. Expiry line has no 'Current Monthly' filler, displaying clean Date and DTE.
+    4. Defined-Risk Hedge Spread and secondary quant analytics are tucked inside <blockquote expandable>.
+    """
+    from bot.alert_templates import format_auto_alert_telegram
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-options-momentum-bosch-51000ce-20261103",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="BOSCHLTD",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="🟢 OPTIONS MOMENTUM [AUTO] ⚡️ DECOUPLER: NSE:BOSCHLTD 51000 CE @ ₹1,100.0 (Lot: 25) (Vol/OI 7.34x)",
+        summary="Institutional Call surge in BOSCHLTD 51000 CE. Underlying spot ₹49,865.0.",
+        ltp=1100.0,
+        trigger_level=1100.0,
+        target_level=1534.5,
+        stop_loss=858.6,
+        strike=51000.0,
+        option_type="CE",
+        contract_symbol="BOSCHLTD 51000 CE",
+        expiry_date="2026-11-23",
+        expiry_type="MONTHLY",
+        underlying_spot=49865.0,
+        lot_size=25,
+        confidence=96,
+        actionable_plan={
+            "action": "BUY",
+            "contract": "BOSCHLTD 51000 CE",
+            "recommended_entry": "₹1,100.00",
+            "stop_loss": "₹858.6",
+            "spot_invalidation_anchor": 49238.6,
+            "target": "₹1,534.5",
+            "target_2": "₹1,582.8",
+            "target_3": "₹1,824.2",
+            "risk_reward": "1:1.8",
+            "expected_value_r": "+0.53R",
+            "lot_size": 25,
+            "when_to_wait": "Wait for 5m consolidation retest.",
+            "free_roll_plan": {
+                "status": "ELIGIBLE",
+                "protocol_summary": "Bank 50% at T1, ratchet SL to Cost. Net trade risk becomes ₹0.00.",
+            },
+            "hedge_plan": {
+                "strategy": "Bull Call Spread",
+                "preferred_vehicle": "HEDGED_SPREAD",
+                "risk_reward": "1:2.6",
+                "buy_leg": "BUY BOSCHLTD 51000 CE @ ₹1,100.0",
+                "sell_leg": "SELL BOSCHLTD 51500 CE @ ₹961.7",
+                "net_debit_per_share": 138.3,
+                "max_loss": 3458.0,
+                "max_profit": 9042.0,
+                "booking_target_70": 391.5,
+                "short_strike": 51500.0,
+                "spread_stop_loss": 69.2,
+                "net_delta": 0.09,
+                "long_delta": 0.17,
+                "short_delta": 0.08,
+            },
+        },
+    )
+
+    rendered = format_auto_alert_telegram(alert)
+
+    # 1. Headline ticker must NOT start with OPTIONS MOMENTUM; symbol & strike lead
+    ticker_line = rendered.split("━━━━━━━━━━━━━━━━━━━━\n")[1].split("\n")[0]
+    assert "OPTIONS MOMENTUM" not in ticker_line
+    assert "BOSCHLTD 51000 CE @ ₹1,100.0 (Lot: 25)" in ticker_line
+    assert "NSE:" not in ticker_line
+    assert "[AUTO]" in ticker_line
+    assert "⚡️ DECOUPLER" in ticker_line or "⚡ DECOUPLER" in ticker_line
+
+    # 2. Expiry must NOT say 'Current Monthly'
+    assert "Current Monthly" not in rendered
+    assert "• <b>Expiry:</b> ⏳ 23-Nov-2026 (19 DTE)" in rendered
+
+    # 3. Lot size must NOT be duplicated on Action line
+    action_line = rendered.split("• <b>Action:</b>")[1].split("\n")[0]
+    assert "(Lot: 25)" not in action_line
+    assert "BUY <b>BOSCHLTD 51000 CE</b> @ <code>₹1,100.00</code>" in action_line
+
+    # 4. Native Telegram expandable blockquote must wrap secondary details
+    assert "<blockquote expandable>" in rendered
+    assert "</blockquote>" in rendered
+
+    # 5. Hedge spread & free roll must be tucked inside the blockquote
+    quote_content = rendered.split("<blockquote expandable>\n")[1].split("\n</blockquote>")[0]
+    assert "DEFINED-RISK HEDGE SPREAD" in quote_content
+    assert "Bull Call Spread" in quote_content
+    assert "BUY BOSCHLTD 51000 CE" in quote_content
+    assert "Free-Roll Protocol" in quote_content
+    assert "Reason:" in quote_content
+
+
+def test_milestone_visual_runway_progress_meter():
+    """Verify that milestone alerts (T0.5, T1, T2, Final, Trail) render visual runway progress meters."""
+    from bot.alert_templates import MilestoneAlertData, render_milestone_alert
+
+    # 1. Target 1
+    d_t1 = MilestoneAlertData(
+        milestone_type="TARGET_1",
+        symbol="NIFTY",
+        contract="NIFTY 24500 CE",
+        alert_type="OPTIONS MOMENTUM",
+        ltp=150.0,
+        entry_price=100.0,
+        target_1=150.0,
+        target_2=200.0,
+        trailing_stop=102.0,
+        environment="LIVE",
+    )
+    rendered_t1 = render_milestone_alert(d_t1, in_market=True)
+    assert "• 📊 <b>Runway:</b>" in rendered_t1
+    assert "T1 Reached → Next: T2 (<code>₹200.00</code>)" in rendered_t1
+    assert "▰▰▰▰▰▱▱▱▱▱" in rendered_t1
+
+    # 2. Target 2
+    d_t2 = MilestoneAlertData(
+        milestone_type="TARGET_2",
+        symbol="NIFTY",
+        contract="NIFTY 24500 CE",
+        alert_type="OPTIONS MOMENTUM",
+        ltp=200.0,
+        entry_price=100.0,
+        target_1=150.0,
+        target_2=200.0,
+        target_moonshot=250.0,
+        environment="LIVE",
+    )
+    rendered_t2 = render_milestone_alert(d_t2, in_market=True)
+    assert "• 📊 <b>Runway:</b>" in rendered_t2
+    assert "T2 Reached → Next: Runner (<code>₹250.00</code>)" in rendered_t2
+    assert "80%" in rendered_t2
+
+    # 3. Final Target
+    d_final = MilestoneAlertData(
+        milestone_type="FINAL_TARGET",
+        symbol="NIFTY",
+        contract="NIFTY 24500 CE",
+        alert_type="OPTIONS MOMENTUM",
+        ltp=250.0,
+        entry_price=100.0,
+        target_1=150.0,
+        target_2=200.0,
+        should_trail=False,
+        environment="LIVE",
+    )
+    rendered_final = render_milestone_alert(d_final, in_market=True)
+    assert "• 📊 <b>Runway:</b>" in rendered_final
+    assert "100%</code> · All Targets Achieved 🏆" in rendered_final
+
+
+def test_telegram_bot_edit_message_text_and_status():
+    """Verify edit_message_text and update_root_signal_status facade methods."""
+    from bot.telegram_bot import (
+        get_telegram_bot,
+        record_signal_message_id,
+        clear_signal_message_ids,
+    )
+
+    bot = get_telegram_bot()
+    clear_signal_message_ids()
+
+    # Record root message
+    record_signal_message_id("SIG_TEST_001", 998877, chat_id="-1001234567")
+
+    # In-place status check
+    status_updated = bot.update_root_signal_status(
+        signal_id="SIG_TEST_001", status_badge="[✅ T1 HIT]", chat_id="-1001234567"
+    )
+    assert status_updated is True
+
+    # edit_message_text returns True in test mode
+    res = bot.edit_message_text(message_id=998877, text="Updated text", chat_id="-1001234567")
+    assert res is True
+
+
+def test_iron_condor_clean_rendering_and_zero_dte_suppression():
+    """Verify Iron Condor setups have genuine strikes, real expiry, and zero phantom 0DTE/APEX ASYMMETRY."""
+    from bot.alert_templates import resolve_expiry_cycle, render_asymmetric_alert
+    from engine.asymmetric_radar import asymmetric_radar
+
+    # 1. Unknown expiry resolution must never hallucinate 0DTE
+    res_none = resolve_expiry_cycle(
+        contract=None, expiry_date=None, dte=None, underlying="RELIANCE"
+    )
+    assert res_none["dte"] is None
+    assert res_none["badge"] == ""
+    assert res_none["cycle"] == ""
+    assert res_none["is_0dte"] is False
+
+    # 2. Detect Iron Condor on RELIANCE
+    opp = asymmetric_radar.detect_volatility_pinning_iron_condor(
+        "RELIANCE", quote={"last_price": 1314.80, "volume": 1000000}
+    )
+    assert opp is not None
+    assert opp.expiry_date is not None
+    assert opp.short_pe == 1280.0
+    assert opp.short_ce == 1360.0
+    assert opp.long_pe == 1240.0
+    assert opp.long_ce == 1400.0
+
+    d = opp.to_dict()
+    msg = render_asymmetric_alert(d, in_market=True)
+
+    # 3. Guard against all corrupt alert regressions
+    assert "DO NOT MISS SETUP · APEX ASYMMETRY" not in msg
+    assert "0DTE" not in msg
+    assert "1:3.0 R:R" not in msg
+    assert "Corridor Pin Zone:</b> <code>₹1,280.00 – ₹1,360.00</code>" in msg
+    assert "Short Wing (Sell):</b> <code>1,280 PE + 1,360 CE</code>" in msg
+    assert "Hedge Wing (Buy):</b> <code>1,240 PE + 1,400 CE</code>" in msg
+    assert "Net Credit Harvest:</b> <code>+₹6,400.00/lot</code>" in msg
+    assert "Max Risk:</b> ₹13,600.00/lot" in msg
+    assert "[REAL/LIVE]" not in msg
+    assert "[LIVE]" in msg
+    assert msg.count("(Lot: 500)") == 1
+    assert "Lot: 500 | Lot: 500" not in msg

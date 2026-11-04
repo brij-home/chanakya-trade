@@ -260,3 +260,20 @@ async def test_fastapi_gtt_endpoints():
     del_res = await api_cancel_gtt("GTT-NONEXISTENT")
     assert del_res["status"] == "error"
     assert del_res["cancelled"] is False
+
+
+@pytest.mark.anyio
+async def test_live_gtt_cancel_is_blocked_until_oms_tracks_protection(monkeypatch):
+    from fastapi import HTTPException
+    from unittest.mock import Mock
+    from web.routers.orders_api import api_cancel_gtt
+
+    broker = Mock()
+    monkeypatch.setenv("TRADING_MODE", "EXECUTE")
+    monkeypatch.setattr("brokers.session.get_execution_broker", lambda: broker)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api_cancel_gtt("GTT-UNTRACKED")
+
+    assert exc_info.value.status_code == 409
+    broker.cancel_gtt.assert_not_called()

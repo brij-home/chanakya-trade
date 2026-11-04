@@ -765,6 +765,9 @@ def test_fno_index_channel_whitelist_nifty_banknifty_midcp_sensex_only(monkeypat
     # 3. AutoAlertEngine._dispatch filtering verification
     monkeypatch.setenv("TELEGRAM_FNO_INDEX_CHAT_ID", "-1004380788314")
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
+    # This test covers the dedicated paid F&O channel only. Disable the optional
+    # community mirror so a developer's local .env cannot change its send count.
+    monkeypatch.setattr("engine.free_index_router.free_index_router.get_chat_id", lambda: None)
 
     sent_tg = []
 

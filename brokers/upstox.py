@@ -37,6 +37,7 @@ from typing import Optional
 import httpx
 
 from brokers.base import (
+    save_secure_token,
     BrokerAPI,
     UserProfile,
     Funds,
@@ -92,13 +93,14 @@ class UpstoxAPI(BrokerAPI):
 
     def _save_token(self, token: str) -> None:
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_FILE.write_text(
+        save_secure_token(
+            TOKEN_FILE,
             json.dumps(
                 {
                     "access_token": token,
                     "timestamp": time.time(),
                 }
-            )
+            ),
         )
 
     def _headers(self) -> dict:
@@ -216,7 +218,6 @@ class UpstoxAPI(BrokerAPI):
             name=payload.get("user_name", ""),
             email=payload.get("email", ""),
             broker="Upstox",
-            metadata=payload,
         )
         return self._profile
 
@@ -228,7 +229,6 @@ class UpstoxAPI(BrokerAPI):
             available_cash=float(equity.get("available_margin", 0)),
             used_margin=float(equity.get("used_margin", 0)),
             total_balance=float(equity.get("net", 0)),
-            metadata=payload,
         )
 
     # ── Portfolio ─────────────────────────────────────────────
@@ -274,8 +274,6 @@ class UpstoxAPI(BrokerAPI):
                     avg_price=avg,
                     last_price=ltp,
                     pnl=float(item.get("pnl", 0)),
-                    day_change=round(float(item.get("day_change", 0) or 0), 2),
-                    day_change_pct=round(float(item.get("day_change_percentage", 0) or 0), 2),
                     product=item.get("product", "D"),
                     exchange=item.get("exchange", "NSE"),
                     instrument_type=item.get("instrument_type", "EQ"),
@@ -367,13 +365,16 @@ class UpstoxAPI(BrokerAPI):
     # ── Orders ────────────────────────────────────────────────
 
     def place_order(self, req: OrderRequest) -> OrderResponse:
+        exch = (req.exchange or "NSE").upper()
+        seg = "BSE_EQ" if exch == "BSE" else ("NSE_FO" if exch == "NFO" else "NSE_EQ")
+        inst_token = f"{seg}|{req.symbol}"
         payload = {
             "quantity": req.quantity,
             "product": self._map_product(req.product),
             "validity": "DAY",
             "price": req.price if req.order_type == "LIMIT" else 0,
             "tag": "chanakya-trade",
-            "instrument_token": f"NSE_EQ|{req.symbol}",
+            "instrument_token": inst_token,
             "order_type": req.order_type,
             "transaction_type": req.transaction_type,
             "disclosed_quantity": 0,
@@ -383,9 +384,9 @@ class UpstoxAPI(BrokerAPI):
         data = self._post("/order/place", payload)
         return OrderResponse(
             order_id=data.get("data", {}).get("order_id", ""),
-            status="OPEN",
+            status="SUBMITTED",
             message="Order placed",
-            metadata=data,
+            raw=data,
         )
 
     def get_orders(self) -> list[Order]:
@@ -396,6 +397,7 @@ class UpstoxAPI(BrokerAPI):
                 Order(
                     order_id=item.get("order_id", ""),
                     symbol=item.get("tradingsymbol", ""),
+                    exchange=item.get("exchange", "NSE"),
                     transaction_type=item.get("transaction_type", ""),
                     product=item.get("product", ""),
                     order_type=item.get("order_type", ""),
@@ -403,10 +405,8 @@ class UpstoxAPI(BrokerAPI):
                     price=float(item.get("price", 0)),
                     status=item.get("status", ""),
                     filled_quantity=int(item.get("filled_quantity", 0)),
-                    avg_price=float(item.get("average_price", 0)),
-                    timestamp=datetime.fromisoformat(item["order_timestamp"])
-                    if item.get("order_timestamp")
-                    else datetime.now(),
+                    average_price=float(item.get("average_price", 0)),
+                    placed_at=item.get("order_timestamp"),
                 )
             )
         return orders

@@ -15,6 +15,7 @@ early-warning alert for the parent index 60-120 seconds *before* the index spot 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
@@ -24,7 +25,6 @@ from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("engine.index_contagion")
 from config.constants import IST_ZONE as IST
-from market.instruments import format_strike
 
 # ── Institutional Constituent Weightings (Active 2026) ───────────────────────
 
@@ -360,9 +360,22 @@ class IndexContagionEngine:
         except Exception as e_tp:
             logger.debug(f"[IndexContagion] Trade plan failed: {e_tp}")
 
-        is_viable = True
-        asym_verdict = "ACCEPTABLE"
-        asym_note = ""
+        if tp is None:
+            logger.info(
+                "[IndexContagion] Holding %s %s: verified underlying trade plan unavailable.",
+                index_name,
+                direction,
+            )
+            return None
+        is_viable = bool(getattr(tp, "is_asymmetry_viable", False))
+        asym_verdict = str(getattr(tp, "asymmetry_verdict", "UNAVAILABLE"))
+        asym_note = str(getattr(tp, "asymmetry_note", ""))
+        sl = tp.invalidation_stop
+        t1 = tp.target_1
+        t2 = tp.target_2
+        t3 = tp.target_3
+        rr_str = f"1:{tp.rr_t1}"
+        tp_dict = tp.as_dict()
 
         # Day Extreme Exhaustion Guard:
         # If spot is pressing within 0.10% of Day High (Bullish) or Day Low (Bearish)
@@ -392,31 +405,17 @@ class IndexContagionEngine:
                 f"Index spot is pinned against Day Low (₹{day_low:,.1f}) and -{vwap_dist_pct:.2f}% from VWAP. "
                 f"High risk of exhaustion bounce; await consolidation pullback to VWAP."
             )
-        elif tp:
-            sl = tp.invalidation_stop
-            t1 = tp.target_1
-            t2 = tp.target_2
-            t3 = tp.target_3
-            rr_str = f"1:{tp.rr_t1}"
-            tp_dict = tp.as_dict()
-            is_viable = tp.is_asymmetry_viable
-            asym_verdict = tp.asymmetry_verdict
-            asym_note = tp.asymmetry_note
-        else:
-            # High-precision ATR anchor for indices (BankNifty ~140 pts, Nifty ~60 pts)
-            risk_pts = 140.0 if "BANK" in index_name else 60.0
-            if is_bull:
-                sl = round(max(vwap * 0.998, spot - risk_pts), 1)
-                t1 = round(spot + 1.8 * risk_pts, 1)
-                t2 = round(spot + 3.0 * risk_pts, 1)
-                t3 = round(spot + 4.5 * risk_pts, 1)
-            else:
-                sl = round(min(vwap * 1.002, spot + risk_pts), 1)
-                t1 = round(spot - 1.8 * risk_pts, 1)
-                t2 = round(spot - 3.0 * risk_pts, 1)
-                t3 = round(spot - 4.5 * risk_pts, 1)
-            rr_str = "1:2.2"
-            tp_dict = None
+
+        levels = (sl, t1, t2, t3)
+        if any(
+            not math.isfinite(float(level or 0.0)) or float(level or 0.0) <= 0 for level in levels
+        ):
+            logger.info(
+                "[IndexContagion] Holding %s %s: trade plan contains unavailable price anchors.",
+                index_name,
+                direction,
+            )
+            return None
 
         # Fail-closed guard: Non-viable setups (fatigue trap or poor R:R) MUST NOT emit alerts
         if not is_viable:
@@ -473,7 +472,7 @@ class IndexContagionEngine:
         leaders_str = ", ".join(leading[:3]) if leading else "Core heavyweights"
         tag = "🚀 HEAVYWEIGHT CONTAGION" if is_bull else "🔻 HEAVYWEIGHT BREAKDOWN"
 
-        # Resolve live ATM Option Contract for the index
+        # Resolve a broker-realtime option chain and exact currently listed contract.
         opt_type = "CE" if is_bull else "PE"
         atm_contract = None
         opt_plan = None
@@ -486,11 +485,40 @@ class IndexContagionEngine:
         opt_t2 = None
         opt_t3 = None
         try:
-            from market.options import get_options_chain
-            from engine.position_sizer import get_lot_size
+            from datetime import datetime
+
+            from config.constants import IST
+            from market.contract_selection import get_listed_contracts
+            from market.options import get_options_snapshot
             from engine.trade_plan import calculate_option_execution_plan
 
-            chain = get_options_chain(index_name)
+            chain, _, _, source_info = get_options_snapshot(index_name)
+            if (
+                str(source_info.get("source", "")).upper() != "BROKER_REST"
+                or str(source_info.get("data_state", "")).upper() != "LIVE"
+                or source_info.get("is_realtime") is not True
+                or source_info.get("is_market_open") is not True
+            ):
+                logger.info(
+                    "[IndexContagion] Holding %s: option chain is not broker-realtime during the active session.",
+                    index_name,
+                )
+                return None
+            as_of_raw = str(source_info.get("as_of") or "")
+            as_of = datetime.fromisoformat(as_of_raw.replace("Z", "+00:00"))
+            if as_of.tzinfo is None:
+                return None
+            as_of = as_of.astimezone(IST)
+            exchange = "BSE" if index_name in ("SENSEX", "BANKEX") else "NSE"
+            listed = get_listed_contracts(index_name, exchange=exchange, as_of=as_of)
+            listed_by_key = {
+                (
+                    contract.symbol.rsplit(":", 1)[-1].upper(),
+                    contract.option_type,
+                    contract.strike,
+                ): contract
+                for contract in listed
+            }
             if chain:
                 # Institutional ATM Proximity Gate:
                 # Strike must be within 2.0% of index spot (typically within 150-500 pts for 20k-25k indices).
@@ -499,97 +527,95 @@ class IndexContagionEngine:
                 matching = [
                     c
                     for c in chain
-                    if getattr(c, "option_type", "") == opt_type
+                    if str(getattr(c, "option_type", "")).upper() == opt_type
+                    and math.isfinite(float(getattr(c, "last_price", 0.0) or 0.0))
                     and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                    and int(getattr(c, "oi", 0) or 0) > 0
+                    and int(getattr(c, "volume", 0) or 0) > 0
                     and (abs(float(getattr(c, "strike", 0.0)) - spot) / max(1.0, spot))
                     <= max_allowed_dist_pct
+                    and (
+                        str(getattr(c, "symbol", "")).rsplit(":", 1)[-1].upper(),
+                        opt_type,
+                        float(getattr(c, "strike", 0.0)),
+                    )
+                    in listed_by_key
                 ]
-                # Prioritize liquid contracts with open interest or volume if available
-                liquid_matching = [
-                    c
-                    for c in matching
-                    if int(getattr(c, "oi", 0) or 0) > 0 or int(getattr(c, "volume", 0) or 0) > 0
-                ]
-                chosen_pool = liquid_matching if liquid_matching else matching
-                if chosen_pool:
-                    chosen_pool.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
-                    atm_contract = chosen_pool[0]
+                if matching:
+                    matching.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
+                    atm_contract = matching[0]
                     opt_ltp = float(atm_contract.last_price)
                     opt_strike = float(atm_contract.strike)
-                    opt_contract_sym = atm_contract.symbol
-                    opt_expiry = getattr(atm_contract, "expiry", None)
-                    lot_sz = get_lot_size(index_name)
-                    if tp and getattr(tp, "invalidation_stop", 0) > 0:
-                        opt_plan = calculate_option_execution_plan(
-                            trade_plan=tp,
-                            option_type=opt_type,
-                            strike=opt_strike,
-                            expiry=str(opt_expiry) if opt_expiry else "",
-                            option_ltp=opt_ltp,
-                            lot_size=lot_sz or 15,
+                    selected = listed_by_key[
+                        (
+                            str(getattr(atm_contract, "symbol", "")).rsplit(":", 1)[-1].upper(),
+                            opt_type,
+                            opt_strike,
                         )
-                        if opt_plan and opt_plan.get("sl_premium"):
-                            opt_sl = float(opt_plan["sl_premium"])
-                            opt_t1 = float(opt_plan.get("t1_premium") or round(opt_ltp * 1.25, 2))
-                            opt_t2 = float(opt_plan.get("t2_premium") or round(opt_ltp * 1.45, 2))
-                            opt_t3 = float(opt_plan.get("t3_premium") or round(opt_ltp * 1.75, 2))
-                            rr_str = str(opt_plan.get("option_rr") or rr_str)
-                    if not opt_sl:
-                        opt_sl = round(max(0.05, opt_ltp * 0.85), 2)
-                        opt_t1 = round(opt_ltp * 1.25, 2)
-                        opt_t2 = round(opt_ltp * 1.45, 2)
-                        opt_t3 = round(opt_ltp * 1.75, 2)
+                    ]
+                    option_expiry = datetime.strptime(
+                        str(atm_contract.expiry)[:10], "%Y-%m-%d"
+                    ).date()
+                    if option_expiry != selected.expiry:
+                        return None
+                    opt_contract_sym = selected.symbol
+                    opt_expiry = option_expiry.isoformat()
+                    lot_sz = int(selected.lot_size)
+                    if lot_sz <= 0:
+                        return None
+                    opt_plan = calculate_option_execution_plan(
+                        trade_plan=tp,
+                        option_type=opt_type,
+                        strike=opt_strike,
+                        expiry=opt_expiry,
+                        option_ltp=opt_ltp,
+                        lot_size=lot_sz,
+                        contract_symbol=opt_contract_sym,
+                    )
+                    if not isinstance(opt_plan, dict):
+                        return None
+                    try:
+                        opt_sl = float(opt_plan.get("sl_premium") or 0.0)
+                        opt_t1 = float(opt_plan.get("t1_premium") or 0.0)
+                        opt_t2 = float(opt_plan.get("t2_premium") or 0.0)
+                        opt_t3 = float(opt_plan.get("t3_premium") or 0.0)
+                    except (TypeError, ValueError, OverflowError):
+                        return None
+                    if any(
+                        not math.isfinite(level) or level <= 0
+                        for level in (opt_sl, opt_t1, opt_t2, opt_t3)
+                    ):
+                        return None
+                    rr_str = str(opt_plan.get("option_rr") or rr_str)
         except Exception as e_opt:
-            logger.debug(f"[IndexContagion] Option resolution failed for {index_name}: {e_opt}")
+            logger.info(
+                "[IndexContagion] Option contract resolution unavailable for %s: %s",
+                index_name,
+                e_opt,
+            )
+            return None
 
-        if opt_ltp and opt_contract_sym:
-            headline = (
-                f"{tag}: {opt_contract_sym} @ ₹{opt_ltp:,.1f} ({sync_pct:.0f}% Weight {direction})"
+        if not opt_ltp or not opt_contract_sym or not opt_plan:
+            logger.info(
+                "[IndexContagion] Holding %s: no liquid, listed option contract is available.",
+                index_name,
             )
-            summary = (
-                f"Institutional {index_name} constituent synchronization ({sync_pct:.0f}% aligned). "
-                f"ATM Option: {opt_contract_sym} @ ₹{opt_ltp:,.1f} (SL ₹{opt_sl:,.1f} | T1 ₹{opt_t1:,.1f}). "
-                f"Leaders: {leaders_str}. Index spot at ₹{spot:,.1f} (VWAP ₹{vwap:,.1f})."
-            )
-            alert_ltp = opt_ltp
-            alert_sl = opt_sl
-            alert_t1 = opt_t1
-            entry_range_str = f"₹{round(opt_ltp * 0.98, 1):,.1f} – ₹{round(opt_ltp * 1.02, 1):,.1f}"
-            when_to_buy_str = f"Buy {opt_contract_sym} on limit/ask while {index_name} spot holds above ₹{vwap:,.1f}."
-        else:
-            # Estimate ATM strike from index spot (25 for MIDCPNIFTY, 100 for BANKNIFTY/SENSEX, 50 for NIFTY/FINNIFTY)
-            if index_name in ("BANKNIFTY", "SENSEX", "BANKEX"):
-                step = 100
-            elif index_name == "MIDCPNIFTY":
-                step = 25
-            else:
-                step = 50
-            est_strike = round(spot / step) * step
-            est_premium = round(max(20.0, spot * 0.0065), 1)
-            est_sl = round(est_premium * 0.82, 1)
-            est_t1 = round(est_premium * 1.35, 1)
-            est_t2 = round(est_premium * 1.70, 1)
-            est_t3 = round(est_premium * 2.10, 1)
-            opt_contract_sym = f"{index_name} {format_strike(est_strike)} {opt_type}"
-            opt_ltp = est_premium
-            opt_sl = est_sl
-            opt_t1 = est_t1
-            opt_t2 = est_t2
-            opt_t3 = est_t3
-            opt_strike = est_strike
-            headline = (
-                f"{tag}: {opt_contract_sym} ~₹{opt_ltp:,.1f} ({sync_pct:.0f}% Weight {direction})"
-            )
-            summary = (
-                f"Institutional {index_name} constituent synchronization ({sync_pct:.0f}% aligned). "
-                f"ATM Option: {opt_contract_sym} ~₹{opt_ltp:,.1f} (SL ₹{opt_sl:,.1f} | T1 ₹{opt_t1:,.1f}). "
-                f"Leaders: {leaders_str}. Index spot at ₹{spot:,.1f} (VWAP ₹{vwap:,.1f})."
-            )
-            alert_ltp = opt_ltp
-            alert_sl = opt_sl
-            alert_t1 = opt_t1
-            entry_range_str = f"₹{round(opt_ltp * 0.96, 1):,.1f} – ₹{round(opt_ltp * 1.04, 1):,.1f}"
-            when_to_buy_str = f"Buy {opt_contract_sym} on ask while {index_name} spot holds above ₹{vwap:,.1f} (Spot SL: ₹{sl:,.1f})."
+            return None
+        headline = (
+            f"{tag}: {opt_contract_sym} @ ₹{opt_ltp:,.1f} ({sync_pct:.0f}% Weight {direction})"
+        )
+        summary = (
+            f"Institutional {index_name} constituent synchronization ({sync_pct:.0f}% aligned). "
+            f"ATM Option: {opt_contract_sym} @ ₹{opt_ltp:,.1f} (SL ₹{opt_sl:,.1f} | T1 ₹{opt_t1:,.1f}). "
+            f"Leaders: {leaders_str}. Index spot at ₹{spot:,.1f} (VWAP ₹{vwap:,.1f})."
+        )
+        alert_ltp = opt_ltp
+        alert_sl = opt_sl
+        alert_t1 = opt_t1
+        entry_range_str = f"₹{round(opt_ltp * 0.98, 1):,.1f} – ₹{round(opt_ltp * 1.02, 1):,.1f}"
+        when_to_buy_str = (
+            f"Buy {opt_contract_sym} on limit/ask while {index_name} spot holds above ₹{vwap:,.1f}."
+        )
 
         # Calibrated institutional confidence scoring (0 - 95%)
         # Base: 60 pts

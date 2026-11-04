@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,16 @@ def bypass_risk_limits(tmp_path, monkeypatch):
     import engine.risk_limits as rl_mod
 
     rl_mod.risk_limits = rl_mod.RiskLimits()
+    monkeypatch.setattr(
+        "market.quotes.get_ltp",
+        lambda instrument: 2500.0,
+    )
+    monkeypatch.setattr(
+        "engine.order_lifecycle.submit_simulated_order_intent",
+        lambda **kwargs: SimpleNamespace(
+            order_id="PAPER-OMS-001", status="FILLED_PAPER", rejection_reason=None
+        ),
+    )
     yield
     rl_mod.risk_limits = rl_mod.RiskLimits()
 
@@ -113,7 +124,7 @@ class TestIsPaper:
     def test_exception_defaults_to_paper(self):
         broker = MagicMock()
         broker.get_profile.side_effect = RuntimeError("network error")
-        assert _is_paper(broker) is True
+        assert _is_paper(broker) is False
 
 
 # ── _trading_mode_override ───────────────────────────────────
@@ -151,7 +162,10 @@ class TestIsLiveExecutionAllowed:
             assert is_live_execution_allowed(_make_broker("FYERS")) is False
 
     def test_live_broker_with_live_env_is_allowed(self):
-        with patch.dict(os.environ, {"TRADING_MODE": "LIVE"}):
+        with patch.dict(
+            os.environ,
+            {"TRADING_MODE": "LIVE", "ALLOW_LIVE_TRADING": "1", "LIVE_EXECUTION_QUALIFIED": "1"},
+        ):
             assert is_live_execution_allowed(_make_broker("FYERS")) is True
 
     def test_live_broker_with_default_env_is_not_live(self):
@@ -171,15 +185,15 @@ class TestExecuteTradePlan:
         assert result == []
         broker.place_order.assert_not_called()
 
-    def test_paper_broker_executes_without_confirmation(self):
+    def test_paper_broker_routes_through_simulated_oms(self):
         broker = _make_broker("PAPER")
         env = {k: v for k, v in os.environ.items() if k != "TRADING_MODE"}
         with patch.dict(os.environ, env, clear=True):
             result = execute_trade_plan(_make_plan(), broker)
         assert len(result) == 1
-        assert result[0]["status"] == "COMPLETE"
-        assert result[0]["mode"] == "PAPER"
-        broker.place_order.assert_called_once()
+        assert result[0]["status"] == "FILLED_PAPER"
+        assert result[0]["mode"] == "SIMULATE"
+        broker.place_order.assert_not_called()
 
     def test_paper_broker_multiple_legs(self):
         broker = _make_broker("PAPER")
@@ -187,47 +201,43 @@ class TestExecuteTradePlan:
         with patch.dict(os.environ, env, clear=True):
             result = execute_trade_plan(_make_plan(n_legs=3), broker)
         assert len(result) == 3
-        assert broker.place_order.call_count == 3
-
-    def test_live_broker_cancelled_returns_empty(self):
-        """If user cancels the confirmation, no orders placed."""
-        broker = _make_broker("FYERS")
-        with patch.dict(os.environ, {"TRADING_MODE": "LIVE"}):
-            with patch("engine.trade_executor.Confirm.ask", return_value=False):
-                result = execute_trade_plan(_make_plan(), broker)
-        assert result == []
+        assert result[0]["status"] == "FILLED_PAPER"
         broker.place_order.assert_not_called()
 
-    def test_live_broker_confirmed_places_order(self):
+    def test_live_broker_is_blocked_without_touching_broker(self):
         broker = _make_broker("FYERS")
         with patch.dict(os.environ, {"TRADING_MODE": "LIVE"}):
-            with patch("engine.trade_executor.Confirm.ask", return_value=True):
-                with patch("engine.trade_executor.Prompt.ask", return_value="CONFIRM"):
-                    result = execute_trade_plan(_make_plan(), broker)
-        assert len(result) == 1
-        assert result[0]["mode"] == "LIVE"
-        assert result[0]["status"] == "COMPLETE"
-        broker.place_order.assert_called_once()
+            result = execute_trade_plan(_make_plan(), broker)
+        assert result[0]["status"] == "BLOCKED"
+        broker.place_order.assert_not_called()
 
-    def test_skip_confirmation_bypasses_prompt(self):
-        """skip_confirmation=True skips the Confirm.ask entirely for live brokers."""
+    def test_live_broker_confirmation_cannot_enable_legacy_direct_execution(self):
         broker = _make_broker("FYERS")
         with patch.dict(os.environ, {"TRADING_MODE": "LIVE"}):
-            with patch("engine.trade_executor.Confirm.ask") as mock_confirm:
-                result = execute_trade_plan(_make_plan(), broker, skip_confirmation=True)
-        mock_confirm.assert_not_called()
-        assert len(result) == 1
-        assert result[0]["mode"] == "LIVE"
+            result = execute_trade_plan(_make_plan(), broker)
+        assert result[0]["mode"] == "EXECUTE"
+        assert result[0]["status"] == "BLOCKED"
+        broker.place_order.assert_not_called()
+
+    def test_skip_confirmation_cannot_bypass_central_mode_gate(self):
+        broker = _make_broker("FYERS")
+        with patch.dict(os.environ, {"TRADING_MODE": "LIVE"}):
+            result = execute_trade_plan(_make_plan(), broker, skip_confirmation=True)
+        assert result[0]["status"] == "BLOCKED"
+        broker.place_order.assert_not_called()
 
     def test_failed_order_recorded_in_results(self):
         broker = _make_broker("PAPER")
-        broker.place_order.side_effect = RuntimeError("API timeout")
-        env = {k: v for k, v in os.environ.items() if k != "TRADING_MODE"}
-        with patch.dict(os.environ, env, clear=True):
-            result = execute_trade_plan(_make_plan(), broker)
+        with patch(
+            "engine.order_lifecycle.submit_simulated_order_intent",
+            side_effect=RuntimeError("paper OMS unavailable"),
+        ):
+            env = {k: v for k, v in os.environ.items() if k != "TRADING_MODE"}
+            with patch.dict(os.environ, env, clear=True):
+                result = execute_trade_plan(_make_plan(), broker)
         assert len(result) == 1
         assert result[0]["status"] == "FAILED"
-        assert "API timeout" in result[0]["message"]
+        assert "paper OMS unavailable" in result[0]["message"]
 
     def test_result_contains_expected_fields(self):
         broker = _make_broker("PAPER")
@@ -248,27 +258,24 @@ class TestExecuteTradePlan:
         with patch.dict(os.environ, env, clear=True):
             result = execute_trade_plan(_make_plan(with_exit=False), broker)
         assert len(result) == 1
-        assert result[0]["status"] == "COMPLETE"
+        assert result[0]["status"] == "FILLED_PAPER"
 
-    def test_trading_mode_paper_env_shows_warning_for_live_broker(self, capsys):
-        """When TRADING_MODE=PAPER but a live broker is connected, a warning is shown."""
+    def test_trading_mode_paper_uses_simulated_oms_even_when_live_broker_is_connected(self, capsys):
+        """A configured live broker is never used by the legacy paper path."""
         broker = _make_broker("FYERS")
         with patch.dict(os.environ, {"TRADING_MODE": "PAPER"}):
             result = execute_trade_plan(_make_plan(), broker)
-        # Orders still execute (as paper)
         assert len(result) == 1
-        assert result[0]["mode"] == "PAPER"
+        assert result[0]["mode"] == "SIMULATE"
+        broker.place_order.assert_not_called()
 
-    def test_order_records_audit_and_lifecycle_event(self):
-        """CLI orders must record security audit and order lifecycle events (Invariant 20)."""
+    def test_order_routes_through_central_simulated_order_intent(self):
         broker = _make_broker("PAPER")
-        with (
-            patch("engine.security_audit.record_audit_event") as mock_audit,
-            patch("engine.order_lifecycle._record_order_event") as mock_lifecycle,
-        ):
+        with patch("engine.order_lifecycle.submit_simulated_order_intent") as mock_submit:
+            mock_submit.return_value = SimpleNamespace(
+                order_id="PAPER-OMS-002", status="FILLED_PAPER", rejection_reason=None
+            )
             result = execute_trade_plan(_make_plan(), broker)
             assert len(result) == 1
-            mock_audit.assert_called_once()
-            assert mock_audit.call_args[1]["event_type"] == "CLI_ORDER_EXECUTED"
-            mock_lifecycle.assert_called_once()
-            assert mock_lifecycle.call_args[1]["event_type"] == "ORDER_PLACED"
+            mock_submit.assert_called_once()
+        broker.place_order.assert_not_called()

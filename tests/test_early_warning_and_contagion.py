@@ -10,7 +10,8 @@ Unit & integration tests for institutional early-warning and precision timing im
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -24,8 +25,86 @@ from engine.auto_alert_engine import (
 from engine.detectors.gamma_blast import detect_gamma_blast, _STRIKE_OI_SNAPSHOTS
 from engine.detectors.squeeze_breakout import detect_squeeze_breakout
 from engine.index_contagion import index_contagion_engine
+from market.contract_selection import ListedContract
 
 from config.constants import IST
+
+
+def _patch_live_index_option_inputs(
+    monkeypatch,
+    *,
+    underlying: str,
+    as_of: datetime,
+    direction: str,
+    spot: float,
+    strike: float | None = None,
+):
+    """Provide explicit broker/master evidence for deterministic contagion tests."""
+    option_type = "CE" if direction == "BULLISH" else "PE"
+    venue = "BSE" if underlying in ("SENSEX", "BANKEX") else "NSE"
+    strike = float(strike if strike is not None else round(spot / 100.0) * 100.0)
+    expiry = as_of.date() + timedelta(days=7)
+    symbol = f"{venue}:{underlying}26{expiry.strftime('%b').upper()}{int(strike)}{option_type}"
+    chain_contract = OptionsContract(
+        symbol=symbol,
+        underlying=underlying,
+        strike=strike,
+        option_type=option_type,
+        expiry=expiry.isoformat(),
+        last_price=125.0,
+        oi=25000,
+        oi_change=1200,
+        volume=8000,
+    )
+    listed = ListedContract(
+        symbol=symbol,
+        underlying=underlying,
+        expiry=expiry,
+        option_type=option_type,
+        strike=strike,
+        lot_size=20 if venue == "BSE" else 65,
+        tick_size=0.05,
+        token="test-listed-token",
+    )
+    source_info = {
+        "source": "BROKER_REST",
+        "data_state": "LIVE",
+        "is_realtime": True,
+        "is_market_open": True,
+        "as_of": as_of.astimezone(timezone.utc).isoformat(),
+    }
+    monkeypatch.setattr(
+        "market.options.get_options_snapshot",
+        lambda *args, **kwargs: ([chain_contract], spot, [expiry.isoformat()], source_info),
+    )
+    monkeypatch.setattr(
+        "market.contract_selection.get_listed_contracts",
+        lambda *args, **kwargs: [listed],
+    )
+    risk_distance = max(spot * 0.002, 10.0)
+    is_bull = direction == "BULLISH"
+    trade_plan = SimpleNamespace(
+        invalidation_stop=spot - risk_distance if is_bull else spot + risk_distance,
+        target_1=spot + 2 * risk_distance if is_bull else spot - 2 * risk_distance,
+        target_2=spot + 3 * risk_distance if is_bull else spot - 3 * risk_distance,
+        target_3=spot + 4 * risk_distance if is_bull else spot - 4 * risk_distance,
+        rr_t1=2.0,
+        is_asymmetry_viable=True,
+        asymmetry_verdict="ACCEPTABLE",
+        asymmetry_note="Deterministic test trade plan",
+        as_dict=lambda: {"source": "TEST_FIXTURE"},
+    )
+    monkeypatch.setattr("engine.trade_plan.calculate_trade_plan", lambda **kwargs: trade_plan)
+    monkeypatch.setattr(
+        "engine.trade_plan.calculate_option_execution_plan",
+        lambda **kwargs: {
+            "sl_premium": 100.0,
+            "t1_premium": 160.0,
+            "t2_premium": 200.0,
+            "t3_premium": 250.0,
+            "option_rr": "1:2.0",
+        },
+    )
 
 
 class TestTimeOfDayRvol:
@@ -68,7 +147,7 @@ class TestIndexContagionEngine:
     """Validates heavyweights synchronization engine for NIFTY & BANKNIFTY."""
 
     @patch("engine.daily_levels.get_daily_levels", return_value=None)
-    def test_banknifty_bullish_synchronization(self, mock_dl):
+    def test_banknifty_bullish_synchronization(self, mock_dl, monkeypatch):
         dt = datetime(2026, 9, 15, 10, 15, tzinfo=IST)
 
         # Mock quotes where HDFCBANK and ICICIBANK (>52% weight) are surging above VWAP
@@ -118,6 +197,13 @@ class TestIndexContagionEngine:
             ),
         }
 
+        _patch_live_index_option_inputs(
+            monkeypatch,
+            underlying="BANKNIFTY",
+            as_of=dt,
+            direction="BULLISH",
+            spot=54000.0,
+        )
         res = index_contagion_engine.evaluate_index("BANKNIFTY", quotes_map=quotes, ref_dt=dt)
         assert res is not None
         assert res.index_name == "BANKNIFTY"
@@ -130,7 +216,7 @@ class TestIndexContagionEngine:
         assert "HEAVYWEIGHT CONTAGION" in res.alert.headline
 
     @patch("engine.daily_levels.get_daily_levels", return_value=None)
-    def test_nifty_bearish_synchronization(self, mock_dl):
+    def test_nifty_bearish_synchronization(self, mock_dl, monkeypatch):
         dt = datetime(2026, 9, 15, 11, 0, tzinfo=IST)
 
         quotes = {
@@ -201,6 +287,13 @@ class TestIndexContagionEngine:
             ),
         }
 
+        _patch_live_index_option_inputs(
+            monkeypatch,
+            underlying="NIFTY",
+            as_of=dt,
+            direction="BEARISH",
+            spot=25000.0,
+        )
         res = index_contagion_engine.evaluate_index("NIFTY", quotes_map=quotes, ref_dt=dt)
         assert res is not None
         assert res.bearish_weight_pct >= 70.0
@@ -360,7 +453,7 @@ class TestContagionHolisticSanity:
         assert res.alert is None
 
     @patch("engine.daily_levels.get_daily_levels", return_value=None)
-    def test_contagion_rejects_far_otm_strike(self, mock_dl):
+    def test_contagion_rejects_far_otm_strike(self, mock_dl, monkeypatch):
         """Options chain with strikes > 2.0% away from spot (e.g. 27250 on 25250 spot) must be rejected."""
         from engine.index_contagion import IndexContagionEngine
 
@@ -378,24 +471,41 @@ class TestContagionHolisticSanity:
             oi_change=0,
             volume=2000,
         )
-        with patch("market.options.get_options_chain", return_value=[far_contract]):
-            alert = engine._create_contagion_alert(
-                index_name="FINNIFTY",
-                direction="BULLISH",
-                spot=25250.0,
-                vwap=25230.0,
-                change_pct=0.5,
-                sync_pct=85.0,
-                leading=["HDFCBANK (+1.2%)", "ICICIBANK (+1.0%)"],
-                now_iso="2026-09-16 12:34:00 IST",
-            )
-            assert alert is not None
-            # The 27250 CE strike is 7.9% away from 25250, so it MUST NOT be selected as an ATM option!
-            assert alert.strike != 27250.0
-            assert "27250" not in alert.headline
-            # Falls back cleanly to spot index setup
-            assert alert.symbol == "FINNIFTY"
-            assert alert.underlying_spot == 25250.0
+        ref_dt = datetime(2026, 9, 16, 12, 34, tzinfo=IST)
+        _patch_live_index_option_inputs(
+            monkeypatch,
+            underlying="FINNIFTY",
+            as_of=ref_dt,
+            direction="BULLISH",
+            spot=25250.0,
+            strike=27250.0,
+        )
+        monkeypatch.setattr(
+            "market.options.get_options_snapshot",
+            lambda *args, **kwargs: (
+                [far_contract],
+                25250.0,
+                [far_contract.expiry],
+                {
+                    "source": "BROKER_REST",
+                    "data_state": "LIVE",
+                    "is_realtime": True,
+                    "is_market_open": True,
+                    "as_of": ref_dt.astimezone(timezone.utc).isoformat(),
+                },
+            ),
+        )
+        alert = engine._create_contagion_alert(
+            index_name="FINNIFTY",
+            direction="BULLISH",
+            spot=25250.0,
+            vwap=25230.0,
+            change_pct=0.5,
+            sync_pct=85.0,
+            leading=["HDFCBANK (+1.2%)", "ICICIBANK (+1.0%)"],
+            now_iso="2026-09-16 12:34:00 IST",
+        )
+        assert alert is None
 
     def test_finnifty_yfinance_ticker_mapping(self):
         """FINNIFTY must map to NIFTY_FIN_SERVICE.NS, not ^CNXFIN."""
@@ -406,7 +516,7 @@ class TestContagionHolisticSanity:
         assert _INDEX_MAP.get("FINNIFTY") != "^CNXFIN"
 
     @patch("engine.daily_levels.get_daily_levels", return_value=None)
-    def test_midcpnifty_contagion_evaluation(self, mock_dl):
+    def test_midcpnifty_contagion_evaluation(self, mock_dl, monkeypatch):
         """MIDCPNIFTY constituent synchronization triggers early warning for Midcap index."""
         dt = datetime(2026, 10, 16, 10, 15, tzinfo=IST)
         mid_q = Quote(
@@ -494,6 +604,13 @@ class TestContagionHolisticSanity:
                 low=227.0,
             ),
         }
+        _patch_live_index_option_inputs(
+            monkeypatch,
+            underlying="MIDCPNIFTY",
+            as_of=dt,
+            direction="BULLISH",
+            spot=13790.0,
+        )
         res = index_contagion_engine.evaluate_index("MIDCPNIFTY", quotes_map=quotes, ref_dt=dt)
         assert res is not None
         assert res.index_name == "MIDCPNIFTY"
@@ -502,7 +619,7 @@ class TestContagionHolisticSanity:
         assert res.alert.symbol == "MIDCPNIFTY"
         assert res.alert.exchange == "NFO"
 
-    def test_sensex_contagion_evaluation(self):
+    def test_sensex_contagion_evaluation(self, monkeypatch):
         """SENSEX constituent synchronization triggers early warning for BSE derivatives (BFO)."""
         dt = datetime(2026, 10, 16, 10, 15, tzinfo=IST)
         quotes = {
@@ -572,6 +689,13 @@ class TestContagionHolisticSanity:
         mock_dl = MagicMock()
         mock_dl.camarilla = {"h5": 83500.0, "l5": 81000.0}
         mock_dl.atr_14 = 650.0
+        _patch_live_index_option_inputs(
+            monkeypatch,
+            underlying="SENSEX",
+            as_of=dt,
+            direction="BULLISH",
+            spot=82150.0,
+        )
         with patch("engine.daily_levels.get_daily_levels", return_value=mock_dl):
             res = index_contagion_engine.evaluate_index("SENSEX", quotes_map=quotes, ref_dt=dt)
             assert res is not None

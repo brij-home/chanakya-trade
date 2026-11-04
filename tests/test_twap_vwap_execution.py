@@ -11,6 +11,23 @@ from engine.smart_order_router import (
 )
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def published_quantity_freeze_fixture(monkeypatch):
+    limits = {"NIFTY": 1777, "BANKNIFTY": 890, "INFY": 6137, "TCS": 6137, "RELIANCE": 6137}
+
+    def resolve(symbol, *, segment=None):
+        clean = str(symbol).upper().split(":")[-1]
+        underlying = next((name for name in limits if clean.startswith(name)), None)
+        if underlying is None:
+            raise RuntimeError(f"No test-master freeze fixture for {symbol}")
+        return {"quantity": limits[underlying], "source": "TEST_FIXTURE"}
+
+    monkeypatch.setattr("market.symbol_master.get_quantity_freeze_info", resolve)
+
+
 def test_twap_execution_plan_basic():
     """Verify TWAP slicer disperses lots across duration with pseudo-random jitter."""
     symbol = "NIFTY"
@@ -82,7 +99,8 @@ def test_twap_freeze_limit_enforcement():
     symbol = "BANKNIFTY"
     lot_size = 30
     freeze_limit = get_exchange_freeze_limit(symbol, lot_size)  # 900
-    huge_qty = freeze_limit * 4  # 3600 (120 lots)
+    per_slice = (freeze_limit // lot_size) * lot_size
+    huge_qty = per_slice * 4
     ltp = 52000.0
 
     plan = build_twap_execution_plan(
@@ -135,8 +153,9 @@ def test_vwap_pov_freeze_limit_enforcement():
     """Verify VWAP tranche sizing clamps to freeze limit even in high volume peak bins."""
     symbol = "NIFTY"
     lot_size = 75
-    freeze_limit = get_exchange_freeze_limit(symbol, lot_size)  # 1800
-    huge_qty = freeze_limit * 3  # 5400
+    freeze_limit = get_exchange_freeze_limit(symbol, lot_size)
+    per_slice = (freeze_limit // lot_size) * lot_size
+    huge_qty = per_slice * 3
     ltp = 25000.0
 
     plan = build_vwap_pov_execution_plan(

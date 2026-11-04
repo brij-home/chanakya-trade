@@ -5,7 +5,7 @@ Verifies integration of real historical expired F&O contract prices
 in OptionsBacktester with deterministic provenance and fallback to Black-Scholes.
 """
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock, patch
 import pandas as pd
 
@@ -16,6 +16,7 @@ from engine.options_backtest import (
     OptionsTrade,
     OptionsBacktestResult,
 )
+from engine.options_backtest import _get_expiries
 
 
 def _build_synthetic_spot_df(days: int = 40) -> pd.DataFrame:
@@ -36,8 +37,25 @@ def _build_synthetic_spot_df(days: int = 40) -> pd.DataFrame:
             }
         )
     df = pd.DataFrame(data)
-    df.set_index("date", inplace=True)
-    return df
+    return df.set_index("date")
+
+
+def test_backtest_expiry_grid_is_underlying_specific():
+    start, end = date(2026, 9, 22), date(2026, 9, 30)
+    assert _get_expiries("NIFTY", start, end) == [date(2026, 9, 22), date(2026, 9, 29)]
+    assert _get_expiries("BANKNIFTY", start, end) == [date(2026, 9, 29)]
+    assert _get_expiries("RELIANCE", start, end) == [date(2026, 9, 29)]
+
+
+def test_backtest_queries_only_the_canonical_contract_symbol():
+    backtester = OptionsBacktester("NIFTY", lot_size=65)
+    assert backtester._format_candidate_option_symbols("NIFTY", date(2026, 9, 22), 25000, "CE") == [
+        "NSE:NIFTY2692225000CE"
+    ]
+    stock_backtester = OptionsBacktester("RELIANCE", lot_size=250)
+    assert stock_backtester._format_candidate_option_symbols(
+        "RELIANCE", date(2026, 9, 29), 3000, "PE"
+    ) == ["NSE:RELIANCE26SEP3000PE"]
 
 
 def test_options_backtest_uses_real_expired_fno():

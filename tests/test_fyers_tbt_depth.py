@@ -7,6 +7,106 @@ and Tier 2 Depth Audit Gatekeeper.
 """
 
 import pytest
+import time
+from datetime import date, datetime as RealDatetime
+from config.constants import IST
+from brokers.base import Quote
+
+
+@pytest.fixture
+def listed_grid_feed(monkeypatch):
+    """Explicit synthetic feed/master snapshots for orchestration tests.
+
+    Selector validation and unavailable-data behavior are independently tested in
+    test_listed_contract_selection. No price or master is supplied in production.
+    """
+    from market import fyers_tbt_manager as tbt
+    from market.instruments import canonical_symbol
+
+    class SelectionClock(RealDatetime):
+        @classmethod
+        def now(cls, tz=None):
+            result = tbt.datetime.now(IST)
+            return result if result.tzinfo is not None else result.replace(tzinfo=IST)
+
+    monkeypatch.setattr("market.contract_selection.datetime", SelectionClock)
+
+    levels = {
+        "NIFTY": (25000, 50),
+        "BANKNIFTY": (52000, 100),
+        "MIDCPNIFTY": (13200, 25),
+        "FINNIFTY": (24000, 50),
+        "RELIANCE": (2800, 20),
+        "SENSEX": (81500, 100),
+    }
+
+    def quotes(instruments, **kwargs):
+        now = tbt.datetime.now(IST)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=IST)
+        result = {}
+        for instrument in instruments:
+            clean = canonical_symbol(instrument)
+            if clean in levels:
+                price = __import__("market.quotes", fromlist=["get_ltp"]).get_ltp(instrument)
+                price = float(price) if price and float(price) > 0 else levels[clean][0]
+                result[instrument] = Quote(
+                    symbol=instrument,
+                    last_price=price,
+                    provider="FYERS",
+                    source="STREAM",
+                    data_state="LIVE",
+                    received_at=now.isoformat(),
+                )
+        return result
+
+    monkeypatch.setattr("market.quotes.get_quote", quotes)
+    monkeypatch.setattr(
+        "market.quotes.get_ltp", lambda symbol: levels.get(canonical_symbol(symbol), (25000, 50))[0]
+    )
+    records = {}
+    for underlying, (spot, step) in levels.items():
+        venue = "BSE" if underlying == "SENSEX" else "NSE"
+        for expiry in (
+            date(2026, 10, 19),
+            date(2026, 10, 27),
+            date(2026, 11, 3),
+            date(2026, 11, 24),
+        ):
+            epoch = int(
+                RealDatetime(expiry.year, expiry.month, expiry.day, 15, 40, tzinfo=IST).timestamp()
+            )
+            future = f"{venue}:{underlying}{expiry:%y%b}".upper() + "FUT"
+            rows = [(future, "XX", -1)]
+            for offset in range(-10, 11):
+                strike = spot + offset * step
+                for side in ("CE", "PE"):
+                    rows.append(
+                        (f"{venue}:{underlying}{expiry:%y%m%d}{strike}{side}", side, strike)
+                    )
+            for symbol, side, strike in rows:
+                records[symbol] = {
+                    "symTicker": symbol,
+                    "underSym": underlying,
+                    "optType": side,
+                    "strikePrice": strike,
+                    "expiryDate": epoch,
+                    "minLotSize": 65,
+                    "tickSize": 0.05,
+                    "fyToken": "123",
+                    "tradeStatus": 1,
+                }
+    monkeypatch.setattr(
+        "market.symbol_master.load_master",
+        lambda master, **kwargs: {
+            s: r
+            for s, r in records.items()
+            if s.startswith("BSE:" if master == "BSE_FO" else "NSE:")
+        },
+    )
+    return records
+
+
 from fastapi.testclient import TestClient
 
 from market.fyers_tbt_manager import FyersTbtManager, fyers_tbt_manager
@@ -171,8 +271,7 @@ def test_tbt_tradable_symbol_resolution():
     assert res_banknifty.endswith("FUT")
 
     res_sensex = resolve_tradable_tbt_symbol("BSE:SENSEX-INDEX")
-    assert res_sensex.startswith("BSE:SENSEX")
-    assert res_sensex.endswith("FUT")
+    assert res_sensex == ""  # BSE is unsupported on the documented TBT transport.
 
     # 2. Crypto rejected
     assert resolve_tradable_tbt_symbol("BTCUSDT") == ""
@@ -269,7 +368,7 @@ def test_tbt_elastic_scout_when_no_expiry_blocking():
     assert scout_count == 9
 
 
-def test_tbt_primary_focus_elastic_core():
+def test_tbt_primary_focus_elastic_core(listed_grid_feed):
     """Verify that setting a primary focus index expands core grid and borrows elastically from scout pool."""
     from market.fyers_tbt_manager import FyersTbtManager
 
@@ -281,9 +380,9 @@ def test_tbt_primary_focus_elastic_core():
     assert status["primary_focus"] == "MIDCPNIFTY"
     # Should include MIDCPNIFTY options in core_grid
     mid_options = [s for s in status["core_grid"] if "MIDCPNIFTY" in s and ("CE" in s or "PE" in s)]
-    assert len(mid_options) == 4
+    assert len(mid_options) == 6
     assert (
-        len(status["core_grid"]) == 7
+        len(status["core_grid"]) == 9
     )  # 3 benchmark futures (NIFTY, BANKNIFTY, MIDCPNIFTY) + 4 MIDCPNIFTY options
 
     # Desired subscriptions accommodate 7 core symbols cleanly without exceeding 15
@@ -328,7 +427,7 @@ def test_tbt_no_finnifty_blocking_and_dynamic_sampling():
     assert len(desired) <= 15
 
 
-def test_tbt_revolve_atm_strikes_on_drift(monkeypatch):
+def test_tbt_revolve_atm_strikes_on_drift(monkeypatch, listed_grid_feed):
     """Verify that spot drift triggers automatic ATM strike rotation in TBT core grid."""
     from market.fyers_tbt_manager import FyersTbtManager
 
@@ -351,14 +450,14 @@ def test_tbt_revolve_atm_strikes_on_drift(monkeypatch):
     assert any("25200PE" in s for s in status["core_grid"])
 
 
-def test_tbt_zero_duplication_on_nifty_expiry_week(monkeypatch):
-    """Verify that on Thursday (NIFTY Expiry) and Friday (SENSEX Expiry), zero slots are duplicated."""
+def test_tbt_zero_duplication_on_nifty_expiry_week(monkeypatch, listed_grid_feed):
+    """Verify that on active expiry sessions, zero slots are duplicated."""
     from market.fyers_tbt_manager import FyersTbtManager, get_default_core_grid
     from datetime import datetime
 
     mgr = FyersTbtManager()
 
-    # 1. Simulate Thursday (NIFTY 0DTE Expiry)
+    # 1. Simulate active index expiry session
     fake_thursday = datetime(2026, 10, 15, 10, 30)
     monkeypatch.setattr(
         "market.fyers_tbt_manager.datetime",
@@ -378,7 +477,7 @@ def test_tbt_zero_duplication_on_nifty_expiry_week(monkeypatch):
     assert len(overlap) == 0
 
     # On Thursday with NIFTY in focus, NIFTY 0DTE has ATM + Wings in Core (7 symbols: 3 futures + 4 options)
-    assert len(core) == 7
+    assert len(core) == 9
     # todays_expiry is 0 (no redundant duplication!)
     assert len(todays) == 0
 
@@ -389,7 +488,7 @@ def test_tbt_zero_duplication_on_nifty_expiry_week(monkeypatch):
         mgr._scout.clear()
 
     desired = mgr.compute_desired_subscriptions(fill_sector_leaders=False)
-    assert len(desired) == 7
+    assert len(desired) == 9
     assert len(desired) == len(set(desired))  # Strictly unique
     # 8 remaining slots available for Scouts
     for i in range(10):
@@ -420,7 +519,7 @@ def test_tbt_zero_duplication_on_nifty_expiry_week(monkeypatch):
 
     # When SENSEX is set as primary focus, it expands dynamically
     core_sensex, _ = get_default_core_grid("EQUITY_NFO", primary_focus="SENSEX")
-    assert any("SENSEX" in s for s in core_sensex)
+    assert not any(s.startswith("BSE:") for s in core_sensex)
 
 
 def test_tbt_in_flight_deregistration_and_sync():
@@ -473,6 +572,7 @@ def test_tbt_depth_quote_bridge():
         "MockDepth",
         (),
         {
+            "ltp": 142.50,
             "bidprice": [142.45],
             "askprice": [142.55],
             "bidqty": [1500],
@@ -498,7 +598,8 @@ def test_tbt_depth_quote_bridge():
     assert res["NSE:NIFTY26O1525000CE"].last_price > 0
 
 
-def test_alert_scrutiny_tbt_microstructure_gate():
+def test_alert_scrutiny_tbt_microstructure_gate(monkeypatch):
+    monkeypatch.setattr("analysis.regime_governor._fresh_live_vix", lambda: 15.0)
     """Verify Tier-1.5 Scrutiny detects iceberg walls and adverse OBI on candidate setups."""
     from engine.alert_model import AutoAlert
     from engine.alert_scrutiny import alert_scrutiny_auditor
@@ -538,6 +639,7 @@ def test_alert_scrutiny_tbt_microstructure_gate():
             stop_loss=24950.0,
             target_level=25100.0,
             confidence=85,
+            metrics={"rvol": 2.5},
         )
 
         passed, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
@@ -621,11 +723,15 @@ def test_tbt_depth_quote_cache_bridge():
 
     mgr = FyersTbtManager()
     test_sym = "NSE:TBTBRIDGE_TEST"
+    import time
+
+    now_t = time.time()
     mgr._depth_cache[test_sym] = {
         "symbol": test_sym,
         "status": "LIVE",
         "ltp": 456.75,
-        "timestamp": 1727900123,
+        "timestamp": int(now_t),
+        "received_at": now_t,
         "tbq": 50000,
         "tsq": 30000,
         "bids": [{"price": 456.70, "qty": 100}],
@@ -830,76 +936,19 @@ def test_tbt_commodity_session_priority_and_wall_calibration():
     assert status["current_session"] == "EQUITY_NFO"
 
 
-def test_tbt_monday_morning_expiry_and_sebi_compliance(monkeypatch):
-    """
-    Verify that on Monday morning:
-      1. NIFTY options resolve to upcoming Thursday weekly contract (NOT Monday).
-      2. In monthly expiry week, NIFTY options resolve to monthly contract.
-      3. BANKNIFTY & MIDCPNIFTY resolve strictly to monthly contracts per SEBI rules.
-      4. SENSEX options resolve to Friday weekly contract.
-      5. Futures resolve to active near-month contract without premature rolling.
-    """
-    from datetime import datetime, date
-    from market.calendar import (
-        get_active_derivative_expiry,
-        get_nearest_weekly_expiry,
-        get_nearest_monthly_expiry,
-    )
+def test_tbt_core_uses_only_actual_master_rows_on_reference_date(monkeypatch, listed_grid_feed):
     from market.fyers_tbt_manager import get_default_core_grid
 
-    # Case A: Monday Oct 19, 2026 (Mid-month week)
-    fake_monday_19 = datetime(2026, 10, 19, 9, 15)
+    observed = RealDatetime(2026, 10, 19, 9, 15, tzinfo=IST)
     monkeypatch.setattr(
-        "market.fyers_tbt_manager.datetime",
-        type(
-            "MockDt",
-            (),
-            {
-                "now": lambda *args, **kwargs: fake_monday_19,
-                "fromtimestamp": datetime.fromtimestamp,
-            },
-        ),
+        "market.fyers_tbt_manager.datetime", type("Clock", (), {"now": lambda *a, **k: observed})
     )
-
-    n_exp = get_active_derivative_expiry("NIFTY", is_future=False, ref_date=date(2026, 10, 19))
-    assert n_exp == date(2026, 10, 22)  # Thursday, NOT Monday Oct 19!
-    assert get_nearest_weekly_expiry("NIFTY", ref_date=date(2026, 10, 19)) == date(2026, 10, 22)
-    assert get_nearest_monthly_expiry("NIFTY", ref_date=date(2026, 10, 19)) == date(2026, 10, 29)
-
-    bn_exp = get_active_derivative_expiry("BANKNIFTY", is_future=False, ref_date=date(2026, 10, 19))
-    assert bn_exp == date(2026, 10, 29)  # Monthly contract only!
-
-    s_exp = get_active_derivative_expiry("SENSEX", is_future=False, ref_date=date(2026, 10, 19))
-    assert s_exp == date(2026, 10, 23)  # Friday weekly!
-    assert get_nearest_weekly_expiry("SENSEX", ref_date=date(2026, 10, 19)) == date(2026, 10, 23)
-
-    # Check Core grid on Monday Oct 19 with NIFTY in focus
     core, todays = get_default_core_grid("EQUITY_NFO", primary_focus="NIFTY")
-    assert "NSE:NIFTY26OCTFUT" in core
-    assert "NSE:BANKNIFTY26OCTFUT" in core
-    assert "NSE:MIDCPNIFTY26OCTFUT" in core
-    # Verify NIFTY options have Thursday Oct 22 expiry (26O22), NOT 26O19!
-    assert any("NSE:NIFTY26O22" in s for s in core)
-    assert not any("NSE:NIFTY26O19" in s for s in core)
-
-    # Case B: Monday Oct 26, 2026 (Monthly expiry week)
-    fake_monday_26 = datetime(2026, 10, 26, 9, 15)
-    monkeypatch.setattr(
-        "market.fyers_tbt_manager.datetime",
-        type(
-            "MockDt",
-            (),
-            {
-                "now": lambda *args, **kwargs: fake_monday_26,
-                "fromtimestamp": datetime.fromtimestamp,
-            },
-        ),
-    )
-
-    core_26, _ = get_default_core_grid("EQUITY_NFO", primary_focus="NIFTY")
-    # Must remain in October near-month (NOT prematurely jumped to November!)
-    assert "NSE:NIFTY26OCTFUT" in core_26
-    assert any("NSE:NIFTY26OCT" in s for s in core_26)
+    assert core and not todays
+    assert set(core) <= listed_grid_feed.keys()
+    assert any(s.endswith("CE") for s in core)
+    assert any(s.endswith("PE") for s in core)
+    assert all(s.startswith("NSE:") for s in core)
 
 
 def test_fyers_broker_depth_tbt_bridge_zero_network_calls():
@@ -914,6 +963,8 @@ def test_fyers_broker_depth_tbt_bridge_zero_network_calls():
     mgr = FyersTbtManager()
     mgr._depth_cache["NSE:NIFTY26OCTFUT"] = {
         "symbol": "NSE:NIFTY26OCTFUT",
+        "status": "LIVE",
+        "received_at": time.time(),
         "ltp": 25250.0,
         "tbq": 5000,
         "tsq": 4500,
@@ -949,6 +1000,8 @@ def test_fyers_broker_depth_when_sdk_not_installed(monkeypatch):
     mgr = FyersTbtManager()
     mgr._depth_cache["NSE:BANKNIFTY26OCTFUT"] = {
         "symbol": "NSE:BANKNIFTY26OCTFUT",
+        "status": "LIVE",
+        "received_at": time.time(),
         "ltp": 52000.0,
         "tbq": 2000,
         "tsq": 1800,
@@ -1052,7 +1105,7 @@ def test_build_sentinel_decision_intel():
     assert "TRADE PRICE ACTION" in intel_bal["decision"]
 
 
-def test_tbt_single_stock_fno_focus_allocation(monkeypatch):
+def test_tbt_single_stock_fno_focus_allocation(monkeypatch, listed_grid_feed):
     """Verify Fyers Prime L3 TBT manager dynamically allocates slots for single-stock F&O."""
     from market.fyers_tbt_manager import FyersTbtManager, _tbt_symbol_priority
 

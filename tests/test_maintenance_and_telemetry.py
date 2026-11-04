@@ -241,3 +241,20 @@ def test_global_exception_middleware_suppresses_stream_disconnect():
     # Ensure no new incident was created
     final_incidents = len(get_error_incidents(limit=10))
     assert final_incidents == initial_incidents
+
+
+def test_global_exception_middleware_suppresses_rest_disconnect():
+    """Verify that client transport disconnect on REST endpoints does not record false incidents."""
+    from web.api import app
+    from engine.telemetry import get_error_incidents
+
+    @app.get("/api/test-rest-disconnect")
+    def _rest_disconnect():
+        raise RuntimeError("No response returned.")
+
+    initial_incidents = len(get_error_incidents(limit=10))
+    client = TestClient(app, raise_server_exceptions=False)
+    res = client.get("/api/test-rest-disconnect")
+    assert res.status_code == 204
+    final_incidents = len(get_error_incidents(limit=10))
+    assert final_incidents == initial_incidents

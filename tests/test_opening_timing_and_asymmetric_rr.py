@@ -324,37 +324,45 @@ def test_index_call_setup_ord_displacement_at_09_18():
 
 
 def test_synthetic_option_chain_ssot_expiries_and_paper_fallback():
-    """Verify synthetic option chain resolves canonical weekdays and functions in PAPER mode."""
+    """Verify synthetic chains resolve the canonical calendar and PAPER has no mock-chain fallback."""
     from market.options import build_index_synthetic_option_chain, get_options_chain
+    from market.calendar import get_nearest_weekly_expiry, get_nearest_monthly_expiry
+    from config.constants import IST
 
-    # Test NIFTY weekly expiry weekday (Thursday = 3)
+    ref_dt = datetime.now(IST)
+
+    # Compare to the shared resolver so holiday-adjusted dates are covered.
     nifty_chain = build_index_synthetic_option_chain("NIFTY", spot=22500.0)
     assert len(nifty_chain) > 0
-    nifty_exp_dt = datetime.fromisoformat(nifty_chain[0].expiry)
-    assert nifty_exp_dt.weekday() == 3, (
-        f"Nifty weekly expiry must be Thursday (3), got {nifty_exp_dt.weekday()}"
+    assert (
+        nifty_chain[0].expiry
+        == get_nearest_weekly_expiry(
+            "NIFTY", ref_date=ref_dt.date(), ref_time=ref_dt.time()
+        ).isoformat()
     )
 
-    # Test SENSEX weekly expiry weekday (Friday = 4)
     sensex_chain = build_index_synthetic_option_chain("SENSEX", spot=75000.0)
     assert len(sensex_chain) > 0
-    sensex_exp_dt = datetime.fromisoformat(sensex_chain[0].expiry)
-    assert sensex_exp_dt.weekday() == 4, (
-        f"Sensex weekly expiry must be Friday (4), got {sensex_exp_dt.weekday()}"
+    assert (
+        sensex_chain[0].expiry
+        == get_nearest_weekly_expiry(
+            "SENSEX", ref_date=ref_dt.date(), ref_time=ref_dt.time()
+        ).isoformat()
     )
 
-    # Test BANKNIFTY monthly expiry (last Thursday = 3)
     bn_chain = build_index_synthetic_option_chain("BANKNIFTY", spot=52500.0)
     assert len(bn_chain) > 0
-    bn_exp_dt = datetime.fromisoformat(bn_chain[0].expiry)
-    assert bn_exp_dt.weekday() == 3, (
-        f"Bank Nifty monthly expiry must be Thursday (3), got {bn_exp_dt.weekday()}"
+    assert (
+        bn_chain[0].expiry
+        == get_nearest_monthly_expiry(
+            "BANKNIFTY", ref_date=ref_dt.date(), ref_time=ref_dt.time()
+        ).isoformat()
     )
 
     # Test PAPER mode fallback
     os.environ["TRADING_MODE"] = "PAPER"
     chain = get_options_chain("NIFTY")
-    assert len(chain) > 0, "Option chain should successfully return in PAPER mode"
+    assert not chain, "PAPER mode must not populate a synthetic chain as market data"
 
 
 def test_opening_drive_wick_trap_filtered():

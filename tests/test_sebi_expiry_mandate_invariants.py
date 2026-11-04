@@ -3,7 +3,7 @@ tests/test_sebi_expiry_mandate_invariants.py
 ────────────────────────────────────────────
 Permanent static and runtime invariant test suite ensuring:
 1. SEBI Single-Weekly Index Mandate (SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136):
-   - Only NIFTY (Thursday) and SENSEX (Friday) offer weekly contracts.
+   - Only NIFTY and SENSEX offer weekly contracts on their effective-dated weekdays.
    - BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX, and single stocks are strictly MONTHLY.
 2. System Prompts and Core Templates never inject stale pre-2024 assumptions:
    - No 'Bank Nifty Wednesday weekly expiry'
@@ -49,8 +49,8 @@ def test_banknifty_strictly_resolves_to_monthly_expiry():
     assert active_bn == monthly_bn, "BANKNIFTY active expiry did not resolve to monthly expiry!"
     assert classify_expiry_type(str(active_bn), symbol="BANKNIFTY") == "MONTHLY"
 
-    # Last Thursday of October 2026 is 2026-10-29
-    assert active_bn == date(2026, 10, 29)
+    # Under NSE effective-dated rules (expiry_weekday=1), monthly expiry is Tuesday 2026-10-27
+    assert active_bn == date(2026, 10, 27)
 
 
 def test_finnifty_and_midcpnifty_strictly_monthly():
@@ -69,13 +69,13 @@ def test_nifty_and_sensex_resolve_weekly():
     ref_d = date(2026, 10, 19)  # Monday
 
     nifty_exp = get_active_derivative_expiry("NIFTY", is_future=False, ref_date=ref_d)
-    # Thursday of the same week is 2026-10-22
-    assert nifty_exp == date(2026, 10, 22)
+    # Tuesday 2026-10-20 is an exchange holiday, so the weekly expiry adjusts backward.
+    assert nifty_exp == date(2026, 10, 19)
     assert classify_expiry_type(str(nifty_exp), symbol="NIFTY") == "WEEKLY"
 
     sensex_exp = get_active_derivative_expiry("SENSEX", is_future=False, ref_date=ref_d)
-    # Friday of the same week is 2026-10-23
-    assert sensex_exp == date(2026, 10, 23)
+    # BSE SENSEX weekly expiry is Thursday 2026-10-22.
+    assert sensex_exp == date(2026, 10, 22)
     assert classify_expiry_type(str(sensex_exp), symbol="SENSEX") == "WEEKLY"
 
 

@@ -441,19 +441,23 @@ def resolve_option_greeks(symbol: str, ltp: float = 0.0) -> Optional[dict[str, A
         strike = float(match.group(1))
         opt_type = match.group(2)
         prefix_part = clean[: match.start()].strip()
-        und_match = re.match(r"^([A-Za-z0-9_&]+?)(?:\d{2}[A-Z]{3}|\d{2}\d{2}|\d{5})?$", prefix_part)
-        und = (
-            und_match.group(1).upper()
-            if und_match
-            else re.split(r"\d", prefix_part)[0].upper().strip()
-        )
-        if not und:
-            und = "NIFTY"
+        _INDEX_PREFIXES = ("BANKNIFTY", "MIDCPNIFTY", "FINNIFTY", "BANKEX", "NIFTY", "SENSEX")
+        matched_idx = next((idx for idx in _INDEX_PREFIXES if prefix_part.startswith(idx)), None)
+        if matched_idx:
+            und = matched_idx
+        else:
+            und_match = re.match(r"^([A-Za-z_&]+)", prefix_part)
+            und = und_match.group(1).upper() if und_match else "NIFTY"
 
         spot_p = strike
         try:
-            spot_q = get_quote([und])
-            q_obj = spot_q.get(und) if isinstance(spot_q, dict) else spot_q
+            spot_q = get_quote([und], ws_only=True)
+            q_obj = (
+                spot_q.get(und)
+                or spot_q.get(f"NSE:{und}")
+                or spot_q.get(f"NSE:{und}50-INDEX")
+                or spot_q.get(f"NSE:{und}BANK-INDEX")
+            )
             if q_obj and getattr(q_obj, "ltp", 0.0) > 0:
                 spot_p = float(q_obj.ltp)
         except Exception as e_suppressed:
@@ -714,8 +718,11 @@ def analyze_symbol_order_book(
         is_cds = True
         query_sym = symbol if symbol.upper().startswith(("NSE:", "CDS:")) else f"NSE:{clean_sym}"
         sym_to_report = symbol if symbol.upper().startswith("CDS:") else f"CDS:{clean_sym}"
+    elif is_bse or symbol.upper().startswith("BSE:"):
+        query_sym = symbol if symbol.upper().startswith("BSE:") else f"BSE:{clean_sym}"
+        sym_to_report = clean_sym
     else:
-        query_sym = symbol if is_bse else clean_sym
+        query_sym = symbol if symbol.upper().startswith("NSE:") else f"NSE:{clean_sym}"
         sym_to_report = clean_sym
 
     # 0. Canonical Spot Index Resolution:
@@ -942,25 +949,13 @@ def analyze_symbol_order_book(
                 is_stream = getattr(q, "source", "") == "STREAM"
                 bid_p = float(getattr(q, "bid", 0.0) or 0.0)
                 ask_p = float(getattr(q, "ask", 0.0) or 0.0)
-                if bid_p > 0 and ask_p > 0:
-                    vol = int(getattr(q, "volume", 0) or 0)
-                    qty_proxy = max(1, int(vol * 0.05)) if vol > 0 else 50
-                    raw_l1 = {
-                        "buy": [{"price": bid_p, "quantity": qty_proxy, "orders": 1}],
-                        "sell": [{"price": ask_p, "quantity": qty_proxy, "orders": 1}],
-                    }
-                    return compute_order_book_metrics(
-                        clean_sym,
-                        raw_l1,
-                        ltp,
-                        live_broker_connected=is_stream,
-                        provenance="LIVE_STREAM_L1" if is_stream else "CACHED_L1",
-                    )
                 return OrderBookSnapshot(
                     symbol=clean_sym,
                     ltp=ltp,
-                    spread=0.0,
-                    spread_pct=0.0,
+                    spread=max(0.0, ask_p - bid_p) if bid_p > 0 and ask_p >= bid_p else 0.0,
+                    spread_pct=max(0.0, ask_p - bid_p) / ltp * 100
+                    if bid_p > 0 and ask_p >= bid_p
+                    else 0.0,
                     total_bid_qty=0,
                     total_ask_qty=0,
                     obi_5=0.0,

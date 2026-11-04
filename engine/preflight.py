@@ -350,12 +350,27 @@ def run_preflight(verbose: bool = True) -> PreflightReport:
         if _has_valid_token("fyers.json") or os.environ.get("FYERS_APP_ID"):
             import importlib.util
 
-            fyers_sdk_installed = importlib.util.find_spec("fyers_apiv3") is not None
-            tag = (
-                "Data API"
-                if fyers_sdk_installed
-                else "Data API - SDK MISSING: pip install fyers-apiv3"
-            )
+            fyers_spec = importlib.util.find_spec("fyers_apiv3")
+
+            fyers_importable = False
+
+            if fyers_spec is not None:
+                try:
+                    from fyers_apiv3 import fyersModel  # noqa: F401
+
+                    fyers_importable = True
+
+                except Exception:
+                    fyers_importable = False
+
+            if fyers_importable:
+                tag = "Data API"
+
+            elif fyers_spec is not None:
+                tag = "Data API - DEPENDENCY ERROR: pip install aiohttp websocket-client aws-lambda-powertools setuptools"
+
+            else:
+                tag = "Data API - SDK MISSING: pip install fyers-apiv3"
             active_configured.append(f"fyers ({tag})")
         # Stoxkart (Planned standby/failover)
         if _has_valid_token("stoxkart.json") or os.environ.get("STOXKART_API_KEY"):
@@ -397,28 +412,84 @@ def run_preflight(verbose: bool = True) -> PreflightReport:
             )
         )
 
-    # 9. Trading Mode & Safety Guardrails
-    raw_mode = os.environ.get("TRADING_MODE", "PAPER").upper()
-    trading_mode = "EXECUTE" if raw_mode == "LIVE" else "SIMULATE"
+    # 9. Trading Mode & Safety Guardrails (OPS-01)
+    from engine.modes import TradingMode, get_trading_mode
 
-    if trading_mode == "SIMULATE":
+    mode_info = get_trading_mode()
+    mode = mode_info.mode
+    raw_mode = os.environ.get("TRADING_MODE", "PAPER").strip()
+    trading_mode = mode.value
+
+    allow_live = os.environ.get("ALLOW_LIVE_TRADING") == "1"
+    live_qualified = os.environ.get("LIVE_EXECUTION_QUALIFIED") == "1"
+    pilot_allow = os.environ.get("PILOT_ALLOW_LIVE_EXECUTION") == "1"
+    acknowledged = os.environ.get("LIVE_EXECUTION_ACKNOWLEDGED") == "1"
+
+    details = {
+        "mode": trading_mode,
+        "raw": raw_mode,
+        "is_observe": mode_info.is_observe,
+        "is_simulate": mode_info.is_simulate,
+        "is_execute": mode_info.is_execute,
+        "allow_live_trading": allow_live,
+        "live_execution_qualified": live_qualified,
+        "pilot_allow_live_execution": pilot_allow,
+        "acknowledged": acknowledged,
+    }
+
+    if mode == TradingMode.OBSERVE:
         checks.append(
             PreflightCheckResult(
                 name="Trading Mode Safety",
                 status="PASS",
-                message="Safe Default: SIMULATE (Paper Mode). No real broker orders will be placed.",
-                details={"mode": "SIMULATE", "raw": raw_mode},
+                message="OBSERVE (Demo Mode): Telemetry and read-only analysis with zero order placement.",
+                details=details,
             )
         )
-    else:
+    elif mode == TradingMode.SIMULATE:
         checks.append(
             PreflightCheckResult(
                 name="Trading Mode Safety",
-                status="WARN",
-                message="EXECUTE (Live Mode) is enabled in configuration. Extreme caution required.",
-                details={"mode": "EXECUTE", "raw": raw_mode},
+                status="PASS",
+                message="Safe Default: SIMULATE (Paper Mode). Simulated fills only — zero real capital risk.",
+                details=details,
             )
         )
+    else:  # TradingMode.EXECUTE
+        is_gate_open = allow_live and live_qualified
+        if not is_gate_open:
+            healthy = False
+            checks.append(
+                PreflightCheckResult(
+                    name="Trading Mode Safety",
+                    status="FAIL",
+                    message=(
+                        f"EXECUTE (Live Mode) misconfigured: requires both ALLOW_LIVE_TRADING=1 "
+                        f"and LIVE_EXECUTION_QUALIFIED=1 (current: ALLOW_LIVE_TRADING={int(allow_live)}, "
+                        f"LIVE_EXECUTION_QUALIFIED={int(live_qualified)})."
+                    ),
+                    details=details,
+                )
+            )
+        elif not acknowledged:
+            healthy = False
+            checks.append(
+                PreflightCheckResult(
+                    name="Trading Mode Safety",
+                    status="WARN",
+                    message="EXECUTE (Live Mode) ACTIVE with dual gates open. Requires LIVE_EXECUTION_ACKNOWLEDGED=1 for healthy preflight status.",
+                    details=details,
+                )
+            )
+        else:
+            checks.append(
+                PreflightCheckResult(
+                    name="Trading Mode Safety",
+                    status="WARN",
+                    message="EXECUTE (Live Mode) fully acknowledged and active. Real capital order placement enabled.",
+                    details=details,
+                )
+            )
 
     # 10. AI Providers & Model Configuration
     ai_provider = os.environ.get("AI_PROVIDER", "gemini")
@@ -457,6 +528,9 @@ def run_preflight(verbose: bool = True) -> PreflightReport:
         "GROWW_API_KEY",
         "UPSTOX_API_KEY",
         "ALLOW_LIVE_TRADING",
+        "LIVE_EXECUTION_QUALIFIED",
+        "PILOT_ALLOW_LIVE_EXECUTION",
+        "LIVE_EXECUTION_ACKNOWLEDGED",
     ]
 
     masked_env = {k: mask_secret(os.environ.get(k)) for k in keys_to_inspect}

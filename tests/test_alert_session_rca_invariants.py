@@ -65,8 +65,34 @@ def test_trend_day_continuation_zero_ghost_r_multiple():
     assert alert.r_multiple is None, f"Expected r_multiple=None at ignition, got {alert.r_multiple}"
 
 
+def test_unanchored_alert_exit_does_not_invent_one_r_outcome():
+    """Missing immutable entry evidence must not become a fabricated +/-1R sample."""
+    engine = AutoAlertEngine()
+    alert = make_alert(
+        alert_id="aa-unanchored-exit-20261031",
+        trigger_level=0.0,
+        initial_stop_loss=95.0,
+    )
+    engine._alerts = [alert]
+
+    with (
+        patch.object(engine, "_save", return_value=None),
+        patch.object(engine, "_dispatch", return_value=None),
+        patch("engine.detector_circuit_breaker.detector_circuit_breaker.record_outcome") as record,
+    ):
+        engine._handle_alert_exit(
+            alert,
+            reason="trailing stop reached",
+            current_ltp=101.0,
+            loop_context="test",
+        )
+
+    assert alert.r_multiple is None
+    record.assert_not_called()
+
+
 def test_tier2_scrutiny_veto_calls_disqualify_not_invalidate():
-    """Verify that when Tier-2 scrutiny vetoes an alert, it marks SETUP_DISQUALIFIED and 0 capital risked."""
+    """A scrutiny veto leaves external/manual account P&L unknown."""
     engine = AutoAlertEngine()
     alert = make_alert(alert_id="aa-test-scrutiny-veto-20261028")
     engine._alerts = [alert]
@@ -79,7 +105,8 @@ def test_tier2_scrutiny_veto_calls_disqualify_not_invalidate():
     assert vetoed_alert.stage == "CANCELLED"
     assert vetoed_alert.target_status == "SETUP_DISQUALIFIED"
     assert vetoed_alert.is_invalidated is False
-    assert vetoed_alert.r_multiple == 0.0
+    assert vetoed_alert.r_multiple is None
+    assert vetoed_alert.pnl_pct is None
     assert "PRE-TRADE VETO" in vetoed_alert.headline
 
 
@@ -112,7 +139,7 @@ def test_postmortem_scorecard_excludes_disqualified_from_losses():
 
 
 def test_sector_leader_supersede_marks_cancelled():
-    """Verify that when a sector leader supersedes an existing alert, the superseded alert is CANCELLED."""
+    """Verify that sector concurrency allows up to 2 active leaders to co-exist without cancelling existing."""
     engine = AutoAlertEngine()
     existing = make_alert(
         alert_id="aa-existing-leader-20261028",
@@ -136,13 +163,24 @@ def test_sector_leader_supersede_marks_cancelled():
         patch.object(engine, "_dispatch", return_value=None),
     ):
         # Calling sector leader evaluation
-        engine.record_alert(incoming)
+        recorded = engine.record_alert(incoming)
 
-        # Existing alert should be superseded
-        assert existing.is_archived is True
-        assert existing.stage == "CANCELLED"
-        assert existing.target_status == "SUPERSEDED"
-        assert "Superseded by stronger Sector Leader" in existing.archive_reason
+        # Both alerts should co-exist up to strict cap of 2; existing is NOT cancelled or archived
+        assert recorded is True
+        assert existing.is_archived is False
+        assert existing.stage == "IGNITED"
+        assert incoming in engine._alerts
+        assert incoming.metrics.get("is_concurrent_sector_setup") is True
+
+        # Third incoming leader should be rejected (cap of 2 reached)
+        third = make_alert(
+            alert_id="aa-third-leader-20261028",
+            symbol="THIRDLEAD",
+            confidence=88,
+            metrics={"rvol": 3.0, "sector_id": "IT"},
+        )
+        recorded_third = engine.record_alert(third)
+        assert recorded_third is False
 
 
 def test_eod_report_equity_spot_scale_isolation():
@@ -221,7 +259,7 @@ def test_eod_sweep_squares_off_intraday_positions():
 
         closed = engine.sweep_intraday_eod_squareoffs()
         assert len(closed) == 1
-        assert alert_intraday.stage == "COMPLETED"
+        assert alert_intraday.stage == "SESSION_CLOSE_EXIT"
         assert alert_intraday.target_status == "SESSION_CLOSE_EXIT"
         assert "15:15 IST cutoff reached" in alert_intraday.archive_reason
 

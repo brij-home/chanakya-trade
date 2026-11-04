@@ -1,11 +1,12 @@
 """
 engine/event_strategies.py
 ──────────────────────────
-Event-driven strategy recommendations for Indian markets.
+Event-calendar context for Indian markets. Earnings option ideas are omitted
+until verified option-IV history and historical move inputs are available.
 
 Auto-detects upcoming events and recommends pre/post-event strategies:
   - RBI policy: hedge rate-sensitives, straddle BANKNIFTY
-  - Earnings: sell premium if IV high, buy straddle if IV low
+  - Earnings: no premium strategy without verified option-IV and move evidence
   - Expiry: max pain convergence, gamma scalping
   - Budget: sector-specific positioning
 
@@ -20,7 +21,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
 from typing import Optional
 
 from rich.console import Console
@@ -71,64 +72,33 @@ def get_event_strategies(
 
 
 def _expiry_strategies(today: date, days_ahead: int) -> list[EventStrategy]:
-    """Strategies around weekly/monthly expiry."""
+    """Calendar context for verified upcoming index expiries."""
     strategies = []
+    from market.calendar import get_nearest_weekly_expiry, get_nearest_monthly_expiry
 
-    # Find next Thursday (weekly expiry)
-    days_to_thu = (3 - today.weekday()) % 7
-    if days_to_thu == 0 and today.weekday() == 3:
-        days_to_thu = 0  # today is Thursday
-    next_expiry = today + timedelta(days=days_to_thu)
-    days_away = (next_expiry - today).days
-
-    if days_away <= days_ahead:
-        # Check if it's monthly expiry (last Thursday of month)
-        next_week = next_expiry + timedelta(days=7)
-        is_monthly = next_week.month != next_expiry.month
-
-        if is_monthly:
+    upcoming = (
+        ("NIFTY weekly expiry", "NIFTY", get_nearest_weekly_expiry("NIFTY", ref_date=today)),
+        (
+            "BANKNIFTY monthly expiry",
+            "BANKNIFTY",
+            get_nearest_monthly_expiry("BANKNIFTY", ref_date=today),
+        ),
+    )
+    for label, symbol, expiry in upcoming:
+        days_away = (expiry - today).days
+        if 0 <= days_away <= days_ahead:
             strategies.append(
                 EventStrategy(
-                    event="Monthly F&O Expiry",
-                    event_date=next_expiry.isoformat(),
+                    event=label,
+                    event_date=expiry.isoformat(),
                     days_away=days_away,
                     timing="PRE",
-                    strategy="Roll existing positions to next series. Consider selling high-IV options.",
-                    rationale="Monthly settlement causes OI unwinding and max pain convergence. "
-                    "Last 2 hours extremely volatile. Roll by Wednesday.",
+                    strategy="Review open exposure, listed contract expiry and defined risk; no directional edge is implied.",
+                    rationale="Expiry may change liquidity, gamma and settlement risk. Use current listed contracts and live quotes.",
                     risk_level="HIGH",
-                    instruments=["NIFTY", "BANKNIFTY"],
+                    instruments=[symbol],
                 )
             )
-        else:
-            if days_away <= 2:
-                strategies.append(
-                    EventStrategy(
-                        event="Weekly Expiry",
-                        event_date=next_expiry.isoformat(),
-                        days_away=days_away,
-                        timing="PRE",
-                        strategy="Sell OTM options expiring today/tomorrow. Max pain play.",
-                        rationale="Theta decay accelerates. Options lose 50%+ value in last 2 days. "
-                        "Sell OTM options near max pain strike.",
-                        risk_level="MEDIUM",
-                        instruments=["NIFTY", "BANKNIFTY"],
-                    )
-                )
-
-            if days_away == 0:
-                strategies.append(
-                    EventStrategy(
-                        event="Expiry Day",
-                        event_date=next_expiry.isoformat(),
-                        days_away=0,
-                        timing="PRE",
-                        strategy="Gamma scalping or close all expiring positions by 2:30 PM.",
-                        rationale="Extreme gamma risk. Avoid holding naked short options past 2:30 PM.",
-                        risk_level="HIGH",
-                        instruments=["NIFTY", "BANKNIFTY"],
-                    )
-                )
 
     return strategies
 
@@ -202,8 +172,16 @@ def _earnings_strategies(
 
                 if 1 <= days_away <= 5:
                     iv_data = get_pre_earnings_iv(entry.symbol)
-                    iv_rank = iv_data.get("iv_rank", 50)
-                    avg_move = entry.avg_move or 3.0
+                    iv_rank = iv_data.get("iv_rank")
+                    avg_move = entry.avg_move
+
+                    # Do not manufacture an event-volatility trade idea when
+                    # actual option-IV history and a comparable move estimate
+                    # are unavailable.
+                    if iv_rank is None:
+                        continue
+                    if avg_move is None:
+                        continue
 
                     if iv_rank > 60:
                         strategy = (

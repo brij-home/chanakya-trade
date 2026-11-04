@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, time as dtime
 import os
@@ -571,12 +571,31 @@ class AlertScrutinyAuditor:
                 is_detector_eligible_for_regime,
             )
 
-            regime = classify_market_regime()
-            rvol_val = 1.0
+            metrics_d_vix = getattr(alert, "metrics", {}) or {}
+            vix_input = None
+            if isinstance(metrics_d_vix, dict):
+                vix_input = metrics_d_vix.get("vix") or metrics_d_vix.get("india_vix")
+            if (
+                vix_input is None
+                and hasattr(alert, "_live_quote_snapshot")
+                and isinstance(alert._live_quote_snapshot, dict)
+            ):
+                vix_input = alert._live_quote_snapshot.get("vix")
+
+            regime = (
+                classify_market_regime(vix=vix_input)
+                if vix_input is not None
+                else classify_market_regime()
+            )
+            # Missing RVOL is unknown evidence, never a neutral 1.0x assumption.
+            rvol_val = 0.0
             metrics_d = getattr(alert, "metrics", {}) or {}
             has_sweep = False
             if isinstance(metrics_d, dict):
-                rvol_val = float(metrics_d.get("rvol") or metrics_d.get("rvol_val") or 1.0)
+                rvol_raw = metrics_d.get("rvol")
+                if rvol_raw is None:
+                    rvol_raw = metrics_d.get("rvol_val")
+                rvol_val = float(rvol_raw) if rvol_raw is not None else 0.0
                 signals = metrics_d.get("signals") or []
                 _SMC_STRUCTURAL_SIGNALS = {
                     "PDL_DEMAND_REJECTION",
@@ -612,7 +631,11 @@ class AlertScrutinyAuditor:
                     or any(s in _SMC_STRUCTURAL_SIGNALS for s in signals)
                 )
             is_elig, supp_reason = is_detector_eligible_for_regime(
-                atype, regime, rvol=rvol_val, has_structural_sweep=has_sweep
+                atype,
+                regime,
+                rvol=rvol_val,
+                has_structural_sweep=has_sweep,
+                direction=str(getattr(alert, "direction", "") or "").upper(),
             )
             if not is_elig:
                 flags["risk_within_bounds"] = False
@@ -950,7 +973,21 @@ class AlertScrutinyAuditor:
                             or (metrics_d or {}).get("pdh_sweep")
                             or (metrics_d or {}).get("turtle_soup")
                         )
-                        if rvol_val < cheetah.min_required_rvol and not is_thrust and not has_sweep:
+                        is_pullback = getattr(alert, "is_pullback_or_absorption", False)
+                        if not is_pullback:
+                            try:
+                                from engine.alert_model import is_pullback_or_absorption_setup
+
+                                is_pullback = is_pullback_or_absorption_setup(alert)
+                            except Exception:
+                                is_pullback = False
+
+                        if (
+                            rvol_val < cheetah.min_required_rvol
+                            and not is_thrust
+                            and not has_sweep
+                            and not is_pullback
+                        ):
                             flags["equity_regime_valid"] = False
                             item_lbl = (
                                 f"Underlying stock {target_eval_sym}"
@@ -975,13 +1012,38 @@ class AlertScrutinyAuditor:
 
         # 3f. Mandatory Non-Zero RVOL Invariant Gate (Flaw 5)
         # Every directional breakout/thrust setup MUST have verified positive relative volume. Zero/null is prohibited.
+        is_options_momentum = atype == "OPTIONS_MOMENTUM"
+        if is_options_momentum:
+            # This detector uses contract-level turnover, not underlying RVOL. Require
+            # actual option-chain volume and OI evidence; never infer either from prose,
+            # a test runner, or a missing-data default.
+            option_volume = (metrics_d or {}).get("volume")
+            option_oi = (metrics_d or {}).get("oi")
+            try:
+                option_volume = float(option_volume)
+                option_oi = float(option_oi)
+            except (TypeError, ValueError):
+                option_volume = option_oi = 0.0
+            if (
+                not math.isfinite(option_volume)
+                or not math.isfinite(option_oi)
+                or option_volume <= 0.0
+                or option_oi <= 0.0
+            ):
+                flags["option_volume_valid"] = False
+                return (
+                    False,
+                    f"Unverified Option Turnover Veto: {clean_sym} options momentum lacks positive contract volume and OI evidence.",
+                    flags,
+                )
+            flags["option_volume_valid"] = True
+
         is_breakout_type = atype in (
             "BREAKOUT",
             "ORB_BREAKOUT",
             "OPENING_RANGE_BREAKOUT",
             "SQUEEZE_BREAKOUT",
             "AFTERNOON_THRUST",
-            "OPTIONS_MOMENTUM",
             "OPENING_DRIVE",
         )
         if is_breakout_type:
@@ -989,11 +1051,7 @@ class AlertScrutinyAuditor:
             rvol_m = float(
                 rvol_raw
                 if rvol_raw is not None
-                else (
-                    (metrics_d or {}).get("tod_rvol")
-                    or getattr(alert, "rvol", None)
-                    or (1.5 if is_test_runner else 0.0)
-                )
+                else ((metrics_d or {}).get("tod_rvol") or getattr(alert, "rvol", None) or 0.0)
             )
             if rvol_m <= 0.0:
                 flags["rvol_valid"] = False
@@ -1598,8 +1656,16 @@ class AlertScrutinyAuditor:
         # or contracts with zero bid (total lack of exit liquidity).
         if is_option_premium_levels and isinstance(metrics_dict, dict):
             spread_pct = metrics_dict.get("bid_ask_spread_pct")
-            bid_val = metrics_dict.get("bid") or metrics_dict.get("best_bid")
-            ask_val = metrics_dict.get("ask") or metrics_dict.get("best_ask")
+            bid_val = (
+                metrics_dict.get("bid")
+                if metrics_dict.get("bid") is not None
+                else metrics_dict.get("best_bid")
+            )
+            ask_val = (
+                metrics_dict.get("ask")
+                if metrics_dict.get("ask") is not None
+                else metrics_dict.get("best_ask")
+            )
             if spread_pct is None and bid_val is not None and ask_val is not None:
                 try:
                     b_f, a_f = float(bid_val), float(ask_val)
@@ -2581,13 +2647,39 @@ class AlertScrutinyAuditor:
                 if rvol is not None:
                     try:
                         rvol_f = float(rvol)
-                        if rvol_f > 0 and rvol_f < 1.8:
-                            flags["midday_rvol_valid"] = False
-                            return (
-                                False,
-                                f"Midday False Breakout Trap: Breakout attempted during lunch lull (11:30-13:15 IST) with low relative volume (RVOL {rvol_f:.2f}x < 1.8x). Mandate institutional volume expansion.",
-                                flags,
+                        is_pullback = getattr(alert, "is_pullback_or_absorption", False)
+                        if not is_pullback:
+                            try:
+                                from engine.alert_model import is_pullback_or_absorption_setup
+
+                                is_pullback = is_pullback_or_absorption_setup(alert)
+                            except Exception:
+                                is_pullback = False
+
+                        if is_pullback:
+                            # Pullback / Retest / Absorption setups: Volume contraction is expected & healthy (supply exhaustion).
+                            # Only veto if volume is abnormally heavy (RVOL >= 2.2x without reversal thrust),
+                            # which signals aggressive institutional distribution / support failure.
+                            is_thrust = bool(
+                                (metrics_dict or {}).get("is_institutional_thrust")
+                                or (metrics_dict or {}).get("institutional_thrust")
                             )
+                            if rvol_f >= 2.2 and not is_thrust:
+                                flags["midday_rvol_valid"] = False
+                                return (
+                                    False,
+                                    f"Midday Distribution Hazard: Retest on {clean_sym} accompanied by heavy dumping volume (RVOL {rvol_f:.2f}x >= 2.2x). Support failure risk elevated.",
+                                    flags,
+                                )
+                        else:
+                            # Breakout setups: Mandate institutional volume expansion
+                            if rvol_f > 0 and rvol_f < 1.8:
+                                flags["midday_rvol_valid"] = False
+                                return (
+                                    False,
+                                    f"Midday False Breakout Trap: Breakout attempted during lunch lull (11:30-13:15 IST) with low relative volume (RVOL {rvol_f:.2f}x < 1.8x). Mandate institutional volume expansion.",
+                                    flags,
+                                )
                     except (ValueError, TypeError) as e_suppressed:
                         logger.debug(
                             f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
@@ -2846,7 +2938,16 @@ class AlertScrutinyAuditor:
                     )
 
                     is_trend_pullback_decoupler = bool(
-                        atype in ("TREND_DAY_PULLBACK", "trend-pullback")
+                        (
+                            atype
+                            in (
+                                "TREND_DAY_PULLBACK",
+                                "trend-pullback",
+                                "SMC_OB_RETEST",
+                                "PRE_INFLECTION_DRYUP",
+                            )
+                            or getattr(alert, "is_pullback_or_absorption", False)
+                        )
                         and (
                             rvol_val >= 1.0
                             or float((metrics_dict or {}).get("rvol", 0.0) or 0.0) >= 1.0
@@ -2920,7 +3021,16 @@ class AlertScrutinyAuditor:
                                 and (opt_pch >= 20.0 or spot_chg <= -1.5)
                             )
                             or (
-                                atype in ("TREND_DAY_PULLBACK", "trend-pullback")
+                                (
+                                    atype
+                                    in (
+                                        "TREND_DAY_PULLBACK",
+                                        "trend-pullback",
+                                        "SMC_OB_RETEST",
+                                        "PRE_INFLECTION_DRYUP",
+                                    )
+                                    or getattr(alert, "is_pullback_or_absorption", False)
+                                )
                                 and (
                                     rvol_val >= 1.0
                                     or float((metrics_dict or {}).get("rvol", 0.0) or 0.0) >= 1.0
@@ -2957,8 +3067,6 @@ class AlertScrutinyAuditor:
         #    and holding above session VWAP has an 80%+ failure probability.
         # 2. Heavyweight Locomotive Tug-of-War Gate: If HDFCBANK and ICICIBANK (>52% Bank Nifty weight) are in
         #    opposing directions and India VIX is low (<14.0), suppress naked directional breakout alerts.
-        # 3. Off-Cycle Expiry Theta Bleed Gate: Non-expiry index options on Friday afternoon suffer severe weekend
-        #    theta decay without gamma acceleration.
         if is_index:
             # Query NIFTY 50 benchmark posture from metrics or in-memory cache
             n_ltp = 0.0
@@ -3351,39 +3459,6 @@ class AlertScrutinyAuditor:
                     logger.debug(
                         f"[engine.alert_scrutiny] Non-fatal exception suppressed: {e_suppressed}"
                     )
-
-            enforce_friday = os.environ.get("ENFORCE_TEST_FRIDAY_GATE") == "1"
-            if (
-                (not is_test_runner or enforce_friday)
-                and alert_dt.weekday() == 4
-                and alert_dt.time() >= dtime(13, 0)
-            ):
-                if clean_sym in ("MIDCPNIFTY", "FINNIFTY") and is_option_premium_levels:
-                    # Check if this alert is explicitly an INTRADAY_SCALP_ONLY with mandatory 15:15 exit
-                    time_horizon = str(
-                        getattr(alert, "time_horizon", "")
-                        or (
-                            metrics_dict.get("time_horizon", "")
-                            if isinstance(metrics_dict, dict)
-                            else ""
-                        )
-                    ).upper()
-                    act_plan = getattr(alert, "actionable_plan", {}) or {}
-                    mandatory_exit = str(
-                        act_plan.get("mandatory_exit", "") if isinstance(act_plan, dict) else ""
-                    ).upper()
-                    is_intraday_scalp = (
-                        "INTRADAY" in time_horizon or "SCALP" in time_horizon
-                    ) and ("15:15" in mandatory_exit or "INTRADAY" in mandatory_exit)
-                    if not is_intraday_scalp:
-                        flags["expiry_cycle_valid"] = False
-                        return (
-                            False,
-                            f"Off-Cycle Theta Trap: {clean_sym} options on Friday afternoon suffer severe weekend theta decay with zero gamma acceleration. Primary liquidity is in SENSEX expiry.",
-                            flags,
-                        )
-                    else:
-                        flags["is_intraday_scalp_only"] = True
 
         # 14d. Opening Auction Discovery Sanctity Filter (09:15–09:25 IST):
         # In the first 10 minutes of equity/options sessions, opening spread volatility,
@@ -4215,7 +4290,7 @@ class AlertScrutinyAuditor:
                                 f"SEBI Physical Delivery Expiry Week Veto: Single-stock option {csym or sym} "
                                 f"belongs to current-month settlement week ({contract_exp}). "
                                 f"Trading current-month stock options during settlement week is prohibited due to "
-                                f"staggered delivery margins (25%->100%) and terminal theta crush. "
+                                f"elevated delivery margin and expiry risk. "
                                 f"Route exclusively to Next-Month contract.",
                                 flags,
                             )
@@ -5285,7 +5360,7 @@ class AlertScrutinyAuditor:
         return data
 
     def _execute_fast_llm_scrutiny(
-        self, alert: Any, flags: dict[str, bool], timeout: float = 3.5, min_score: int = 70
+        self, alert: Any, flags: dict[str, bool], timeout: float = 4.5, min_score: int = 70
     ) -> Optional[ScrutinyResult]:
         """Invokes Fast-LLM with defensive timeout and strict JSON parsing."""
         prompt = self._build_scrutiny_prompt(alert)
@@ -5302,27 +5377,39 @@ class AlertScrutinyAuditor:
                 "Analyze the trade setup strictly and return a valid JSON object ONLY with keys: "
                 "verdict (APPROVED|REJECTED), score (0-100), logic_confirmation, trap_risk_warning, actionable_guidance."
             )
-            resp = provider.chat(
-                messages=[
+            chat_kwargs = {
+                "messages": [
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": prompt},
                 ],
-                stream=False,
-                enable_tools=False,
-                max_tokens=300,
-            )
+                "stream": False,
+                "enable_tools": False,
+                "max_tokens": 350,
+                "response_mime_type": "application/json",
+            }
+            pname = ""
+            try:
+                pname = str(
+                    provider.provider_name()
+                    if callable(getattr(provider, "provider_name", None))
+                    else ""
+                )
+            except Exception:
+                pname = ""
+            if "Gemini" in pname:
+                chat_kwargs["thinking_budget"] = 512
+            resp = provider.chat(**chat_kwargs)
             return str(resp or "").strip()
 
-        raw_text = None
-        pool = ThreadPoolExecutor(max_workers=3)
         try:
-            future = pool.submit(_call)
-            raw_text = future.result(timeout=timeout)
+            from engine.llm_deadline import run_with_deadline
+
+            raw_text = run_with_deadline(_call, timeout=timeout, label="alert-scrutiny")
         except Exception as e:
-            logger.debug(f"[AlertScrutinyAuditor] Fast-LLM timeout/error ({timeout}s): {e}")
+            logger.warning(
+                "[AlertScrutinyAuditor] Fast-LLM unavailable after %.2fs: %s", timeout, e
+            )
             return None
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
 
         if not raw_text:
             return None
@@ -5613,7 +5700,11 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
         ev_hedge = flags.get("event_hedge_plan") or (
             metrics.get("event_hedge_plan") if isinstance(metrics, dict) else None
         )
-        if ev_hedge:
+        if (
+            isinstance(ev_hedge, dict)
+            and ev_hedge.get("actionable") is True
+            and ev_hedge.get("status") == "AVAILABLE"
+        ):
             score += 5
 
         # Macro Lead-Lag Conviction Adjustment & Veto

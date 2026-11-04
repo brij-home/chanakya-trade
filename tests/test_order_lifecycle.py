@@ -289,6 +289,111 @@ def test_paper_preview_cannot_execute_in_live_mode(monkeypatch):
         execute_order_intent(intent.order_id)
 
 
+def test_simulated_adapter_persists_through_order_lifecycle(monkeypatch):
+    from engine.modes import ModeInfo, TradingMode
+    from engine.order_lifecycle import submit_simulated_order_intent
+
+    monkeypatch.setattr(
+        "engine.order_lifecycle.get_trading_mode",
+        lambda: ModeInfo(
+            mode=TradingMode.SIMULATE,
+            is_observe=False,
+            is_simulate=True,
+            is_execute=False,
+            description="Simulate",
+        ),
+    )
+    result = submit_simulated_order_intent(
+        symbol="TCS", side="BUY", quantity=1, price=3500.0, order_type="MARKET", product="CNC"
+    )
+    assert result.status == "FILLED_PAPER"
+    assert result.order_id.startswith("PAPER-")
+
+
+def test_simulated_adapter_rejects_non_simulate_modes_before_preview(monkeypatch):
+    from engine.modes import ModeInfo, TradingMode
+    from engine.order_lifecycle import submit_simulated_order_intent
+
+    monkeypatch.setattr(
+        "engine.order_lifecycle.get_trading_mode",
+        lambda: ModeInfo(
+            mode=TradingMode.EXECUTE,
+            is_observe=False,
+            is_simulate=False,
+            is_execute=True,
+            description="Execute",
+        ),
+    )
+    monkeypatch.setattr(
+        "engine.order_lifecycle.preview_order_intent",
+        lambda **kwargs: pytest.fail("No preview should be created outside SIMULATE mode"),
+    )
+    with pytest.raises(PermissionError, match="only supports SIMULATE"):
+        submit_simulated_order_intent(symbol="TCS", side="BUY", quantity=1, price=3500.0)
+
+
+def test_internal_snapshot_is_unavailable_without_account_scoped_execution_facts():
+    from engine.order_lifecycle import get_internal_ledger_snapshot
+
+    assert get_internal_ledger_snapshot("broker-user-1") is None
+
+
+def test_cancel_remains_pending_until_broker_snapshot_confirms_cancel(monkeypatch):
+    from brokers.base import OrderResponse
+    from engine.order_lifecycle import _get_orders_db, cancel_order_intent
+
+    intent = preview_order_intent(symbol="TCS", side="BUY", quantity=1, price=3500.0)
+    confirm_order_intent(intent.order_id, intent.preview_hash)
+    with _get_orders_db() as conn:
+        conn.execute(
+            "UPDATE orders_ledger SET status='OPEN', broker_order_id='PAPER-EXEC-1' WHERE order_id=?",
+            (intent.order_id,),
+        )
+        conn.commit()
+
+    class AcceptedNotCanceledBroker:
+        def cancel_order(self, broker_order_id):
+            assert broker_order_id == "PAPER-EXEC-1"
+            return True
+
+        def get_orders(self):
+            return [OrderResponse(order_id="PAPER-EXEC-1", status="OPEN")]
+
+    monkeypatch.setattr("engine.paper.PaperBroker", AcceptedNotCanceledBroker)
+    result = cancel_order_intent(intent.order_id)
+    assert result["cancel_acknowledged"] is True
+    assert result["cancel_confirmed"] is False
+    assert result["status"] == "CANCEL_PENDING"
+    with pytest.raises(ValueError, match="already pending"):
+        cancel_order_intent(intent.order_id)
+
+
+def test_cancel_marks_canceled_only_after_broker_snapshot_confirms(monkeypatch):
+    from brokers.base import OrderResponse
+    from engine.order_lifecycle import _get_orders_db, cancel_order_intent
+
+    intent = preview_order_intent(symbol="INFY", side="BUY", quantity=1, price=1800.0)
+    confirm_order_intent(intent.order_id, intent.preview_hash)
+    with _get_orders_db() as conn:
+        conn.execute(
+            "UPDATE orders_ledger SET status='OPEN', broker_order_id='PAPER-EXEC-2' WHERE order_id=?",
+            (intent.order_id,),
+        )
+        conn.commit()
+
+    class ConfirmedCancelBroker:
+        def cancel_order(self, broker_order_id):
+            return True
+
+        def get_orders(self):
+            return [OrderResponse(order_id="PAPER-EXEC-2", status="CANCELLED")]
+
+    monkeypatch.setattr("engine.paper.PaperBroker", ConfirmedCancelBroker)
+    result = cancel_order_intent(intent.order_id)
+    assert result["status"] == "CANCELLED"
+    assert result["cancel_confirmed"] is True
+
+
 def test_live_preview_cannot_execute_in_paper_mode(monkeypatch):
     """
     P0 Safety Invariant: A preview created in LIVE/EXECUTE mode MUST NOT be executed
@@ -575,13 +680,88 @@ def test_execute_order_batch_live_basket(tmp_path, monkeypatch):
     confirm_order_intent(o1.order_id, preview_hash=o1.preview_hash)
     confirm_order_intent(o2.order_id, preview_hash=o2.preview_hash)
 
-    results = execute_order_batch([o1.order_id, o2.order_id])
-    assert len(results) == 2
-    assert mock_broker.basket_called is True
-    assert results[0].status == "OPEN"
-    assert results[0].broker_order_id == "FY_BASKET_1"
-    assert results[1].status == "FILLED"
-    assert results[1].broker_order_id == "FY_BASKET_2"
+    monkeypatch.setattr("engine.modes.assert_live_execution_allowed", lambda: None)
+    with pytest.raises(PermissionError, match="Live basket execution is disabled"):
+        execute_order_batch([o1.order_id, o2.order_id])
+
+    assert mock_broker.basket_called is False
+    from engine.order_lifecycle import _get_orders_db
+
+    with _get_orders_db() as conn:
+        statuses = conn.execute(
+            "SELECT status FROM orders_ledger WHERE order_id IN (?, ?)",
+            (o1.order_id, o2.order_id),
+        ).fetchall()
+    assert len(statuses) == 2
+    assert {row[0] for row in statuses} == {"CONFIRMED"}
+
+
+def test_live_sliced_order_stays_confirmed_and_is_not_submitted(monkeypatch):
+    import engine.order_lifecycle as lifecycle
+
+    monkeypatch.setenv("TRADING_MODE", "EXECUTE")
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+    monkeypatch.setattr("engine.modes.assert_live_execution_allowed", lambda: None)
+    monkeypatch.setattr(
+        "engine.smart_order_router.slice_quantity_by_freeze_limit",
+        lambda symbol, quantity, lot_size, **kwargs: [quantity // 2, quantity - quantity // 2],
+    )
+
+    order = preview_order_intent(
+        symbol="INFY",
+        side="BUY",
+        quantity=10,
+        price=1800.0,
+        auto_gtt_oco=False,
+        idempotency_key="LIVE-SLICED-OMS-BLOCK-1",
+    )
+    confirm_order_intent(order.order_id, order.preview_hash or "")
+
+    with pytest.raises(PermissionError, match="Live freeze-limit sliced orders are disabled"):
+        lifecycle.execute_order_intent(order.order_id)
+
+    with lifecycle._get_orders_db() as conn:
+        row = conn.execute(
+            "SELECT status, broker_order_id FROM orders_ledger WHERE order_id = ?",
+            (order.order_id,),
+        ).fetchone()
+    assert row["status"] == "CONFIRMED"
+    assert row["broker_order_id"] is None
+
+
+def test_live_automatic_protective_order_stays_confirmed(monkeypatch):
+    import engine.order_lifecycle as lifecycle
+
+    monkeypatch.setenv("TRADING_MODE", "EXECUTE")
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+    monkeypatch.setattr("engine.modes.assert_live_execution_allowed", lambda: None)
+    monkeypatch.setattr(
+        "market.symbol_master.get_quantity_freeze_info",
+        lambda symbol, *, segment=None: {"quantity": 1000, "source": "TEST_FIXTURE"},
+    )
+
+    order = preview_order_intent(
+        symbol="INFY",
+        side="BUY",
+        quantity=10,
+        price=1800.0,
+        stop_loss=1700.0,
+        target=2000.0,
+        idempotency_key="LIVE-GTT-OMS-BLOCK-1",
+    )
+    confirm_order_intent(order.order_id, order.preview_hash or "")
+
+    with pytest.raises(PermissionError, match="Live automatic protective GTT orders are disabled"):
+        lifecycle.execute_order_intent(order.order_id)
+
+    with lifecycle._get_orders_db() as conn:
+        row = conn.execute(
+            "SELECT status, broker_order_id, gtt_order_id FROM orders_ledger WHERE order_id = ?",
+            (order.order_id,),
+        ).fetchone()
+    assert row["status"] == "CONFIRMED"
+    assert row["broker_order_id"] is None
+    assert row["gtt_order_id"] is None
 
 
 def test_order_preview_depth_sweep_slippage():

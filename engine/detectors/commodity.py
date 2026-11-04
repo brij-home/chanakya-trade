@@ -1452,7 +1452,13 @@ def detect_commodity_breakouts(
                                 if isinstance(expiry, _date)
                                 else _date.fromisoformat(str(expiry)[:10])
                             )
-                            dte = (exp_date - _date.today()).days
+                            try:
+                                from config.constants import now_ist as _now_ist_fn
+
+                                _today_ist = _now_ist_fn().date()
+                            except Exception:
+                                _today_ist = _date.today()
+                            dte = (exp_date - _today_ist).days
                             if dte <= 5:
                                 dte_warning = f"⚠️ THETA RISK: Only {dte} DTE — rapid premium decay."
                     except Exception as e_suppressed:

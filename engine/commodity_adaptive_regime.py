@@ -683,8 +683,16 @@ def evaluate_commodity_adaptive_regime(
     """
     Unified entry point evaluating Eagle Eye, Tiger Stalking, and Sniper Execution for MCX.
     """
+    if callable(ref_time):
+        try:
+            ref_time = ref_time()
+        except Exception:
+            ref_time = None
     now_dt = ref_time or datetime.now(IST)
-    evaluated_at_str = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    if hasattr(now_dt, "strftime"):
+        evaluated_at_str = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    else:
+        evaluated_at_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
     # 1. Eagle Eye Radar
     eagle = evaluate_commodity_eagle_regime(

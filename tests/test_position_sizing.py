@@ -35,6 +35,47 @@ class TestSizeByPct:
         with pytest.raises(ValueError, match="too small"):
             size_by_pct("INFY", 1.0, 1_000, limit_price=50_000.0)
 
+
+def test_fno_risk_budget_does_not_force_one_lot():
+    from engine.position_sizer import calculate_position_size
+
+    result = calculate_position_size(
+        symbol="NIFTY",
+        entry_price=500.0,
+        stop_loss=490.0,
+        target_price=520.0,
+        capital=50_000.0,
+        max_risk_pct=0.1,
+        max_capital_pct=None,
+        sizing_model="fixed_fractional",
+        is_fno=True,
+        vix=15.0,
+    )
+
+    assert result.lot_size > 1
+    assert result.lots == 0
+    assert result.shares == 0
+    assert result.risk_amount == 0.0
+
+
+def test_zero_sized_ticket_is_blocked_and_has_no_sor_plan():
+    from engine.position_sizer import generate_execution_ticket
+
+    ticket = generate_execution_ticket(
+        symbol="NSE:RELIANCE-EQ",
+        entry_price=1000.0,
+        stop_loss=990.0,
+        target_price=1020.0,
+        capital=100.0,
+        max_risk_pct=0.01,
+        segment="EQUITY",
+    )
+
+    assert ticket["shares"] == 0
+    assert ticket["execution_status"] == "BLOCKED_RISK_BUDGET"
+    assert ticket["auto_submit_ready"] is False
+    assert ticket["smart_routing"] is None
+
     def test_exceeds_max_position_pct_raises(self, monkeypatch):
         from engine.trade_executor import size_by_pct
 
@@ -151,6 +192,25 @@ class TestParsePctArg:
         assert "SEBI Physical Settlement" in res_physical.notes
 
 
+def test_detector_dampener_can_reduce_one_lot_to_zero():
+    from engine.position_sizer import calculate_position_size_for_alert
+
+    result = calculate_position_size_for_alert(
+        alert_type="COUNTER_TREND",
+        symbol="NIFTY",
+        entry_price=100.0,
+        stop_loss=90.0,
+        capital=50000.0,
+        max_risk_pct=1.5,
+        is_fno=True,
+    )
+
+    assert result.lot_size == 65
+    assert result.lots == 0
+    assert result.shares == 0
+    assert "no minimum lot is forced" in result.notes
+
+
 class TestSebiPhysicalSettlementRiskGate:
     def test_single_stock_vs_index_classification(self):
         from engine.position_sizer import is_physical_delivery_fno
@@ -211,6 +271,25 @@ class TestSebiPhysicalSettlementRiskGate:
         )
         assert allowed.allowed is True
         assert "SEBI_PHYSICAL_DELIVERY_RISK" not in allowed.flags
+
+    def test_physical_settlement_risk_never_substitutes_a_missing_price(self):
+        from engine.position_sizer import check_sebi_physical_settlement_risk
+
+        result = check_sebi_physical_settlement_risk("RELIANCE", dte=2, capital=1_000_000)
+        assert result["blocked"] is True
+        assert result["status"] == "UNAVAILABLE"
+        assert result["required_delivery_capital"] is None
+        assert "verified underlying price is missing" in result["warning"]
+
+    def test_physical_settlement_risk_never_substitutes_missing_dte_or_capital(self):
+        from engine.position_sizer import check_sebi_physical_settlement_risk
+
+        missing_dte = check_sebi_physical_settlement_risk("RELIANCE", price=2500, capital=1_000_000)
+        missing_capital = check_sebi_physical_settlement_risk("RELIANCE", dte=2, price=2500)
+        assert missing_dte["blocked"] is True
+        assert missing_dte["status"] == "UNAVAILABLE"
+        assert missing_capital["blocked"] is True
+        assert missing_capital["status"] == "UNAVAILABLE"
 
     def test_estimate_market_impact_liquid_and_slicing(self):
         from engine.position_sizer import estimate_market_impact, calculate_position_size

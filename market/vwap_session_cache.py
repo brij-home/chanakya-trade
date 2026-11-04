@@ -43,8 +43,8 @@ class VwapSessionCache:
     Session-level cache for computed VWAPs that survives service restarts.
     """
 
-    def __init__(self, ttl_seconds: float = 1800.0) -> None:
-        self._ttl_seconds = float(ttl_seconds)  # 30 minutes default
+    def __init__(self, ttl_seconds: float = 60.0) -> None:
+        self._ttl_seconds = float(ttl_seconds)  # 60s default during active market
         self._lock = threading.Lock()
         self._in_flight_locks: dict[str, threading.Lock] = {}
         self._in_flight_master_lock = threading.Lock()
@@ -83,6 +83,31 @@ class VwapSessionCache:
             logger.warning(
                 f"[VwapCache] Could not load disk cache {cache_file}: {exc}", exc_info=True
             )
+
+    def _ensure_current_session(self) -> None:
+        """Purge memory cache on day rollover to prevent previous day VWAP leakage."""
+        today = datetime.now(IST).strftime("%Y%m%d")
+        if today != self._current_date:
+            with self._lock:
+                self._memory_cache.clear()
+                self._current_date = today
+            self._load_from_disk()
+
+    def _get_effective_ttl(self, val: float) -> float:
+        """
+        Dynamically adjusts TTL:
+        - Active market hours: 60.0s for fresh reactive VWAP
+        - Negative cache (val <= 0) during active market: 30.0s
+        - Market closed (after 15:30 IST / weekend): infinite (final session value)
+        """
+        now_ist = datetime.now(IST)
+        is_weekday = now_ist.weekday() < 5
+        curr_min = now_ist.hour * 60 + now_ist.minute
+        is_market_hours = is_weekday and (9 * 60 + 15 <= curr_min <= 15 * 60 + 30)
+
+        if not is_market_hours:
+            return float("inf") if val > 0 else 120.0
+        return self._ttl_seconds if val > 0 else 30.0
 
     def _save_to_disk(self) -> None:
         """Persist in-memory cache to disk with thread-safe atomic write and Windows retry."""
@@ -135,16 +160,15 @@ class VwapSessionCache:
         Get cached VWAP if fresh.
         Returns None if expired or not found.
         """
+        self._ensure_current_session()
         clean = canonical_symbol(symbol)
         now = time.time()
         with self._lock:
             entry = self._memory_cache.get(clean)
             if entry:
                 computed_ts, val = entry
-                # If market is closed (after 15:30 IST), today's VWAP is final and never expires
-                now_ist = datetime.now(IST)
-                market_closed = (now_ist.hour > 15) or (now_ist.hour == 15 and now_ist.minute >= 30)
-                if market_closed or (now - computed_ts < self._ttl_seconds):
+                ttl = self._get_effective_ttl(val)
+                if now - computed_ts < ttl:
                     return val if val > 0 else None
         return None
 
@@ -152,6 +176,7 @@ class VwapSessionCache:
         """Store computed VWAP in memory and schedule disk persistence."""
         if vwap_val <= 0:
             return
+        self._ensure_current_session()
         clean = canonical_symbol(symbol)
         now = time.time()
         with self._lock:
@@ -160,16 +185,15 @@ class VwapSessionCache:
 
     def is_cached_fresh(self, symbol: str) -> tuple[bool, Optional[float]]:
         """Check if symbol is cached (including negative cache). Returns (is_fresh, value_or_none)."""
+        self._ensure_current_session()
         clean = canonical_symbol(symbol)
         now = time.time()
         with self._lock:
             entry = self._memory_cache.get(clean)
             if entry:
                 computed_ts, val = entry
-                now_ist = datetime.now(IST)
-                market_closed = (now_ist.hour > 15) or (now_ist.hour == 15 and now_ist.minute >= 30)
-                ttl = self._ttl_seconds if val > 0 else 300.0
-                if market_closed or (now - computed_ts < ttl):
+                ttl = self._get_effective_ttl(val)
+                if now - computed_ts < ttl:
                     return True, (val if val > 0 else None)
         return False, None
 
@@ -233,7 +257,7 @@ class VwapSessionCache:
 
 
 # Global singleton
-vwap_session_cache = VwapSessionCache(ttl_seconds=1800.0)
+vwap_session_cache = VwapSessionCache(ttl_seconds=60.0)
 
 
 def get_vwap_session_cache() -> VwapSessionCache:

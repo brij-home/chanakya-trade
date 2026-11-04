@@ -86,6 +86,9 @@ def calculate_transaction_charges(
     side: OrderSide = "BUY",
     brokerage_rate: float | None = None,  # None = use standard discount defaults
     broker_flat_fee: float = 20.0,
+    trade_date=None,
+    option_exercised: bool = False,
+    intrinsic_value: float | None = None,
 ) -> TransactionCostBreakdown:
     """
     Calculate full statutory Indian transaction costs for an order leg.
@@ -101,6 +104,13 @@ def calculate_transaction_charges(
     Returns:
         TransactionCostBreakdown dataclass with all individual line items.
     """
+    from datetime import date, datetime
+    from config.constants import IST
+
+    as_of = trade_date or datetime.now(IST).date()
+    if not isinstance(as_of, date) or isinstance(as_of, datetime):
+        raise ValueError("trade_date must be a calendar date")
+    revised = as_of >= date(2026, 4, 1)
     p = Decimal(str(price))
     q = Decimal(str(abs(quantity)))
     turnover = p * q
@@ -144,11 +154,18 @@ def calculate_transaction_charges(
     elif segment in ("FUTURES", "FUT"):
         # 0.02% on Sell only
         if side == "SELL":
-            stt = turnover * Decimal("0.0002")
+            stt = turnover * (Decimal("0.0005") if revised else Decimal("0.0002"))
     elif segment in ("OPTIONS", "OPT"):
-        # 0.1% on Sell premium turnover
-        if side == "SELL":
-            stt = turnover * Decimal("0.001")
+        if option_exercised:
+            if intrinsic_value is None or intrinsic_value < 0:
+                raise ValueError("Exercise STT requires nonnegative intrinsic_value per unit")
+            stt = (
+                Decimal(str(intrinsic_value))
+                * q
+                * (Decimal("0.0015") if revised else Decimal("0.00125"))
+            )
+        elif side == "SELL":
+            stt = turnover * (Decimal("0.0015") if revised else Decimal("0.001"))
     elif segment == "COMMODITY":
         # CTT on Commodity Futures: 0.01% on Sell
         if side == "SELL":

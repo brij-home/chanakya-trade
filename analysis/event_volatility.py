@@ -1,23 +1,12 @@
 """
 analysis/event_volatility.py
 ────────────────────────────
-Institutional Event Volatility & Hedged Earnings Intelligence Engine.
+Event-volatility research context for earnings catalysts.
 
-Replaces naive "blackout vetoes" with predictive, defined-risk volatility architecture.
-Harnesses binary catalysts (Corporate Earnings, RBI MPC, Union Budget) to capture outsized
-asymmetric profits while mathematically neutralizing Implied Volatility (IV) crush.
-
-Institutional Blueprints:
-  1. VOL-CRUSH HARVESTING (IV Rank >= 50%):
-     Options are overpriced. Deploys Defined-Risk Vertical Spreads (Bull Call / Bear Put)
-     or Iron Condors. The short leg captures the post-announcement volatility collapse
-     (IV crush) as pure profit, turning a retail liability into an institutional asset.
-  2. EXPLOSIVE SQUEEZE (IV Rank < 40%):
-     Options are underpriced relative to historical earnings realized moves. Deploys
-     Long Straddles / Strangles to capture explosive directional expansion with positive EV.
-  3. POST-EARNINGS ANNOUNCEMENT DRIFT (PEAD):
-     Captures institutional Day 1 / Day 2 multi-day portfolio re-weighting post-earnings surprise.
-     Enters on high RVOL (>= 2.5x) ORB continuation with zero IV crush risk.
+This module can construct an illustrative leg shape only when an IV-rank input
+is explicitly supplied. It has no integrated historical option-IV source or
+source-qualified leg-premium payoff model, so its output is always
+RESEARCH_ONLY and cannot be used as a trade recommendation or conviction bonus.
 """
 
 from __future__ import annotations
@@ -31,7 +20,7 @@ from market.instruments import format_strike
 
 logger = logging.getLogger("analysis.event_volatility")
 from config.constants import IST_ZONE as IST
-from market.earnings import _AVG_EARNINGS_MOVE, _NIFTY50_EARNINGS_MONTHS, get_pre_earnings_iv
+from market.earnings import _NIFTY50_EARNINGS_MONTHS, get_pre_earnings_iv
 
 
 @dataclass
@@ -47,16 +36,18 @@ class EventHedgePlan:
     symbol: str
     event_type: str  # "EARNINGS" | "RBI_POLICY" | "UNION_BUDGET"
     hours_to_event: float
-    iv_rank: float
-    historical_avg_move_pct: float
+    iv_rank: Optional[float]
+    historical_avg_move_pct: Optional[float]
     volatility_regime: str  # "OVERPRICED_IV" | "UNDERPRICED_IV" | "NEUTRAL"
     recommended_strategy: str  # "BULL_CALL_SPREAD" | "BEAR_PUT_SPREAD" | "IRON_CONDOR" | "LONG_STRADDLE" | "PEAD_ORB_DRIFT"
     preferred_vehicle: str
     legs: list[OptionLeg] = field(default_factory=list)
-    iv_crush_neutralized: bool = True
-    max_risk_pts: float = 0.0
-    max_reward_pts: float = 0.0
-    reward_risk_ratio: float = 2.5
+    status: str = "RESEARCH_ONLY"
+    actionable: bool = False
+    iv_crush_neutralized: bool = False
+    max_risk_pts: Optional[float] = None
+    max_reward_pts: Optional[float] = None
+    reward_risk_ratio: Optional[float] = None
     rationale: str = ""
     evaluated_at: str = field(
         default_factory=lambda: datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
@@ -99,7 +90,7 @@ def evaluate_event_volatility_strategy(
     iv_rank_override: Optional[float] = None,
 ) -> Optional[EventHedgePlan]:
     """
-    Transforms binary event gap/volatility risk into an institutional defined-risk hedge.
+    Creates a non-actionable structure illustration when IV rank is supplied.
     """
     if spot <= 0:
         return None
@@ -116,12 +107,25 @@ def evaluate_event_volatility_strategy(
     if effective_hours > 48.0 and hours_to_event is None:
         return None  # No upcoming binary event within 48h
 
-    # 2. Extract IV metrics
-    iv_data = get_pre_earnings_iv(clean_sym)
-    iv_rank = float(
-        iv_rank_override if iv_rank_override is not None else iv_data.get("iv_rank", 50.0)
+    # 2. Extract IV metrics. An explicit override is only a research/test input;
+    # it cannot make this plan actionable without source-qualified option quotes.
+    iv_data = (
+        {"iv_rank": iv_rank_override, "avg_earnings_move": None}
+        if iv_rank_override is not None
+        else get_pre_earnings_iv(clean_sym)
     )
-    avg_move = float(iv_data.get("avg_earnings_move") or _AVG_EARNINGS_MOVE.get(clean_sym, 3.5))
+    raw_iv_rank = iv_data.get("iv_rank")
+    try:
+        iv_rank = float(raw_iv_rank) if raw_iv_rank is not None else None
+    except (TypeError, ValueError):
+        iv_rank = None
+    if iv_rank is None or not 0 <= iv_rank <= 100:
+        logger.info(
+            "Event volatility research unavailable for %s: valid IV rank is missing", clean_sym
+        )
+        return None
+    raw_avg_move = iv_data.get("avg_earnings_move")
+    avg_move = float(raw_avg_move) if raw_avg_move is not None else None
 
     # Authoritative strike step from SSOT
     from market.symbol_master import get_strike_step
@@ -152,13 +156,12 @@ def evaluate_event_volatility_strategy(
                     description=f"Short OTM {format_strike(atm_strike + strike_step)} CE (Harvester)",
                 ),
             ]
-            max_risk = round(strike_step * 0.38, 2)
-            max_reward = round(strike_step * 0.62, 2)
-            rr = round(max_reward / max_risk, 2) if max_risk > 0 else 2.5
+            max_risk = None
+            max_reward = None
+            rr = None
             rationale = (
-                f"⚡ IV CRUSH HARVESTER: {clean_sym} IV Rank is elevated at {iv_rank:.1f}%. "
-                f"Naked calls are vulnerable to volatility collapse; deploying Bull Call Spread. "
-                f"Short {format_strike(atm_strike + strike_step)} CE captures IV crush as pure profit."
+                f"Research-only bullish spread illustration for {clean_sym}; IV rank {iv_rank:.1f}%. "
+                "No premium-based payoff or post-event edge has been verified."
             )
         else:
             strategy = "BEAR_PUT_SPREAD"
@@ -177,13 +180,12 @@ def evaluate_event_volatility_strategy(
                     description=f"Short OTM {format_strike(atm_strike - strike_step)} PE (Harvester)",
                 ),
             ]
-            max_risk = round(strike_step * 0.38, 2)
-            max_reward = round(strike_step * 0.62, 2)
-            rr = round(max_reward / max_risk, 2) if max_risk > 0 else 2.5
+            max_risk = None
+            max_reward = None
+            rr = None
             rationale = (
-                f"⚡ IV CRUSH HARVESTER: {clean_sym} IV Rank is elevated at {iv_rank:.1f}%. "
-                f"Deploying Bear Put Spread to cap tail risk; short {format_strike(atm_strike - strike_step)} PE "
-                f"monetizes post-earnings volatility collapse."
+                f"Research-only bearish spread illustration for {clean_sym}; IV rank {iv_rank:.1f}%. "
+                "No premium-based payoff or post-event edge has been verified."
             )
 
     # Case 2: Underpriced IV (IV Rank < 40) -> Exploits Asymmetric Move with Long Straddle
@@ -205,13 +207,12 @@ def evaluate_event_volatility_strategy(
                 description=f"Long ATM {format_strike(atm_strike)} PE",
             ),
         ]
-        max_risk = round(strike_step * 0.70, 2)
-        max_reward = round(strike_step * 1.80, 2)  # Assuming historical avg move
-        rr = round(max_reward / max_risk, 2) if max_risk > 0 else 2.5
+        max_risk = None
+        max_reward = None
+        rr = None
         rationale = (
-            f"⚡ UNDERPRICED VOLATILITY SQUEEZE: {clean_sym} IV Rank is suppressed ({iv_rank:.1f}%). "
-            f"Options market is underpricing historical earnings move ({avg_move:.1f}%). "
-            f"Dual-delta Long Straddle captures explosive breakout in either direction with strictly capped risk."
+            f"Research-only long-volatility illustration for {clean_sym}; IV rank {iv_rank:.1f}%. "
+            "No event-move comparison or executable edge has been verified."
         )
 
     # Case 3: Neutral IV (40 <= IV Rank < 50) -> Defined-Risk Vertical Spread
@@ -235,12 +236,12 @@ def evaluate_event_volatility_strategy(
                 description=f"Short {format_strike(otm_strike)} {opt_t}",
             ),
         ]
-        max_risk = round(strike_step * 0.40, 2)
-        max_reward = round(strike_step * 0.60, 2)
-        rr = round(max_reward / max_risk, 2) if max_risk > 0 else 2.5
+        max_risk = None
+        max_reward = None
+        rr = None
         rationale = (
             f"⚡ DEFINED-RISK EVENT SPREAD: Pre-earnings positioning on {clean_sym}. "
-            f"Vertical spread eliminates gap risk and bounds downside to ₹{max_risk:,.2f}."
+            "Illustrative vertical spread only; premium-based payoff is unavailable."
         )
 
     return EventHedgePlan(
@@ -253,7 +254,9 @@ def evaluate_event_volatility_strategy(
         recommended_strategy=strategy,
         preferred_vehicle=preferred_veh,
         legs=legs,
-        iv_crush_neutralized=True,
+        status="RESEARCH_ONLY",
+        actionable=False,
+        iv_crush_neutralized=False,
         max_risk_pts=max_risk,
         max_reward_pts=max_reward,
         reward_risk_ratio=rr,

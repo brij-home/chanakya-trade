@@ -61,6 +61,59 @@ class EarningsEntry:
     # Post-earnings data (filled after results)
     surprise: Optional[str] = None  # "BEAT" / "MISS" / "INLINE"
     actual_move: Optional[float] = None  # actual % move on result day
+    published_at: Optional[str] = None
+    first_seen_at: Optional[str] = None
+    revision_id: Optional[str] = None
+    source_entity: str = "NSE"
+
+
+def filter_earnings_as_of(
+    entries: list[EarningsEntry],
+    as_of: datetime | str,
+) -> list[EarningsEntry]:
+    """
+    Filter earnings entries to prevent lookahead bias in backtest/replay.
+    Only includes entries whose first_seen_at (or published_at / result_date) is <= as_of.
+    """
+    if not entries:
+        return []
+
+    from datetime import timezone
+
+    if isinstance(as_of, str):
+        try:
+            as_of_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        except ValueError:
+            as_of_dt = datetime.strptime(as_of[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    else:
+        as_of_dt = as_of
+
+    if as_of_dt.tzinfo is None:
+        as_of_dt = as_of_dt.replace(tzinfo=timezone.utc)
+
+    valid_entries = []
+    for e in entries:
+        ts_str = getattr(e, "first_seen_at", None) or getattr(e, "published_at", None)
+        if ts_str:
+            try:
+                e_dt = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                if e_dt.tzinfo is None:
+                    e_dt = e_dt.replace(tzinfo=timezone.utc)
+                if e_dt <= as_of_dt:
+                    valid_entries.append(e)
+                continue
+            except Exception as e_ts:
+                logger.debug(f"[market.earnings] Failed parsing ISO timestamp '{ts_str}': {e_ts}")
+
+        d_str = getattr(e, "result_date", None)
+        if d_str and d_str != "TBD":
+            try:
+                e_d = datetime.strptime(str(d_str)[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                if e_d <= as_of_dt:
+                    valid_entries.append(e)
+            except Exception as e_d_err:
+                logger.debug(f"[market.earnings] Failed parsing result_date '{d_str}': {e_d_err}")
+    return valid_entries
 
 
 # ── NIFTY 50 Earnings Calendar ───────────────────────────────
@@ -95,39 +148,6 @@ _NIFTY50_EARNINGS_MONTHS = {
     "ADANIENT": [2, 5, 8, 11],
     "NTPC": [2, 5, 8, 11],
     "POWERGRID": [2, 5, 8, 11],
-}
-
-# Historical average post-earnings move (absolute %) for major stocks
-_AVG_EARNINGS_MOVE = {
-    "TCS": 3.5,
-    "INFY": 4.2,
-    "RELIANCE": 2.8,
-    "HDFCBANK": 2.5,
-    "ICICIBANK": 3.0,
-    "SBIN": 4.0,
-    "BHARTIARTL": 3.5,
-    "ITC": 2.0,
-    "TATAMOTORS": 5.0,
-    "BAJFINANCE": 4.5,
-    "WIPRO": 3.8,
-    "MARUTI": 3.0,
-    "TITAN": 3.5,
-    "SUNPHARMA": 3.2,
-    # Additional NIFTY 50 constituents
-    "TATASTEEL": 4.5,
-    "M&M": 3.5,
-    "DRREDDY": 3.8,
-    "ADANIENT": 5.0,
-    "NTPC": 2.0,
-    "POWERGRID": 1.8,
-    "KOTAKBANK": 2.8,
-    "AXISBANK": 3.2,
-    "LT": 3.0,
-    "ULTRACEMCO": 3.5,
-    "HINDUNILVR": 2.5,
-    "ASIANPAINT": 3.0,
-    "HCLTECH": 3.8,
-    "TECHM": 4.5,
 }
 
 
@@ -212,7 +232,7 @@ def get_earnings_calendar(
             symbol=sym,
             quarter=quarter,
             result_date="TBD",
-            avg_move=_AVG_EARNINGS_MOVE.get(sym),
+            avg_move=None,
         )
 
         # Try to get actual date from NSE
@@ -259,23 +279,33 @@ def get_earnings_calendar(
 def get_pre_earnings_iv(symbol: str) -> dict:
     """
     Check IV rank/percentile before earnings.
-    High IV rank = expensive options = consider selling premium.
-    Low IV rank = cheap options = consider buying straddles.
+    Historical option-IV data is not currently integrated. Never substitute
+    realized volatility or a neutral-looking default for implied volatility.
     """
     symbol = symbol.upper()
-    avg_move = _AVG_EARNINGS_MOVE.get(symbol, 3.0)
-
+    avg_move = None
+    iv_rank = None
+    reason = "Historical option implied-volatility observations are unavailable"
     try:
         from agent.tools import build_registry
 
         reg = build_registry()
         iv_result = reg.execute("get_iv_rank", {"symbol": symbol})
-        iv_rank = iv_result.get("iv_rank", 50) if isinstance(iv_result, dict) else 50
-    except Exception:
-        iv_rank = 50
+        if isinstance(iv_result, dict):
+            raw_rank = iv_result.get("iv_rank")
+            if raw_rank is not None:
+                iv_rank = float(raw_rank)
+                reason = ""
+            else:
+                reason = str(iv_result.get("reason") or reason)
+    except Exception as exc:
+        logger.warning("[market.earnings] IV rank lookup unavailable for %s: %s", symbol, exc)
 
-    # Strategy suggestion based on IV
-    if iv_rank > 60:
+    # Only provide a volatility classification when actual IV history exists.
+    if iv_rank is None:
+        strategy = "Unavailable — verified historical option IV data is not integrated."
+        action = "UNAVAILABLE"
+    elif iv_rank > 60:
         strategy = "SELL premium — IV elevated. Consider selling straddle/strangle."
         action = "SELL_PREMIUM"
     elif iv_rank < 30:
@@ -291,6 +321,11 @@ def get_pre_earnings_iv(symbol: str) -> dict:
         "avg_earnings_move": avg_move,
         "strategy_suggestion": strategy,
         "action": action,
+        "status": "UNAVAILABLE" if iv_rank is None else "AVAILABLE",
+        "reason": reason or None,
+        "iv_provenance": "UNAVAILABLE_NO_HISTORICAL_OPTION_IV_SOURCE"
+        if iv_rank is None
+        else "PROVIDER",
         "quarter": _current_quarter(),
     }
 
@@ -370,13 +405,16 @@ def predict_earnings_surprise(symbol: str) -> dict:
 
     # 2. IV rank (market expectation)
     iv_data = get_pre_earnings_iv(symbol)
-    iv_rank = iv_data.get("iv_rank", 50)
-    avg_move = iv_data.get("avg_earnings_move", 3.0)
+    iv_rank = iv_data.get("iv_rank")
+    avg_move = iv_data.get("avg_earnings_move")
 
-    if iv_rank > 70:
-        signals.append(f"IV rank {iv_rank} — market expects big move (±{avg_move:.1f}%)")
+    if iv_rank is None:
+        signals.append("Options IV context unavailable; no IV-based event conclusion")
+    elif iv_rank > 70:
+        move_text = f" (historical move ±{avg_move:.1f}%)" if avg_move is not None else ""
+        signals.append(f"IV rank {iv_rank:.1f}{move_text}")
     elif iv_rank < 30:
-        signals.append(f"IV rank {iv_rank} — market complacent, surprise could be amplified")
+        signals.append(f"IV rank {iv_rank:.1f} — low relative to its verified history")
 
     # 3. Historical beat/miss tendency
     _BEAT_TENDENCY = {

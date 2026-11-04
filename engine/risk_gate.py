@@ -152,8 +152,14 @@ def _days_until_event(symbol: str, upcoming_events: dict | None) -> int | None:
     if not event_str:
         return None
     try:
+        from config.constants import now_ist
+
+        today_val = now_ist().date()
+    except Exception:
+        today_val = date.today()
+    try:
         event_date = date.fromisoformat(str(event_str))
-        delta = (event_date - date.today()).days
+        delta = (event_date - today_val).days
         return max(delta, 0)
     except (ValueError, TypeError):
         return None
@@ -172,6 +178,7 @@ def compute_allowed_actions(
     vix: float | None = None,  # India VIX value (None = skip VIX check)
     max_sector_pct: float = 0.30,  # Max portfolio concentration in a single sector (default 30%)
     dte: int | None = None,  # Days to expiry for derivative contracts
+    direction: Literal["BULLISH", "BEARISH", "BOTH"] = "BULLISH",
 ) -> AllowedAction:
     """
     Compute what actions are allowed for this symbol before LLM sees it.
@@ -266,8 +273,10 @@ def compute_allowed_actions(
                 # There IS an existing position — flag that limit is partially consumed
                 flags.append("POSITION_LIMIT")
     else:
-        # No price info — use a reasonable default based on capital
-        base_max_qty = max(0, int(remaining_room / 100)) if remaining_room > 0 else 0
+        # Price is missing or non-positive — fail closed; do NOT invent /100 shares
+        base_max_qty = 0
+        flags.append("MISSING_PRICE")
+        warnings.append("Missing current price — risk sizing cannot allocate shares")
 
     max_qty = base_max_qty
     max_capital = min(remaining_room, position_limit) if remaining_room > 0 else 0.0
@@ -344,7 +353,7 @@ def compute_allowed_actions(
         from engine.options_hedging import audit_heavyweight_correlation_shield
 
         shield_res = audit_heavyweight_correlation_shield(
-            sym, direction="BULLISH", open_positions=portfolio
+            sym, direction=direction, open_positions=portfolio
         )
         if shield_res.get("shield_triggered"):
             flags.append("CORRELATED_INDEX_EXPOSURE")
@@ -359,18 +368,31 @@ def compute_allowed_actions(
         logging.getLogger(__name__).debug(f"[risk_gate] Correlation shield check: {e_shield}")
 
     # ── Final: determine direction ────────────────────────────
-    # Default to BOTH — caller can override based on portfolio context
-    direction: Literal["BUY_ONLY", "SELL_ONLY", "BOTH", "NONE"] = "BOTH"
     if max_qty == 0:
-        direction = "SELL_ONLY" if existing_value > 0 else "NONE"
+        if existing_value > 0:
+            direction_out: Literal["BUY_ONLY", "SELL_ONLY", "BOTH", "NONE"] = "SELL_ONLY"
+            allowed_out = True  # Can manage / exit existing holding
+            block_msg = ""
+        else:
+            direction_out = "NONE"
+            allowed_out = False
+            block_msg = (
+                "Position limit reached — zero allocation allowed"
+                if remaining_room <= 0
+                else "Missing price or insufficient capacity — zero allocation allowed"
+            )
+    else:
+        direction_out = "BOTH"
+        allowed_out = True
+        block_msg = ""
 
     return AllowedAction(
         symbol=sym,
-        allowed=True,
-        direction=direction,
+        allowed=allowed_out,
+        direction=direction_out,
         max_qty=max_qty,
         max_capital=max_capital,
         flags=flags,
-        block_reason="",
+        block_reason=block_msg,
         warnings=warnings,
     )

@@ -265,10 +265,6 @@ def calculate_trade_plan(
         except Exception as e_suppressed:
             logger.debug(f"[engine.trade_plan] Non-fatal exception suppressed: {e_suppressed}")
 
-    if ltp <= 0:
-        # Fallback to index approximation if completely disconnected
-        ltp = 23500.0 if "NIFTY" in clean_sym else 1000.0
-
     # ── 2. Fetch Historical OHLCV & Compute Realized ATR ───────────────────────
     atr = 0.0
     has_custom_df = df is not None
@@ -288,13 +284,15 @@ def calculate_trade_plan(
             tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
             atr = float(tr.rolling(14).mean().iloc[-1])
 
-            # Unit divergence sanity check:
-            # If caller accidentally passed an option premium or badly scaled price,
-            # detect divergence against the historical equity/index closing price.
             hist_close = float(close.dropna().iloc[-1]) if len(close.dropna()) > 0 else 0.0
-            if hist_close > 0:
+            if ltp <= 0 and hist_close > 0:
+                ltp = hist_close
+            elif hist_close > 0 and ltp > 0:
+                # Unit divergence sanity check:
+                # If caller accidentally passed an option premium (<25% of underlying stock close)
+                # or an extreme order-of-magnitude scaling mismatch (>4x), correct to historical close.
                 divergence = abs(ltp - hist_close) / hist_close
-                if divergence > 0.6:
+                if ltp < hist_close * 0.25 or divergence > 3.0:
                     logger.warning(
                         f"[TradePlan] Unit divergence detected for {clean_sym}: passed spot ₹{ltp:,.2f} "
                         f"differs by {divergence * 100:.1f}% from historical close ₹{hist_close:,.2f}. "
@@ -1095,7 +1093,7 @@ def calculate_trade_plan(
         options_recommended_structure = "DEFINED_RISK_SPREAD"
         structure_advice = (
             f"⚠️ SEBI PHYSICAL SETTLEMENT EXPIRY WEEK: Near-month {clean_sym} derivatives carry mandatory physical delivery "
-            f"and staggered margin surge (25%->100% full lot cash value). Trade NEXT-MONTH options/spreads or NEXT-MONTH futures "
+            f"and elevated delivery margin. Trade NEXT-MONTH options/spreads or NEXT-MONTH futures "
             f"to bypass margin calls, avoid penalty, and protect against expiry theta crush."
         )
     elif theta_drag_pct > 22.0 or eta_t1_minutes > 120 or session_overrun_risk:
@@ -1788,6 +1786,35 @@ def calculate_option_execution_plan(
         ),
     }
 
+    # ── Spot-to-Option Delta Parity & Wide Spot Risk Audit ──────────
+    spot_sl_distance = abs(entry_spot - spot_sl) if (spot_sl and entry_spot) else 0.0
+    delta_risk_pts = round(spot_sl_distance * abs(delta), 1) if spot_sl_distance > 0 else 0.0
+    if any(idx in clean_contract for idx in ("BANKNIFTY", "SENSEX", "BANKEX")):
+        max_naked_spot_distance = 130.0
+    elif is_index_contract:
+        max_naked_spot_distance = 55.0
+    else:
+        max_naked_spot_distance = round(entry_spot * 0.015, 1)
+
+    is_wide_spot_risk = bool(
+        (spot_sl_distance > max_naked_spot_distance)
+        or (option_ltp > 0 and delta_risk_pts > (option_ltp * 0.28))
+        or (
+            raw_sl_prem < disciplined_sl_floor
+            and option_ltp > 0
+            and (disciplined_sl_floor - raw_sl_prem) > 15.0
+        )
+    )
+    preferred_vehicle = "SPREAD_ONLY" if is_wide_spot_risk else "NAKED_OR_SPREAD"
+
+    hedged_spread_plan["preferred_vehicle"] = preferred_vehicle
+    hedged_spread_plan["is_spread_mandated"] = is_wide_spot_risk
+    if is_wide_spot_risk:
+        hedged_spread_plan["wide_risk_reason"] = (
+            f"Spot SL distance ({spot_sl_distance:.1f} pts) exceeds naked threshold ({max_naked_spot_distance:.1f} pts) "
+            f"or Delta risk (₹{delta_risk_pts:.1f}) exceeds 28% of premium."
+        )
+
     # ── Free-Roll Execution Protocol (Zero-Risk Runner Monetization at T1) ────
     t1_gain_pts = max(0.1, round(t1_prem - option_ltp, 2)) if option_ltp > 0 else 0.0
     t1_gain_pct = round((t1_gain_pts / option_ltp) * 100, 1) if option_ltp > 0 else 0.0
@@ -1813,7 +1840,7 @@ def calculate_option_execution_plan(
             f"to lock in max profit and eliminate all theta on remaining runner."
         ),
         "protocol_summary": (
-            f"Bank 50% at T1 (₹{t1_prem:,.1f} / +{t1_gain_pct:.0f}%), ratchet SL to Cost (₹{breakeven_stop:,.1f}). "
+            f"Multi-lot: Bank 50% at T1, ratchet SL to Cost (₹{breakeven_stop:,.1f}) | 1-lot: Ratchet SL to Breakeven & hold for T2. "
             f"Time stop: {time_stop_mins}m if stagnation occurs. "
             f"Net trade risk becomes ₹0.00 (Free-Roll). Hold remaining 50% for T2 (₹{t2_prem:,.1f}) and T3 (₹{t3_prem:,.1f})."
         ),
@@ -1880,6 +1907,12 @@ def calculate_option_execution_plan(
         "t3_eta": getattr(trade_plan, "eta_t3_str", "~80 mins"),
         # Hedged Defined-Risk Spread Blueprint (Theta Neutralization & Wall Monetization)
         "hedged_spread": hedged_spread_plan,
+        "is_wide_spot_risk": is_wide_spot_risk,
+        "is_spread_mandated": is_wide_spot_risk,
+        "preferred_vehicle": preferred_vehicle,
+        "spot_sl_distance": spot_sl_distance,
+        "delta_risk_pts": delta_risk_pts,
+        "max_naked_spot_distance": max_naked_spot_distance,
         # Institutional Event Volatility & Hedging Blueprint
         "event_hedge_plan": event_hedge_plan,
         # Free-Roll Execution Protocol (+2R Scale 50% & Zero-Risk Runner)

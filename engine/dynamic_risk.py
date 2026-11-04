@@ -276,7 +276,10 @@ def get_vix_regime_multiplier(vix: Optional[float] = None) -> tuple[float, str]:
             logger.debug(f"[engine.dynamic_risk] Non-fatal exception suppressed: {e_suppressed}")
 
     if vix is None or vix <= 0:
-        return 1.0, "NORMAL_MARKET"
+        return (
+            0.50,
+            "UNKNOWN_VIX_DEFENSIVE (VIX feed unavailable: fail-closed to 50% defensive risk)",
+        )
 
     if vix < 12.0:
         return (
@@ -554,7 +557,7 @@ def calculate_hierarchical_position_size(
     symbol: str,
     entry_price: float,
     stop_loss: float,
-    capital: float = 100000.0,
+    capital: Optional[float] = None,
     target_risk_pct: float = 1.5,
     max_capital_pct: float = 25.0,
     atr: Optional[float] = None,
@@ -622,13 +625,10 @@ def calculate_hierarchical_position_size(
 
     if use_fno and eff_lot_size > 1:
         lots = allowed_shares // eff_lot_size
-        if lots == 0 and capital >= (scale.entry_price * eff_lot_size):
-            # Allow 1 lot if account can margin it
-            lots = 1
         shares = lots * eff_lot_size
     else:
-        lots = 1
-        shares = max(1, allowed_shares)
+        shares = max(0, allowed_shares)
+        lots = shares
 
     # Step 5: SEBI Physical Delivery check for single-stock F&O in expiry week
     physical_warning = ""
@@ -637,7 +637,7 @@ def calculate_hierarchical_position_size(
         if capital < min_delivery_val:
             physical_warning = (
                 f" [SEBI PHYSICAL SETTLEMENT NOTICE: Single-stock F&O in final expiry week (DTE={dte}). "
-                f"Holding overnight requires 100% margin (₹{min_delivery_val:,.1f}) vs Capital (₹{capital:,.1f})]"
+                f"Conservative full-delivery-value check is ₹{min_delivery_val:,.1f} vs Capital (₹{capital:,.1f})]"
             )
 
     allocated_capital = round(shares * scale.entry_price, 2)

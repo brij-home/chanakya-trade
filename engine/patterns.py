@@ -61,48 +61,34 @@ def _get_calendar_patterns(today: date) -> list[MarketPattern]:
             )
         )
 
-    # Thursday expiry
-    if weekday == 3:
-        patterns.append(
-            MarketPattern(
-                name="Weekly Expiry Day (NIFTY)",
-                description="NIFTY weekly options expire today (Thursday). High gamma risk, "
-                "sharp moves possible near round strike levels. Max pain gravitational pull.",
-                impact="VOLATILE",
-                confidence=80,
-                action="Avoid selling naked options. Use spreads. Close positions before 2:30 PM.",
-                tags=["weekly", "expiry", "options"],
+    # Expiry is calendar context only; it does not establish direction or edge.
+    from market.calendar import get_nearest_weekly_expiry, get_nearest_monthly_expiry
+
+    expiring_today: set[str] = set()
+    for symbol, resolver in (
+        ("NIFTY", get_nearest_weekly_expiry),
+        ("SENSEX", get_nearest_weekly_expiry),
+        ("BANKNIFTY", get_nearest_monthly_expiry),
+    ):
+        try:
+            if resolver(symbol, ref_date=today) == today:
+                expiring_today.add(symbol)
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Expiry context unavailable for %s: %s", symbol, exc
             )
-        )
 
-    # Friday profit booking & BSE SENSEX Weekly Expiry
-    if weekday == 4:
+    for symbol in sorted(expiring_today):
         patterns.append(
             MarketPattern(
-                name="Friday Profit Booking & SENSEX Expiry",
-                description="BSE SENSEX weekly options expire today (Friday). Traders often book profits "
-                "to avoid weekend risk. High gamma pins on round SENSEX strikes with profit booking in last 1-2 hours.",
-                impact="VOLATILE",
-                confidence=70,
-                action="Manage SENSEX options risk before 2:30 PM. Avoid fresh naked longs after 2 PM.",
-                tags=["weekly", "expiry", "options", "intraday"],
-            )
-        )
-
-    # ── Monthly patterns ─────────────────────────────────────
-
-    # Last Thursday of month — monthly expiry
-    # (approximation: last week of month + Thursday)
-    if weekday == 3 and day >= 24:
-        patterns.append(
-            MarketPattern(
-                name="Monthly F&O Expiry",
-                description="Monthly settlement day. Rollover activity, sharp OI unwinding, "
-                "and max pain convergence. Highly volatile last 2 hours.",
-                impact="VOLATILE",
-                confidence=85,
-                action="Roll positions before 1 PM. Avoid new positions. Watch OI data closely.",
-                tags=["monthly", "expiry", "options"],
+                name=f"{symbol} Listed Expiry",
+                description="A listed derivative expiry is scheduled today. Expiry alone does not imply direction or volatility expansion.",
+                impact="NEUTRAL",
+                confidence=0,
+                action="Verify the exact contract expiry, current liquidity and settlement obligations before acting.",
+                tags=["expiry", "options", "calendar"],
             )
         )
 

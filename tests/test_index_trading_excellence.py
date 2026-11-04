@@ -70,7 +70,7 @@ def _make_dummy_5m_ohlcv(
             }
         )
     df = pd.DataFrame(records)
-    df.set_index("datetime", inplace=True)
+    df = df.set_index("datetime")
     return df
 
 

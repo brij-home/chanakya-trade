@@ -48,6 +48,7 @@ logger = logging.getLogger("agent.harness")
 
 
 import os
+from typing import Callable, Optional
 from datetime import date
 from pathlib import Path
 
@@ -447,6 +448,7 @@ def run(
     query: str,
     broker=None,
     history_file: Path | None = None,
+    approval_callback: Optional[Callable[[str, dict], bool]] = None,
 ) -> str:
     """
     Run the trading harness for a natural language query.
@@ -469,6 +471,32 @@ def run(
 
     if broker is not None:
         _register_execute_tool(registry, broker)
+
+    # Enforce interactive approval gate for destructive tools (OPS-03)
+    if approval_callback is not None:
+        registry.set_approval_callback(approval_callback)
+    elif harness_mode() == HARNESS_MODE_AUTO:
+        registry.set_approval_callback(None)
+    elif harness_mode() == HARNESS_MODE_PROMPT:
+        import sys
+
+        if sys.stdin and hasattr(sys.stdin, "isatty") and sys.stdin.isatty():
+
+            def _prompt_operator_approval(tool_name: str, arguments: dict) -> bool:
+                try:
+                    from rich.prompt import Confirm
+
+                    console.print(
+                        f"\n[bold yellow]⚠️ Operator Confirmation Required: {tool_name}[/bold yellow]"
+                    )
+                    console.print(f"[dim]Arguments: {arguments}[/dim]")
+                    return Confirm.ask("Authorize execution?")
+                except Exception:
+                    return False
+
+            registry.set_approval_callback(_prompt_operator_approval)
+        else:
+            registry.set_approval_callback(None)
 
     trader_context = _load_trader_context()
     system_prompt = _build_harness_system_prompt(trader_context)

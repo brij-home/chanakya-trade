@@ -12,8 +12,13 @@ All functions return a list of NewsItem dicts:
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger("market.news")
+
 import os
 from dataclasses import dataclass
+from typing import Optional
 from datetime import datetime, timezone
 
 import httpx
@@ -38,6 +43,57 @@ class NewsItem:
     url: str
     published: str  # ISO datetime string
     summary: str = ""
+    published_at: Optional[str] = None
+    first_seen_at: Optional[str] = None
+    revision_id: Optional[str] = None
+    source_entity: str = ""
+
+    def __post_init__(self):
+        if not self.published_at and self.published:
+            self.published_at = self.published
+        if not self.source_entity and self.source:
+            self.source_entity = self.source
+
+
+def filter_news_as_of(
+    items: list[NewsItem],
+    as_of: datetime | str,
+) -> list[NewsItem]:
+    """
+    Filter news items to prevent lookahead bias in backtest/replay.
+    Only includes items whose first_seen_at (or published_at / published) is <= as_of.
+    """
+    if not items:
+        return []
+
+    if isinstance(as_of, str):
+        try:
+            as_of_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        except ValueError:
+            as_of_dt = datetime.strptime(as_of[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    else:
+        as_of_dt = as_of
+
+    if as_of_dt.tzinfo is None:
+        as_of_dt = as_of_dt.replace(tzinfo=timezone.utc)
+
+    valid_items = []
+    for item in items:
+        ts_str = (
+            getattr(item, "first_seen_at", None)
+            or getattr(item, "published_at", None)
+            or getattr(item, "published", None)
+        )
+        if ts_str:
+            try:
+                item_dt = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                if item_dt.tzinfo is None:
+                    item_dt = item_dt.replace(tzinfo=timezone.utc)
+                if item_dt <= as_of_dt:
+                    valid_items.append(item)
+            except Exception as e_ts:
+                logger.debug(f"[market.news] Failed parsing timestamp '{ts_str}': {e_ts}")
+    return valid_items
 
 
 # ── RSS feed definitions ──────────────────────────────────────

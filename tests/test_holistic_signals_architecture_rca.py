@@ -325,6 +325,8 @@ def test_option_spread_friction_veto_tightened():
         contract_symbol="NIFTY26OCT25000CE",
         metrics={
             "rvol": 2.0,
+            "volume": 12500,
+            "oi": 84000,
             "best_bid": 97.0,
             "best_ask": 103.0,  # 6.0 pt spread on 100 pt option = 6.0% spread (> 2.5% limit)
         },

@@ -99,9 +99,10 @@ def test_pilot_profile_fails_closed_until_deliberately_enabled(monkeypatch):
 
     monkeypatch.setenv("PILOT_ALLOW_LIVE_EXECUTION", "1")
     monkeypatch.setenv("PILOT_MAX_ORDER_NOTIONAL", "1000")
-    assert_pilot_execution_allowed(segment="EQUITY_DELIVERY", product="CNC", notional=1000)
-    with pytest.raises(PermissionError, match="exceeds"):
-        assert_pilot_execution_allowed(segment="EQUITY_DELIVERY", product="CNC", notional=1001)
+    # Pilot permission alone is not owner qualification; this test must never
+    # set LIVE_EXECUTION_QUALIFIED to manufacture a successful live gate.
+    with pytest.raises(PermissionError, match="LIVE_EXECUTION_QUALIFIED"):
+        assert_pilot_execution_allowed(segment="EQUITY_DELIVERY", product="CNC", notional=1000)
 
 
 def test_derivative_requires_verified_contract(tmp_path, monkeypatch):

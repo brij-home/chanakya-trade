@@ -25,6 +25,7 @@ import {
   useLiveSpot,
   extractQuotes,
   TYPE_STYLE,
+  getAlertStyle,
   AUTO_TYPE_STYLE,
   INDEX_LOT_SIZES,
   convictionEmoji,
@@ -50,6 +51,7 @@ import {
   isAlertActive,
   resolveAlertLifecycle,
   resolveHorizonAndETA,
+  formatAlertTriggerTime,
 } from './alerts'
 import DepthLadderWidget from '../Widgets/DepthLadderWidget'
 
@@ -256,7 +258,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
   }
 
   const postMortem = alert.metrics?.post_mortem
-  const style = AUTO_TYPE_STYLE[alert.alert_type] || AUTO_TYPE_STYLE.GAMMA_BLAST
+  const style = getAlertStyle(alert.alert_type)
   const provenance = resolveAlertProvenance(alert)
   const isTest = provenance.isTest
 
@@ -271,6 +273,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
   const {
     isDerivative,
     isBull,
+    isNeutral,
     isOptionSell,
     isTerminal,
     isTimeStop,
@@ -285,6 +288,8 @@ const AutoAlertCard = memo(function AutoAlertCard({
     strikeNum,
     optType,
     isFuture,
+    condorCorridor,
+    isNeutralSpread,
     spotNum,
     currentPrice,
     liveReturn,
@@ -342,13 +347,21 @@ const AutoAlertCard = memo(function AutoAlertCard({
               <span className={`text-[10px] px-1.5 py-px rounded font-black tracking-wider uppercase border ${provenance.cls}`}>
                 {provenance.label}
               </span>
-              {isDerivative && strikeNum && !isFuture && (
-                <span className="text-[11px] font-black text-gold font-mono leading-none">₹{Number(strikeNum).toLocaleString('en-IN')}</span>
-              )}
-              {isDerivative && optType && !isFuture && (
-                <span className={`text-[10px] px-1 py-px rounded font-black uppercase ${
-                  optType === 'CE' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
-                }`}>{optType}</span>
+              {condorCorridor ? (
+                <span className="text-[10px] px-1.5 py-px rounded font-black font-mono tracking-wider border bg-purple-500/15 text-purple-300 border-purple-500/35" title={`Profit Corridor: ${condorCorridor}`}>
+                  Corridor [{condorCorridor}]
+                </span>
+              ) : (
+                <>
+                  {isDerivative && strikeNum && !isFuture && (
+                    <span className="text-[11px] font-black text-gold font-mono leading-none">₹{Number(strikeNum).toLocaleString('en-IN')}</span>
+                  )}
+                  {isDerivative && optType && !isFuture && (
+                    <span className={`text-[10px] px-1 py-px rounded font-black uppercase ${
+                      optType === 'CE' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
+                    }`}>{optType}</span>
+                  )}
+                </>
               )}
               {isDerivative && moneyness && !isFuture && (
                 <span className={`text-[10px] px-1 py-px rounded font-black ${
@@ -358,8 +371,10 @@ const AutoAlertCard = memo(function AutoAlertCard({
             </div>
             {/* Expiry + direction sub-line */}
             <div className="flex items-center gap-1 mt-0.5 flex-wrap">
-              <span className={`text-[10px] font-bold ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {isBull ? '▲' : '▼'} {alert.direction}
+              <span className={`text-[10px] font-bold ${
+                isBull ? 'text-emerald-400' : isNeutral ? 'text-purple-400' : 'text-rose-400'
+              }`}>
+                {isBull ? '▲' : isNeutral ? '◆' : '▼'} {alert.direction}
               </span>
               {isDerivative && expiryInfo?.fullDisplay && (
                 <span
@@ -630,21 +645,23 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
       {/* ── Thesis Summary Bar (single slim line below header) ─────────── */}
       {(alert.trailing_rationale || alert.summary) && (
-        <div className="flex items-start gap-2 px-1 text-[10px] text-zinc-400 leading-relaxed">
+        <div className="flex items-start gap-2 px-1 text-[10px] text-slate-600 dark:text-zinc-400 leading-relaxed">
           <span
             className="text-[10px] px-1 py-px rounded font-black uppercase flex-shrink-0 mt-0.5"
             style={{ background: style.bg, color: style.color, border: `1px solid ${style.border}` }}
-          >{style.label}</span>
-          <p className={`${showDetails ? '' : 'line-clamp-2'} flex-1 min-w-0`}>
+          >{style.shortLabel || style.label}</span>
+          <p className={`${showDetails ? '' : 'line-clamp-2'} flex-1 min-w-0 text-slate-700 dark:text-zinc-300`}>
             {alert.trailing_rationale || alert.summary}
           </p>
           {alert.metrics?.oi_change_pct !== undefined && (
             <span className={`flex-shrink-0 text-[11px] font-mono font-bold px-1 py-px rounded ${
-              alert.metrics.oi_change_pct < 0 ? 'bg-rose-500/15 text-rose-300' : 'bg-emerald-500/15 text-emerald-300'
+              alert.metrics.oi_change_pct < 0
+                ? 'bg-rose-100 text-rose-800 border border-rose-300 dark:bg-rose-500/15 dark:text-rose-300'
+                : 'bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-500/15 dark:text-emerald-300'
             }`}>ΔOI {alert.metrics.oi_change_pct}%</span>
           )}
           {alert.trailing_stop && (
-            <span className="flex-shrink-0 text-[11px] font-mono font-bold px-1 py-px rounded bg-cyan-500/15 text-cyan-300">
+            <span className="flex-shrink-0 text-[11px] font-mono font-bold px-1 py-px rounded bg-cyan-100 text-cyan-800 border border-cyan-300 dark:bg-cyan-500/15 dark:text-cyan-300">
               Trail ₹{Number(alert.trailing_stop).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
             </span>
           )}
@@ -870,8 +887,8 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
       {/* ── Crisp 1-Line Trap Risk Warning (only if present, zero screen bloat) ── */}
       {alert.metrics?.scrutiny?.trap_risk_warning && !isInvalidated && (
-        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-800 dark:text-amber-200">
-          <span className="font-bold flex-shrink-0 text-amber-700 dark:text-amber-300">⚠️ Trap Risk:</span>
+        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-500/10 border border-amber-300 dark:border-amber-500/25 text-[11px] text-amber-900 dark:text-amber-200">
+          <span className="font-bold flex-shrink-0 text-amber-800 dark:text-amber-300">⚠️ Trap Risk:</span>
           <span className="truncate flex-1 font-sans" title={alert.metrics.scrutiny.trap_risk_warning}>
             {alert.metrics.scrutiny.trap_risk_warning}
           </span>
@@ -880,8 +897,8 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
       {/* ── Institutional Apex Confluence Banner ── */}
       {alert.is_apex_confluence && !isInvalidated && (
-        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-purple-500/15 border border-purple-500/35 text-[11px] text-purple-200">
-          <span className="font-bold flex-shrink-0 text-purple-300">💎 Apex Confluence:</span>
+        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-purple-50 dark:bg-purple-500/15 border border-purple-300 dark:border-purple-500/35 text-[11px] text-purple-900 dark:text-purple-200">
+          <span className="font-bold flex-shrink-0 text-purple-800 dark:text-purple-300">💎 Apex Confluence:</span>
           <span className="truncate flex-1 font-sans" title="Multiple quantitative detectors confirmed identical setup within active window">
             Institutional multi-model confirmation (+10% conviction boost).
           </span>
@@ -890,8 +907,8 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
       {/* ── Microstructure Execution Friction & Order Mandate Banner ── */}
       {alert.execution_friction_badge && !isInvalidated && (
-        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/35 text-[11px] text-amber-200">
-          <span className="font-bold flex-shrink-0 text-amber-300">⚠️ Execution Mandate:</span>
+        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-500/15 border border-amber-300 dark:border-amber-500/35 text-[11px] text-amber-900 dark:text-amber-200">
+          <span className="font-bold flex-shrink-0 text-amber-800 dark:text-amber-300">⚠️ Execution Mandate:</span>
           <span className="truncate flex-1 font-sans" title={alert.execution_friction_badge}>
             {alert.execution_friction_badge}
             {alert.estimated_slippage_bps ? ` · Est. Slippage: ${alert.estimated_slippage_bps} bps` : ''}
@@ -902,8 +919,8 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
       {/* ── 0DTE Afternoon Theta Stagnation Bailout Banner ── */}
       {alert.theta_scratch_recommended && !isInvalidated && (
-        <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-rose-500/20 border border-rose-500/40 text-[11px] text-rose-200 animate-pulse">
-          <span className="font-bold flex-shrink-0 text-rose-300">🛑 0DTE Bailout Alert:</span>
+        <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-rose-50 dark:bg-rose-500/20 border border-rose-300 dark:border-rose-500/40 text-[11px] text-rose-900 dark:text-rose-200 animate-pulse">
+          <span className="font-bold flex-shrink-0 text-rose-800 dark:text-rose-300">🛑 0DTE Bailout Alert:</span>
           <span className="truncate flex-1 font-sans font-medium" title={alert.stagnation_bailout_reason}>
             {alert.stagnation_bailout_reason || '0DTE Option Stagnant post-13:30 IST. Scratch position at market immediately.'}
           </span>
@@ -1202,7 +1219,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
       {/* Footer Timestamp Strip */}
       <div className="flex items-center justify-between text-[11px] font-mono text-muted/70 pt-1.5 border-t border-border/20 flex-wrap gap-1.5">
         <div className="flex items-center gap-2 flex-wrap">
-          <span>🕒 Triggered: {alert.timestamp || alert.created_at || 'Live'}</span>
+          <span>🕒 Triggered: {alert.timestamp || alert.created_at ? (formatAlertTriggerTime(alert.timestamp || alert.created_at)?.full || alert.timestamp || alert.created_at) : 'Live'}</span>
           {alert.invalidated_at && (
             <span className="text-rose-400 font-semibold">⚠️ Invalidated: {alert.invalidated_at}</span>
           )}

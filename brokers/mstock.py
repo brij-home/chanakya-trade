@@ -13,7 +13,7 @@ Credentials needed:
     MSTOCK_CLIENT_CODE  — Your m.Stock trading login ID / Client Code
     MSTOCK_PASSWORD     — Your m.Stock trading password (optional for direct login)
     MSTOCK_TOTP_SECRET  — (Optional) Base32 TOTP secret for automated 2FA login
-    MSTOCK_REDIRECT_URL — Redirect URL (default: http://103.149.127.88:8765/mstock/callback)
+    MSTOCK_REDIRECT_URL — Redirect URL (default: http://127.0.0.1:8765/mstock/callback)
 
 Session token is persisted to ~/.trading_platform/mstock.json and auto-restored.
 """
@@ -44,6 +44,7 @@ except ImportError as e_suppressed:
 import httpx
 
 from brokers.base import (
+    save_secure_token,
     BrokerAPI,
     UserProfile,
     Funds,
@@ -81,6 +82,8 @@ _ORDER_TYPE_MAP = {
     "LIMIT": "LIMIT",
     "SL": "SL",
     "SL-M": "SL-M",
+    "SL_LIMIT": "SL",
+    "SL_MARKET": "SL-M",
 }
 
 # Product Type mapping (Maps standard Chanakya types to official mStock Type B API values)
@@ -181,10 +184,12 @@ class MStockAPI(BrokerAPI):
         self._client_code = client_code or os.environ.get("MSTOCK_CLIENT_CODE", "")
         self._password = password or os.environ.get("MSTOCK_PASSWORD", "")
         self._totp_secret = totp_secret or os.environ.get("MSTOCK_TOTP_SECRET", "")
+        from config.constants import get_broker_callback_url
+
         self._redirect_uri = (
             redirect_uri
             or os.environ.get("MSTOCK_REDIRECT_URL", "")
-            or "http://103.149.127.88:8765/mstock/callback"
+            or get_broker_callback_url("mstock")
         )
 
         self._token: str = ""
@@ -300,7 +305,10 @@ class MStockAPI(BrokerAPI):
         if clean_sym in _KNOWN_NSE_TOKENS:
             return _KNOWN_NSE_TOKENS[clean_sym]
 
-        return clean_sym
+        # Invariant 11: Never pass unverified raw symbol as token
+        raise ValueError(
+            f"Could not resolve mStock instrument token for symbol '{clean_sym}' on '{exchange}'"
+        )
 
     def _ensure_scrip_cache(self) -> None:
         """Parse instruments from Scrip Master if not yet loaded."""
@@ -427,7 +435,7 @@ class MStockAPI(BrokerAPI):
                 "expiry": time.time() + expiry_seconds,
                 "updated_at": datetime.now().isoformat(),
             }
-            TOKEN_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            save_secure_token(TOKEN_FILE, json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as e_suppressed:
             logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -559,9 +567,12 @@ class MStockAPI(BrokerAPI):
             logger.debug(f"[brokers.mstock] Non-fatal exception suppressed: {e_suppressed}")
         return False
 
-    def get_login_url(self) -> str:
+    def get_login_url(self, state: Optional[str] = None) -> str:
         """Returns the m.Stock OAuth authorization URL."""
-        return f"{MSTOCK_AUTH_URL}/login/?platform_key={self._api_key}&redirect_url={self._redirect_uri}"
+        url = f"{MSTOCK_AUTH_URL}/login/?platform_key={self._api_key}&redirect_url={self._redirect_uri}"
+        if state:
+            url += f"&state={state}"
+        return url
 
     def complete_login(
         self,
@@ -1579,7 +1590,12 @@ class MStockAPI(BrokerAPI):
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/orders/regular"
             clean_sym = order.symbol.replace("NSE:", "").replace("BSE:", "").strip()
-            exchange = _EXCHANGE_MAP.get(order.exchange, "NSE")
+            exch_key = (order.exchange or "").upper()
+            if exch_key not in _EXCHANGE_MAP:
+                raise ValueError(
+                    f"Unsupported exchange '{order.exchange}' for m.Stock. Supported: {list(_EXCHANGE_MAP.keys())}"
+                )
+            exchange = _EXCHANGE_MAP[exch_key]
             token = self.get_symbol_token(clean_sym, exchange)
             product = _PRODUCT_MAP.get(order.product, order.product)
             order_type = _ORDER_TYPE_MAP.get(order.order_type, "MARKET")
@@ -1625,10 +1641,10 @@ class MStockAPI(BrokerAPI):
                 if order_id:
                     return OrderResponse(
                         order_id=order_id,
-                        status="PLACED",
+                        status="SUBMITTED",
                         message="Order placed successfully with m.Stock",
-                        average_price=order.price,
-                        filled_quantity=order.quantity,
+                        average_price=None,
+                        filled_quantity=0,
                     )
             raise RuntimeError(f"m.Stock order placement failed: {resp.text}")
         except Exception as e:

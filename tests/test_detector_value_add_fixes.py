@@ -51,6 +51,7 @@ def test_sub_noise_option_sl_rejection(auditor: AlertScrutinyAuditor):
         strike=25000.0,
         option_type="CE",
         option_premium=120.0,
+        metrics={"volume": 12500, "oi": 84000},
         is_live=True,
     )
     passed, reason, flags = auditor.verify_tier1_sanity(alert)
@@ -80,6 +81,7 @@ def test_valid_option_sl_approval(auditor: AlertScrutinyAuditor):
         strike=25000.0,
         option_type="CE",
         option_premium=120.0,
+        metrics={"volume": 12500, "oi": 84000},
         is_live=True,
     )
     passed, reason, flags = auditor.verify_tier1_sanity(alert)

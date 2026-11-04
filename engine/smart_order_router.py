@@ -90,82 +90,67 @@ class SmartExecutionPlan:
         return d
 
 
-# Canonical Exchange Order Quantity Freeze Limits (NSE / BSE / MCX official circulars)
-# Orders exceeding these limits in a single order are rejected by Exchange RMS.
-EXCHANGE_FREEZE_LIMITS: dict[str, int] = {
-    "NIFTY": 1800,
-    "BANKNIFTY": 900,
-    "FINNIFTY": 1800,
-    "MIDCPNIFTY": 4200,
-    "NIFTYNXT50": 1000,
-    "SENSEX": 1000,
-    "BANKEX": 1000,
-    "CRUDEOIL": 10000,
-    "NATURALGAS": 100000,
-    "GOLD": 1000,
-    "SILVER": 300,
-}
-
-
-def get_exchange_freeze_limit(symbol: str, lot_size: Optional[int] = None) -> int:
+def get_exchange_freeze_limit(
+    symbol: str, lot_size: Optional[int] = None, *, segment: str | None = None
+) -> int:
     """
-    Returns the maximum allowable order quantity per single order under Exchange RMS rules.
-    If quantity exceeds this, order must be sliced into discrete tranches.
+    Resolve an active contract's published single-order quantity freeze.
+
+    `lot_size` is retained for call compatibility; it is never used to infer a
+    freeze limit. Missing, stale, ambiguous, or noncanonical master data raises
+    instead of substituting a heuristic.
     """
-    clean_sym = (
-        symbol.upper()
-        .replace(".NS", "")
-        .replace("NSE:", "")
-        .replace("BSE:", "")
-        .replace("NFO:", "")
-        .replace("MCX:", "")
-        .strip()
-    )
+    from market.symbol_master import get_quantity_freeze_info
 
-    # Check exact match first
-    if clean_sym in EXCHANGE_FREEZE_LIMITS:
-        return EXCHANGE_FREEZE_LIMITS[clean_sym]
-
-    # Check substring match prioritizing longer names (e.g. BANKNIFTY before NIFTY)
-    for key, limit in sorted(EXCHANGE_FREEZE_LIMITS.items(), key=lambda x: len(x[0]), reverse=True):
-        if key in clean_sym:
-            return limit
-
-    # For stock F&O, exchange freeze limits are typically 25 to 30 lots, capped at 25,000
-    if lot_size is None or lot_size <= 0:
-        from market.instruments import STANDARD_LOT_SIZES
-
-        lot_size = STANDARD_LOT_SIZES.get(clean_sym, 1)
-
-    if lot_size > 1:
-        return min(25000, lot_size * 25)
-
-    # Cash equity default freeze limit
-    return 50000
+    info = get_quantity_freeze_info(symbol, segment=segment)
+    published_lot_size = info.get("lot_size")
+    if published_lot_size is not None:
+        try:
+            published_lot_size = int(published_lot_size)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Invalid published lot size for {symbol}") from exc
+        if published_lot_size <= 0:
+            raise RuntimeError(f"Invalid published lot size for {symbol}")
+        if lot_size is not None and lot_size != published_lot_size:
+            raise RuntimeError(
+                f"Requested lot size {lot_size} does not match current published lot size "
+                f"{published_lot_size} for {symbol}"
+            )
+    return int(info["quantity"])
 
 
 def slice_quantity_by_freeze_limit(
-    symbol: str, total_quantity: int, lot_size: Optional[int] = None
+    symbol: str, total_quantity: int, lot_size: Optional[int] = None, *, segment: str | None = None
 ) -> list[int]:
     """
     Slices an institutional order quantity into discrete child tranches that strictly
     comply with Exchange RMS per-order freeze limits and valid lot size multiples.
     """
-    if total_quantity <= 0:
-        return []
+    if (
+        isinstance(total_quantity, bool)
+        or not isinstance(total_quantity, int)
+        or total_quantity <= 0
+    ):
+        raise ValueError("Order quantity must be a positive integer")
+    if (
+        lot_size is None
+        or isinstance(lot_size, bool)
+        or not isinstance(lot_size, int)
+        or lot_size <= 0
+    ):
+        raise ValueError("A positive canonical lot size is required for freeze slicing")
+    eff_lot = lot_size
+    if total_quantity % eff_lot:
+        raise ValueError("Order quantity must be an exact multiple of the canonical lot size")
 
-    clean_sym = symbol.upper()
-    freeze_limit = get_exchange_freeze_limit(clean_sym, lot_size)
-
-    if lot_size is None or lot_size <= 0:
-        from market.instruments import STANDARD_LOT_SIZES
-
-        eff_lot = STANDARD_LOT_SIZES.get(clean_sym, 1)
-    else:
-        eff_lot = lot_size
+    freeze_limit = get_exchange_freeze_limit(symbol, lot_size, segment=segment)
+    if freeze_limit < eff_lot:
+        raise ValueError(
+            f"Published freeze quantity {freeze_limit} is below one lot ({eff_lot}); no valid slice exists"
+        )
 
     # Maximum quantity per slice in exact multiples of lot size
-    max_slice = max(eff_lot, (freeze_limit // eff_lot) * eff_lot)
+    max_slice = (freeze_limit // eff_lot) * eff_lot
 
     slices: list[int] = []
     remaining = total_quantity
@@ -204,6 +189,7 @@ def build_twap_execution_plan(
     urgency: UrgencyLevel = "NORMAL",
     tick_size: Optional[float] = None,
     randomize_jitter: bool = True,
+    segment: str | None = None,
 ) -> SmartExecutionPlan:
     """
     Institutional Time-Weighted Average Price (TWAP) Slicing Engine.
@@ -215,9 +201,19 @@ def build_twap_execution_plan(
     is_buy = side.upper() in ("BUY", "LONG", "BULLISH")
     norm_side: Literal["BUY", "SELL"] = "BUY" if is_buy else "SELL"
 
-    resolved_lot_size = max(1, lot_size)
-    total_lots = max(1, math.ceil(total_quantity / resolved_lot_size))
-    resolved_qty = total_lots * resolved_lot_size
+    if (
+        isinstance(total_quantity, bool)
+        or not isinstance(total_quantity, int)
+        or total_quantity <= 0
+    ):
+        raise ValueError("Order quantity must be a positive integer")
+    if isinstance(lot_size, bool) or lot_size <= 0:
+        raise ValueError("A positive canonical lot size is required")
+    resolved_lot_size = lot_size
+    if total_quantity % resolved_lot_size:
+        raise ValueError("Order quantity must be an exact multiple of the canonical lot size")
+    total_lots = total_quantity // resolved_lot_size
+    resolved_qty = total_quantity
 
     eff_tick = tick_size or resolve_tick_size(ltp, clean_sym)
     b_price = float(bid_price) if bid_price and bid_price > 0 else round(ltp - eff_tick, 2)
@@ -225,8 +221,10 @@ def build_twap_execution_plan(
     spread_pts = round(max(0.0, a_price - b_price), 2)
     spread_pct = round((spread_pts / max(0.01, ltp)) * 100.0, 3)
 
-    freeze_limit = get_exchange_freeze_limit(clean_sym, resolved_lot_size)
-    max_freeze_lots = max(1, freeze_limit // resolved_lot_size)
+    freeze_limit = get_exchange_freeze_limit(symbol, resolved_lot_size, segment=segment)
+    max_freeze_lots = freeze_limit // resolved_lot_size
+    if max_freeze_lots <= 0:
+        raise ValueError("Published quantity freeze is below one canonical lot")
 
     # Resolve number of slices: default 1 slice per 3 to 5 minutes, bounded by [2, 20]
     if num_slices is None or num_slices <= 0:
@@ -322,6 +320,7 @@ def build_vwap_pov_execution_plan(
     lot_size: int = 1,
     urgency: UrgencyLevel = "NORMAL",
     tick_size: Optional[float] = None,
+    segment: str | None = None,
 ) -> SmartExecutionPlan:
     """
     Volume-Weighted Average Price & Percentage of Volume (VWAP / POV) Engine.
@@ -332,9 +331,19 @@ def build_vwap_pov_execution_plan(
     is_buy = side.upper() in ("BUY", "LONG", "BULLISH")
     norm_side: Literal["BUY", "SELL"] = "BUY" if is_buy else "SELL"
 
-    resolved_lot_size = max(1, lot_size)
-    total_lots = max(1, math.ceil(total_quantity / resolved_lot_size))
-    resolved_qty = total_lots * resolved_lot_size
+    if (
+        isinstance(total_quantity, bool)
+        or not isinstance(total_quantity, int)
+        or total_quantity <= 0
+    ):
+        raise ValueError("Order quantity must be a positive integer")
+    if isinstance(lot_size, bool) or lot_size <= 0:
+        raise ValueError("A positive canonical lot size is required")
+    resolved_lot_size = lot_size
+    if total_quantity % resolved_lot_size:
+        raise ValueError("Order quantity must be an exact multiple of the canonical lot size")
+    total_lots = total_quantity // resolved_lot_size
+    resolved_qty = total_quantity
 
     eff_tick = tick_size or resolve_tick_size(ltp, clean_sym)
     b_price = float(bid_price) if bid_price and bid_price > 0 else round(ltp - eff_tick, 2)
@@ -342,8 +351,10 @@ def build_vwap_pov_execution_plan(
     spread_pts = round(max(0.0, a_price - b_price), 2)
     spread_pct = round((spread_pts / max(0.01, ltp)) * 100.0, 3)
 
-    freeze_limit = get_exchange_freeze_limit(clean_sym, resolved_lot_size)
-    max_freeze_lots = max(1, freeze_limit // resolved_lot_size)
+    freeze_limit = get_exchange_freeze_limit(symbol, resolved_lot_size, segment=segment)
+    max_freeze_lots = freeze_limit // resolved_lot_size
+    if max_freeze_lots <= 0:
+        raise ValueError("Published quantity freeze is below one canonical lot")
 
     num_bins = max(2, min(len(INDIAN_INTRADAY_VOLUME_PROFILE), math.ceil(duration_minutes / 15.0)))
     weights = [bin_info[2] for bin_info in INDIAN_INTRADAY_VOLUME_PROFILE[:num_bins]]
@@ -434,6 +445,7 @@ def build_smart_execution_plan(
     routing_mode_override: Optional[RoutingMode] = None,
     duration_minutes: int = 30,
     target_pov_pct: float = 0.10,
+    segment: str | None = None,
 ) -> SmartExecutionPlan:
     """
     Builds an optimized institutional execution plan.
@@ -453,6 +465,7 @@ def build_smart_execution_plan(
             lot_size=lot_size,
             urgency=urgency,
             tick_size=tick_size,
+            segment=segment,
         )
     elif routing_mode_override == "VWAP_POV":
         return build_vwap_pov_execution_plan(
@@ -467,15 +480,32 @@ def build_smart_execution_plan(
             lot_size=lot_size,
             urgency=urgency,
             tick_size=tick_size,
+            segment=segment,
         )
 
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
     is_buy = side.upper() in ("BUY", "LONG", "BULLISH")
     norm_side: Literal["BUY", "SELL"] = "BUY" if is_buy else "SELL"
 
-    resolved_lot_size = max(1, lot_size)
-    total_lots = max(1, math.ceil(total_quantity / resolved_lot_size))
-    resolved_qty = total_lots * resolved_lot_size
+    if (
+        isinstance(total_quantity, bool)
+        or not isinstance(total_quantity, int)
+        or total_quantity <= 0
+    ):
+        raise ValueError("Order quantity must be a positive integer")
+    if isinstance(lot_size, bool) or not isinstance(lot_size, int) or lot_size <= 0:
+        raise ValueError("A positive canonical lot size is required")
+    if (
+        isinstance(max_tranche_lots, bool)
+        or not isinstance(max_tranche_lots, int)
+        or max_tranche_lots <= 0
+    ):
+        raise ValueError("max_tranche_lots must be a positive integer")
+    resolved_lot_size = lot_size
+    if total_quantity % resolved_lot_size:
+        raise ValueError("Order quantity must be an exact multiple of the canonical lot size")
+    total_lots = total_quantity // resolved_lot_size
+    resolved_qty = total_quantity
 
     # Fallbacks for bid/ask
     eff_tick = tick_size or resolve_tick_size(ltp, clean_sym)
@@ -485,14 +515,16 @@ def build_smart_execution_plan(
     spread_pts = round(max(0.0, a_price - b_price), 2)
     spread_pct = round((spread_pts / max(0.01, ltp)) * 100.0, 3)
 
-    freeze_limit = get_exchange_freeze_limit(clean_sym, resolved_lot_size)
+    freeze_limit = get_exchange_freeze_limit(symbol, resolved_lot_size, segment=segment)
     exceeds_freeze = resolved_qty > freeze_limit
 
     # 1. Determine Routing Mode
     if exceeds_freeze:
         # Mandatory Iceberg Slicing: Single order exceeds exchange quantity freeze limit
         routing_mode: RoutingMode = "ICEBERG"
-        max_freeze_lots = max(1, freeze_limit // resolved_lot_size)
+        max_freeze_lots = freeze_limit // resolved_lot_size
+        if max_freeze_lots <= 0:
+            raise ValueError("Published quantity freeze is below one canonical lot")
         effective_tranche_lots = min(max_tranche_lots, max_freeze_lots)
         num_tranches = math.ceil(total_lots / effective_tranche_lots)
         tranche_lots = effective_tranche_lots

@@ -25,8 +25,6 @@ from rich.table import Table
 from rich.prompt import Prompt, Confirm
 from rich import box
 
-from brokers.base import OrderRequest
-from brokers.session import get_broker
 from engine.strategy import recommend, StrategyResult
 
 console = Console()
@@ -42,8 +40,16 @@ def run(symbol: str | None = None, view: str | None = None) -> None:
     """
     console.print()
 
-    mode = os.environ.get("TRADING_MODE", "PAPER")
-    mode_badge = "[green]PAPER[/green]" if mode == "PAPER" else "[bold red]LIVE[/bold red]"
+    from engine.modes import get_trading_mode
+
+    mode = get_trading_mode().mode.name
+    if mode != "SIMULATE":
+        console.print(
+            f"[yellow]Trade builder order submission is disabled in {mode}. "
+            "Use the authenticated order ticket for live order workflows.[/yellow]"
+        )
+        return
+    mode_badge = "[green]SIMULATE[/green]" if mode == "SIMULATE" else f"[bold red]{mode}[/bold red]"
     console.print(
         Panel(
             "[bold cyan]📈  Trade Builder[/bold cyan]\n"
@@ -139,8 +145,8 @@ def run(symbol: str | None = None, view: str | None = None) -> None:
         )
 
     # ── Step 7: Final Double Confirmation ─────────────────────
-    mode = os.environ.get("TRADING_MODE", "PAPER")
-    mode_badge = "[green]PAPER[/green]" if mode == "PAPER" else "[bold red]LIVE[/bold red]"
+    mode = get_trading_mode().mode.name
+    mode_badge = "[green]SIMULATE[/green]"
 
     console.print(f"\n  Mode: {mode_badge}")
     console.print(f"  Strategy: [bold]{selected.name}[/bold]")
@@ -156,19 +162,14 @@ def run(symbol: str | None = None, view: str | None = None) -> None:
         console.print("[dim]Trade cancelled.[/dim]")
         return
 
-    if mode == "LIVE":
+    # ── Step 8: Place simulated order(s) through the OMS only ──
+    if mode != "SIMULATE":
         console.print(
-            "\n[bold red]⚠ REAL MONEY EXECUTION (Step 2 of 2):[/bold red]\n"
-            "Type [bold green]CONFIRM[/bold green] to transmit live order(s) to your broker:"
+            "[yellow]This CLI cannot place broker orders. Use the authenticated order ticket "
+            "for a live order.[/yellow]"
         )
-        double_confirm = Prompt.ask("  Double Confirmation", default="CANCEL")
-        if double_confirm.strip().upper() != "CONFIRM":
-            console.print("[dim]Live trade cancelled: Confirmation did not match 'CONFIRM'.[/dim]")
-            return
-
-    # ── Step 8: Place order(s) ────────────────────────────────
-    broker = get_broker()
-    _place_strategy_legs(broker, selected, symbol, mode)
+        return
+    _place_strategy_legs(selected, symbol, mode)
 
 
 def _show_strategies(strategies: list[StrategyResult]) -> None:
@@ -224,8 +225,11 @@ def _show_trade_summary(s: StrategyResult, symbol: str, spot: float) -> None:
     )
 
 
-def _place_strategy_legs(broker, strategy: StrategyResult, symbol: str, mode: str) -> None:
-    """Place each leg of the selected strategy."""
+def _place_strategy_legs(strategy: StrategyResult, symbol: str, mode: str) -> None:
+    """Submit selected strategy legs through the simulated order lifecycle."""
+    if mode != "SIMULATE":
+        raise PermissionError("CLI strategy orders are limited to SIMULATE mode.")
+
     for leg in strategy.legs:
         action = leg.get("action", "BUY")
         opt_type = leg.get("type", "")
@@ -237,11 +241,13 @@ def _place_strategy_legs(broker, strategy: StrategyResult, symbol: str, mode: st
         if opt_type in ("CE", "PE"):
             from market.events import get_expiry_dates
 
-            try:
-                expiry = get_expiry_dates().monthly
-                exp_compact = expiry.replace("-", "").replace("20", "")[2:]  # "25APR"
-            except Exception:
-                exp_compact = "25MAR"
+            expiry = get_expiry_dates().monthly
+            if not expiry:
+                console.print(
+                    "  [red]No verified listed expiry available; option leg skipped.[/red]"
+                )
+                continue
+            exp_compact = expiry.replace("-", "").replace("20", "")[2:]
             trade_symbol = f"{symbol}{exp_compact}{int(strike)}{opt_type}"
             qty = lots * lot_size
         else:
@@ -249,26 +255,27 @@ def _place_strategy_legs(broker, strategy: StrategyResult, symbol: str, mode: st
             qty = leg.get("qty", 1)
 
         exchange = "NFO" if opt_type in ("CE", "PE") else "NSE"
-        req = OrderRequest(
-            symbol=trade_symbol,
-            exchange=exchange,
-            transaction_type=action,
-            quantity=qty,
-            order_type="MARKET",
-            product="CNC" if opt_type == "" else "NRML",
-        )
-
         try:
-            resp = broker.place_order(req)
-            status_color = "green" if resp.status == "COMPLETE" else "yellow"
-            fill = f" @ ₹{resp.average_price:,.2f}" if resp.average_price else ""
+            from market.quotes import get_ltp
+            from engine.order_lifecycle import submit_simulated_order_intent
+
+            reference_price = float(get_ltp(f"{exchange}:{trade_symbol}") or 0.0)
+            resp = submit_simulated_order_intent(
+                symbol=trade_symbol,
+                side=action,
+                quantity=qty,
+                price=reference_price,
+                order_type="MARKET",
+                product="CNC" if opt_type == "" else "NRML",
+            )
+            status_color = "green" if resp.status in ("FILLED_PAPER", "OPEN") else "red"
+            fill = f" reference ₹{reference_price:,.2f}"
+            mark = "✓" if status_color == "green" else "✗"
             console.print(
-                f"  [{status_color}]✓[/{status_color}]  {action} {qty} {trade_symbol}{fill}  "
-                f"— [{status_color}]{resp.status}[/{status_color}]"
+                f"  [{status_color}]{mark}[/{status_color}]  {action} {qty} {trade_symbol}{fill}  "
+                f"— [{status_color}]{resp.status}[/{status_color}] OMS {resp.order_id}"
             )
         except Exception as e:
             console.print(f"  [red]✗  Failed to place {action} {trade_symbol}: {e}[/red]")
 
-    console.print(
-        "\n  [bold green]Order(s) placed.[/bold green] Use [bold]positions[/bold] to monitor.\n"
-    )
+    console.print("\n  [bold green]Simulated OMS submissions complete.[/bold green]\n")

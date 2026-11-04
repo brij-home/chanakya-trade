@@ -6,7 +6,7 @@ symmetric volatility noise floors, time gate cutoffs, and scorecard integrity.
 
 Validates:
   1. Untriggered alerts (STALK, EARLY_WARNING, PRIMED) never register trading losses.
-  2. Invalidation of untriggered setups transitions cleanly to SETUP_DISQUALIFIED (R=0.0, PnL=0.0%).
+  2. Untriggered setup disqualification leaves account P&L unknown when the system has no order record.
   3. No circuit breaker penalties or symbol lockouts are levied on disqualified untriggered setups.
   4. Session scorecards partition untriggered setups under 'unfulfilled', never 'losses'.
   5. Precursor Radar alerts do not pre-ignite; genuine trigger breach is mandatory.
@@ -159,7 +159,7 @@ def test_untriggered_stop_breach_evaluator_message():
 
 
 def test_untriggered_exit_routes_to_setup_disqualified():
-    """Verify _handle_alert_exit transitions untriggered setups to SETUP_DISQUALIFIED with 0 PnL and zero penalties."""
+    """Untriggered alert disqualification does not assert an account result."""
     engine = AutoAlertEngine()
 
     radar = AutoAlert(
@@ -189,8 +189,8 @@ def test_untriggered_exit_routes_to_setup_disqualified():
     # Invariants for untriggered invalidation
     assert was_loss is True, "Untriggered setup exit is recorded as an invalidation exit event"
     assert radar.target_status == "SETUP_DISQUALIFIED"
-    assert radar.r_multiple == 0.0
-    assert radar.pnl_pct == 0.0
+    assert radar.r_multiple is None
+    assert radar.pnl_pct is None
     assert radar.is_invalidated is True
     assert radar.stage == "EXPIRED"
 

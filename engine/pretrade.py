@@ -171,7 +171,7 @@ def _gate_kill_switch(
         )
 
 
-def _gate_market_session(segment: str) -> GateResult:
+def _gate_market_session(segment: str, symbol: Optional[str] = None) -> GateResult:
     """
     Gate 2: Verify the market is open for this segment.
 
@@ -182,6 +182,7 @@ def _gate_market_session(segment: str) -> GateResult:
     """
     try:
         from datetime import time as dtime
+        from datetime import date as dt_date
         import zoneinfo
 
         ist = zoneinfo.ZoneInfo("Asia/Kolkata")
@@ -198,10 +199,54 @@ def _gate_market_session(segment: str) -> GateResult:
                 details={"weekday": weekday},
             )
 
-        seg = segment.upper()
+        seg = {
+            "EQUITY_DELIVERY": "EQ",
+            "EQUITY_INTRADAY": "EQ",
+            "EQUITY": "EQ",
+            "OPTIONS": "OPT",
+            "FUTURES": "FUT",
+            "COMMODITY": "MCX",
+            "CURRENCY": "CDS",
+        }.get(segment.upper(), segment.upper())
+
+        # Exchange holiday check
+        from market.calendar import is_trading_holiday, get_holiday_reason
+
+        exch = "MCX" if seg == "MCX" else ("CDS" if seg == "CDS" else "NSE")
+        if is_trading_holiday(check_date=now_ist.date(), exchange=exch, ref_time=now_time):
+            h_name = (
+                get_holiday_reason(check_date=now_ist.date(), exchange=exch)
+                or "Official Exchange Holiday"
+            )
+            return GateResult(
+                gate="market_session",
+                passed=False,
+                reason=f"Market closed: {h_name} ({now_ist.date()})",
+                details={"holiday": h_name, "date": str(now_ist.date()), "exchange": exch},
+            )
         if seg in ("EQ", "FUT", "OPT"):
             open_t = dtime(9, 15)
-            close_t = dtime(15, 30)
+            from market.rule_schedule import derivative_close
+
+            if seg in ("FUT", "OPT"):
+                expiring_index = False
+                if now_ist.date() >= dt_date(2026, 12, 7):
+                    expiry_class = _expiring_index_contract(symbol, now_ist.date())
+                    if expiry_class is None:
+                        return GateResult(
+                            gate="market_session",
+                            passed=False,
+                            reason="Current derivative master data is required to verify the December 2026 session cutoff.",
+                        )
+                    expiring_index = expiry_class
+                close_t = derivative_close(now_ist.date(), expiring_index=expiring_index)
+            else:
+                from market.rule_schedule import cash_continuous_close
+                from market.instruments import is_derivative_eligible
+
+                close_t = cash_continuous_close(
+                    now_ist.date(), cas_eligible=bool(symbol and is_derivative_eligible(symbol))
+                )
         elif seg == "MCX":
             open_t = dtime(9, 0)
             close_t = dtime(23, 30)
@@ -212,11 +257,11 @@ def _gate_market_session(segment: str) -> GateResult:
             # Unknown segment — pass with warning
             return GateResult(
                 gate="market_session",
-                passed=True,
+                passed=False,
                 reason=f"Unknown segment '{segment}' — session check skipped",
             )
 
-        if open_t <= now_time <= close_t:
+        if open_t <= now_time < close_t:
             return GateResult(
                 gate="market_session",
                 passed=True,
@@ -235,6 +280,31 @@ def _gate_market_session(segment: str) -> GateResult:
             passed=False,
             reason=f"Session check error: {exc}",
         )
+
+
+def _expiring_index_contract(symbol: Optional[str], session_date) -> Optional[bool]:
+    """Return expiry-day index classification from a listed derivative master row."""
+    if not symbol:
+        return None
+    try:
+        from datetime import datetime as dt_datetime
+        from config.constants import IST_ZONE
+        from engine.option_resolver import is_index_symbol
+        from market.symbol_master import get_symbol_info
+
+        info = get_symbol_info(symbol, require_fresh=True)
+        if not isinstance(info, dict) or not info.get("expiryDate"):
+            return None
+        expiry = dt_datetime.fromtimestamp(float(info["expiryDate"]), tz=IST_ZONE).date()
+        underlying = str(info.get("underSym") or info.get("exSymbol") or "").strip()
+        if not underlying:
+            return None
+        return expiry == session_date and is_index_symbol(underlying)
+    except (TypeError, ValueError, OverflowError, OSError) as exc:
+        logger.warning(
+            "[PreTrade] Could not resolve derivative session cutoff for %s: %s", symbol, exc
+        )
+        return None
 
 
 def _gate_lot_size(
@@ -287,9 +357,23 @@ def _gate_price_band(
     prev_close: Optional[float],
     order_type: str,
     band_pct: float = NSE_DEFAULT_PRICE_BAND_PCT,
+    require_prev_close: bool = False,
 ) -> GateResult:
     """Gate 5: Verify price is within circuit filter band."""
-    if order_type == "MARKET" or price is None or prev_close is None or prev_close <= 0:
+    if order_type == "MARKET" or price is None:
+        return GateResult(
+            gate="price_band",
+            passed=True,
+            reason="Market order or missing price — band check skipped",
+        )
+    if prev_close is None or prev_close <= 0:
+        if require_prev_close:
+            return GateResult(
+                gate="price_band",
+                passed=False,
+                reason="Missing prev_close — price band validation cannot be completed",
+                details={"price": price},
+            )
         return GateResult(
             gate="price_band",
             passed=True,
@@ -319,13 +403,148 @@ def _gate_buying_power(
     ltp: Optional[float],
     available_cash: Optional[float],
     segment: str,
+    symbol: str = "",
+    held_quantity: Optional[int] = None,
+    underlying_spot: Optional[float] = None,
+    is_expiry_day: bool = False,
+    is_calendar_spread: bool = False,
+    require_context: bool = False,
 ) -> GateResult:
-    """Gate 6: Verify buying power / margin sufficiency for BUY orders."""
-    if side.upper() != "BUY":
+    """Gate 6: Verify buying power / margin sufficiency for BUY & derivative SELL orders."""
+    seg = segment.upper()
+    side_up = side.upper()
+    effective_price = price if price is not None else (ltp or 0.0)
+
+    import re
+
+    is_option_contract = seg in ("OPT", "OPTIONS") or bool(
+        re.search(r"\d+(CE|PE)$", symbol.upper())
+    )
+    is_futures_contract = seg in ("FUT", "FUTURES") or (
+        seg in ("FNO", "FNO_INDEX", "FNO_STOCK") and not is_option_contract
+    )
+
+    # 1. Equity SELL check
+    if (
+        side_up == "SELL"
+        and seg in ("EQ", "EQUITY", "EQUITY_DELIVERY", "EQUITY_INTRADAY")
+        and not is_option_contract
+    ):
+        if held_quantity is not None:
+            if held_quantity < quantity:
+                return GateResult(
+                    gate="buying_power",
+                    passed=False,
+                    reason=f"Insufficient holdings: sell quantity {quantity} exceeds held quantity {held_quantity}",
+                    details={"held_quantity": held_quantity, "sell_quantity": quantity},
+                )
+            return GateResult(
+                gate="buying_power",
+                passed=True,
+                reason=f"Equity sell covered by holdings ({held_quantity} >= {quantity})",
+                details={"held_quantity": held_quantity, "sell_quantity": quantity},
+            )
+        if require_context:
+            return GateResult(
+                gate="buying_power",
+                passed=False,
+                reason="Missing holdings quantity — cannot verify equity sell coverage",
+            )
+        return GateResult(
+            gate="buying_power",
+            passed=True,
+            reason="SELL order — buying power not checked",
+        )
+
+    # 2. Derivative SELL check (Short options / short futures)
+    if side_up == "SELL" and (is_option_contract or is_futures_contract):
+        if available_cash is None:
+            if require_context:
+                return GateResult(
+                    gate="buying_power",
+                    passed=False,
+                    reason="Missing available_cash for short derivative margin requirement",
+                )
+            return GateResult(
+                gate="buying_power",
+                passed=True,
+                reason="available_cash not provided — buying power check skipped",
+            )
+
+        if effective_price <= 0 and (underlying_spot is None or underlying_spot <= 0):
+            return GateResult(
+                gate="buying_power",
+                passed=False,
+                reason="Cannot determine derivative margin: price and LTP are both unavailable",
+            )
+
+        from engine.margin_engine import calculate_order_margin
+
+        margin_seg = "OPTIONS" if is_option_contract else "FUTURES"
+        spot = underlying_spot
+        if (spot is None or spot <= 0) and is_option_contract:
+            try:
+                from market.options import parse_option_symbol
+
+                parsed = parse_option_symbol(symbol)
+                if parsed and parsed.get("strike"):
+                    spot = float(parsed["strike"])
+            except Exception as e_sym:
+                logger.debug(
+                    f"[pretrade] Error parsing option symbol {symbol} for strike fallback: {e_sym}"
+                )
+        if spot is None or spot <= 0:
+            spot = ltp or effective_price
+        margin_req = calculate_order_margin(
+            symbol=symbol,
+            price=effective_price,
+            quantity=quantity,
+            segment=margin_seg,
+            side="SELL",
+            underlying_spot=spot,
+            is_expiry_day=is_expiry_day,
+            is_calendar_spread=is_calendar_spread,
+        )
+        required_margin = margin_req.total_margin_required
+
+        if available_cash >= required_margin:
+            return GateResult(
+                gate="buying_power",
+                passed=True,
+                details={
+                    "required_margin": round(required_margin, 2),
+                    "available_cash": round(available_cash, 2),
+                    "span_margin": round(margin_req.span_margin, 2),
+                    "exposure_margin": round(margin_req.exposure_margin, 2),
+                    "is_short_option": margin_req.is_short_option,
+                },
+            )
+        return GateResult(
+            gate="buying_power",
+            passed=False,
+            reason=f"Insufficient margin for derivative short: need ₹{required_margin:,.2f}, have ₹{available_cash:,.2f}",
+            details={
+                "required_margin": round(required_margin, 2),
+                "available_cash": round(available_cash, 2),
+                "span_margin": round(margin_req.span_margin, 2),
+                "exposure_margin": round(margin_req.exposure_margin, 2),
+            },
+        )
+
+    # 3. Non-BUY catch-all
+    if side_up != "BUY":
         return GateResult(
             gate="buying_power", passed=True, reason="SELL order — buying power not checked"
         )
+
+    # 4. BUY check
     if available_cash is None:
+        if require_context:
+            return GateResult(
+                gate="buying_power",
+                passed=False,
+                reason="available_cash is required but was not provided",
+            )
         return GateResult(
             gate="buying_power",
             passed=True,
@@ -341,11 +560,12 @@ def _gate_buying_power(
         )
 
     # Apply margin multipliers
-    seg = segment.upper()
-    if seg == "EQ":
+    if seg in ("EQ", "EQUITY", "EQUITY_DELIVERY"):
         margin_fraction = 1.0  # CNC: full value
-    elif seg in ("FUT", "OPT"):
-        margin_fraction = 0.15  # ~15% SPAN+exposure margin (conservative estimate)
+    elif seg == "EQUITY_INTRADAY":
+        margin_fraction = 0.20
+    elif seg in ("FUT", "FUTURES", "OPT", "OPTIONS", "FNO", "FNO_INDEX", "FNO_STOCK"):
+        margin_fraction = 1.0  # Bought options require full premium cash
     elif seg == "CDS":
         margin_fraction = 0.03
     elif seg == "MCX":
@@ -409,6 +629,8 @@ def _gate_portfolio_risk(
     ltp: Optional[float],
     portfolio_value: Optional[float],
     daily_pnl: Optional[float],
+    require_context: bool = False,
+    is_live: bool = False,
 ) -> tuple[GateResult, list[str]]:
     """
     Gate 9: Portfolio risk advisory check.
@@ -432,10 +654,13 @@ def _gate_portfolio_risk(
     if daily_pnl is not None and portfolio_value and portfolio_value > 0:
         daily_loss_pct = abs(daily_pnl) / portfolio_value * 100
         if daily_pnl < 0 and daily_loss_pct >= MAX_DAILY_LOSS_CAP_PCT:
-            warnings.append(
-                f"Daily loss cap advisory: current daily loss is {daily_loss_pct:.1f}% of portfolio. "
-                f"Consider pausing new positions."
+            msg = (
+                f"Daily loss cap reached: current daily loss is {daily_loss_pct:.1f}% of portfolio "
+                f"(cap: {MAX_DAILY_LOSS_CAP_PCT}%)."
             )
+            if is_live or require_context:
+                return GateResult(gate="portfolio_risk", passed=False, reason=msg), warnings
+            warnings.append(f"{msg} Consider pausing new positions.")
 
     return GateResult(gate="portfolio_risk", passed=True), warnings
 
@@ -633,8 +858,13 @@ def validate_pretrade(
     depth_sweep_vwap: Optional[float] = None,
     is_fully_fillable: Optional[bool] = None,
     unfilled_qty: Optional[int] = None,
+    held_quantity: Optional[int] = None,
+    underlying_spot: Optional[float] = None,
+    is_expiry_day: bool = False,
+    is_calendar_spread: bool = False,
     # Control
     skip_session_check: bool = False,  # Set True in tests / after-hours paper
+    require_context: bool = False,
     correlation_id: Optional[str] = None,
 ) -> PreTradeValidationResult:
     """
@@ -710,7 +940,7 @@ def validate_pretrade(
 
     # Gate 2: Market session
     if not skip_session_check:
-        session_gate = _gate_market_session(segment)
+        session_gate = _gate_market_session(segment, symbol=symbol)
         gate_results["market_session"] = session_gate
         if session_gate.blocked:
             blocking.append(session_gate.reason or "Market closed")
@@ -732,13 +962,28 @@ def validate_pretrade(
         blocking.append(tick_gate.reason or "Tick size violation")
 
     # Gate 5: Price band
-    band_gate = _gate_price_band(price, prev_close, order_type, price_band_pct)
+    band_gate = _gate_price_band(
+        price, prev_close, order_type, price_band_pct, require_prev_close=require_context
+    )
     gate_results["price_band"] = band_gate
     if band_gate.blocked:
         blocking.append(band_gate.reason or "Price outside circuit band")
 
     # Gate 6: Buying power
-    bp_gate = _gate_buying_power(side, quantity, price, ltp, available_cash, segment)
+    bp_gate = _gate_buying_power(
+        side=side,
+        quantity=quantity,
+        price=price,
+        ltp=ltp,
+        available_cash=available_cash,
+        segment=segment,
+        symbol=symbol,
+        held_quantity=held_quantity,
+        underlying_spot=underlying_spot,
+        is_expiry_day=is_expiry_day,
+        is_calendar_spread=is_calendar_spread,
+        require_context=require_context,
+    )
     gate_results["buying_power"] = bp_gate
     if bp_gate.blocked:
         blocking.append(bp_gate.reason or "Insufficient buying power")
@@ -749,11 +994,20 @@ def validate_pretrade(
     if freshness_gate.blocked:
         blocking.append(freshness_gate.reason or "Stale data")
 
-    # Gate 9: Portfolio risk (advisory only)
+    # Gate 9: Portfolio risk
     risk_gate, risk_warnings = _gate_portfolio_risk(
-        side, symbol, quantity, ltp, portfolio_value, daily_pnl
+        side,
+        symbol,
+        quantity,
+        ltp,
+        portfolio_value,
+        daily_pnl,
+        require_context=require_context,
+        is_live=not skip_session_check,
     )
     gate_results["portfolio_risk"] = risk_gate
+    if risk_gate.blocked:
+        blocking.append(risk_gate.reason or "Portfolio risk violation")
     all_warnings.extend(risk_warnings)
 
     # Gate 10: Anti-FOMO & No-Chase

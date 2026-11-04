@@ -6,6 +6,8 @@ description: >-
   options backtesting, market regime filtering, and performance reporting.
 ---
 
+> **Current safety contract (31 October 2026):** Read `docs/SAFETY_CONTRACTS.md` before any change. It supersedes older weekday, STT, session, synthetic-data and one-lot-floor examples in this document. All AI tools/providers must preserve the behavioral release tests in `tests/test_verified_market_safety.py`. Market-rule changes require a primary source and effective date; never change tests merely to preserve an obsolete assumption.
+
 # Backtesting & Strategy Engine Runbook
 
 ## Engine Components

@@ -19,7 +19,8 @@ from bot.alert_templates import render_auto_alert
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
-def test_climax_overbought_exhaustion_filter():
+def test_climax_overbought_exhaustion_filter(monkeypatch):
+    monkeypatch.setattr("analysis.regime_governor._fresh_live_vix", lambda: 15.0)
     """Verify AlertScrutinyAuditor rejects parabolic blow-off setups with RSI > 78 and capitulation shorts with RSI < 22."""
     auditor = AlertScrutinyAuditor()
 
@@ -114,7 +115,7 @@ def test_two_strike_hard_session_lockout(tmp_path, monkeypatch):
 
     # Check that price above reclaim level clears lockout for Strike 1
     is_locked, _ = engine.is_symbol_locked_out(
-        "SILVER", direction="BULLISH", ltp=249000.0, vwap=248500.0
+        "SILVER", direction="BULLISH", ltp=249000.0, vwap=248500.0, refractory_seconds=0.0
     )
     assert is_locked is False
 

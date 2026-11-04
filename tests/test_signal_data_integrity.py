@@ -44,7 +44,10 @@ def make_alert(**overrides) -> AutoAlert:
 
 def test_valid_equity_alert_data_integrity():
     """A valid, clean equity breakout alert passes all data integrity checks."""
-    alert = make_alert()
+    alert = make_alert(
+        target_level=3070.0,  # 3R reward-to-risk from the explicit 40-point stop.
+        metrics={"rvol": 2.0},
+    )
     is_valid, reason = alert.validate_data_integrity()
     assert is_valid is True
     assert reason == ""
@@ -163,7 +166,7 @@ def test_zero_bid_liquidity_veto():
         stop_loss=21.4,
         target_level=37.1,
         underlying_spot=1376.3,
-        metrics={"bid": 0.0, "ask": 29.5},
+        metrics={"bid": 0.0, "ask": 29.5, "volume": 12000, "oi": 50000},
     )
     passed, rej_reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
     assert passed is False
@@ -324,7 +327,13 @@ def test_order_book_wide_spread_and_zero_bid_veto():
         ltp=105.0,
         stop_loss=85.0,
         target_level=145.0,
-        metrics={"bid": 100.0, "ask": 108.0, "bid_ask_spread_pct": 7.4},
+        metrics={
+            "bid": 100.0,
+            "ask": 108.0,
+            "bid_ask_spread_pct": 7.4,
+            "volume": 12000,
+            "oi": 50000,
+        },
     )
     passed, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(wide_alert)
     assert passed is False
@@ -340,7 +349,7 @@ def test_order_book_wide_spread_and_zero_bid_veto():
         ltp=25.0,
         stop_loss=20.0,
         target_level=45.0,
-        metrics={"bid": 0.0, "ask": 25.0},
+        metrics={"bid": 0.0, "ask": 25.0, "volume": 12000, "oi": 50000},
     )
     passed, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(zero_bid_alert)
     assert passed is False
@@ -388,7 +397,7 @@ def test_pre_squareoff_advisory_broadcast(monkeypatch):
     assert len(sent_msgs) == 1  # No duplicate message
 
 
-def test_record_alert_populates_position_sizing():
+def test_record_alert_populates_position_sizing(monkeypatch):
     """record_alert enriches actionable_plan with lot_size, recommended_lots, and capital_at_risk."""
     from engine.auto_alert_engine import AutoAlertEngine
 
@@ -398,12 +407,26 @@ def test_record_alert_populates_position_sizing():
     alert = make_alert(
         alert_id="aa-sizing-test-01",
         symbol="RELIANCE",
+        contract_symbol="NFO:RELIANCE26NOV2500CE",
         ltp=2500.0,
         trigger_level=2500.0,
         stop_loss=2450.0,
         target_level=2600.0,
         actionable_plan={},
-        is_live=True,
+        segment="FNO_STOCK",
+        exchange="NFO",
+        environment="TEST",
+        is_live=False,
+    )
+
+    import market.symbol_master as symbol_master
+
+    monkeypatch.setattr(
+        symbol_master,
+        "get_symbol_info",
+        lambda symbol, **kwargs: (
+            {"minLotSize": 250} if symbol == "NFO:RELIANCE26NOV2500CE" else None
+        ),
     )
     engine.record_alert(alert)
 
@@ -412,7 +435,40 @@ def test_record_alert_populates_position_sizing():
     assert "recommended_lots" in plan
     assert "capital_at_risk" in plan
     assert plan["lot_size"] in (250, 500)  # Canonical RELIANCE F&O lot size
-    assert plan["recommended_lots"] >= 1
+    assert plan["recommended_lots"] == 0
+    assert plan["recommended_shares"] == 0
+
+
+def test_record_fno_alert_without_exact_contract_has_no_executable_size(monkeypatch):
+    """A bare F&O underlying must not inherit a research lot map for execution sizing."""
+    from engine.auto_alert_engine import AutoAlertEngine
+    import engine.option_resolver as option_resolver
+
+    # Model an unavailable contract selection result; sizing must remain zero.
+    monkeypatch.setattr(option_resolver, "resolve_option_contract", lambda **kwargs: None)
+
+    engine = AutoAlertEngine()
+    engine.clear_alerts()
+    alert = make_alert(
+        alert_id="aa-sizing-no-contract-01",
+        symbol="RELIANCE",
+        ltp=2500.0,
+        trigger_level=2500.0,
+        stop_loss=2450.0,
+        target_level=2600.0,
+        actionable_plan={},
+        segment="FNO_STOCK",
+        exchange="NFO",
+        environment="TEST",
+        is_live=False,
+    )
+
+    engine.record_alert(alert)
+
+    assert alert.actionable_plan["lot_size"] == 0
+    assert alert.actionable_plan["recommended_lots"] == 0
+    assert alert.actionable_plan["recommended_shares"] == 0
+    assert alert.actionable_plan["sizing_status"] == "UNAVAILABLE_EXACT_CONTRACT"
 
 
 def test_0dte_expiry_day_afternoon_theta_cliff_veto(monkeypatch):
@@ -444,7 +500,7 @@ def test_0dte_expiry_day_afternoon_theta_cliff_veto(monkeypatch):
         ltp=25.0,
         stop_loss=20.0,
         target_level=45.0,
-        metrics={"spot": 25000.0, "expiry_date": today_str},
+        metrics={"spot": 25000.0, "expiry_date": today_str, "volume": 18000, "oi": 52000},
     )
 
     passed, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(naked_otm)
@@ -463,7 +519,7 @@ def test_0dte_expiry_day_afternoon_theta_cliff_veto(monkeypatch):
         stop_loss=20.0,
         target_level=45.0,
         actionable_plan={"hedged_spread": {"short_leg": "25300CE", "type": "BULL_CALL_SPREAD"}},
-        metrics={"spot": 25000.0, "expiry_date": today_str},
+        metrics={"spot": 25000.0, "expiry_date": today_str, "volume": 18000, "oi": 52000},
     )
     passed2, reason2, flags2 = alert_scrutiny_auditor.verify_tier1_sanity(hedged_alert)
     assert passed2 is True
@@ -498,7 +554,13 @@ def test_0dte_expiry_pin_risk_veto(monkeypatch):
         ltp=30.0,
         stop_loss=24.0,
         target_level=50.0,
-        metrics={"spot": 25000.0, "oi_wall_strike": 25010.0, "expiry_date": today_str},
+        metrics={
+            "spot": 25000.0,
+            "oi_wall_strike": 25010.0,
+            "expiry_date": today_str,
+            "volume": 18000,
+            "oi": 52000,
+        },
     )
 
     passed, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(pin_alert)

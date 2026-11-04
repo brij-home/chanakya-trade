@@ -227,16 +227,30 @@ def detect_defined_risk_neutral(
         f"Safe corridor ₹{lower_be:,.1f} to ₹{upper_be:,.1f}. Capped max loss ₹{spread.max_loss:,.0f}."
     )
 
+    eff_lot = lot_size if lot_size > 0 else 1
     t1_profit = round(spread.max_profit * 0.5, 2)
     t2_profit = round(spread.max_profit * 0.8, 2)
 
-    return AutoAlert(
+    spread_dict = spread.to_dict()
+    spread_dict["spread_name"] = "Iron Condor Neutral Harvest"
+    spread_dict["short_put_strike"] = short_put.strike
+    spread_dict["long_put_strike"] = long_put.strike
+    spread_dict["short_call_strike"] = short_call.strike
+    spread_dict["long_call_strike"] = long_call.strike
+    spread_dict["profit_corridor"] = f"₹{short_put.strike:,.0f} to ₹{short_call.strike:,.0f}"
+    spread_dict["breakevens"] = f"₹{lower_be:,.1f} – ₹{upper_be:,.1f}"
+
+    entry_min = min(round(ltp * 0.995, 1), round(ltp * 1.005, 1))
+    entry_max = max(round(ltp * 0.995, 1), round(ltp * 1.005, 1))
+
+    alert = AutoAlert(
         alert_id=generate_alert_id(symbol, "DEFINED_RISK_NEUTRAL", variant="condor"),
         alert_type="DEFINED_RISK_NEUTRAL",
         stage="ACTIONABLE",
         symbol=symbol,
         exchange=ctx.exchange,
         direction="NEUTRAL",
+        derivative_type="SPREAD",
         headline=headline,
         summary=summary,
         ltp=ltp,
@@ -244,6 +258,7 @@ def detect_defined_risk_neutral(
         trigger_level=ltp,
         target_level=round(upper_be, 2),
         stop_loss=round(lower_be, 2),
+        lot_size=lot_size,
         metrics={
             "strategy": "IRON_CONDOR",
             "vix": round(vix, 2),
@@ -263,20 +278,27 @@ def detect_defined_risk_neutral(
             "sabr_skew": sabr_skew,
             "short_put_iv_edge": short_put_edge,
             "short_call_iv_edge": short_call_edge,
+            "hedged_spread": spread_dict,
         },
         actionable_plan={
             "action": "EXECUTE_IRON_CONDOR",
+            "preferred_vehicle": "DEFINED_RISK_SPREAD",
+            "hedged_spread": spread_dict,
             "structure": (
                 f"BUY {long_put.strike:.0f} PE | SELL {short_put.strike:.0f} PE | "
                 f"SELL {short_call.strike:.0f} CE | BUY {long_call.strike:.0f} CE"
             ),
-            "entry_range": f"Spot ₹{round(ltp * 0.995, 1):.1f} – ₹{round(ltp * 1.005, 1):.1f}",
+            "entry_price": round(net_credit_pts, 2),
+            "stop_loss": round(spread.max_loss / eff_lot, 2),
+            "target_1": round(t1_profit / eff_lot, 2),
+            "target_2": round(t2_profit / eff_lot, 2),
+            "target_3": round(spread.max_profit / eff_lot, 2),
+            "entry_range": f"Spot ₹{entry_min:.1f} – ₹{entry_max:.1f}",
             "profit_corridor": f"₹{short_put.strike:,.0f} to ₹{short_call.strike:,.0f}",
             "breakevens": f"₹{lower_be:,.1f} – ₹{upper_be:,.1f}",
-            "no_chase_boundary": f"₹{upper_be:,.1f}",
-            "target": f"+50% Decay (Harvest ₹{t1_profit:,.0f})",
-            "target_2": f"+80% Decay (Harvest ₹{t2_profit:,.0f})",
-            "stop_loss": f"Exit if underlying crosses ₹{lower_be:.1f} or ₹{upper_be:.1f}",
+            "no_chase_boundary": round(upper_be, 2),
+            "decay_target_1": f"+50% Decay (Harvest ₹{t1_profit:,.0f})",
+            "decay_target_2": f"+80% Decay (Harvest ₹{t2_profit:,.0f})",
             "risk_reward": f"1:{spread.risk_reward_ratio:.2f}",
             "profit_rule": "Scale 50% profits at 50% max theta decay; close all wings if underlying challenges short strikes.",
         },
@@ -284,3 +306,5 @@ def detect_defined_risk_neutral(
         confidence=conviction,
         created_at=now_iso,
     )
+    alert.hedged_spread = spread_dict
+    return alert

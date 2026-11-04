@@ -58,7 +58,7 @@ def _get_audit_pool() -> SQLiteConnectionPool:
 
 @contextmanager
 def _get_audit_db() -> Generator[sqlite3.Connection, None, None]:
-    with _get_audit_pool().acquire() as conn:
+    with _get_audit_pool().transaction() as conn:
         yield conn
 
 

@@ -191,11 +191,21 @@ def execute_defined_risk_spread(
     for leg in buy_legs:
         try:
             # 1. Create order intent preview
+            eff_price = float(leg.limit_price or 0.0)
+            if eff_price <= 0:
+                from market.quotes import get_ltp
+
+                eff_price = float(get_ltp(leg.symbol) or 0.0)
+                if eff_price <= 0:
+                    raise ValueError(
+                        f"Cannot preview market leg for {leg.symbol}: quote unavailable"
+                    )
+
             intent = preview_order_intent(
                 symbol=leg.symbol,
                 side="BUY",
                 quantity=leg.quantity,
-                price=leg.limit_price,
+                price=eff_price,
                 order_type="LIMIT" if leg.limit_price > 0 else "MARKET",
                 product=product,
             )
@@ -212,8 +222,10 @@ def execute_defined_risk_spread(
                 getattr(exec_res, "fill_price", None) or exec_res.price or leg.limit_price
             )
 
-            if exec_res.status not in ("FILLED", "OPEN"):
-                raise RuntimeError(f"Hedge leg {leg.symbol} failed with status {exec_res.status}")
+            if exec_res.status not in ("FILLED", "FILLED_PAPER"):
+                raise RuntimeError(
+                    f"Hedge leg {leg.symbol} status is {exec_res.status} (must be FILLED before proceeding with short legs)."
+                )
 
             _log_event("HEDGE_LEG_CONFIRMED", {"leg_symbol": leg.symbol, "order_id": leg.order_id})
 
@@ -241,11 +253,21 @@ def execute_defined_risk_spread(
                     f"Legging timeout exceeded ({elapsed_ms:.1f}ms > {max_legging_timeout_ms}ms)"
                 )
 
+            eff_sell_price = float(leg.limit_price or 0.0)
+            if eff_sell_price <= 0:
+                from market.quotes import get_ltp
+
+                eff_sell_price = float(get_ltp(leg.symbol) or 0.0)
+                if eff_sell_price <= 0:
+                    raise ValueError(
+                        f"Cannot preview market short leg for {leg.symbol}: quote unavailable"
+                    )
+
             intent = preview_order_intent(
                 symbol=leg.symbol,
                 side="SELL",
                 quantity=leg.quantity,
-                price=leg.limit_price,
+                price=eff_sell_price,
                 order_type="LIMIT" if leg.limit_price > 0 else "MARKET",
                 product=product,
             )
@@ -259,7 +281,7 @@ def execute_defined_risk_spread(
                 getattr(exec_res, "fill_price", None) or exec_res.price or leg.limit_price
             )
 
-            if exec_res.status not in ("FILLED", "OPEN"):
+            if exec_res.status not in ("FILLED", "FILLED_PAPER"):
                 raise RuntimeError(f"Short leg {leg.symbol} failed with status {exec_res.status}")
 
             _log_event("SHORT_LEG_CONFIRMED", {"leg_symbol": leg.symbol, "order_id": leg.order_id})
@@ -274,9 +296,20 @@ def execute_defined_risk_spread(
             result.rejection_reason = f"Short leg failed ({e_short}). Auto-unwind executed."
 
             # ── Emergency Auto-Unwind: Liquidate Filled BUY Legs ───────────
-            _unwind_filled_hedges(buy_legs, unwind_fn)
-            result.unwind_performed = True
-            _log_event("EMERGENCY_UNWIND_COMPLETED", {"unwound_legs": [l.symbol for l in buy_legs]})
+            unwind_ok = _unwind_filled_hedges(buy_legs, unwind_fn)
+            result.unwind_performed = unwind_ok
+            if unwind_ok:
+                result.status = "LEGGING_FAILED_UNWOUND"
+                result.rejection_reason = f"Short leg failed ({e_short}). Auto-unwind executed."
+                _log_event(
+                    "EMERGENCY_UNWIND_COMPLETED", {"unwound_legs": [l.symbol for l in buy_legs]}
+                )
+            else:
+                result.status = "UNKNOWN_FREEZE"
+                result.rejection_reason = f"Short leg failed ({e_short}) AND auto-unwind failed! Naked exposure requires manual intervention."
+                _log_event(
+                    "EMERGENCY_UNWIND_FAILED", {"unwound_legs": [l.symbol for l in buy_legs]}
+                )
 
             result.execution_end_time = datetime.now(timezone.utc).isoformat()
             result.total_duration_ms = (time.monotonic() - start_t) * 1000.0
@@ -304,27 +337,44 @@ def execute_defined_risk_spread(
 def _unwind_filled_hedges(
     filled_buy_legs: list[ChildLegExecution],
     custom_unwind_fn: Optional[Callable[[str, int, str], bool]] = None,
-) -> None:
+) -> bool:
     """
     Emergency liquidation of already-filled long hedge legs to neutralize naked exposure.
+    Returns True if ALL filled legs were successfully liquidated, False if any failed.
     """
+    all_ok = True
     for leg in filled_buy_legs:
-        if leg.status in ("FILLED", "OPEN") and leg.order_id:
+        if leg.status in ("FILLED", "FILLED_PAPER") and leg.order_id:
             try:
                 if custom_unwind_fn:
-                    custom_unwind_fn(leg.symbol, leg.quantity, "SELL")
+                    res = custom_unwind_fn(leg.symbol, leg.quantity, "SELL")
+                    if res is False:
+                        raise RuntimeError("Custom unwind function returned False")
                 else:
-                    # Place emergency market SELL to exit the long leg
+                    ref_px = float(leg.fill_price or leg.limit_price or 0.0)
+                    if ref_px <= 0.0:
+                        from market.quotes import get_quote
+
+                        q = get_quote([leg.symbol]).get(leg.symbol)
+                        ref_px = float(getattr(q, "last_price", 0.0) or 0.0)
+                        if ref_px <= 0.0:
+                            raise RuntimeError(f"Cannot unwind {leg.symbol}: quote unavailable")
+
                     unwind_intent = preview_order_intent(
                         symbol=leg.symbol,
                         side="SELL",
                         quantity=leg.quantity,
-                        price=0.0,
+                        price=round(ref_px, 2),
                         order_type="MARKET",
                         product="MIS",
                     )
                     confirm_order_intent(unwind_intent.order_id, unwind_intent.preview_hash)
-                    execute_order_intent(unwind_intent.order_id)
+                    u_exec = execute_order_intent(unwind_intent.order_id)
+                    if u_exec.status not in ("FILLED", "FILLED_PAPER"):
+                        raise RuntimeError(
+                            f"Unwind execution unconfirmed (status: {u_exec.status})"
+                        )
+
                 logger.info(
                     f"[multi_leg_executor] Successfully unwound long hedge leg {leg.symbol}."
                 )
@@ -332,3 +382,5 @@ def _unwind_filled_hedges(
                 logger.critical(
                     f"[multi_leg_executor] CRITICAL: Failed to unwind long hedge leg {leg.symbol}: {e_unwind}. Manual intervention required!"
                 )
+                all_ok = False
+    return all_ok

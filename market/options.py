@@ -310,9 +310,9 @@ def get_options_chain(
                     return cached_chain
 
     # Institutional Single-Stock Physical Expiry Rollover:
-    # Under SEBI regulations, single-stock options are physically settled. In the final 4 trading
-    # days before the last Thursday, near-month stock options are subject to 100% physical delivery
-    # margin surges and severe gamma/theta collapse.
+    # Single-stock options are physically settled. In the final four calendar days
+    # before the listed, effective-dated expiry, near-month stock options can incur
+    # delivery margin and settlement risk.
     # CRITICAL: Check pure calendar math first (zero API calls) before querying expiries.
     if not is_commodity and not is_index and expiry is None:
         try:
@@ -450,11 +450,7 @@ def get_options_chain(
             broker_key = ""
 
         trading_mode = os.environ.get("TRADING_MODE", "").upper()
-        allow_synthetic = (
-            broker_key == "mock"
-            or trading_mode in ("DEMO", "PAPER", "SIMULATE", "")
-            or not broker_key
-        )
+        allow_synthetic = broker_key == "mock" and trading_mode in ("DEMO", "OBSERVE")
         if allow_synthetic:
             if clean_sym in ("SENSEX", "BANKEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
                 try:
@@ -538,7 +534,7 @@ def build_index_synthetic_option_chain(
     (e.g., SENSEX, BANKEX on BSE, or NSE indices when external feeds are unavailable).
     Generates strikes around ATM with realistic pricing, volume, and OI.
     """
-    from datetime import date, datetime, timedelta
+    from datetime import datetime
     from zoneinfo import ZoneInfo
 
     from market.instruments import canonical_symbol, get_fno_lot_size
@@ -550,31 +546,18 @@ def build_index_synthetic_option_chain(
     exch = "BFO" if is_bse else "NFO"
     lot_sz = get_fno_lot_size(clean_sym)
 
-    today = date.today()
+    today = datetime.now(_ist)
     if expiry:
         exp_str = expiry
     else:
-        # Resolve canonical expiry from SSOT (engine.alert_model)
-        from engine.alert_model import INDEX_WEEKLY_EXPIRY_WEEKDAY
+        from market.calendar import get_nearest_weekly_expiry, get_nearest_monthly_expiry
 
-        if clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY:
-            target_wd = INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym]
-            days_ahead = (target_wd - today.weekday()) % 7
-            if days_ahead == 0 and datetime.now(_ist).hour >= 15:
-                days_ahead = 7
-            exp_str = (today + timedelta(days=days_ahead)).isoformat()
-        else:
-            # Monthly expiry: resolve last Thursday of the month for NSE, last Friday for BSE
-            from market.events import _last_thursday
-
-            nm = today.month
-            ny = today.year
-            exp_date_obj = _last_thursday(ny, nm)
-            if exp_date_obj < today or (exp_date_obj == today and datetime.now(_ist).hour >= 15):
-                nm_next = nm + 1 if nm < 12 else 1
-                ny_next = ny if nm < 12 else ny + 1
-                exp_date_obj = _last_thursday(ny_next, nm_next)
-            exp_str = exp_date_obj.isoformat()
+        resolver = (
+            get_nearest_weekly_expiry
+            if clean_sym in ("NIFTY", "SENSEX")
+            else get_nearest_monthly_expiry
+        )
+        exp_str = resolver(clean_sym, ref_date=today.date(), ref_time=today.time()).isoformat()
 
     step = get_strike_step(clean_sym, spot=spot)
     atm_strike = round(spot / step) * step
@@ -779,6 +762,8 @@ def get_options_snapshot(
                     "is_market_open": market_open,
                     "as_of": now_utc,
                     "as_of_display": now_ist,
+                    "observation_time": now_utc,
+                    "receipt_time": now_utc,
                     "source_label": (
                         f"{broker_name.upper()} Direct Real-Time Feed"
                         if market_open

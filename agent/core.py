@@ -98,7 +98,7 @@ console = Console(legacy_windows=False)
 
 ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-7"
 OPENAI_DEFAULT_MODEL = "gpt-4o"
-GEMINI_DEFAULT_MODEL = "gemini-3.6-flash,gemini-3.5-flash-lite"
+GEMINI_DEFAULT_MODEL = "gemini-3.8-flash,gemini-3.8-flash-thinking,gemini-3.5-flash-lite"
 OLLAMA_DEFAULT_MODEL = "llama3.3"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
 GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b,openai/gpt-oss-120b,openai/gpt-oss-20b"
@@ -2508,6 +2508,20 @@ class GeminiProvider(LLMProvider):
         }
         if effective_max_tokens is not None:
             config_kwargs["max_output_tokens"] = effective_max_tokens
+        thinking_budget = kwargs.get("thinking_budget") or os.environ.get("GEMINI_THINKING_BUDGET")
+        if thinking_budget is not None and hasattr(types, "ThinkingConfig"):
+            try:
+                config_kwargs["thinking_config"] = types.ThinkingConfig(
+                    thinking_budget=int(thinking_budget)
+                )
+            except Exception as e_tb:
+                logger.debug(
+                    f"[AgentCore] Failed setting thinking_budget={thinking_budget}: {e_tb}"
+                )
+        if kwargs.get("response_mime_type"):
+            config_kwargs["response_mime_type"] = kwargs.get("response_mime_type")
+        if kwargs.get("response_schema"):
+            config_kwargs["response_schema"] = kwargs.get("response_schema")
         config = types.GenerateContentConfig(**config_kwargs)
 
         # Convert history to Gemini format (filtering out system messages handled via system_instruction)
@@ -2530,7 +2544,12 @@ class GeminiProvider(LLMProvider):
             if m not in candidate_models and m:
                 candidate_models.append(m)
         if not candidate_models:
-            candidate_models = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"]
+            candidate_models = [
+                "gemini-3.8-flash",
+                "gemini-3.8-flash-thinking",
+                "gemini-3.5-flash-lite",
+                "gemini-flash-latest",
+            ]
         active_model = candidate_models[0]
 
         def _create_session(client_obj, model_name):

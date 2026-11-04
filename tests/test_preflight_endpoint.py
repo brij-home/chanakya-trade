@@ -74,5 +74,5 @@ def test_api_calculate_charges_options(client):
     assert res.status_code == 200
     data = res.json()
     assert data["notional_turnover"] == 150000.0
-    assert data["stt"] == 150.0  # 0.1% on sell premium
+    assert data["stt"] == 225.0  # 0.15% on sell premium from 2026-04-01
     assert data["brokerage"] == 20.0  # Capped at ₹20

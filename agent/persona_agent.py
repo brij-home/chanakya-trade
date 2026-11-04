@@ -755,14 +755,15 @@ def _call_llm(
         return ""
 
     try:
-        from concurrent.futures import ThreadPoolExecutor
+        from engine.llm_deadline import run_with_deadline
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_execute)
-            return future.result(timeout=12.0)
+        return str(run_with_deadline(_execute, timeout=12.0, label="persona-analysis") or "")
     except Exception as exc:
         # Any LLM failure or timeout → return empty (caller will use rule-based fallback)
-        return f"LLM call failed: {exc}"
+        logger.warning(
+            "[persona_agent] LLM analysis unavailable; using rule-based fallback: %s", exc
+        )
+        return ""
     return ""
 
 

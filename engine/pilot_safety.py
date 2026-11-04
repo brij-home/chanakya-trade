@@ -39,7 +39,10 @@ def get_pilot_safety_profile() -> PilotSafetyProfile:
         max_order_notional = 5000.0
     return PilotSafetyProfile(
         profile=os.environ.get("PILOT_PROFILE", "OBSERVE").strip().upper() or "OBSERVE",
-        live_execution_enabled=os.environ.get("PILOT_ALLOW_LIVE_EXECUTION", "0") == "1",
+        live_execution_enabled=(
+            os.environ.get("PILOT_ALLOW_LIVE_EXECUTION", "0") == "1"
+            and os.environ.get("LIVE_EXECUTION_QUALIFIED", "0").strip() == "1"
+        ),
         allowed_segments=allowed_segments,
         allowed_products=allowed_products,
         max_order_notional=max_order_notional,
@@ -53,7 +56,9 @@ def assert_pilot_execution_allowed(*, segment: str, product: str, notional: floa
     profile = get_pilot_safety_profile()
     if not profile.live_execution_enabled:
         raise PermissionError(
-            "Pilot live execution is disabled. Set PILOT_ALLOW_LIVE_EXECUTION=1 only after paper validation."
+            "Pilot live execution is disabled. Both PILOT_ALLOW_LIVE_EXECUTION=1 and "
+            "LIVE_EXECUTION_QUALIFIED=1 are required; qualification must follow paper validation "
+            "and acceptance of the unresolved live execution controls."
         )
     if segment.upper() not in profile.allowed_segments:
         raise PermissionError(

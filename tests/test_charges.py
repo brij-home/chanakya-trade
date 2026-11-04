@@ -93,7 +93,7 @@ class TestOptionsCharges:
             segment="OPTIONS",
             side="SELL",
         )
-        assert breakdown.stt == Decimal("1125.00")  # 0.1% of premium turnover
+        assert breakdown.stt == Decimal("1687.50")  # 0.15% of premium turnover from April 2026
         assert breakdown.stamp_duty == Decimal("0.00")
 
 

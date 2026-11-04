@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
@@ -92,9 +93,9 @@ def detect_options_momentum_breakouts(
     is_opening_freeze = now_dt.hour == 9 and now_dt.minute < 25
     is_opening_drive = now_dt.hour == 9 and (25 <= now_dt.minute <= 45)
     is_midday_lull = (
-        (now_dt.hour == 11 and now_dt.minute >= 45)
+        (now_dt.hour == 11 and now_dt.minute >= 15)
         or (now_dt.hour == 12)
-        or (now_dt.hour == 13 and now_dt.minute < 15)
+        or (now_dt.hour == 13 and now_dt.minute <= 15)
     )
     is_late_session_theta = now_dt.hour > 14 or (now_dt.hour == 14 and now_dt.minute >= 45)
 
@@ -265,7 +266,7 @@ def detect_options_momentum_breakouts(
             # Institutional Single-Stock Expiry Protection:
             # Under SEBI regulations, single-stock options are physically settled.
             # In settlement week (DTE <= 4), automatically route stock options to Next-Month
-            # series to eliminate staggered physical delivery margins (25%->100%) and near-month theta collapse.
+            # series to reduce near-month physical settlement and expiry risk.
             chain = None
             is_next_month_routed = False
             if not is_idx:
@@ -826,12 +827,12 @@ def detect_options_momentum_breakouts(
                         )
                         continue
 
-                    # 2. Midday Volume Lull (11:45 - 13:15 IST)
-                    # Suppress single-stock options during midday consolidation unless extreme catalyst
-                    if is_midday_lull and not is_idx and not is_extreme_catalyst:
-                        if vol_oi < 2.0 or vol < 1500:
+                    # 2. Midday Volume Lull (11:15 - 13:15 IST)
+                    # Suppress options buying during midday consolidation unless high volume/OI expansion
+                    if is_midday_lull and not is_extreme_catalyst:
+                        if vol_oi < 2.5 or vol < 2500:
                             logger.debug(
-                                f"[OptionsBreakout] Suppressed {clean_sym} during 11:45-13:15 IST midday lull (vol_oi {vol_oi}x < 2.0x)"
+                                f"[OptionsBreakout] Suppressed {clean_sym} during 11:15-13:15 IST midday lull (vol_oi {vol_oi}x < 2.5x or vol {vol} < 2500)"
                             )
                             continue
 
@@ -1151,32 +1152,47 @@ def detect_options_momentum_breakouts(
                     "SENSEX",
                     "BANKEX",
                 )
+                max_sl_pct = 0.18 if is_index_sym else 0.22
+                max_allowed_risk = round(opt_ltp * max_sl_pct, 2)
+
                 if opt_plan and opt_plan.get("sl_premium") and opt_plan.get("t1_premium"):
-                    opt_sl = float(opt_plan["sl_premium"])
+                    raw_sl = float(opt_plan["sl_premium"])
+                    raw_risk = max(0.2, opt_ltp - raw_sl)
+                    if raw_risk > max_allowed_risk:
+                        opt_sl = round(max(0.05, opt_ltp - max_allowed_risk), 2)
+                        opt_risk = max_allowed_risk
+                    else:
+                        opt_sl = raw_sl
+                        opt_risk = raw_risk
+
                     opt_t1 = float(opt_plan["t1_premium"])
+                    min_t1 = round(opt_ltp + (opt_risk * 2.0), 2)
+                    if opt_t1 < min_t1:
+                        opt_t1 = min_t1
                     opt_t2 = float(
-                        opt_plan.get("t2_premium")
-                        or round(opt_ltp * (1.30 if is_index_sym else 1.38), 2)
+                        opt_plan.get("t2_premium") or round(opt_ltp + (opt_risk * 3.5), 2)
                     )
+                    min_t2 = round(opt_ltp + (opt_risk * 3.5), 2)
+                    if opt_t2 < min_t2:
+                        opt_t2 = min_t2
                     opt_moonshot = float(
-                        opt_plan.get("t3_premium")
-                        or round(opt_ltp * (1.50 if is_index_sym else 1.65), 2)
+                        opt_plan.get("t3_premium") or round(opt_ltp + (opt_risk * 5.0), 2)
                     )
-                    opt_risk = max(0.2, opt_ltp - opt_sl)
+                    min_moonshot = round(opt_ltp + (opt_risk * 5.0), 2)
+                    if opt_moonshot < min_moonshot:
+                        opt_moonshot = min_moonshot
                     opt_t0_5 = float(
                         opt_plan.get("t0_5_premium") or round(opt_ltp + (0.8 * opt_risk), 2)
                     )
-                    rr_str = opt_plan.get(
-                        "option_rr", f"1:{round((opt_t1 - opt_ltp) / max(0.01, opt_risk), 1)}"
-                    )
+                    rr_str = f"1:{round((opt_t1 - opt_ltp) / max(0.01, opt_risk), 1)}"
                 else:
-                    max_sl_pct = 0.18 if is_index_sym else 0.22
                     risk_pts = round(max(0.20, min(opt_ltp * max_sl_pct, opt_ltp - 0.05)), 2)
+                    opt_risk = risk_pts
                     opt_sl = round(max(0.05, opt_ltp - risk_pts), 2)
                     opt_t0_5 = round(opt_ltp + (0.8 * risk_pts), 2)
-                    opt_t1 = round(opt_ltp + (1.4 * risk_pts), 2)
-                    opt_t2 = round(opt_ltp + (2.2 * risk_pts), 2)
-                    opt_moonshot = round(opt_ltp + (3.5 * risk_pts), 2)
+                    opt_t1 = round(opt_ltp + (2.0 * risk_pts), 2)
+                    opt_t2 = round(opt_ltp + (3.5 * risk_pts), 2)
+                    opt_moonshot = round(opt_ltp + (5.0 * risk_pts), 2)
                     rr_val = round((opt_t1 - opt_ltp) / max(0.01, risk_pts), 1)
                     rr_str = f"1:{rr_val}"
 
@@ -1191,7 +1207,7 @@ def detect_options_momentum_breakouts(
                     else ""
                 )
                 phys_tag = (
-                    " ⚠️ SEBI Physical Delivery Expiry Week: STAGGERED MARGIN SURGE (25%->100% full lot cash value). INTRADAY SCALP ONLY — MANDATORY EXIT BY 15:00 IST."
+                    " Physical settlement risk is elevated near listed stock expiry. Verify current exchange margin before holding."
                     if (is_physical_expiry_week and not is_next_month_routed)
                     else ""
                 )
@@ -1344,14 +1360,22 @@ def detect_options_momentum_breakouts(
                     else ""
                 )
                 if opt_type == "PE":
-                    headline = f"🔴 OPTIONS MOMENTUM{sec_badge}{cat_badge} (PUT SURGE): {contract_sym} @ ₹{opt_ltp:,.1f}{lot_tag} (Vol/OI {vol_oi}x)"
+                    from bot.alert_templates import format_contract_display
+
+                    contract_clean = format_contract_display(contract_sym)
+                    contract_clean = re.sub(
+                        r"^(?:NSE|BSE|NFO|MCX|CDS|BFO):", "", contract_clean, flags=re.IGNORECASE
+                    ).strip()
+                    sec_cat = f"{sec_badge}{cat_badge}".strip()
+                    sec_cat_str = f" · {sec_cat}" if sec_cat else ""
+                    headline = f"🔴 {contract_clean} @ ₹{opt_ltp:,.1f}{lot_tag}{sec_cat_str} (Vol/OI {vol_oi}x)"
                     summary = (
                         f"Institutional Put surge in {clean_sym} {format_strike(strike)} PE. "
                         f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
                         f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}{high_vix_tag}"
                     )
                 else:
-                    headline = f"🟢 OPTIONS MOMENTUM{sec_badge}{cat_badge}: {contract_sym} @ ₹{opt_ltp:,.1f}{lot_tag} (Vol/OI {vol_oi}x)"
+                    headline = f"🟢 {contract_clean} @ ₹{opt_ltp:,.1f}{lot_tag}{sec_cat_str} (Vol/OI {vol_oi}x)"
                     summary = (
                         f"Institutional Call surge in {clean_sym} {format_strike(strike)} CE. "
                         f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
@@ -1606,7 +1630,7 @@ def detect_options_momentum_breakouts(
                             else None
                         ),
                         "physical_settlement_warning": (
-                            "⚠️ SEBI Physical Delivery Expiry Week: STAGGERED MARGIN SURGE (25%->100% full lot cash value). Mandatory exit by 15:00 IST — DO NOT CARRY OVERNIGHT."
+                            "Physical settlement risk is elevated near listed stock expiry. Verify current exchange margin and avoid unprotected overnight carry."
                             if (is_physical_expiry_week and not is_next_month_routed)
                             else None
                         ),

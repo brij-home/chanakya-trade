@@ -13,8 +13,11 @@ Tool executor dispatches the call and returns a JSON-serialisable result.
 
 from __future__ import annotations
 
+import logging
 import traceback
-from typing import Any, Callable
+from typing import Any, Callable, Optional
+
+logger = logging.getLogger("agent.tools")
 
 
 # ── Tool registry ─────────────────────────────────────────────
@@ -23,12 +26,16 @@ from typing import Any, Callable
 class ToolRegistry:
     """Holds all tools with their schemas and Python implementations."""
 
-    def __init__(self) -> None:
+    def __init__(self, approval_callback: Optional[Callable[[str, dict], bool]] = None) -> None:
         self._tools: dict[str, dict] = {}  # name → {fn, description, params, flags}
         # Soft tool limiter — warns on excessive or looping tool calls (#177)
         from engine.tool_limiter import ToolLimiter
 
         self._limiter = ToolLimiter()
+        self._approval_callback: Optional[Callable[[str, dict], bool]] = approval_callback
+
+    def set_approval_callback(self, callback: Optional[Callable[[str, dict], bool]]) -> None:
+        self._approval_callback = callback
 
     def register(
         self,
@@ -55,8 +62,13 @@ class ToolRegistry:
           permission          — "auto" (run freely) | "ask" (always confirm) |
                                 "deny" (blocked; only overridable by env/config).
         """
-        # Destructive tools are always "ask" unless explicitly overridden
-        if is_destructive and permission == "auto":
+        # Destructive tools MUST have permission="ask" or "deny"; NEVER "auto"
+        if is_destructive and permission not in ("ask", "deny"):
+            permission = "ask"
+
+        # Prevent untrusted re-registration from demoting an existing destructive tool
+        if name in self._tools and self._tools[name].get("is_destructive") and not is_destructive:
+            is_destructive = True
             permission = "ask"
 
         self._tools[name] = {
@@ -125,12 +137,46 @@ class ToolRegistry:
         tool = self._tools.get(name)
         return tool["fn"] if tool else None
 
-    def execute(self, name: str, arguments: dict) -> Any:
+    def execute(
+        self,
+        name: str,
+        arguments: dict,
+        approval_callback: Optional[Callable[[str, dict], bool]] = None,
+    ) -> Any:
         """Run a tool by name with given arguments. Returns JSON-serialisable result."""
         if name not in self._tools:
             return {"error": f"Unknown tool: {name}"}
-        if self._tools[name].get("permission") == "deny":
+
+        perm = self._tools[name].get("permission", "auto")
+        if perm == "deny":
             return {"error": f"Tool '{name}' is blocked by permission rules."}
+
+        if perm == "ask":
+            cb = approval_callback or self._approval_callback
+            # In non-interactive or auto contexts, treat "ask" as "deny"
+            if cb is None:
+                logger.warning(
+                    f"[ToolRegistry] Tool '{name}' has permission='ask' but no approval mechanism was provided. Failing closed."
+                )
+                return {
+                    "error": f"Tool '{name}' requires interactive operator approval (permission='ask'), but no approval mechanism was provided.",
+                    "permission_denied": True,
+                }
+
+            try:
+                approved = bool(cb(name, arguments))
+            except Exception as e:
+                logger.error(
+                    f"[ToolRegistry] Approval callback failed for '{name}': {e}", exc_info=True
+                )
+                approved = False
+
+            if not approved:
+                logger.warning(f"[ToolRegistry] Operator denied permission for tool '{name}'.")
+                return {
+                    "error": f"Tool '{name}' execution was denied by operator confirmation gate.",
+                    "permission_denied": True,
+                }
 
         # Check and record for loop/limit detection (#177)
         warning = self._limiter.check_and_record(name)
@@ -148,7 +194,11 @@ class ToolRegistry:
         except Exception as exc:
             return {"error": str(exc), "trace": traceback.format_exc()[-500:]}
 
-    def execute_parallel(self, tool_calls: list[dict]) -> list[dict]:
+    def execute_parallel(
+        self,
+        tool_calls: list[dict],
+        approval_callback: Optional[Callable[[str, dict], bool]] = None,
+    ) -> list[dict]:
         """
         Execute a batch of tool calls, running concurrency-safe tools in parallel.
 
@@ -174,7 +224,10 @@ class ToolRegistry:
         if safe:
             with ThreadPoolExecutor(max_workers=len(safe)) as pool:
                 futures = {
-                    pool.submit(self.execute, tc["name"], tc["input"]): tc["id"] for tc in safe
+                    pool.submit(
+                        self.execute, tc["name"], tc["input"], approval_callback=approval_callback
+                    ): tc["id"]
+                    for tc in safe
                 }
                 for future in as_completed(futures):
                     tool_id = futures[future]
@@ -185,7 +238,9 @@ class ToolRegistry:
 
         # Run unsafe tools sequentially
         for tc in unsafe:
-            results[tc["id"]] = self.execute(tc["name"], tc["input"])
+            results[tc["id"]] = self.execute(
+                tc["name"], tc["input"], approval_callback=approval_callback
+            )
 
         # Rebuild in original order
         return [
@@ -587,8 +642,8 @@ def build_registry() -> ToolRegistry:
     reg.register(
         name="get_iv_rank",
         description=(
-            "Get the IV Rank for a symbol (0–100), computed from 52-week historical realized volatility. "
-            ">50 = volatility elevated (good for selling premium). <30 = volatility low (good for buying options)."
+            "Get historical implied-volatility rank only when a verified option-IV history source is available. "
+            "Underlying realized volatility is a separate measure and is never returned as IV rank."
         ),
         parameters={
             "type": "object",
@@ -601,7 +656,30 @@ def build_registry() -> ToolRegistry:
             "iv_rank": __import__(
                 "analysis.options", fromlist=["compute_iv_rank_from_history"]
             ).compute_iv_rank_from_history(symbol),
-            "method": "30-day rolling realized volatility ranked over 52 weeks",
+            "iv_status": "UNAVAILABLE",
+            "reason": "No verified historical option implied-volatility source is integrated",
+            "method": "IV rank requires historical option IV observations",
+        },
+    )
+
+    reg.register(
+        name="get_realized_volatility_rank",
+        description=(
+            "Get a 30-day underlying realized-volatility rank from historical prices. "
+            "This is not implied volatility and must not be used as an IV rank, IV-crush, "
+            "or option-premium valuation signal."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+        fn=lambda symbol: {
+            "realized_volatility_rank": __import__(
+                "analysis.options", fromlist=["compute_realized_volatility_rank_from_history"]
+            ).compute_realized_volatility_rank_from_history(symbol),
+            "status": "AVAILABLE_WITH_REALIZED_VOLATILITY_ONLY",
+            "method": "30-day rolling annualized historical volatility rank",
         },
     )
 

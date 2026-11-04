@@ -108,7 +108,7 @@ def test_intraday_equities_sub_atr_noise_floor_veto(auditor: AlertScrutinyAudito
         time_horizon="INTRADAY",
         is_live=True,
         environment="LIVE",
-        metrics={"atr": 40.0, "atr_14": 40.0},
+        metrics={"atr": 40.0, "atr_14": 40.0, "rvol": 1.5},
     )
     passed, reason, _ = auditor.verify_tier1_sanity(alert_tight)
     assert passed is False
@@ -132,7 +132,7 @@ def test_intraday_equities_sub_atr_noise_floor_veto(auditor: AlertScrutinyAudito
         time_horizon="INTRADAY",
         is_live=True,
         environment="LIVE",
-        metrics={"atr": 40.0, "atr_14": 40.0},
+        metrics={"atr": 40.0, "atr_14": 40.0, "rvol": 1.5},
     )
     passed_ok, reason_ok, _ = auditor.verify_tier1_sanity(alert_ok)
     assert passed_ok is True
@@ -165,7 +165,7 @@ def test_late_session_exhaustion_gate(auditor: AlertScrutinyAuditor):
         created_at=late_time,
         is_live=True,
         environment="LIVE",
-        metrics={"atr": 15.0},
+        metrics={"atr": 15.0, "rvol": 1.5},
     )
     passed_intra, reason_intra, _ = auditor.verify_tier1_sanity(alert_intra)
     assert passed_intra is False
@@ -397,7 +397,7 @@ def test_falcon_cheetah_trending_momentum_expansion_passes(auditor: AlertScrutin
             "atr": 250.0,
             "chop_index": 32.0,  # Trending expansion (<= 38.2)
             "adx_14": 31.5,  # Strong trend (>= 25.0)
-            "rvol": 1.60,
+            "rvol": 2.2,
         },
     )
     passed, reason, flags = auditor.verify_tier1_sanity(alert_trend)
@@ -473,6 +473,7 @@ def test_order_flow_cvd_bearish_exhaustion_absorption_veto(auditor: AlertScrutin
         environment="LIVE",
         metrics={
             "atr": 18.0,
+            "rvol": 2.0,
             "cvd_divergence": "BEARISH_EXHAUSTION",  # Passive iceberg sell absorption!
         },
     )

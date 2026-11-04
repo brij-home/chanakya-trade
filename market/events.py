@@ -13,7 +13,7 @@ logger = logging.getLogger("market.events")
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 
 from market.http_pool import get_nse_client
@@ -31,8 +31,8 @@ except ImportError:
 
 @dataclass
 class ExpiryDates:
-    weekly: date  # nearest weekly expiry (Thursday)
-    monthly: date  # nearest monthly expiry (last Thursday of month)
+    weekly: date  # nearest weekly expiry from the effective-dated exchange calendar
+    monthly: date  # nearest monthly expiry from the effective-dated exchange calendar
     next_monthly: date  # following month's expiry
 
 
@@ -42,6 +42,10 @@ class EarningsEvent:
     company: str
     date: str  # "YYYY-MM-DD"
     purpose: str  # "Quarterly Results", "Board Meeting" etc.
+    published_at: Optional[str] = None
+    first_seen_at: Optional[str] = None
+    revision_id: Optional[str] = None
+    source_entity: str = "NSE"
 
 
 @dataclass
@@ -49,6 +53,10 @@ class RBIEvent:
     date: str
     event: str
     rate: Optional[float] = None  # repo rate after decision
+    published_at: Optional[str] = None
+    first_seen_at: Optional[str] = None
+    revision_id: Optional[str] = None
+    source_entity: str = "RBI"
 
 
 @dataclass
@@ -57,61 +65,106 @@ class CorporateAction:
     action: str  # "Dividend", "Bonus", "Split", "Rights"
     ex_date: str
     details: str
+    published_at: Optional[str] = None
+    first_seen_at: Optional[str] = None
+    revision_id: Optional[str] = None
+    source_entity: str = "NSE"
+
+
+def filter_events_as_of(
+    events: list[Any],
+    as_of: datetime | str,
+) -> list[Any]:
+    """
+    Filter events to prevent lookahead bias in backtest/replay.
+    Only includes events whose first_seen_at (or published_at / date) is <= as_of.
+    """
+    if not events:
+        return []
+
+    from datetime import timezone
+
+    if isinstance(as_of, str):
+        try:
+            as_of_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        except ValueError:
+            as_of_dt = datetime.strptime(as_of[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    else:
+        as_of_dt = as_of
+
+    if as_of_dt.tzinfo is None:
+        as_of_dt = as_of_dt.replace(tzinfo=timezone.utc)
+
+    valid_events = []
+    for ev in events:
+        ts_str = getattr(ev, "first_seen_at", None) or getattr(ev, "published_at", None)
+        if ts_str:
+            try:
+                ev_dt = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                if ev_dt.tzinfo is None:
+                    ev_dt = ev_dt.replace(tzinfo=timezone.utc)
+                if ev_dt <= as_of_dt:
+                    valid_events.append(ev)
+                continue
+            except Exception as e_ts:
+                logger.debug(f"[market.events] Failed parsing ISO timestamp '{ts_str}': {e_ts}")
+
+        d_str = getattr(ev, "date", None) or getattr(ev, "ex_date", None)
+        if d_str:
+            try:
+                ev_d = datetime.strptime(str(d_str)[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                if ev_d <= as_of_dt:
+                    valid_events.append(ev)
+            except Exception as e_d:
+                logger.debug(f"[market.events] Failed parsing date '{d_str}': {e_d}")
+    return valid_events
 
 
 # ── F&O Expiry Dates ─────────────────────────────────────────
 
 
 def _last_thursday(year: int, month: int) -> date:
-    """Last Thursday of the given month."""
-    # Walk back from last day to find Thursday (weekday 3)
-    # Get last day properly
-    if month == 12:
-        last = date(year + 1, 1, 1) - timedelta(days=1)
-    else:
-        last = date(year, month + 1, 1) - timedelta(days=1)
-    while last.weekday() != 3:  # 3 = Thursday
-        last -= timedelta(days=1)
-    return last
+    """Compatibility name returning the effective-dated NSE monthly expiry."""
+    from market.rule_schedule import monthly_expiry
+    from market.calendar import get_adjusted_expiry_date
+
+    return get_adjusted_expiry_date(monthly_expiry(year, month, "NSE"), "NFO")
 
 
 def _next_thursday(from_date: date = None) -> date:
-    """Next Thursday from given date (or today)."""
-    d = from_date or date.today()
-    days_ahead = 3 - d.weekday()  # Thursday = 3
-    if days_ahead <= 0:
-        days_ahead += 7
-    return d + timedelta(days=days_ahead)
+    """Compatibility name returning the next canonical NIFTY weekly expiry."""
+    from market.calendar import get_nearest_weekly_expiry
+
+    return get_nearest_weekly_expiry("NIFTY", ref_date=from_date or date.today())
 
 
 def get_expiry_dates() -> ExpiryDates:
     """
-    Calculate current week/month/next-month F&O expiry dates.
-    NSE weekly expiries: every Thursday.
-    NSE monthly expiries: last Thursday of the month.
+    Calculate current week/month/next-month F&O expiry dates through the
+    effective-dated exchange calendar.
     """
     today = date.today()
     year, month = today.year, today.month
 
-    # Weekly: next Thursday (if today is Thursday and market hours, it's today)
-    weekly = _next_thursday(today)
-    if today.weekday() == 3:
-        weekly = today  # today IS Thursday
+    # Weekly NIFTY expiry; calendar resolver applies holidays and dated rules.
+    from market.calendar import get_nearest_weekly_expiry
 
-    # Monthly: last Thursday of current month
-    monthly = _last_thursday(year, month)
+    weekly = get_nearest_weekly_expiry("NIFTY", ref_date=today)
+
+    # Monthly NSE expiry from the same rule schedule.
+    monthly = _monthly_contract_expiry(year, month)
     if monthly < today:
         # Current month already expired — move to next month
         nm = month + 1 if month < 12 else 1
         ny = year if month < 12 else year + 1
-        monthly = _last_thursday(ny, nm)
+        monthly = _monthly_contract_expiry(ny, nm)
 
     # Next monthly
     if monthly.month == 12:
         nm2, ny2 = 1, monthly.year + 1
     else:
         nm2, ny2 = monthly.month + 1, monthly.year
-    next_monthly = _last_thursday(ny2, nm2)
+    next_monthly = _monthly_contract_expiry(ny2, nm2)
 
     from market.calendar import get_adjusted_expiry_date
 
@@ -264,3 +317,10 @@ def get_upcoming_events(days: int = 7) -> dict:
         ],
         "rbi": [{"date": r.date, "event": r.event} for r in rbi[:2]],
     }
+
+
+def _monthly_contract_expiry(year, month):
+    from market.rule_schedule import monthly_expiry
+    from market.calendar import get_adjusted_expiry_date
+
+    return get_adjusted_expiry_date(monthly_expiry(year, month), "NFO")

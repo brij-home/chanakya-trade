@@ -63,14 +63,16 @@ class ZerodhaAPI(BrokerAPI):
     # ── Token management ──────────────────────────────────────
 
     def _save_token(self, access_token: str) -> None:
-        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_FILE.write_text(
+        from brokers.base import save_secure_token
+
+        save_secure_token(
+            TOKEN_FILE,
             json.dumps(
                 {
                     "access_token": access_token,
                     "saved_at": datetime.now().isoformat(),
                 }
-            )
+            ),
         )
         self.kite.set_access_token(access_token)
 

@@ -305,11 +305,19 @@ def test_auto_alert_upgrade_preserves_telegram_root(tmp_path, monkeypatch):
     from zoneinfo import ZoneInfo
 
     ist = ZoneInfo("Asia/Kolkata")
-    now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+    now_str = datetime.now(ist).strftime("%Y-%m-%d 10:15:00 IST")
 
     data_file = tmp_path / "auto_alerts.json"
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    monkeypatch.setattr(
+        "engine.signal_policy.evaluate_candidate_policy",
+        lambda ctx, a: type(
+            "PolicyRes",
+            (),
+            {"decision": "ACCEPT", "conviction_tier": "HIGH", "to_dict": lambda s: {}},
+        )(),
+    )
     engine = AutoAlertEngine(max_buffer=20)
     engine.clear_alerts()
 
@@ -615,3 +623,131 @@ def test_record_signal_message_id_overwrite_behavior():
     # Explicit overwrite=True updates the anchor
     record_signal_message_id("SIG_MRPL_15OCT_1046", 9999, chat_id="-1003524867091", overwrite=True)
     assert get_signal_message_id("SIG_MRPL_15OCT_1046", chat_id="-1003524867091") == 9999
+
+
+def test_cross_channel_threading_isolation():
+    """
+    RCA Regression Test:
+    When a signal is recorded in Chat A (e.g. Equity), querying get_signal_message_id
+    for Chat B (e.g. F&O) MUST return None and NEVER return Chat A's message ID.
+    """
+    chat_eq = "-1003524867091"
+    chat_fno = "-1004393392375"
+    sig = "SIG_ADANIPORTS_02NOV_1050"
+    aid = "aa-asym-pocket-pivot-adaniports-20261102"
+
+    # Record message 1097 in Equity channel
+    record_signal_message_id(sig, 1097, chat_id=chat_eq, alert_id=aid)
+
+    # In Equity channel, it must resolve to 1097
+    assert get_signal_message_id(sig, chat_id=chat_eq, alert_id=aid) == 1097
+
+    # In F&O channel, it MUST return None (isolated!)
+    assert get_signal_message_id(sig, chat_id=chat_fno, alert_id=aid) is None
+
+
+def test_zero_ghost_milestone_suppression_when_no_parent_thread(tmp_path, monkeypatch):
+    """
+    RCA Regression Test:
+    A lifecycle milestone (e.g. IN_FLIGHT_WARNING or SCRATCH) MUST be suppressed
+    if no parent Telegram thread ID exists in the destination chat, even if
+    telegram_dispatched was previously marked True.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    dispatched_messages = []
+
+    def mock_notify(*args, **kwargs):
+        dispatched_messages.append((args, kwargs))
+
+    monkeypatch.setattr("engine.alerts._telegram_notify", mock_notify)
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    # Alert marked telegram_dispatched=True but with NO telegram_chat_id or root message id in destination
+    alert = AutoAlert(
+        alert_id="aa-asym-adaniports-ghost-test",
+        alert_type="ASYMMETRIC_OPPORTUNITY",
+        stage="IN_FLIGHT_WARNING",
+        symbol="ADANIPORTS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="ADANIPORTS Action Required",
+        summary="Velocity stagnation scratch",
+        ltp=1833.0,
+        trigger_level=1833.0,
+        target_level=1900.0,
+        stop_loss=1800.0,
+        telegram_dispatched=True,
+        telegram_chat_id=None,
+        telegram_root_message_id=None,
+        telegram_message_id=None,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    engine._dispatch(alert)
+
+    # Because no parent thread existed in the target channel, it MUST fail closed and NOT dispatch!
+    assert len(dispatched_messages) == 0
+    assert "No Telegram parent message ID found" in (alert.telegram_suppression_reason or "")
+
+
+def test_channel_anchoring_prevents_segment_migration(tmp_path, monkeypatch):
+    """
+    RCA Regression Test:
+    When an alert is initially dispatched to an Equity chat, subsequent milestone
+    updates MUST route to the exact same Equity chat and NOT migrate to FNO_STOCK chat.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    dispatched_targets = []
+
+    def mock_notify(msg, chat_id=None, **kwargs):
+        dispatched_targets.append(chat_id)
+
+    monkeypatch.setattr("engine.alerts._telegram_notify", mock_notify)
+    engine = AutoAlertEngine(max_buffer=20)
+
+    # Primary alert was anchored to Equity channel "-1003524867091" with message ID 1097
+    alert = AutoAlert(
+        alert_id="aa-asym-pocket-pivot-adaniports-anchored",
+        alert_type="ASYMMETRIC_OPPORTUNITY",
+        stage="IN_FLIGHT_WARNING",
+        symbol="ADANIPORTS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="ADANIPORTS Velocity Scratch",
+        summary="Midday scratch",
+        ltp=1833.0,
+        trigger_level=1833.0,
+        target_level=1900.0,
+        stop_loss=1800.0,
+        telegram_dispatched=True,
+        telegram_chat_id="-1003524867091",
+        telegram_root_message_id=1097,
+        telegram_message_id=1097,
+        actionable_plan={
+            "option_plan": {
+                "contract_symbol": "ADANIPORTS26NOV1840CE",
+                "strike": 1840.0,
+                "option_type": "CE",
+            }
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+
+    engine._dispatch(alert)
+
+    # Must be dispatched to the original anchored chat "-1003524867091", NOT "-1004393392375"
+    assert len(dispatched_targets) == 1
+    assert dispatched_targets[0] == "-1003524867091"

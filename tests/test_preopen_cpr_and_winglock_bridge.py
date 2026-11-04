@@ -247,6 +247,9 @@ def test_execute_wing_lock_hedge(monkeypatch):
     with engine._lock:
         engine._alerts.insert(0, alert)
 
+    # Mock quote so PaperBroker fills the SELL limit order at >= 42.0
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 42.0)
+
     # Execute wing lock hedge
     result = execute_wing_lock_hedge(
         alert_id="aa-gamma-blast-nifty-24500ce-test-20261031",

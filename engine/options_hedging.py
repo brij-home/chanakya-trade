@@ -209,14 +209,13 @@ def get_optimal_expiry_recommendation(
 ) -> dict[str, Any]:
     """
     Evaluates optimal contract expiry cycle recommendation.
-    - For Weekly Benchmark Indices (NIFTY 50 on Thursday, SENSEX on Friday):
+    - For weekly benchmark indices, uses the effective-dated, holiday-adjusted expiry resolver:
       Protects positions from the post-13:15 IST 0DTE Theta Cliff.
     - For Stock Options and Monthly-Only Indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, Stocks):
-      Enforces SEBI Physical Delivery Protection: routes to NEXT_MONTHLY during the final 4 days
-      of the monthly settlement cycle to avoid 100% margin surcharges and assignment risks.
+      Routes to NEXT_MONTHLY during the final four calendar days when the listed monthly
+      contract carries physical settlement risk.
     """
     now = now_dt or datetime.now(IST)
-    weekday = now.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
     now_time = now.time()
 
     clean_sym = (
@@ -240,7 +239,7 @@ def get_optimal_expiry_recommendation(
             if is_monthly_physical_expiry_week(symbol=clean_sym, ref_dt=now):
                 return {
                     "preferred_expiry": "NEXT_MONTHLY",
-                    "warning": "⚠️ SEBI PHYSICAL SETTLEMENT SURGE: Expiring stock/monthly derivatives enter mandatory 100% delivery margin. Route all positions to NEXT MONTHLY expiry.",
+                    "warning": "Physical settlement risk is elevated for the expiring stock/monthly contract. Review current exchange margin requirements and prefer a later listed series.",
                     "reason": "SEBI_PHYSICAL_SETTLEMENT_WEEK",
                 }
         except Exception as e_suppressed:
@@ -254,20 +253,19 @@ def get_optimal_expiry_recommendation(
             "reason": "NORMAL_MONTHLY_CYCLE",
         }
 
-    # 2. Benchmark Weekly Index Expiries (NIFTY on Thursday, SENSEX on Friday)
-    is_expiry_day = (clean_sym == "NIFTY" and weekday == 3) or (
-        clean_sym == "SENSEX" and weekday == 4
-    )
-    is_pre_expiry_eve = (clean_sym == "NIFTY" and weekday == 2 and now_time >= dtime(13, 0)) or (
-        clean_sym == "SENSEX" and weekday == 3 and now_time >= dtime(13, 0)
-    )
-    is_fri_weekend_eve = weekday == 4 and now_time >= dtime(14, 0)
+    # 2. Benchmark weekly index expiry, sourced from the effective-dated calendar.
+    from market.calendar import get_nearest_weekly_expiry
+
+    expiry_date = get_nearest_weekly_expiry(clean_sym, ref_date=now.date(), ref_time=now_time)
+    days_to_expiry = (expiry_date - now.date()).days
+    is_expiry_day = expiry_date == now.date()
+    is_pre_expiry_eve = days_to_expiry == 1 and now_time >= dtime(13, 0)
 
     if is_expiry_day:
         if now_time >= dtime(13, 15):
             return {
                 "preferred_expiry": "NEXT_WEEKLY",
-                "warning": "⚠️ 0DTE THETA CLIFF ACTIVE: Same-day weekly options lose ~60% premium in final 90 minutes. Route defined-risk spreads to NEXT WEEKLY expiry.",
+                "warning": "0DTE theta and gamma risk is elevated late in the session. Review current premium, liquidity and defined-risk alternatives before holding.",
                 "reason": "EXPIRY_DAY_AFTERNOON_CLIFF",
             }
         else:
@@ -280,13 +278,7 @@ def get_optimal_expiry_recommendation(
         return {
             "preferred_expiry": "NEXT_WEEKLY",
             "warning": "⏳ PRE-EXPIRY DECAY ACCELERATION: Next Weekly contract provides ~5x more theta runway and avoids pin risk.",
-            "reason": "WEDNESDAY_PRE_EXPIRY" if weekday == 2 else "PRE_EXPIRY_AFTERNOON",
-        }
-    elif is_fri_weekend_eve:
-        return {
-            "preferred_expiry": "CURRENT_WEEKLY",
-            "warning": "⚠️ WEEKEND THETA HOLD: Close intraday MIS before 15:20 IST or hold defined-risk spread to withstand weekend decay.",
-            "reason": "FRIDAY_WEEKEND_THETA",
+            "reason": "PRE_EXPIRY_AFTERNOON",
         }
 
     return {
@@ -306,40 +298,31 @@ def get_0dte_intraday_phase(
     """
     Evaluates the 0DTE Intraday Phase for Indian Index / Stock Options.
 
-    SEBI Index Derivatives Regulatory Framework (Effective Nov 2024):
+    SEBI index weekly-contract eligibility is distinct from the effective-dated expiry calendar:
       - Exchanges provide derivative contracts for ONLY ONE benchmark index with weekly expiry:
-        • NSE: NIFTY 50 (Weekly Expiry on Thursday). Weekly contracts on BANKNIFTY, FINNIFTY, MIDCPNIFTY are DISCONTINUED.
-        • BSE: SENSEX (Weekly Expiry on Friday). Weekly contracts on BANKEX are DISCONTINUED.
-      - All other indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX) and single-stock options trade strictly MONTHLY expiries (last Thursday of the month).
-      - Monday, Tuesday, and Wednesday have ZERO index weekly expiries.
+        • NSE: NIFTY 50. Weekly contracts on BANKNIFTY, FINNIFTY, MIDCPNIFTY are DISCONTINUED.
+        • BSE: SENSEX. Weekly contracts on BANKEX are DISCONTINUED.
+      - All other indices and single-stock options use their effective-dated listed monthly expiries.
 
     Deterministic 0DTE Verification (Rules 10, 11, 20, 22):
       1. If `dte` is provided, `is_0dte = (dte == 0)`.
       2. If `expiry_date` or `contract_symbol` is provided, compare contract expiration date against current session date.
-      3. If only `symbol` is provided:
-         - NIFTY is 0DTE on Thursdays (weekday == 3).
-         - SENSEX is 0DTE on Fridays (weekday == 4).
-         - BANKNIFTY, FINNIFTY, MIDCPNIFTY, and Stock F&O are 0DTE ONLY on their monthly expiry date (last Thursday of the month), NEVER every Mon/Tue/Wed.
+      3. If only `symbol` is provided, expiry is unknown and must not be inferred.
 
     Intraday Clock Phases (IST):
       1. MORNING_EXPANSION (09:15 - 11:00):
-         High velocity opening momentum. Vega and delta expansion dominate. Favor Route A (Naked Convexity)
-         on high-conviction breakout levels. Avoid premature OTM short sells.
+         Opening liquidity and volatility can change quickly. Use current quotes and defined invalidation.
       2. MIDDAY_THETA_GRIND (11:00 - 13:30):
-         Consolidation and aggressive intraday theta decay. Pure naked buying risks rapid decay in chop.
-         Favor Route B (Dynamic Spread) to harvest short premium or sit out.
+         Intraday consolidation can increase theta exposure. Evaluate current premium, spread and scenario risk.
       3. AFTERNOON_GAMMA_SQUEEZE (13:30 - 15:00):
-         0DTE Gamma Squeeze window. Unwinding of dealer gamma walls. Asymmetric R:R (1:5+) for close ATM/OTM options
-         on high-velocity breaks. Extreme blowout risk for naked option sellers.
+         Expiry-day gamma and liquidity can change quickly. Use verified contract data, current quotes and defined risk.
       4. TERMINAL_CLOSING (15:00 - 15:30):
-         Expiry final auction window. Delta and gamma collapse into intrinsic cash value.
-         Square off winning spreads and harvest remaining residual gains. No new naked entries.
+         Late-session liquidity and expiry exposure require fresh quotes and explicit exit rules.
       5. OFF_MARKET:
          Outside 09:15-15:30 IST.
     """
     now = now_dt or datetime.now(IST)
     now_date = now.date()
-    weekday = now.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
     now_time = now.time()
 
     clean_sym = (
@@ -371,21 +354,8 @@ def get_0dte_intraday_phase(
             logger.debug(
                 f"[engine.options_hedging] 0DTE contract resolution exception: {e_suppressed}"
             )
-    else:
-        # 2. General ticker fallback under SEBI single-benchmark weekly regime:
-        if clean_sym in ("NIFTY", "NIFTY50") and weekday == 3:
-            is_0dte = True
-        elif clean_sym in ("SENSEX", "BSX") and weekday == 4:
-            is_0dte = True
-        else:
-            # BANKNIFTY, FINNIFTY, MIDCPNIFTY, and Stock F&O are 0DTE ONLY on their monthly expiry day
-            try:
-                from engine.alert_expiry import get_last_thursday_of_month
-
-                last_thu = get_last_thursday_of_month(now_date.year, now_date.month)
-                is_0dte = bool(now_date == last_thu and weekday == 3)
-            except Exception:
-                is_0dte = False
+    # No contract expiry or sourced DTE means expiry status is unknown. Never
+    # infer 0DTE from ticker plus weekday; holidays and listed series vary.
 
     if not is_0dte:
         return {
@@ -422,9 +392,9 @@ def get_0dte_intraday_phase(
             "symbol": clean_sym,
             "is_0dte": True,
             "phase": "MORNING_EXPANSION",
-            "tactical_bias": "NAKED_FAVORED",
-            "guidance": "High velocity opening momentum. Vega and delta expansion dominate. Favor Route A (Naked Convexity) on high-conviction breakout levels. Avoid premature OTM short sells.",
-            "volatility_multiplier": 1.35,
+            "tactical_bias": "REGIME_DEPENDENT",
+            "guidance": "Opening conditions change quickly. Select structure only from verified quotes, measured liquidity, defined risk and the current market regime.",
+            "volatility_multiplier": 1.0,
             "time_in_phase_pct": pct,
             "veto_naked_otm": False,
             "allowed_moneyness": "ANY",
@@ -438,9 +408,9 @@ def get_0dte_intraday_phase(
             "symbol": clean_sym,
             "is_0dte": True,
             "phase": "MIDDAY_THETA_GRIND",
-            "tactical_bias": "SPREAD_FAVORED",
-            "guidance": "Consolidation and aggressive intraday theta decay. Pure naked buying risks rapid decay in chop. Favor Route B (Dynamic Spread) to harvest short premium or sit out.",
-            "volatility_multiplier": 0.85,
+            "tactical_bias": "REGIME_DEPENDENT",
+            "guidance": "Intraday time decay matters, but direction and structure depend on observed regime, spread costs, liquidity and defined payoff risk.",
+            "volatility_multiplier": 1.0,
             "time_in_phase_pct": pct,
             "veto_naked_otm": False,
             "allowed_moneyness": "SPREAD_OR_ATM",
@@ -454,9 +424,9 @@ def get_0dte_intraday_phase(
             "symbol": clean_sym,
             "is_0dte": True,
             "phase": "AFTERNOON_GAMMA_SQUEEZE",
-            "tactical_bias": "GAMMA_SNIPER",
-            "guidance": "0DTE Gamma Squeeze window. Unwinding of dealer gamma walls. Asymmetric R:R (1:5+) for close ATM/OTM options on high-velocity breaks. Extreme blowout risk for naked option sellers.",
-            "volatility_multiplier": 1.80,
+            "tactical_bias": "REGIME_DEPENDENT",
+            "guidance": "Expiry-day gamma and liquidity can change quickly. Use verified contract data, current quotes and defined risk.",
+            "volatility_multiplier": 1.0,
             "time_in_phase_pct": pct,
             "veto_naked_otm": True,
             "allowed_moneyness": "ATM_OR_ITM_ONLY",
@@ -469,9 +439,9 @@ def get_0dte_intraday_phase(
         "symbol": clean_sym,
         "is_0dte": True,
         "phase": "TERMINAL_CLOSING",
-        "tactical_bias": "SQUARE_OFF",
-        "guidance": "Expiry final auction window. Delta and gamma collapse into intrinsic cash value. Square off winning spreads and harvest remaining residual gains. No new naked entries.",
-        "volatility_multiplier": 0.50,
+        "tactical_bias": "REGIME_DEPENDENT",
+        "guidance": "Late-session expiry exposure. Recheck contract status, liquidity, executable exit quotes and the precommitted risk plan; time of day alone is not an exit signal.",
+        "volatility_multiplier": 1.0,
         "time_in_phase_pct": pct,
         "veto_naked_otm": True,
         "allowed_moneyness": "SQUARE_OFF_ONLY",
@@ -1535,7 +1505,7 @@ def evaluate_spread_in_flight(
     is_test = (getattr(alert, "environment", "LIVE") == "TEST") or (
         not getattr(alert, "is_live", True)
     )
-    env_tag = "[TEST]" if is_test else "[REAL/LIVE]"
+    env_tag = "[TEST]" if is_test else "[LIVE]"
 
     achieved = getattr(alert, "achieved_milestones", None) or []
 

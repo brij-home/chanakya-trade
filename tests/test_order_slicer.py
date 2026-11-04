@@ -5,6 +5,7 @@ Unit tests for engine/order_slicer.py (TWAP and POV Order Slicing).
 """
 
 from engine.order_slicer import build_twap_schedule, build_pov_schedule
+import pytest
 
 
 def test_build_twap_schedule_conservation_of_quantity():
@@ -47,6 +48,31 @@ def test_build_twap_schedule_lot_size_quantization():
     assert schedule.total_sliced_quantity == 100
     for s in schedule.slices:
         assert s.quantity % 25 == 0  # Every slice must be a multiple of lot size 25
+
+
+def test_twap_rejects_partial_lot_instead_of_inflating_parent_quantity():
+    with pytest.raises(ValueError, match="exact multiple"):
+        build_twap_schedule(
+            symbol="NIFTY",
+            side="BUY",
+            total_quantity=24,
+            base_limit_price=24500.0,
+            lot_size=25,
+        )
+
+
+def test_twap_caps_slice_count_at_parent_lot_count():
+    schedule = build_twap_schedule(
+        symbol="NIFTY",
+        side="BUY",
+        total_quantity=25,
+        base_limit_price=24500.0,
+        num_slices=5,
+        lot_size=25,
+        seed=42,
+    )
+    assert schedule.total_sliced_quantity == 25
+    assert len(schedule.slices) == 1
 
 
 def test_build_pov_schedule():

@@ -1,6 +1,4 @@
-"""
-Core AutoAlert data model and Indian expiry calendar mapping.
-"""
+"""Core AutoAlert data model."""
 
 from __future__ import annotations
 
@@ -8,7 +6,7 @@ import logging
 import os
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Optional
 
 from config.constants import IST_ZONE as IST
@@ -19,6 +17,13 @@ from engine.alert_expiry import (
     get_expiry_metadata,
     get_next_expiry_opportunity,
 )
+from market.rule_schedule import expiry_weekday
+
+# SEBI Regulatory Mandate: Only NIFTY and SENSEX have weekly expiries.
+INDEX_WEEKLY_EXPIRY_WEEKDAY: dict[str, int] = {
+    "NIFTY": expiry_weekday("NSE", datetime.now(IST).date()),
+    "SENSEX": expiry_weekday("BSE", datetime.now(IST).date()),
+}
 
 # ── Interception Pipeline Stages ───────────────────────────────────────────
 STAGE_STALK = "STALK"  # Radar tracking & coiling base identified
@@ -29,15 +34,79 @@ STAGE_INVALIDATED = "INVALIDATED"  # Stop-loss breached or setup structure broke
 STAGE_EXPIRED = "EXPIRED"  # Session or TTL expired
 STAGE_COMPLETED = "COMPLETED"  # Final profit targets or runner exited
 
-# SEBI Regulatory Mandate (Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/136):
-# Only ONE benchmark index derivative contract per exchange offers weekly options:
-#   - NSE: NIFTY 50 (Thursday = 3)
-#   - BSE: SENSEX (Friday = 4)
-# All other indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX) trade strictly MONTHLY expiries.
-INDEX_WEEKLY_EXPIRY_WEEKDAY = {
-    "NIFTY": 3,  # Thursday (NSE sole weekly index)
-    "SENSEX": 4,  # Friday (BSE sole weekly index)
-}
+PULLBACK_ABSORPTION_ALERT_TYPES: frozenset[str] = frozenset(
+    {
+        "TREND_DAY_PULLBACK",
+        "TREND-PULLBACK",
+        "SMC_OB_RETEST",
+        "SMC_ORDERBLOCK_RETEST",
+        "PRE_INFLECTION_DRYUP",
+        "TURTLE_SOUP",
+        "TURTLE_SOUP_RETEST",
+        "TURTLE_SOUP_SWEEP",
+        "LIQUIDITY_SWEEP",
+        "SMT_SWEEP",
+        "SMC_SPRING_SWEEP",
+        "PREDATOR_SWEEP",
+        "SWING_INFLECTION",
+        "PATTERN_COILING",
+        "PULLBACK_RETEST",
+        "VWAP_BOUNCE",
+        "TREND_PULLBACK_BOUNCE",
+        "LIMIT_ON_PULLBACK",
+        "LIMIT_ON_RETEST",
+    }
+)
+
+
+def is_pullback_or_absorption_setup(alert_or_type: Any) -> bool:
+    """
+    Returns True if the alert or setup represents a pullback, structural retest,
+    or low-volume accumulation/absorption setup rather than an aggressive momentum breakout chase.
+    """
+    if not alert_or_type:
+        return False
+
+    if isinstance(alert_or_type, str):
+        val = alert_or_type.upper().replace(" ", "_")
+        return val in PULLBACK_ABSORPTION_ALERT_TYPES or any(
+            k in val for k in ("PULLBACK", "RETEST", "DRYUP", "ABSORPTION", "COILING")
+        )
+
+    atype = str(getattr(alert_or_type, "alert_type", "") or "").upper()
+    if atype in PULLBACK_ABSORPTION_ALERT_TYPES or any(
+        k in atype for k in ("PULLBACK", "RETEST", "DRYUP", "ABSORPTION", "COILING")
+    ):
+        return True
+
+    plan = getattr(alert_or_type, "actionable_plan", None) or {}
+    entry_style = str(
+        getattr(alert_or_type, "entry_type", "")
+        or plan.get("entry_type", "")
+        or plan.get("setup_style", "")
+        or plan.get("action", "")
+        or ""
+    ).upper()
+    if any(
+        k in entry_style
+        for k in ("PULLBACK", "RETEST", "LIMIT_ON_PULLBACK", "LIMIT_ON_RETEST", "DRYUP")
+    ):
+        return True
+
+    m = getattr(alert_or_type, "metrics", None) or {}
+    if (
+        m.get("is_pullback")
+        or m.get("is_retest")
+        or m.get("is_volume_dryup")
+        or (m.get("vol_dryup_ratio") is not None and float(m.get("vol_dryup_ratio") or 0.0) <= 0.85)
+        or (
+            m.get("pullback_vol_ratio") is not None
+            and float(m.get("pullback_vol_ratio") or 0.0) <= 1.25
+        )
+    ):
+        return True
+
+    return False
 
 
 @dataclass
@@ -208,8 +277,12 @@ class AutoAlert:
     telegram_dispatched: bool = False
     dispatched_channels: list[str] = field(default_factory=list)
     telegram_suppression_reason: Optional[str] = None
+    telegram_delivery_status: str = (
+        "PENDING"  # "SENT" | "HELD" | "HELD_RADAR" | "SUPPRESSED" | "PENDING"
+    )
     telegram_message_id: Optional[int] = None
     telegram_root_message_id: Optional[int] = None
+    telegram_chat_id: Optional[str] = None  # Anchored target Telegram chat ID (Invariant 19)
     strike_clock_sent: bool = False
     trace_id: Optional[str] = None
     correlation_id: Optional[str] = None
@@ -581,27 +654,15 @@ class AutoAlert:
                 try:
                     from engine.position_sizer import get_lot_size
 
-                    ls = get_lot_size(self.contract_symbol or self.symbol)
+                    # An underlying is not an exact derivative contract. Never
+                    # authorize an executable lot from its research fallback map.
+                    ls = get_lot_size(self.contract_symbol) if self.contract_symbol else 0
                     if ls and ls > 1:
                         self.lot_size = ls
                 except Exception as e_suppressed:
                     logger.debug(
                         f"[engine.alert_model] Non-fatal exception suppressed: {e_suppressed}"
                     )
-            if self.lot_size is None:
-                from market.instruments import STANDARD_LOT_SIZES
-
-                clean = (
-                    (self.symbol or "")
-                    .replace("NSE:", "")
-                    .replace("NFO:", "")
-                    .replace("BSE:", "")
-                    .replace("MCX:", "")
-                    .strip()
-                    .upper()
-                )
-                self.lot_size = STANDARD_LOT_SIZES.get(clean)
-
         # Auto-resolve market_status if not explicitly provided or defaulted to closed
         if not self.market_status or (
             self.market_status == "SESSION_CLOSED" and self.environment == "LIVE"
@@ -1274,7 +1335,13 @@ class AutoAlert:
                 str(getattr(self, "direction", "")).upper()
                 in ("NEUTRAL", "DELTA_NEUTRAL", "NON_DIRECTIONAL")
                 or getattr(self, "alert_type", "")
-                in ("IRON_CONDOR_PINNING", "IRON_CONDOR", "STRADDLE", "STRANGLE")
+                in (
+                    "IRON_CONDOR_PINNING",
+                    "IRON_CONDOR",
+                    "DEFINED_RISK_NEUTRAL",
+                    "STRADDLE",
+                    "STRANGLE",
+                )
                 or str(plan_dict.get("action", "")).upper()
                 in ("IRON_CONDOR_PINNING", "IRON_CONDOR", "EXECUTE_IRON_CONDOR")
             )
@@ -1820,22 +1887,9 @@ class AutoAlert:
 
         if is_deriv:
             if created_dt:
-                clean_sym = self.symbol.replace("NSE:", "").replace("NFO:", "").strip().upper()
-                # Indian index weekly options expiry mapping (only if no explicit expiry date)
-                if not self.expiry_date and clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY:
-                    target_weekday = INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym]
-                    days_ahead = (target_weekday - created_dt.weekday()) % 7
-                    if days_ahead == 0 and (
-                        created_dt.hour > 15 or (created_dt.hour == 15 and created_dt.minute >= 30)
-                    ):
-                        days_ahead = 7
-                    exp_dt = created_dt.replace(hour=15, minute=30, second=0) + timedelta(
-                        days=days_ahead
-                    )
-                    if now >= exp_dt:
-                        return True
-
-                # Gamma blast & index setups shelf-life: intraday momentum spike expires after 24 hours only if no explicit expiry date
+                # Never infer a listed derivative's expiry from its weekday.
+                # Missing contract expiry uses the short alert TTL below; contract
+                # lifecycle requires the canonical instrument-master expiry.
                 if (
                     self.alert_type in ("GAMMA_BLAST", "INDEX_CALL_SETUP", "INDEX_PUT_SETUP")
                     and not self.expiry_date
@@ -2316,6 +2370,11 @@ class AutoAlert:
             return str(plan["execution_style_mandate"])
         return None
 
+    @property
+    def is_pullback_or_absorption(self) -> bool:
+        """True if setup is a pullback, structural retest, or quiet absorption."""
+        return is_pullback_or_absorption_setup(self)
+
     def generate_dual_blueprints(self) -> dict[str, Any]:
         """
         Generates dual institutional execution blueprints:
@@ -2389,6 +2448,14 @@ class AutoAlert:
         if self.is_do_not_miss:
             d["do_not_miss_label"] = "🌟 DO NOT MISS"
         d["execution_style_mandate"] = self.execution_style_mandate
+        m_dict = self.metrics if isinstance(self.metrics, dict) else {}
+        if "jackpot_score" in m_dict:
+            d["jackpot_score"] = m_dict["jackpot_score"]
+            d["coiling_score"] = m_dict.get("coiling_score")
+            d["structure_score"] = m_dict.get("structure_score")
+            d["thrust_score"] = m_dict.get("thrust_score")
+            d["sector_score"] = m_dict.get("sector_score")
+            d["confluence_tier"] = m_dict.get("confluence_tier")
         d["timestamp"] = (
             self.invalidated_at
             or self.created_at
@@ -2404,7 +2471,11 @@ class AutoAlert:
             else {}
         )
         plan_dict = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
-        d["hedged_spread"] = plan_dict.get("hedged_spread") or plan_opt.get("hedged_spread")
+        d["hedged_spread"] = (
+            getattr(self, "hedged_spread", None)
+            or plan_dict.get("hedged_spread")
+            or plan_opt.get("hedged_spread")
+        )
         d["free_roll_plan"] = plan_dict.get("free_roll_plan") or plan_opt.get("free_roll_plan")
         eff_exp_date = (
             self.expiry_date
@@ -2489,6 +2560,8 @@ class AutoAlert:
                 d_copy["telegram_message_id"] = int(d_copy["telegram_message_id"])
             except (ValueError, TypeError):
                 d_copy["telegram_message_id"] = None
+        if d_copy.get("telegram_chat_id") is not None:
+            d_copy["telegram_chat_id"] = str(d_copy["telegram_chat_id"])
 
         clean_kwargs = {k: v for k, v in d_copy.items() if k in valid_keys}
         return cls(**clean_kwargs)

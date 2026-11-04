@@ -56,7 +56,7 @@ export function resolveAlertProvenance(alert) {
   if (!alert) {
     return {
       label: '🟢 REAL / LIVE',
-      cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+      cls: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/40',
       isTest: false,
       isLive: true,
       isOffMarket: false,
@@ -66,7 +66,7 @@ export function resolveAlertProvenance(alert) {
   if (isTestOrSimAlert(alert)) {
     return {
       label: '🧪 TEST',
-      cls: 'bg-purple-500/20 text-purple-300 border-purple-500/40',
+      cls: 'bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-500/20 dark:text-purple-300 dark:border-purple-500/40',
       isTest: true,
       isLive: false,
       isOffMarket: false,
@@ -80,7 +80,7 @@ export function resolveAlertProvenance(alert) {
   if (isOffMarket) {
     return {
       label: '🌙 OFF-MARKET / EOD',
-      cls: 'bg-sky-500/20 text-sky-300 border-sky-500/30',
+      cls: 'bg-sky-100 text-sky-800 border-sky-300 dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-500/30',
       isTest: false,
       isLive: false,
       isOffMarket: true,
@@ -89,10 +89,92 @@ export function resolveAlertProvenance(alert) {
 
   return {
     label: '🟢 REAL / LIVE',
-    cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+    cls: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/40',
     isTest: false,
     isLive: true,
     isOffMarket: false,
+  }
+}
+
+/**
+ * Canonical Single Source of Truth (SSOT) Trigger Time Formatter.
+ * Accurately converts UTC ISO strings (e.g. 2026-11-03T06:43:16.608Z),
+ * naive timestamps, or explicit IST strings into Asia/Kolkata (IST) display
+ * without naive regex hour-slicing corruption.
+ */
+export function formatAlertTriggerTime(triggerTimeStr) {
+  if (!triggerTimeStr) return null
+  try {
+    const raw = String(triggerTimeStr).trim()
+    let date = null
+
+    if (raw.endsWith('IST')) {
+      const clean = raw.replace(/\s*IST$/i, '').trim()
+      const m = clean.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?/)
+      if (m) {
+        const [_, y, mo, d, hh, mm, ss] = m
+        const utcMs = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(hh) - 5, Number(mm) - 30, Number(ss || 0))
+        date = new Date(utcMs)
+      } else {
+        date = new Date(clean)
+      }
+    } else if (raw.includes('Z') || raw.includes('+') || (raw.includes('-') && raw.indexOf('-', 8) > 0)) {
+      date = new Date(raw)
+    } else {
+      const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?/)
+      if (m) {
+        const [_, y, mo, d, hh, mm, ss] = m
+        const utcMs = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(hh) - 5, Number(mm) - 30, Number(ss || 0))
+        date = new Date(utcMs)
+      } else {
+        date = new Date(raw)
+      }
+    }
+
+    if (!date || isNaN(date.getTime())) {
+      return { display: raw, full: raw, elapsed: '', timeOnly: raw, isToday: false, raw }
+    }
+
+    // Format strictly in Asia/Kolkata (IST)
+    const istTimeFormatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    })
+    const timeStr = istTimeFormatter.format(date)
+
+    const istDateFormatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Kolkata',
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric'
+    })
+    const istDateParts = istDateFormatter.format(date)
+    const todayParts = istDateFormatter.format(new Date())
+    const isToday = istDateParts === todayParts
+
+    const diffMs = Math.max(0, Date.now() - date.getTime())
+    const diffMins = Math.floor(diffMs / 60000)
+    let elapsed = ''
+    if (diffMins < 1) elapsed = 'just now'
+    else if (diffMins < 60) elapsed = `${diffMins}m ago`
+    else if (diffMins < 1440) elapsed = `${Math.floor(diffMins / 60)}h ago`
+    else elapsed = `${Math.floor(diffMins / 1440)}d ago`
+
+    const display = isToday ? `${timeStr} IST` : `${istDateParts.split(' ').slice(0, 2).join(' ')} ${timeStr} IST`
+
+    return {
+      display,
+      full: `${istDateParts} ${timeStr} IST`,
+      elapsed,
+      timeOnly: timeStr,
+      isToday,
+      raw
+    }
+  } catch (_) {
+    return { display: String(triggerTimeStr), full: String(triggerTimeStr), elapsed: '', timeOnly: String(triggerTimeStr), isToday: false, raw: String(triggerTimeStr) }
   }
 }
 
@@ -100,6 +182,7 @@ export const AUTO_TYPE_STYLE = {
   GAMMA_BLAST: {
     icon: '⚡',
     label: 'GAMMA BLAST',
+    shortLabel: 'Γ-Blast',
     color: 'var(--color-gold)',
     bg: 'rgba(245, 166, 35, 0.08)',
     border: 'rgba(245, 166, 35, 0.20)',
@@ -107,6 +190,7 @@ export const AUTO_TYPE_STYLE = {
   SQUEEZE_BREAKOUT: {
     icon: '🎯',
     label: 'SQUEEZE BREAKOUT',
+    shortLabel: 'Squeeze',
     color: 'var(--color-emerald)',
     bg: 'rgba(0, 214, 143, 0.08)',
     border: 'rgba(0, 214, 143, 0.20)',
@@ -114,6 +198,7 @@ export const AUTO_TYPE_STYLE = {
   SQUEEZE_BREAKDOWN: {
     icon: '🔻',
     label: 'SQUEEZE BREAKDOWN',
+    shortLabel: 'Squeeze',
     color: 'var(--color-rose)',
     bg: 'rgba(255, 79, 123, 0.08)',
     border: 'rgba(255, 79, 123, 0.20)',
@@ -121,6 +206,7 @@ export const AUTO_TYPE_STYLE = {
   ORDER_FLOW_DIVERGENCE: {
     icon: '📊',
     label: 'CVD ORDER FLOW',
+    shortLabel: 'CVD Flow',
     color: '#38bdf8',
     bg: 'rgba(56, 189, 248, 0.08)',
     border: 'rgba(56, 189, 248, 0.20)',
@@ -128,6 +214,7 @@ export const AUTO_TYPE_STYLE = {
   PATTERN_COILING: {
     icon: '🌀',
     label: 'PATTERN COILING',
+    shortLabel: 'Coiling',
     color: 'var(--color-cyan)',
     bg: 'rgba(0, 209, 255, 0.08)',
     border: 'rgba(0, 209, 255, 0.20)',
@@ -135,6 +222,7 @@ export const AUTO_TYPE_STYLE = {
   CIRCUIT_WARNING: {
     icon: '🔒',
     label: 'CIRCUIT WARNING',
+    shortLabel: 'Circuit',
     color: 'var(--color-rose)',
     bg: 'rgba(255, 79, 123, 0.08)',
     border: 'rgba(255, 79, 123, 0.20)',
@@ -142,6 +230,7 @@ export const AUTO_TYPE_STYLE = {
   SMC_SWEEP: {
     icon: '🌊',
     label: 'SMC LIQUIDITY',
+    shortLabel: 'SMC',
     color: 'var(--color-violet)',
     bg: 'rgba(157, 125, 255, 0.08)',
     border: 'rgba(157, 125, 255, 0.20)',
@@ -149,6 +238,7 @@ export const AUTO_TYPE_STYLE = {
   CONFLUENCE_INFLECTION: {
     icon: '👑',
     label: 'CONFLUENCE INFLECTION',
+    shortLabel: 'Confluence',
     color: 'var(--color-sapphire)',
     bg: 'rgba(77, 155, 255, 0.08)',
     border: 'rgba(77, 155, 255, 0.20)',
@@ -156,6 +246,7 @@ export const AUTO_TYPE_STYLE = {
   PRECURSOR_RADAR: {
     icon: '⚡',
     label: 'PRECURSOR RADAR',
+    shortLabel: 'Precursor',
     color: '#f59e0b',
     bg: 'rgba(245, 158, 11, 0.08)',
     border: 'rgba(245, 158, 11, 0.20)',
@@ -163,6 +254,7 @@ export const AUTO_TYPE_STYLE = {
   PRE_INFLECTION_DRYUP: {
     icon: '🤫',
     label: 'PRE-INFLECTION DRY-UP',
+    shortLabel: 'Dry-Up',
     color: '#06b6d4',
     bg: 'rgba(6, 182, 212, 0.08)',
     border: 'rgba(6, 182, 212, 0.20)',
@@ -170,6 +262,7 @@ export const AUTO_TYPE_STYLE = {
   OPTIONS_MOMENTUM: {
     icon: '🚀',
     label: 'OPTIONS MOMENTUM',
+    shortLabel: 'Opt Mom',
     color: 'var(--color-gold)',
     bg: 'rgba(245, 166, 35, 0.08)',
     border: 'rgba(245, 166, 35, 0.20)',
@@ -177,6 +270,7 @@ export const AUTO_TYPE_STYLE = {
   OPTION_WRITE: {
     icon: '🛡️',
     label: 'OPTION WRITE',
+    shortLabel: 'Opt Write',
     color: '#a855f7',
     bg: 'rgba(168, 85, 247, 0.08)',
     border: 'rgba(168, 85, 247, 0.20)',
@@ -184,6 +278,7 @@ export const AUTO_TYPE_STYLE = {
   ASYMMETRIC_OPPORTUNITY: {
     icon: '🎯',
     label: 'ASYMMETRIC R:R',
+    shortLabel: 'Asym',
     color: '#38bdf8',
     bg: 'rgba(56, 189, 248, 0.08)',
     border: 'rgba(56, 189, 248, 0.20)',
@@ -191,6 +286,7 @@ export const AUTO_TYPE_STYLE = {
   TURTLE_SOUP_SHORT: {
     icon: '🐢',
     label: 'TURTLE SOUP SHORT',
+    shortLabel: 'Turtle Short',
     color: '#f43f5e',
     bg: 'rgba(244, 63, 94, 0.08)',
     border: 'rgba(244, 63, 94, 0.20)',
@@ -198,6 +294,7 @@ export const AUTO_TYPE_STYLE = {
   TURTLE_SOUP_PLUS_ONE_LONG: {
     icon: '🐢',
     label: 'TURTLE SOUP LONG',
+    shortLabel: 'Turtle Long',
     color: '#10b981',
     bg: 'rgba(16, 185, 129, 0.08)',
     border: 'rgba(16, 185, 129, 0.20)',
@@ -205,6 +302,7 @@ export const AUTO_TYPE_STYLE = {
   TURTLE_SOUP_SWEEP: {
     icon: '🐢',
     label: 'TURTLE SOUP SWEEP',
+    shortLabel: 'Turtle',
     color: '#38bdf8',
     bg: 'rgba(56, 189, 248, 0.08)',
     border: 'rgba(56, 189, 248, 0.20)',
@@ -212,6 +310,7 @@ export const AUTO_TYPE_STYLE = {
   TURTLE_SOUP_SPRING: {
     icon: '🐢',
     label: 'TURTLE SOUP SPRING',
+    shortLabel: 'Turtle Spring',
     color: '#10b981',
     bg: 'rgba(16, 185, 129, 0.08)',
     border: 'rgba(16, 185, 129, 0.20)',
@@ -219,20 +318,255 @@ export const AUTO_TYPE_STYLE = {
   TURTLE_SOUP_UPTHRUST: {
     icon: '🐢',
     label: 'TURTLE SOUP UPTHRUST',
+    shortLabel: 'Turtle Upthrust',
     color: '#f43f5e',
     bg: 'rgba(244, 63, 94, 0.08)',
     border: 'rgba(244, 63, 94, 0.20)',
   },
+  TURTLE_SOUP: {
+    icon: '🐢',
+    label: 'TURTLE SOUP',
+    shortLabel: 'Turtle',
+    color: '#38bdf8',
+    bg: 'rgba(56, 189, 248, 0.08)',
+    border: 'rgba(56, 189, 248, 0.20)',
+  },
   IRON_CONDOR_PINNING: {
     icon: '🦅',
     label: 'IRON CONDOR PINNING',
+    shortLabel: 'Condor',
     color: '#a855f7',
     bg: 'rgba(168, 85, 247, 0.08)',
     border: 'rgba(168, 85, 247, 0.20)',
   },
+  DEFINED_RISK_NEUTRAL: {
+    icon: '🦅',
+    label: 'DEFINED RISK CONDOR',
+    shortLabel: 'Condor',
+    color: '#a855f7',
+    bg: 'rgba(168, 85, 247, 0.08)',
+    border: 'rgba(168, 85, 247, 0.20)',
+  },
+  INDEX_MICRO_SCALP: {
+    icon: '⚡',
+    label: 'INDEX MICRO SCALP',
+    shortLabel: 'Micro Scalp',
+    color: '#38bdf8',
+    bg: 'rgba(56, 189, 248, 0.08)',
+    border: 'rgba(56, 189, 248, 0.20)',
+  },
+  INDEX_CALL_SETUP: {
+    icon: '📈',
+    label: 'INDEX CALL SETUP',
+    shortLabel: 'Index Call',
+    color: '#10b981',
+    bg: 'rgba(16, 185, 129, 0.08)',
+    border: 'rgba(16, 185, 129, 0.20)',
+  },
+  INDEX_PUT_SETUP: {
+    icon: '📉',
+    label: 'INDEX PUT SETUP',
+    shortLabel: 'Index Put',
+    color: '#f43f5e',
+    bg: 'rgba(244, 63, 94, 0.08)',
+    border: 'rgba(244, 63, 94, 0.20)',
+  },
+  ORB_BREAKOUT: {
+    icon: '💥',
+    label: 'ORB BREAKOUT',
+    shortLabel: 'ORB Long',
+    color: '#10b981',
+    bg: 'rgba(16, 185, 129, 0.08)',
+    border: 'rgba(16, 185, 129, 0.20)',
+  },
+  ORB_BREAKDOWN: {
+    icon: '🔻',
+    label: 'ORB BREAKDOWN',
+    shortLabel: 'ORB Short',
+    color: '#f43f5e',
+    bg: 'rgba(244, 63, 94, 0.08)',
+    border: 'rgba(244, 63, 94, 0.20)',
+  },
+  SMC_OB_RETEST: {
+    icon: '🏛️',
+    label: 'ORDER BLOCK RETEST',
+    shortLabel: 'OB Retest',
+    color: '#818cf8',
+    bg: 'rgba(129, 140, 248, 0.08)',
+    border: 'rgba(129, 140, 248, 0.20)',
+  },
+  SMT_SWEEP: {
+    icon: '🧹',
+    label: 'SMT SWEEP',
+    shortLabel: 'SMT Sweep',
+    color: '#a855f7',
+    bg: 'rgba(168, 85, 247, 0.08)',
+    border: 'rgba(168, 85, 247, 0.20)',
+  },
+  SMT_DIVERGENCE: {
+    icon: '⚡',
+    label: 'SMT DIVERGENCE',
+    shortLabel: 'SMT Div',
+    color: '#06b6d4',
+    bg: 'rgba(6, 182, 212, 0.08)',
+    border: 'rgba(6, 182, 212, 0.20)',
+  },
+  PREDATOR_SWEEPS: {
+    icon: '🦈',
+    label: 'PREDATOR SWEEP',
+    shortLabel: 'Predator',
+    color: '#f59e0b',
+    bg: 'rgba(245, 158, 11, 0.08)',
+    border: 'rgba(245, 158, 11, 0.20)',
+  },
+  PREDATOR_SWEEP: {
+    icon: '🦈',
+    label: 'PREDATOR SWEEP',
+    shortLabel: 'Predator',
+    color: '#f59e0b',
+    bg: 'rgba(245, 158, 11, 0.08)',
+    border: 'rgba(245, 158, 11, 0.20)',
+  },
+  OPENING_DRIVE: {
+    icon: '🏎️',
+    label: 'OPENING DRIVE',
+    shortLabel: 'Open Drive',
+    color: '#38bdf8',
+    bg: 'rgba(56, 189, 248, 0.08)',
+    border: 'rgba(56, 189, 248, 0.20)',
+  },
+  OPENING_DRIVE_IGNITION: {
+    icon: '🏎️',
+    label: 'OPENING DRIVE',
+    shortLabel: 'Open Drive',
+    color: '#38bdf8',
+    bg: 'rgba(56, 189, 248, 0.08)',
+    border: 'rgba(56, 189, 248, 0.20)',
+  },
+  AFTERNOON_THRUST: {
+    icon: '🚀',
+    label: 'AFTERNOON THRUST',
+    shortLabel: 'PM Thrust',
+    color: '#6366f1',
+    bg: 'rgba(99, 102, 241, 0.08)',
+    border: 'rgba(99, 102, 241, 0.20)',
+  },
+  PAIRS_ARBITRAGE: {
+    icon: '⚖️',
+    label: 'PAIRS ARBITRAGE',
+    shortLabel: 'Pairs Arb',
+    color: '#10b981',
+    bg: 'rgba(16, 185, 129, 0.08)',
+    border: 'rgba(16, 185, 129, 0.20)',
+  },
+  INDEX_CONTAGION: {
+    icon: '🌐',
+    label: 'INDEX CONTAGION',
+    shortLabel: 'Contagion',
+    color: '#ec4899',
+    bg: 'rgba(236, 72, 153, 0.08)',
+    border: 'rgba(236, 72, 153, 0.20)',
+  },
+  STAGE_1_TO_2_EXPANSION: {
+    icon: '📈',
+    label: 'STAGE 2 EXPANSION',
+    shortLabel: 'Stage 2',
+    color: '#10b981',
+    bg: 'rgba(16, 185, 129, 0.08)',
+    border: 'rgba(16, 185, 129, 0.20)',
+  },
+  MULTIBAGGER: {
+    icon: '💎',
+    label: 'MULTIBAGGER RADAR',
+    shortLabel: 'Multibagger',
+    color: '#eab308',
+    bg: 'rgba(234, 179, 8, 0.08)',
+    border: 'rgba(234, 179, 8, 0.20)',
+  },
+  TREND_DAY_CONTINUATION: {
+    icon: '🌊',
+    label: 'TREND CONTINUATION',
+    shortLabel: 'Trend Cont',
+    color: '#38bdf8',
+    bg: 'rgba(56, 189, 248, 0.08)',
+    border: 'rgba(56, 189, 248, 0.20)',
+  },
+  TREND_DAY_PULLBACK: {
+    icon: '🌊',
+    label: 'TREND PULLBACK',
+    shortLabel: 'Trend PB',
+    color: '#38bdf8',
+    bg: 'rgba(56, 189, 248, 0.08)',
+    border: 'rgba(56, 189, 248, 0.20)',
+  },
+  GAMMA_UNPIN_SQUEEZER: {
+    icon: '🧲',
+    label: 'GAMMA UNPIN SQUEEZE',
+    shortLabel: 'Unpin Squeeze',
+    color: '#a855f7',
+    bg: 'rgba(168, 85, 247, 0.08)',
+    border: 'rgba(168, 85, 247, 0.20)',
+  },
+  '0DTE_GAMMA_UNPIN_SQUEEZE': {
+    icon: '🧲',
+    label: 'GAMMA UNPIN SQUEEZE',
+    shortLabel: 'Unpin Squeeze',
+    color: '#a855f7',
+    bg: 'rgba(168, 85, 247, 0.08)',
+    border: 'rgba(168, 85, 247, 0.20)',
+  },
+  SWING_INFLECTION: {
+    icon: '🔄',
+    label: 'SWING INFLECTION',
+    shortLabel: 'Swing Infl',
+    color: '#06b6d4',
+    bg: 'rgba(6, 182, 212, 0.08)',
+    border: 'rgba(6, 182, 212, 0.20)',
+  },
+  INTRADAY_BREAKOUT_SPARK: {
+    icon: '⚡',
+    label: 'BREAKOUT SPARK',
+    shortLabel: 'Spark',
+    color: '#f59e0b',
+    bg: 'rgba(245, 158, 11, 0.08)',
+    border: 'rgba(245, 158, 11, 0.20)',
+  },
+  SMC_SPRING_SWEEP: {
+    icon: '🌊',
+    label: 'SMC SPRING SWEEP',
+    shortLabel: 'Spring',
+    color: '#10b981',
+    bg: 'rgba(16, 185, 129, 0.08)',
+    border: 'rgba(16, 185, 129, 0.20)',
+  },
+  INITIAL_BALANCE_BREAKOUT: {
+    icon: '💥',
+    label: 'INITIAL BALANCE BREAKOUT',
+    shortLabel: 'IB Breakout',
+    color: '#10b981',
+    bg: 'rgba(16, 185, 129, 0.08)',
+    border: 'rgba(16, 185, 129, 0.20)',
+  },
+  INITIAL_BALANCE_SFP: {
+    icon: '⚡',
+    label: 'INITIAL BALANCE SFP',
+    shortLabel: 'IB SFP',
+    color: '#f43f5e',
+    bg: 'rgba(244, 63, 94, 0.08)',
+    border: 'rgba(244, 63, 94, 0.20)',
+  },
+  ORDER_BOOK_THRUST: {
+    icon: '🚀',
+    label: 'ORDER BOOK THRUST',
+    shortLabel: 'Book Thrust',
+    color: '#38bdf8',
+    bg: 'rgba(56, 189, 248, 0.08)',
+    border: 'rgba(56, 189, 248, 0.20)',
+  },
   COMMODITY_MOMENTUM: {
     icon: '⛏️',
     label: 'COMMODITY MOMENTUM',
+    shortLabel: 'Commodity',
     color: '#f97316',
     bg: 'rgba(249, 115, 22, 0.08)',
     border: 'rgba(249, 115, 22, 0.20)',
@@ -240,6 +574,7 @@ export const AUTO_TYPE_STYLE = {
   CURRENCY_MOMENTUM: {
     icon: '💱',
     label: 'CURRENCY MOMENTUM',
+    shortLabel: 'Currency',
     color: '#06b6d4',
     bg: 'rgba(6, 182, 212, 0.08)',
     border: 'rgba(6, 182, 212, 0.20)',
@@ -247,6 +582,7 @@ export const AUTO_TYPE_STYLE = {
   MOMENTUM_ACCELERATION: {
     icon: '🚀',
     label: 'MOMENTUM SPARK',
+    shortLabel: 'Spark',
     color: '#10b981',
     bg: 'rgba(16, 185, 129, 0.08)',
     border: 'rgba(16, 185, 129, 0.20)',
@@ -254,6 +590,7 @@ export const AUTO_TYPE_STYLE = {
   CRYPTO_SQUEEZE: {
     icon: '🪙',
     label: 'CRYPTO SQUEEZE',
+    shortLabel: 'Crypto Squeeze',
     color: '#f59e0b',
     bg: 'rgba(245, 158, 11, 0.08)',
     border: 'rgba(245, 158, 11, 0.20)',
@@ -261,6 +598,7 @@ export const AUTO_TYPE_STYLE = {
   CRYPTO_MOMENTUM: {
     icon: '⚡',
     label: 'CRYPTO ALPHA',
+    shortLabel: 'Crypto Alpha',
     color: '#fbbf24',
     bg: 'rgba(251, 191, 36, 0.08)',
     border: 'rgba(251, 191, 36, 0.20)',
@@ -268,6 +606,7 @@ export const AUTO_TYPE_STYLE = {
   CRYPTO_VOLATILITY: {
     icon: '🌊',
     label: 'DERIBIT SURFACE',
+    shortLabel: 'Deribit',
     color: '#818cf8',
     bg: 'rgba(129, 140, 248, 0.08)',
     border: 'rgba(129, 140, 248, 0.20)',
@@ -275,6 +614,7 @@ export const AUTO_TYPE_STYLE = {
   CRYPTO_CVD_ABSORPTION: {
     icon: '🪙',
     label: 'ORDER FLOW CVD',
+    shortLabel: 'CVD Absorb',
     color: '#38bdf8',
     bg: 'rgba(56, 189, 248, 0.08)',
     border: 'rgba(56, 189, 248, 0.20)',
@@ -282,6 +622,7 @@ export const AUTO_TYPE_STYLE = {
   CRYPTO_LIQUIDATION_FLUSH: {
     icon: '⚡',
     label: 'LIQUIDATION FLUSH',
+    shortLabel: 'Liq Flush',
     color: '#f43f5e',
     bg: 'rgba(244, 63, 94, 0.08)',
     border: 'rgba(244, 63, 94, 0.20)',
@@ -289,6 +630,7 @@ export const AUTO_TYPE_STYLE = {
   CRYPTO_BASIS_ARBITRAGE: {
     icon: '🌾',
     label: 'BASIS ARBITRAGE',
+    shortLabel: 'Basis Arb',
     color: '#10b981',
     bg: 'rgba(16, 185, 129, 0.08)',
     border: 'rgba(16, 185, 129, 0.20)',
@@ -296,10 +638,23 @@ export const AUTO_TYPE_STYLE = {
   CRYPTO_VOL_ARBITRAGE: {
     icon: '🎯',
     label: 'VOL ARBITRAGE',
+    shortLabel: 'Vol Arb',
     color: '#a855f7',
     bg: 'rgba(168, 85, 247, 0.08)',
     border: 'rgba(168, 85, 247, 0.20)',
   },
+}
+
+export function getAlertStyle(alertType) {
+  if (AUTO_TYPE_STYLE[alertType]) return AUTO_TYPE_STYLE[alertType]
+  return {
+    icon: '⚡',
+    label: alertType ? String(alertType).replace(/_/g, ' ') : 'ALERT',
+    shortLabel: alertType ? String(alertType).split('_').map(w => w.charAt(0) + w.slice(1).toLowerCase()).join('-') : 'Alert',
+    color: 'var(--color-sapphire)',
+    bg: 'rgba(77, 155, 255, 0.08)',
+    border: 'rgba(77, 155, 255, 0.20)',
+  }
 }
 
 export const INDEX_LOT_SIZES = {
@@ -724,14 +1079,73 @@ export function computeNextExpiryOpportunity(alert, expiryInfo) {
 }
 
 export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) {
-  const isBull = alert.direction === 'BULLISH'
+  const dirStr = String(alert.direction || alert.metrics?.direction || '').toUpperCase()
   const plan = alert.actionable_plan || {}
   const tradePlan = plan.trade_plan || {}
   const optPlan = plan.option_plan || null
 
+  const parseQuickNum = (val) => {
+    if (val == null) return null
+    if (typeof val === 'number') return isNaN(val) ? null : val
+    const str = String(val).trim()
+    const m = str.replace(/,/g, '').match(/[-+]?[0-9]+(?:\.[0-9]+)?/)
+    return m ? Number(m[0]) : null
+  }
+  // Early direction geometry: include ALL normalized store fields (alert.sl, alert.t1, alert.entry, alert.initial_stop_loss)
+  // so PRECURSOR_RADAR coiling setups with direction=BEAR but upward SL/T1 geometry are correctly detected as upward.
+  const rawEntryCheck = parseQuickNum(tradePlan.entry_price || plan.entry_price || alert.trigger_level || alert.entry_price || alert.entry || alert.ltp)
+  const rawSlCheck = parseQuickNum(tradePlan.invalidation_stop || plan.stop_loss || alert.stop_loss || alert.initial_stop_loss || alert.sl)
+  const rawT1Check = parseQuickNum(tradePlan.target_1 || plan.target_1 || alert.target_1 || alert.t1 || alert.target_level)
+
+  // Level geometry takes PRIORITY over direction tag for spot/index radar setups (PRECURSOR_RADAR, PATTERN_COILING, etc.)
+  // where direction=BEAR is sometimes used as market context but the actual SL/T1 geometry is upward.
+  const _geomUpward = Boolean(rawSlCheck && rawT1Check && rawEntryCheck && rawSlCheck < rawEntryCheck && rawT1Check > rawEntryCheck)
+  const _geomDownward = Boolean(rawSlCheck && rawT1Check && rawEntryCheck && rawSlCheck > rawEntryCheck && rawT1Check < rawEntryCheck)
+  const _isSpotRadar = (alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'PRE_INFLECTION_DRYUP' || alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT') && !alert.option_type && !alert.contract_symbol
+  // For spot/index radar types, if geometry clearly contradicts the direction tag, trust geometry
+  const isBull = alert.is_bull === true ||
+    (_isSpotRadar && _geomUpward) ||
+    (!_isSpotRadar && (dirStr === 'BULL' || dirStr === 'BULLISH' || dirStr === 'BUY')) ||
+    (_isSpotRadar && !_geomDownward && (dirStr === 'BULL' || dirStr === 'BULLISH' || dirStr === 'BUY')) ||
+    (!_isSpotRadar && _geomUpward && !_geomDownward && (dirStr !== 'BEAR' && dirStr !== 'BEARISH' && dirStr !== 'SELL')) ||
+    Boolean(rawSlCheck && rawT1Check && rawEntryCheck && rawSlCheck < rawEntryCheck && rawT1Check > rawEntryCheck && dirStr !== 'BEAR' && dirStr !== 'BEARISH' && dirStr !== 'SELL')
+  const isBear = alert.is_bear === true ||
+    (_isSpotRadar && _geomDownward && !_geomUpward) ||
+    (!_isSpotRadar && !_geomUpward && (dirStr === 'BEAR' || dirStr === 'BEARISH' || dirStr === 'SELL')) ||
+    (!_isSpotRadar && !_geomUpward && _geomDownward)
   const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
   const rawContract = alert.contract_symbol || optPlan?.contract_symbol || plan.option_contract || ''
-  const optType = alert.option_type || optPlan?.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
+  let optType = alert.option_type || optPlan?.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
+
+  const textForOpt = `${alert.headline || ''} ${alert.summary || ''} ${rawContract || ''}`
+  const optMatch = textForOpt.match(/(\d{4,6})\s*(CE|PE)\b/i)
+  if (!optType && optMatch) {
+    optType = optMatch[2].toUpperCase()
+  }
+
+  const isNeutralSpread = Boolean(
+    alert.alert_type === 'DEFINED_RISK_NEUTRAL' ||
+    alert.alert_type === 'IRON_CONDOR_PINNING' ||
+    alert.derivative_type === 'SPREAD' ||
+    (alert.hedged_spread && (alert.hedged_spread.strategy_name === 'IRON_CONDOR' || alert.hedged_spread.flow_type === 'NET_CREDIT')) ||
+    (alert.headline || '').includes('CONDOR') ||
+    (alert.summary || '').includes('Iron Condor')
+  )
+
+  const resolvedIsDerivative = typeof isDerivative === 'boolean'
+    ? isDerivative
+    : Boolean(
+        alert.is_derivative ||
+        optType ||
+        rawContract ||
+        alert.derivative_type === 'SPREAD' ||
+        alert.derivative_type === 'OPTION' ||
+        isNeutralSpread ||
+        Boolean(alert.hedged_spread) ||
+        alert.segment === 'FNO_INDEX' ||
+        alert.segment === 'FNO_STOCK' ||
+        alert.segment === 'FNO'
+      )
 
   const effectiveSpot = (spotNum && Number(spotNum) > 0)
     ? Number(spotNum)
@@ -761,24 +1175,57 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
 
   let entry = null
   const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE'
-  if (isDerivative) {
+
+  if (isNeutralSpread) {
+    const effLot = alert.lot_size || alert.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || 1
+    const rawCredit = alert.actionable_plan?.entry_price || alert.metrics?.net_credit || alert.hedged_spread?.net_cashflow || alert.actionable_plan?.net_credit || alert.net_credit || alert.credit || alert.entry
+    if (rawCredit != null) {
+      const parsedCredit = parseCleanNumber(rawCredit)
+      if (parsedCredit > 1000 && effLot > 1) {
+        entry = Math.round((parsedCredit / effLot) * 100) / 100
+      } else {
+        entry = parsedCredit
+      }
+    }
+    if (!entry) {
+      const credMatch = `${alert.headline || ''} ${alert.summary || ''}`.match(/(?:Credit|collects)\s*₹?([0-9,.]+)/i)
+      if (credMatch) {
+        const parsed = parseCleanNumber(credMatch[1])
+        if (parsed > 1000 && effLot > 1) {
+          entry = Math.round((parsed / effLot) * 100) / 100
+        } else {
+          entry = parsed
+        }
+      }
+    }
+  } else if (resolvedIsDerivative) {
     if (optPlan?.entry_premium && parseCleanNumber(optPlan.entry_premium) > 0) {
       entry = parseCleanNumber(optPlan.entry_premium)
+    } else if (plan.entry_price && parseCleanNumber(plan.entry_price) > 0 && !isSpotScale(parseCleanNumber(plan.entry_price))) {
+      entry = parseCleanNumber(plan.entry_price)
+    } else if (plan.entry_premium && parseCleanNumber(plan.entry_premium) > 0) {
+      entry = parseCleanNumber(plan.entry_premium)
     } else if (plan.option_entry && parseCleanNumber(plan.option_entry) > 0) {
       entry = parseCleanNumber(plan.option_entry)
     } else if (alert.initial_entry_premium && parseCleanNumber(alert.initial_entry_premium) > 0) {
       entry = parseCleanNumber(alert.initial_entry_premium)
+    } else if (alert.entry && parseCleanNumber(alert.entry) > 0 && !isSpotScale(parseCleanNumber(alert.entry))) {
+      entry = parseCleanNumber(alert.entry)
     } else if (alert.entry_price && parseCleanNumber(alert.entry_price) > 0 && !isSpotScale(parseCleanNumber(alert.entry_price))) {
       entry = parseCleanNumber(alert.entry_price)
     } else if (alert.trigger_level && parseCleanNumber(alert.trigger_level) > 0 && !isSpotScale(parseCleanNumber(alert.trigger_level))) {
       entry = parseCleanNumber(alert.trigger_level)
+    } else if (plan.trigger_level && parseCleanNumber(plan.trigger_level) > 0 && !isSpotScale(parseCleanNumber(plan.trigger_level))) {
+      entry = parseCleanNumber(plan.trigger_level)
     } else if (plan.recommended_entry && parseCleanNumber(plan.recommended_entry) > 0 && !alert.underlying_spot && !isSpotScale(parseCleanNumber(plan.recommended_entry))) {
       entry = parseCleanNumber(plan.recommended_entry)
     } else if (plan.entry_zone && parseCleanNumber(plan.entry_zone) > 0 && !isSpotScale(parseCleanNumber(plan.entry_zone))) {
       entry = parseCleanNumber(plan.entry_zone)
     } else if (alert.option_premium && parseCleanNumber(alert.option_premium) > 0 && !isSpotScale(parseCleanNumber(alert.option_premium))) {
       entry = parseCleanNumber(alert.option_premium)
-    } else if (isPureOption && alert.ltp && parseCleanNumber(alert.ltp) > 0 && !isSpotScale(parseCleanNumber(alert.ltp))) {
+    } else if (alert.premium && parseCleanNumber(alert.premium) > 0 && !isSpotScale(parseCleanNumber(alert.premium))) {
+      entry = parseCleanNumber(alert.premium)
+    } else if (alert.ltp && parseCleanNumber(alert.ltp) > 0 && !isSpotScale(parseCleanNumber(alert.ltp))) {
       entry = parseCleanNumber(alert.ltp)
     } else if (optLtpNum && optLtpNum > 0 && !isSpotScale(optLtpNum)) {
       entry = optLtpNum
@@ -786,60 +1233,154 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   } else {
     if (tradePlan.entry_price) {
       entry = parseCleanNumber(tradePlan.entry_price)
+    } else if (plan.entry_price) {
+      entry = parseCleanNumber(plan.entry_price)
     } else if (plan.spot_entry) {
       entry = parseCleanNumber(plan.spot_entry)
+    } else if (plan.trigger_level) {
+      entry = parseCleanNumber(plan.trigger_level)
+    } else if (alert.entry) {
+      entry = parseCleanNumber(alert.entry)
     } else if (alert.trigger_level) {
       entry = parseCleanNumber(alert.trigger_level)
     } else if (alert.entry_price) {
       entry = parseCleanNumber(alert.entry_price)
     } else if (alert.ltp) {
       entry = parseCleanNumber(alert.ltp)
+    } else if (alert.spot) {
+      entry = parseCleanNumber(alert.spot)
     } else if (effectiveSpot) {
       entry = effectiveSpot
     }
   }
+
+  // Graceful text fallback if entry is still missing
   if (!entry || isNaN(entry) || entry <= 0) {
-    entry = isDerivative ? (optLtpNum || null) : (effectiveSpot || null)
+    const textAll = `${alert.headline || ''} ${alert.summary || ''}`
+    const entryMatch = textAll.match(/(?:Buy above|ignited at|Coiling at|@|Entry:\s*₹?)\s*₹?([0-9,.]+)/i)
+    if (entryMatch) {
+      const v = parseCleanNumber(entryMatch[1])
+      if (v && v > 0 && (isDerivative ? !isSpotScale(v) : true)) entry = v
+    }
+  }
+
+  // Graceful fallback: If derivative search yielded null or was spot-scale, preserve underlying spot levels
+  if (!entry || isNaN(entry) || entry <= 0) {
+    if (tradePlan.entry_price) entry = parseCleanNumber(tradePlan.entry_price)
+    else if (plan.entry_price) entry = parseCleanNumber(plan.entry_price)
+    else if (plan.trigger_level) entry = parseCleanNumber(plan.trigger_level)
+    else if (alert.trigger_level) entry = parseCleanNumber(alert.trigger_level)
+    else if (alert.entry) entry = parseCleanNumber(alert.entry)
+    else if (alert.entry_price) entry = parseCleanNumber(alert.entry_price)
+    else if (alert.ltp) entry = parseCleanNumber(alert.ltp)
+    else entry = isDerivative ? (optLtpNum || effectiveSpot || null) : (effectiveSpot || null)
   }
 
   let sl = null
-  if (isDerivative) {
+  if (isNeutralSpread) {
+    const effLot = alert.lot_size || alert.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || 1
+    const rawLoss = alert.actionable_plan?.stop_loss || alert.metrics?.max_loss || alert.hedged_spread?.max_loss || alert.actionable_plan?.max_loss || alert.max_loss || alert.sl
+    if (rawLoss != null) {
+      const parsedLoss = parseCleanNumber(rawLoss)
+      if (parsedLoss > 1000 && effLot > 1) {
+        sl = Math.round((parsedLoss / effLot) * 100) / 100
+      } else {
+        sl = parsedLoss
+      }
+    }
+    if (!sl) {
+      const lossMatch = `${alert.headline || ''} ${alert.summary || ''}`.match(/(?:Capped max loss|Max Loss)\s*₹?([0-9,.]+)/i)
+      if (lossMatch) {
+        const parsed = parseCleanNumber(lossMatch[1])
+        if (parsed > 1000 && effLot > 1) {
+          sl = Math.round((parsed / effLot) * 100) / 100
+        } else {
+          sl = parsed
+        }
+      }
+    }
+  } else if (resolvedIsDerivative) {
     if (optPlan?.sl_premium && parseCleanNumber(optPlan.sl_premium) > 0) {
       sl = parseCleanNumber(optPlan.sl_premium)
+    } else if (plan.stop_loss && parseCleanNumber(plan.stop_loss) > 0 && !isSpotScale(parseCleanNumber(plan.stop_loss))) {
+      sl = parseCleanNumber(plan.stop_loss)
+    } else if (plan.invalidation_stop && parseCleanNumber(plan.invalidation_stop) > 0 && !isSpotScale(parseCleanNumber(plan.invalidation_stop))) {
+      sl = parseCleanNumber(plan.invalidation_stop)
     } else if (plan.option_sl && parseCleanNumber(plan.option_sl) > 0) {
       sl = parseCleanNumber(plan.option_sl)
     } else if (alert.option_stop_loss && parseCleanNumber(alert.option_stop_loss) > 0) {
       sl = parseCleanNumber(alert.option_stop_loss)
-    } else if (plan.stop_loss && parseCleanNumber(plan.stop_loss) > 0 && !isSpotScale(parseCleanNumber(plan.stop_loss))) {
-      sl = parseCleanNumber(plan.stop_loss)
+    } else if (alert.sl && parseCleanNumber(alert.sl) > 0 && !isSpotScale(parseCleanNumber(alert.sl))) {
+      sl = parseCleanNumber(alert.sl)
     } else if (alert.stop_loss && parseCleanNumber(alert.stop_loss) > 0 && !isSpotScale(parseCleanNumber(alert.stop_loss))) {
       sl = parseCleanNumber(alert.stop_loss)
+    } else if (alert.initial_stop_loss && parseCleanNumber(alert.initial_stop_loss) > 0 && !isSpotScale(parseCleanNumber(alert.initial_stop_loss))) {
+      sl = parseCleanNumber(alert.initial_stop_loss)
     }
   } else {
     if (tradePlan.invalidation_stop) {
       sl = parseCleanNumber(tradePlan.invalidation_stop)
+    } else if (plan.stop_loss) {
+      sl = parseCleanNumber(plan.stop_loss)
+    } else if (plan.invalidation_stop) {
+      sl = parseCleanNumber(plan.invalidation_stop)
     } else if (plan.spot_stop_loss) {
       sl = parseCleanNumber(plan.spot_stop_loss)
+    } else if (alert.sl) {
+      sl = parseCleanNumber(alert.sl)
     } else if (alert.stop_loss) {
       sl = parseCleanNumber(alert.stop_loss)
     }
   }
-  if ((!sl || isNaN(sl) || sl <= 0) && entry) {
-    sl = isDerivative ? Math.max(1, entry * 0.80) : isBull ? entry * 0.985 : entry * 1.015
+
+  // Graceful text fallback for SL
+  if (!sl || isNaN(sl) || sl <= 0) {
+    const slMatch = `${alert.headline || ''} ${alert.summary || ''}`.match(/(?:SL|Stop-Loss|invalidation at)\s*₹?([0-9,.]+)/i)
+    if (slMatch) {
+      const v = parseCleanNumber(slMatch[1])
+      if (v && v > 0) sl = v
+    }
+  }
+
+  if (!sl || isNaN(sl) || sl <= 0) {
+    if (tradePlan.invalidation_stop) sl = parseCleanNumber(tradePlan.invalidation_stop)
+    else if (plan.stop_loss) sl = parseCleanNumber(plan.stop_loss)
+    else if (plan.invalidation_stop) sl = parseCleanNumber(plan.invalidation_stop)
+    else if (alert.sl) sl = parseCleanNumber(alert.sl)
+    else if (alert.stop_loss) sl = parseCleanNumber(alert.stop_loss)
+    else if (entry) {
+      sl = isDerivative ? Math.max(1, entry * 0.80) : isBull ? entry * 0.985 : entry * 1.015
+    }
   }
 
   let t1 = null
-  if (isDerivative) {
+  if (isNeutralSpread) {
+    if (plan.target_1 && parseCleanNumber(plan.target_1) > 0) {
+      t1 = parseCleanNumber(plan.target_1)
+    } else if (alert.t1 && parseCleanNumber(alert.t1) > 0) {
+      const parsedT1 = parseCleanNumber(alert.t1)
+      const effLot = alert.lot_size || alert.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || 1
+      t1 = (parsedT1 > 1000 && effLot > 1) ? Math.round((parsedT1 / effLot) * 100) / 100 : parsedT1
+    } else if (entry) {
+      t1 = Math.round(entry * 0.5 * 100) / 100
+    }
+    // Strict invariant: T1 of credit spread is 50% decay level, must be <= entry!
+    if (entry && t1 && t1 > entry) {
+      t1 = Math.round(entry * 0.5 * 100) / 100
+    }
+  } else if (resolvedIsDerivative) {
     if (optPlan?.t1_premium && parseCleanNumber(optPlan.t1_premium) > 0) {
       t1 = parseCleanNumber(optPlan.t1_premium)
+    } else if (plan.target_1 && parseCleanNumber(plan.target_1) > 0 && !isSpotScale(parseCleanNumber(plan.target_1))) {
+      t1 = parseCleanNumber(plan.target_1)
     } else if (plan.option_target_1 || plan.option_target) {
       t1 = parseCleanNumber(plan.option_target_1 || plan.option_target)
     } else if (alert.option_target_1 || alert.option_target) {
       t1 = parseCleanNumber(alert.option_target_1 || alert.option_target)
+    } else if (alert.t1 && parseCleanNumber(alert.t1) > 0 && !isSpotScale(parseCleanNumber(alert.t1))) {
+      t1 = parseCleanNumber(alert.t1)
     } else if (optPlan?.target_1 && parseCleanNumber(optPlan.target_1) > 0 && !isSpotScale(parseCleanNumber(optPlan.target_1))) {
       t1 = parseCleanNumber(optPlan.target_1)
-    } else if (plan.target_1 && parseCleanNumber(plan.target_1) > 0 && !isSpotScale(parseCleanNumber(plan.target_1))) {
-      t1 = parseCleanNumber(plan.target_1)
     } else if (alert.target_1 && parseCleanNumber(alert.target_1) > 0 && !isSpotScale(parseCleanNumber(alert.target_1))) {
       t1 = parseCleanNumber(alert.target_1)
     } else if (alert.target_level && parseCleanNumber(alert.target_level) > 0 && !isSpotScale(parseCleanNumber(alert.target_level))) {
@@ -848,79 +1389,146 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   } else {
     if (tradePlan.target_1) {
       t1 = parseCleanNumber(tradePlan.target_1)
+    } else if (plan.target_1) {
+      t1 = parseCleanNumber(plan.target_1)
     } else if (plan.spot_target_1 || plan.spot_target) {
       t1 = parseCleanNumber(plan.spot_target_1 || plan.spot_target)
+    } else if (alert.t1) {
+      t1 = parseCleanNumber(alert.t1)
     } else if (alert.target_1) {
       t1 = parseCleanNumber(alert.target_1)
     } else if (alert.target_level) {
       t1 = parseCleanNumber(alert.target_level)
     }
   }
-  if ((!t1 || isNaN(t1) || t1 <= 0) && entry) {
-    t1 = isDerivative ? entry * 1.35 : isBull ? entry * 1.03 : entry * 0.97
+
+  // Graceful text fallback for T1
+  if (!t1 || isNaN(t1) || t1 <= 0) {
+    const t1Match = `${alert.headline || ''} ${alert.summary || ''}`.match(/(?:T1(?:\s*\([^)]+\))?|Target 1)\s*₹?([0-9,.]+)/i)
+    if (t1Match) {
+      const v = parseCleanNumber(t1Match[1])
+      if (v && v > 0) t1 = v
+    }
+  }
+
+  if (!t1 || isNaN(t1) || t1 <= 0) {
+    if (tradePlan.target_1) t1 = parseCleanNumber(tradePlan.target_1)
+    else if (plan.target_1) t1 = parseCleanNumber(plan.target_1)
+    else if (alert.t1) t1 = parseCleanNumber(alert.t1)
+    else if (alert.target_1) t1 = parseCleanNumber(alert.target_1)
+    else if (alert.target_level) t1 = parseCleanNumber(alert.target_level)
+    else if (entry) {
+      t1 = isDerivative ? entry * 1.35 : isBull ? entry * 1.03 : entry * 0.97
+    }
   }
 
   let t2 = null
   const act = String(tradePlan.action || alert?.actionable_plan?.action || '').toUpperCase()
-  let isOptionSell = isDerivative && (
+  let isOptionSell = isNeutralSpread || (resolvedIsDerivative && (
     act === 'WRITE' ||
     alert.alert_type === 'OPTION_WRITE' ||
     (act === 'SELL' && !act.includes('BUY') && !(optType && act.includes(optType))) ||
     (sl && entry && t1 && sl > entry && t1 < entry)
-  )
-  if (isDerivative && sl && entry && t1 && sl < entry && t1 > entry) {
+  ))
+  if (resolvedIsDerivative && !isNeutralSpread && sl && entry && t1 && sl < entry && t1 > entry) {
     isOptionSell = false
   }
-  const isUpwardPayoff = isDerivative ? !isOptionSell : isBull
-  if (isDerivative) {
+  let isUpwardPayoff = isNeutralSpread ? false : (optType ? !isOptionSell : isBull)
+  if (sl && entry && t1) {
+    if (sl < entry && t1 > entry) {
+      isUpwardPayoff = true
+    } else if (sl > entry && t1 < entry) {
+      isUpwardPayoff = false
+    }
+  }
+
+  if (isNeutralSpread) {
+    if (plan.target_2 && parseCleanNumber(plan.target_2) > 0) {
+      t2 = parseCleanNumber(plan.target_2)
+    } else if (entry) {
+      t2 = Math.round(entry * 0.2 * 100) / 100
+    }
+    // Strict invariant: T2 of credit spread is 80% decay level, must be <= entry!
+    if (entry && t2 && t2 > entry) {
+      t2 = Math.round(entry * 0.2 * 100) / 100
+    }
+  } else if (resolvedIsDerivative) {
     if (optPlan?.t2_premium && parseCleanNumber(optPlan.t2_premium) > 0) {
       t2 = parseCleanNumber(optPlan.t2_premium)
+    } else if (plan.target_2 && parseCleanNumber(plan.target_2) > 0 && !isSpotScale(parseCleanNumber(plan.target_2))) {
+      t2 = parseCleanNumber(plan.target_2)
     } else if (plan.option_target_2 && parseCleanNumber(plan.option_target_2) > 0) {
       t2 = parseCleanNumber(plan.option_target_2)
     } else if (alert.option_target_2 && parseCleanNumber(alert.option_target_2) > 0) {
       t2 = parseCleanNumber(alert.option_target_2)
     } else if (optPlan?.target_2 && parseCleanNumber(optPlan.target_2) > 0 && !isSpotScale(parseCleanNumber(optPlan.target_2))) {
       t2 = parseCleanNumber(optPlan.target_2)
-    } else if (plan.target_2 && parseCleanNumber(plan.target_2) > 0 && !isSpotScale(parseCleanNumber(plan.target_2))) {
-      t2 = parseCleanNumber(plan.target_2)
     } else if (alert.target_2 && parseCleanNumber(alert.target_2) > 0 && !isSpotScale(parseCleanNumber(alert.target_2))) {
       t2 = parseCleanNumber(alert.target_2)
     }
   } else if (tradePlan.target_2) {
     t2 = parseCleanNumber(tradePlan.target_2)
+  } else if (plan.target_2) {
+    t2 = parseCleanNumber(plan.target_2)
   } else if (plan.spot_target_2) {
     t2 = parseCleanNumber(plan.spot_target_2)
   } else if (alert.target_2) {
     t2 = parseCleanNumber(alert.target_2)
+  } else if (alert.t2) {
+    t2 = parseCleanNumber(alert.t2)
   }
+
+  if (!t2 || isNaN(t2) || t2 <= 0) {
+    const t2Match = `${alert.headline || ''} ${alert.summary || ''}`.match(/(?:T2(?:\s*\([^)]+\))?|Target 2)\s*₹?([0-9,.]+)/i)
+    if (t2Match) {
+      const v = parseCleanNumber(t2Match[1])
+      if (v && v > 0) t2 = v
+    }
+  }
+
   if ((!t2 || isNaN(t2) || t2 <= 0) && t1 && entry) {
     const spread1 = Math.abs(t1 - entry)
     t2 = isUpwardPayoff ? t1 + spread1 * 0.6 : t1 - spread1 * 0.6
   }
 
   let t3 = null
-  if (isDerivative) {
+  if (isNeutralSpread) {
+    t3 = plan.target_3 != null ? parseCleanNumber(plan.target_3) : 0
+  } else if (resolvedIsDerivative) {
     if (optPlan?.t3_premium && parseCleanNumber(optPlan.t3_premium) > 0) {
       t3 = parseCleanNumber(optPlan.t3_premium)
+    } else if (plan.target_3 && parseCleanNumber(plan.target_3) > 0 && !isSpotScale(parseCleanNumber(plan.target_3))) {
+      t3 = parseCleanNumber(plan.target_3)
     } else if (plan.option_target_3 && parseCleanNumber(plan.option_target_3) > 0) {
       t3 = parseCleanNumber(plan.option_target_3)
     } else if (alert.option_target_3 && parseCleanNumber(alert.option_target_3) > 0) {
       t3 = parseCleanNumber(alert.option_target_3)
     } else if (optPlan?.target_3 && parseCleanNumber(optPlan.target_3) > 0 && !isSpotScale(parseCleanNumber(optPlan.target_3))) {
       t3 = parseCleanNumber(optPlan.target_3)
-    } else if (plan.target_3 && parseCleanNumber(plan.target_3) > 0 && !isSpotScale(parseCleanNumber(plan.target_3))) {
-      t3 = parseCleanNumber(plan.target_3)
     } else if (alert.target_3 && parseCleanNumber(alert.target_3) > 0 && !isSpotScale(parseCleanNumber(alert.target_3))) {
       t3 = parseCleanNumber(alert.target_3)
     }
   } else if (tradePlan.target_3 && Number(tradePlan.target_3) > 0) {
     t3 = parseCleanNumber(tradePlan.target_3)
-  } else if (plan.spot_target_3) {
-    t3 = parseCleanNumber(plan.spot_target_3)
+  } else if (plan.target_3) {
+    t3 = parseCleanNumber(plan.target_3)
+  } else if (plan.spot_target_3 || plan.runner_target) {
+    t3 = parseCleanNumber(plan.spot_target_3 || plan.runner_target)
+  } else if (alert.t3) {
+    t3 = parseCleanNumber(alert.t3)
   } else if (alert.target_3) {
     t3 = parseCleanNumber(alert.target_3)
   }
-  if ((!t3 || isNaN(t3) || t3 <= 0) && t2 && entry) {
+
+  if (!isNeutralSpread && (!t3 || isNaN(t3) || t3 <= 0)) {
+    const t3Match = `${alert.headline || ''} ${alert.summary || ''}`.match(/(?:Runner|T3(?:\s*\([^)]+\))?|Target 3)\s*₹?([0-9,.]+)/i)
+    if (t3Match) {
+      const v = parseCleanNumber(t3Match[1])
+      if (v && v > 0) t3 = v
+    }
+  }
+
+  if (!isNeutralSpread && (!t3 || isNaN(t3) || t3 <= 0) && t2 && entry) {
     const spread2 = Math.abs(t2 - entry)
     t3 = isDerivative
       ? (isOptionSell ? entry * 0.2 : entry * 2.0)
@@ -929,7 +1537,37 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
       : t2 - spread2 * 0.8
   }
 
-  if (t1 && t2 && entry) {
+  // Institutional Directional Integrity Enforcement:
+  const isTrailed = Boolean(
+    alert.trailing_stop ||
+    plan.trailing_stop ||
+    tradePlan.trailing_stop_loss ||
+    alert.metrics?.trailing_stop ||
+    ['T1_ACHIEVED', 'T2_ACHIEVED', 'TARGET_ACHIEVED', 'RUNNER_ACTIVE', 'T1_HIT', 'T2_HIT', 'T3_HIT', 'BREAKEVEN_HIT'].includes(alert.target_status) ||
+    ['T1_HIT', 'T2_HIT', 'T3_HIT', 'BREAKEVEN_HIT'].includes(alert.stage) ||
+    alert.metrics?.free_roll_locked ||
+    (alert.headline && (alert.headline.includes('TRAIL STOP-LOSS') || alert.headline.includes('LOCKING')))
+  )
+
+  if (entry && !isNeutralSpread) {
+    if (isUpwardPayoff) {
+      if (sl && sl >= entry && !isTrailed) {
+        sl = Math.round((entry - Math.max(0.5, Math.abs(sl - entry))) * 100) / 100
+      }
+      if (t1 && t1 <= entry) {
+        t1 = Math.round((entry + Math.max(0.5, Math.abs(t1 - entry))) * 100) / 100
+      }
+    } else {
+      if (sl && sl <= entry && !isTrailed) {
+        sl = Math.round((entry + Math.max(0.5, Math.abs(entry - sl))) * 100) / 100
+      }
+      if (t1 && t1 >= entry) {
+        t1 = Math.round((entry - Math.max(0.5, Math.abs(entry - t1))) * 100) / 100
+      }
+    }
+  }
+
+  if (t1 && t2 && entry && !isNeutralSpread) {
     if (isUpwardPayoff) {
       if (t2 <= t1) t2 = t1 + Math.abs(t1 - entry) * 0.5
       if (t3 !== null && t3 <= t2) t3 = t2 + Math.abs(t2 - t1) * 0.8
@@ -955,10 +1593,6 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   const t3_pct = entry && t3 && entry > 0 ? ((t3_pts / entry) * 100).toFixed(1) : null
   const t3_rr = t3_pts !== null && sl_pts && sl_pts > 0 ? (t3_pts / sl_pts).toFixed(1) : null
 
-  // Resolve No-Chase Boundary with Institutional Scale Harmonization:
-  // If this is a derivative/option setup, no_chase_boundary MUST be in option premium space.
-  // If the raw boundary is in spot space (e.g. > entry * 1.35 or near spotNum), preserve as spot_no_chase_boundary
-  // and re-derive the option premium execution ceiling.
   let rawNoChase = null
   if (optPlan?.no_chase_boundary != null) {
     rawNoChase = parseCleanNumber(optPlan.no_chase_boundary)
@@ -982,7 +1616,7 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   }
 
   let no_chase_boundary = null
-  if (isDerivative) {
+  if (isDerivative && !isNeutralSpread) {
     const isSpotDenominated = Boolean(
       rawNoChase && entry && (
         rawNoChase > entry * 1.35 ||
@@ -1008,6 +1642,14 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     no_chase_boundary = (rawNoChase && rawNoChase > 0) ? rawNoChase : (entry ? (isBull ? entry * 1.02 : entry * 0.98) : null)
   }
 
+  if (no_chase_boundary && entry && !isNeutralSpread) {
+    if (isUpwardPayoff && no_chase_boundary <= entry) {
+      no_chase_boundary = Math.round((entry + Math.abs(no_chase_boundary - entry)) * 10) / 10
+    } else if (!isUpwardPayoff && no_chase_boundary >= entry) {
+      no_chase_boundary = Math.round((entry - Math.abs(entry - no_chase_boundary)) * 10) / 10
+    }
+  }
+
   return {
     entry,
     sl,
@@ -1027,6 +1669,7 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     t3_rr,
     isUpwardPayoff,
     isOptionSell,
+    isNeutralSpread,
     optPlanRef: optPlan || null,
     net_risk_reward: plan.net_risk_reward || alert.metrics?.net_risk_reward || optPlan?.net_option_rr || null,
     max_loss: plan.max_loss_capped ?? plan.max_loss_rupees ?? plan.max_loss_per_lot ?? alert.metrics?.max_loss_rupees ?? optPlan?.max_loss_per_lot ?? null,
@@ -1424,10 +2067,38 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   const cleanContract = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
   const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
 
-  const optType = alert.option_type || optPlan?.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
-  const rawStrike = alert.strike || optPlan?.strike || alert.metrics?.strike
+  let rawOptType = alert.option_type || optPlan?.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
+  let rawStrike = alert.strike || optPlan?.strike || plan?.strike || alert.metrics?.strike
+
+  if (!rawStrike || !rawOptType) {
+    const text = `${alert.headline || ''} ${alert.summary || ''} ${rawContract || ''}`
+    const optMatch = text.match(/(\d{4,6})\s*(CE|PE)\b/i)
+    if (optMatch) {
+      if (!rawStrike) rawStrike = optMatch[1]
+      if (!rawOptType) rawOptType = optMatch[2].toUpperCase()
+    }
+  }
+  const optType = rawOptType
   const strikeNum = rawStrike ? Number(String(rawStrike).replace(/[^0-9.-]/g, '')) : null
   const isFuture = Boolean(rawContract?.toUpperCase().includes('FUT') || alert.symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
+
+  const condorCorridor = alert.hedged_spread?.profit_corridor ||
+    alert.actionable_plan?.profit_corridor ||
+    alert.condor_corridor ||
+    alert.profit_corridor ||
+    (alert.metrics?.short_put_strike && alert.metrics?.short_call_strike ? `₹${Number(alert.metrics.short_put_strike).toLocaleString('en-IN')} – ₹${Number(alert.metrics.short_call_strike).toLocaleString('en-IN')}` : null) ||
+    alert.headline?.match(/Corridor\s*\[([^\]]+)\]/i)?.[1] ||
+    alert.summary?.match(/Safe corridor\s*(₹?[\d,]+(?:\.\d+)?\s*(?:to|–|-)\s*₹?[\d,]+(?:\.\d+)?)/i)?.[1] ||
+    null
+
+  const isNeutralSpread = Boolean(
+    alert.alert_type === 'DEFINED_RISK_NEUTRAL' ||
+    alert.alert_type === 'IRON_CONDOR_PINNING' ||
+    alert.derivative_type === 'SPREAD' ||
+    (alert.hedged_spread && (alert.hedged_spread.strategy_name === 'IRON_CONDOR' || alert.hedged_spread.flow_type === 'NET_CREDIT')) ||
+    (alert.headline || '').includes('CONDOR') ||
+    (alert.summary || '').includes('Iron Condor')
+  )
 
   const hasOptionContract = Boolean(
     (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE'))) ||
@@ -1467,12 +2138,22 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     hasOptionContract ||
     alert.exchange === 'NFO' ||
     alert.exchange === 'BFO' ||
+    alert.derivative_type === 'SPREAD' ||
+    alert.derivative_type === 'OPTION' ||
+    alert.alert_type === 'DEFINED_RISK_NEUTRAL' ||
+    Boolean(alert.hedged_spread) ||
     ((alert.segment === 'FNO_INDEX' || alert.segment === 'FNO_STOCK' || alert.segment === 'FNO') && (optType || strikeNum || rawContract))
   )
 
-  const isBull = alert.direction === 'BULLISH'
-  const isBear = alert.direction === 'BEARISH'
-  const isNeutral = alert.direction === 'NEUTRAL' || alert.alert_type === 'IRON_CONDOR_PINNING'
+  const dirStr = String(alert.direction || alert.metrics?.direction || '').toUpperCase()
+  const isBull = dirStr === 'BULL' || dirStr === 'BULLISH' || dirStr === 'BUY' || alert.is_bull === true
+  const isBear = dirStr === 'BEAR' || dirStr === 'BEARISH' || dirStr === 'SELL' || alert.is_bear === true
+  const isNeutral = dirStr === 'NEUTRAL' ||
+    alert.alert_type === 'IRON_CONDOR_PINNING' ||
+    alert.alert_type === 'DEFINED_RISK_NEUTRAL' ||
+    Boolean(alert.hedged_spread && alert.hedged_spread.strategy_name === 'IRON_CONDOR') ||
+    (alert.headline || '').includes('CONDOR') ||
+    (alert.headline || '').includes('NEUTRAL')
 
   const act = String(tradePlan.action || plan.action || '').toUpperCase()
   let isOptionSell = isDerivative && (
@@ -1537,10 +2218,20 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     }
   } else {
     // In-flight active trade: live quote takes priority, fallback to alert snapshot
-    const rawSpot = liveSpot?.ltp ?? alert.underlying_spot ?? alert.metrics?.spot
+    const rawSpot = liveSpot?.ltp ?? alert.underlying_spot ?? alert.spot ?? alert.metrics?.spot
     spotNum = rawSpot != null ? Number(String(rawSpot).replace(/[^0-9.-]/g, '')) : null
+    if (!spotNum) {
+      const spotMatch = `${alert.headline || ''} ${alert.summary || ''}`.match(/(?:Spot|Coiling at|@)\s*₹?([0-9,.]+)/i)
+      if (spotMatch) {
+        const v = Number(spotMatch[1].replace(/,/g, ''))
+        if (v > 1000) spotNum = v
+      }
+    }
 
-    if (isDerivative) {
+    if (isNeutralSpread) {
+      premiumNum = entryNum
+      currentPrice = premiumNum
+    } else if (isDerivative) {
       const isIndexOrStockSpot = (val) => {
         if (val == null || isNaN(val) || val <= 0) return false
         if (spotNum && Math.abs(val - spotNum) / spotNum < 0.05) return true
@@ -1559,10 +2250,10 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
         rawOpt = alert.trigger_level != null && !isIndexOrStockSpot(Number(alert.trigger_level)) ? alert.trigger_level : entryNum
       }
 
-      premiumNum = rawOpt != null ? Number(String(rawOpt).replace(/[^0-9.-]/g, '')) : null
-      currentPrice = premiumNum
+      premiumNum = rawOpt != null ? Number(String(rawOpt).replace(/[^0-9.-]/g, '')) : (alert.premium ? Number(alert.premium) : (entryNum && !isIndexOrStockSpot(entryNum) ? entryNum : null))
+      currentPrice = premiumNum != null ? premiumNum : (spotNum != null ? spotNum : entryNum)
     } else {
-      const rawEq = liveSpot?.ltp ?? alert.ltp ?? alert.underlying_spot ?? alert.trigger_level
+      const rawEq = liveSpot?.ltp ?? alert.ltp ?? alert.underlying_spot ?? alert.spot ?? spotNum ?? entryNum ?? alert.trigger_level
       currentPrice = rawEq != null ? Number(String(rawEq).replace(/[^0-9.-]/g, '')) : null
     }
   }
@@ -1842,66 +2533,66 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
   }
 
   // 5. Stage Pill & Trajectory Status
-  let stagePill = { label: '🟢 ACTIVE', cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20', icon: '🟢' }
+  let stagePill = { label: '🟢 ACTIVE', cls: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20', icon: '🟢' }
   let trajectoryStatus = { badge: '🟢 ACTIVE', text: 'Trade in flight — active execution', theme: 'emerald' }
 
   if (isDisqualified) {
-    stagePill = { label: '🚫 CANCELLED', cls: 'bg-zinc-700/40 text-zinc-300 border-zinc-600/40', icon: '🚫' }
+    stagePill = { label: '🚫 CANCELLED', cls: 'bg-zinc-100 text-zinc-800 border-zinc-300 dark:bg-zinc-700/40 dark:text-zinc-300 dark:border-zinc-600/40', icon: '🚫' }
     trajectoryStatus = { badge: '🚫 CANCELLED (NO FILL)', text: alert.invalidation_reason || 'Setup invalidated prior to trigger — trade was never entered', theme: 'slate' }
   } else if (isTimeStop) {
-    stagePill = { label: '⏱️ TIME STOP', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/40', icon: '⏱️' }
+    stagePill = { label: '⏱️ TIME STOP', cls: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40', icon: '⏱️' }
     trajectoryStatus = { badge: '⏱️ TIME STOP', text: alert.invalidation_reason || 'Velocity time stop reached — closed at CMP', theme: 'amber' }
   } else if (isTrailedProfitHit) {
-    stagePill = { label: '💰 TRAIL SL HIT', cls: 'bg-emerald-500/25 text-emerald-200 border-emerald-400/60 ring-1 ring-emerald-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '💰' }
+    stagePill = { label: '💰 TRAIL SL HIT', cls: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-500/25 dark:text-emerald-200 dark:border-emerald-400/60 ring-1 ring-emerald-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '💰' }
     trajectoryStatus = { badge: '💰 TRAILED SL HIT', text: alert.invalidation_reason || 'Trailed stop hit — secured profit locked in', theme: 'emerald' }
   } else if (isBreakevenHit) {
-    stagePill = { label: '🛡️ BREAKEVEN HIT', cls: 'bg-amber-500/25 text-amber-200 border-amber-400/60 ring-1 ring-amber-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🛡️' }
+    stagePill = { label: '🛡️ BREAKEVEN HIT', cls: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-500/25 dark:text-amber-200 dark:border-amber-400/60 ring-1 ring-amber-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🛡️' }
     trajectoryStatus = { badge: '🛡️ BREAKEVEN HIT', text: alert.invalidation_reason || 'Trailed stop triggered at breakeven — capital protected', theme: 'amber' }
   } else if (isSLHit) {
-    stagePill = { label: '🛑 SL HIT', cls: 'bg-rose-500/25 text-rose-300 border-rose-500/60 ring-1 ring-rose-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🛑' }
+    stagePill = { label: '🛑 SL HIT', cls: 'bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-500/25 dark:text-rose-300 dark:border-rose-500/60 ring-1 ring-rose-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🛑' }
     trajectoryStatus = { badge: '🛑 SL BREACHED', text: alert.invalidation_reason || 'Stop loss triggered — trade thesis invalidated', theme: 'rose' }
   } else if (isExpired) {
-    stagePill = { label: '⏱️ EXPIRED', cls: 'bg-zinc-700/40 text-zinc-300 border-zinc-600/40', icon: '⏱️' }
+    stagePill = { label: '⏱️ EXPIRED', cls: 'bg-zinc-100 text-zinc-800 border-zinc-300 dark:bg-zinc-700/40 dark:text-zinc-300 dark:border-zinc-600/40', icon: '⏱️' }
     trajectoryStatus = { badge: '⏱️ EXPIRED', text: alert.invalidation_reason || 'Session time cutoff reached — trade closed', theme: 'slate' }
   } else if (isInvalidated) {
-    stagePill = { label: '⚠️ INVALIDATED', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/40', icon: '⚠️' }
+    stagePill = { label: '⚠️ INVALIDATED', cls: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40', icon: '⚠️' }
     trajectoryStatus = { badge: '⚠️ INVALIDATED', text: alert.invalidation_reason || 'Trade setup invalidated — structure or momentum collapsed', theme: 'amber' }
   } else if (isT3Hit) {
-    stagePill = { label: '🚀 T3 HIT', cls: 'bg-purple-500/25 text-purple-200 border-purple-400/60 ring-1 ring-purple-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🚀' }
+    stagePill = { label: '🚀 T3 HIT', cls: 'bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-500/25 dark:text-purple-200 dark:border-purple-400/60 ring-1 ring-purple-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🚀' }
     trajectoryStatus = { badge: '🚀 T3 REACHED', text: 'Target 3 hit — runners locked (+6R+ extension)', theme: 'purple' }
   } else if (isT2Hit) {
-    stagePill = { label: '🏁 T2 HIT', cls: 'bg-cyan-500/25 text-cyan-200 border-cyan-400/60 ring-1 ring-cyan-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🏁' }
+    stagePill = { label: '🏁 T2 HIT', cls: 'bg-cyan-100 text-cyan-800 border-cyan-300 dark:bg-cyan-500/25 dark:text-cyan-200 dark:border-cyan-400/60 ring-1 ring-cyan-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🏁' }
     trajectoryStatus = { badge: '🏁 T2 ACHIEVED', text: 'Target 2 hit — 75% profit secured, trailing at T1', theme: 'cyan' }
   } else if (isT1Hit) {
-    stagePill = { label: '🎯 T1 HIT', cls: 'bg-emerald-500/25 text-emerald-200 border-emerald-400/60 ring-1 ring-emerald-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🎯' }
+    stagePill = { label: '🎯 T1 HIT', cls: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-500/25 dark:text-emerald-200 dark:border-emerald-400/60 ring-1 ring-emerald-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🎯' }
     trajectoryStatus = { badge: '🎯 T1 ACHIEVED', text: 'Target 1 hit — 50% scale out complete, SL ratcheted to breakeven', theme: 'emerald' }
   } else if (isRunnerExit) {
-    stagePill = { label: '🏁 RUNNER EXIT', cls: 'bg-cyan-500/25 text-cyan-200 border-cyan-400/60', icon: '🏁' }
+    stagePill = { label: '🏁 RUNNER EXIT', cls: 'bg-cyan-100 text-cyan-800 border-cyan-300 dark:bg-cyan-500/25 dark:text-cyan-200 dark:border-cyan-400/60', icon: '🏁' }
     trajectoryStatus = { badge: '🏁 RUNNER CLOSED', text: alert.invalidation_reason || 'Runner trailing exit hit — remaining position closed', theme: 'cyan' }
   } else if (isTrail) {
-    stagePill = { label: '📈 TRAIL', cls: 'bg-blue-500/20 text-blue-300 border-blue-500/40', icon: '📈' }
+    stagePill = { label: '📈 TRAIL', cls: 'bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-500/20 dark:text-blue-300 dark:border-blue-500/40', icon: '📈' }
     trajectoryStatus = { badge: '📈 TRAILING ACTIVE', text: alert.trailing_rationale || 'Trailing stop active to protect gains', theme: 'blue' }
   } else if (rawStage === 'ACTIONABLE') {
     const isWeekend = new Date().getDay() === 0 || new Date().getDay() === 6
     const isClosed = (String(alert.environment || '').toUpperCase() !== 'LIVE' && alert.market_status === 'SESSION_CLOSED') || isWeekend
     if (isClosed) {
-      stagePill = { label: '📅 MONDAY OPEN', cls: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 ring-1 ring-indigo-500/30', icon: '📅' }
+      stagePill = { label: '📅 MONDAY OPEN', cls: 'bg-indigo-100 text-indigo-800 border-indigo-300 dark:bg-indigo-500/20 dark:text-indigo-300 dark:border-indigo-500/40 ring-1 ring-indigo-500/30', icon: '📅' }
       trajectoryStatus = { badge: '📅 WEEKEND RADAR', text: 'Off-market swing playbook — stalk for Monday 09:15 open', theme: 'indigo' }
     } else {
-      stagePill = { label: '⚡ ACTIONABLE', cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 ring-1 ring-emerald-500/30 animate-pulse', icon: '⚡' }
+      stagePill = { label: '⚡ ACTIONABLE', cls: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/40 ring-1 ring-emerald-500/30 animate-pulse', icon: '⚡' }
       trajectoryStatus = { badge: '⚡ ACTIONABLE NOW', text: `Setup active at entry level ${isCrypto ? '$' : '₹'}${entryNum ? entryNum.toFixed(1) : ''} — ready to execute`, theme: 'emerald' }
     }
   } else if (isPrimed) {
-    stagePill = { label: '🎯 PRIMED', cls: 'bg-amber-400/20 text-amber-300 border-amber-400/50 ring-1 ring-amber-400/30 animate-pulse', icon: '🎯' }
+    stagePill = { label: '🎯 PRIMED', cls: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-400/20 dark:text-amber-300 dark:border-amber-400/50 ring-1 ring-amber-400/30 animate-pulse', icon: '🎯' }
     trajectoryStatus = { badge: '🎯 PRIMED', text: `Proximity zone reached — awaiting trigger breakout at ${isCrypto ? '$' : '₹'}${entryNum ? entryNum.toFixed(1) : ''}`, theme: 'amber' }
   } else if (isStalk) {
-    stagePill = { label: '🦅 STALK', cls: 'bg-sky-500/15 text-sky-400 border-sky-500/30', icon: '🦅' }
+    stagePill = { label: '🦅 STALK', cls: 'bg-sky-100 text-sky-800 border-sky-300 dark:bg-sky-500/15 dark:text-sky-400 dark:border-sky-500/30', icon: '🦅' }
     trajectoryStatus = { badge: '🦅 STALK', text: `Setup tracked on radar — waiting for trigger zone approach at ${isCrypto ? '$' : '₹'}${entryNum ? entryNum.toFixed(1) : ''}`, theme: 'sky' }
   } else if (isEarly) {
-    stagePill = { label: '⏳ EARLY', cls: 'bg-amber-500/15 text-amber-400 border-amber-500/30', icon: '⏳' }
-    trajectoryStatus = { badge: '⏳ EARLY WARNING', text: `Setup forming in base — awaiting breakout above ${isCrypto ? '$' : '₹'}${entryNum ? entryNum.toFixed(1) : ''}`, theme: 'amber' }
+    stagePill = { label: '👀 RADAR', cls: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-500/15 dark:text-amber-400 dark:border-amber-500/30', icon: '👀' }
+    trajectoryStatus = { badge: '👀 RADAR (AWAITING IGNITION)', text: `Setup forming on radar — awaiting breakout above ${isCrypto ? '$' : '₹'}${entryNum ? entryNum.toFixed(1) : ''}`, theme: 'amber' }
   } else if (isIgnited) {
-    stagePill = { label: '🔥 IGNITED', cls: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 animate-pulse', icon: '🔥' }
+    stagePill = { label: '🔥 IGNITED', cls: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-500/15 dark:text-emerald-400 dark:border-emerald-500/30 animate-pulse', icon: '🔥' }
     trajectoryStatus = { badge: '🔥 IGNITED', text: 'Breakout confirmed — trade active in flight', theme: 'emerald' }
   } else if (!isPreTrigger && liveReturn && currentPrice && entryNum) {
     if (liveReturn.isProfitable) {
@@ -1947,9 +2638,11 @@ export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = n
     isTerminal,
     isDisqualified,
     isDerivative,
-    isBull,
-    isBear,
+    isBull: isNeutral ? false : (levels?.isUpwardPayoff !== undefined ? levels.isUpwardPayoff : isBull),
+    isBear: isNeutral ? false : (levels?.isUpwardPayoff !== undefined ? !levels.isUpwardPayoff : isBear),
     isNeutral,
+    isNeutralSpread,
+    condorCorridor,
     isOptionSell,
     isUpwardPayoff: levels?.isUpwardPayoff ?? (isDerivative ? !isOptionSell : isBull),
     cleanSym,

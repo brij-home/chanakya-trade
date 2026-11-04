@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from brokers.base import (
+    save_secure_token,
     BrokerAPI,
     UserProfile,
     Funds,
@@ -154,7 +155,8 @@ class AngelOneAPI(BrokerAPI):
 
     def _save_token(self) -> None:
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_FILE.write_text(
+        save_secure_token(
+            TOKEN_FILE,
             json.dumps(
                 {
                     "auth_token": self._auth_token,
@@ -166,7 +168,7 @@ class AngelOneAPI(BrokerAPI):
                     "email": self._profile_cache.email if self._profile_cache else "",
                 },
                 indent=2,
-            )
+            ),
         )
 
     def _load_token(self) -> None:
@@ -539,10 +541,38 @@ class AngelOneAPI(BrokerAPI):
     def place_order(self, order: OrderRequest) -> OrderResponse:
         if not self._obj:
             raise RuntimeError("Not authenticated. Run the 'login' command first.")
+
+        # Resolve symboltoken (BRK-08)
+        symbol_token = ""
+        try:
+            search = self._obj.searchScrip(order.exchange, order.symbol)
+            scrip_list = search.get("data", []) if search else []
+            if scrip_list:
+                symbol_token = str(scrip_list[0].get("symboltoken", ""))
+        except Exception as exc:
+            logger.debug(f"[AngelOneAPI] searchScrip failed for {order.symbol}: {exc}")
+
+        if not symbol_token:
+            try:
+                from market.instrument_master import get_master_record
+
+                rec = get_master_record(order.symbol)
+                if rec and getattr(rec, "token", ""):
+                    symbol_token = str(rec.token)
+            except Exception as e_tok:
+                logger.debug(
+                    f"[AngelOneAPI] get_master_record failed for token resolution: {e_tok}"
+                )
+
+        if not symbol_token:
+            raise ValueError(
+                f"Angel One order error: Could not resolve symboltoken for '{order.symbol}' on exchange '{order.exchange}'."
+            )
+
         params = {
             "variety": "NORMAL",
             "tradingsymbol": order.symbol,
-            "symboltoken": "",  # Angel One needs token; looked up separately
+            "symboltoken": symbol_token,
             "transactiontype": order.transaction_type,
             "exchange": order.exchange,
             "ordertype": _map_order_type(order.order_type),
@@ -677,20 +707,29 @@ def _map_product(angel_type: str) -> str:
 
 
 def _map_product_reverse(product: str) -> str:
-    return {
+    m = {
         "CNC": "DELIVERY",
         "NRML": "CARRYFORWARD",
         "MIS": "INTRADAY",
-    }.get(product.upper(), "INTRADAY")
+    }
+    prod_upper = product.upper()
+    if prod_upper not in m:
+        raise ValueError(
+            f"Unsupported product '{product}' for Angel One. Supported: CNC, NRML, MIS."
+        )
+    return m[prod_upper]
 
 
 def _map_order_type(order_type: str) -> str:
+    from brokers.order_types import normalize_order_type
+
+    norm = normalize_order_type(order_type)
     return {
         "MARKET": "MARKET",
         "LIMIT": "LIMIT",
-        "SL": "STOPLOSS_LIMIT",
-        "SL-M": "STOPLOSS_MARKET",
-    }.get(order_type.upper(), "MARKET")
+        "SL_LIMIT": "STOPLOSS_LIMIT",
+        "SL_MARKET": "STOPLOSS_MARKET",
+    }[norm]
 
 
 def _map_status(status: str) -> str:

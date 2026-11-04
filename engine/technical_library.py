@@ -1585,7 +1585,7 @@ TECH_TEMPLATES: dict[str, TechnicalTemplate] = {
         explanation=(
             "Rank all NIFTY sector indices by trailing 1-month return. "
             "Allocate equally to the top 2 sectors via sector ETFs (BANKBEES, ITBEES, PHARMABEES, etc.). "
-            "Rebalance on the last Thursday of each month to align with F&O expiry. "
+            "Rebalance monthly on a documented portfolio schedule; exchange expiry dates are not a universal rebalance rule. "
             "Filter: only hold a sector if its 1-month return is positive (absolute momentum filter)."
         ),
         when_to_use="Monthly rebalancing strategy; best in trending, rotation-heavy market regimes.",
@@ -1691,7 +1691,7 @@ TECH_TEMPLATES: dict[str, TechnicalTemplate] = {
             "Quality screen: ROE > 15%, Debt/Equity < 1, positive EPS growth. "
             "Momentum screen: top quartile 6-month price return among quality stocks. "
             "Portfolio: equal-weight top 20 stocks passing both filters. "
-            "Rebalance monthly on last Thursday. "
+            "Rebalance monthly on a documented portfolio schedule. "
             "Historical outperformance: Quality + Momentum factor portfolios have beaten NIFTY by 4-8% annually on NSE."
         ),
         when_to_use="Core long-term equity portfolio; works best over 3+ year horizons.",

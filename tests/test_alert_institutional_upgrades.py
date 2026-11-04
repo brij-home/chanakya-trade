@@ -153,7 +153,7 @@ def test_position_sizer_mandates_strict_limit_on_friction_badge():
     """Verify that generate_execution_ticket forces LIMIT order when friction badge is present."""
     # When market order is requested with wide spread friction badge
     ticket = generate_execution_ticket(
-        symbol="NIFTY 24500 CE",
+        symbol="NSE:NIFTY26NOV23000CE",
         entry_price=135.0,
         stop_loss=115.0,
         target_price=175.0,

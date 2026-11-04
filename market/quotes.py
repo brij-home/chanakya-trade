@@ -95,7 +95,9 @@ def _compute_raw_vwap(clean_sym: str, exchange: str = "NSE") -> Optional[float]:
 
         today_str = datetime.now(IST).strftime("%Y-%m-%d")
 
-        df = get_ohlcv(clean_sym, exchange=exchange, interval="5minute", days=1)
+        df = get_ohlcv(
+            clean_sym, exchange=exchange, interval="5minute", days=1, include_live_candle=True
+        )
         if df is None or len(df) < 1:
             return None
 
@@ -611,11 +613,11 @@ def _futures_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
                 q = Quote(
                     symbol=clean,
                     last_price=fut_price,
-                    open=round(spot_q.open * carry_factor, 2) if spot_q.open else None,
-                    high=round(spot_q.high * carry_factor, 2) if spot_q.high else None,
-                    low=round(spot_q.low * carry_factor, 2) if spot_q.low else None,
-                    close=round(spot_q.close * carry_factor, 2) if spot_q.close else None,
-                    volume=spot_q.volume or 0,
+                    open=None,
+                    high=None,
+                    low=None,
+                    close=None,
+                    volume=0,
                     change=round((spot_q.change or 0.0) * carry_factor, 2),
                     change_pct=spot_q.change_pct or 0.0,
                 )
@@ -623,9 +625,9 @@ def _futures_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
                     q,
                     instrument=inst,
                     provider="cost_of_carry_synthetic",
-                    source="FALLBACK",
+                    source="SYNTHETIC",
                     correlation_id=correlation_id,
-                    quality_flags=("COST_OF_CARRY_ESTIMATE",),
+                    quality_flags=("COST_OF_CARRY_ESTIMATE", "SYNTHETIC_PRICE"),
                 )
                 res[inst] = enriched
                 res[clean] = enriched
@@ -787,6 +789,9 @@ def get_quote(
                                 f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}"
                             )
                     if now_wall - ts < effective_ttl and getattr(cached_q, "last_price", 0.0) > 0:
+                        if now_wall - ts >= _QUOTE_TTL_SECONDS:
+                            # Off-market extended TTL: truthfulness contract requires OFF_MARKET state (DATA-06)
+                            cached_q = replace(cached_q, data_state="OFF_MARKET")
                         result[inst] = cached_q
 
     missing = [i for i in canonical_instruments if i not in result]
@@ -801,7 +806,7 @@ def get_quote(
         # 2.2. Try Fyers 50-Level Depth TBT Cache (0.01ms top-of-book resolution)
         if missing:
             try:
-                from market.fyers_tbt_manager import FyersTbtManager
+                from market.fyers_tbt_manager import FyersTbtManager, is_fresh_tbt_depth
 
                 tbt = FyersTbtManager()
                 for m_inst in missing:
@@ -809,32 +814,34 @@ def get_quote(
                         depth_obj = tbt._depth_cache.get(m_inst) or tbt._depth_cache.get(
                             m_inst.split(":")[-1]
                         )
-                    if depth_obj and depth_obj.get("ltp", 0.0) > 0:
-                        ltp = float(depth_obj.get("ltp") or 0.0)
-                        bids = depth_obj.get("bids", [])
-                        asks = depth_obj.get("asks", [])
-                        bid_p = float(bids[0]["price"]) if bids else ltp
-                        ask_p = float(asks[0]["price"]) if asks else ltp
-                        q = Quote(
-                            symbol=m_inst,
-                            last_price=ltp,
-                            open=ltp,
-                            high=ltp,
-                            low=ltp,
-                            close=ltp,
-                            volume=int(depth_obj.get("tbq", 0) + depth_obj.get("tsq", 0)),
-                            change=0.0,
-                            change_pct=0.0,
-                            bid=bid_p,
-                            ask=ask_p,
-                            vwap=float(depth_obj.get("rolling_tick_vwap") or ltp),
-                            source="STREAM",
-                            provider="FYERS_TBT_50",
-                            data_state="LIVE",
-                        )
-                        result[m_inst] = q
-                        with _quote_cache_lock:
-                            _QUOTE_CACHE[m_inst] = (now_wall, q)
+                    if depth_obj and is_fresh_tbt_depth(depth_obj):
+                        raw_ltp = depth_obj.get("ltp")
+                        if raw_ltp is not None and float(raw_ltp) > 0:
+                            ltp = float(raw_ltp)
+                            bids = depth_obj.get("bids", [])
+                            asks = depth_obj.get("asks", [])
+                            bid_p = float(bids[0]["price"]) if bids else None
+                            ask_p = float(asks[0]["price"]) if asks else None
+                            q = Quote(
+                                symbol=m_inst,
+                                last_price=ltp,
+                                open=None,
+                                high=None,
+                                low=None,
+                                close=None,
+                                volume=0,
+                                change=0.0,
+                                change_pct=0.0,
+                                bid=bid_p,
+                                ask=ask_p,
+                                vwap=float(depth_obj.get("rolling_tick_vwap") or 0.0) or None,
+                                source="STREAM",
+                                provider="FYERS_TBT_50",
+                                data_state="LIVE",
+                            )
+                            result[m_inst] = q
+                            with _quote_cache_lock:
+                                _QUOTE_CACHE[m_inst] = (now_wall, q)
                 missing = [i for i in canonical_instruments if i not in result]
             except Exception as e_tbt:
                 logger.debug(f"[quotes] TBT depth cache check error: {e_tbt}")
@@ -1013,12 +1020,19 @@ def get_quote(
         result.update(fetched_external)
         missing = [i for i in canonical_instruments if i not in result]
     elif missing and ws_only:
-        # For pure WebSocket queries, resolve synthetic futures locally from in-memory spot quotes
-        fut_candidates = [i for i in missing if _FUT_PATTERN.match(i.split(":")[-1])]
-        if fut_candidates:
-            fut_quotes = _futures_quotes(fut_candidates, correlation_id=correlation_id)
-            if fut_quotes:
-                result.update(fut_quotes)
+        # For pure WebSocket queries, resolve synthetic futures locally only in non-EXECUTE modes (DATA-07)
+        from engine.modes import get_trading_mode
+
+        if get_trading_mode().is_execute:
+            logger.warning(
+                "[market.quotes] Synthetic futures resolution blocked in LIVE/EXECUTE mode."
+            )
+        else:
+            fut_candidates = [i for i in missing if _FUT_PATTERN.match(i.split(":")[-1])]
+            if fut_candidates:
+                fut_quotes = _futures_quotes(fut_candidates, correlation_id=correlation_id)
+                if fut_quotes:
+                    result.update(fut_quotes)
 
     # 5. Populate cache with newly fetched quotes
     if result:
@@ -1082,12 +1096,15 @@ def get_quote(
     return final_result
 
 
-def get_ltp(instrument: str) -> float:
+def get_ltp(instrument: str, allow_close_fallback: bool = False) -> float:
     """
     Last traded price for a single instrument.
 
     Args:
         instrument: "EXCHANGE:SYMBOL" or "SYMBOL"  e.g. "NSE:INFY", "GOLD", "USDINR"
+        allow_close_fallback: If True, falls back to previous session close when
+                             last_price is unpopulated (DATA-08). Default False to
+                             prevent sizing and execution from using stale prices.
 
     Returns:
         Last traded price as float.
@@ -1098,11 +1115,12 @@ def get_ltp(instrument: str) -> float:
         return quotes[canon].last_price
     if instrument in quotes and quotes[instrument].last_price > 0:
         return quotes[instrument].last_price
-    # Fallback to previous session close during pre-market / off-market if last_price is unpopulated
-    if canon in quotes and getattr(quotes[canon], "close", 0.0) > 0:
-        return float(quotes[canon].close)
-    if instrument in quotes and getattr(quotes[instrument], "close", 0.0) > 0:
-        return float(quotes[instrument].close)
+    # Fallback to previous session close ONLY when explicitly requested (DATA-08)
+    if allow_close_fallback:
+        if canon in quotes and getattr(quotes[canon], "close", 0.0) > 0:
+            return float(quotes[canon].close)
+        if instrument in quotes and getattr(quotes[instrument], "close", 0.0) > 0:
+            return float(quotes[instrument].close)
     return 0.0
 
 

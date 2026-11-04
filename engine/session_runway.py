@@ -120,15 +120,22 @@ def evaluate_session_runway(
         "LONG_TERM",
         "INVESTMENT",
     )
-    is_equity_intraday = (segment == "EQUITY") and not is_swing
-    is_fno_stock_intraday = (segment in ("FNO_STOCK", "FNO_STK")) and not is_swing
-    is_fno_index = (
-        (segment in ("FNO_INDEX", "INDEX"))
-        or alert_type in ("INDEX_CALL_SETUP", "INDEX_PUT_SETUP", "SMT_SWEEP", "INDEX_MICRO_SCALP")
-        or any(
-            idx in symbol.upper()
-            for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
-        )
+    seg_upper = str(segment or "").upper().strip()
+    sym_upper = str(symbol or "").upper().strip()
+    is_opt = seg_upper in ("OPTIONS", "OPT") or sym_upper.endswith(("CE", "PE"))
+    is_idx_sym = (seg_upper in ("FNO_INDEX", "INDEX")) or any(
+        idx in sym_upper
+        for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+    )
+    is_equity_intraday = (seg_upper == "EQUITY" and not is_opt) and not is_swing
+    is_fno_stock_intraday = (
+        seg_upper in ("FNO_STOCK", "FNO_STK") or (is_opt and not is_idx_sym)
+    ) and not is_swing
+    is_fno_index = is_idx_sym or alert_type in (
+        "INDEX_CALL_SETUP",
+        "INDEX_PUT_SETUP",
+        "SMT_SWEEP",
+        "INDEX_MICRO_SCALP",
     )
 
     # In test environment, bypass time-of-day blocks unless specifically testing runway
@@ -234,16 +241,29 @@ def evaluate_session_runway(
                 veto_reason="Opening Auction Discovery (09:15-09:25 IST): Price discovery freeze active.",
             )
 
-    is_pullback_setup = alert_type.upper() in (
-        "TREND_DAY_PULLBACK",
-        "SMC_ORDERBLOCK_RETEST",
-        "TURTLE_SOUP_RETEST",
-        "PULLBACK_RETEST",
-        "VWAP_BOUNCE",
-        "TREND_PULLBACK_BOUNCE",
-        "SMC_SPRING_SWEEP",
-        "PREDATOR_SWEEP",
-    )
+    try:
+        from engine.alert_model import is_pullback_or_absorption_setup
+
+        is_pullback_setup = is_pullback_or_absorption_setup(alert_type)
+    except Exception:
+        is_pullback_setup = alert_type.upper() in (
+            "TREND_DAY_PULLBACK",
+            "SMC_ORDERBLOCK_RETEST",
+            "SMC_OB_RETEST",
+            "PRE_INFLECTION_DRYUP",
+            "TURTLE_SOUP",
+            "TURTLE_SOUP_RETEST",
+            "TURTLE_SOUP_SWEEP",
+            "LIQUIDITY_SWEEP",
+            "SMT_SWEEP",
+            "SMC_SPRING_SWEEP",
+            "PREDATOR_SWEEP",
+            "SWING_INFLECTION",
+            "PATTERN_COILING",
+            "PULLBACK_RETEST",
+            "VWAP_BOUNCE",
+            "TREND_PULLBACK_BOUNCE",
+        )
 
     # 4. Morning Reversal Trap Gate (10:15 - 11:00 IST)
     # Institutional counter-trend absorption zone: require institutional RVOL (>= 2.2x) for single-stock breakout chases.
@@ -309,7 +329,7 @@ def evaluate_session_runway(
 
     # 7. Index Options Late Entry Gate:
     # After 14:40 IST, 0DTE options face rapid theta collapse.
-    if segment == "FNO_INDEX" and now_dt.time() >= dtime(14, 40):
+    if is_fno_index and now_dt.time() >= dtime(14, 40):
         return RunwayEvaluation(
             is_allowed=False,
             phase=phase,

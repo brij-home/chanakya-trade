@@ -116,12 +116,12 @@ class TestGetCredential:
 
 class TestSetCredential:
     def test_sets_env(self, monkeypatch):
-        monkeypatch.delenv("SET_TEST_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         with patch("config.credentials._kr_set", return_value=True):
-            set_credential("SET_TEST_KEY", "new_value")
-            assert os.environ["SET_TEST_KEY"] == "new_value"
+            set_credential("GEMINI_API_KEY", "new_value")
+            assert os.environ["GEMINI_API_KEY"] == "new_value"
         # Clean up
-        monkeypatch.delenv("SET_TEST_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
 
 # ── load_all ─────────────────────────────────────────────────

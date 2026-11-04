@@ -1301,3 +1301,199 @@ def test_scrutiny_opposing_barrier_catches_naked_strike_wall_collision():
     spread_alert = DummyAlert(is_spread=True)
     passed_spread, _, _ = alert_scrutiny_auditor.verify_tier1_sanity(spread_alert)
     assert passed_spread is True
+
+
+def test_intraday_capitulation_top_suppressed_when_spot_oversold_below_vwap_or_extended():
+    """Verify that INTRADAY_CAPITULATION_TOP is NOT generated when price is extended 190 pts below high and below VWAP (chasing the bottom)."""
+    spot = 23752.55
+    day_high = 23946.3  # Was +0.36% above VWAP
+    day_low = 23740.0
+    vwap = 23859.6  # Spot is now 107 pts BELOW VWAP!
+
+    timestamps = pd.date_range("2026-11-04 11:30:00", periods=10, freq="5min")
+    rows = [
+        {"open": 23940.0, "high": 23946.3, "low": 23920.0, "close": 23925.0, "volume": 30000},
+        {"open": 23925.0, "high": 23930.0, "low": 23890.0, "close": 23900.0, "volume": 25000},
+        {"open": 23900.0, "high": 23905.0, "low": 23860.0, "close": 23865.0, "volume": 28000},
+        {"open": 23865.0, "high": 23870.0, "low": 23830.0, "close": 23835.0, "volume": 32000},
+        {"open": 23835.0, "high": 23840.0, "low": 23800.0, "close": 23805.0, "volume": 35000},
+        {"open": 23805.0, "high": 23810.0, "low": 23780.0, "close": 23785.0, "volume": 40000},
+        {"open": 23785.0, "high": 23790.0, "low": 23760.0, "close": 23765.0, "volume": 38000},
+        {"open": 23765.0, "high": 23770.0, "low": 23750.0, "close": 23755.0, "volume": 42000},
+        {"open": 23755.0, "high": 23760.0, "low": 23745.0, "close": 23748.0, "volume": 45000},
+        {"open": 23748.0, "high": 23755.0, "low": 23740.0, "close": 23752.55, "volume": 50000},
+    ]
+    df_5m = pd.DataFrame(rows, index=timestamps)
+
+    chain = [
+        MockOptionContract(
+            "NIFTY26NOV23800PE", 23800.0, "PE", 215.35, volume=50000, oi=30000, pchange=20.0
+        ),
+    ]
+
+    alerts = detect_index_put_setup(
+        underlying="NIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=vwap,
+        day_high=day_high,
+        day_low=day_low,
+        ohlcv_5m=df_5m,
+        ignore_time_gate=True,
+    )
+
+    # Must NOT detect INTRADAY_CAPITULATION_TOP because spot is 107 pts below VWAP and retreat is 0.81%
+    cap_signals = [a for a in alerts if "INTRADAY_CAPITULATION_TOP" in a.metrics.get("signals", [])]
+    assert len(cap_signals) == 0, (
+        "INTRADAY_CAPITULATION_TOP should be suppressed when spot is far below VWAP"
+    )
+
+
+def test_intraday_capitulation_top_fires_when_fresh_near_high_and_above_vwap():
+    """Verify that INTRADAY_CAPITULATION_TOP fires when fresh (within 3 bars of Day High), above VWAP, with bounded retreat."""
+    spot = 23915.0
+    day_high = 23946.3  # +0.36% above VWAP 23859.6
+    day_low = 23800.0
+    vwap = 23859.6  # Spot (23915) is +0.23% above VWAP
+
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    timestamps = pd.date_range(f"{today_str} 11:45:00", periods=10, freq="5min")
+    rows = [
+        {"open": 23840.0, "high": 23850.0, "low": 23835.0, "close": 23845.0, "volume": 18000},
+        {"open": 23845.0, "high": 23860.0, "low": 23840.0, "close": 23855.0, "volume": 19000},
+        {"open": 23855.0, "high": 23870.0, "low": 23850.0, "close": 23865.0, "volume": 20000},
+        {"open": 23865.0, "high": 23880.0, "low": 23860.0, "close": 23875.0, "volume": 21000},
+        {"open": 23875.0, "high": 23890.0, "low": 23870.0, "close": 23885.0, "volume": 22000},
+        {"open": 23885.0, "high": 23920.0, "low": 23880.0, "close": 23915.0, "volume": 28000},
+        {
+            "open": 23915.0,
+            "high": 23946.3,
+            "low": 23910.0,
+            "close": 23940.0,
+            "volume": 35000,
+        },  # Day High peak bar
+        {
+            "open": 23940.0,
+            "high": 23945.0,
+            "low": 23922.0,
+            "close": 23925.0,
+            "volume": 30000,
+        },  # Rejection wick
+        {"open": 23925.0, "high": 23930.0, "low": 23912.0, "close": 23915.0, "volume": 32000},
+        {
+            "open": 23915.0,
+            "high": 23920.0,
+            "low": 23912.0,
+            "close": 23915.0,
+            "volume": 34000,
+        },  # Lower high
+    ]
+    df_5m = pd.DataFrame(rows, index=timestamps)
+
+    chain = [
+        MockOptionContract(
+            "NIFTY26NOV23950PE", 23950.0, "PE", 120.0, volume=40000, oi=25000, pchange=12.0
+        ),
+    ]
+
+    alerts = detect_index_put_setup(
+        underlying="NIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=vwap,
+        day_high=day_high,
+        day_low=day_low,
+        ohlcv_5m=df_5m,
+        ignore_time_gate=True,
+    )
+
+    cap_signals = [a for a in alerts if "INTRADAY_CAPITULATION_TOP" in a.metrics.get("signals", [])]
+    assert len(cap_signals) >= 1
+    alert = cap_signals[0]
+    assert alert.direction == "BEARISH"
+    assert "CAPITULATION TOP" in alert.headline
+    # Verify reason text is accurate (mentions Day High reached overbought extension)
+    assert "Day High reached" in alert.summary
+    assert "rejecting at" in alert.summary
+
+
+def test_vwap_session_cache_freshness_and_rollover(monkeypatch):
+    """Verify that VwapSessionCache enforces 60s active market TTL and purges on session date rollover."""
+    from market.vwap_session_cache import VwapSessionCache
+    from datetime import datetime, timedelta
+    from config.constants import IST_ZONE as IST
+
+    cache = VwapSessionCache(ttl_seconds=60.0)
+    cache.clear()
+
+    # Put a VWAP value for NIFTY
+    cache.put("NIFTY", 23850.0)
+    assert cache.get("NIFTY") == 23850.0
+
+    # Simulate date rollover to a new session date (tomorrow)
+    tomorrow_dt = datetime.now(IST) + timedelta(days=1)
+    tomorrow_str = tomorrow_dt.strftime("%Y%m%d")
+
+    class MockDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            return tomorrow_dt
+
+    monkeypatch.setattr("market.vwap_session_cache.datetime", MockDatetime)
+
+    # Calling get() now detects rollover to tomorrow_str, clearing today's in-memory VWAP
+    val = cache.get("NIFTY")
+    assert val is None, "Session rollover must clear previous day in-memory VWAP"
+    assert cache._current_date == tomorrow_str
+
+
+def test_temporal_bar_freshness_guard_index_put_and_call(monkeypatch):
+    """Verify that index_put_setup and index_call_setup reject 5m OHLCV when the latest bar is > 15m old."""
+    from engine.detectors.index_put_setup import detect_index_put_setup
+    from engine.detectors.index_call_setup import detect_index_call_setup
+    from datetime import datetime, timedelta
+    from config.constants import IST_ZONE as IST
+    import pandas as pd
+
+    # Mock market open
+    monkeypatch.setattr("market.calendar.is_market_open", lambda exchange: True)
+    # Ensure not running as test runner to test production guard
+    monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    now_dt = datetime.now(IST)
+    # Create stale 5m bars ending 30 minutes ago
+    stale_end = now_dt - timedelta(minutes=30)
+    timestamps = [stale_end - timedelta(minutes=5 * (5 - i)) for i in range(6)]
+    rows = [
+        {"open": 23800.0, "high": 23820.0, "low": 23790.0, "close": 23810.0, "volume": 10000}
+        for _ in range(6)
+    ]
+    df_stale = pd.DataFrame(rows, index=timestamps)
+
+    chain = [
+        MockOptionContract("NIFTY26NOV23800PE", 23800.0, "PE", 150.0, volume=20000, oi=15000),
+    ]
+
+    put_alerts = detect_index_put_setup(
+        underlying="NIFTY",
+        spot=23810.0,
+        chain=chain,
+        vwap=23800.0,
+        ohlcv_5m=df_stale,
+        ref_time=now_dt,
+    )
+    assert put_alerts == [], "Stale 5m OHLCV (> 15m old) must abort index put detection"
+
+    chain_ce = [
+        MockOptionContract("NIFTY26NOV23800CE", 23800.0, "CE", 150.0, volume=20000, oi=15000),
+    ]
+    call_alerts = detect_index_call_setup(
+        underlying="NIFTY",
+        spot=23810.0,
+        chain=chain_ce,
+        vwap=23800.0,
+        ohlcv_5m=df_stale,
+        ref_time=now_dt,
+    )
+    assert call_alerts == [], "Stale 5m OHLCV (> 15m old) must abort index call detection"

@@ -98,23 +98,29 @@ def test_audit_stock_option_liquidity_spread():
 
 def test_0dte_intraday_phase_afternoon_otm_veto():
     """Validates 0DTE afternoon phase vetoes naked OTM strikes post-13:00 IST."""
-    # Thursday 13:30 IST on NIFTY (0DTE)
-    thursday_afternoon = datetime(2026, 10, 29, 13, 30, tzinfo=IST)
-    phase_afternoon = get_0dte_intraday_phase("NIFTY", now_dt=thursday_afternoon)
+    # Tuesday 27 October is the listed NIFTY monthly expiry under the effective schedule.
+    tuesday_afternoon = datetime(2026, 10, 27, 13, 30, tzinfo=IST)
+    phase_afternoon = get_0dte_intraday_phase(
+        "NIFTY", now_dt=tuesday_afternoon, expiry_date="2026-10-27"
+    )
     assert phase_afternoon["is_0dte"] is True
     assert phase_afternoon["phase"] == "AFTERNOON_GAMMA_SQUEEZE"
     assert phase_afternoon["veto_naked_otm"] is True
     assert phase_afternoon["allowed_moneyness"] == "ATM_OR_ITM_ONLY"
 
-    # Thursday 10:15 IST on NIFTY (0DTE Morning Drive)
-    thursday_morning = datetime(2026, 10, 29, 10, 15, tzinfo=IST)
-    phase_morning = get_0dte_intraday_phase("NIFTY", now_dt=thursday_morning)
+    # Same listed expiry during the morning session.
+    tuesday_morning = datetime(2026, 10, 27, 10, 15, tzinfo=IST)
+    phase_morning = get_0dte_intraday_phase(
+        "NIFTY", now_dt=tuesday_morning, expiry_date="2026-10-27"
+    )
     assert phase_morning["is_0dte"] is True
     assert phase_morning["veto_naked_otm"] is False
 
     # Tuesday 14:00 IST on NIFTY (Non-0DTE)
     tuesday_afternoon = datetime(2026, 10, 27, 14, 0, tzinfo=IST)
-    phase_non_0dte = get_0dte_intraday_phase("NIFTY", now_dt=tuesday_afternoon)
+    phase_non_0dte = get_0dte_intraday_phase(
+        "NIFTY", now_dt=tuesday_afternoon, expiry_date="2026-11-03"
+    )
     assert phase_non_0dte["is_0dte"] is False
     assert phase_non_0dte["veto_naked_otm"] is False
 

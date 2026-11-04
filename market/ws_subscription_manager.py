@@ -15,17 +15,17 @@ from __future__ import annotations
 
 import json
 import logging
+from config.discovery_policy import allows_context_symbol, get_discovery_policy
 import os
 import threading
 import time
 from calendar import monthrange
 from collections import OrderedDict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
-from market.instruments import format_strike
 
 MAX_WS_SUBSCRIPTIONS = 5000  # FYERS API v3 Data Socket supports up to 5,000 symbols concurrently
 
@@ -171,13 +171,14 @@ MONTH_NAME_MAP: dict[str, int] = {
 
 def _calc_monthly_expiry_date(exch: str, underlying: str, yr: int, mo: int) -> date:
     """Calculate the precise monthly expiry date for NSE, BSE, MCX, or CDS."""
-    _, num_days = monthrange(yr, mo)
     exch_up = (exch or "NSE").upper()
-    if exch_up == "BSE":
-        d = date(yr, mo, num_days)
-        while d.weekday() != 4:  # Last Friday
-            d -= timedelta(days=1)
-    elif exch_up == "MCX":
+    if exch_up in ("NSE", "NFO", "BSE", "BFO"):
+        from market.calendar import get_monthly_expiry_for_month
+
+        return get_monthly_expiry_for_month(underlying, yr, mo)
+
+    _, num_days = monthrange(yr, mo)
+    if exch_up == "MCX":
         if "CRUDE" in underlying.upper():
             exp_day = min(19, num_days)
             d = date(yr, mo, exp_day)
@@ -185,8 +186,6 @@ def _calc_monthly_expiry_date(exch: str, underlying: str, yr: int, mo: int) -> d
             d = date(yr, mo, num_days)
     else:
         d = date(yr, mo, num_days)
-        while d.weekday() != 3:  # Last Thursday
-            d -= timedelta(days=1)
     try:
         from market.calendar import get_adjusted_expiry_date
 
@@ -259,148 +258,24 @@ def is_valid_ws_symbol(symbol: str) -> bool:
 def get_active_index_options_grid(
     num_strikes_per_side: int = 8, ref_time: Optional[datetime] = None
 ) -> list[str]:
-    """
-    Generate active Index Options contracts for NIFTY, BANKNIFTY, MIDCPNIFTY, SENSEX, and FINNIFTY.
-    Generates ATM ± num_strikes_per_side strikes for each index (~170 contracts).
-    """
-    now = ref_time or datetime.now()
-    today = now.date()
-    from market.instruments import _calc_monthly_expiry_date
+    """Return actual listed CE/PE pairs around fresh prices, including active expiries."""
+    from config.constants import IST
+    from engine.option_resolver import INDEX_SYMBOLS
+    from market.contract_selection import get_subscription_option_grid
 
-    estimated_spots = {
-        "NIFTY": ("NSE", 25000.0, 50, num_strikes_per_side),
-        "BANKNIFTY": ("NSE", 52000.0, 100, num_strikes_per_side),
-        "MIDCPNIFTY": ("NSE", 13200.0, 25, num_strikes_per_side),
-        "SENSEX": ("BSE", 81500.0, 100, max(4, num_strikes_per_side - 2)),
-        "FINNIFTY": ("NSE", 24000.0, 100, max(4, num_strikes_per_side - 3)),
-    }
-
-    try:
-        from market.quotes import get_ltp
-
-        n_p = get_ltp("NSE:NIFTY50-INDEX") or get_ltp("NIFTY")
-        if n_p and n_p > 0:
-            estimated_spots["NIFTY"] = ("NSE", n_p, 50, num_strikes_per_side)
-        bn_p = get_ltp("NSE:NIFTYBANK-INDEX") or get_ltp("BANKNIFTY")
-        if bn_p and bn_p > 0:
-            estimated_spots["BANKNIFTY"] = ("NSE", bn_p, 100, num_strikes_per_side)
-        mid_p = get_ltp("NSE:MIDCPNIFTY-INDEX") or get_ltp("MIDCPNIFTY")
-        if mid_p and mid_p > 0:
-            estimated_spots["MIDCPNIFTY"] = ("NSE", mid_p, 25, num_strikes_per_side)
-        sen_p = get_ltp("BSE:SENSEX-INDEX") or get_ltp("SENSEX")
-        if sen_p and sen_p > 0:
-            estimated_spots["SENSEX"] = ("BSE", sen_p, 100, max(4, num_strikes_per_side - 2))
-        fin_p = get_ltp("NSE:FINNIFTY-INDEX") or get_ltp("FINNIFTY")
-        if fin_p and fin_p > 0:
-            estimated_spots["FINNIFTY"] = ("NSE", fin_p, 50, max(4, num_strikes_per_side - 3))
-    except Exception as e_suppressed:
-        logger.debug(
-            f"[market.ws_subscription_manager] Non-fatal exception suppressed: {e_suppressed}"
-        )
-
-    from market.symbol_master import get_strike_step
-
+    now = ref_time or datetime.now(IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
     grid: list[str] = []
-    for idx_name, (exch, spot, default_step, n_stk) in estimated_spots.items():
-        # Institutional expiry resolution: never prematurely roll to next month before actual monthly expiry
-        try:
-            exp_date = _calc_monthly_expiry_date(exch, idx_name, now.year, now.month)
-            if today <= exp_date:
-                active_suffixes = [now.strftime("%y%b").upper()]
-                # If within 3 calendar days of expiry, also pre-seed next month for seamless rollover
-                if (exp_date - today).days <= 3:
-                    nm = now.month + 1 if now.month < 12 else 1
-                    ny = now.year if now.month < 12 else now.year + 1
-                    active_suffixes.append(datetime(ny, nm, 1).strftime("%y%b").upper())
-            else:
-                nm = now.month + 1 if now.month < 12 else 1
-                ny = now.year if now.month < 12 else now.year + 1
-                active_suffixes = [datetime(ny, nm, 1).strftime("%y%b").upper()]
-        except Exception:
-            active_suffixes = [now.strftime("%y%b").upper()]
-
-        step = get_strike_step(idx_name, spot=spot) or default_step
-        atm_strike = round(spot / float(step)) * step
-        for m_suf in active_suffixes:
-            for offset in range(-n_stk, n_stk + 1):
-                strike = round(atm_strike + (offset * step), 2)
-                grid.append(f"{exch}:{idx_name}{m_suf}{format_strike(strike)}CE")
-                grid.append(f"{exch}:{idx_name}{m_suf}{format_strike(strike)}PE")
-
-    # On Thursday (NIFTY 0DTE) and Friday (SENSEX 0DTE), pre-seed active weekly options
-    try:
-        from brokers.fyers import format_fyers_option_symbol
-
-        weekday = now.weekday()
-        if weekday == 3:  # Thursday: NIFTY weekly options
-            n_spot = estimated_spots["NIFTY"][1]
-            n_atm = int(round(n_spot / 50.0) * 50)
-            for offset in range(-num_strikes_per_side, num_strikes_per_side + 1):
-                stk = n_atm + (offset * 50)
-                ce = format_fyers_option_symbol("NIFTY", now.date(), stk, "CE")
-                pe = format_fyers_option_symbol("NIFTY", now.date(), stk, "PE")
-                if ce not in grid:
-                    grid.append(ce)
-                if pe not in grid:
-                    grid.append(pe)
-        elif weekday == 4:  # Friday: SENSEX weekly options
-            s_spot = estimated_spots["SENSEX"][1]
-            s_atm = int(round(s_spot / 100.0) * 100)
-            for offset in range(-6, 7):
-                stk = s_atm + (offset * 100)
-                ce = format_fyers_option_symbol("SENSEX", now.date(), stk, "CE")
-                pe = format_fyers_option_symbol("SENSEX", now.date(), stk, "PE")
-                if ce not in grid:
-                    grid.append(ce)
-                if pe not in grid:
-                    grid.append(pe)
-    except Exception as e_suppressed:
-        logger.debug(
-            f"[market.ws_subscription_manager] Non-fatal exception suppressed: {e_suppressed}"
+    for underlying in sorted(INDEX_SYMBOLS):
+        grid.extend(
+            get_subscription_option_grid(
+                underlying,
+                strikes_per_side=num_strikes_per_side,
+                as_of=now if ref_time is not None else None,
+            )
         )
-
-    # Authoritative Pre-Subscription Filter: validate existence against exchange masters
-    try:
-        from market.symbol_master import load_master
-
-        nse_fo_data = None
-        try:
-            nse_fo_data = load_master("NSE_FO", offline_fallback=True)
-        except Exception as e_suppressed:
-            logger.debug(
-                f"[market.ws_subscription_manager] NSE_FO master load non-fatal: {e_suppressed}"
-            )
-
-        bse_fo_data = None
-        try:
-            bse_fo_data = load_master("BSE_FO", offline_fallback=True)
-        except Exception as e_suppressed:
-            logger.debug(
-                f"[market.ws_subscription_manager] BSE_FO master load non-fatal: {e_suppressed}"
-            )
-
-        filtered_grid = []
-        for s in grid:
-            if s.startswith("NSE:") and nse_fo_data is not None:
-                if s in nse_fo_data:
-                    filtered_grid.append(s)
-            elif s.startswith("BSE:") and bse_fo_data is not None:
-                if s in bse_fo_data:
-                    filtered_grid.append(s)
-            else:
-                # Retain candidate if master for that exchange was not loaded
-                filtered_grid.append(s)
-
-        pruned = len(grid) - len(filtered_grid)
-        if pruned > 0:
-            logger.info(
-                f"[ws_sub_manager] Proactive pre-subscription filter pruned {pruned} phantom option strikes before broker dispatch."
-            )
-        grid = filtered_grid
-    except Exception as e_grid_flt:
-        logger.debug(f"[ws_sub_manager] Non-fatal options grid filter: {e_grid_flt}")
-
-    return grid
+    return list(dict.fromkeys(grid))
 
 
 def get_active_commodity_grid(ref_time: datetime | None = None) -> list[str]:
@@ -511,7 +386,7 @@ class WsSubscriptionManager:
     def __init__(self, max_subscriptions: int = MAX_WS_SUBSCRIPTIONS) -> None:
         self._max_subscriptions = max_subscriptions
         self._lock = threading.RLock()
-        self._core_symbols: set[str] = set(CORE_BASE_SYMBOLS)
+        self._core_symbols: set[str] = {s for s in CORE_BASE_SYMBOLS if allows_context_symbol(s)}
         # Dynamic subscriptions tracked in OrderedDict for LRU eviction: symbol -> timestamp
         self._dynamic_symbols: OrderedDict[str, float] = OrderedDict()
         self._anchored_spots: dict[str, float] = {}
@@ -524,7 +399,9 @@ class WsSubscriptionManager:
         Leverages Fyers Prime 5,000 capacity to ensure 100% in-memory quote hits.
         """
         options_grid = get_active_index_options_grid()
-        commodity_grid = get_active_commodity_grid()
+        commodity_grid = (
+            get_active_commodity_grid() if get_discovery_policy().allows("COMMODITY") else []
+        )
         to_add = [s for s in (options_grid + commodity_grid) if is_valid_ws_symbol(s)]
 
         with self._lock:
@@ -930,6 +807,12 @@ class WsSubscriptionManager:
                 "utilization_pct": util_pct,
                 "recent_symbols": recent_dynamic,
                 "anchored_spots": dict(self._anchored_spots),
+                "discovery_profile": get_discovery_policy().profile,
+                "retained_out_of_scope_symbols": [
+                    s
+                    for s in self._core_symbols | set(self._dynamic_symbols)
+                    if not allows_context_symbol(s)
+                ],
             }
 
 

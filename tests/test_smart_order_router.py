@@ -10,6 +10,19 @@ from __future__ import annotations
 from engine.smart_order_router import build_smart_execution_plan, resolve_tick_size
 
 
+def _install_published_test_freezes(monkeypatch):
+    published = {"NIFTY": 1777, "BANKNIFTY": 890, "RELIANCE": 6137}
+
+    def resolve(symbol, *, segment=None):
+        clean = str(symbol).upper().split(":")[-1]
+        underlying = next((key for key in published if clean.startswith(key)), clean)
+        if underlying not in published:
+            raise RuntimeError(f"No test-master freeze fixture for {symbol}")
+        return {"quantity": published[underlying], "source": "TEST_FIXTURE"}
+
+    monkeypatch.setattr("market.symbol_master.get_quantity_freeze_info", resolve)
+
+
 def test_resolve_tick_size():
     """Verify correct tick size for standard equity, F&O and commodities."""
     assert resolve_tick_size(24500.0, "NIFTY") == 0.05
@@ -17,8 +30,9 @@ def test_resolve_tick_size():
     assert resolve_tick_size(6500.0, "CRUDEOIL") == 1.0
 
 
-def test_direct_limit_small_order_tight_spread():
+def test_direct_limit_small_order_tight_spread(monkeypatch):
     """Single lot with tight spread (<= 1 tick) routes directly as DIRECT_LIMIT."""
+    _install_published_test_freezes(monkeypatch)
     plan = build_smart_execution_plan(
         symbol="NIFTY",
         side="BUY",
@@ -35,8 +49,9 @@ def test_direct_limit_small_order_tight_spread():
     assert plan.tranches[0].quantity == 25
 
 
-def test_passive_peg_moderate_spread():
+def test_passive_peg_moderate_spread(monkeypatch):
     """Moderate spread order uses PASSIVE_PEG to capture half-spread."""
+    _install_published_test_freezes(monkeypatch)
     plan = build_smart_execution_plan(
         symbol="BANKNIFTY",
         side="BUY",
@@ -54,8 +69,9 @@ def test_passive_peg_moderate_spread():
     assert plan.estimated_spread_savings_inr == 30 * 5.0  # 30 shares * 5 pts half-spread = 150 INR
 
 
-def test_iceberg_slicer_institutional_lots():
+def test_iceberg_slicer_institutional_lots(monkeypatch):
     """Large orders (> max_tranche_lots) slice into discrete tranches."""
+    _install_published_test_freezes(monkeypatch)
     plan = build_smart_execution_plan(
         symbol="RELIANCE",
         side="SELL",

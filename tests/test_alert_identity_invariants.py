@@ -236,15 +236,55 @@ def test_scale_isolation_in_fno_enrichment():
         },
     )
 
+    from datetime import date, datetime, timezone
+    from market.contract_selection import ActiveContractResolution, ListedContract
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    mock_source = {
+        "provider": "FYERS",
+        "source": "BROKER_REST",
+        "data_state": "LIVE",
+        "is_realtime": True,
+        "is_market_open": True,
+        "as_of": now_iso,
+        "observation_time": now_iso,
+        "receipt_time": now_iso,
+    }
+    mock_chain = [
+        MagicMock(
+            symbol="NSE:ABB26OCT6200PE",
+            last_price=139.55,
+            strike=6200.0,
+            option_type="PE",
+            expiry="2026-10-29",
+        )
+    ]
+    mock_active = ActiveContractResolution(
+        is_valid=True,
+        contract=ListedContract(
+            symbol="NSE:ABB26OCT6200PE",
+            underlying="ABB",
+            expiry=date(2026, 10, 29),
+            option_type="PE",
+            strike=6200.0,
+            lot_size=125,
+            tick_size=0.05,
+            token="12345",
+        ),
+    )
+
     mock_opt_plan = MagicMock()
     mock_opt_plan.contract_symbol = "NSE:ABB26OCT6200PE"
     mock_opt_plan.strike = 6200.0
     mock_opt_plan.expiry = "2026-10-29"
+    mock_opt_plan.expiry_date = "2026-10-29"
+    mock_opt_plan.option_type = "PE"
     mock_opt_plan.entry_premium = 139.55
     mock_opt_plan.sl_premium = 112.48
     mock_opt_plan.t1_premium = 168.0
     mock_opt_plan.t2_premium = 198.16
     mock_opt_plan.lot_size = 125
+    mock_opt_plan.is_estimated = False
     mock_opt_plan.as_dict.return_value = {
         "contract_symbol": "NSE:ABB26OCT6200PE",
         "entry_premium": 139.55,
@@ -253,7 +293,14 @@ def test_scale_isolation_in_fno_enrichment():
         "t2_premium": 198.16,
     }
 
-    with patch("engine.option_resolver.resolve_option_contract", return_value=mock_opt_plan):
+    with (
+        patch(
+            "market.options.get_options_snapshot",
+            return_value=(mock_chain, 6152.0, ["2026-10-29"], mock_source),
+        ),
+        patch("market.contract_selection.resolve_active_contract", return_value=mock_active),
+        patch("engine.option_resolver.resolve_option_contract", return_value=mock_opt_plan),
+    ):
         engine._enrich_fno_contract_if_applicable(alert)
 
     # Invariant: Underlying spot coordinates preserved in underlying_sl and underlying_target

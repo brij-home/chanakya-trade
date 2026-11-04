@@ -62,7 +62,7 @@ def test_classify_market_regime_macro_shock():
 
 def test_classify_market_regime_expiry_afternoon():
     """Verify that expiry afternoon session classifies as VOLATILITY_EXPANSION_EXPIRY."""
-    dt = datetime(2026, 10, 1, 14, 0, tzinfo=IST)  # Thursday (Nifty Expiry) 14:00 IST
+    dt = datetime(2026, 10, 1, 14, 0, tzinfo=IST)  # Thursday (Sensex Expiry / BSE) 14:00 IST
     regime = classify_market_regime(vix=14.0, nifty_spot=25000.0, ref_dt=dt)
     assert regime.regime == "VOLATILITY_EXPANSION_EXPIRY"
     assert regime.min_scrutiny_score == 75
@@ -101,6 +101,52 @@ def test_classify_market_regime_gap_down_with_orb_breakout():
     )
     assert regime.regime == "TREND_EXPANSION"
     assert regime.dominant_bias == "TREND_FRIENDLY"
+
+
+def test_production_missing_vix_is_unavailable_and_blocks_regime_eligibility(monkeypatch):
+    import analysis.regime_governor as governor
+
+    monkeypatch.setattr(governor, "_is_test_environment", lambda: False)
+    monkeypatch.setattr(governor, "_fresh_live_vix", lambda: None)
+    ref_dt = datetime(2026, 11, 2, 10, 0, tzinfo=IST)
+
+    regime = governor.classify_market_regime(ref_dt=ref_dt)
+    eligible, reason = governor.is_detector_eligible_for_regime(
+        "SQUEEZE_BREAKOUT", regime, rvol=5.0
+    )
+
+    assert regime.regime == "UNAVAILABLE"
+    assert regime.vix is None
+    assert regime.data_status == "UNAVAILABLE"
+    assert regime.unavailable_reasons == ["FRESH_LIVE_INDIA_VIX_MISSING"]
+    assert eligible is False
+    assert "fresh verified volatility data is unavailable" in reason
+
+
+def test_fresh_vix_accepts_only_live_recent_provider_quote(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    import market.quotes
+    import analysis.regime_governor as governor
+
+    quote = SimpleNamespace(
+        last_price=14.2,
+        provider="FYERS",
+        data_state="LIVE",
+        received_at=datetime.now(timezone.utc).isoformat(),
+    )
+    monkeypatch.setattr(market.quotes, "get_quote", lambda symbol: {symbol: quote})
+    assert governor._fresh_live_vix() == 14.2
+
+    quote.received_at = (datetime.now(timezone.utc) - timedelta(seconds=31)).isoformat()
+    assert governor._fresh_live_vix() is None
+
+    quote.received_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+    assert governor._fresh_live_vix() is None
+
+    quote.received_at = datetime.now(timezone.utc).isoformat()
+    quote.data_state = "DEGRADED"
+    assert governor._fresh_live_vix() is None
 
 
 def test_detector_eligibility_call_setup_structural_sweep_in_distribution():

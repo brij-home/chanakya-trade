@@ -34,7 +34,7 @@ import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -62,6 +62,78 @@ class Trade:
     pnl_pct: float
     hold_days: int
     signal: str = ""  # what triggered this trade
+
+
+@dataclass
+class DatasetManifest:
+    """Immutable audit manifest for historical datasets used in backtests."""
+
+    symbol: str
+    source: str
+    schema_version: str
+    sha256: str
+    row_count: int
+    start_session: str
+    end_session: str
+    session_count: int
+    columns: list[str]
+    generated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "source": self.source,
+            "schema_version": self.schema_version,
+            "sha256": self.sha256,
+            "row_count": self.row_count,
+            "start_session": self.start_session,
+            "end_session": self.end_session,
+            "session_count": self.session_count,
+            "columns": self.columns,
+            "generated_at": self.generated_at,
+        }
+
+
+def generate_dataset_manifest(
+    df: pd.DataFrame,
+    symbol: str,
+    source: str = "HISTORICAL",
+    schema_version: str = "1.0",
+) -> DatasetManifest:
+    """
+    Generate cryptographic checksum and session audit manifest for a backtest dataset.
+    """
+    import hashlib
+    from datetime import timezone
+
+    if df.empty:
+        raise ValueError("Cannot generate manifest for empty dataset")
+
+    date_strs = [str(idx)[:10] for idx in df.index]
+    cols = sorted(list(df.columns))
+    data_digest = hashlib.sha256()
+    data_digest.update(symbol.encode("utf-8"))
+    for c in cols:
+        data_digest.update(c.encode("utf-8"))
+        data_digest.update(df[c].to_numpy().tobytes())
+    digest_hex = data_digest.hexdigest()
+
+    start_date = date_strs[0]
+    end_date = date_strs[-1]
+    unique_sessions = len(set(date_strs))
+
+    return DatasetManifest(
+        symbol=symbol,
+        source=source,
+        schema_version=schema_version,
+        sha256=digest_hex,
+        row_count=len(df),
+        start_session=start_date,
+        end_session=end_date,
+        session_count=unique_sessions,
+        columns=list(df.columns),
+        generated_at=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 @dataclass
@@ -803,8 +875,8 @@ class SMCStrategy(Strategy):
         close = df["close"]
 
         # 5-bar swing highs / lows
-        swing_high = high.rolling(window=self.swing_lookback, center=True).max()
-        swing_low = low.rolling(window=self.swing_lookback, center=True).min()
+        swing_high = high.rolling(window=self.swing_lookback).max()
+        swing_low = low.rolling(window=self.swing_lookback).min()
 
         for i in range(self.ob_lookback, len(df)):
             prev_high = swing_high.iloc[i - 1]
@@ -836,17 +908,34 @@ class Backtester:
         exchange: str = "NSE",
         period: str = "1y",
         capital: float = 100000,
+        conservative_fills: bool = False,
+        slippage_bps: float = 10.0,
+        clock: Optional[Any] = None,
+        execute_on_next_bar: bool = False,
     ) -> None:
         self.symbol = symbol.upper()
         self.exchange = exchange.upper()
         self.period = period
         self.initial_capital = capital
+        self.conservative_fills = conservative_fills
+        self.slippage_bps = slippage_bps
+        self.clock = clock
+        self.execute_on_next_bar = execute_on_next_bar
         self._df: Optional[pd.DataFrame] = None
 
     def _load_data(self) -> pd.DataFrame:
         """Fetch historical OHLCV data."""
         if self._df is not None:
-            return self._df
+            df = self._df
+            if self.clock is not None:
+                now_dt = (
+                    self.clock.now() if callable(getattr(self.clock, "now", None)) else self.clock
+                )
+                now_ts = pd.Timestamp(now_dt)
+                if hasattr(now_ts, "tz") and now_ts.tz is not None:
+                    now_ts = now_ts.tz_localize(None)
+                df = df.loc[df.index <= now_ts]
+            return df
 
         from market.history import get_ohlcv
 
@@ -882,6 +971,14 @@ class Backtester:
         df.index = pd.to_datetime(df.index)
         if hasattr(df.index, "tz") and df.index.tz is not None:
             df.index = df.index.tz_localize(None)
+
+        if self.clock is not None:
+            now_dt = self.clock.now() if callable(getattr(self.clock, "now", None)) else self.clock
+            now_ts = pd.Timestamp(now_dt)
+            if hasattr(now_ts, "tz") and now_ts.tz is not None:
+                now_ts = now_ts.tz_localize(None)
+            df = df.loc[df.index <= now_ts]
+
         self._df = df
         return df
 
@@ -914,18 +1011,40 @@ class Backtester:
 
         for i in range(1, len(df)):
             date_str = str(df.index[i])[:10]
-            price = float(df.iloc[i]["close"])
-            signal = int(signals.iloc[i]) if i < len(signals) else 0
+            close_p = float(df.iloc[i]["close"])
+            open_p = float(df.iloc[i].get("open", close_p)) if "open" in df.columns else close_p
+            high_p = float(df.iloc[i].get("high", close_p)) if "high" in df.columns else close_p
+            low_p = float(df.iloc[i].get("low", close_p)) if "low" in df.columns else close_p
+            if self.execute_on_next_bar:
+                signal = int(signals.iloc[i - 1]) if (i - 1) >= 0 and (i - 1) < len(signals) else 0
+                base_exec_p = open_p
+            else:
+                signal = int(signals.iloc[i]) if i < len(signals) else 0
+                base_exec_p = close_p
+
+            price = base_exec_p
 
             if position == 0 and signal == 1:
                 # Enter long
                 position = 1
-                entry_price = price
+                if self.conservative_fills:
+                    # Conservative entry: pay higher of open/close plus adverse slippage
+                    fill_p = max(open_p, close_p) * (1.0 + self.slippage_bps / 10000.0)
+                    entry_price = min(high_p, fill_p) if high_p >= fill_p else fill_p
+                else:
+                    entry_price = base_exec_p
                 entry_date = date_str
 
             elif position == 1 and signal == -1:
                 # Exit long
-                pnl_pct = (price - entry_price) / entry_price * 100
+                if self.conservative_fills:
+                    # Conservative exit: receive lower of open/close minus adverse slippage
+                    fill_p = min(open_p, close_p) * (1.0 - self.slippage_bps / 10000.0)
+                    exit_price = max(low_p, fill_p) if low_p <= fill_p else fill_p
+                else:
+                    exit_price = base_exec_p
+
+                pnl_pct = (exit_price - entry_price) / entry_price * 100
                 pnl = capital * pnl_pct / 100
                 capital += pnl
 
@@ -947,7 +1066,7 @@ class Backtester:
                         exit_date=date_str,
                         direction="LONG",
                         entry_price=entry_price,
-                        exit_price=price,
+                        exit_price=exit_price,
                         quantity=int(capital / price) if price > 0 else 0,
                         pnl=round(pnl, 2),
                         pnl_pct=round(pnl_pct, 2),

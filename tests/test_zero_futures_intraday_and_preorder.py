@@ -13,7 +13,7 @@ from bot.alert_templates import render_auto_alert, render_asymmetric_alert
 from market.indices import get_opening_range_battle_plan, format_opening_range_radar
 
 
-def test_zero_futures_for_intraday_asymmetric_alert():
+def test_zero_futures_for_intraday_asymmetric_alert(monkeypatch):
     """Verify that an intraday asymmetric index alert suppresses the Futures Preferred line."""
     asym_intraday = {
         "symbol": "NIFTY",
@@ -32,18 +32,19 @@ def test_zero_futures_for_intraday_asymmetric_alert():
             "target_1": 25050.0,
             "lot_size": 25,
             "futures_plan": {
-                "contract_symbol": "NIFTY26OCTFUT",
+                "contract_symbol": "NFO:NIFTY26NOVFUT",
                 "entry_price": 24860.0,
                 "stop_loss": 24750.0,
                 "target_1": 25050.0,
-                "lot_size": 25,
+                "lot_size": 65,
             },
             "option_plan": {
-                "contract_symbol": "NIFTY 24900 CE",
+                "contract_symbol": "NFO:NIFTY26NOV24900CE",
                 "entry_premium": 135.0,
                 "sl_premium": 95.0,
                 "t1_premium": 215.0,
-                "lot_size": 25,
+                "lot_size": 65,
+                "expiry_date": "2026-11-03",
             },
             "hedge_plan": {
                 "strategy": "BULL_CALL_SPREAD",
@@ -57,6 +58,14 @@ def test_zero_futures_for_intraday_asymmetric_alert():
             },
         },
     }
+
+    import market.symbol_master as symbol_master
+
+    monkeypatch.setattr(
+        symbol_master,
+        "get_symbol_info",
+        lambda symbol, **kwargs: {"minLotSize": 65} if symbol == "NFO:NIFTY26NOV24900CE" else None,
+    )
 
     rendered = render_asymmetric_alert(asym_intraday)
 
@@ -73,7 +82,7 @@ def test_zero_futures_for_intraday_asymmetric_alert():
     assert "NIFTY 24900 CE" in rendered
 
 
-def test_zero_futures_for_swing_and_stock_asymmetric_alert():
+def test_zero_futures_for_swing_and_stock_asymmetric_alert(monkeypatch):
     """Verify that positional/swing single-stock alerts never recommend Futures, strictly options or hedges."""
     asym_swing_stock = {
         "symbol": "LT",
@@ -92,18 +101,19 @@ def test_zero_futures_for_swing_and_stock_asymmetric_alert():
             "target_1": 3864.9,
             "lot_size": 175,
             "futures_plan": {
-                "contract_symbol": "LT26OCTFUT",
+                "contract_symbol": "NFO:LT26NOVFUT",
                 "entry_price": 3635.0,
                 "stop_loss": 3588.86,
                 "target_1": 3864.9,
                 "lot_size": 175,
             },
             "option_plan": {
-                "contract_symbol": "LT 3650 CE",
+                "contract_symbol": "NFO:LT26NOV3650CE",
                 "entry_premium": 68.5,
                 "sl_premium": 42.0,
                 "t1_premium": 130.0,
                 "lot_size": 175,
+                "expiry_date": "2026-11-24",
             },
             "hedge_plan": {
                 "strategy": "BULL_CALL_SPREAD",
@@ -117,6 +127,14 @@ def test_zero_futures_for_swing_and_stock_asymmetric_alert():
             },
         },
     }
+
+    import market.symbol_master as symbol_master
+
+    monkeypatch.setattr(
+        symbol_master,
+        "get_symbol_info",
+        lambda symbol, **kwargs: {"minLotSize": 175} if symbol == "NFO:LT26NOV3650CE" else None,
+    )
 
     rendered = render_asymmetric_alert(asym_swing_stock)
 

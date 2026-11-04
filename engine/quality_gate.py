@@ -366,7 +366,7 @@ def evaluate_institutional_quality_gate(
 
     # ── 3b. Check 2b: SEBI Physical Delivery Expiry Week Veto (Single-Stock F&O) ──
     # SEBI mandates physical delivery for all in-the-money (ITM) stock options during monthly
-    # expiry week (final 4 trading days before the last Thursday). Near-month stock options
+    # expiry week (final four calendar days before the listed, effective-dated expiry). Near-month stock options
     # must be strictly vetoed; trade pipelines must select the Next-Month series.
     is_idx = clean_sym in (
         "NIFTY",
@@ -517,10 +517,32 @@ def evaluate_institutional_quality_gate(
         try:
             rvol_f = float(rvol)
             verdict_metrics["rvol"] = rvol_f
-            if rvol_f < 1.20 and confidence < 88:
-                notes.append(
-                    f"Low Breakout RVOL ({rvol_f:.2f}x < 1.20x): Lack of institutional volume surge; defined-risk spread mandated."
-                )
+            is_pullback = getattr(alert, "is_pullback_or_absorption", False)
+            if not is_pullback:
+                try:
+                    from engine.alert_model import is_pullback_or_absorption_setup
+
+                    is_pullback = is_pullback_or_absorption_setup(alert)
+                except Exception:
+                    is_pullback = False
+
+            if is_pullback:
+                dryup = (getattr(alert, "metrics", {}) or {}).get("is_volume_dryup") or (
+                    getattr(alert, "metrics", {}) or {}
+                ).get("vol_dryup_ratio")
+                if rvol_f <= 1.25 or dryup:
+                    notes.append(
+                        f"Controlled Retest Absorption (RVOL {rvol_f:.2f}x): Quiet volume contraction into structural support confirmed."
+                    )
+                elif rvol_f >= 2.2:
+                    notes.append(
+                        f"Elevated Retest Volume (RVOL {rvol_f:.2f}x >= 2.2x): Heavy volume into support; defined-risk spread mandated."
+                    )
+            else:
+                if rvol_f < 1.20 and confidence < 88:
+                    notes.append(
+                        f"Low Breakout RVOL ({rvol_f:.2f}x < 1.20x): Lack of institutional volume surge; defined-risk spread mandated."
+                    )
         except Exception as e_suppressed:
             logger.debug(f"[engine.quality_gate] Non-fatal exception suppressed: {e_suppressed}")
 

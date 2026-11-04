@@ -64,6 +64,35 @@ class DetectionContext:
         return is_index_symbol(self.canonical_symbol)
 
     @property
+    def is_intraday_feed_fresh(self) -> bool:
+        """
+        Validates that intraday candles in this context are fresh (< 15 mins old during market hours).
+        Prevents detectors from evaluating stale or lagging candle feeds.
+        """
+        df = self.candles_5m if self.candles_5m is not None else self.candles_15m
+        if df is None or len(df) == 0:
+            return True
+        try:
+            from market.calendar import is_market_open
+
+            if not is_market_open(self.exchange):
+                return True
+            last_dt = df.index[-1]
+            if hasattr(last_dt, "to_pydatetime"):
+                last_dt = last_dt.to_pydatetime()
+            if getattr(last_dt, "tzinfo", None) is not None:
+                last_dt = last_dt.astimezone(IST).replace(tzinfo=None)
+            now_dt = (
+                self.timestamp.replace(tzinfo=None)
+                if hasattr(self.timestamp, "replace")
+                else datetime.now()
+            )
+            age_min = (now_dt - last_dt).total_seconds() / 60.0
+            return age_min <= 15.0
+        except Exception:
+            return True
+
+    @property
     def day_change_pct(self) -> float:
         """Percentage price change against previous session close."""
         if self.prev_close and self.prev_close > 0 and self.ltp > 0:
@@ -255,6 +284,7 @@ class DetectionContext:
             alert_type=alert_type,
             is_fno=self.segment in ("NFO", "BFO", "F&O"),
             execution_friction_badge=self.execution_friction_badge,
+            segment=self.segment,
         )
 
 
@@ -352,6 +382,12 @@ class DetectorRegistry:
         """
         Executes all eligible registered detectors sequentially against the context.
         """
+        from config.discovery_policy import get_discovery_policy, allows_context_symbol
+
+        if get_discovery_policy().fno_only:
+            symbol = ctx.symbol if ":" in ctx.symbol else f"{ctx.exchange}:{ctx.symbol}"
+            if not allows_context_symbol(symbol):
+                return []
         alerts: list[AutoAlert] = []
         for detector in self.get_detectors():
             try:

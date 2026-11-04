@@ -36,3 +36,18 @@ This rule governs all agent communication, terminal outputs, UI tooltips, card c
   - `[LIVE]` / `[PAPER]` / `[DEMO]` for mode display
   - `[TRIGGER]` / `[STALK]` / `[STANDDOWN]` for alert status
 
+---
+
+## 6. Mermaid Diagram Formatting & Invariants
+
+- **Strictly Supported Diagram Headers**: When generating visual architectures, workflows, or lifecycles in Markdown artifacts, chat responses, or documentation, use ONLY the supported Mermaid headers:
+  - `flowchart TD` / `flowchart LR` / `graph TD` / `graph LR`
+  - `sequenceDiagram`
+  - `stateDiagram-v2` or `stateDiagram`
+  - `classDiagram`
+  - `erDiagram`
+  - `xychart-beta`
+  - `pie`
+- **Strictly Prohibited Headers**: `gantt`, `gitGraph`, `journey`, `quadrantChart`, `mindmap`, `timeline`, and other unsupported Mermaid headers fail client-side rendering with `Invalid mermaid header: "<type>"`.
+- **Roadmaps & Timelines**: For phase-wise roadmaps, schedules, and release plans, always use structured directed flowcharts (`flowchart TD` / `flowchart LR` with subgraphs) or Markdown tables instead of `gantt`.
+

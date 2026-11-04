@@ -59,13 +59,72 @@ def test_universal_fno_contract_enrichment(engine):
         actionable_plan={"action": "BUY", "target_1": "2550.0"},
     )
 
+    from datetime import date, datetime, timezone
+    from market.contract_selection import ActiveContractResolution, ListedContract
+
     # Mock option resolver to return deterministic contract
     mock_resolved = MagicMock()
     mock_resolved.contract_symbol = "NSE:RELIANCE26OCT2500CE"
     mock_resolved.strike = 2500.0
     mock_resolved.expiry_date = "2026-10-29"
+    mock_resolved.expiry = "2026-10-29"
+    mock_resolved.option_type = "CE"
+    mock_resolved.entry_premium = 50.0
+    mock_resolved.sl_premium = 35.0
+    mock_resolved.t1_premium = 75.0
+    mock_resolved.lot_size = 250
+    mock_resolved.is_estimated = False
+    mock_resolved.as_dict.return_value = {
+        "contract": "NSE:RELIANCE26OCT2500CE",
+        "strike": 2500.0,
+        "option_type": "CE",
+        "expiry_date": "2026-10-29",
+        "lot_size": 250,
+        "entry_premium": 50.0,
+    }
 
-    with patch("engine.option_resolver.resolve_option_contract", return_value=mock_resolved):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    mock_source = {
+        "provider": "FYERS",
+        "source": "BROKER_REST",
+        "data_state": "LIVE",
+        "is_realtime": True,
+        "is_market_open": True,
+        "as_of": now_iso,
+        "observation_time": now_iso,
+        "receipt_time": now_iso,
+    }
+    mock_chain = [
+        MagicMock(
+            symbol="NSE:RELIANCE26OCT2500CE",
+            last_price=50.0,
+            strike=2500.0,
+            option_type="CE",
+            expiry="2026-10-29",
+        )
+    ]
+    mock_active = ActiveContractResolution(
+        is_valid=True,
+        contract=ListedContract(
+            symbol="NSE:RELIANCE26OCT2500CE",
+            underlying="RELIANCE",
+            expiry=date(2026, 10, 29),
+            option_type="CE",
+            strike=2500.0,
+            lot_size=250,
+            tick_size=0.05,
+            token="22222",
+        ),
+    )
+
+    with (
+        patch(
+            "market.options.get_options_snapshot",
+            return_value=(mock_chain, 2500.0, ["2026-10-29"], mock_source),
+        ),
+        patch("market.contract_selection.resolve_active_contract", return_value=mock_active),
+        patch("engine.option_resolver.resolve_option_contract", return_value=mock_resolved),
+    ):
         engine._enrich_fno_contract_if_applicable(raw_alert)
 
     assert raw_alert.contract_symbol == "NSE:RELIANCE26OCT2500CE"

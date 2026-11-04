@@ -796,10 +796,9 @@ def _score_max_pain_proximity(
     session_time_str: Optional[str] = None,
 ) -> FactorScore:
     """
-    Factor 9: Max Pain Expiry Gravity.
-    ORTHOGONAL TO SMC — this is a mean-reversion factor, not a trend factor.
-    Near expiry + spot far from max pain = high probability of convergence.
-    This INTENTIONALLY contradicts trend signals near expiry.
+    Factor 9: Max pain context.
+    Max pain is descriptive positioning context; it is not a validated directional
+    forecast and therefore contributes no bullish/bearish conviction by itself.
     """
     if not max_pain or max_pain <= 0 or spot <= 0:
         return FactorScore(
@@ -812,67 +811,15 @@ def _score_max_pain_proximity(
         )
 
     distance_pct = abs(spot - max_pain) / max_pain * 100
-    is_above = spot > max_pain
-
-    # Check if we're near expiry (Thursday = expiry day in NSE)
-    from datetime import datetime
-
-    now = datetime.now()
-    days_to_thursday = (3 - now.weekday()) % 7  # 0 = Thursday
-    near_expiry = days_to_thursday <= 1  # Thursday or Wednesday
-
-    score = 5
-    details = []
-
-    if near_expiry:
-        if distance_pct <= 0.3:
-            score = 8
-            details.append(
-                f"Expiry day: Spot at Max Pain ₹{max_pain:,.0f} → Pin risk (mean reversion done)"
-            )
-        elif distance_pct <= 1.0:
-            score = 6
-            direction = "above" if is_above else "below"
-            details.append(
-                f"Near expiry: Spot {direction} Max Pain by {distance_pct:.1f}% → moderate pull expected"
-            )
-        elif distance_pct <= 2.0:
-            score = 4
-            direction = "above" if is_above else "below"
-            details.append(
-                f"Near expiry: Spot {distance_pct:.1f}% {direction} Max Pain ₹{max_pain:,.0f} → strong pull likely"
-            )
-        else:
-            # Far from max pain near expiry = strong contrarian mean-reversion opportunity
-            score = 2 if is_above else 8  # Far above max pain near expiry = bearish
-            direction = "above" if is_above else "below"
-            details.append(
-                f"EXPIRY GRAVITY: Spot {distance_pct:.1f}% {direction} Max Pain ₹{max_pain:,.0f} → "
-                f"{'Strong pull DOWN to max pain' if is_above else 'Strong pull UP to max pain'}"
-            )
-    else:
-        # Mid-week: max pain is less predictive
-        if distance_pct <= 0.5:
-            score = 7
-            details.append(f"Spot near Max Pain ₹{max_pain:,.0f} — low volatility zone")
-        elif distance_pct <= 2.0:
-            score = 5
-            details.append(
-                f"Spot {distance_pct:.1f}% from Max Pain ₹{max_pain:,.0f} — normal range"
-            )
-        else:
-            score = 5
-            details.append(
-                f"Spot {distance_pct:.1f}% from Max Pain ₹{max_pain:,.0f} — mid-week pull limited"
-            )
-
-    signal = "BULLISH" if score >= 7 else "BEARISH" if score <= 3 else "NEUTRAL"
     return FactorScore(
         factor_id="max_pain",
-        label="Max Pain Expiry Gravity",
-        score=max(0, min(10, score)),
-        signal=signal,
-        detail=" | ".join(details),
+        label="Max Pain Context",
+        score=5,
+        signal="NEUTRAL",
+        detail=(
+            f"Spot is {distance_pct:.2f}% from max pain ₹{max_pain:,.0f}; "
+            "context only, no directional edge assigned without out-of-sample validation."
+        ),
         raw_value=distance_pct,
         axis="PRICE",
     )

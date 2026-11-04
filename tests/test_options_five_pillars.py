@@ -88,7 +88,8 @@ def test_0dte_phase_weekly_schedule():
     """Verify correct 0DTE classification under SEBI's single-benchmark weekly regime."""
     # Under SEBI index derivative regulations (effective Nov 2024):
     # Mon (MIDCPNIFTY), Tue (FINNIFTY), Wed (BANKNIFTY) weekly expiries are DISCONTINUED.
-    # Only NSE NIFTY (Thursday) and BSE SENSEX (Friday) offer weekly options.
+    # Only NSE NIFTY and BSE SENSEX offer weekly options. A ticker and weekday
+    # alone do not prove that a listed contract expires today.
     mon_dt = datetime(2026, 10, 26, 10, 30, tzinfo=IST)
     res_midcp = get_0dte_intraday_phase("MIDCPNIFTY", now_dt=mon_dt)
     res_nifty_mon = get_0dte_intraday_phase("NIFTY", now_dt=mon_dt)
@@ -103,16 +104,28 @@ def test_0dte_phase_weekly_schedule():
     wed_dt = datetime(2026, 10, 28, 10, 30, tzinfo=IST)
     assert get_0dte_intraday_phase("BANKNIFTY", now_dt=wed_dt)["is_0dte"] is False
 
-    # Thursday (2026-10-29): NSE NIFTY 50 authorized weekly expiry -> is_0dte is True
-    thu_dt = datetime(2026, 10, 29, 10, 30, tzinfo=IST)
-    assert get_0dte_intraday_phase("NIFTY", now_dt=thu_dt)["is_0dte"] is True
+    # Tuesday (2026-10-27): NIFTY expiry is explicit, not inferred from weekday.
+    tue_expiry = datetime(2026, 10, 27, 10, 30, tzinfo=IST)
+    assert get_0dte_intraday_phase("NIFTY", now_dt=tue_expiry)["is_0dte"] is False
+    assert (
+        get_0dte_intraday_phase("NIFTY", expiry_date="2026-10-27", now_dt=tue_expiry)["is_0dte"]
+        is True
+    )
 
-    # Friday (2026-10-30): BSE SENSEX authorized weekly expiry -> is_0dte is True
-    fri_dt = datetime(2026, 10, 30, 10, 30, tzinfo=IST)
-    assert get_0dte_intraday_phase("SENSEX", now_dt=fri_dt)["is_0dte"] is True
+    # Thursday (2026-10-29): BSE SENSEX expiry also requires explicit evidence.
+    thu_expiry = datetime(2026, 10, 29, 10, 30, tzinfo=IST)
+    assert get_0dte_intraday_phase("SENSEX", now_dt=thu_expiry)["is_0dte"] is False
+    assert (
+        get_0dte_intraday_phase("SENSEX", expiry_date="2026-10-29", now_dt=thu_expiry)["is_0dte"]
+        is True
+    )
 
-    # Monthly Expiry: BANKNIFTY on last Thursday of the month (2026-10-29) -> is_0dte is True!
-    assert get_0dte_intraday_phase("BANKNIFTY", now_dt=thu_dt)["is_0dte"] is True
+    # BANKNIFTY monthly expiry is Tuesday 2026-10-27; ticker alone is insufficient.
+    assert get_0dte_intraday_phase("BANKNIFTY", now_dt=tue_expiry)["is_0dte"] is False
+    assert (
+        get_0dte_intraday_phase("BANKNIFTY", expiry_date="2026-10-27", now_dt=tue_expiry)["is_0dte"]
+        is True
+    )
 
     # Contract-level DTE: Any contract with dte=0 is explicitly 0DTE regardless of day
     assert get_0dte_intraday_phase("RELIANCE", dte=0, now_dt=mon_dt)["is_0dte"] is True
@@ -121,36 +134,39 @@ def test_0dte_phase_weekly_schedule():
 
 def test_0dte_intraday_clock_phases():
     """Verify the 4 daily intraday phases and tactical biases."""
-    thu_dt = datetime(2026, 10, 29, 9, 45, tzinfo=IST)
+    tue_dt = datetime(2026, 10, 27, 9, 45, tzinfo=IST)
     # Morning: 09:15 - 11:00
-    res_morning = get_0dte_intraday_phase("NIFTY", now_dt=thu_dt)
+    res_morning = get_0dte_intraday_phase("NIFTY", expiry_date="2026-10-27", now_dt=tue_dt)
     assert res_morning["phase"] == "MORNING_EXPANSION"
-    assert res_morning["tactical_bias"] == "NAKED_FAVORED"
-    assert res_morning["volatility_multiplier"] == 1.35
+    assert res_morning["tactical_bias"] == "REGIME_DEPENDENT"
+    assert res_morning["volatility_multiplier"] == 1.0
 
     # Midday: 11:00 - 13:30
-    midday_dt = datetime(2026, 10, 29, 12, 15, tzinfo=IST)
-    res_midday = get_0dte_intraday_phase("NIFTY", now_dt=midday_dt)
+    midday_dt = datetime(2026, 10, 27, 12, 15, tzinfo=IST)
+    res_midday = get_0dte_intraday_phase("NIFTY", expiry_date="2026-10-27", now_dt=midday_dt)
     assert res_midday["phase"] == "MIDDAY_THETA_GRIND"
-    assert res_midday["tactical_bias"] == "SPREAD_FAVORED"
-    assert res_midday["volatility_multiplier"] == 0.85
+    assert res_midday["tactical_bias"] == "REGIME_DEPENDENT"
+    assert res_midday["volatility_multiplier"] == 1.0
 
     # Afternoon Gamma Squeeze: 13:30 - 15:00
-    afternoon_dt = datetime(2026, 10, 29, 14, 15, tzinfo=IST)
-    res_afternoon = get_0dte_intraday_phase("NIFTY", now_dt=afternoon_dt)
+    afternoon_dt = datetime(2026, 10, 27, 14, 15, tzinfo=IST)
+    res_afternoon = get_0dte_intraday_phase("NIFTY", expiry_date="2026-10-27", now_dt=afternoon_dt)
     assert res_afternoon["phase"] == "AFTERNOON_GAMMA_SQUEEZE"
-    assert res_afternoon["tactical_bias"] == "GAMMA_SNIPER"
-    assert res_afternoon["volatility_multiplier"] == 1.80
+    assert res_afternoon["tactical_bias"] == "REGIME_DEPENDENT"
+    assert res_afternoon["volatility_multiplier"] == 1.0
 
     # Terminal Closing: 15:00 - 15:30
-    closing_dt = datetime(2026, 10, 29, 15, 10, tzinfo=IST)
-    res_closing = get_0dte_intraday_phase("NIFTY", now_dt=closing_dt)
+    closing_dt = datetime(2026, 10, 27, 15, 10, tzinfo=IST)
+    res_closing = get_0dte_intraday_phase("NIFTY", expiry_date="2026-10-27", now_dt=closing_dt)
     assert res_closing["phase"] == "TERMINAL_CLOSING"
-    assert res_closing["tactical_bias"] == "SQUARE_OFF"
+    assert res_closing["tactical_bias"] == "REGIME_DEPENDENT"
 
     # Off-market
-    post_dt = datetime(2026, 10, 29, 16, 0, tzinfo=IST)
-    assert get_0dte_intraday_phase("NIFTY", now_dt=post_dt)["phase"] == "OFF_MARKET"
+    post_dt = datetime(2026, 10, 27, 16, 0, tzinfo=IST)
+    assert (
+        get_0dte_intraday_phase("NIFTY", expiry_date="2026-10-27", now_dt=post_dt)["phase"]
+        == "OFF_MARKET"
+    )
 
 
 # ── Pillar 3: Hard Liquidity & Bid-Ask Slippage Guard ────────────────────────
@@ -328,12 +344,12 @@ def test_get_optimal_expiry_stock_fno_physical_delivery():
     """Verify stock options get routed to NEXT_MONTHLY during SEBI physical delivery week."""
     from engine.options_hedging import get_optimal_expiry_recommendation
 
-    # 2026-10-27 is Tuesday of monthly expiry week (last Thursday is 2026-10-29)
+    # 2026-10-27 is the effective-dated NSE monthly expiry.
     settlement_tue = datetime(2026, 10, 27, 11, 0, tzinfo=IST)
     res_stock = get_optimal_expiry_recommendation("RELIANCE", now_dt=settlement_tue)
     assert res_stock["preferred_expiry"] == "NEXT_MONTHLY"
     assert res_stock["reason"] == "SEBI_PHYSICAL_SETTLEMENT_WEEK"
-    assert "PHYSICAL SETTLEMENT" in res_stock["warning"]
+    assert "physical settlement" in res_stock["warning"].lower()
 
     # Normal mid-month session (e.g. 2026-10-14) returns CURRENT_MONTHLY
     normal_dt = datetime(2026, 10, 14, 11, 0, tzinfo=IST)
@@ -597,13 +613,35 @@ def test_heavyweight_correlation_shield_detection():
     assert res_tatachem["haircut_multiplier"] == 1.0
 
 
-def test_midpoint_limit_order_enforcer_in_position_sizer():
+def test_midpoint_limit_order_enforcer_in_position_sizer(monkeypatch):
     """Pillar 5: Verify position sizer enforces LIMIT order and pegs midpoint for F&O contracts."""
     from engine.position_sizer import generate_execution_ticket
 
+    canonical_lots = {
+        "RELIANCE": 100,
+        "NIFTY": 65,
+    }
+
+    def exact_contract_info(symbol, *, require_fresh=False):
+        body = str(symbol).upper().split(":", 1)[-1]
+        underlying = "NIFTY" if body.startswith("NIFTY") else "RELIANCE"
+        return {"minLotSize": canonical_lots[underlying], "tradeStatus": 1}
+
+    def current_freeze(symbol, *, segment=None):
+        body = str(symbol).upper().split(":", 1)[-1]
+        underlying = "NIFTY" if body.startswith("NIFTY") else "RELIANCE"
+        return {
+            "quantity": 1000,
+            "lot_size": canonical_lots[underlying],
+            "source": "TEST_FIXTURE",
+        }
+
+    monkeypatch.setattr("market.symbol_master.get_symbol_info", exact_contract_info)
+    monkeypatch.setattr("market.symbol_master.get_quantity_freeze_info", current_freeze)
+
     # 1. Market order on F&O stock option contract -> Converted to LIMIT
     ticket_market = generate_execution_ticket(
-        symbol="RELIANCE26OCT1400CE",
+        symbol="NSE:RELIANCE26NOV1200CE",
         entry_price=45.0,
         stop_loss=30.0,
         target_price=75.0,
@@ -615,7 +653,7 @@ def test_midpoint_limit_order_enforcer_in_position_sizer():
 
     # 2. Wide Bid-Ask spread (bid: 42.0, ask: 48.0 -> midpoint 45.0, spread 12.5% > 1.8%)
     ticket_midpoint = generate_execution_ticket(
-        symbol="NIFTY26OCT24500CE",
+        symbol="NSE:NIFTY26NOV23000CE",
         entry_price=46.5,
         stop_loss=30.0,
         target_price=75.0,

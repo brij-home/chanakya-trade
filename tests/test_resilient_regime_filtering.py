@@ -144,7 +144,7 @@ def test_intraday_rsi_exhaustion_tightened(auditor: AlertScrutinyAuditor):
         contract_symbol="RELIANCE3000CE",
         is_live=True,
         environment="LIVE",
-        metrics={"rsi_5m": 74.5, "timeframe": "5m"},
+        metrics={"rsi_5m": 74.5, "timeframe": "5m", "volume": 12000, "oi": 50000},
     )
     passed, reason, flags = auditor.verify_tier1_sanity(intraday_alert)
     assert passed is False

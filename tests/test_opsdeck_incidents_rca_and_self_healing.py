@@ -171,7 +171,7 @@ def test_detector_circuit_breaker_atomic_write_and_self_healing(tmp_path):
 
     # Step A: Initialize with clean ledger and record outcome
     cb = DetectorCircuitBreaker(ledger_file=ledger_path, rolling_window=10)
-    cb.record_outcome("alert-1", "TCS", "ORB_BREAKOUT", "WIN", 2.5)
+    cb.record_outcome("alert-1", "TCS", "ORB_BREAKOUT", "WIN", 2.5, provenance="TEST")
     assert ledger_path.exists()
 
     with open(ledger_path, "r", encoding="utf-8") as f:
@@ -192,7 +192,7 @@ def test_detector_circuit_breaker_atomic_write_and_self_healing(tmp_path):
     assert len(corrupted_files) == 1
 
     # Record new outcome on healed breaker -> succeeds atomically
-    cb_healed.record_outcome("alert-2", "INFY", "ORB_BREAKOUT", "WIN", 3.0)
+    cb_healed.record_outcome("alert-2", "INFY", "ORB_BREAKOUT", "WIN", 3.0, provenance="TEST")
     with open(ledger_path, "r", encoding="utf-8") as f:
         healed_data = json.load(f)
     assert "ORB_BREAKOUT" in healed_data
@@ -325,6 +325,9 @@ def test_telemetry_priority_routing_for_opsdeck():
 def test_fyers_tbt_socket_subscription_info_and_403_resilience():
     """Verify Fyers TBT socket patch fixes KeyError on getSymbolsInfo and halts on 403."""
     pytest.importorskip("fyers_apiv3", reason="fyers_apiv3 is an optional broker SDK")
+    pytest.importorskip(
+        "websocket", reason="websocket-client is required by the optional Fyers TBT SDK"
+    )
     from fyers_apiv3.FyersWebsocket import tbt_ws
 
     # A: SubscriptionInfo KeyError prevention
@@ -553,3 +556,139 @@ def test_telemetry_handler_websocket_routine_disconnect_p3():
             f"Expected P2 for routine websocket drop, got {kwargs['priority']}"
         )
         assert kwargs["severity"] == "WARNING"
+
+
+# ── 14. NIFTYNXT50 Index Symbol Canonicalization ──────────────────────────────
+
+
+def test_niftynxt50_symbol_resolved_as_index():
+    """Verify NIFTYNXT50 resolves to official Fyers index ticker, not false -EQ."""
+    from brokers.fyers import to_fyers_symbol
+
+    assert to_fyers_symbol("NIFTYNXT50") == "NSE:NIFTYNXT50-INDEX"
+    assert to_fyers_symbol("NSE:NIFTYNXT50") == "NSE:NIFTYNXT50-INDEX"
+    assert to_fyers_symbol("NIFTYNEXT50") == "NSE:NIFTYNEXT50-INDEX"
+
+
+# ── 15. Strike Clock Dispatch with String Actionable Plan ─────────────────────
+
+
+def test_strike_clock_dispatch_with_string_actionable_plan():
+    """Verify render_primed_strike_clock_alert safely handles string actionable_plan without AttributeError."""
+    from bot.alert_templates import render_primed_strike_clock_alert
+
+    alert_dict = {
+        "symbol": "LTF",
+        "segment": "EQUITY",
+        "ltp": 200.0,
+        "trigger_level": 201.0,
+        "stop_loss": 198.0,
+        "target_level": 205.0,
+        "target_2": 210.0,
+        "direction": "BULLISH",
+        "confidence": 85,
+        "actionable_plan": "BUY_CASH / BUY_CALL",  # String actionable_plan
+    }
+
+    rendered = render_primed_strike_clock_alert(alert_dict, in_market=True)
+    assert isinstance(rendered, str)
+    assert "LTF" in rendered
+    assert "Trigger:" in rendered
+
+
+# ── 16. AutoAlertEngine Monotonic Version Bump on Re-staging ──────────────────
+
+
+def test_auto_alert_outbox_monotonic_version_bump_on_restage(tmp_path):
+    """Verify AutoAlertEngine increments event_version when re-staging alert to prevent outbox conflict."""
+    from engine.alert_model import AutoAlert
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.sqlite_store import SQLiteAlertStore
+    from engine.storage.alert_repository import AlertRepository
+
+    db_path = tmp_path / "test_version_bump.db"
+    store = SQLiteAlertStore(db_path=db_path)
+    repo = AlertRepository(target_file_fn=lambda: tmp_path / "auto_alerts.json")
+    repo._sqlite_store = store
+
+    _engine = AutoAlertEngine(repository=repo)
+
+    alert = AutoAlert(
+        alert_id="aa-test-bump-rvnl-20261102",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="TRIGGERED",
+        symbol="RVNL",
+        exchange="NSE",
+        segment="NFO",
+        direction="BULLISH",
+        headline="RVNL CE Momentum",
+        summary="Test",
+        ltp=187.5,
+        trigger_level=187.5,
+        target_level=195.0,
+        stop_loss=180.0,
+        is_live=True,
+    )
+
+    # First staging
+    v1 = store.get_latest_outbox_version(alert.alert_id)
+    assert v1 == 0
+    store.stage_outbox_entry(alert.alert_id, "SSE", {"ltp": 187.5}, event_version=1)
+
+    # Next version query reports 1
+    v2 = store.get_latest_outbox_version(alert.alert_id)
+    assert v2 == 1
+
+
+# ── 17. Telemetry Priority Suppression for LLM Deadline & Scan Timeout ────────
+
+
+def test_telemetry_priority_suppression_for_llm_deadline_and_scan_timeout():
+    """Verify LLM deadline timeouts, scan timeouts, and illiquid hedge skips are classified as P3 audits."""
+    from engine.telemetry import derive_priority
+
+    assert (
+        derive_priority(
+            "SYSTEM_LOG",
+            "engine.alert_scrutiny",
+            "WARNING",
+            "[AlertScrutinyAuditor] Fast-LLM unavailable after 3.50s: LLM call exceeded 3.500s deadline (alert-scrutiny)",
+        )
+        == "P3"
+    )
+    assert (
+        derive_priority(
+            "SYSTEM_LOG",
+            "engine.llm_deadline",
+            "WARNING",
+            "[llm_deadline] Provider call exceeded 3.500s deadline: alert-scrutiny",
+        )
+        == "P3"
+    )
+    assert (
+        derive_priority(
+            "SYSTEM_LOG",
+            "engine.auto_alert_engine",
+            "WARNING",
+            "[AutoAlertEngine] Scan cycle timeout (18.0s) reached! 2 detectors stalled: ['sparks']",
+        )
+        == "P3"
+    )
+    assert (
+        derive_priority(
+            "SYSTEM_LOG",
+            "engine.auto_alert_engine",
+            "WARNING",
+            "[AutoAlertEngine] Skipping hedge spread for aa-orb-breakout: could not find liquid OTM hedge",
+        )
+        == "P3"
+    )
+    assert (
+        derive_priority(
+            "SYSTEM_LOG",
+            "engine.position_sizer",
+            "WARNING",
+            "[engine.position_sizer] Exact contract has no valid active listed master lot: BAJAJHLDNG 1",
+        )
+        == "P3"
+    )

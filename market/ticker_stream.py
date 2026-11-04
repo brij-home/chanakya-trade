@@ -139,10 +139,13 @@ def compute_ribbon_tickers() -> list[dict[str, Any]]:
     """Compute normalized ticker quotes for the Live Ticker Ribbon."""
     from market.quotes import get_quote
 
-    insts = [r["inst"] for r in RIBBON_SPEC]
+    from config.discovery_policy import allows_context_symbol
+
+    active_spec = [r for r in RIBBON_SPEC if allows_context_symbol(r["inst"])]
+    insts = [r["inst"] for r in active_spec]
     quotes_map = get_quote(insts)
     tickers = []
-    for r in RIBBON_SPEC:
+    for r in active_spec:
         q = (
             quotes_map.get(r["inst"])
             or quotes_map.get(r["symbol"])

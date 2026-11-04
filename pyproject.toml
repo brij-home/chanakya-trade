@@ -76,7 +76,13 @@ dependencies = [
 [project.optional-dependencies]
 vollib = ["py_vollib>=1.0.1"]
 shoonya = ["websocket-client>=1.8.0"]
-fyers = ["fyers-apiv3>=3.1.16"]
+fyers = [
+    "fyers-apiv3>=3.1.16",
+    "aiohttp>=3.9.0",
+    "websocket-client>=1.8.0",
+    "aws-lambda-powertools>=3.0.0",
+    "setuptools",
+]
 # High-speed parallel analytics for high-frequency tick and order-book data
 quant = ["polars>=1.0.0"]
 # Vertex AI is only needed for a Google Cloud / Workspace deployment. The

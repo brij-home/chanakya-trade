@@ -9,10 +9,32 @@ which broker is active.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import logging
+import os
+
+logger = logging.getLogger("brokers.base")
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+
+def save_secure_token(token_file: Path | str, content: str) -> None:
+    """Save broker token file with restricted 0600 permissions (BRK-12)."""
+    p = Path(token_file)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    mode = 0o600
+    fd = os.open(str(p), flags, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(content)
+    try:
+        os.chmod(p, 0o600)
+    except Exception as e_chmod:
+        logger.debug(f"[brokers.base] chmod 0600 not supported on this platform: {e_chmod}")
 
 
 # ── Shared dataclasses ────────────────────────────────────────────────────────

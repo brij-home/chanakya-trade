@@ -26,7 +26,7 @@ import logging
 import math
 import threading
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -62,17 +62,9 @@ def get_regime_weights(vix: Optional[float] = None) -> dict[str, float]:
     """
     if vix is None:
         try:
-            from market.indices import get_vix
-            import os
+            from analysis.regime_governor import _fresh_live_vix
 
-            if not os.environ.get("CHANAKYA_TESTING"):
-                raw_vix = get_vix()
-                if isinstance(raw_vix, (int, float)):
-                    vix = float(raw_vix)
-                elif hasattr(raw_vix, "ltp"):
-                    vix = float(raw_vix.ltp)
-                elif isinstance(raw_vix, dict):
-                    vix = float(raw_vix.get("ltp") or raw_vix.get("value") or 0)
+            vix = _fresh_live_vix()
         except Exception as e_suppressed:
             logger.debug(f"[engine.signal_ensemble] Non-fatal exception suppressed: {e_suppressed}")
 
@@ -166,6 +158,9 @@ class EnsembleSignal:
     breakdown: dict[str, StrategyVote] = field(default_factory=dict)
     hurst: Optional[float] = None  # Hurst exponent value (for reference)
     adx: Optional[float] = None  # latest ADX value (for reference)
+    ensemble_score: float = 0.0  # continuous score [-1.0, 1.0]
+    is_calibrated: bool = False  # heuristic/uncalibrated unless empirically mapped
+    feature_families: dict[str, Any] = field(default_factory=dict)
 
 
 # ── Technical helpers ────────────────────────────────────────────
@@ -543,16 +538,11 @@ def ensemble_signal(df: pd.DataFrame) -> EnsembleSignal:
     regime_label = "NORMAL"
     _vix_hint: Optional[float] = None
     try:
-        import os
+        from analysis.regime_governor import _fresh_live_vix
 
-        if not os.environ.get("CHANAKYA_TESTING"):
-            from market.indices import get_vix
-
-            _raw = get_vix()
-            if isinstance(_raw, (int, float)):
-                _vix_hint = float(_raw)
-            elif hasattr(_raw, "ltp"):
-                _vix_hint = float(_raw.ltp)
+        _raw = _fresh_live_vix()
+        if _raw is not None and isinstance(_raw, (int, float)):
+            _vix_hint = float(_raw)
             if _vix_hint:
                 regime_label = (
                     "CALM"
@@ -606,6 +596,15 @@ def ensemble_signal(df: pd.DataFrame) -> EnsembleSignal:
         verdict = "NEUTRAL"
         confidence = 0.5  # tie
 
+    ensemble_score = round(bull_score - bear_score, 3)
+    feature_families = {
+        "trend": trend_vote.label,
+        "mean_rev": mean_rev_vote.label,
+        "momentum": momentum_vote.label,
+        "volatility": vol_vote.label,
+        "statistical": stat_vote.label,
+    }
+
     return EnsembleSignal(
         signal=signal,
         verdict=verdict,
@@ -615,6 +614,9 @@ def ensemble_signal(df: pd.DataFrame) -> EnsembleSignal:
         breakdown=breakdown,
         hurst=hurst_val,
         adx=adx_val,
+        ensemble_score=ensemble_score,
+        is_calibrated=False,
+        feature_families=feature_families,
     )
 
 
