@@ -630,6 +630,7 @@ class TestInFlightDecayAlerts:
             in_flight_warning_sent=True,
             in_flight_warning_reason="DANGER ZONE: 84% risk budget consumed.",
             telegram_dispatched=True,
+            telegram_root_message_id=12345,
         )
         with patch("engine.alerts._telegram_notify") as mock_notify:
             # First dispatch -> dispatches to Telegram

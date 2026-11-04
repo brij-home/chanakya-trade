@@ -3746,16 +3746,16 @@ def edit_message_text(
     if not target_chat_id or not message_id or not text:
         return False
 
-    try:
-        token = _get_bot_token()
-    except Exception:
-        return False
-
     if os.environ.get("CHANAKYA_TESTING") == "1" and not _ALLOW_TEST_DISPATCH:
         logger.debug(
             f"[TelegramEdit] Skipped during test execution: editMessageText msg={message_id} chat={target_chat_id}"
         )
         return True
+
+    try:
+        token = _get_bot_token()
+    except Exception:
+        return False
 
     payload: dict[str, Any] = {
         "chat_id": target_chat_id,

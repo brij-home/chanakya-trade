@@ -185,7 +185,7 @@ class TestJackpotMomentumConfluence:
             "ltp": ltp,
             "vwap": ltp * 0.995,
             "change_pct": 1.2,
-            "high": ltp * 1.001,
+            "high": ltp,
             "low": ltp * 0.990,
             "volume": 200000,
         }
@@ -196,7 +196,7 @@ class TestJackpotMomentumConfluence:
 
         monkeypatch.setattr(
             "engine.asymmetric_radar.asymmetric_radar.scan_asymmetric_opportunities",
-            lambda top_n=6: [opp],
+            lambda *args, **kwargs: [opp],
         )
 
         alerts = engine.scan_asymmetric_opportunities()

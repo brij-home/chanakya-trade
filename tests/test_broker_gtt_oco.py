@@ -77,7 +77,7 @@ def test_paper_broker_gtt_lifecycle():
 
     # 5. Verify GTT marked TRIGGERED and no longer in active query
     active_now = broker.get_gtts()
-    assert not any(g["gtt_id"] == res.gtt_id for g in active_now)
+    assert not any(g["gtt_id"] == res.gtt_id for g in active_now), f"active_now={active_now}"
 
 
 def test_paper_broker_gtt_cancel():

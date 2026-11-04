@@ -637,6 +637,7 @@ async def auth_middleware(request: _Request, call_next):
             "localhost",
             "testclient",
             "testserver",
+            "test",
         ):
             return JSONResponse({"detail": "Forbidden: Invalid Host header"}, status_code=403)
 

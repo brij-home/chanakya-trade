@@ -596,7 +596,11 @@ class PaperBroker(BrokerAPI):
         Check active GTT triggers against latest market prices.
         Executes paper market fill order when stop or target level is breached.
         """
+        with _PAPER_LOCK:
+            self._state = self._load_or_init(getattr(self, "_capital", 200000.0))
+
         triggered_ids = []
+        candidates = []
         for g in self._state.get("gtts", []):
             if g.get("status") != "ACTIVE":
                 continue
@@ -609,8 +613,6 @@ class PaperBroker(BrokerAPI):
             leg1 = g.get("leg1", {})
             leg2 = g.get("leg2")
 
-            # For SELL exit (closing LONG): stop triggers if ltp <= stop_trigger, target triggers if ltp >= target_trigger
-            # For BUY exit (closing SHORT): stop triggers if ltp >= stop_trigger, target triggers if ltp <= target_trigger
             hit_leg = None
             if side == "SELL":
                 if leg1 and ltp <= float(leg1.get("trigger_price", 0)):
@@ -624,27 +626,55 @@ class PaperBroker(BrokerAPI):
                     hit_leg = ("TARGET", leg2)
 
             if hit_leg:
-                leg_name, target_leg = hit_leg
-                g["status"] = "TRIGGERED"
-                g["triggered_leg"] = leg_name
-                g["triggered_at"] = datetime.now().isoformat()
-                g["triggered_price"] = ltp
-
-                order_req = OrderRequest(
-                    symbol=sym,
-                    exchange=g.get("exchange", "NSE"),
-                    transaction_type=side,
-                    order_type="MARKET",
-                    product=g.get("product", "MIS"),
-                    quantity=int(target_leg.get("quantity", 1)),
-                    price=float(target_leg.get("price", ltp)),
+                candidates.append(
+                    (
+                        g["gtt_id"],
+                        sym,
+                        side,
+                        hit_leg,
+                        ltp,
+                        g.get("exchange", "NSE"),
+                        g.get("product", "MIS"),
+                    )
                 )
-                try:
-                    self.place_order(order_req)
-                except Exception as e_fill:
-                    logger.warning(f"[PaperBroker] GTT execution order failed for {sym}: {e_fill}")
-                triggered_ids.append(g["gtt_id"])
 
-        if triggered_ids:
-            self._save()
+        for gtt_id, sym, side, hit_leg, ltp, exch, prod in candidates:
+            leg_name, target_leg = hit_leg
+            with _PAPER_LOCK:
+                self._state = self._load_or_init(getattr(self, "_capital", 200000.0))
+                for g in self._state.get("gtts", []):
+                    if g.get("gtt_id") == gtt_id:
+                        g["status"] = "TRIGGERED"
+                        g["triggered_leg"] = leg_name
+                        g["triggered_at"] = datetime.now().isoformat()
+                        g["triggered_price"] = ltp
+                self._save()
+
+            order_req = OrderRequest(
+                symbol=sym,
+                exchange=exch,
+                transaction_type=side,
+                order_type="MARKET",
+                product=prod,
+                quantity=int(target_leg.get("quantity", 1)),
+                price=float(target_leg.get("price", ltp)),
+            )
+            try:
+                self.place_order(order_req)
+            except Exception as e_fill:
+                logger.warning(f"[PaperBroker] GTT execution order failed for {sym}: {e_fill}")
+
+            # Re-latch TRIGGERED in case place_order state synchronization overwrote it
+            with _PAPER_LOCK:
+                self._state = self._load_or_init(getattr(self, "_capital", 200000.0))
+                for g in self._state.get("gtts", []):
+                    if g.get("gtt_id") == gtt_id:
+                        g["status"] = "TRIGGERED"
+                        g["triggered_leg"] = leg_name
+                        g["triggered_at"] = datetime.now().isoformat()
+                        g["triggered_price"] = ltp
+                self._save()
+
+            triggered_ids.append(gtt_id)
+
         return triggered_ids

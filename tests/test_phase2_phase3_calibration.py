@@ -75,7 +75,7 @@ def test_telegram_apex_gate_multi_target_rr_evaluation():
     alert = AutoAlert(
         alert_id="aa-stage-1-to-2-expansion-nuvama-pull-20261012",
         alert_type="STAGE_1_TO_2_EXPANSION",
-        stage="PRIMED",
+        stage="IGNITED",
         symbol="NUVAMA",
         exchange="NSE",
         headline="Stage 1 to 2 Base Expansion",

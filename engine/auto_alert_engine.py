@@ -1094,6 +1094,69 @@ class AutoAlertEngine:
             if spot <= 0:
                 return
 
+            # Negative Invariants & Snapshot Provenance Verification
+            from datetime import datetime, timezone
+            from market.options import get_options_snapshot
+
+            snapshot_res = get_options_snapshot(clean_sym)
+            source_info = (
+                snapshot_res[3]
+                if (isinstance(snapshot_res, tuple) and len(snapshot_res) >= 4)
+                else {}
+            )
+            if isinstance(source_info, dict) and source_info:
+                # 1. Stale snapshot rejection (>15s)
+                as_of_raw = source_info.get("as_of") or source_info.get("observation_time")
+                if as_of_raw:
+                    try:
+                        as_of_dt = datetime.fromisoformat(str(as_of_raw).replace("Z", "+00:00"))
+                        if as_of_dt.tzinfo is None:
+                            as_of_dt = as_of_dt.replace(tzinfo=timezone.utc)
+                        age_sec = (datetime.now(timezone.utc) - as_of_dt).total_seconds()
+                        if age_sec > 15.0:
+                            if hasattr(alert, "record_audit"):
+                                alert.record_audit(
+                                    "ENRICHMENT_HELD",
+                                    f"F&O enrichment held: STALE_SNAPSHOT ({age_sec:.1f}s > 15s)",
+                                    actor="FNO_ENRICHMENT_GATE",
+                                    details={
+                                        "reason": "STALE_SNAPSHOT",
+                                        "age_seconds": age_sec,
+                                        "source_info": source_info,
+                                    },
+                                )
+                            return
+                    except Exception as e_stale:
+                        logger.debug(
+                            f"[AutoAlertEngine] Stale snapshot timestamp check non-fatal: {e_stale}"
+                        )
+
+                # 2. Off-market snapshot rejection
+                data_state = str(source_info.get("data_state", "") or "").upper()
+                is_mkt_open = source_info.get("is_market_open", True)
+                is_rt = source_info.get("is_realtime", True)
+                if data_state == "OFF_MARKET" or not is_mkt_open or not is_rt:
+                    if hasattr(alert, "record_audit"):
+                        alert.record_audit(
+                            "ENRICHMENT_HELD",
+                            "F&O enrichment held: OFF_MARKET_SNAPSHOT",
+                            actor="FNO_ENRICHMENT_GATE",
+                            details={"reason": "OFF_MARKET_SNAPSHOT", "source_info": source_info},
+                        )
+                    return
+
+                # 3. Simulated or mock provider rejection
+                provider = str(source_info.get("provider", "") or "").upper()
+                if "MOCK" in provider or "SIMULATED" in provider:
+                    if hasattr(alert, "record_audit"):
+                        alert.record_audit(
+                            "ENRICHMENT_HELD",
+                            f"F&O enrichment held: MOCK_OR_SIMULATED_PROVIDER ({provider})",
+                            actor="FNO_ENRICHMENT_GATE",
+                            details={"reason": "MOCK_OR_SIMULATED_PROVIDER", "provider": provider},
+                        )
+                    return
+
             underlying_sl = getattr(alert, "stop_loss", None) or getattr(alert, "sl_price", None)
             underlying_target = getattr(alert, "target_level", None) or getattr(
                 alert, "target_price", None
@@ -1128,6 +1191,43 @@ class AutoAlertEngine:
                 strike_tier=strike_tier_val,
                 prefer_spread=prefer_spread_val,
             )
+            if not resolved or not getattr(resolved, "contract_symbol", None):
+                return
+
+            # Check estimated pricing flag
+            if getattr(resolved, "is_estimated", False):
+                if hasattr(alert, "record_audit"):
+                    alert.record_audit(
+                        "ENRICHMENT_HELD",
+                        "F&O enrichment held: ESTIMATED_PRICING",
+                        actor="FNO_ENRICHMENT_GATE",
+                        details={"reason": "ESTIMATED_PRICING"},
+                    )
+                return
+
+            # Check active contract resolution in master
+            target_contract = getattr(resolved, "contract_symbol", "")
+            try:
+                from market.contract_selection import resolve_active_contract
+
+                active_res = resolve_active_contract(target_contract)
+                if not getattr(active_res, "is_valid", True):
+                    if hasattr(alert, "record_audit"):
+                        alert.record_audit(
+                            "ENRICHMENT_HELD",
+                            f"F&O enrichment held: UNLISTED_CONTRACT ({getattr(active_res, 'rejection_reason', 'NOT_FOUND')})",
+                            actor="FNO_ENRICHMENT_GATE",
+                            details={
+                                "reason": "UNLISTED_CONTRACT",
+                                "rejection_reason": getattr(
+                                    active_res, "rejection_reason", "NOT_FOUND"
+                                ),
+                            },
+                        )
+                    return
+            except Exception as e_active:
+                logger.debug(f"[AutoAlertEngine] Error verifying active contract: {e_active}")
+
             if resolved and getattr(resolved, "contract_symbol", None):
                 alert.contract_symbol = resolved.contract_symbol
                 alert.strike = getattr(resolved, "strike", None)
@@ -1454,6 +1554,16 @@ class AutoAlertEngine:
                 policy_res = evaluate_candidate_policy(policy_ctx, alert)
                 if policy_res.decision == "REJECT":
                     if hasattr(alert, "record_audit"):
+                        if (
+                            policy_res.blocking_gate
+                            and policy_res.blocking_gate.gate_name == "QUALITY_GATE"
+                        ):
+                            alert.record_audit(
+                                "QUALITY_GATE_VETOED",
+                                policy_res.blocking_gate.reason,
+                                actor="QUALITY_GATE",
+                                details=policy_res.to_dict(),
+                            )
                         alert.record_audit(
                             "POLICY_VETO",
                             policy_res.blocking_gate.reason
@@ -2720,11 +2830,64 @@ class AutoAlertEngine:
                             and (getattr(a, "metrics", {}) or {}).get("sector_id") == sec_id
                             and self._clean_sym(a.symbol) != clean_target
                         ]
-                        # Sector Concurrency Policy: Co-exist up to a strict cap of 2 per sector.
-                        # Existing active sector leaders are NEVER cancelled, archived, or superseded.
-                        max_sector_leaders = 2
+                        existing_leader = (
+                            active_sector_leaders[0] if active_sector_leaders else None
+                        )
+                        incoming_rvol = float(
+                            (alert.metrics or {}).get("tod_rvol")
+                            or (alert.metrics or {}).get("rvol")
+                            or 0.0
+                        )
+                        leader_rvol = (
+                            float(
+                                (existing_leader.metrics or {}).get("tod_rvol")
+                                or (existing_leader.metrics or {}).get("rvol")
+                                or 0.0
+                            )
+                            if existing_leader
+                            else 0.0
+                        )
+                        incoming_conf = getattr(alert, "confidence", 0) or 0
+                        leader_conf = (
+                            getattr(existing_leader, "confidence", 0) or 0 if existing_leader else 0
+                        )
 
-                        if len(active_sector_leaders) >= max_sector_leaders:
+                        is_apex_candidate = bool(
+                            (alert.metrics or {}).get("is_apex_confluence")
+                            or incoming_conf >= 90
+                            or (alert.metrics or {}).get("conviction_tier") == "APEX_CONFLUENCE"
+                        )
+
+                        # Check if incoming candidate is decisively stronger leader promotion
+                        is_stronger_leader = bool(
+                            existing_leader
+                            and incoming_rvol >= 1.25
+                            and incoming_conf >= leader_conf
+                            and (
+                                (leader_rvol > 0 and incoming_rvol >= 1.25 * leader_rvol)
+                                or (incoming_conf >= leader_conf + 5)
+                            )
+                        )
+
+                        if is_stronger_leader:
+                            logger.info(
+                                f"[AutoAlertEngine] 👑 Sector Leader Promoted for {sec_name}: {clean_target} "
+                                f"(RVOL {incoming_rvol:.1f}x, Conf {incoming_conf}%) promoted over "
+                                f"{existing_leader.symbol} (RVOL {leader_rvol:.1f}x, Conf {leader_conf}%)."
+                            )
+                            if isinstance(alert.metrics, dict):
+                                alert.metrics["is_sector_leader"] = True
+                                alert.metrics["promoted_over"] = existing_leader.symbol
+                                alert.metrics["is_concurrent_sector_setup"] = True
+                                alert.metrics["concurrent_sector_peer"] = existing_leader.symbol
+                            if hasattr(alert, "record_audit"):
+                                alert.record_audit(
+                                    "SECTOR_LEADER_PROMOTED",
+                                    f"Promoted as sector leader over {existing_leader.symbol}",
+                                    actor="SECTOR_GOVERNOR",
+                                    details={"promoted_over": existing_leader.symbol},
+                                )
+                        elif len(active_sector_leaders) >= 2:
                             has_actionable_plan = bool(
                                 alert.actionable_plan
                                 and isinstance(alert.actionable_plan, dict)
@@ -2739,7 +2902,7 @@ class AutoAlertEngine:
                                     f"[AutoAlertEngine] 🛑 SECTOR CLUSTER HELD for {clean_target}: "
                                     f"Sector '{sec_name}' already at max capacity ({len(active_sector_leaders)} active: "
                                     f"{[a.symbol for a in active_sector_leaders]}). "
-                                    f"Suppressed to prevent correlated portfolio cluster risk (Capacity {max_sector_leaders})."
+                                    f"Suppressed to prevent correlated portfolio cluster risk."
                                 )
                                 if hasattr(alert, "record_audit"):
                                     alert.record_audit(
@@ -2775,16 +2938,28 @@ class AutoAlertEngine:
                                     f"({len(active_sector_leaders)} active). Defined-risk hedge attached."
                                 )
                         elif len(active_sector_leaders) == 1:
-                            logger.info(
-                                f"[AutoAlertEngine] 🤝 Sector Concurrency: Allowed concurrent leader {clean_target} "
-                                f"alongside {active_sector_leaders[0].symbol} in sector '{sec_name}' "
-                                f"(Co-existence 2 of {max_sector_leaders})."
-                            )
-                            if isinstance(alert.metrics, dict):
-                                alert.metrics["is_concurrent_sector_setup"] = True
-                                alert.metrics["concurrent_sector_peer"] = active_sector_leaders[
-                                    0
-                                ].symbol
+                            if is_apex_candidate:
+                                logger.info(
+                                    f"[AutoAlertEngine] 🤝 Sector Concurrency Apex Expansion: Allowed concurrent leader {clean_target} "
+                                    f"alongside {existing_leader.symbol} in sector '{sec_name}' (Apex Confluence)."
+                                )
+                                if isinstance(alert.metrics, dict):
+                                    alert.metrics["is_concurrent_sector_setup"] = True
+                                    alert.metrics["concurrent_sector_peer"] = existing_leader.symbol
+                            else:
+                                logger.info(
+                                    f"[AutoAlertEngine] 🛑 SECTOR CLUSTER FOLLOWER SUPPRESSED for {clean_target}: "
+                                    f"Sector '{sec_name}' already led by {existing_leader.symbol} (RVOL {leader_rvol:.1f}x, Conf {leader_conf}%). "
+                                    f"Follower {clean_target} (RVOL {incoming_rvol:.1f}x, Conf {incoming_conf}%) held to prevent correlated cluster risk."
+                                )
+                                if hasattr(alert, "record_audit"):
+                                    alert.record_audit(
+                                        "SECTOR_FOLLOWER_SUPPRESSED",
+                                        f"Follower suppressed; sector already led by {existing_leader.symbol}",
+                                        actor="SECTOR_GOVERNOR",
+                                        details={"existing_leader": existing_leader.symbol},
+                                    )
+                                return False
                         else:
                             if isinstance(alert.metrics, dict):
                                 alert.metrics["is_sector_leader"] = True
@@ -10827,6 +11002,11 @@ class AutoAlertEngine:
                         or getattr(alert, "dte", None) == 0
                         or getattr(alert, "is_0dte", False)
                         or (isinstance(alert.metrics, dict) and alert.metrics.get("is_0dte"))
+                        or (
+                            getattr(alert, "expiry_date", None)
+                            and str(getattr(alert, "expiry_date"))[:10]
+                            == now_dt.strftime("%Y-%m-%d")
+                        )
                     )
                     is_opt = bool(
                         alert.option_type

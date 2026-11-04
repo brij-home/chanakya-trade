@@ -2315,7 +2315,7 @@ def detect_index_put_setup(
         try:
             from analysis.options import compute_greeks
 
-            g = compute_greeks(spot, strike, str(exp_date)[:10], "PE", opt_ltp)
+            g = compute_greeks(spot, strike, str(exp_date)[:10], "PE", opt_ltp, as_of=now_dt)
             if g and getattr(g, "delta", None) is not None:
                 opt_delta = round(float(g.delta), 4)
                 opt_gamma = round(float(g.gamma), 6)

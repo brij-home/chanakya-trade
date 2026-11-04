@@ -396,7 +396,9 @@ def test_daily_levels_rejects_divergent_stale_historical_bars(temp_store, monkey
         lambda *a, **k: {"NSE:NIFTY 50": mock_quote, "NSE:NIFTY": mock_quote},
     )
 
-    dl = temp_store.compute_and_store("NIFTY", session_date="2026-11-04")
+    dl = temp_store.compute_and_store(
+        "NIFTY", session_date="2026-11-04", preloaded_quote=mock_quote
+    )
     assert dl is None, "Must fail closed when historical bar diverges by >4% from live LTP"
 
 

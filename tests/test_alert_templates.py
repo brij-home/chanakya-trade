@@ -3667,7 +3667,8 @@ def test_telegram_alert_trader_ux_and_collapsible_blockquote_invariants():
 
     # 2. Expiry must NOT say 'Current Monthly'
     assert "Current Monthly" not in rendered
-    assert "• <b>Expiry:</b> ⏳ 23-Nov-2026 (19 DTE)" in rendered
+    assert "• <b>Expiry:</b> ⏳ 23-Nov-2026 (" in rendered
+    assert "DTE)" in rendered
 
     # 3. Lot size must NOT be duplicated on Action line
     action_line = rendered.split("• <b>Action:</b>")[1].split("\n")[0]

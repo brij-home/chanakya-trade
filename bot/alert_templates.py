@@ -5105,7 +5105,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         )
 
     # 0b. Velocity Time-Stop Exit & Momentum Window Expiry / Stagnation Scratch (prioritized over standard invalidation)
-    if (
+    if getattr(alert, "stage", "") not in ("IN_FLIGHT_WARNING", "DANGER_ZONE") and (
         getattr(alert, "stage", "")
         in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH", "EXPIRED", "STAGNATION_SCRATCH", "SCRATCH")
         or getattr(alert, "target_status", "")

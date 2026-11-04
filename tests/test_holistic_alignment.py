@@ -131,7 +131,7 @@ def test_web_api_symbol_and_regime_endpoints():
 
     async def _test():
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with AsyncClient(transport=transport, base_url="http://testclient") as client:
             # 1. Market regime with governor
             res_regime = await client.get("/api/market/regime")
             assert res_regime.status_code == 200
