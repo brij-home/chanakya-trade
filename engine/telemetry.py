@@ -25,7 +25,7 @@ import time
 import traceback
 import uuid
 from collections import Counter, deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -71,7 +71,36 @@ class TelemetryEvent:
     priority: str = "P3"  # "P0", "P1", "P2", "P3"
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        for attempt in range(5):
+            try:
+                details_copy = (
+                    dict(self.details) if isinstance(self.details, dict) else self.details
+                )
+                return {
+                    "event_type": self.event_type,
+                    "component": self.component,
+                    "action_taken": self.action_taken,
+                    "reason": self.reason,
+                    "timestamp": self.timestamp,
+                    "details": details_copy,
+                    "severity": self.severity,
+                    "incident_id": self.incident_id,
+                    "priority": self.priority,
+                }
+            except RuntimeError:
+                if attempt == 4:
+                    return {
+                        "event_type": self.event_type,
+                        "component": self.component,
+                        "action_taken": self.action_taken,
+                        "reason": self.reason,
+                        "timestamp": self.timestamp,
+                        "details": {},
+                        "severity": self.severity,
+                        "incident_id": self.incident_id,
+                        "priority": self.priority,
+                    }
+                time.sleep(0.005)
 
 
 def derive_priority(event_type: str, component: str, severity: str, reason: str) -> str:

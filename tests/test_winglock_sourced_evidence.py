@@ -53,6 +53,19 @@ def test_wing_lock_open_order_does_not_claim_locked(monkeypatch):
 
     # Mock market quote to be 20.0, but order is SELL LIMIT @ 50.0 -> PaperBroker leaves OPEN
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 20.0)
+    monkeypatch.setattr(
+        "market.instrument_master.get_verified_contract",
+        lambda sym: {
+            "lookup_symbol": sym,
+            "provider": "fyers",
+            "provider_symbol": f"NSE:{sym}",
+            "provider_token": "12345",
+            "exchange": "NFO",
+            "segment": "OPTIONS",
+            "lot_size": 25,
+            "tick_size": 0.05,
+        },
+    )
 
     engine = get_auto_alert_engine()
     alert = AutoAlert(

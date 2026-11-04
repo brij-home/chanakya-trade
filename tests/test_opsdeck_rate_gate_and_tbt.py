@@ -172,7 +172,7 @@ def test_api_fyers_tbt_focus_endpoint(client):
 def test_api_system_health_hub_includes_rate_gate_and_tbt(client):
     """Verify GET /api/system/health-hub includes both rate_gate and tbt telemetry."""
     res = client.get("/api/system/health-hub")
-    assert res.status_code == 200
+    assert res.status_code == 200, res.text
     data = res.json()
 
     assert "rate_gate" in data

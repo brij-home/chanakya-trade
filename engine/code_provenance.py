@@ -26,7 +26,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -96,7 +96,44 @@ class CodeProvenanceReport:
     status: str = "FRESH"  # "FRESH", "STALE", "UNKNOWN"
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        for attempt in range(5):
+            try:
+                stale_copy = [dict(x) if isinstance(x, dict) else x for x in self.stale_files]
+                return {
+                    "boot_timestamp": self.boot_timestamp,
+                    "uptime_seconds": self.uptime_seconds,
+                    "pid": self.pid,
+                    "python_version": self.python_version,
+                    "git_commit": self.git_commit,
+                    "git_branch": self.git_branch,
+                    "git_dirty": self.git_dirty,
+                    "is_stale_in_memory": self.is_stale_in_memory,
+                    "stale_files_count": self.stale_files_count,
+                    "stale_files": stale_copy,
+                    "staleness_latency_seconds": self.staleness_latency_seconds,
+                    "reload_required": self.reload_required,
+                    "scanned_roots": list(self.scanned_roots),
+                    "status": self.status,
+                }
+            except RuntimeError:
+                if attempt == 4:
+                    return {
+                        "boot_timestamp": self.boot_timestamp,
+                        "uptime_seconds": self.uptime_seconds,
+                        "pid": self.pid,
+                        "python_version": self.python_version,
+                        "git_commit": self.git_commit,
+                        "git_branch": self.git_branch,
+                        "git_dirty": self.git_dirty,
+                        "is_stale_in_memory": self.is_stale_in_memory,
+                        "stale_files_count": self.stale_files_count,
+                        "stale_files": [],
+                        "staleness_latency_seconds": self.staleness_latency_seconds,
+                        "reload_required": self.reload_required,
+                        "scanned_roots": list(self.scanned_roots),
+                        "status": self.status,
+                    }
+                time.sleep(0.005)
 
 
 class CodeProvenanceSentinel:

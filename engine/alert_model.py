@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Optional
@@ -2434,7 +2435,17 @@ class AutoAlert:
         }
 
     def to_dict(self) -> dict[str, Any]:
-        d = asdict(self)
+        d = None
+        for attempt in range(5):
+            try:
+                d = asdict(self)
+                break
+            except RuntimeError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.005)
+        if d is None:
+            d = asdict(self)
         d["dual_blueprints"] = self.generate_dual_blueprints()
         d["status"] = self.stage
         d["scrutiny"] = (

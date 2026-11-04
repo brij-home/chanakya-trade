@@ -1099,6 +1099,11 @@ class AutoAlertEngine:
             from market.options import get_options_snapshot
 
             snapshot_res = get_options_snapshot(clean_sym)
+            snapshot_contracts = (
+                snapshot_res[0]
+                if (isinstance(snapshot_res, tuple) and len(snapshot_res) >= 1)
+                else None
+            )
             source_info = (
                 snapshot_res[3]
                 if (isinstance(snapshot_res, tuple) and len(snapshot_res) >= 4)
@@ -1171,12 +1176,14 @@ class AutoAlertEngine:
                 strike_tier_val = "HIGH_GAMMA_ASYMMETRY"
 
             prefer_spread_val = None
+            vix_val = None
             try:
                 from analysis.regime_governor import classify_market_regime
 
                 reg_obj = classify_market_regime()
                 if reg_obj and reg_obj.regime == "BALANCED_CHOP":
                     prefer_spread_val = True
+                vix_val = getattr(reg_obj, "vix", None) if reg_obj else None
             except Exception as e_regime:
                 logger.debug(
                     f"[AutoAlertEngine] Error classifying regime for spread preference: {e_regime}"
@@ -1190,6 +1197,8 @@ class AutoAlertEngine:
                 underlying_target=underlying_target,
                 strike_tier=strike_tier_val,
                 prefer_spread=prefer_spread_val,
+                india_vix=vix_val,
+                contracts_override=snapshot_contracts,
             )
             if not resolved or not getattr(resolved, "contract_symbol", None):
                 return

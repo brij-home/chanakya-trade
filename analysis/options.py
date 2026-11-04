@@ -142,15 +142,6 @@ def _dte_years(expiry_str: str, as_of: Optional[datetime] = None) -> float:
     delta_days = (exp - today_ist).days
 
     if delta_days < 0:
-        import os
-
-        is_test = (
-            os.environ.get("CHANAKYA_TESTING") == "1"
-            or "PYTEST_CURRENT_TEST" in os.environ
-            or os.environ.get("DEPLOY_MODE") == "test"
-        )
-        if is_test:
-            return 5.0 / 365.0
         return 0.0
 
     now_time = curr_ist.time()
