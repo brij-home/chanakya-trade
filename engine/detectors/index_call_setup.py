@@ -621,10 +621,11 @@ def detect_index_call_setup(
 
     # Index options carry high base OI (often 200k-1M+ contracts); vol_oi >= 1.2 is an equity metric.
     # For index options, vol_oi >= 0.35x with volume >= min_vol or a 10%+ premium gain confirms institutional breakout momentum.
+    # Premium expansion (>= 10.0%) is required alongside volume to differentiate true buying from call-writing absorption traps.
     is_breakout_momentum = (
         (cand_ce_pchange >= 10.0 and cand_ce_vol >= min_vol)
-        or (cand_ce_vol_oi >= 0.35 and cand_ce_vol >= min_vol)
-        or (cand_ce_vol >= int(min_vol * 1.5))
+        or (cand_ce_pchange >= 10.0 and cand_ce_vol_oi >= 0.35 and cand_ce_vol >= min_vol)
+        or (cand_ce_pchange >= 10.0 and cand_ce_vol >= int(min_vol * 1.5))
         or _is_opening_displacement
         or _is_trend_exp_day
     ) and (spot > effective_vwap)
