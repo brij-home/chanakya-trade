@@ -13,6 +13,24 @@ from config.constants import IST
 from brokers.base import Quote
 
 
+@pytest.fixture(autouse=True)
+def _reset_tbt_state():
+    """Hermetically reset TbtManager singleton and memoized caches before and after each test."""
+    from market.fyers_tbt_manager import (
+        FyersTbtManager,
+        _resolve_index_future_memo,
+        _resolve_stock_future_memo,
+    )
+
+    _resolve_index_future_memo.cache_clear()
+    _resolve_stock_future_memo.cache_clear()
+    FyersTbtManager().reset_for_testing()
+    yield
+    _resolve_index_future_memo.cache_clear()
+    _resolve_stock_future_memo.cache_clear()
+    FyersTbtManager().reset_for_testing()
+
+
 @pytest.fixture
 def listed_grid_feed(monkeypatch):
     """Explicit synthetic feed/master snapshots for orchestration tests.

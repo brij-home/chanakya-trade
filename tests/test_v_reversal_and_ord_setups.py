@@ -1460,6 +1460,7 @@ def test_temporal_bar_freshness_guard_index_put_and_call(monkeypatch):
     # Ensure not running as test runner to test production guard
     monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("DEPLOY_MODE", raising=False)
 
     now_dt = datetime.now(IST)
     # Create stale 5m bars ending 30 minutes ago

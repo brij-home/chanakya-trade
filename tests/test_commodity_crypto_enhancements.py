@@ -395,6 +395,10 @@ def test_commodity_silver_gsr_breakdown_boost():
     with (
         patch("engine.quality_gate.is_mcx_golden_hours_window", return_value=True),
         patch("market.commodity_macro.get_commodity_macro_snapshot", return_value=mock_macro),
+        patch(
+            "market.macro.get_macro_snapshot",
+            return_value=MagicMock(dxy_change=-0.35, crude_change=0.0),
+        ),
         patch("market.quotes.get_quote", return_value={"MCX:SILVER": mock_quote}),
         patch("market.history.get_ohlcv", return_value=df_5m),
         patch("analysis.market_structure.analyze_market_structure", return_value=None),

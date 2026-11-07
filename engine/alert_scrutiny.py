@@ -1197,15 +1197,15 @@ class AlertScrutinyAuditor:
         ):
             req_rr = min(req_rr, 1.3)
 
-            # Extreme Tail Risk Gate: If VIX > 25.0, naked option buying carries extreme IV crush hazard
-            if vix_val > 25.0 and is_option_premium_levels:
-                act = str((getattr(alert, "actionable_plan", None) or {}).get("action", "")).upper()
-                if "BUY" in act and "SPREAD" not in act:
-                    return (
-                        False,
-                        f"VIX Tail Risk Veto: India VIX {vix_val:.1f} > 25 (Extreme IV crush risk on naked option buying). Mandate defined-risk spread structure.",
-                        flags,
-                    )
+        # Extreme Tail Risk Gate: If VIX > 25.0, naked option buying carries extreme IV crush hazard
+        if vix_val and vix_val > 25.0 and is_option_premium_levels:
+            act = str((getattr(alert, "actionable_plan", None) or {}).get("action", "")).upper()
+            if "BUY" in act and "SPREAD" not in act:
+                return (
+                    False,
+                    f"VIX Tail Risk Veto: India VIX {vix_val:.1f} > 25 (Extreme IV crush risk on naked option buying). Mandate defined-risk spread structure.",
+                    flags,
+                )
 
         rr_ratio = reward_pts / risk_pts if risk_pts > 0 else 0.0
         if rr_ratio < req_rr:

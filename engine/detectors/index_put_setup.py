@@ -605,8 +605,8 @@ def detect_index_put_setup(
     # Premium expansion (>= 8.0%) is required alongside volume to differentiate true buying from put-writing absorption traps.
     is_breakdown_momentum = is_spot_below_vwap and (
         (cand_pe_pchange >= 10.0 and cand_pe_vol >= min_vol)
-        or (cand_pe_pchange >= 8.0 and cand_pe_vol_oi >= 0.35 and cand_pe_vol >= min_vol)
-        or (cand_pe_pchange >= 8.0 and cand_pe_vol >= int(min_vol * 1.5))
+        or (cand_pe_pchange >= 10.0 and cand_pe_vol_oi >= 0.35 and cand_pe_vol >= min_vol)
+        or (cand_pe_pchange >= 10.0 and cand_pe_vol >= int(min_vol * 1.5))
         or _spot_below_open_escape
         or _is_trend_breakdown_day
     )
@@ -766,7 +766,9 @@ def detect_index_put_setup(
                 )
 
                 _is_l5_expansion = bool(
-                    (
+                    l5 > 0
+                    and spot <= l5 * 1.0010
+                    and (
                         is_breakdown_momentum
                         or is_explosive_momentum
                         or _is_opening_displacement
@@ -775,17 +777,12 @@ def detect_index_put_setup(
                     )
                     and (effective_vwap and spot < effective_vwap * 1.0015)
                 )
-                if l5 > 0 and spot <= l5 * 1.0010 and not _is_l5_expansion:
+                if l5 > 0 and spot <= l5 * 1.0010 and not is_gap_down_day:
                     logger.info(
                         f"[IndexPutSetup] Camarilla L5 Floor Exhaustion: Spot ₹{spot:,.1f} reached/breached Camarilla L5 ₹{l5:,.1f}. "
                         f"Selloff statistically exhausted. Suppressing long put setup."
                     )
                     return []
-                elif l5 > 0 and spot <= l5 * 1.0010 and _is_l5_expansion:
-                    logger.debug(
-                        f"[IndexPutSetup] Camarilla L5 Floor Expansion: Spot ₹{spot:,.1f} broke below L5 ₹{l5:,.1f} "
-                        f"with confirmed downward momentum holding below VWAP. Allowing trend continuation."
-                    )
                 candle_range = 0.0
                 upper_wick_ratio = 0.0
                 lower_wick_ratio = 0.0

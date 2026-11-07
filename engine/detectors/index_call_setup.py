@@ -736,7 +736,11 @@ def detect_index_call_setup(
                 return []
             # Afternoon Call Wall Trap Guard: In afternoon sessions (>= 13:30 IST) with <= 0.25% runway into heavy call writing,
             # upside is statistically choked and downside risk dominates. Suppress long call setups fail-closed.
-            if curr_time >= dtime(13, 30) and call_wall_dist_pct <= 0.25 and not is_test_runner:
+            if (
+                (ref_time is not None or not is_test_runner)
+                and curr_time >= dtime(13, 30)
+                and call_wall_dist_pct <= 0.25
+            ):
                 logger.info(
                     f"[IndexCallSetup] Afternoon Call Wall Trap: Spot ₹{spot:,.1f} is only {call_wall_dist_pct:.2f}% "
                     f"below Call Wall ₹{max_call_oi_strike:,.0f} with writers adding after 13:30 IST. Suppressing long calls."
@@ -782,7 +786,9 @@ def detect_index_call_setup(
                 )
 
                 _is_h5_expansion = bool(
-                    (
+                    h5 > 0
+                    and spot >= h5 * 0.9990
+                    and (
                         is_breakout_momentum
                         or is_explosive_momentum
                         or _is_opening_displacement
@@ -791,17 +797,12 @@ def detect_index_call_setup(
                     )
                     and (effective_vwap and spot > effective_vwap * 0.9985)
                 )
-                if h5 > 0 and spot >= h5 * 0.9990 and not _is_h5_expansion:
+                if h5 > 0 and spot >= h5 * 0.9990 and not is_gap_day:
                     logger.info(
                         f"[IndexCallSetup] Camarilla H5 Ceiling Exhaustion: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ₹{h5:,.1f}. "
                         f"Rally statistically exhausted. Suppressing long call setup."
                     )
                     return []
-                elif h5 > 0 and spot >= h5 * 0.9990 and _is_h5_expansion:
-                    logger.debug(
-                        f"[IndexCallSetup] Camarilla H5 Blue Sky Expansion: Spot ₹{spot:,.1f} broke above H5 ₹{h5:,.1f} "
-                        f"with confirmed momentum holding above VWAP. Allowing trend continuation."
-                    )
                 candle_range = 0.0
                 upper_wick_ratio = 0.0
                 lower_wick_ratio = 0.0
@@ -1297,12 +1298,7 @@ def detect_index_call_setup(
                 or (cam_h5 > 0 and _day_open_price_ce >= cam_h5 * 0.998)
             )
         )
-        if (
-            spot >= cam_h5 * 0.9990
-            and not is_test_runner
-            and not is_gap_day_late
-            and not _is_h5_expansion
-        ):
+        if spot >= cam_h5 * 0.9990 and not is_gap_day_late:
             logger.info(
                 f"[IndexCallSetup] Suppressed: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ceiling ₹{cam_h5:,.1f}."
             )

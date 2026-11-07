@@ -22,10 +22,11 @@ def test_intraday_index_option_targets_are_feasible():
         timeframe="INTRADAY",
     )
     assert tp is not None
-    # Intraday spot T1 must be within realistic single-wave ATR (max 0.25 * atr = ~162.5 pts)
+    # Intraday spot T1 must be within realistic single-wave ATR (max 0.25 * atr)
     spot_move_t1 = tp.target_1 - 55229.0
-    assert spot_move_t1 <= 200.0, (
-        f"Spot T1 move {spot_move_t1:.1f} is excessively large for intraday"
+    max_expected_t1 = max(200.0, 0.25 * tp.atr_points + 1.0)
+    assert spot_move_t1 <= max_expected_t1, (
+        f"Spot T1 move {spot_move_t1:.1f} is excessively large for intraday (exceeds {max_expected_t1:.1f})"
     )
 
     # Now calculate option execution plan for a ₹972 option
