@@ -654,6 +654,59 @@ def evaluate_single_stock_inflection(
     else:
         score -= 20
 
+    # ── Swingscape Flow & Momentum Confirmation (OBV + Triple-DMI + VSA) ──
+    try:
+        from analysis.obv import analyse_obv
+        from analysis.dmi_filter import evaluate_triple_dmi
+        from analysis.vsa import analyse_vsa
+
+        _obv = analyse_obv(df, is_intraday=False)
+        _dmi = evaluate_triple_dmi(df, is_intraday=False)
+        _vsa = analyse_vsa(df, symbol=clean_sym, is_intraday=False)
+
+        # 1. Granville On Balance Volume (OBV)
+        if _obv.divergence == "BULLISH_DIVERGENCE":
+            score += 10
+            confluence_factors.append(
+                "🐋 OBV Bullish Accumulation Divergence (Smart Money Accumulating)"
+            )
+        elif _obv.divergence == "BULLISH_CONVERGENCE":
+            score += 7
+            confluence_factors.append("📈 OBV Bullish Convergence (Healthy Volume Trend)")
+        elif _obv.is_pivot_breakout:
+            score += 6
+            confluence_factors.append("📈 OBV Swing Pivot Breakout Confirmed")
+        elif _obv.divergence == "BEARISH_DIVERGENCE":
+            score -= 15
+            confluence_factors.append(
+                "⚠️ OBV Bearish Distribution Divergence (Smart Money Distributing)"
+            )
+
+        # 2. Swingscape Triple-Filtered DMI Model
+        if _dmi.verdict == "TRIPLE_BULLISH_CONFIRMED":
+            score += 10
+            confluence_factors.append(
+                "🎯 Triple-DMI Momentum Breakout Confirmed (+DI > 25 & -DI Pivot Breached)"
+            )
+        elif _dmi.verdict == "BULLISH_ESTABLISHED":
+            score += 5
+            confluence_factors.append("🎯 DMI Bullish Momentum Established (+DI Dominant)")
+
+        # 3. Wyckoff Volume Spread Analysis (VSA)
+        if _vsa.vsa_signal == "ABSORPTION_BREAKOUT":
+            score += 7
+            confluence_factors.append("📊 VSA Absorption Breakout (High Volume Spread Expansion)")
+        elif _vsa.vsa_signal == "STOPPING_VOLUME":
+            score += 6
+            confluence_factors.append("🛡️ VSA Stopping Volume Support (Demand Absorbing Supply)")
+        elif _vsa.vsa_signal == "EFFORT_VS_RESULT_BEARISH_CLIMAX":
+            score -= 12
+            confluence_factors.append(
+                "⚠️ VSA Effort vs Result Bearish Climax (High Volume Churning at Resistance)"
+            )
+    except Exception as _e_flow:
+        logger.debug(f"[analysis.inflection_scanner] Flow analysis non-fatal: {_e_flow}")
+
     score = max(10, min(99, score))
 
     # ─────────────────────────────────────────────────────────────────

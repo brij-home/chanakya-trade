@@ -451,7 +451,13 @@ def is_option_seller(alert: Any) -> bool:
         return getattr(alert, key, default)
 
     atype = str(_g("alert_type", "") or "").upper()
-    if atype == "OPTION_WRITE" or atype in ("SHORT_STRADDLE", "SHORT_STRANGLE"):
+    if atype in (
+        "OPTION_WRITE",
+        "SHORT_STRADDLE",
+        "SHORT_STRANGLE",
+        "DEFINED_RISK_NEUTRAL",
+        "IRON_CONDOR",
+    ):
         return True
 
     deriv = str(_g("derivative_type", "") or "").upper()
@@ -470,6 +476,10 @@ def is_option_seller(alert: Any) -> bool:
             "SHORT_STRANGLE",
             "BEAR_CALL_SPREAD",
             "BULL_PUT_SPREAD",
+            "IRON_CONDOR",
+            "ASYMMETRIC_IRON_CONDOR",
+            "DEFINED_RISK_NEUTRAL",
+            "SHORT_CONDOR",
         ):
             return True
 

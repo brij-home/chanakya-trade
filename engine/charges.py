@@ -242,6 +242,109 @@ def calculate_transaction_charges(
     )
 
 
+def calculate_roundtrip_charges(
+    entry_price: float | Decimal,
+    exit_price: float | Decimal,
+    quantity: int,
+    segment: SegmentType = "OPTIONS",
+    entry_side: OrderSide = "BUY",
+    trade_date=None,
+    broker_flat_fee: float = 20.0,
+) -> tuple[Decimal, Decimal, Decimal]:
+    """
+    Calculate the total roundtrip transaction costs (entry leg + exit leg).
+
+    Returns:
+        (entry_charges, exit_charges, total_roundtrip_charges)
+    """
+    exit_side: OrderSide = "SELL" if entry_side == "BUY" else "BUY"
+    entry_breakdown = calculate_transaction_charges(
+        price=entry_price,
+        quantity=quantity,
+        segment=segment,
+        side=entry_side,
+        trade_date=trade_date,
+        broker_flat_fee=broker_flat_fee,
+    )
+    exit_breakdown = calculate_transaction_charges(
+        price=exit_price,
+        quantity=quantity,
+        segment=segment,
+        side=exit_side,
+        trade_date=trade_date,
+        broker_flat_fee=broker_flat_fee,
+    )
+    total_cost = entry_breakdown.total_charges + exit_breakdown.total_charges
+    return entry_breakdown.total_charges, exit_breakdown.total_charges, total_cost
+
+
+def calculate_net_expectancy(
+    entry_price: float,
+    target_price: float,
+    stop_price: float,
+    quantity: int = 1,
+    segment: SegmentType = "OPTIONS",
+    entry_side: OrderSide = "BUY",
+    half_spread_pct: float = 0.0005,
+    trade_date=None,
+) -> dict[str, float]:
+    """
+    Calculate net profit, net loss, net Risk:Reward, and friction drag.
+    Accounts for statutory transaction costs (0.15% STT on options sales, 0.05% on futures sales,
+    brokerage, exchange turnover, stamp duty, GST) and bid-ask spread friction.
+    """
+    if entry_side == "BUY":
+        gross_reward = (target_price - entry_price) * quantity
+        gross_risk = (entry_price - stop_price) * quantity
+    else:
+        gross_reward = (entry_price - target_price) * quantity
+        gross_risk = (stop_price - entry_price) * quantity
+
+    slippage_entry = entry_price * quantity * half_spread_pct
+    slippage_exit = target_price * quantity * half_spread_pct
+    slippage_stop = stop_price * quantity * half_spread_pct
+
+    _, _, fees_target = calculate_roundtrip_charges(
+        entry_price,
+        target_price,
+        quantity,
+        segment=segment,
+        entry_side=entry_side,
+        trade_date=trade_date,
+    )
+    _, _, fees_stop = calculate_roundtrip_charges(
+        entry_price,
+        stop_price,
+        quantity,
+        segment=segment,
+        entry_side=entry_side,
+        trade_date=trade_date,
+    )
+
+    net_reward = gross_reward - float(fees_target) - slippage_entry - slippage_exit
+    net_risk = gross_risk + float(fees_stop) + slippage_entry + slippage_stop
+
+    net_rr = (net_reward / net_risk) if net_risk > 0 else 0.0
+    friction_drag_pct = (
+        ((float(fees_target) + slippage_entry + slippage_exit) / gross_reward * 100.0)
+        if gross_reward > 0
+        else 0.0
+    )
+
+    return {
+        "gross_reward": round(gross_reward, 2),
+        "gross_risk": round(gross_risk, 2),
+        "gross_rr": round(gross_reward / gross_risk, 2) if gross_risk > 0 else 0.0,
+        "net_reward": round(net_reward, 2),
+        "net_risk": round(net_risk, 2),
+        "net_rr": round(net_rr, 2),
+        "total_friction_target": round(float(fees_target) + slippage_entry + slippage_exit, 2),
+        "total_friction_stop": round(float(fees_stop) + slippage_entry + slippage_stop, 2),
+        "friction_drag_pct": round(friction_drag_pct, 2),
+        "is_positive_expectancy": net_reward > 0 and net_rr >= 1.0,
+    }
+
+
 # ── Capital Gains & Tax Engine (Post-Budget 2024/2026 Rules) ──
 
 

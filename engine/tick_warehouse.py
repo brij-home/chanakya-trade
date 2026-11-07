@@ -251,12 +251,21 @@ class TickWarehouse:
                             target_table = table
 
                     pq.write_table(target_table, temp_file, compression="SNAPPY")
-                    try:
-                        temp_file.replace(file_path)
-                    except Exception:
-                        import shutil
+                    replaced = False
+                    for attempt in range(5):
+                        try:
+                            temp_file.replace(file_path)
+                            replaced = True
+                            break
+                        except (PermissionError, OSError):
+                            time.sleep(0.04 * (2**attempt))
+                    if not replaced:
+                        try:
+                            import shutil
 
-                        shutil.move(str(temp_file), str(file_path))
+                            shutil.move(str(temp_file), str(file_path))
+                        except Exception as e_move:
+                            logger.debug(f"[engine.tick_warehouse] Move fallback note: {e_move}")
 
                     total_flushed += len(records)
                 except Exception as e:

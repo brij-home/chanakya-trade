@@ -222,3 +222,54 @@ def test_observability_off_market_slo_protection():
     assert report["overall_status"] == "OK"
 
     obs.clear_metrics()
+
+
+def test_primary_broker_health_authority_shields_against_auxiliary_provider_degradation(
+    monkeypatch,
+):
+    """Verify primary broker health dictates overall provider health even if auxiliary fallback has errors."""
+    from engine.observability import ObservabilityRegistry
+
+    obs = ObservabilityRegistry()
+    monkeypatch.setattr("brokers.session.get_data_broker_key", lambda: "fyers")
+    monkeypatch.setattr("market.calendar.is_market_open", lambda exch: True)
+
+    # Primary broker is healthy
+    obs.record_provider_success("fyers")
+
+    # Auxiliary fallback encounters errors
+    for _ in range(3):
+        obs.record_provider_error("yfinance", is_stale=True)
+
+    health = obs.get_provider_health()
+    assert health["providers"]["fyers"]["health"] == "HEALTHY"
+    assert health["providers"]["yfinance"]["health"] == "UNHEALTHY"
+    # Primary broker authority guarantees overall terminal health is HEALTHY
+    assert health["overall_health"] == "HEALTHY"
+
+
+def test_latency_slo_requires_minimum_statistical_sample_size():
+    """Verify latency SLO breach is not falsely triggered on statistically insignificant cold-start sample sizes (< 50)."""
+    from engine.observability import ObservabilityRegistry
+
+    obs = ObservabilityRegistry()
+    obs.clear_metrics()
+
+    # Record 10 measurements exceeding the 1000ms p95 threshold
+    for _ in range(10):
+        obs.record_metric(
+            journey_id="quote_fetch",
+            latency_ms=1800.0,
+            success=True,
+            metadata={"symbol": "NIFTY", "off_market": False},
+        )
+
+    report = obs.get_slo_report(journey_id="quote_fetch")
+    journey = report["journeys"]["quote_fetch"]
+    # Availability is 100%, total measurements (10) < 50 minimum sample size -> NO false breach
+    assert journey["availability_pct"] == 100.0
+    assert journey["slo_breach"] is False
+    assert journey["status"] == "OK"
+    assert report["overall_status"] == "OK"
+
+    obs.clear_metrics()

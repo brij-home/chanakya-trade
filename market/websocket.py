@@ -89,12 +89,41 @@ _SYMBOL_MAP = {
     "NSE:NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
     "BSE:BANKEX": "BSE:BANKEX-INDEX",
     "BANKEX": "BSE:BANKEX-INDEX",
+    # Sectoral Indices
+    "IT": "NSE:NIFTYIT-INDEX",
+    "NIFTY IT": "NSE:NIFTYIT-INDEX",
+    "NIFTYIT": "NSE:NIFTYIT-INDEX",
+    "NSE:IT": "NSE:NIFTYIT-INDEX",
     "NSE:NIFTY IT": "NSE:NIFTYIT-INDEX",
+    "PHARMA": "NSE:NIFTYPHARMA-INDEX",
+    "NIFTY PHARMA": "NSE:NIFTYPHARMA-INDEX",
+    "NIFTYPHARMA": "NSE:NIFTYPHARMA-INDEX",
+    "NSE:PHARMA": "NSE:NIFTYPHARMA-INDEX",
     "NSE:NIFTY PHARMA": "NSE:NIFTYPHARMA-INDEX",
+    "AUTO": "NSE:NIFTYAUTO-INDEX",
+    "NIFTY AUTO": "NSE:NIFTYAUTO-INDEX",
+    "NIFTYAUTO": "NSE:NIFTYAUTO-INDEX",
+    "NSE:AUTO": "NSE:NIFTYAUTO-INDEX",
     "NSE:NIFTY AUTO": "NSE:NIFTYAUTO-INDEX",
+    "FMCG": "NSE:NIFTYFMCG-INDEX",
+    "NIFTY FMCG": "NSE:NIFTYFMCG-INDEX",
+    "NIFTYFMCG": "NSE:NIFTYFMCG-INDEX",
+    "NSE:FMCG": "NSE:NIFTYFMCG-INDEX",
     "NSE:NIFTY FMCG": "NSE:NIFTYFMCG-INDEX",
+    "REALTY": "NSE:NIFTYREALTY-INDEX",
+    "NIFTY REALTY": "NSE:NIFTYREALTY-INDEX",
+    "NIFTYREALTY": "NSE:NIFTYREALTY-INDEX",
+    "NSE:REALTY": "NSE:NIFTYREALTY-INDEX",
     "NSE:NIFTY REALTY": "NSE:NIFTYREALTY-INDEX",
+    "METAL": "NSE:NIFTYMETAL-INDEX",
+    "NIFTY METAL": "NSE:NIFTYMETAL-INDEX",
+    "NIFTYMETAL": "NSE:NIFTYMETAL-INDEX",
+    "NSE:METAL": "NSE:NIFTYMETAL-INDEX",
     "NSE:NIFTY METAL": "NSE:NIFTYMETAL-INDEX",
+    "ENERGY": "NSE:NIFTYENERGY-INDEX",
+    "NIFTY ENERGY": "NSE:NIFTYENERGY-INDEX",
+    "NIFTYENERGY": "NSE:NIFTYENERGY-INDEX",
+    "NSE:ENERGY": "NSE:NIFTYENERGY-INDEX",
     "NSE:NIFTY ENERGY": "NSE:NIFTYENERGY-INDEX",
     "NSE:NIFTY PSU BANK": "NSE:NIFTYPSUBANK-INDEX",
     "NIFTY PSU BANK": "NSE:NIFTYPSUBANK-INDEX",
@@ -103,16 +132,23 @@ _SYMBOL_MAP = {
     "NSE:NIFTY INFRA": "NSE:NIFTYINFRA-INDEX",
     "NIFTY INFRA": "NSE:NIFTYINFRA-INDEX",
     "INFRA": "NSE:NIFTYINFRA-INDEX",
+    "NSE:INFRA": "NSE:NIFTYINFRA-INDEX",
     "NSE:NIFTY MEDIA": "NSE:NIFTYMEDIA-INDEX",
     "NIFTY MEDIA": "NSE:NIFTYMEDIA-INDEX",
     "MEDIA": "NSE:NIFTYMEDIA-INDEX",
+    "NSE:MEDIA": "NSE:NIFTYMEDIA-INDEX",
     "NSE:NIFTY PSE": "NSE:NIFTYPSE-INDEX",
     "NIFTY PSE": "NSE:NIFTYPSE-INDEX",
     "PSE": "NSE:NIFTYPSE-INDEX",
+    "NSE:PSE": "NSE:NIFTYPSE-INDEX",
     "NSE:NIFTY COMMODITIES": "NSE:NIFTYCOMMODITIES-INDEX",
     "NIFTY COMMODITIES": "NSE:NIFTYCOMMODITIES-INDEX",
+    "COMMODITIES": "NSE:NIFTYCOMMODITIES-INDEX",
+    "NSE:COMMODITIES": "NSE:NIFTYCOMMODITIES-INDEX",
     "NSE:NIFTY CPSE": "NSE:NIFTYCPSE-INDEX",
     "NIFTY CPSE": "NSE:NIFTYCPSE-INDEX",
+    "CPSE": "NSE:NIFTYCPSE-INDEX",
+    "NSE:CPSE": "NSE:NIFTYCPSE-INDEX",
 }
 
 _INDEX_PREFIXES = (
@@ -324,42 +360,6 @@ class WebSocketManager:
             except Exception as e:
                 logger.debug(f"[WebSocket] Watchdog loop error: {e}")
 
-    def _run_connection_watchdog(self) -> None:
-        """Background watchdog: detects silent WebSocket disconnects during active market hours."""
-        while self._running:
-            time.sleep(5.0)
-            if not self._running:
-                break
-            if not self._connected or not self._access_token:
-                continue
-
-            with self._lock:
-                sub_count = len(self._subscribed)
-            if sub_count == 0:
-                continue
-
-            # Check if any subscribed exchange market is open
-            try:
-                from market.calendar import is_market_open
-
-                mkt_open = is_market_open("NSE") or is_market_open("MCX") or is_market_open("BSE")
-            except Exception:
-                mkt_open = True
-
-            if not mkt_open:
-                continue
-
-            now = time.time()
-            silence_sec = now - self._last_packet_at if self._last_packet_at > 0 else 0.0
-            # If market is active, connected is True, subscribed to >0 symbols, but zero packets in 30s:
-            if self._last_packet_at > 0 and silence_sec > 30.0:
-                logger.warning(
-                    f"[WebSocket] 🚨 Zombie WebSocket detected: 0 packets received for {silence_sec:.1f}s "
-                    f"during active market session ({sub_count} subscriptions). Triggering proactive reconnect."
-                )
-                self._connected = False
-                self._schedule_proactive_reconnect(delay_sec=1.0)
-
     def _run_dispatch_worker(self) -> None:
         """Asynchronously dispatches incoming ticks to registered listeners without stalling the socket thread."""
         while self._running:
@@ -471,6 +471,8 @@ class WebSocketManager:
 
         ws_to_close = self._ws
         self._connected = False
+        with self._lock:
+            self._subscribed.clear()
         self._ws = None
 
         if ws_to_close:
@@ -598,9 +600,16 @@ class WebSocketManager:
             return
 
         try:
-            self._ws.subscribe(new_symbols)
-            self._subscribed.update(new_symbols)
-            logger.info(f"Subscribed to {len(new_symbols)} symbols")
+            CHUNK_SIZE = 50
+            for i in range(0, len(new_symbols), CHUNK_SIZE):
+                batch = new_symbols[i : i + CHUNK_SIZE]
+                self._ws.subscribe(batch)
+                self._subscribed.update(batch)
+                if i + CHUNK_SIZE < len(new_symbols):
+                    time.sleep(0.05)
+            logger.info(
+                f"Subscribed to {len(new_symbols)} symbols (batched in chunks of {CHUNK_SIZE})"
+            )
             if record_in_manager:
                 try:
                     from market.ws_subscription_manager import get_ws_subscription_manager
@@ -727,6 +736,8 @@ class WebSocketManager:
     def _on_connect(self) -> None:
         self._connected = True
         self._last_packet_at = time.time()
+        with self._lock:
+            self._subscribed.clear()
         logger.info("WebSocket: connected")
         try:
             from market.ws_subscription_manager import get_ws_subscription_manager
@@ -844,6 +855,8 @@ class WebSocketManager:
 
     def _on_close(self, *args, **kwargs) -> None:
         self._connected = False
+        with self._lock:
+            self._subscribed.clear()
         logger.info("WebSocket: disconnected")
         if getattr(self, "_running", False) and getattr(self, "_access_token", ""):
             self._schedule_proactive_reconnect()
@@ -1036,6 +1049,52 @@ class WebSocketManager:
                         self._ticks[clean] = tick
                         if "-" in clean:
                             self._ticks[clean.split("-")[0]] = tick
+                    # Cross-index canonical benchmark aliases
+                    if symbol == "NSE:NIFTY50-INDEX":
+                        for a in (
+                            "NSE:NIFTY 50",
+                            "NIFTY 50",
+                            "NSE:NIFTY",
+                            "NIFTY",
+                            "NSE:NIFTY50",
+                            "NIFTY50",
+                        ):
+                            self._ticks[a] = tick
+                    elif symbol == "NSE:NIFTYBANK-INDEX":
+                        for a in (
+                            "NSE:NIFTY BANK",
+                            "NIFTY BANK",
+                            "NSE:BANKNIFTY",
+                            "BANKNIFTY",
+                            "NSE:BANK",
+                            "BANK",
+                        ):
+                            self._ticks[a] = tick
+                    elif symbol == "NSE:FINNIFTY-INDEX":
+                        for a in (
+                            "NSE:NIFTY FIN SERVICE",
+                            "NIFTY FIN SERVICE",
+                            "NSE:FINNIFTY",
+                            "FINNIFTY",
+                        ):
+                            self._ticks[a] = tick
+                    elif symbol == "NSE:MIDCPNIFTY-INDEX":
+                        for a in (
+                            "NSE:NIFTY MID SELECT",
+                            "NIFTY MID SELECT",
+                            "NSE:MIDCPNIFTY",
+                            "MIDCPNIFTY",
+                        ):
+                            self._ticks[a] = tick
+                    elif symbol == "BSE:SENSEX-INDEX":
+                        for a in ("BSE:SENSEX", "SENSEX"):
+                            self._ticks[a] = tick
+                    elif symbol == "BSE:BANKEX-INDEX":
+                        for a in ("BSE:BANKEX", "BANKEX"):
+                            self._ticks[a] = tick
+                    elif symbol == "NSE:INDIAVIX-INDEX":
+                        for a in ("NSE:INDIA VIX", "INDIA VIX", "NSE:INDIAVIX", "INDIAVIX", "VIX"):
+                            self._ticks[a] = tick
 
                 # Update live BisectDepthBook in RAM
                 try:

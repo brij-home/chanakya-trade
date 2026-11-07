@@ -286,53 +286,61 @@ def detect_divergence(
 
         # Use last `lookback` bars for pivot comparison
         window = min(lookback, len(df))
-        price_lows = lows.iloc[-window:]
-        price_highs = highs.iloc[-window:]
-        rsi_win = rsi.iloc[-window:]
+        w_df = df.iloc[-window:].copy()
+        w_lows = lows.iloc[-window:].values
+        w_highs = highs.iloc[-window:].values
+        w_rsi = rsi.iloc[-window:].values
+        n_w = len(w_df)
 
-        # Split into first half vs second half for simple pivot comparison
-        mid = window // 2
-        if mid < 3:
+        if n_w < 6:
             return result
 
-        price_low1 = float(price_lows.iloc[:mid].min())
-        price_low2 = float(price_lows.iloc[mid:].min())
-        price_high1 = float(price_highs.iloc[:mid].max())
-        price_high2 = float(price_highs.iloc[mid:].max())
+        # Detect fractal swing peaks and troughs in the window
+        # 3-bar fractal: bar i is peak if high[i] > high[i-1] and high[i] >= high[i+1]
+        peaks = []  # (index_in_window, price, rsi_val)
+        troughs = []  # (index_in_window, price, rsi_val)
 
-        rsi_low1 = float(rsi_win.iloc[:mid].min())
-        rsi_low2 = float(rsi_win.iloc[mid:].min())
-        rsi_high1 = float(rsi_win.iloc[:mid].max())
-        rsi_high2 = float(rsi_win.iloc[mid:].max())
+        for i in range(1, n_w - 1):
+            if w_highs[i] > w_highs[i - 1] and w_highs[i] >= w_highs[i + 1]:
+                # RSI at peak (check local 3-bar window for exact oscillator crest)
+                r_crest = float(max(w_rsi[max(0, i - 1) : min(n_w, i + 2)]))
+                peaks.append((i, float(w_highs[i]), r_crest))
+            if w_lows[i] < w_lows[i - 1] and w_lows[i] <= w_lows[i + 1]:
+                r_trough = float(min(w_rsi[max(0, i - 1) : min(n_w, i + 2)]))
+                troughs.append((i, float(w_lows[i]), r_trough))
 
-        # Tolerance: 0.3% for price, 2 pts for RSI
-        def price_lower(a: float, b: float) -> bool:
-            return b < a * 0.997
+        # Check latest candle against last confirmed pivot if at a new extreme
+        curr_price_high = float(w_highs[-1])
+        curr_price_low = float(w_lows[-1])
+        curr_rsi = float(w_rsi[-1])
 
-        def price_higher(a: float, b: float) -> bool:
-            return b > a * 1.003
+        # 1. Bearish Regular Divergence: Price Higher High, RSI Lower High
+        if len(peaks) >= 2:
+            p_prior = peaks[-2]
+            p_recent = peaks[-1]
+            if p_recent[1] > p_prior[1] * 1.002 and p_recent[2] < p_prior[2] - 1.5:
+                return {"type": "BEARISH_REGULAR", "bias": "BEARISH"}
+            # Hidden Bearish Divergence: Price Lower High, RSI Higher High
+            elif p_recent[1] < p_prior[1] * 0.998 and p_recent[2] > p_prior[2] + 1.5:
+                return {"type": "BEARISH_HIDDEN", "bias": "BEARISH"}
+        elif len(peaks) == 1:
+            p_prior = peaks[0]
+            if curr_price_high > p_prior[1] * 1.002 and curr_rsi < p_prior[2] - 2.0:
+                return {"type": "BEARISH_REGULAR", "bias": "BEARISH"}
 
-        def rsi_higher(a: float, b: float) -> bool:
-            return b > a + 2.0
-
-        def rsi_lower(a: float, b: float) -> bool:
-            return b < a - 2.0
-
-        # Regular Bullish: price LL, RSI HL
-        if price_lower(price_low1, price_low2) and rsi_higher(rsi_low1, rsi_low2):
-            return {"type": "BULLISH_REGULAR", "bias": "BULLISH"}
-
-        # Regular Bearish: price HH, RSI LH
-        if price_higher(price_high1, price_high2) and rsi_lower(rsi_high1, rsi_high2):
-            return {"type": "BEARISH_REGULAR", "bias": "BEARISH"}
-
-        # Hidden Bullish: price HL, RSI LL (trend continuation up)
-        if price_higher(price_low1, price_low2) and rsi_lower(rsi_low1, rsi_low2):
-            return {"type": "BULLISH_HIDDEN", "bias": "BULLISH"}
-
-        # Hidden Bearish: price LH, RSI HH (trend continuation down)
-        if price_lower(price_high1, price_high2) and rsi_higher(rsi_high1, rsi_high2):
-            return {"type": "BEARISH_HIDDEN", "bias": "BEARISH"}
+        # 2. Bullish Regular Divergence: Price Lower Low, RSI Higher Low
+        if len(troughs) >= 2:
+            t_prior = troughs[-2]
+            t_recent = troughs[-1]
+            if t_recent[1] < t_prior[1] * 0.998 and t_recent[2] > t_prior[2] + 1.5:
+                return {"type": "BULLISH_REGULAR", "bias": "BULLISH"}
+            # Hidden Bullish Divergence: Price Higher Low, RSI Lower Low
+            elif t_recent[1] > t_prior[1] * 1.002 and t_recent[2] < t_prior[2] - 1.5:
+                return {"type": "BULLISH_HIDDEN", "bias": "BULLISH"}
+        elif len(troughs) == 1:
+            t_prior = troughs[0]
+            if curr_price_low < t_prior[1] * 0.998 and curr_rsi > t_prior[2] + 2.0:
+                return {"type": "BULLISH_REGULAR", "bias": "BULLISH"}
 
     except Exception as e_suppressed:
         logger.debug(f"[analysis.market_structure] Non-fatal exception suppressed: {e_suppressed}")

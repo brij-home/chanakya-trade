@@ -90,6 +90,11 @@ Fyers (data) → explicitly configured, source-qualified data provider; executio
    - `get_expired_fno_history()` uses the dedicated expired-contract endpoint. Optional OI and Greeks are read by the response `columns` names, not fixed offsets; null values remain null and carry explicit field status.
    - This API does not cover active contracts. A collection of expired-contract IV values is not a comparable historical IV rank; constant-tenor/moneyness construction, as-of validation and held-out evidence are required before any live alert can consume it.
    - The FYERS endpoint limits seconds history to recent sessions, has per-request range caps, and may omit individual Greek values. Unsupported or unavailable data remains explicitly unavailable.
+14. **FYERS Prime 15-Slot Level-3 TBT Streaming Invariant**:
+   - Under `FYERS_PLAN=PRIME`, the terminal possesses full entitlement for up to 3 concurrent WebSockets with 5 symbols each, supporting 15 total Level-3 50-depth streams.
+   - Do NOT throttle `FYERS_TBT_WORKERS=1` in `.env` or operational configurations. Worker 0, Worker 1, and Worker 2 must be active during derivative trading hours.
+   - Slot distribution: Worker 0 handles slots 0..4 (In-flight + Anchor Index Futures: NIFTY, BANKNIFTY, MIDCPNIFTY), Worker 1 handles slots 5..9 (Core Grid + Revolving ATM Options + Primary Sector Leaders), Worker 2 handles slots 10..14 (Secondary Sector Leaders + JIT Scouts).
+   - If transient 429 throttling occurs, workers apply exponential backoff (60s..300s) and multi-socket entitlement auto-heals after a 15-minute probation window. Never latch multi-socket entitlement to `False` permanently.
 
 ---
 

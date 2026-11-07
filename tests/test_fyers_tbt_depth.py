@@ -8,9 +8,27 @@ and Tier 2 Depth Audit Gatekeeper.
 
 import pytest
 import time
-from datetime import date, datetime as RealDatetime
+from datetime import date, datetime as RealDatetime, timedelta
 from config.constants import IST
 from brokers.base import Quote
+
+
+@pytest.fixture(autouse=True)
+def _reset_tbt_state():
+    """Hermetically reset TbtManager singleton and memoized caches before and after each test."""
+    from market.fyers_tbt_manager import (
+        FyersTbtManager,
+        _resolve_index_future_memo,
+        _resolve_stock_future_memo,
+    )
+
+    _resolve_index_future_memo.cache_clear()
+    _resolve_stock_future_memo.cache_clear()
+    FyersTbtManager().reset_for_testing()
+    yield
+    _resolve_index_future_memo.cache_clear()
+    _resolve_stock_future_memo.cache_clear()
+    FyersTbtManager().reset_for_testing()
 
 
 @pytest.fixture
@@ -65,14 +83,22 @@ def listed_grid_feed(monkeypatch):
         "market.quotes.get_ltp", lambda symbol: levels.get(canonical_symbol(symbol), (25000, 50))[0]
     )
     records = {}
-    for underlying, (spot, step) in levels.items():
-        venue = "BSE" if underlying == "SENSEX" else "NSE"
-        for expiry in (
+    base_d = tbt.datetime.now(IST).date()
+    synthetic_expiries = sorted(
+        {
             date(2026, 10, 19),
             date(2026, 10, 27),
             date(2026, 11, 3),
             date(2026, 11, 24),
-        ):
+            base_d + timedelta(days=7),
+            base_d + timedelta(days=14),
+            base_d + timedelta(days=21),
+            base_d + timedelta(days=28),
+        }
+    )
+    for underlying, (spot, step) in levels.items():
+        venue = "BSE" if underlying == "SENSEX" else "NSE"
+        for expiry in synthetic_expiries:
             epoch = int(
                 RealDatetime(expiry.year, expiry.month, expiry.day, 15, 40, tzinfo=IST).timestamp()
             )

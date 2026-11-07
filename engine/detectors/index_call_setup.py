@@ -115,11 +115,27 @@ def detect_index_call_setup(
         or (os.environ.get("DEPLOY_MODE") == "test")
     )
     _day_open_price_ce: Optional[float] = None
-    if ohlcv_5m is not None:
+    if quotes_map:
+        q_obj = (
+            quotes_map.get(f"NSE:{clean_sym}")
+            or quotes_map.get(clean_sym)
+            or quotes_map.get(underlying)
+        )
+        if q_obj:
+            q_open = getattr(q_obj, "open", 0.0) or getattr(q_obj, "day_open", 0.0) or 0.0
+            if q_open and float(q_open) > 0:
+                _day_open_price_ce = float(q_open)
+    if _day_open_price_ce is None and ohlcv_5m is not None:
         try:
-            if hasattr(ohlcv_5m, "iloc") and len(ohlcv_5m) >= 1:
-                col_o = "open" if "open" in ohlcv_5m.columns else "Open"
-                _day_open_price_ce = float(ohlcv_5m[col_o].iloc[0])
+            col_o = "open" if "open" in ohlcv_5m.columns else "Open"
+            now_dt_ref = ref_time or datetime.now(IST)
+            today_str = now_dt_ref.strftime("%Y-%m-%d")
+            if hasattr(ohlcv_5m, "index") and hasattr(ohlcv_5m.index, "strftime"):
+                today_bars = ohlcv_5m[ohlcv_5m.index.strftime("%Y-%m-%d") == today_str]
+                if len(today_bars) >= 1:
+                    _day_open_price_ce = float(today_bars[col_o].iloc[0])
+            if _day_open_price_ce is None and hasattr(ohlcv_5m, "iloc") and len(ohlcv_5m) >= 1:
+                _day_open_price_ce = float(ohlcv_5m[col_o].iloc[-1])
         except Exception as e_suppressed:
             logger.debug(
                 f"[engine.detectors.index_call_setup] Non-fatal exception suppressed: {e_suppressed}"
@@ -156,7 +172,15 @@ def detect_index_call_setup(
         try:
             from engine.smt_divergence import evaluate_smt_divergence
 
-            smt_res = evaluate_smt_divergence(clean_sym, spot, quotes_map=quotes_map)
+            smt_res = evaluate_smt_divergence(
+                primary_symbol=clean_sym,
+                direction="BULLISH",
+                primary_spot=spot,
+                primary_day_high=day_high,
+                primary_day_low=day_low,
+                primary_vwap=vwap,
+                quotes_map=quotes_map,
+            )
             if smt_res and smt_res.verdict in ("BULLISH_DIVERGENCE_BEAR_TRAP", "CONFIRMED_HARMONY"):
                 _has_smt_reversal = True
         except Exception as e_smt:
@@ -230,35 +254,40 @@ def detect_index_call_setup(
     # through Previous Day High (PDH) by >= 0.20% and is up >= 0.50% from open,
     # institutional accumulation is already underway. Bypass opening buffer so early breakouts are caught.
     _is_opening_displacement = bool(
-        prev_day_high
-        and prev_day_high > 0
-        and spot > prev_day_high * 1.002
-        and _spot_above_open_escape
+        (
+            (prev_day_high and prev_day_high > 0 and spot > prev_day_high * 1.002)
+            or (prev_close and prev_close > 0 and (spot - prev_close) / prev_close * 100.0 >= 0.50)
+        )
+        and (
+            _spot_above_open_escape
+            or (vwap and vwap > 0 and spot >= vwap * 0.9995)
+            or (_day_open_price_ce and spot >= _day_open_price_ce * 0.9990)
+        )
     )
     is_opening_buffer = (
-        (curr_time < dtime(9, 25))
+        (curr_time < dtime(9, 18) if _is_opening_displacement else curr_time < dtime(9, 25))
         and not ignore_time_gate
-        and not _is_opening_displacement
         and (not is_test_runner or ref_time is not None)
     )
     if is_opening_buffer:
         logger.info(
             f"[IndexCallSetup] Suppressed CE setup on {clean_sym} at {curr_time.strftime('%H:%M:%S')}: "
-            f"Opening auction stabilization window (09:15–09:25 IST) active."
+            f"Opening auction stabilization window active (until {'09:18' if _is_opening_displacement else '09:25'} IST)."
         )
         return []
 
-    # ── 14:00 IST Option Entry Cutoff Gate ─────────────────────────
+    # ── 15:05 IST Option Entry Cutoff Gate ─────────────────────────
     # In Indian markets, broker auto-square-off occurs between 15:15–15:20 IST.
-    # Entries after 14:00 IST suffer accelerated theta decay, terminal gamma risk,
-    # and inadequate session runway to reach targets.
-    if (curr_time > dtime(14, 0)) and not ignore_time_gate and not is_test_runner:
+    # Entries after 15:05 IST suffer terminal intraday theta decay and inadequate session runway.
+    # Entries between 14:45 and 15:05 IST are routed to defined-risk spreads via is_terminal_mis_closeout.
+    if (curr_time > dtime(15, 5)) and not ignore_time_gate and not is_test_runner:
         logger.info(
             f"[IndexCallSetup] Suppressed CE setup on {clean_sym} at {curr_time.strftime('%H:%M:%S')}: "
-            f"Intraday option entry cutoff passed (14:00 IST). Inadequate session runway before 15:15 IST auto-square-off."
+            f"Intraday option entry cutoff passed (15:05 IST). Inadequate session runway before 15:15 IST auto-square-off."
         )
         return []
 
+    mandate_spread_afternoon = False
     # Strict today session bar isolation: prevent yesterday's historical bars from forging fake today patterns
     today_str = now_dt.strftime("%Y-%m-%d")
     df_today_5m = None
@@ -579,13 +608,29 @@ def detect_index_call_setup(
         if cand_ce_oi > cand_ce_oi_change and cand_ce_oi_change > 0
         else 0.0
     )
+    # Define trend expansion day early so it informs breakout momentum
+    _is_trend_exp_day = bool(
+        (prev_close and prev_close > 0 and (spot - prev_close) / prev_close * 100.0 >= 0.50)
+        or (
+            _day_open_price_ce
+            and _day_open_price_ce > 0
+            and (spot - _day_open_price_ce) / _day_open_price_ce * 100.0 >= 0.35
+        )
+        or _spot_above_open_escape
+    )
+
+    # Index options carry high base OI (often 200k-1M+ contracts); vol_oi >= 1.2 is an equity metric.
+    # For index options, vol_oi >= 0.35x with volume >= min_vol or a 10%+ premium gain confirms institutional breakout momentum.
+    # Premium expansion (>= 10.0%) is required alongside volume to differentiate true buying from call-writing absorption traps.
     is_breakout_momentum = (
-        (cand_ce_pchange >= 15.0 and cand_ce_vol_oi >= 1.2 and cand_ce_vol >= min_vol)
-        or (cand_ce_vol_oi >= 2.0 and cand_ce_vol >= int(min_vol * 1.5))
+        (cand_ce_pchange >= 10.0 and cand_ce_vol >= min_vol)
+        or (cand_ce_pchange >= 10.0 and cand_ce_vol_oi >= 0.35 and cand_ce_vol >= min_vol)
+        or (cand_ce_pchange >= 10.0 and cand_ce_vol >= int(min_vol * 1.5))
         or _is_opening_displacement
+        or _is_trend_exp_day
     ) and (spot > effective_vwap)
-    is_explosive_momentum = (cand_ce_vol_oi >= 3.0 and cand_ce_vol >= min_vol * 2) or (
-        cand_ce_pchange >= 25.0 and cand_ce_vol_oi >= 2.0 and cand_ce_vol >= min_vol
+    is_explosive_momentum = (cand_ce_vol_oi >= 1.0 and cand_ce_vol >= min_vol * 2) or (
+        cand_ce_pchange >= 20.0 and cand_ce_vol >= min_vol
     )
 
     # ── Optimization 1: Intraday Put-Call Ratio (PCR) Confluence Gate ───
@@ -692,7 +737,11 @@ def detect_index_call_setup(
                 return []
             # Afternoon Call Wall Trap Guard: In afternoon sessions (>= 13:30 IST) with <= 0.25% runway into heavy call writing,
             # upside is statistically choked and downside risk dominates. Suppress long call setups fail-closed.
-            if curr_time >= dtime(13, 30) and call_wall_dist_pct <= 0.25 and not is_test_runner:
+            if (
+                (ref_time is not None or not is_test_runner)
+                and curr_time >= dtime(13, 30)
+                and call_wall_dist_pct <= 0.25
+            ):
                 logger.info(
                     f"[IndexCallSetup] Afternoon Call Wall Trap: Spot ₹{spot:,.1f} is only {call_wall_dist_pct:.2f}% "
                     f"below Call Wall ₹{max_call_oi_strike:,.0f} with writers adding after 13:30 IST. Suppressing long calls."
@@ -728,44 +777,104 @@ def detect_index_call_setup(
                     else 0.0
                 )
 
+                is_gap_day = bool(
+                    _day_open_price_ce
+                    and (
+                        (prev_close and prev_close > 0 and _day_open_price_ce >= prev_close * 1.008)
+                        or (h4 > 0 and _day_open_price_ce >= h4 * 0.999)
+                        or (h5 > 0 and _day_open_price_ce >= h5 * 0.998)
+                    )
+                )
+
                 _is_h5_expansion = bool(
-                    (
+                    h5 > 0
+                    and spot >= h5 * 0.9990
+                    and (
                         is_breakout_momentum
                         or is_explosive_momentum
                         or _is_opening_displacement
                         or _has_structural_reversal
+                        or is_gap_day
                     )
-                    and (effective_vwap and spot > effective_vwap * 1.001)
+                    and (effective_vwap and spot > effective_vwap * 0.9985)
                 )
-                if h5 > 0 and spot >= h5 * 0.9990 and not _is_h5_expansion:
+                if h5 > 0 and spot >= h5 * 0.9990 and not is_gap_day:
                     logger.info(
                         f"[IndexCallSetup] Camarilla H5 Ceiling Exhaustion: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ₹{h5:,.1f}. "
                         f"Rally statistically exhausted. Suppressing long call setup."
                     )
                     return []
-                elif h5 > 0 and spot >= h5 * 0.9990 and _is_h5_expansion:
-                    logger.debug(
-                        f"[IndexCallSetup] Camarilla H5 Blue Sky Expansion: Spot ₹{spot:,.1f} broke above H5 ₹{h5:,.1f} "
-                        f"with confirmed momentum holding above VWAP. Allowing trend continuation."
-                    )
+                candle_range = 0.0
+                upper_wick_ratio = 0.0
+                lower_wick_ratio = 0.0
+                if (
+                    active_ohlcv is not None
+                    and hasattr(active_ohlcv, "iloc")
+                    and len(active_ohlcv) >= 1
+                ):
+                    try:
+                        col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                        col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                        col_h = "high" if "high" in active_ohlcv.columns else "High"
+                        col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                        _lb = active_ohlcv.iloc[-1]
+                        _lb_h = float(_lb[col_h])
+                        _lb_l = float(_lb[col_l])
+                        _lb_c = float(_lb[col_c])
+                        _lb_o = float(_lb[col_o])
+                        candle_range = max(0.01, _lb_h - _lb_l)
+                        upper_wick_ratio = max(0.0, _lb_h - max(_lb_c, _lb_o)) / candle_range
+                        lower_wick_ratio = max(0.0, min(_lb_c, _lb_o) - _lb_l) / candle_range
+                    except Exception as e_wick:
+                        logger.debug(
+                            f"[IndexCallSetup] Candle wick ratio calculation failed: {e_wick}"
+                        )
                 if atr > 0 and day_low > 0:
                     up_move = spot - day_low
-                    if up_move >= (1.15 * atr):
-                        logger.info(
-                            f"[IndexCallSetup] Absolute Terminal ADR Upward Exhaustion: Spot ₹{spot:,.1f} expanded +{up_move:.1f} pts "
-                            f"(>= 1.15x ATR {atr:.1f}) off day low ₹{day_low:,.1f}. Upside statistically exhausted; suppressing call setup."
+                    is_trend_expansion = bool(
+                        (
+                            is_breakout_momentum
+                            or is_explosive_momentum
+                            or is_short_squeeze_unwind
+                            or is_gap_day
+                            or _is_h5_expansion
+                            or (
+                                prev_close
+                                and prev_close > 0
+                                and (spot - prev_close) / prev_close * 100.0 >= 0.80
+                            )
                         )
-                        return []
-                    elif up_move >= (1.10 * atr) and not is_short_squeeze_unwind:
+                        and (effective_vwap and spot >= effective_vwap * 0.9985)
+                        and not (candle_range >= (spot * 0.0025) and upper_wick_ratio > 0.50)
+                    )
+                    if up_move >= (1.15 * atr):
+                        if is_trend_expansion:
+                            logger.info(
+                                f"[IndexCallSetup] 🚀 Trend Expansion Regime: Spot ₹{spot:,.1f} expanded +{up_move:.1f} pts "
+                                f"({up_move / atr:.2f}x ATR) off day low ₹{day_low:,.1f} holding firmly above VWAP ₹{effective_vwap:,.1f}. "
+                                f"Allowing Trend Expansion continuation setup."
+                            )
+                            mandate_spread_afternoon = True
+                        else:
+                            logger.info(
+                                f"[IndexCallSetup] Absolute Terminal ADR Upward Exhaustion: Spot ₹{spot:,.1f} expanded +{up_move:.1f} pts "
+                                f"(>= 1.15x ATR {atr:.1f}) off day low ₹{day_low:,.1f} without confirmed trend expansion. Upside statistically exhausted; suppressing call setup."
+                            )
+                            return []
+                    elif up_move >= (1.10 * atr) and not (
+                        is_short_squeeze_unwind or is_trend_expansion
+                    ):
                         logger.info(
                             f"[IndexCallSetup] Terminal ADR Upward Exhaustion: Spot ₹{spot:,.1f} expanded +{up_move:.1f} pts "
-                            f"(>= 1.1x ATR {atr:.1f}) off day low ₹{day_low:,.1f} without active short squeeze unwind. Suppressing breakout buy."
+                            f"(>= 1.1x ATR {atr:.1f}) off day low ₹{day_low:,.1f} without active trend expansion. Suppressing breakout buy."
                         )
                         return []
-                    elif up_move >= (0.85 * atr) and not is_breakout_momentum:
+                    elif up_move >= (0.85 * atr) and not (
+                        is_breakout_momentum or is_trend_expansion
+                    ):
                         logger.info(
                             f"[IndexCallSetup] Upside ADR Exhaustion: Spot ₹{spot:,.1f} expanded +{up_move:.1f} pts "
-                            f"(>= 85% of ATR {atr:.1f}) off day low ₹{day_low:,.1f} without high volume breakout. "
+                            f"(>= 85% of ATR {atr:.1f}) off day low ₹{day_low:,.1f} without high volume breakout or trend expansion. "
                             f"Late-chasing into institutional resistance suppressed."
                         )
                         return []
@@ -1044,7 +1153,12 @@ def detect_index_call_setup(
         and ((day_high - day_low) / max(1.0, spot)) >= 0.003
     ):
         dh_headroom_pct = (day_high - spot) / spot * 100.0
-        if dh_headroom_pct < 0.15 and not is_breakout_momentum and not _is_proximity_watch:
+        if (
+            dh_headroom_pct < 0.15
+            and not is_breakout_momentum
+            and not _is_proximity_watch
+            and not _is_trend_exp_day
+        ):
             logger.info(
                 f"[IndexCallSetup] Suppressed CE: Spot ₹{spot:,.1f} is within {dh_headroom_pct:.2f}% of Day High ₹{day_high:,.1f} (Headroom Truncated / Overhead Supply Collision)"
             )
@@ -1077,7 +1191,20 @@ def detect_index_call_setup(
             cand_ce_pchange >= 15.0
             and cand_ce_vol >= (8000 if clean_sym in ("NIFTY", "BANKNIFTY") else 1500)
         )
-        _vwap_cap = 2.0 if _is_full_flush_cs else (1.2 if _is_momentum_exp_cs else 0.65)
+        _is_trend_exp_day = bool(
+            (prev_close and prev_close > 0 and (spot - prev_close) / prev_close * 100.0 >= 0.50)
+            or (
+                _day_open_price_ce
+                and _day_open_price_ce > 0
+                and (spot - _day_open_price_ce) / _day_open_price_ce * 100.0 >= 0.35
+            )
+            or _spot_above_open_escape
+        )
+        _vwap_cap = (
+            2.5
+            if _is_trend_exp_day
+            else (2.0 if _is_full_flush_cs else (1.2 if _is_momentum_exp_cs else 0.85))
+        )
         if spot_vwap_ext > _vwap_cap:
             logger.debug(
                 f"[IndexCallSetup] Suppressed CE: Spot extended +{spot_vwap_ext:.2f}% above VWAP "
@@ -1163,7 +1290,16 @@ def detect_index_call_setup(
 
         # Terminal Camarilla H5 Exhaustion Check:
         # If spot has already reached or penetrated Camarilla H5, the expansion target is achieved.
-        if spot >= cam_h5 * 0.9990 and not is_test_runner:
+        # Skip if in an active Gap Expansion Regime or institutional thrust holding above VWAP.
+        is_gap_day_late = bool(
+            _day_open_price_ce
+            and (
+                (prev_close and prev_close > 0 and _day_open_price_ce >= prev_close * 1.008)
+                or (cam_h4 > 0 and _day_open_price_ce >= cam_h4 * 0.999)
+                or (cam_h5 > 0 and _day_open_price_ce >= cam_h5 * 0.998)
+            )
+        )
+        if spot >= cam_h5 * 0.9990 and not is_gap_day_late:
             logger.info(
                 f"[IndexCallSetup] Suppressed: Spot ₹{spot:,.1f} reached/exceeded Camarilla H5 ceiling ₹{cam_h5:,.1f}."
             )
@@ -1179,10 +1315,17 @@ def detect_index_call_setup(
             and (spot - day_low) >= (1.25 * cam_range)
             and not is_test_runner
         ):
-            logger.info(
-                f"[IndexCallSetup] Suppressed: Spot ₹{spot:,.1f} reached Terminal ADR expansion (+{spot - day_low:.1f} pts >= 1.25x range {cam_range:.1f})."
-            )
-            return []
+            if _is_h5_expansion or is_breakout_momentum or is_explosive_momentum:
+                logger.info(
+                    f"[IndexCallSetup] 🚀 Afternoon Trend Expansion: Spot ₹{spot:,.1f} expanded +{spot - day_low:.1f} pts "
+                    f"(>= 1.25x cam range {cam_range:.1f}). Mandating Bull Call Spread to mitigate late-session theta/delta decay."
+                )
+                mandate_spread_afternoon = True
+            else:
+                logger.info(
+                    f"[IndexCallSetup] Suppressed: Spot ₹{spot:,.1f} reached Terminal ADR expansion (+{spot - day_low:.1f} pts >= 1.25x range {cam_range:.1f}) without confirmed trend expansion."
+                )
+                return []
 
         # Central Pivot Range (CPR) Trap Veto on Wide CPR Days (SSOT Gate):
         if not is_test_runner and cpr_gate.is_vetoed:
@@ -2503,6 +2646,47 @@ def detect_index_call_setup(
     ):
         confidence += 6
 
+    # ── Institutional Flow Engine: OBV, Triple-DMI, VSA & AVWAP Confluence ──
+    vsa_signal_val = "NEUTRAL"
+    avwap_bias_val = "NEUTRAL"
+    obv_div_val = "NONE"
+    dmi_model_val = "NEUTRAL"
+
+    if active_ohlcv is not None and len(active_ohlcv) >= 5:
+        try:
+            from analysis.obv import analyse_obv
+            from analysis.dmi_filter import evaluate_triple_dmi
+            from analysis.vsa import analyse_vsa
+            from analysis.anchored_vwap import detect_intraday_anchors
+
+            _obv = analyse_obv(active_ohlcv, is_intraday=True)
+            obv_div_val = _obv.divergence
+            if _obv.divergence in ("BULLISH_DIVERGENCE", "BULLISH_CONVERGENCE"):
+                confidence += 6
+            elif _obv.divergence == "BEARISH_DIVERGENCE":
+                confidence = max(50, confidence - 10)
+
+            _dmi = evaluate_triple_dmi(active_ohlcv, is_intraday=True)
+            dmi_model_val = _dmi.verdict
+            if _dmi.verdict in ("TRIPLE_BULLISH_CONFIRMED", "BULLISH_ESTABLISHED"):
+                confidence += 6
+            elif _dmi.verdict == "TRIPLE_BEARISH_CONFIRMED":
+                confidence = max(50, confidence - 10)
+
+            _vsa = analyse_vsa(active_ohlcv, symbol=clean_sym, is_intraday=True)
+            vsa_signal_val = _vsa.vsa_signal
+            if _vsa.bias == "BULLISH":
+                confidence += min(8, max(4, _vsa.conviction_modifier))
+            elif _vsa.is_fake_breakout_risk:
+                confidence = max(50, confidence - 8)
+
+            _avwap = detect_intraday_anchors(active_ohlcv, spot_price=spot)
+            avwap_bias_val = _avwap.get("bias", "NEUTRAL")
+            if avwap_bias_val == "BULLISH":
+                confidence += 5
+        except Exception as e_flow:
+            logger.debug(f"[IndexCallSetup] Flow analysis skipped: {e_flow}")
+
     confidence = min(92, confidence)
 
     # Chop / Balanced Range Confidence Dampener:
@@ -3187,7 +3371,14 @@ def detect_index_call_setup(
         # 0DTE Late Session Expiration: Post 13:30 IST on expiry day, naked options face catastrophic terminal theta collapse.
         is_0dte_late_session = is_0dte and (now_time >= dtime(13, 30))
 
-        if vix_regime_info.mandate_spread or is_low_vix_range:
+        if mandate_spread_afternoon:
+            pref_veh = "SPREAD_ONLY"
+            is_spread_mandated = True
+            spread_guidance = (
+                f"🚀 AFTERNOON TREND EXPANSION (+{spot - day_low:.1f} pts >= 1.25x daily range): "
+                "Execute defined-risk Bull Call Spread only to capture continuation while eliminating late-day gamma/theta decay."
+            )
+        elif vix_regime_info.mandate_spread or is_low_vix_range:
             pref_veh = "SPREAD_ONLY"
             spread_guidance = (
                 f"⚠️ LOW-VIX REGIME (India VIX {vix_val:.1f} < 13.0): Option buying has negative edge; "
@@ -3620,6 +3811,10 @@ def detect_index_call_setup(
             "roc_momentum": roc_metric.to_dict(),
             "premium_velocity": round(prem_vel, 2),
             "oi_roc": cand_ce_oi_roc,
+            "obv_divergence": obv_div_val,
+            "dmi_triple_verdict": dmi_model_val,
+            "vsa_signal": vsa_signal_val,
+            "avwap_bias": avwap_bias_val,
             "cvd_divergence": cvd_divergence_status,
             "cvd_ratio": thrust_details.get("cvd_ratio", cvd_ratio_val),
             "spot_invalidation_anchor": underlying_spot_sl,

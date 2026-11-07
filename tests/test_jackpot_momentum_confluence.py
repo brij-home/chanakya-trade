@@ -185,8 +185,8 @@ class TestJackpotMomentumConfluence:
             "ltp": ltp,
             "vwap": ltp * 0.995,
             "change_pct": 1.2,
-            "high": ltp,
-            "low": ltp * 0.990,
+            "high": ltp * 1.001,
+            "low": ltp * 0.9990,
             "volume": 200000,
         }
 

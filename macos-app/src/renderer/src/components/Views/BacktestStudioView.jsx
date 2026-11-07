@@ -15,6 +15,10 @@ const STRATEGY_PRESETS = [
   { id: 'donchian', name: 'Donchian 20D Channel', icon: '📊', desc: 'Turtle 20-day high breakout with ATR stop-loss' },
   { id: 'smc', name: 'SMC Order Block Sniper', icon: '🎪', desc: 'ICT CHoCH, Fair Value Gap & Order Block sweep' },
   { id: 'turtle_soup', name: 'Turtle Soup (Sweep Inversion)', icon: '🐢', desc: 'ICT/Linda Raschke 20-day high/low liquidity sweep with instant candle rejection' },
+  { id: 'inside_bar', name: 'Inside Bar (The Strat 2-1-2)', icon: '🔢', desc: 'Rob Smith Inside Bar (1) contraction followed by directional breakout (2)' },
+  { id: 'smt_sweep', name: 'SMT Divergence Sweep', icon: '⚡', desc: 'Cross-market high/low structural divergence and liquidity sweep' },
+  { id: 'keltner', name: 'Keltner Channel Reversion', icon: '🌊', desc: '20-EMA with 2.0×ATR volatility envelope pullback' },
+  { id: 'dual_momentum', name: 'Dual Momentum (Antonacci)', icon: '📈', desc: 'Relative + absolute trend momentum with monthly rebalance' },
 ]
 
 const TIMEFRAMES = ['1D', '1H', '15m', '5m']

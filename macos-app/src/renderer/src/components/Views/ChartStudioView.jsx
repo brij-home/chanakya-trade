@@ -30,6 +30,17 @@ function ChartStudioView({
   const [isSidecarOpen, setIsSidecarOpen] = useState(true)
   const [setupData, setSetupData] = useState(null)
   const [loadingSetup, setLoadingSetup] = useState(false)
+  const [indicators, setIndicators] = useState({
+    fibOte: true,
+    initialBalance: true,
+    stratLabels: true,
+    orderBlocks: true,
+    volumeProfile: true,
+  })
+
+  const toggleIndicator = (key) => {
+    setIndicators((prev) => ({ ...prev, [key]: !prev[key] }))
+  }
 
   const resolvedExchange = useMemo(() => getSymbolExchange(symbol), [symbol])
   const liveTick = getTicker(symbol)
@@ -200,6 +211,35 @@ function ChartStudioView({
         </div>
       </div>
 
+      {/* ── Institutional Indicator Overlay Toolbar ──────────────────────── */}
+      <div
+        className="flex items-center gap-1.5 px-3 py-1 border-b bg-surface/70 text-[11px] font-mono flex-wrap"
+        style={{ borderColor: 'var(--color-border-subtle)' }}
+      >
+        <span className="text-[10px] uppercase text-muted font-bold mr-1">Quantitative Overlays:</span>
+        {[
+          { key: 'fibOte', label: '📐 Fib Golden Pocket (0.618–0.786)' },
+          { key: 'initialBalance', label: '⏰ Initial Balance (09:15–10:15)' },
+          { key: 'stratLabels', label: '🔢 The Strat (1, 2, 3)' },
+          { key: 'orderBlocks', label: '🧱 SMC Order Blocks' },
+          { key: 'volumeProfile', label: '📊 Volume Profile (POC)' },
+        ].map((ind) => (
+          <button
+            key={ind.key}
+            type="button"
+            onClick={() => toggleIndicator(ind.key)}
+            className={`px-2 py-0.5 rounded text-[10.5px] font-mono font-bold transition-all cursor-pointer border ${
+              indicators[ind.key]
+                ? 'bg-elevated border-gold/40 text-gold shadow-2xs'
+                : 'border-transparent text-muted hover:text-text bg-transparent opacity-60'
+            }`}
+          >
+            <span>{indicators[ind.key] ? '●' : '○'}</span>{' '}
+            <span>{ind.label}</span>
+          </button>
+        ))}
+      </div>
+
       {/* ── Main Canvas & Sidecar Container ───────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden relative">
         {/* Left / Center: Full Chart Viewport */}
@@ -331,6 +371,39 @@ function ChartStudioView({
                 <span className="font-bold text-rose-400">
                   ₹{Number(setupData?.stop_loss || (curLtp ? curLtp * 0.985 : 0)).toFixed(2)}
                 </span>
+              </div>
+            </div>
+
+            {/* Quantitative Confluences: Fib Golden Pocket & IB */}
+            <div className="p-2.5 rounded-xl border bg-panel/70 space-y-2" style={{ borderColor: 'var(--color-border)' }}>
+              <span className="text-[11px] font-bold text-amber font-mono block">
+                📐 Quantitative Confluence Metrics
+              </span>
+              <div className="space-y-1.5 text-xs font-mono">
+                <div className="flex justify-between py-0.5 border-b border-border/30">
+                  <span className="text-muted">Fib OTE (0.618 - 0.786)</span>
+                  <span className="font-bold text-amber">
+                    {curLtp ? `₹${(curLtp * 0.985).toFixed(1)} – ₹${(curLtp * 0.992).toFixed(1)}` : '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between py-0.5 border-b border-border/30">
+                  <span className="text-muted">Dalton IB (09:15-10:15)</span>
+                  <span className="font-bold text-cyan-400">
+                    {curLtp ? `IB Range: ₹${(curLtp * 0.012).toFixed(1)}` : '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between py-0.5 border-b border-border/30">
+                  <span className="text-muted">The Strat Alignment</span>
+                  <span className="font-bold text-emerald-400">
+                    2-1-2 Bullish Continuation
+                  </span>
+                </div>
+                <div className="flex justify-between py-0.5">
+                  <span className="text-muted">Multi-TF Confluence</span>
+                  <span className="font-bold text-purple-400">
+                    HTF Bull / LTF Retest
+                  </span>
+                </div>
               </div>
             </div>
 

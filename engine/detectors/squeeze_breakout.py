@@ -91,8 +91,13 @@ def _format_squeeze_alert(
     entry_rg: str,
     trigger_lvl: float,
     time_horizon: str = "SWING_SHORT",
+    preferred_vehicle: str = "NAKED_OPTION",
 ) -> AutoAlert:
     clean_sym = canonical_alert_symbol(symbol)
+    if "spot" not in metrics:
+        metrics["spot"] = ltp
+    if "vwap" not in metrics and "spot_vwap" not in metrics and ltp > 0:
+        metrics["vwap"] = ltp
     now_dt = None
     try:
         now_dt = datetime.fromisoformat(now_iso.replace(" IST", "").strip()).replace(tzinfo=IST)
@@ -188,6 +193,7 @@ def _format_squeeze_alert(
             confidence=conf,
             created_at=now_iso,
             time_horizon=time_horizon,
+            preferred_vehicle=preferred_vehicle,
             metrics=metrics,
             actionable_plan=act_plan,
         )
@@ -235,6 +241,7 @@ def _format_squeeze_alert(
         stop_loss=sl,
         no_chase_boundary=cash_no_chase,
         time_horizon=time_horizon,
+        preferred_vehicle=preferred_vehicle,
         metrics=metrics,
         actionable_plan={
             "action": action,
@@ -306,23 +313,21 @@ def _check_index_macro_filters(clean_sym: str, ltp: float, direction: str, df: A
                     )
                     return False
 
-            if dl.camarilla:
+            if dl and dl.camarilla:
+                h5 = float(dl.camarilla.get("h5", 0.0) or 0.0)
+                l5 = float(dl.camarilla.get("l5", 0.0) or 0.0)
                 if direction == "BEARISH":
-                    l4 = float(dl.camarilla.get("l4", 0.0) or 0.0)
-                    if l4 > 0 and ltp >= (l4 * 0.998) and ltp <= (l4 * 1.0025):
+                    if l5 > 0 and abs(ltp - l5) / ltp <= 0.03 and ltp <= (l5 * 1.001):
                         logger.info(
-                            f"[SqueezeBreakout] Suppressed Bearish setup on {clean_sym}: Spot ₹{ltp:,.1f} testing Camarilla L4 Floor ₹{l4:,.1f}. "
-                            f"Absorption bounce floor active."
+                            f"[SqueezeBreakout] Suppressed Bearish setup on {clean_sym}: Spot ₹{ltp:,.1f} reached Camarilla L5 Terminal Floor ₹{l5:,.1f}."
                         )
                         return False
-            elif direction == "BULLISH":
-                h4 = float(dl.camarilla.get("h4", 0.0) or 0.0)
-                if h4 > 0 and ltp <= (h4 * 1.002) and ltp >= (h4 * 0.9975):
-                    logger.info(
-                        f"[SqueezeBreakout] Suppressed Bullish setup on {clean_sym}: Spot ₹{ltp:,.1f} testing Camarilla H4 Ceiling ₹{h4:,.1f}. "
-                        f"Resistance ceiling active."
-                    )
-                    return False
+                elif direction == "BULLISH":
+                    if h5 > 0 and abs(ltp - h5) / ltp <= 0.03 and ltp >= (h5 * 0.999):
+                        logger.info(
+                            f"[SqueezeBreakout] Suppressed Bullish setup on {clean_sym}: Spot ₹{ltp:,.1f} reached Camarilla H5 Terminal Ceiling ₹{h5:,.1f}."
+                        )
+                        return False
     except Exception as e_dl:
         logger.debug(f"[SqueezeBreakout] Daily levels check skipped for {clean_sym}: {e_dl}")
 
@@ -497,6 +502,27 @@ def detect_squeeze_breakout(
         # Compute 14-period ADX trend energy
         adx_val, adx_slope = compute_adx(df, period=14)
 
+        # Smart Money Flow Analysis: Granville OBV, Swingscape Triple-DMI, and Tom Williams VSA
+        obv_res = None
+        dmi_res = None
+        vsa_res = None
+        try:
+            from analysis.obv import analyse_obv
+            from analysis.dmi_filter import evaluate_triple_dmi
+            from analysis.vsa import analyse_vsa
+
+            obv_res = analyse_obv(df, is_intraday=is_intraday)
+            dmi_res = evaluate_triple_dmi(df, is_intraday=is_intraday)
+            vsa_res = analyse_vsa(df, is_intraday=is_intraday)
+        except Exception as e_flow:
+            logger.debug(f"[SqueezeBreakout] Flow analysis skipped: {e_flow}")
+
+        curr_t = now_dt.time()
+        is_pm_theta = is_intraday and (
+            curr_t.hour > 13 or (curr_t.hour == 13 and curr_t.minute >= 30)
+        )
+        pref_vehicle = "SPREAD_ONLY" if (is_pm_theta and rvol < 2.0) else "NAKED_OPTION"
+
         # Sector RRG Alignment Gate (Institutional Predatory Edge)
         clean_sym = canonical_alert_symbol(symbol)
         is_idx_sym = clean_sym in (
@@ -649,7 +675,39 @@ def detect_squeeze_breakout(
             conf += min(10, int(rvol * 4))
             conf += 5 if dist_to_pivot_pct <= 0.7 else 0
             conf += 5 if ltp > sma20 else 0
-            confidence_val = min(90, max(72, conf))
+
+            # Flow Calibration
+            flow_metrics: dict[str, Any] = {}
+            has_flow = False
+            if obv_res:
+                if (
+                    obv_res.divergence in ("BULLISH_DIVERGENCE", "BULLISH_CONVERGENCE")
+                    or obv_res.is_pivot_breakout
+                ):
+                    conf += 6
+                    has_flow = True
+                    flow_metrics["obv_divergence"] = obv_res.divergence
+                    flow_metrics["obv_regime"] = obv_res.divergence
+                elif obv_res.divergence == "BEARISH_DIVERGENCE":
+                    conf -= 12
+                    flow_metrics["obv_divergence"] = obv_res.divergence
+            if dmi_res and dmi_res.verdict == "TRIPLE_DMI_BULLISH_CONFIRMED":
+                conf += 6
+                has_flow = True
+                flow_metrics["dmi_triple_verdict"] = dmi_res.verdict
+            if vsa_res and vsa_res.signal in (
+                "ABSORPTION_BREAKOUT",
+                "EFFORT_VS_RESULT_BULLISH_ABSORPTION",
+                "STOPPING_VOLUME",
+                "NO_SUPPLY",
+            ):
+                conf += 5
+                has_flow = True
+                flow_metrics["vsa_signal"] = vsa_res.signal
+            if has_flow:
+                flow_metrics["has_flow"] = True
+
+            confidence_val = min(94, max(68, conf))
 
             entry_min = round(max(sl + 0.5, ltp * 0.998), 1)
             entry_max = round(min(target - 0.5, pivot_high * 1.002), 1)
@@ -669,6 +727,9 @@ def detect_squeeze_breakout(
                 "sma20": round(sma20, 1),
                 "atr20": round(atr20, 1),
             }
+            metrics.update(flow_metrics)
+            if vwap and vwap > 0:
+                metrics["vwap"] = vwap
             if sector_align:
                 metrics["sector"] = sector_align.get("sector")
                 metrics["sector_quadrant"] = sector_align.get("quadrant")
@@ -696,6 +757,7 @@ def detect_squeeze_breakout(
                 entry_rg=entry_rg,
                 trigger_lvl=pivot_high,
                 time_horizon=trade_tf,
+                preferred_vehicle=pref_vehicle,
             )
 
         # ── EARLY WARNING (BEARISH): Coiled in squeeze, close above pivot low support ───
@@ -729,16 +791,19 @@ def detect_squeeze_breakout(
             # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance)
             if not is_test_env and not is_idx_sym:
                 try:
-                    from market.quotes import get_quote
+                    from engine.market_regime_gate import evaluate_index_tide_gate
 
-                    n_probe = get_quote("NSE:NIFTY 50")
-                    nq = n_probe.get("NSE:NIFTY 50") or n_probe.get("NIFTY 50")
-                    if nq and (getattr(nq, "change_pct", 0.0) or 0.0) >= 0.15:
-                        n_ltp = float(getattr(nq, "last_price", 0.0) or 0.0)
-                        n_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
-                        if n_vwap > 0 and n_ltp >= n_vwap:
-                            # NIFTY is green and holding VWAP — suppress counter-trend breakdown trap!
-                            return None
+                    tide_res = evaluate_index_tide_gate(
+                        clean_sym,
+                        direction="BEARISH",
+                        ltp=ltp,
+                        rvol=rvol,
+                    )
+                    if tide_res.is_vetoed:
+                        logger.info(
+                            f"[SqueezeBreakout] Suppressed counter-trend Early Warning on {clean_sym}: {tide_res.veto_reason}"
+                        )
+                        return None
                 except Exception as e_suppressed:
                     logger.debug(
                         f"[engine.detectors.squeeze_breakout] Non-fatal exception suppressed: {e_suppressed}"
@@ -810,7 +875,38 @@ def detect_squeeze_breakout(
             conf_be += min(10, int(rvol * 5))
             conf_be += 5 if dist_to_low_pct <= 0.7 else 0
             conf_be += 5 if ltp < sma20 else 0
-            confidence_bear_ew = min(90, max(72, conf_be))
+
+            # Flow Calibration
+            flow_metrics_be: dict[str, Any] = {}
+            has_flow_be = False
+            if obv_res:
+                if (
+                    obv_res.divergence in ("BEARISH_DIVERGENCE", "BEARISH_CONVERGENCE")
+                    or obv_res.is_pivot_breakout
+                ):
+                    conf_be += 6
+                    has_flow_be = True
+                    flow_metrics_be["obv_divergence"] = obv_res.divergence
+                    flow_metrics_be["obv_regime"] = obv_res.divergence
+                elif obv_res.divergence == "BULLISH_DIVERGENCE":
+                    conf_be -= 12
+                    flow_metrics_be["obv_divergence"] = obv_res.divergence
+            if dmi_res and dmi_res.verdict == "TRIPLE_DMI_BEARISH_CONFIRMED":
+                conf_be += 6
+                has_flow_be = True
+                flow_metrics_be["dmi_triple_verdict"] = dmi_res.verdict
+            if vsa_res and vsa_res.signal in (
+                "SELLING_CLIMAX",
+                "EFFORT_VS_RESULT_BEARISH_CLIMAX",
+                "NO_DEMAND",
+            ):
+                conf_be += 5
+                has_flow_be = True
+                flow_metrics_be["vsa_signal"] = vsa_res.signal
+            if has_flow_be:
+                flow_metrics_be["has_flow"] = True
+
+            confidence_bear_ew = min(94, max(68, conf_be))
 
             entry_max = round(min(sl - 0.5, ltp * 1.002), 1)
             entry_min = round(max(target + 0.5, pivot_low * 0.998), 1)
@@ -832,6 +928,9 @@ def detect_squeeze_breakout(
                 "sma20": round(sma20, 1),
                 "atr20": round(atr20, 1),
             }
+            metrics.update(flow_metrics_be)
+            if vwap and vwap > 0:
+                metrics["vwap"] = vwap
             if sector_align:
                 metrics["sector"] = sector_align.get("sector")
                 metrics["sector_quadrant"] = sector_align.get("quadrant")
@@ -859,6 +958,7 @@ def detect_squeeze_breakout(
                 entry_rg=entry_rg,
                 trigger_lvl=pivot_low,
                 time_horizon=trade_tf,
+                preferred_vehicle=pref_vehicle,
             )
 
         # ── IGNITED (BULLISH): Squeeze Fired + Fresh Breakout above pivot ───
@@ -958,7 +1058,38 @@ def detect_squeeze_breakout(
             conf_ig = 82
             conf_ig += min(8, int(rvol * 4))
             conf_ig += 5 if (ltp - pivot_high) / pivot_high <= 0.01 else 0
-            confidence_ignited = min(95, max(82, conf_ig))
+
+            # Flow Calibration
+            flow_metrics_ig: dict[str, Any] = {}
+            has_flow_ig = False
+            if obv_res:
+                if obv_res.is_pivot_breakout or obv_res.divergence in (
+                    "BULLISH_DIVERGENCE",
+                    "BULLISH_CONVERGENCE",
+                ):
+                    conf_ig += 6
+                    has_flow_ig = True
+                    flow_metrics_ig["obv_divergence"] = obv_res.divergence
+                    flow_metrics_ig["obv_regime"] = obv_res.divergence
+                elif obv_res.divergence == "BEARISH_DIVERGENCE":
+                    conf_ig -= 12
+                    flow_metrics_ig["obv_divergence"] = obv_res.divergence
+            if dmi_res and dmi_res.verdict == "TRIPLE_DMI_BULLISH_CONFIRMED":
+                conf_ig += 6
+                has_flow_ig = True
+                flow_metrics_ig["dmi_triple_verdict"] = dmi_res.verdict
+            if vsa_res and vsa_res.signal in (
+                "ABSORPTION_BREAKOUT",
+                "EFFORT_VS_RESULT_BULLISH_ABSORPTION",
+                "STOPPING_VOLUME",
+            ):
+                conf_ig += 5
+                has_flow_ig = True
+                flow_metrics_ig["vsa_signal"] = vsa_res.signal
+            if has_flow_ig:
+                flow_metrics_ig["has_flow"] = True
+
+            confidence_ignited = min(97, max(75, conf_ig))
 
             entry_min = round(max(sl + 0.5, ltp * 0.998), 1)
             entry_max = round(min(target - 0.5, ltp * 1.008), 1)
@@ -978,6 +1109,9 @@ def detect_squeeze_breakout(
                 "adx_slope": adx_slope,
                 "breakout_pct": round(((ltp - pivot_high) / pivot_high) * 100, 2),
             }
+            metrics.update(flow_metrics_ig)
+            if vwap and vwap > 0:
+                metrics["vwap"] = vwap
             if sector_align:
                 metrics["sector"] = sector_align.get("sector")
                 metrics["sector_quadrant"] = sector_align.get("quadrant")
@@ -1005,6 +1139,7 @@ def detect_squeeze_breakout(
                 entry_rg=entry_rg,
                 trigger_lvl=pivot_high,
                 time_horizon=trade_tf,
+                preferred_vehicle=pref_vehicle,
             )
 
         # ── IGNITED (BEARISH): Squeeze Fired + Fresh Breakdown below pivot low ───
@@ -1041,16 +1176,19 @@ def detect_squeeze_breakout(
             # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance)
             if not is_test_env and not is_idx_sym:
                 try:
-                    from market.quotes import get_quote
+                    from engine.market_regime_gate import evaluate_index_tide_gate
 
-                    n_probe = get_quote("NSE:NIFTY 50")
-                    nq = n_probe.get("NSE:NIFTY 50") or n_probe.get("NIFTY 50")
-                    if nq and (getattr(nq, "change_pct", 0.0) or 0.0) >= 0.15:
-                        n_ltp = float(getattr(nq, "last_price", 0.0) or 0.0)
-                        n_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
-                        if n_vwap > 0 and n_ltp >= n_vwap:
-                            # NIFTY is green and holding VWAP — suppress counter-trend breakdown trap!
-                            return None
+                    tide_res = evaluate_index_tide_gate(
+                        clean_sym,
+                        direction="BEARISH",
+                        ltp=ltp,
+                        rvol=rvol,
+                    )
+                    if tide_res.is_vetoed:
+                        logger.info(
+                            f"[SqueezeBreakout] Suppressed counter-trend Early Warning on {clean_sym}: {tide_res.veto_reason}"
+                        )
+                        return None
                 except Exception as e_suppressed:
                     logger.debug(
                         f"[engine.detectors.squeeze_breakout] Non-fatal exception suppressed: {e_suppressed}"
@@ -1119,7 +1257,38 @@ def detect_squeeze_breakout(
             conf_big = 82
             conf_big += min(8, int(rvol * 4))
             conf_big += 5 if (pivot_low - ltp) / pivot_low <= 0.01 else 0
-            confidence_bear_ig = min(95, max(82, conf_big))
+
+            # Flow Calibration
+            flow_metrics_big: dict[str, Any] = {}
+            has_flow_big = False
+            if obv_res:
+                if obv_res.is_pivot_breakout or obv_res.divergence in (
+                    "BEARISH_DIVERGENCE",
+                    "BEARISH_CONVERGENCE",
+                ):
+                    conf_big += 6
+                    has_flow_big = True
+                    flow_metrics_big["obv_divergence"] = obv_res.divergence
+                    flow_metrics_big["obv_regime"] = obv_res.divergence
+                elif obv_res.divergence == "BULLISH_DIVERGENCE":
+                    conf_big -= 12
+                    flow_metrics_big["obv_divergence"] = obv_res.divergence
+            if dmi_res and dmi_res.verdict == "TRIPLE_DMI_BEARISH_CONFIRMED":
+                conf_big += 6
+                has_flow_big = True
+                flow_metrics_big["dmi_triple_verdict"] = dmi_res.verdict
+            if vsa_res and vsa_res.signal in (
+                "SELLING_CLIMAX",
+                "EFFORT_VS_RESULT_BEARISH_CLIMAX",
+                "NO_DEMAND",
+            ):
+                conf_big += 5
+                has_flow_big = True
+                flow_metrics_big["vsa_signal"] = vsa_res.signal
+            if has_flow_big:
+                flow_metrics_big["has_flow"] = True
+
+            confidence_bear_ig = min(97, max(75, conf_big))
 
             entry_max = round(min(sl - 0.5, ltp * 1.002), 1)
             entry_min = round(max(target + 0.5, ltp * 0.992), 1)
@@ -1139,6 +1308,9 @@ def detect_squeeze_breakout(
                 "adx_slope": adx_slope,
                 "breakdown_pct": round(((pivot_low - ltp) / pivot_low) * 100, 2),
             }
+            metrics.update(flow_metrics_big)
+            if vwap and vwap > 0:
+                metrics["vwap"] = vwap
             if sector_align:
                 metrics["sector"] = sector_align.get("sector")
                 metrics["sector_quadrant"] = sector_align.get("quadrant")
@@ -1166,6 +1338,7 @@ def detect_squeeze_breakout(
                 entry_rg=entry_rg,
                 trigger_lvl=pivot_low,
                 time_horizon=trade_tf,
+                preferred_vehicle=pref_vehicle,
             )
 
     except Exception as e:

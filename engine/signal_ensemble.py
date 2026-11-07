@@ -274,40 +274,106 @@ def _hurst_exponent(close: pd.Series, min_window: int = 8) -> Optional[float]:
 # ── Individual strategy signals ──────────────────────────────────
 
 
-def _trend_signal(df: pd.DataFrame) -> StrategyVote:
+def _trend_signal(df: pd.DataFrame, is_intraday: bool = False) -> StrategyVote:
     """
-    EMA-20/50 crossover with ADX > 20 confirmation.
+    Institutional Trend Signal with Triple-Filtered DMI & OBV Confluence (#TripleDMIStrategy & #TripleThrustStrategy).
 
-    Bullish:  EMA20 > EMA50 and ADX > 20
-    Bearish:  EMA20 < EMA50 and ADX > 20
-    Neutral:  ADX ≤ 20 (choppy/no trend)
+    1. Triple-Filtered DMI Check:
+       - TRIPLE_BULLISH_CONFIRMED: Strongest institutional buy impulse (+1)
+       - TRIPLE_BEARISH_CONFIRMED: Strongest institutional sell impulse (-1)
+       - WEAK_OR_CHOPPY: Suppresses trend vote to NEUTRAL (0), eliminating chop whipsaws.
+    2. Granville OBV Divergence Filter:
+       - BEARISH_DIVERGENCE: Neutralizes bullish setup (Distribution Trap).
+       - BULLISH_DIVERGENCE: Institutional accumulation base.
+    3. Classic EMA20/50 fallback when DMI is transitioning.
     """
     close = df["close"]
-    if len(close) < 50:
+    if len(close) < (15 if is_intraday else 50):
         return StrategyVote(0, STRATEGY_WEIGHTS["trend"], "NEUTRAL", "Insufficient data")
 
-    ema20 = close.ewm(span=20, min_periods=20, adjust=False).mean()
-    ema50 = close.ewm(span=50, min_periods=50, adjust=False).mean()
+    from analysis.dmi_filter import evaluate_triple_dmi
+    from analysis.obv import analyse_obv
 
-    adx_series, _, _ = _adx(df)
-    adx_val = float(adx_series.iloc[-1]) if not math.isnan(adx_series.iloc[-1]) else 0.0
+    dmi_res = evaluate_triple_dmi(df, is_intraday=is_intraday)
+    obv_snap = analyse_obv(df, is_intraday=is_intraday)
 
+    ema20 = close.ewm(span=20, min_periods=min(20, len(close)), adjust=False).mean()
+    ema50 = close.ewm(span=50, min_periods=min(50, len(close)), adjust=False).mean()
     ema20_val = float(ema20.iloc[-1])
     ema50_val = float(ema50.iloc[-1])
 
-    if adx_val <= 20:
+    # 1. Triple-DMI Bullish Confirmation or Established Bullish Trend
+    if dmi_res.verdict in ("TRIPLE_BULLISH_CONFIRMED", "BULLISH_ESTABLISHED"):
+        if obv_snap.divergence == "BEARISH_DIVERGENCE":
+            return StrategyVote(
+                0,
+                STRATEGY_WEIGHTS["trend"],
+                "NEUTRAL",
+                "Bullish Trend neutralized by Bearish OBV Divergence (Distribution Trap)",
+            )
+        prefix = (
+            "Triple DMI Confirmed"
+            if dmi_res.verdict == "TRIPLE_BULLISH_CONFIRMED"
+            else "Established Bullish Trend"
+        )
+        detail = f"{prefix}: +DI={dmi_res.plus_di:.1f}, -DI={dmi_res.minus_di:.1f}, ADX={dmi_res.adx:.1f}"
+        if obv_snap.regime == "ACCUMULATION":
+            detail += " + OBV Accumulation"
+        return StrategyVote(1, STRATEGY_WEIGHTS["trend"], "BULLISH", detail)
+
+    # 2. Triple-DMI Bearish Confirmation or Established Bearish Trend
+    if dmi_res.verdict in ("TRIPLE_BEARISH_CONFIRMED", "BEARISH_ESTABLISHED"):
+        if obv_snap.divergence == "BULLISH_DIVERGENCE":
+            return StrategyVote(
+                0,
+                STRATEGY_WEIGHTS["trend"],
+                "NEUTRAL",
+                "Bearish Trend neutralized by Bullish OBV Accumulation Divergence",
+            )
+        prefix = (
+            "Triple DMI Confirmed"
+            if dmi_res.verdict == "TRIPLE_BEARISH_CONFIRMED"
+            else "Established Bearish Trend"
+        )
+        detail = f"{prefix}: -DI={dmi_res.minus_di:.1f}, +DI={dmi_res.plus_di:.1f}, ADX={dmi_res.adx:.1f}"
+        return StrategyVote(-1, STRATEGY_WEIGHTS["trend"], "BEARISH", detail)
+
+    # 3. Triple-DMI Weak or Choppy: Kill trend vote in chop unless EMA trend with ADX > 20 is established
+    if dmi_res.verdict == "WEAK_OR_CHOPPY":
+        if dmi_res.adx > 20.0 and ema20_val > ema50_val and dmi_res.plus_di > dmi_res.minus_di:
+            detail = f"EMA20={ema20_val:.1f} > EMA50={ema50_val:.1f}, ADX={dmi_res.adx:.1f}"
+            return StrategyVote(1, STRATEGY_WEIGHTS["trend"], "BULLISH", detail)
+        elif dmi_res.adx > 20.0 and ema20_val < ema50_val and dmi_res.minus_di > dmi_res.plus_di:
+            detail = f"EMA20={ema20_val:.1f} < EMA50={ema50_val:.1f}, ADX={dmi_res.adx:.1f}"
+            return StrategyVote(-1, STRATEGY_WEIGHTS["trend"], "BEARISH", detail)
         return StrategyVote(
             0,
             STRATEGY_WEIGHTS["trend"],
             "NEUTRAL",
-            f"ADX={adx_val:.1f} ≤ 20 — no clear trend",
+            f"Chop / Weak DMI: +DI={dmi_res.plus_di:.1f}, -DI={dmi_res.minus_di:.1f} below {dmi_res.threshold} threshold",
+        )
+
+    # 4. Fallback to EMA20/50 with ADX filter if DMI is transitioning
+    if dmi_res.adx <= 20:
+        return StrategyVote(
+            0,
+            STRATEGY_WEIGHTS["trend"],
+            "NEUTRAL",
+            f"ADX={dmi_res.adx:.1f} <= 20 — no clear trend",
         )
 
     if ema20_val > ema50_val:
-        detail = f"EMA20={ema20_val:.1f} > EMA50={ema50_val:.1f}, ADX={adx_val:.1f}"
+        if obv_snap.divergence == "BEARISH_DIVERGENCE":
+            return StrategyVote(
+                0,
+                STRATEGY_WEIGHTS["trend"],
+                "NEUTRAL",
+                "EMA20 > EMA50 neutralized by Bearish OBV Divergence (Distribution Trap)",
+            )
+        detail = f"EMA20={ema20_val:.1f} > EMA50={ema50_val:.1f}, ADX={dmi_res.adx:.1f}"
         return StrategyVote(1, STRATEGY_WEIGHTS["trend"], "BULLISH", detail)
 
-    detail = f"EMA20={ema20_val:.1f} < EMA50={ema50_val:.1f}, ADX={adx_val:.1f}"
+    detail = f"EMA20={ema20_val:.1f} < EMA50={ema50_val:.1f}, ADX={dmi_res.adx:.1f}"
     return StrategyVote(-1, STRATEGY_WEIGHTS["trend"], "BEARISH", detail)
 
 

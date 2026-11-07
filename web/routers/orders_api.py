@@ -345,6 +345,18 @@ async def api_risk_preflight(req: RiskPreflightRequest):
     return JSONResponse(res.to_dict())
 
 
+@router.get("/api/risk/behavioral_status")
+async def api_risk_behavioral_status():
+    """
+    Returns current behavioral anti-tilt metrics, loss streak, drawdown %,
+    and mindful co-pilot coaching directives for active trading session.
+    """
+    from engine.risk_limits import risk_limits
+
+    status = await asyncio.to_thread(risk_limits.get_behavioral_anti_tilt_status)
+    return JSONResponse(status)
+
+
 @router.get("/api/reconciliation")
 async def api_reconciliation():
     """
@@ -595,3 +607,23 @@ async def api_orders_flatten_all(request: Request, req: Optional[FlattenAllReque
         raise HTTPException(403, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
+
+
+@router.get("/api/orders/{order_id}")
+async def api_get_order(order_id: str):
+    """Retrieve an order intent by its order_id from the ledger."""
+    from engine.order_lifecycle import get_order_intent
+
+    intent = await asyncio.to_thread(get_order_intent, order_id)
+    if not intent:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found.")
+    return JSONResponse(intent.to_dict())
+
+
+@router.get("/api/orders/{order_id}/children")
+async def api_get_order_children(order_id: str):
+    """Retrieve all child tranche order intents for a given parent_order_id."""
+    from engine.order_lifecycle import get_child_orders
+
+    children = await asyncio.to_thread(get_child_orders, order_id)
+    return JSONResponse([c.to_dict() for c in children])

@@ -282,6 +282,10 @@ def test_opening_drive_benchmark_regime_gate(monkeypatch):
         index=dates,
     )
 
+    from engine.market_regime_gate import clear_index_tide_cache
+
+    clear_index_tide_cache()
+
     # 1. Mock NIFTY 50 as green +0.40% and above VWAP
     mock_nifty_bull = MagicMock(
         symbol="NIFTY 50",
@@ -303,7 +307,7 @@ def test_opening_drive_benchmark_regime_gate(monkeypatch):
         df_5m=df,
         ltp=98.0,
         vwap=99.5,
-        rvol=2.5,
+        rvol=1.8,
         ignore_time_gate=True,
     )
     assert res_suppressed is None, (
@@ -311,6 +315,10 @@ def test_opening_drive_benchmark_regime_gate(monkeypatch):
     )
 
     # 2. When NIFTY is red -0.35% and below VWAP, breakdown drive is permitted
+    from engine.market_regime_gate import clear_index_tide_cache
+
+    clear_index_tide_cache()
+
     mock_nifty_bear = MagicMock(
         symbol="NIFTY 50",
         last_price=25150.0,
@@ -328,7 +336,7 @@ def test_opening_drive_benchmark_regime_gate(monkeypatch):
         df_5m=df,
         ltp=98.0,
         vwap=99.5,
-        rvol=2.5,
+        rvol=1.8,
         ignore_time_gate=True,
     )
     assert res_allowed is not None, (

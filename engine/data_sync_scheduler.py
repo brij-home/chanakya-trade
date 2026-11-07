@@ -44,6 +44,7 @@ class DataSyncScheduler:
         self._last_fundamentals_sync_date: Optional[str] = None
         self._last_master_sync_date: Optional[str] = None
         self._last_premarket_sync_date: Optional[str] = None
+        self._last_token_refresh_date: Optional[str] = None
         self._is_syncing = False
 
     def get_sync_status(self) -> Dict[str, Any]:
@@ -56,7 +57,77 @@ class DataSyncScheduler:
                 "last_fundamentals_sync_date": self._last_fundamentals_sync_date,
                 "last_master_sync_date": self._last_master_sync_date,
                 "last_premarket_sync_date": self._last_premarket_sync_date,
+                "last_token_refresh_date": self._last_token_refresh_date,
             }
+
+    # ── 0a. Morning Broker Daily Token & TOTP Refresh ───────────────
+
+    def sync_broker_tokens(self, force: bool = False) -> Dict[str, Any]:
+        """
+        Morning Broker Token Refresh Engine (06:15 - 07:30 IST):
+        Refreshes Fyers and Shoonya OAuth tokens headlessly via TOTP + PIN.
+        Eliminates daily morning manual login interruptions for institutional autonomy.
+        """
+        from market.calendar import is_trading_day
+        import os
+
+        now_ist = datetime.now(IST)
+        today_str = now_ist.strftime("%Y-%m-%d")
+
+        if not force:
+            if not is_trading_day(now_ist.date(), exchange="NSE"):
+                return {"status": "SKIPPED", "reason": f"{today_str} is not an NSE trading day"}
+
+        refreshed = []
+        errors = []
+
+        # 1. Fyers Headless TOTP Refresh
+        try:
+            if os.environ.get("FYERS_FY_ID") and os.environ.get("FYERS_TOTP_SECRET"):
+                from brokers.fyers import FyersAPI
+
+                b = FyersAPI()
+                if not b.is_authenticated() or force:
+                    b.complete_login()
+                    refreshed.append("fyers")
+                else:
+                    refreshed.append("fyers (valid)")
+        except Exception as e_f:
+            logger.warning(f"[DataSync] Fyers automated token refresh failed: {e_f}")
+            errors.append(f"fyers: {e_f}")
+
+        # 2. Shoonya Headless TOTP Refresh
+        try:
+            if os.environ.get("SHOONYA_USER") and os.environ.get("SHOONYA_TOTP_SECRET"):
+                from brokers.shoonya import ShoonyaAPI
+
+                s = ShoonyaAPI()
+                if not s.is_authenticated() or force:
+                    s.login()
+                    refreshed.append("shoonya")
+                else:
+                    refreshed.append("shoonya (valid)")
+        except Exception as e_s:
+            logger.warning(f"[DataSync] Shoonya automated token refresh failed: {e_s}")
+            errors.append(f"shoonya: {e_s}")
+
+        # 3. Re-verify global broker session mappings
+        try:
+            from brokers.session import _try_auto_restore_sessions
+
+            _try_auto_restore_sessions()
+        except Exception as e_sess:
+            logger.debug(f"[DataSync] Auto-restore session note: {e_sess}")
+
+        with self._lock:
+            self._last_token_refresh_date = today_str
+
+        return {
+            "status": "SUCCESS" if not errors else "PARTIAL",
+            "refreshed_brokers": refreshed,
+            "errors": errors,
+            "session_date": today_str,
+        }
 
     # ── 0. Pre-Market Daily Levels Priming ───────────────────────────
 
@@ -304,36 +375,71 @@ class DataSyncScheduler:
 
     # ── Background Daemon Scheduler ──────────────────────────────────
 
+    async def _check_cadence(self) -> None:
+        """Evaluate cadence triggers based on current time and session state."""
+        now_ist = datetime.now(IST)
+        today_str = now_ist.strftime("%Y-%m-%d")
+
+        # Check -1: Daily Morning Broker Token Refresh (Runs between 06:15 and 07:30 IST on trading days)
+        if 6 <= now_ist.hour < 8:
+            if now_ist.weekday() < 5 and self._last_token_refresh_date != today_str:
+                await asyncio.to_thread(self.sync_broker_tokens)
+
+        # Check 0: Pre-Market Priming & Trading Hours Level Integrity (Weekdays)
+        # If pre-market (08:30+) or active trading hours (up to 15:30 IST), ensure today's levels are in RAM/disk
+        if now_ist.weekday() < 5 and (
+            8 <= now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute <= 30)
+        ):
+            if self._last_premarket_sync_date != today_str:
+                from engine.daily_levels import get_daily_levels_store
+
+                store = get_daily_levels_store()
+                cached_count = len(store.get_all_for_today(today_str))
+                if cached_count < 200:
+                    logger.info(
+                        f"[DataSync] Session level check: {cached_count} levels cached; priming full F&O universe for {today_str}..."
+                    )
+                    await asyncio.to_thread(self.sync_premarket_levels)
+                else:
+                    self._last_premarket_sync_date = today_str
+                    logger.debug(
+                        f"[DataSync] Pre-market levels verified on disk/RAM ({cached_count} symbols for {today_str})."
+                    )
+
+        # Check 1: Post-Market EOD sync (Runs between 16:00 and 19:00 IST on trading days)
+        if 16 <= now_ist.hour < 19:
+            if self._last_eod_sync_date != today_str:
+                await asyncio.to_thread(self.sync_daily_eod)
+
+        # Check 2: Saturday Fundamentals Sync (Runs Saturday between 02:00 and 06:00 IST)
+        if now_ist.weekday() == 5 and 2 <= now_ist.hour < 6:
+            if self._last_fundamentals_sync_date != today_str:
+                await asyncio.to_thread(self.sync_weekly_fundamentals)
+
+        # Check 3: Sunday Master Sync (Runs Sunday between 04:00 and 07:00 IST)
+        if now_ist.weekday() == 6 and 4 <= now_ist.hour < 7:
+            if self._last_master_sync_date != today_str:
+                await asyncio.to_thread(self.sync_weekly_symbol_master)
+
     async def _scheduler_loop(self) -> None:
         """
-        Continuous background event loop running cadence checks every 15 minutes.
+        Continuous background event loop running cadence checks every 15 minutes,
+        with an immediate settling check on startup (2.0s delay).
         """
+        try:
+            # Immediate bootstrap check: 2.0s delay for FastAPI & broker bootstrap
+            await asyncio.sleep(2.0)
+            if self._running:
+                await self._check_cadence()
+        except asyncio.CancelledError:
+            return
+        except Exception as e_boot:
+            logger.debug(f"[DataSync] Initial boot cadence check note: {e_boot}")
+
         while self._running:
             try:
                 await asyncio.sleep(900)  # Check every 15 minutes
-                now_ist = datetime.now(IST)
-                today_str = now_ist.strftime("%Y-%m-%d")
-
-                # Check 0: Pre-Market Priming (Runs between 08:30 and 09:12 IST on trading days)
-                if 8 <= now_ist.hour < 9 or (now_ist.hour == 9 and now_ist.minute < 12):
-                    if now_ist.weekday() < 5 and self._last_premarket_sync_date != today_str:
-                        await asyncio.to_thread(self.sync_premarket_levels)
-
-                # Check 1: Post-Market EOD sync (Runs between 16:00 and 19:00 IST on trading days)
-                if 16 <= now_ist.hour < 19:
-                    if self._last_eod_sync_date != today_str:
-                        await asyncio.to_thread(self.sync_daily_eod)
-
-                # Check 2: Saturday Fundamentals Sync (Runs Saturday between 02:00 and 06:00 IST)
-                if now_ist.weekday() == 5 and 2 <= now_ist.hour < 6:
-                    if self._last_fundamentals_sync_date != today_str:
-                        await asyncio.to_thread(self.sync_weekly_fundamentals)
-
-                # Check 3: Sunday Master Sync (Runs Sunday between 04:00 and 07:00 IST)
-                if now_ist.weekday() == 6 and 4 <= now_ist.hour < 7:
-                    if self._last_master_sync_date != today_str:
-                        await asyncio.to_thread(self.sync_weekly_symbol_master)
-
+                await self._check_cadence()
             except asyncio.CancelledError:
                 break
             except Exception as e:

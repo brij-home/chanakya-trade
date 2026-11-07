@@ -123,11 +123,27 @@ def detect_index_put_setup(
         or (os.environ.get("DEPLOY_MODE") == "test")
     )
     _day_open_price: Optional[float] = None
-    if ohlcv_5m is not None:
+    if quotes_map:
+        q_obj = (
+            quotes_map.get(f"NSE:{clean_sym}")
+            or quotes_map.get(clean_sym)
+            or quotes_map.get(underlying)
+        )
+        if q_obj:
+            q_open = getattr(q_obj, "open", 0.0) or getattr(q_obj, "day_open", 0.0) or 0.0
+            if q_open and float(q_open) > 0:
+                _day_open_price = float(q_open)
+    if _day_open_price is None and ohlcv_5m is not None:
         try:
-            if hasattr(ohlcv_5m, "iloc") and len(ohlcv_5m) >= 1:
-                col_o = "open" if "open" in ohlcv_5m.columns else "Open"
-                _day_open_price = float(ohlcv_5m[col_o].iloc[0])
+            col_o = "open" if "open" in ohlcv_5m.columns else "Open"
+            now_dt_ref = ref_time or datetime.now(IST)
+            today_str = now_dt_ref.strftime("%Y-%m-%d")
+            if hasattr(ohlcv_5m, "index") and hasattr(ohlcv_5m.index, "strftime"):
+                today_bars = ohlcv_5m[ohlcv_5m.index.strftime("%Y-%m-%d") == today_str]
+                if len(today_bars) >= 1:
+                    _day_open_price = float(today_bars[col_o].iloc[0])
+            if _day_open_price is None and hasattr(ohlcv_5m, "iloc") and len(ohlcv_5m) >= 1:
+                _day_open_price = float(ohlcv_5m[col_o].iloc[-1])
         except Exception as e_suppressed:
             logger.debug(
                 f"[engine.detectors.index_put_setup] Non-fatal exception suppressed: {e_suppressed}"
@@ -223,35 +239,40 @@ def detect_index_put_setup(
     # through Previous Day Low (PDL) by >= 0.20% and is down >= 0.50% from open,
     # institutional liquidation is already underway. Bypass opening buffer so early drops are caught.
     _is_opening_displacement = bool(
-        prev_day_low
-        and prev_day_low > 0
-        and spot < prev_day_low * 0.998
-        and _spot_below_open_escape
+        (
+            (prev_day_low and prev_day_low > 0 and spot < prev_day_low * 0.998)
+            or (prev_close and prev_close > 0 and (prev_close - spot) / prev_close * 100.0 >= 0.50)
+        )
+        and (
+            _spot_below_open_escape
+            or (vwap and vwap > 0 and spot <= vwap * 1.0005)
+            or (_day_open_price and spot <= _day_open_price * 1.0010)
+        )
     )
     is_opening_buffer = (
-        (curr_time < dtime(9, 25))
+        (curr_time < dtime(9, 18) if _is_opening_displacement else curr_time < dtime(9, 25))
         and not ignore_time_gate
-        and not _is_opening_displacement
         and (not is_test_runner or ref_time is not None)
     )
     if is_opening_buffer:
         logger.info(
             f"[IndexPutSetup] Suppressed PE setup on {clean_sym} at {curr_time.strftime('%H:%M:%S')}: "
-            f"Opening auction stabilization window (09:15–09:25 IST) active."
+            f"Opening auction stabilization window active (until {'09:18' if _is_opening_displacement else '09:25'} IST)."
         )
         return []
 
-    # ── 14:00 IST Option Entry Cutoff Gate ─────────────────────────
+    # ── 15:05 IST Option Entry Cutoff Gate ─────────────────────────
     # In Indian markets, broker auto-square-off occurs between 15:15–15:20 IST.
-    # Entries after 14:00 IST suffer accelerated theta decay, terminal gamma risk,
-    # and inadequate session runway to reach targets.
-    if (curr_time > dtime(14, 0)) and not ignore_time_gate and not is_test_runner:
+    # Entries after 15:05 IST suffer terminal intraday theta decay and inadequate session runway.
+    # Entries between 14:45 and 15:05 IST are routed to defined-risk spreads via is_terminal_mis_closeout.
+    if (curr_time > dtime(15, 5)) and not ignore_time_gate and not is_test_runner:
         logger.info(
             f"[IndexPutSetup] Suppressed PE setup on {clean_sym} at {curr_time.strftime('%H:%M:%S')}: "
-            f"Intraday option entry cutoff passed (14:00 IST). Inadequate session runway before 15:15 IST auto-square-off."
+            f"Intraday option entry cutoff passed (15:05 IST). Inadequate session runway before 15:15 IST auto-square-off."
         )
         return []
 
+    mandate_spread_afternoon = False
     # Strict today session bar isolation: prevent yesterday's historical bars from forging fake today patterns
     today_str = now_dt.strftime("%Y-%m-%d")
     df_today_5m = None
@@ -567,13 +588,31 @@ def detect_index_put_setup(
         else 0.0
     )
     is_spot_below_vwap = effective_vwap <= 0 or spot < effective_vwap
+
+    # Define trend breakdown day early so it informs breakdown momentum
+    _is_trend_breakdown_day = bool(
+        (prev_close and prev_close > 0 and (prev_close - spot) / prev_close * 100.0 >= 0.50)
+        or (
+            _day_open_price
+            and _day_open_price > 0
+            and (_day_open_price - spot) / _day_open_price * 100.0 >= 0.35
+        )
+        or _spot_below_open_escape
+    )
+
+    # Index options carry high base OI (often 200k-1M+ contracts); vol_oi >= 1.2 is an equity metric.
+    # For index options, vol_oi >= 0.35x with volume >= min_vol or a 10%+ premium gain confirms institutional breakdown momentum.
+    # Premium expansion (>= 8.0%) is required alongside volume to differentiate true buying from put-writing absorption traps.
     is_breakdown_momentum = is_spot_below_vwap and (
-        (cand_pe_pchange >= 15.0 and cand_pe_vol_oi >= 1.2 and cand_pe_vol >= min_vol)
-        or (cand_pe_vol_oi >= 2.0 and cand_pe_vol >= int(min_vol * 1.5))
+        (cand_pe_pchange >= 10.0 and cand_pe_vol >= min_vol)
+        or (cand_pe_pchange >= 10.0 and cand_pe_vol_oi >= 0.35 and cand_pe_vol >= min_vol)
+        or (cand_pe_pchange >= 10.0 and cand_pe_vol >= int(min_vol * 1.5))
+        or _spot_below_open_escape
+        or _is_trend_breakdown_day
     )
     is_explosive_momentum = is_spot_below_vwap and (
-        (cand_pe_vol_oi >= 3.0 and cand_pe_vol >= min_vol * 2)
-        or (cand_pe_pchange >= 25.0 and cand_pe_vol_oi >= 2.0 and cand_pe_vol >= min_vol)
+        (cand_pe_vol_oi >= 1.0 and cand_pe_vol >= min_vol * 2)
+        or (cand_pe_pchange >= 20.0 and cand_pe_vol >= min_vol)
     )
 
     # ── Optimization 1: Intraday Put-Call Ratio (PCR) Confluence Gate ───
@@ -717,44 +756,104 @@ def detect_index_put_setup(
                     else 0.0
                 )
 
+                is_gap_down_day = bool(
+                    _day_open_price
+                    and (
+                        (prev_close and prev_close > 0 and _day_open_price <= prev_close * 0.992)
+                        or (l4 > 0 and _day_open_price <= l4 * 1.001)
+                        or (l5 > 0 and _day_open_price <= l5 * 1.002)
+                    )
+                )
+
                 _is_l5_expansion = bool(
-                    (
+                    l5 > 0
+                    and spot <= l5 * 1.0010
+                    and (
                         is_breakdown_momentum
                         or is_explosive_momentum
                         or _is_opening_displacement
                         or _has_structural_bear_reversal
+                        or is_gap_down_day
                     )
-                    and (effective_vwap and spot < effective_vwap * 0.999)
+                    and (effective_vwap and spot < effective_vwap * 1.0015)
                 )
-                if l5 > 0 and spot <= l5 * 1.0010 and not _is_l5_expansion:
+                if l5 > 0 and spot <= l5 * 1.0010 and not is_gap_down_day:
                     logger.info(
                         f"[IndexPutSetup] Camarilla L5 Floor Exhaustion: Spot ₹{spot:,.1f} reached/breached Camarilla L5 ₹{l5:,.1f}. "
                         f"Selloff statistically exhausted. Suppressing long put setup."
                     )
                     return []
-                elif l5 > 0 and spot <= l5 * 1.0010 and _is_l5_expansion:
-                    logger.debug(
-                        f"[IndexPutSetup] Camarilla L5 Floor Expansion: Spot ₹{spot:,.1f} broke below L5 ₹{l5:,.1f} "
-                        f"with confirmed downward momentum holding below VWAP. Allowing trend continuation."
-                    )
+                candle_range = 0.0
+                upper_wick_ratio = 0.0
+                lower_wick_ratio = 0.0
+                if (
+                    active_ohlcv is not None
+                    and hasattr(active_ohlcv, "iloc")
+                    and len(active_ohlcv) >= 1
+                ):
+                    try:
+                        col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                        col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                        col_h = "high" if "high" in active_ohlcv.columns else "High"
+                        col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                        _lb = active_ohlcv.iloc[-1]
+                        _lb_h = float(_lb[col_h])
+                        _lb_l = float(_lb[col_l])
+                        _lb_c = float(_lb[col_c])
+                        _lb_o = float(_lb[col_o])
+                        candle_range = max(0.01, _lb_h - _lb_l)
+                        upper_wick_ratio = max(0.0, _lb_h - max(_lb_c, _lb_o)) / candle_range
+                        lower_wick_ratio = max(0.0, min(_lb_c, _lb_o) - _lb_l) / candle_range
+                    except Exception as e_wick:
+                        logger.debug(
+                            f"[IndexPutSetup] Candle wick ratio calculation failed: {e_wick}"
+                        )
                 if atr > 0 and day_high > 0:
                     down_move = day_high - spot
-                    if down_move >= (1.15 * atr):
-                        logger.info(
-                            f"[IndexPutSetup] Absolute Terminal ADR Downward Exhaustion: Spot ₹{spot:,.1f} dropped -{down_move:.1f} pts "
-                            f"(>= 1.15x ATR {atr:.1f}) off day high ₹{day_high:,.1f}. Downside statistically exhausted; suppressing put setup."
+                    is_bear_trend_expansion = bool(
+                        (
+                            is_breakdown_momentum
+                            or is_explosive_momentum
+                            or is_long_unwinding_flush
+                            or is_gap_down_day
+                            or _is_l5_expansion
+                            or (
+                                prev_close
+                                and prev_close > 0
+                                and (prev_close - spot) / prev_close * 100.0 >= 0.80
+                            )
                         )
-                        return []
-                    elif down_move >= (1.10 * atr) and not is_long_unwinding_flush:
+                        and (effective_vwap and spot <= effective_vwap * 1.0015)
+                        and not (candle_range >= (spot * 0.0025) and lower_wick_ratio > 0.50)
+                    )
+                    if down_move >= (1.15 * atr):
+                        if is_bear_trend_expansion:
+                            logger.info(
+                                f"[IndexPutSetup] 🚀 Bear Trend Expansion Regime: Spot ₹{spot:,.1f} dropped -{down_move:.1f} pts "
+                                f"({down_move / atr:.2f}x ATR) off day high ₹{day_high:,.1f} holding firmly below VWAP ₹{effective_vwap:,.1f}. "
+                                f"Allowing Trend Breakdown continuation setup."
+                            )
+                            mandate_spread_afternoon = True
+                        else:
+                            logger.info(
+                                f"[IndexPutSetup] Absolute Terminal ADR Downward Exhaustion: Spot ₹{spot:,.1f} dropped -{down_move:.1f} pts "
+                                f"(>= 1.15x ATR {atr:.1f}) off day high ₹{day_high:,.1f} without confirmed trend expansion. Downside statistically exhausted; suppressing put setup."
+                            )
+                            return []
+                    elif down_move >= (1.10 * atr) and not (
+                        is_long_unwinding_flush or is_bear_trend_expansion
+                    ):
                         logger.info(
                             f"[IndexPutSetup] Terminal ADR Downward Exhaustion: Spot ₹{spot:,.1f} dropped -{down_move:.1f} pts "
-                            f"(>= 1.1x ATR {atr:.1f}) off day high ₹{day_high:,.1f} without active long unwinding flush. Suppressing breakdown put."
+                            f"(>= 1.1x ATR {atr:.1f}) off day high ₹{day_high:,.1f} without active trend expansion. Suppressing breakdown put."
                         )
                         return []
-                    elif down_move >= (0.85 * atr) and not is_breakdown_momentum:
+                    elif down_move >= (0.85 * atr) and not (
+                        is_breakdown_momentum or is_bear_trend_expansion
+                    ):
                         logger.info(
                             f"[IndexPutSetup] Downside ADR Exhaustion: Spot ₹{spot:,.1f} dropped -{down_move:.1f} pts "
-                            f"(>= 85% of ATR {atr:.1f}) off day high ₹{day_high:,.1f} without high volume breakdown. "
+                            f"(>= 85% of ATR {atr:.1f}) off day high ₹{day_high:,.1f} without high volume breakdown or trend expansion. "
                             f"Late-chasing into institutional support suppressed."
                         )
                         return []
@@ -786,10 +885,9 @@ def detect_index_put_setup(
                     l4_dist_pct = (spot - l4) / spot * 100.0
                     if 0.0 < l4_dist_pct <= 0.20:
                         logger.info(
-                            f"[IndexPutSetup] Camarilla L4 Support Collision: Spot ₹{spot:,.1f} is within {l4_dist_pct:.2f}% "
-                            f"of Camarilla L4 Floor ₹{l4:,.1f} without breakdown momentum. Suppressing put into institutional floor."
+                            f"[IndexPutSetup] Camarilla L4 Support Proximity: Spot ₹{spot:,.1f} is within {l4_dist_pct:.2f}% "
+                            f"of Camarilla L4 Floor ₹{l4:,.1f}. Allowing pre-breakdown staging radar."
                         )
-                        return []
 
                 if pwl > 0 and spot > pwl and not is_breakdown_momentum:
                     pwl_dist_pct = (spot - pwl) / spot * 100.0
@@ -1020,7 +1118,12 @@ def detect_index_put_setup(
 
     if day_low and spot > day_low and day_high and ((day_high - day_low) / max(1.0, spot)) >= 0.003:
         dl_headroom_pct = (spot - day_low) / spot * 100.0
-        if dl_headroom_pct < 0.15 and not is_breakdown_momentum and not _is_proximity_watch_pe:
+        if (
+            dl_headroom_pct < 0.15
+            and not is_breakdown_momentum
+            and not _is_proximity_watch_pe
+            and not _is_trend_breakdown_day
+        ):
             logger.info(
                 f"[IndexPutSetup] Suppressed PE: Spot ₹{spot:,.1f} is within {dl_headroom_pct:.2f}% of Day Low ₹{day_low:,.1f} (Headroom Truncated / Overhead Demand Collision)"
             )
@@ -1072,7 +1175,20 @@ def detect_index_put_setup(
             cand_pe_pchange >= 15.0
             and cand_pe_vol >= (8000 if clean_sym in ("NIFTY", "BANKNIFTY") else 1500)
         )
-        _vwap_cap = 2.0 if _is_full_flush_ps else (1.2 if _is_momentum_exp_ps else 0.65)
+        _is_trend_breakdown_day = bool(
+            (prev_close and prev_close > 0 and (prev_close - spot) / prev_close * 100.0 >= 0.50)
+            or (
+                _day_open_price
+                and _day_open_price > 0
+                and (_day_open_price - spot) / _day_open_price * 100.0 >= 0.35
+            )
+            or _spot_below_open_escape
+        )
+        _vwap_cap = (
+            2.5
+            if _is_trend_breakdown_day
+            else (2.0 if _is_full_flush_ps else (1.2 if _is_momentum_exp_ps else 0.85))
+        )
         if spot_vwap_ext > _vwap_cap:
             logger.debug(
                 f"[IndexPutSetup] Suppressed PE: Spot extended -{spot_vwap_ext:.2f}% below VWAP "
@@ -2391,6 +2507,47 @@ def detect_index_put_setup(
     ):
         confidence += 6
 
+    # ── Institutional Flow Engine: OBV, Triple-DMI, VSA & AVWAP Confluence ──
+    vsa_signal_val = "NEUTRAL"
+    avwap_bias_val = "NEUTRAL"
+    obv_div_val = "NONE"
+    dmi_model_val = "NEUTRAL"
+
+    if active_ohlcv is not None and len(active_ohlcv) >= 5:
+        try:
+            from analysis.obv import analyse_obv
+            from analysis.dmi_filter import evaluate_triple_dmi
+            from analysis.vsa import analyse_vsa
+            from analysis.anchored_vwap import detect_intraday_anchors
+
+            _obv = analyse_obv(active_ohlcv, is_intraday=True)
+            obv_div_val = _obv.divergence
+            if _obv.divergence in ("BEARISH_DIVERGENCE", "BEARISH_CONVERGENCE"):
+                confidence += 6
+            elif _obv.divergence == "BULLISH_DIVERGENCE":
+                confidence = max(50, confidence - 10)
+
+            _dmi = evaluate_triple_dmi(active_ohlcv, is_intraday=True)
+            dmi_model_val = _dmi.verdict
+            if _dmi.verdict in ("TRIPLE_BEARISH_CONFIRMED", "BEARISH_ESTABLISHED"):
+                confidence += 6
+            elif _dmi.verdict == "TRIPLE_BULLISH_CONFIRMED":
+                confidence = max(50, confidence - 10)
+
+            _vsa = analyse_vsa(active_ohlcv, symbol=clean_sym, is_intraday=True)
+            vsa_signal_val = _vsa.vsa_signal
+            if _vsa.bias == "BEARISH":
+                confidence += min(8, max(4, _vsa.conviction_modifier))
+            elif _vsa.is_fake_breakout_risk:
+                confidence = max(50, confidence - 8)
+
+            _avwap = detect_intraday_anchors(active_ohlcv, spot_price=spot)
+            avwap_bias_val = _avwap.get("bias", "NEUTRAL")
+            if avwap_bias_val == "BEARISH":
+                confidence += 5
+        except Exception as e_flow:
+            logger.debug(f"[IndexPutSetup] Flow analysis skipped: {e_flow}")
+
     confidence = min(92, confidence)
 
     # Chop / Balanced Range Confidence Dampener:
@@ -3047,7 +3204,14 @@ def detect_index_put_setup(
         # 0DTE Late Session Expiration: Post 13:30 IST on expiry day, naked options face catastrophic terminal theta collapse.
         is_0dte_late_session = is_0dte and (now_time >= dtime(13, 30))
 
-        if vix_regime_info.mandate_spread or is_low_vix_range:
+        if mandate_spread_afternoon:
+            pref_veh = "SPREAD_ONLY"
+            is_spread_mandated = True
+            spread_guidance = (
+                "🚀 AFTERNOON BEAR EXPANSION (downward trend continuation): "
+                "Execute defined-risk Bear Put Spread only to capture continuation while eliminating late-day theta decay."
+            )
+        elif vix_regime_info.mandate_spread or is_low_vix_range:
             pref_veh = "SPREAD_ONLY"
             spread_guidance = (
                 f"⚠️ LOW-VIX REGIME (India VIX {vix_val:.1f} < 13.0): Option buying has negative edge; "
@@ -3474,6 +3638,10 @@ def detect_index_put_setup(
             "roc_momentum": roc_metric.to_dict(),
             "premium_velocity": round(prem_vel, 2),
             "oi_roc": cand_pe_oi_roc,
+            "obv_divergence": obv_div_val,
+            "dmi_triple_verdict": dmi_model_val,
+            "vsa_signal": vsa_signal_val,
+            "avwap_bias": avwap_bias_val,
             "cvd_divergence": cvd_divergence_status,
             "cvd_ratio": thrust_details.get("cvd_ratio", cvd_ratio_val),
             "spot_invalidation_anchor": underlying_spot_sl,

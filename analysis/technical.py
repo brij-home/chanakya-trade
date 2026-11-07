@@ -79,6 +79,21 @@ class TechnicalSnapshot:
     score: int = 0  # -100 to +100
     summary: str = ""
 
+    # OBV & Triple-Filtered DMI Indicators (Swingscape Advancements)
+    obv: Optional[float] = None
+    obv_ema: Optional[float] = None
+    obv_regime: str = "NEUTRAL"  # ACCUMULATION | DISTRIBUTION | NEUTRAL
+    obv_divergence: str = "NEUTRAL"  # BULLISH_DIVERGENCE | BEARISH_DIVERGENCE | BULLISH_CONVERGENCE | BEARISH_CONVERGENCE | NEUTRAL
+    dmi_plus: Optional[float] = None
+    dmi_minus: Optional[float] = None
+    adx: Optional[float] = None
+    adx_slope: Optional[float] = None
+    dmi_triple_verdict: str = (
+        "NEUTRAL"  # TRIPLE_BULLISH_CONFIRMED | TRIPLE_BEARISH_CONFIRMED | WEAK_OR_CHOPPY | NEUTRAL
+    )
+    roc_normalized: Optional[float] = None  # Volatility-normalized ROC (z-score)
+    roc_acceleration: Optional[float] = None  # 2nd derivative of momentum (delta ROC)
+
 
 # ── Core indicators ──────────────────────────────────────────
 
@@ -186,6 +201,28 @@ def roc(series: pd.Series, period: int = 12) -> pd.Series:
     return ((series - shifted) / shifted.replace(0, np.nan)) * 100.0
 
 
+def normalized_roc(series: pd.Series, atr_series: pd.Series, period: int = 12) -> pd.Series:
+    """
+    Volatility-normalized Rate of Change.
+    Measures price velocity relative to expected price volatility:
+    Formula: ROC / ((ATR / Close) * 100 * sqrt(period / 12))
+    Values > +1.8 = Exceptional bullish velocity; < -1.8 = Exceptional bearish velocity.
+    """
+    raw_roc = roc(series, period=period)
+    atr_pct = (atr_series / series.replace(0, np.nan)) * 100.0
+    scale = (atr_pct * np.sqrt(period / 12.0)).replace(0, np.nan)
+    return (raw_roc / scale).fillna(0.0)
+
+
+def roc_acceleration(series: pd.Series, period: int = 12) -> pd.Series:
+    """
+    2nd derivative of price momentum: rate of change of ROC (delta ROC).
+    Detects momentum exhaustion and explosive gamma expansion before price peaks.
+    """
+    roc_s = roc(series, period=period)
+    return roc_s.diff().fillna(0.0)
+
+
 def choppiness_index(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """
     Dreiss Choppiness Index (0 to 100).
@@ -235,6 +272,8 @@ def analyse(
     symbol: str,
     exchange: str = "NSE",
     days: int = 365,
+    df: Optional[pd.DataFrame] = None,
+    is_intraday: bool = False,
 ) -> TechnicalSnapshot:
     """
     Full technical analysis for a symbol.
@@ -249,10 +288,11 @@ def analyse(
         else        → NEUTRAL
     """
     # ── Fetch data ────────────────────────────────────────────
-    try:
-        df = get_ohlcv(symbol=symbol, exchange=exchange, days=days)
-    except Exception:
-        df = pd.DataFrame()
+    if df is None:
+        try:
+            df = get_ohlcv(symbol=symbol, exchange=exchange, days=days)
+        except Exception:
+            df = pd.DataFrame()
 
     if (df.empty or len(df) < 30) and exchange.upper() == "NSE":
         # Cross-exchange fallback: if symbol is listed exclusively on BSE
@@ -281,6 +321,11 @@ def analyse(
     ltp = float(close.iloc[-1])
 
     # ── Compute indicators ────────────────────────────────────
+    from analysis.obv import analyse_obv
+    from analysis.dmi_filter import evaluate_triple_dmi
+
+    obv_snap = analyse_obv(df, symbol=symbol, is_intraday=is_intraday)
+    dmi_res = evaluate_triple_dmi(df, symbol=symbol, is_intraday=is_intraday)
     rsi_series = rsi(close)
     rsi_val = float(rsi_series.iloc[-1])
 
@@ -300,10 +345,17 @@ def analyse(
     bb_m = float(bb_mid.iloc[-1])
     bb_l = float(bb_lower.iloc[-1])
 
-    atr_val = float(atr(df).iloc[-1])
-
     roc_series = roc(close, 12)
     roc_val = float(roc_series.iloc[-1]) if not pd.isna(roc_series.iloc[-1]) else 0.0
+
+    atr_series = atr(df)
+    atr_val = float(atr_series.iloc[-1])
+
+    norm_roc_series = normalized_roc(close, atr_series, 12)
+    norm_roc_val = float(norm_roc_series.iloc[-1]) if not pd.isna(norm_roc_series.iloc[-1]) else 0.0
+
+    roc_acc_series = roc_acceleration(close, 12)
+    roc_acc_val = float(roc_acc_series.iloc[-1]) if not pd.isna(roc_acc_series.iloc[-1]) else 0.0
 
     chop_series = choppiness_index(df, 14)
     chop_val = float(chop_series.iloc[-1]) if not pd.isna(chop_series.iloc[-1]) else 50.0
@@ -318,17 +370,37 @@ def analyse(
     signals: list[Signal] = []
     score = 0
 
-    # Rate of Change (ROC-12) Momentum Velocity
-    if roc_val > 4.0:
+    # Volatility-Normalized Rate of Change (ROC-12) & Momentum Acceleration
+    if norm_roc_val > 1.8:
         signals.append(
-            Signal("ROC", f"{roc_val:+.1f}%", "BULLISH", "Strong upward momentum velocity (>+4%)")
+            Signal(
+                "ROC",
+                f"{roc_val:+.1f}% ({norm_roc_val:+.1f}σ)",
+                "BULLISH",
+                "Strong volatility-expanded upward momentum velocity (>+1.8σ)",
+            )
         )
         score += 8
-    elif roc_val < -4.0:
+    elif norm_roc_val < -1.8:
         signals.append(
-            Signal("ROC", f"{roc_val:+.1f}%", "BEARISH", "Strong downward momentum velocity (<-4%)")
+            Signal(
+                "ROC",
+                f"{roc_val:+.1f}% ({norm_roc_val:+.1f}σ)",
+                "BEARISH",
+                "Strong volatility-expanded downward momentum velocity (<-1.8σ)",
+            )
         )
         score -= 8
+    elif roc_val > 4.0:
+        signals.append(
+            Signal("ROC", f"{roc_val:+.1f}%", "BULLISH", "Positive momentum velocity (>+4%)")
+        )
+        score += 5
+    elif roc_val < -4.0:
+        signals.append(
+            Signal("ROC", f"{roc_val:+.1f}%", "BEARISH", "Negative momentum velocity (<-4%)")
+        )
+        score -= 5
     else:
         signals.append(Signal("ROC", f"{roc_val:+.1f}%", "NEUTRAL", "Moderate momentum velocity"))
 
@@ -363,23 +435,123 @@ def analyse(
             )
         )
 
-    # RSI
-    if rsi_val < 30:
-        signals.append(Signal("RSI", round(rsi_val, 1), "BULLISH", "Oversold (<30)"))
-        score += 15
-    elif rsi_val > 70:
-        signals.append(Signal("RSI", round(rsi_val, 1), "BEARISH", "Overbought (>70)"))
-        score -= 15
-    else:
-        signals.append(
-            Signal(
-                "RSI",
-                round(rsi_val, 1),
-                "NEUTRAL",
-                "Bullish zone (50-70)" if rsi_val > 50 else "Bearish zone (30-50)",
+    # Trend-Adaptive RSI Evaluation (Cardwell/Brown Institutional Range Rules)
+    is_bull_trend = (ltp > ema50_val) and (ema20_val >= ema50_val)
+    is_bear_trend = (ltp < ema50_val) and (ema20_val <= ema50_val)
+
+    if is_bull_trend:
+        if 60.0 <= rsi_val <= 75.0:
+            signals.append(
+                Signal(
+                    "RSI",
+                    round(rsi_val, 1),
+                    "BULLISH",
+                    "Strong Bullish Momentum Range (60-75) in established uptrend",
+                )
             )
-        )
-        score += 5 if rsi_val > 50 else -5
+            score += 15
+        elif rsi_val > 75.0:
+            signals.append(
+                Signal(
+                    "RSI",
+                    round(rsi_val, 1),
+                    "NEUTRAL",
+                    "Bullish Overextension (>75) — trail stops, avoid late chase",
+                )
+            )
+            score += 5
+        elif 40.0 <= rsi_val < 60.0:
+            signals.append(
+                Signal(
+                    "RSI",
+                    round(rsi_val, 1),
+                    "BULLISH",
+                    "Bull Market Support Zone (40-60) — healthy pullback area",
+                )
+            )
+            score += 10
+        else:  # rsi_val < 40
+            signals.append(
+                Signal(
+                    "RSI",
+                    round(rsi_val, 1),
+                    "BEARISH",
+                    "Momentum Breakdown below Bull Support (<40)",
+                )
+            )
+            score -= 10
+    elif is_bear_trend:
+        if 25.0 <= rsi_val <= 40.0:
+            signals.append(
+                Signal(
+                    "RSI",
+                    round(rsi_val, 1),
+                    "BEARISH",
+                    "Strong Bearish Momentum Range (25-40) in established downtrend",
+                )
+            )
+            score -= 15
+        elif rsi_val < 25.0:
+            signals.append(
+                Signal(
+                    "RSI",
+                    round(rsi_val, 1),
+                    "NEUTRAL",
+                    "Extreme Capitulation Oversold (<25) — short covering risk",
+                )
+            )
+            score -= 5
+        elif 40.0 < rsi_val <= 60.0:
+            signals.append(
+                Signal(
+                    "RSI",
+                    round(rsi_val, 1),
+                    "BEARISH",
+                    "Bear Market Resistance Ceiling (40-60) — supply bounce zone",
+                )
+            )
+            score -= 10
+        else:
+            signals.append(
+                Signal(
+                    "RSI",
+                    round(rsi_val, 1),
+                    "BULLISH",
+                    "Momentum Breakout above Bear Resistance (>60)",
+                )
+            )
+            score += 10
+    else:  # Range-bound / Mean-reverting regime
+        if rsi_val < 30.0:
+            signals.append(
+                Signal(
+                    "RSI",
+                    round(rsi_val, 1),
+                    "BULLISH",
+                    "Range Support Oversold (<30) — mean-reversion long",
+                )
+            )
+            score += 15
+        elif rsi_val > 70.0:
+            signals.append(
+                Signal(
+                    "RSI",
+                    round(rsi_val, 1),
+                    "BEARISH",
+                    "Range Resistance Overbought (>70) — mean-reversion short",
+                )
+            )
+            score -= 15
+        else:
+            signals.append(
+                Signal(
+                    "RSI",
+                    round(rsi_val, 1),
+                    "NEUTRAL",
+                    "Bullish zone (50-70)" if rsi_val > 50 else "Bearish zone (30-50)",
+                )
+            )
+            score += 5 if rsi_val > 50 else -5
 
     # MACD crossover & positioning
     prev_hist = float(histogram.iloc[-2]) if len(histogram) >= 2 else 0
@@ -473,6 +645,52 @@ def analyse(
     else:
         signals.append(Signal("Volume", f"{vol_ratio:.1f}x avg", "NEUTRAL", "Normal volume"))
 
+    # OBV Signals (Accumulation/Distribution & Divergences)
+    if obv_snap.divergence == "BULLISH_DIVERGENCE":
+        signals.append(Signal("OBV", "Bullish Divergence", "BULLISH", obv_snap.summary))
+        score += 15
+    elif obv_snap.divergence == "BEARISH_DIVERGENCE":
+        signals.append(Signal("OBV", "Bearish Divergence", "BEARISH", obv_snap.summary))
+        score -= 15
+    elif obv_snap.divergence == "BULLISH_CONVERGENCE":
+        signals.append(Signal("OBV", "Bullish Convergence", "BULLISH", obv_snap.summary))
+        score += 8
+    elif obv_snap.divergence == "BEARISH_CONVERGENCE":
+        signals.append(Signal("OBV", "Bearish Convergence", "BEARISH", obv_snap.summary))
+        score -= 8
+    elif obv_snap.regime == "ACCUMULATION":
+        signals.append(Signal("OBV", "Accumulation", "BULLISH", "OBV above 20-EMA"))
+        score += 5
+    elif obv_snap.regime == "DISTRIBUTION":
+        signals.append(Signal("OBV", "Distribution", "BEARISH", "OBV below 20-EMA"))
+        score -= 5
+
+    # Triple-Filtered DMI Signals (Swingscape 3-Tier Filter)
+    if dmi_res.verdict == "TRIPLE_BULLISH_CONFIRMED":
+        signals.append(
+            Signal(
+                "TripleDMI",
+                f"+DI {dmi_res.plus_di:.1f} >= {dmi_res.threshold}",
+                "BULLISH",
+                dmi_res.summary,
+            )
+        )
+        score += 15
+    elif dmi_res.verdict == "TRIPLE_BEARISH_CONFIRMED":
+        signals.append(
+            Signal(
+                "TripleDMI",
+                f"-DI {dmi_res.minus_di:.1f} >= {dmi_res.threshold}",
+                "BEARISH",
+                dmi_res.summary,
+            )
+        )
+        score -= 15
+    elif dmi_res.verdict == "WEAK_OR_CHOPPY":
+        signals.append(
+            Signal("TripleDMI", f"Chop (<{dmi_res.threshold})", "NEUTRAL", dmi_res.summary)
+        )
+
     # ── Verdict ───────────────────────────────────────────────
     score = max(-100, min(100, score))
     verdict = "BULLISH" if score > 30 else "BEARISH" if score < -30 else "NEUTRAL"
@@ -526,4 +744,15 @@ def analyse(
         verdict=verdict,
         score=score,
         summary=summary,
+        obv=round(obv_snap.current_obv, 2),
+        obv_ema=round(obv_snap.obv_ema, 2),
+        obv_regime=obv_snap.regime,
+        obv_divergence=obv_snap.divergence,
+        dmi_plus=round(dmi_res.plus_di, 2),
+        dmi_minus=round(dmi_res.minus_di, 2),
+        adx=round(dmi_res.adx, 2),
+        adx_slope=round(getattr(dmi_res, "adx_slope_3bar", 0.0), 2),
+        dmi_triple_verdict=dmi_res.verdict,
+        roc_normalized=round(norm_roc_val, 2),
+        roc_acceleration=round(roc_acc_val, 2),
     )

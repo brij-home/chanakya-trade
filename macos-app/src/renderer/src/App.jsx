@@ -3,7 +3,7 @@ import { useChatStore, getBaseUrl } from './store/chatStore'
 import { useSSEStream } from './hooks/useSSEStream'
 import { useMarketClock } from './hooks/useMarketClock'
 import ActivityBar from './components/Shell/ActivityBar'
-import ContextBar, { MarketClock } from './components/Shell/ContextBar'
+import ContextBar, { MarketClock, HorizonSwitcher } from './components/Shell/ContextBar'
 import Sidebar from './components/Sidebar'
 import ChatArea from './components/Chat/ChatArea'
 import InputBar from './components/Input/InputBar'
@@ -670,6 +670,7 @@ export default function App() {
 
         {/* Right: Status cluster */}
         <div className="no-drag flex items-center gap-1.5">
+          <HorizonSwitcher />
           <MarketClock />
 
           {/* Quick action: Opportunities Radar */}

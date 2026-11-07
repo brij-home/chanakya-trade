@@ -106,6 +106,7 @@ def test_intraday_equities_sub_atr_noise_floor_veto(auditor: AlertScrutinyAudito
         stop_loss=2785.0,  # 15 pts stop distance (< 0.70 * 40 = 28 pts)
         target_level=2880.0,
         time_horizon="INTRADAY",
+        created_at="2026-10-15 10:15:00 IST",
         is_live=True,
         environment="LIVE",
         metrics={"atr": 40.0, "atr_14": 40.0, "rvol": 1.5},
@@ -130,6 +131,7 @@ def test_intraday_equities_sub_atr_noise_floor_veto(auditor: AlertScrutinyAudito
         stop_loss=2770.0,  # 30 pts stop distance (>= 28.0 pts)
         target_level=2880.0,
         time_horizon="INTRADAY",
+        created_at="2026-10-15 10:15:00 IST",
         is_live=True,
         environment="LIVE",
         metrics={"atr": 40.0, "atr_14": 40.0, "rvol": 1.5},
@@ -391,6 +393,7 @@ def test_falcon_cheetah_trending_momentum_expansion_passes(auditor: AlertScrutin
         stop_loss=14700.0,  # 300 pts risk (2.0%)
         target_level=16000.0,  # 1000 pts reward
         time_horizon="INTRADAY",
+        created_at="2026-10-15 10:15:00 IST",
         is_live=True,
         environment="LIVE",
         metrics={
@@ -428,6 +431,7 @@ def test_falcon_cheetah_stock_option_severe_chop_veto(auditor: AlertScrutinyAudi
         stop_loss=38.0,
         target_level=65.0,
         time_horizon="INTRADAY",
+        created_at="2026-10-15 10:15:00 IST",
         is_live=True,
         environment="LIVE",
         option_type="CE",
@@ -469,6 +473,7 @@ def test_order_flow_cvd_bearish_exhaustion_absorption_veto(auditor: AlertScrutin
         stop_loss=980.0,
         target_level=1060.0,
         time_horizon="INTRADAY",
+        created_at="2026-10-15 10:15:00 IST",
         is_live=True,
         environment="LIVE",
         metrics={
@@ -505,6 +510,7 @@ def test_order_flow_cvd_bullish_absorption_veto(auditor: AlertScrutinyAuditor):
         stop_loss=1020.0,
         target_level=940.0,
         time_horizon="INTRADAY",
+        created_at="2026-10-15 10:15:00 IST",
         is_live=True,
         environment="LIVE",
         metrics={
@@ -602,6 +608,7 @@ def test_reward_to_obstacle_options_call_oi_wall_veto(auditor: AlertScrutinyAudi
         stop_loss=980.0,
         target_level=1060.0,
         time_horizon="INTRADAY",
+        created_at="2026-10-15 10:15:00 IST",
         is_live=True,
         environment="LIVE",
         metrics={
@@ -768,6 +775,7 @@ def test_predatory_pipeline_6_seat_dossier_compilation(auditor: AlertScrutinyAud
         stop_loss=3540.0,  # 60 pts risk (1.67%)
         target_level=3780.0,  # 180 pts reward (3.0R)
         time_horizon="INTRADAY",
+        created_at="2026-10-15 10:15:00 IST",
         is_live=True,
         environment="LIVE",
         metrics={

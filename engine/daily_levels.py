@@ -435,14 +435,17 @@ class DailyLevelsStore:
             s_dt = datetime.now(IST).date()
 
         # Sanity check against stale daily OHLCV bars (Rule 11 Data Provenance)
-        # If PDC diverges from live spot by > 5%, the historical bar is stale or from a different epoch.
-        # Reject rather than synthesizing artificial levels.
+        # For index benchmarks, intraday spot diverges < 5% from PDC except in severe circuit halts.
+        # For individual equities / stock F&O, earnings/breakouts routinely move 5% - 20%.
+        # Reject if divergence exceeds threshold (5% for index, 22% for stocks) to prevent distorted pivots.
+        is_index_sym = clean in INDEX_INSTRUMENT_MAP or "INDEX" in clean
+        max_allowed_div = 0.05 if is_index_sym else 0.22
         if ltp > 0 and pdc > 0:
             divergence = abs(ltp - pdc) / ltp
-            if divergence > 0.05:
+            if divergence > max_allowed_div:
                 logger.warning(
                     f"[DailyLevels] Daily bar close {pdc} diverges from live LTP {ltp} "
-                    f"by {divergence * 100:.1f}% (>5.0%) for {clean}. "
+                    f"by {divergence * 100:.1f}% (>{max_allowed_div * 100:.1f}%) for {clean}. "
                     f"Rejecting stale levels to prevent distorted pivots (Rule 11)."
                 )
                 pdh, pdl, pdc, pdo = 0.0, 0.0, 0.0, 0.0
@@ -466,7 +469,7 @@ class DailyLevelsStore:
                             or ("PYTEST_CURRENT_TEST" in os.environ)
                         )
                         if is_test_env or (0 <= cache_age <= 5):
-                            if ltp <= 0 or abs(ltp - v.pdc) / ltp <= 0.05:
+                            if ltp <= 0 or abs(ltp - v.pdc) / ltp <= max_allowed_div:
                                 pdh, pdl, pdc = v.pdh, v.pdl, v.pdc
                                 pdo = v.pdo
                                 atr_14 = v.atr_14
