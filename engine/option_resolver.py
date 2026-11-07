@@ -69,6 +69,8 @@ class ResolvedOptionPlan:
     confirmation_rule: Optional[str] = None
     execution_notes: Optional[str] = None
     bid_ask_spread_pct: Optional[float] = None
+    delta: Optional[float] = None
+    iv: Optional[float] = None
 
     def as_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -97,6 +99,8 @@ class ResolvedOptionPlan:
             "confirmation_rule": self.confirmation_rule,
             "execution_notes": self.execution_notes,
             "bid_ask_spread_pct": self.bid_ask_spread_pct,
+            "delta": round(self.delta, 4) if self.delta is not None else None,
+            "iv": round(self.iv, 2) if self.iv is not None else None,
         }
         if self.spread_details:
             d["hedged_spread"] = self.spread_details
@@ -118,6 +122,49 @@ def get_strike_step(symbol: str, spot: float = 0.0) -> float:
     from market.symbol_master import get_strike_step as _get_master_step
 
     return _get_master_step(symbol, spot=spot)
+
+
+def extract_contract_delta(
+    c: Any,
+    spot: float,
+    opt_type: str,
+    expiry: Optional[str] = None,
+) -> Optional[float]:
+    """
+    Extracts delta from contract, or dynamically computes Black-Scholes delta
+    if missing or zero. Returns signed float (e.g. +0.50 for CE, -0.50 for PE).
+    """
+    d = getattr(c, "delta", None)
+    if d is not None:
+        try:
+            d_flt = float(d)
+            if math.isfinite(d_flt) and abs(d_flt) > 0.01:
+                return d_flt
+        except (ValueError, TypeError) as e_suppressed:
+            logger.debug(f"[OptionResolver] Non-fatal delta parse error: {e_suppressed}")
+
+    lp = float(getattr(c, "last_price", 0.0) or 0.0)
+    stk = float(getattr(c, "strike", 0.0) or 0.0)
+    exp = getattr(c, "expiry", None) or expiry
+    if lp > 0.05 and stk > 0 and spot > 0 and exp:
+        try:
+            from analysis.options import compute_greeks
+
+            g = compute_greeks(
+                spot=spot,
+                strike=stk,
+                expiry=str(exp),
+                option_type=opt_type,
+                ltp=lp,
+            )
+            if g and math.isfinite(g.delta) and abs(g.delta) > 0.01:
+                c.delta = g.delta
+                if getattr(c, "iv", None) is None or getattr(c, "iv", 0.0) == 0:
+                    c.iv = g.iv_pct
+                return g.delta
+        except Exception as e_suppressed:
+            logger.debug(f"[OptionResolver] Non-fatal compute_greeks error: {e_suppressed}")
+    return None
 
 
 def resolve_option_contract(
@@ -227,6 +274,8 @@ def resolve_option_contract(
     opt_strike = 0.0
     opt_sym = ""
     spread_pct_val: Optional[float] = None
+    contract_delta: float = 0.0
+    contract_iv: float = 0.0
     contracts: list[Any] = []
     step = get_strike_step(clean_sym, spot=spot)
 
@@ -269,65 +318,114 @@ def resolve_option_contract(
                 matching = liquid_matching
 
             if matching:
-                if tier_upper == "HIGH_GAMMA_ASYMMETRY":
-                    # For Bullish CE: OTM+1 is first strike > spot (within 1.8 step)
-                    # For Bearish PE: OTM+1 is first strike < spot (within 1.8 step)
-                    if is_bull:
-                        otm_candidates = [
-                            c
-                            for c in matching
-                            if float(getattr(c, "strike", 0.0)) > spot
-                            and (float(getattr(c, "strike", 0.0)) - spot) <= (step * 1.8)
-                        ]
-                        otm_candidates.sort(key=lambda c: float(getattr(c, "strike", 0.0)))
-                    else:
-                        otm_candidates = [
-                            c
-                            for c in matching
-                            if float(getattr(c, "strike", 0.0)) < spot
-                            and (spot - float(getattr(c, "strike", 0.0))) <= (step * 1.8)
-                        ]
-                        otm_candidates.sort(key=lambda c: -float(getattr(c, "strike", 0.0)))
+                # Pre-extract or compute deltas for near-the-money candidate contracts
+                for c in matching:
+                    extract_contract_delta(c, spot, opt_type, getattr(c, "expiry", None))
 
-                    # Filter for viable liquidity (avoid 0.05 penny junk)
-                    min_viable_ltp = 15.0 if is_idx else 3.0
-                    viable_otm = [
+                if tier_upper == "HIGH_GAMMA_ASYMMETRY":
+                    # Target delta ~ 0.35 (range [0.20, 0.45]) on OTM side
+                    otm_delta_candidates = [
                         c
-                        for c in otm_candidates
-                        if float(getattr(c, "last_price", 0.0)) >= min_viable_ltp
+                        for c in matching
+                        if (
+                            float(getattr(c, "strike", 0.0)) > spot
+                            if is_bull
+                            else float(getattr(c, "strike", 0.0)) < spot
+                        )
+                        and getattr(c, "delta", None) is not None
+                        and 0.20 <= abs(float(c.delta)) <= 0.45
+                        and float(getattr(c, "last_price", 0.0)) >= (15.0 if is_idx else 3.0)
                     ]
-                    if viable_otm:
-                        chosen = viable_otm[0]
-                    elif otm_candidates:
-                        chosen = otm_candidates[0]
+                    if otm_delta_candidates:
+                        otm_delta_candidates.sort(key=lambda c: abs(abs(float(c.delta)) - 0.35))
+                        chosen = otm_delta_candidates[0]
+                    else:
+                        # Fallback to strike step heuristic
+                        if is_bull:
+                            otm_candidates = [
+                                c
+                                for c in matching
+                                if float(getattr(c, "strike", 0.0)) > spot
+                                and (float(getattr(c, "strike", 0.0)) - spot) <= (step * 1.8)
+                            ]
+                            otm_candidates.sort(key=lambda c: float(getattr(c, "strike", 0.0)))
+                        else:
+                            otm_candidates = [
+                                c
+                                for c in matching
+                                if float(getattr(c, "strike", 0.0)) < spot
+                                and (spot - float(getattr(c, "strike", 0.0))) <= (step * 1.8)
+                            ]
+                            otm_candidates.sort(key=lambda c: -float(getattr(c, "strike", 0.0)))
+
+                        min_viable_ltp = 15.0 if is_idx else 3.0
+                        viable_otm = [
+                            c
+                            for c in otm_candidates
+                            if float(getattr(c, "last_price", 0.0)) >= min_viable_ltp
+                        ]
+                        if viable_otm:
+                            chosen = viable_otm[0]
+                        elif otm_candidates:
+                            chosen = otm_candidates[0]
+                        else:
+                            matching.sort(
+                                key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot)
+                            )
+                            chosen = matching[0]
+                elif tier_upper == "DEEP_ITM":
+                    # Target delta ~ 0.75 (range [0.65, 0.90]) on ITM side
+                    itm_delta_candidates = [
+                        c
+                        for c in matching
+                        if (
+                            float(getattr(c, "strike", 0.0)) < spot
+                            if is_bull
+                            else float(getattr(c, "strike", 0.0)) > spot
+                        )
+                        and getattr(c, "delta", None) is not None
+                        and 0.65 <= abs(float(c.delta)) <= 0.90
+                    ]
+                    if itm_delta_candidates:
+                        itm_delta_candidates.sort(key=lambda c: abs(abs(float(c.delta)) - 0.75))
+                        chosen = itm_delta_candidates[0]
+                    else:
+                        if is_bull:
+                            itm_candidates = [
+                                c
+                                for c in matching
+                                if float(getattr(c, "strike", 0.0)) < spot
+                                and (spot - float(getattr(c, "strike", 0.0))) <= (step * 2.5)
+                            ]
+                            itm_candidates.sort(
+                                key=lambda c: abs(float(getattr(c, "strike", 0.0)) - (spot - step))
+                            )
+                        else:
+                            itm_candidates = [
+                                c
+                                for c in matching
+                                if float(getattr(c, "strike", 0.0)) > spot
+                                and (float(getattr(c, "strike", 0.0)) - spot) <= (step * 2.5)
+                            ]
+                            itm_candidates.sort(
+                                key=lambda c: abs(float(getattr(c, "strike", 0.0)) - (spot + step))
+                            )
+                        chosen = itm_candidates[0] if itm_candidates else matching[0]
+                else:  # Default "ATM"
+                    # Institutional 50-Delta strike selection:
+                    # Prefer contract with |delta| closest to 0.50 (in sweet spot [0.38, 0.62])
+                    atm_delta_candidates = [
+                        c
+                        for c in matching
+                        if getattr(c, "delta", None) is not None
+                        and 0.38 <= abs(float(c.delta)) <= 0.62
+                    ]
+                    if atm_delta_candidates:
+                        atm_delta_candidates.sort(key=lambda c: abs(abs(float(c.delta)) - 0.50))
+                        chosen = atm_delta_candidates[0]
                     else:
                         matching.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
                         chosen = matching[0]
-                elif tier_upper == "DEEP_ITM":
-                    if is_bull:
-                        itm_candidates = [
-                            c
-                            for c in matching
-                            if float(getattr(c, "strike", 0.0)) < spot
-                            and (spot - float(getattr(c, "strike", 0.0))) <= (step * 2.5)
-                        ]
-                        itm_candidates.sort(
-                            key=lambda c: abs(float(getattr(c, "strike", 0.0)) - (spot - step))
-                        )
-                    else:
-                        itm_candidates = [
-                            c
-                            for c in matching
-                            if float(getattr(c, "strike", 0.0)) > spot
-                            and (float(getattr(c, "strike", 0.0)) - spot) <= (step * 2.5)
-                        ]
-                        itm_candidates.sort(
-                            key=lambda c: abs(float(getattr(c, "strike", 0.0)) - (spot + step))
-                        )
-                    chosen = itm_candidates[0] if itm_candidates else matching[0]
-                else:  # Default "ATM"
-                    matching.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
-                    chosen = matching[0]
 
                 opt_sym = chosen.symbol
                 opt_ltp = float(chosen.last_price)
@@ -494,12 +592,16 @@ def resolve_option_contract(
 
     opt_sl = disciplined_sl_floor
 
-    # If underlying SL is provided, calibrate option stop with estimated delta
-    delta_est = (
-        0.40
-        if tier_upper == "HIGH_GAMMA_ASYMMETRY"
-        else (0.65 if tier_upper == "DEEP_ITM" else 0.50)
-    )
+    # Dynamic option stop-loss & target calibration using actual contract delta
+    contract_delta = abs(float(getattr(chosen_contract, "delta", 0.0) or 0.0))
+    if 0.15 <= contract_delta <= 0.95:
+        delta_est = round(contract_delta, 3)
+    else:
+        delta_est = (
+            0.40
+            if tier_upper == "HIGH_GAMMA_ASYMMETRY"
+            else (0.65 if tier_upper == "DEEP_ITM" else 0.50)
+        )
     if underlying_sl and underlying_sl > 0:
         spot_risk = abs(spot - underlying_sl)
         estimated_prem_risk = spot_risk * delta_est
@@ -753,4 +855,6 @@ def resolve_option_contract(
         confirmation_rule=conf_rule,
         execution_notes=exec_notes,
         bid_ask_spread_pct=spread_pct_val,
+        delta=contract_delta if contract_delta > 0 else None,
+        iv=contract_iv if contract_iv > 0 else None,
     )

@@ -923,6 +923,7 @@ def calculate_trade_plan(
     elif (
         (rr_t2 >= 1.8 and rr_t1 >= 1.0)
         or (rr_t2 >= 2.0 and rr_t1 >= 0.6)
+        or (rr_t2 >= 1.5 and rr_t1 >= 0.8)
         or (has_active_blast and (rr_t2 >= 1.3 or rr_t1 >= 0.8))
     ):
         is_asymmetry_viable = True
@@ -935,9 +936,9 @@ def calculate_trade_plan(
     else:
         is_asymmetry_viable = False
         asymmetry_verdict = "POOR_ASYMMETRY_REJECTED"
-        if rr_t2 < 1.8:
+        if rr_t2 < 1.5:
             asymmetry_note = (
-                f"Structural R:R ({rr_t2:.2f}:1) is below 1.8:1 threshold. "
+                f"Structural R:R ({rr_t2:.2f}:1) is below 1.5:1 threshold. "
                 f"Overhead resistance ({t1_rationale}) is too close to entry relative to required invalidation stop ({stop_distance_pts:,.1f} pts). "
                 f"Trade should be SKIPPED or taken via credit spreads only."
             )

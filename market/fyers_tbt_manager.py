@@ -76,6 +76,9 @@ def _is_fyers_sdk_available() -> bool:
 
 
 MAX_TBT_SYMBOLS = 15
+MAX_SYMBOLS_PER_WORKER = (
+    5  # Fyers API physical hard limit: at most 5 active symbols per WebSocket connection
+)
 RESERVED_ANCHOR_SLOTS = 3  # Slots 0..2: NIFTY, BANKNIFTY, MIDCPNIFTY near-month futures
 MAX_DYNAMIC_SLOTS = 12  # Slots 3..14: 100% elastic demand-driven slots
 MAX_CORE_GRID_SLOTS = 8  # 3 anchor futures + up to 5 focused asset contracts
@@ -485,7 +488,7 @@ class TbtSocketWorker:
         self.status: str = "DISCONNECTED"  # DISCONNECTED, CONNECTING, CONNECTED, DEGRADED_429
         self.subscribed: set[str] = set()
         self.desired: list[str] = []
-        self._channel_symbols: dict[str, set[str]] = {"1": set(), "2": set(), "3": set()}
+        self._channel_symbols: dict[str, set[str]] = {"1": set()}
         self.last_connected_at: float = 0.0
         self.last_packet_at: float = 0.0
         self.degraded_until: float = 0.0
@@ -564,15 +567,28 @@ class TbtSocketWorker:
         logger.warning(f"[TbtWorker-{self.worker_id}] Fyers server error: {message}")
         if "symbol count exceeds limit" in str(message).lower():
             logger.info(
-                f"[TbtWorker-{self.worker_id}] Resetting channels after server symbol limit warning..."
+                f"[TbtWorker-{self.worker_id}] Server symbol limit exceeded; closing socket to clear server-side channels cleanly..."
             )
             with self._lock:
-                self._channel_symbols = {"1": set(), "2": set(), "3": set()}
+                ws_to_close = self.ws
+                self.ws = None
+                self.connected = False
+                self._channel_symbols = {"1": set()}
+                self.degraded_until = time.time() + 5.0
+            if ws_to_close:
+                try:
+                    setattr(ws_to_close, "restart_flag", False)
+                    if hasattr(ws_to_close, "close_connection"):
+                        ws_to_close.close_connection()
+                    elif hasattr(ws_to_close, "close"):
+                        ws_to_close.close()
+                except Exception as e_close:
+                    logger.debug(f"[TbtWorker-{self.worker_id}] Socket teardown error: {e_close}")
 
     def _on_close(self, *args, **kwargs) -> None:
         with self._lock:
             self.connected = False
-            self._channel_symbols = {"1": set(), "2": set(), "3": set()}
+            self._channel_symbols = {"1": set()}
             if self.status != "DEGRADED_429":
                 self.status = "DISCONNECTED"
         logger.info(f"[TbtWorker-{self.worker_id}] Disconnected")
@@ -625,68 +641,57 @@ class TbtSocketWorker:
         with self._lock:
             if not self.connected or not self.ws:
                 return
-            desired_list = [s for s in self.desired[:MAX_TBT_SYMBOLS] if is_tbt_eligible_symbol(s)]
+            # Strict per-connection invariant: Never attempt > 5 symbols on a single WebSocket connection!
+            desired_list = [
+                s for s in self.desired[:MAX_SYMBOLS_PER_WORKER] if is_tbt_eligible_symbol(s)
+            ]
             desired_set = set(desired_list)
 
             try:
                 from fyers_apiv3.FyersWebsocket.tbt_ws import SubscriptionModes
             except ImportError:
-                return
 
-            # Deterministic slot-to-channel partitioning:
-            # Channel 1: slots 0..4 (max 5)
-            # Channel 2: slots 5..9 (max 5)
-            # Channel 3: slots 10..14 (max 5)
-            for ch_idx in range(3):
-                ch = str(ch_idx + 1)
-                target_syms = set(desired_list[ch_idx * 5 : (ch_idx + 1) * 5])
-                current_syms = set(self._channel_symbols.get(ch, set()))
+                class SubscriptionModes:
+                    DEPTH = "DEPTH"
 
-                to_unsub = current_syms - target_syms
-                if to_unsub:
-                    try:
-                        self.ws.unsubscribe(
-                            symbol_tickers=set(to_unsub),
-                            channelNo=ch,
-                            mode=SubscriptionModes.DEPTH,
-                        )
-                        logger.info(
-                            f"[TbtWorker-{self.worker_id}] Unsubscribed {len(to_unsub)} symbols from ch {ch}: {to_unsub}"
-                        )
-                    except Exception as e:
-                        logger.debug(
-                            f"[TbtWorker-{self.worker_id}] Unsubscribe failed on ch {ch}: {e}"
-                        )
+            ch = "1"
+            target_syms = desired_set
+            current_syms = set(self._channel_symbols.get(ch, set()))
 
-                to_sub = target_syms - current_syms
-                if to_sub:
-                    try:
-                        self.ws.subscribe(
-                            symbol_tickers=set(to_sub),
-                            channelNo=ch,
-                            mode=SubscriptionModes.DEPTH,
-                        )
-                        logger.info(
-                            f"[TbtWorker-{self.worker_id}] Subscribed {len(to_sub)} symbols to ch {ch}: {to_sub}"
-                        )
-                    except Exception as e:
-                        logger.debug(
-                            f"[TbtWorker-{self.worker_id}] Subscribe failed on ch {ch}: {e}"
-                        )
+            to_unsub = current_syms - target_syms
+            if to_unsub:
+                try:
+                    self.ws.unsubscribe(
+                        symbol_tickers=set(to_unsub),
+                        channelNo=ch,
+                        mode=SubscriptionModes.DEPTH,
+                    )
+                    logger.info(
+                        f"[TbtWorker-{self.worker_id}] Unsubscribed {len(to_unsub)} symbols from ch {ch}: {to_unsub}"
+                    )
+                except Exception as e:
+                    logger.debug(f"[TbtWorker-{self.worker_id}] Unsubscribe failed on ch {ch}: {e}")
 
-                self._channel_symbols[ch] = target_syms
+            to_sub = target_syms - current_syms
+            if to_sub:
+                try:
+                    self.ws.subscribe(
+                        symbol_tickers=set(to_sub),
+                        channelNo=ch,
+                        mode=SubscriptionModes.DEPTH,
+                    )
+                    logger.info(
+                        f"[TbtWorker-{self.worker_id}] Subscribed {len(to_sub)} symbols to ch {ch}: {to_sub}"
+                    )
+                except Exception as e:
+                    logger.debug(f"[TbtWorker-{self.worker_id}] Subscribe failed on ch {ch}: {e}")
 
+            self._channel_symbols[ch] = target_syms
             self.subscribed = desired_set
 
             if hasattr(self.ws, "switchChannel") and self.subscribed:
                 try:
-                    active_channels = {
-                        ch for ch in ("1", "2", "3") if self._channel_symbols.get(ch)
-                    }
-                    pause_channels = {"1", "2", "3"} - active_channels
-                    if not active_channels:
-                        active_channels = {"1"}
-                    self.ws.switchChannel(active_channels, pause_channels)
+                    self.ws.switchChannel(resume_channels={"1"}, pause_channels=set())
                 except Exception as e:
                     logger.debug(f"[TbtWorker-{self.worker_id}] switchChannel failed: {e}")
 
@@ -701,16 +706,21 @@ class TbtSocketWorker:
                 if self.connected and self.ws and to_remove_tbt:
                     try:
                         from fyers_apiv3.FyersWebsocket.tbt_ws import SubscriptionModes
+                    except ImportError:
 
-                        for ch, syms in self._channel_symbols.items():
-                            in_ch = syms.intersection(to_remove_tbt)
-                            if in_ch:
-                                syms.difference_update(in_ch)
-                                self.ws.unsubscribe(
-                                    symbol_tickers=set(in_ch),
-                                    channelNo=ch,
-                                    mode=SubscriptionModes.DEPTH,
-                                )
+                        class SubscriptionModes:
+                            DEPTH = "DEPTH"
+
+                    try:
+                        ch = "1"
+                        in_ch = self._channel_symbols.get(ch, set()).intersection(to_remove_tbt)
+                        if in_ch:
+                            self._channel_symbols[ch].difference_update(in_ch)
+                            self.ws.unsubscribe(
+                                symbol_tickers=set(in_ch),
+                                channelNo=ch,
+                                mode=SubscriptionModes.DEPTH,
+                            )
                     except Exception as e:
                         logger.debug(f"[TbtWorker-{self.worker_id}] Unsubscribe error: {e}")
 
@@ -927,18 +937,37 @@ class FyersTbtManager:
                 cls._instance._initialized = False
             return cls._instance
 
+    def _eval_multi_socket_entitled(self) -> bool:
+        """
+        Evaluate multi-socket entitlement (up to 3 concurrent WebSockets = 15 symbols)
+        based on FYERS_TBT_WORKERS and FYERS_PLAN (defaults to True for Prime).
+        """
+        now = time.time()
+        if getattr(self, "_multi_socket_suppressed_until", 0.0) > now:
+            return False
+        env_val = os.environ.get("FYERS_TBT_WORKERS", "").strip()
+        if env_val:
+            try:
+                num = int(env_val)
+                return num > 1
+            except ValueError:
+                return env_val.lower() not in ("1", "false", "no", "0")
+        plan = os.environ.get("FYERS_PLAN", "PRIME").upper()
+        return plan == "PRIME"
+
     def __init__(self) -> None:
         if getattr(self, "_initialized", False):
             return
         self._ws: Any = None
         self._workers: list[TbtSocketWorker] = []
-        self._multi_socket_entitled: bool = os.environ.get("FYERS_TBT_WORKERS", "3") != "1"
+        self._multi_socket_suppressed_until: float = 0.0
+        self._multi_socket_entitled: bool = self._eval_multi_socket_entitled()
         self._connected: bool = False
         self._access_token: str = ""
         self._app_id: str = ""
         self._thread: Optional[threading.Thread] = None
         self._subscribed: Set[str] = set()
-        self._channel_symbols: dict[str, set[str]] = {"1": set(), "2": set(), "3": set()}
+        self._channel_symbols: dict[str, set[str]] = {"1": set()}
         self._depth_cache: dict[str, dict[str, Any]] = {}
         self._depth_lock = threading.Lock()
         self._tick_buffers: dict[str, RollingTickBuffer] = {}
@@ -995,7 +1024,7 @@ class FyersTbtManager:
             self._slot_allocated_at.clear()
             self._wall_history.clear()
             self._subscribed.clear()
-            self._channel_symbols = {"1": set(), "2": set(), "3": set()}
+            self._channel_symbols = {"1": set()}
             self._current_session = "AUTO"
             self._workers.clear()
         with self._depth_lock:
@@ -1149,13 +1178,24 @@ class FyersTbtManager:
                     if free_cap > 0 or expired_ttl:
                         self.sync_subscriptions()
 
+                # Check if multi-socket temporary suppression has expired
+                now_g = time.time()
+                if (
+                    getattr(self, "_multi_socket_suppressed_until", 0.0) > 0
+                    and now_g >= self._multi_socket_suppressed_until
+                ):
+                    self._multi_socket_suppressed_until = 0.0
+                    self._multi_socket_entitled = self._eval_multi_socket_entitled()
+                    logger.info(
+                        "[TbtManager] Multi-socket 429 suppression probation expired. Re-enabling multi-socket entitlement."
+                    )
+
                 # 2d. Reconnect quiescent/disconnected workers if past backoff
-                if getattr(self, "_multi_socket_entitled", True) and self._workers:
-                    now_g = time.time()
+                if self._eval_multi_socket_entitled() and self._workers:
                     for w in self._workers:
                         if (
                             not w.connected
-                            and w.status == "DISCONNECTED"
+                            and w.status in ("DISCONNECTED", "DEGRADED_429")
                             and now_g >= w.degraded_until
                         ):
                             w.connect()
@@ -1194,8 +1234,9 @@ class FyersTbtManager:
                 active_session = get_market_session()
                 if active_session != "OFF_MARKET":
                     now_w = time.time()
+                    entitled = self._eval_multi_socket_entitled()
                     for w in self._workers:
-                        if not self._multi_socket_entitled and w.worker_id > 0:
+                        if not entitled and w.worker_id > 0:
                             continue
                         if not w.connected and (
                             w.status == "DISCONNECTED"
@@ -1266,10 +1307,14 @@ class FyersTbtManager:
 
         # Helper thread to connect workers 1 and 2 with staggered delay
         def _staggered_worker_connect():
+            self._multi_socket_entitled = self._eval_multi_socket_entitled()
             if not getattr(self, "_multi_socket_entitled", True):
+                logger.info(
+                    "[TbtManager] Multi-socket disabled by policy/plan. Operating with primary worker (5 slots)."
+                )
                 return
             if len(self._workers) > 1 and not self._stop_event.is_set():
-                time.sleep(5.0)
+                time.sleep(6.0)
                 if self._workers[0].status == "DEGRADED_429":
                     logger.info(
                         "[TbtManager] Primary worker rate-limited (429). Halting secondary worker connection."
@@ -1278,7 +1323,7 @@ class FyersTbtManager:
                 if not self._stop_event.is_set():
                     self._workers[1].connect()
             if len(self._workers) > 2 and not self._stop_event.is_set():
-                time.sleep(6.0)
+                time.sleep(7.0)
                 if (
                     self._workers[0].status == "DEGRADED_429"
                     or self._workers[1].status == "DEGRADED_429"
@@ -1292,28 +1337,43 @@ class FyersTbtManager:
         ).start()
 
     def _handle_worker_status(self, worker_id: int, status: str) -> None:
-        self._connected = any(w.connected for w in self._workers)
-        if self._workers and getattr(self._workers[0], "ws", None):
-            self._ws = self._workers[0].ws
-        if status == "CONNECTED":
-            if not self._core_grid:
-                self.refresh_grid()
-            else:
+        try:
+            self._connected = any(w.connected for w in self._workers)
+            if self._workers and getattr(self._workers[0], "ws", None):
+                self._ws = self._workers[0].ws
+            if status == "CONNECTED":
+                if not self._core_grid:
+                    self.refresh_grid()
+                else:
+                    self.sync_subscriptions()
+            elif status in ("DEGRADED_429", "DISCONNECTED"):
+                if status == "DEGRADED_429" and worker_id > 0 and self._workers:
+                    # Do NOT permanently disable multi-socket on a single transient 429!
+                    # Only if consecutive 429s persist (>= 5) do we place secondary workers on temporary probation
+                    if (
+                        self._workers[worker_id]._consecutive_429 >= 5
+                        and self._multi_socket_entitled
+                    ):
+                        self._multi_socket_suppressed_until = time.time() + 900.0
+                        self._multi_socket_entitled = False
+                        logger.warning(
+                            f"[TbtManager] Secondary worker {worker_id} hit repeated 429s (strike {self._workers[worker_id]._consecutive_429}). "
+                            f"Multi-socket placed on temporary probation for 15m; will self-heal automatically."
+                        )
+                        for w in self._workers[1:]:
+                            w.status = "STANDBY_SINGLE_SOCKET"
+                            w.desired = []
+                    else:
+                        logger.info(
+                            f"[TbtManager] Secondary worker {worker_id} in backoff cooldown (strike {self._workers[worker_id]._consecutive_429}). "
+                            "Pool sentinel will retry connection automatically."
+                        )
+                # Proactively rebalance top priority slots onto remaining connected workers
                 self.sync_subscriptions()
-        elif status in ("DEGRADED_429", "DISCONNECTED"):
-            if status == "DEGRADED_429" and worker_id > 0 and self._workers:
-                if self._multi_socket_entitled:
-                    self._multi_socket_entitled = False
-                    logger.info(
-                        f"[TbtManager] Secondary worker {worker_id} rate-limited (429). "
-                        "Recognized single-socket retail account entitlement. "
-                        "Gracefully parking secondary workers in standby to protect IP quota."
-                    )
-                    for w in self._workers[1:]:
-                        w.status = "STANDBY_SINGLE_SOCKET"
-                        w.desired = []
-            # Proactively rebalance top priority slots onto remaining connected workers
-            self.sync_subscriptions()
+        except Exception as e:
+            logger.exception(
+                f"[TbtManager] Worker status handling error for worker {worker_id} ({status}): {e}"
+            )
 
     def _handle_connect(self, *args, **kwargs) -> None:
         """Legacy callback maintained for single-socket compatibility."""
@@ -2308,23 +2368,15 @@ class FyersTbtManager:
                     for w in disconnected_workers:
                         w.desired = []
 
-                    num_conn = len(connected_workers)
-                    if num_conn == 1:
-                        # Single active worker takes all 15 desired symbols across channels 1..3
-                        connected_workers[0].desired = desired_list[:MAX_TBT_SYMBOLS]
-                        connected_workers[0].sync()
-                    elif num_conn == 2:
-                        # Worker 0 takes 10 (channels 1 & 2), Worker 1 takes 5 (channel 1)
-                        connected_workers[0].desired = desired_list[:10]
-                        connected_workers[0].sync()
-                        connected_workers[1].desired = desired_list[10:MAX_TBT_SYMBOLS]
-                        connected_workers[1].sync()
-                    else:
-                        # 3 or more workers: 5 symbols each (channel 1 per connection)
-                        for idx, worker in enumerate(connected_workers):
-                            worker_chunk = desired_list[idx * 5 : (idx + 1) * 5]
-                            worker.desired = worker_chunk
-                            worker.sync()
+                    # Dynamically prioritize top slots onto connected workers:
+                    # Each connected worker gets at most MAX_SYMBOLS_PER_WORKER (5),
+                    # strictly respecting the physical Fyers WebSocket server limit.
+                    for idx, worker in enumerate(connected_workers):
+                        start_idx = idx * MAX_SYMBOLS_PER_WORKER
+                        end_idx = start_idx + MAX_SYMBOLS_PER_WORKER
+                        worker_chunk = desired_list[start_idx:end_idx]
+                        worker.desired = worker_chunk
+                        worker.sync()
 
                     self._subscribed = set().union(*(w.subscribed for w in connected_workers))
                 else:
@@ -2460,6 +2512,21 @@ class FyersTbtManager:
             )
 
         return True
+
+    def auto_rotate_dynamic_grid(self, top_fno_movers: Optional[list[str]] = None) -> list[str]:
+        """
+        Autonomous Priority 15-Slot Grid Rotator:
+          - Anchor Slots (3): Near-month futures (NIFTY, BANKNIFTY, MIDCPNIFTY).
+          - Option Slots (up to 6): Today's active ATM CE/PE strikes for current index expiry.
+          - Mover Slots (up to 6): Dynamically rotated with highest-velocity F&O leaders.
+        """
+        if top_fno_movers:
+            for s in top_fno_movers[:6]:
+                try:
+                    self.promote_jit_scout(s, duration_sec=180.0, reason="TOP_FNO_MOVER")
+                except Exception as _e:
+                    logger.debug(f"[TbtManager] Failed to rotate mover {s}: {_e}")
+        return list(self._subscribed)
 
     def promote_jit_scout(
         self,
@@ -2736,10 +2803,28 @@ class FyersTbtManager:
     def rebalance_grid_now(self, session: Optional[str] = None) -> dict[str, Any]:
         """
         Manually trigger full TBT grid rebalance:
-        1. Cleanses stale scouts
-        2. Re-evaluates spot prices for ATM strike rotation
-        3. Synchronizes desired slots against market hierarchy
+        1. Recovers multi-socket entitlement if probation expired or forced
+        2. Reconnects quiescent/disconnected workers
+        3. Cleanses stale scouts
+        4. Re-evaluates spot prices for ATM strike rotation
+        5. Synchronizes desired slots against market hierarchy
         """
+        now = time.time()
+        if (
+            getattr(self, "_multi_socket_suppressed_until", 0.0) > 0
+            and now >= self._multi_socket_suppressed_until
+        ):
+            self._multi_socket_suppressed_until = 0.0
+        self._multi_socket_entitled = self._eval_multi_socket_entitled()
+
+        if self._multi_socket_entitled and self._workers:
+            for w in self._workers:
+                if not w.connected and (
+                    w.status == "DISCONNECTED"
+                    or (w.status == "DEGRADED_429" and now >= w.degraded_until)
+                ):
+                    w.connect()
+
         cleansed = self.cleanse_stale_scouts(ttl_sec=30.0)
         revolved = self.revolve_atm_strikes(force=True)
         self._get_cached_sector_scouts(force_refresh=True)

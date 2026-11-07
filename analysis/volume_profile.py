@@ -21,11 +21,14 @@ Pure numpy/pandas with zero external dependencies.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger("analysis.volume_profile")
 
 
 @dataclass
@@ -539,3 +542,60 @@ def compute_developing_poc_migration(df: pd.DataFrame, num_bins: int = 12) -> di
             res["amt_rule_direction"] = "BEARISH_80_PCT_RULE"
 
     return res
+
+
+def compute_intraday_slot_rvol(
+    df_intraday: pd.DataFrame,
+    current_vol: Optional[float] = None,
+    lookback_days: int = 20,
+) -> float:
+    """
+    Computes Time-Segmented Intraday Relative Volume (RVOL_slot).
+    Accounts for Dalal Street's non-linear U-shaped intraday volume distribution
+    (morning 09:15-10:15 rush, midday 11:30-13:30 lull, afternoon 14:00-15:30 close).
+    Compares the current bar's volume specifically against historical bars occurring at
+    the exact same time-of-day slot over lookback_days.
+    """
+    if df_intraday is None or len(df_intraday) < 5:
+        return 1.0
+
+    vol_col = (
+        "volume"
+        if "volume" in df_intraday.columns
+        else ("Volume" if "Volume" in df_intraday.columns else None)
+    )
+    if not vol_col:
+        return 1.0
+
+    curr_v = (
+        float(current_vol)
+        if (current_vol is not None and current_vol > 0)
+        else float(df_intraday[vol_col].iloc[-1])
+    )
+    if curr_v <= 0:
+        return 1.0
+
+    idx = df_intraday.index
+    if not hasattr(idx, "time"):
+        try:
+            df_intraday = df_intraday.copy()
+            df_intraday.index = pd.to_datetime(df_intraday.index)
+            idx = df_intraday.index
+        except Exception:
+            rolling_20 = df_intraday[vol_col].rolling(20, min_periods=5).mean().iloc[-1]
+            return round(curr_v / max(1.0, float(rolling_20)), 2)
+
+    try:
+        target_time = idx[-1].time()
+        same_slot_mask = [t.time() == target_time for t in idx[:-1]]
+        slot_vols = df_intraday[vol_col].iloc[:-1][same_slot_mask]
+
+        if len(slot_vols) >= 3:
+            avg_slot_vol = float(slot_vols.tail(lookback_days).mean())
+            if avg_slot_vol > 0:
+                return round(curr_v / avg_slot_vol, 2)
+    except Exception as e_suppressed:
+        logger.debug(f"[analysis.volume_profile] Non-fatal slot volume error: {e_suppressed}")
+
+    rolling_avg = df_intraday[vol_col].rolling(20, min_periods=5).mean().iloc[-1]
+    return round(curr_v / max(1.0, float(rolling_avg)), 2)

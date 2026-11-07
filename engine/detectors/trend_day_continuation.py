@@ -438,6 +438,73 @@ def detect_trend_day_pullback(
     if is_narrow_cpr:
         confidence_score = min(98, confidence_score + 6)
 
+    # Smart Money Flow Analysis: Granville OBV, Swingscape Triple-DMI, and Tom Williams VSA
+    has_flow = False
+    vsa_sig = None
+    dmi_verdict = None
+    obv_div = None
+
+    if df_5m is not None and len(df_5m) >= 5:
+        try:
+            from analysis.vsa import analyse_vsa
+            from analysis.dmi_filter import evaluate_triple_dmi
+            from analysis.obv import analyse_obv
+
+            vsa_res = analyse_vsa(df_5m, is_intraday=True)
+            if vsa_res:
+                vsa_sig = vsa_res.signal
+                if is_bull_pullback and vsa_res.signal in (
+                    "NO_SUPPLY",
+                    "STOPPING_VOLUME",
+                    "EFFORT_VS_RESULT_BULLISH_ABSORPTION",
+                    "ABSORPTION_BREAKOUT",
+                ):
+                    confidence_score += 6
+                    has_flow = True
+                elif is_bear_pullback and vsa_res.signal in (
+                    "NO_DEMAND",
+                    "SELLING_CLIMAX",
+                    "EFFORT_VS_RESULT_BEARISH_CLIMAX",
+                ):
+                    confidence_score += 6
+                    has_flow = True
+
+            dmi_res = evaluate_triple_dmi(df_5m, is_intraday=True)
+            if dmi_res:
+                dmi_verdict = dmi_res.verdict
+                if is_bull_pullback and (
+                    dmi_res.verdict == "TRIPLE_DMI_BULLISH_CONFIRMED" or dmi_res.plus_di >= 22.0
+                ):
+                    confidence_score += 5
+                    has_flow = True
+                elif is_bear_pullback and (
+                    dmi_res.verdict == "TRIPLE_DMI_BEARISH_CONFIRMED" or dmi_res.minus_di >= 22.0
+                ):
+                    confidence_score += 5
+                    has_flow = True
+
+            obv_res = analyse_obv(df_5m, is_intraday=True)
+            if obv_res:
+                obv_div = obv_res.divergence
+                if is_bull_pullback and (
+                    obv_res.divergence in ("BULLISH_CONVERGENCE", "BULLISH_DIVERGENCE")
+                    or obv_res.obv_slope_5bar > 0
+                ):
+                    confidence_score += 4
+                    has_flow = True
+                elif is_bear_pullback and (
+                    obv_res.divergence in ("BEARISH_CONVERGENCE", "BEARISH_DIVERGENCE")
+                    or obv_res.obv_slope_5bar < 0
+                ):
+                    confidence_score += 4
+                    has_flow = True
+        except Exception as e_flow:
+            logger.debug(f"[TrendContinuation] Flow analysis skipped: {e_flow}")
+
+    confidence_score = min(98, max(75, confidence_score))
+    is_afternoon = now_time >= dtime(13, 30)
+    pref_vehicle = "SPREAD_ONLY" if is_afternoon else "NAKED_OPTION"
+
     # ── Option Resolution via Unified VIX-Aware Resolver ──────────────
     from engine.option_resolver import resolve_option_contract
 
@@ -621,7 +688,12 @@ def detect_trend_day_pullback(
             "cpr_type": "NARROW" if is_narrow_cpr else ("WIDE" if is_wide_cpr else "AVERAGE"),
             "is_narrow_cpr": is_narrow_cpr,
             "is_wide_cpr": is_wide_cpr,
+            "has_flow": has_flow,
+            "vsa_signal": vsa_sig,
+            "dmi_triple_verdict": dmi_verdict,
+            "obv_regime": obv_div,
         },
+        preferred_vehicle=pref_vehicle,
         no_chase_boundary=opt_no_chase if has_opt else resolved_no_chase,
         spot_no_chase_boundary=resolved_no_chase if has_opt else None,
         created_at=now_iso,

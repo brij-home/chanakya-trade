@@ -121,6 +121,19 @@ export const useChatStore = create((set, get) => ({
     set({ selectedSymbol: clean })
   },
 
+  // ── Global Horizon State ('INTRADAY' | 'SWING') ──────────────────────────────
+  horizon: (typeof window !== 'undefined' && localStorage.getItem('chanakya_horizon')) || 'INTRADAY',
+  setHorizon: (horizon) => {
+    const val = horizon === 'SWING' ? 'SWING' : 'INTRADAY'
+    try { localStorage.setItem('chanakya_horizon', val) } catch (_) {}
+    set({ horizon: val })
+  },
+  toggleHorizon: () => {
+    const next = get().horizon === 'INTRADAY' ? 'SWING' : 'INTRADAY'
+    try { localStorage.setItem('chanakya_horizon', next) } catch (_) {}
+    set({ horizon: next })
+  },
+
   // ── Terminal View Settings (Institutional Default: Chart Hidden) ─────────────
   terminalShowChart: false,
   setTerminalShowChart: (show) =>

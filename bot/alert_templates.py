@@ -1418,6 +1418,10 @@ class FNOAlertData:
     structural_spot_sl: Optional[float] = None
     disaster_stop_floor: Optional[float] = None
     is_do_not_miss: bool = False
+    obv_divergence: Optional[str] = None
+    dmi_triple_verdict: Optional[str] = None
+    vsa_signal: Optional[str] = None
+    avwap_bias: Optional[str] = None
 
     @classmethod
     def from_dict(
@@ -1605,6 +1609,13 @@ class FNOAlertData:
             structural_spot_sl=spot_anchor_val,
             disaster_stop_floor=disaster_floor,
             is_do_not_miss=bool(d.get("is_do_not_miss", False)),
+            obv_divergence=d.get("obv_divergence")
+            or (d.get("metrics") or {}).get("obv_divergence"),
+            dmi_triple_verdict=d.get("dmi_triple_verdict")
+            or d.get("dmi_verdict")
+            or (d.get("metrics") or {}).get("dmi_triple_verdict"),
+            vsa_signal=d.get("vsa_signal") or (d.get("metrics") or {}).get("vsa_signal"),
+            avwap_bias=d.get("avwap_bias") or (d.get("metrics") or {}).get("avwap_bias"),
         )
 
 
@@ -2953,6 +2964,25 @@ def render_fno_alert(
         )
         fno_hedge_line = f"\n• <b>🛡️ Hedged Spread (Preferred):</b> <code>{fh_strat}</code>{fno_exp_tag}{legs_txt}{cost_txt} [Hedged Spread · Defined Risk Payoff]"
 
+    flow_badges = []
+    if d.obv_divergence and str(d.obv_divergence).upper() not in (
+        "NONE",
+        "NO_DIVERGENCE",
+        "NEUTRAL",
+    ):
+        flow_badges.append(f"OBV: {str(d.obv_divergence).replace('_', ' ').title()}")
+    if d.dmi_triple_verdict and str(d.dmi_triple_verdict).upper() not in (
+        "NONE",
+        "WEAK_OR_CHOPPY",
+        "NEUTRAL",
+    ):
+        flow_badges.append(f"Triple-DMI: {str(d.dmi_triple_verdict).replace('_', ' ').title()}")
+    if d.vsa_signal and str(d.vsa_signal).upper() not in ("NONE", "NEUTRAL"):
+        flow_badges.append(f"VSA: {str(d.vsa_signal).replace('_', ' ').title()}")
+    if d.avwap_bias and str(d.avwap_bias).upper() not in ("NONE", "NEUTRAL"):
+        flow_badges.append(f"AVWAP: {str(d.avwap_bias).replace('_', ' ').title()}")
+    flow_line = f"• 📊 <b>Flow:</b> {' · '.join(flow_badges)}\n" if flow_badges else ""
+
     if d.spot_invalidation_anchor:
         disaster_str = (
             f" [Disaster Floor: -32% @ ₹{d.disaster_stop_floor:,.2f}]"
@@ -2984,7 +3014,8 @@ def render_fno_alert(
             else "\n"
         )
         + f"• <b>R:R:</b> <b>{rr_display}</b>{lot_rr_str}{no_chase_str}{fno_hedge_line}\n"
-        f"💡 <b>Reason:</b> {d.trigger_reason} · {d.vol_oi:.1f}x Vol/OI (Imbalance: {d.imbalance:.1f}x)\n"
+        + flow_line
+        + f"💡 <b>Reason:</b> {d.trigger_reason} · {d.vol_oi:.1f}x Vol/OI (Imbalance: {d.imbalance:.1f}x)\n"
         f"📋 <b>Playbook:</b> <i>{d.profit_rule}</i>"
         f"{conv_badge}\n"
         f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
@@ -7965,6 +7996,23 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 c_apc = _clean_sig_phrase(clean_apc, 45)
                 if c_apc and c_apc not in plan_str and c_apc not in sigs:
                     sigs.append(c_apc)
+
+        # Institutional Flow Signals (OBV / Triple-DMI / VSA / AVWAP)
+        obv_div = metrics_d.get("obv_divergence")
+        if obv_div and str(obv_div).upper() not in ("NONE", "NO_DIVERGENCE", "NEUTRAL", "NULL"):
+            sigs.append(f"OBV: {str(obv_div).replace('_', ' ').title()}")
+
+        dmi_verd = metrics_d.get("dmi_triple_verdict")
+        if dmi_verd and str(dmi_verd).upper() not in ("NONE", "WEAK_OR_CHOPPY", "NEUTRAL", "NULL"):
+            sigs.append(f"Triple-DMI: {str(dmi_verd).replace('_', ' ').title()}")
+
+        vsa_sig = metrics_d.get("vsa_signal")
+        if vsa_sig and str(vsa_sig).upper() not in ("NONE", "NEUTRAL", "NULL"):
+            sigs.append(f"VSA: {str(vsa_sig).replace('_', ' ').title()}")
+
+        avwap_b = metrics_d.get("avwap_bias") or metrics_d.get("avwap_confluence")
+        if avwap_b and str(avwap_b).upper() not in ("NONE", "NEUTRAL", "NULL"):
+            sigs.append(f"AVWAP: {str(avwap_b).replace('_', ' ').title()}")
 
         # Minervini stage
         mstage = metrics_d.get("minervini_stage")

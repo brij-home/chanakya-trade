@@ -21,51 +21,15 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
-import numpy as np
-import pandas as pd
 
 from config.constants import IST
 from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 from engine.defined_risk_spreads import build_defined_risk_spread
 from market.instruments import get_fno_lot_size
+from analysis.dmi_filter import compute_adx
 
 logger = logging.getLogger(__name__)
-
-
-def compute_adx(df: pd.DataFrame, period: int = 14) -> Optional[float]:
-    """Computes standard Wilder's ADX from OHLCV dataframe."""
-    if df is None or len(df) < period * 2:
-        return None
-    try:
-        cols = {str(c).lower(): c for c in df.columns}
-        if not {"high", "low", "close"}.issubset(set(cols.keys())):
-            return None
-        h = df[cols["high"]].astype(float)
-        l = df[cols["low"]].astype(float)
-        c = df[cols["close"]].astype(float)
-
-        up_move = h - h.shift(1)
-        down_move = l.shift(1) - l
-
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-
-        prev_c = c.shift(1)
-        tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
-
-        # Smooth
-        atr = tr.rolling(window=period).mean()
-        plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(window=period).mean() / atr)
-        minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(window=period).mean() / atr)
-
-        dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
-        adx = dx.rolling(window=period).mean()
-        val = float(adx.iloc[-1])
-        return round(val, 2) if not np.isnan(val) and val >= 0 else None
-    except Exception as exc:
-        logger.debug("ADX computation error: %s", exc)
-        return None
 
 
 def detect_defined_risk_neutral(
@@ -128,13 +92,49 @@ def detect_defined_risk_neutral(
         except Exception as exc:
             logger.debug("OI wall detection error: %s", exc)
 
-    # Condition: Must exhibit either low ADX or narrow intraday consolidation or flanking OI walls
+    # 4. Flow-Based Choppy / Neutral Regime Confluence (OBV, DMI, AVWAP, VSA)
+    obv_status = "NEUTRAL"
+    dmi_status = "NEUTRAL"
+    avwap_status = "NEUTRAL"
+    vsa_status = "NEUTRAL"
+    is_flow_choppy = False
+
+    if candles is not None and len(candles) >= 8:
+        try:
+            from analysis.obv import analyse_obv
+            from analysis.dmi_filter import evaluate_triple_dmi
+            from analysis.anchored_vwap import detect_intraday_anchors
+            from analysis.vsa import analyse_vsa
+
+            _obv = analyse_obv(candles, is_intraday=True)
+            obv_status = _obv.regime
+            _dmi = evaluate_triple_dmi(candles, is_intraday=True)
+            dmi_status = _dmi.verdict
+            _avwap = detect_intraday_anchors(candles, spot_price=ltp)
+            avwap_status = _avwap.get("confluence", "NEUTRAL")
+            _vsa = analyse_vsa(candles, symbol=symbol, is_intraday=True)
+            vsa_status = _vsa.vsa_signal
+
+            # Flow is verified choppy / non-trending if:
+            # 1. OBV is neutral / compressing
+            # 2. DMI shows weak momentum below threshold
+            # 3. AVWAP is compressed inside anchors
+            if dmi_status in ("WEAK_MOMENTUM_BELOW_25", "CHOP_WHIPSAW", "NEUTRAL"):
+                is_flow_choppy = True
+            if avwap_status in ("COMPRESSION_INSIDE", "NEUTRAL"):
+                is_flow_choppy = True
+        except Exception as e_flow_neutral:
+            logger.debug("Flow neutral analysis non-fatal: %s", e_flow_neutral)
+
+    # Condition: Must exhibit either low ADX, narrow intraday consolidation, flanking OI walls, or verified choppy flow
     evidence_score = 0
     if is_low_adx:
         evidence_score += 1
     if is_narrow_day:
         evidence_score += 1
     if oi_walls_present:
+        evidence_score += 1
+    if is_flow_choppy:
         evidence_score += 1
 
     # Require at least 2 confirming range-bound signals (or index in low VIX with narrow range)
@@ -278,6 +278,10 @@ def detect_defined_risk_neutral(
             "sabr_skew": sabr_skew,
             "short_put_iv_edge": short_put_edge,
             "short_call_iv_edge": short_call_edge,
+            "obv_regime": obv_status,
+            "dmi_triple_verdict": dmi_status,
+            "avwap_confluence": avwap_status,
+            "vsa_signal": vsa_status,
             "hedged_spread": spread_dict,
         },
         actionable_plan={

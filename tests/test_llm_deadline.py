@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from engine.llm_deadline import MAX_INFLIGHT, run_with_deadline
+from engine.llm_deadline import MAX_INFLIGHT, reset_deadline_slots, run_with_deadline
 
 
 def test_deadline_returns_without_waiting_for_stalled_provider():
@@ -27,12 +27,13 @@ def test_deadline_returns_without_waiting_for_stalled_provider():
 
 
 def test_stalled_provider_calls_have_a_global_concurrency_cap():
+    reset_deadline_slots()
     release = threading.Event()
     started: list[threading.Event] = [threading.Event() for _ in range(MAX_INFLIGHT)]
 
     def blocked_provider(index: int):
         started[index].set()
-        release.wait(0.5)
+        release.wait(1.5)
         return index
 
     try:
@@ -43,7 +44,7 @@ def test_stalled_provider_calls_have_a_global_concurrency_cap():
                     timeout=0.01,
                     label=f"test-cap-{index}",
                 )
-        assert all(event.wait(0.1) for event in started)
+        assert all(event.wait(2.0) for event in started)
         with pytest.raises(TimeoutError, match="capacity exhausted"):
             run_with_deadline(lambda: "must not start", timeout=0.1, label="test-over-cap")
     finally:

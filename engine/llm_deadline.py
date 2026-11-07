@@ -21,6 +21,12 @@ MAX_INFLIGHT = 4
 _slots = threading.BoundedSemaphore(MAX_INFLIGHT)
 
 
+def reset_deadline_slots() -> None:
+    """Reset the semaphore to initial MAX_INFLIGHT slots (for test isolation)."""
+    global _slots
+    _slots = threading.BoundedSemaphore(MAX_INFLIGHT)
+
+
 def run_with_deadline(call: Callable[[], T], *, timeout: float, label: str) -> T:
     """Run ``call`` without allowing its worker to extend caller wall time."""
     if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
@@ -40,7 +46,10 @@ def run_with_deadline(call: Callable[[], T], *, timeout: float, label: str) -> T
             result["error"] = exc
         finally:
             completed.set()
-            _slots.release()
+            try:
+                _slots.release()
+            except ValueError:
+                logger.debug("[llm_deadline] Slot already released or reset")
 
     worker = threading.Thread(
         target=_invoke,

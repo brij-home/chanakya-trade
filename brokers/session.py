@@ -96,6 +96,10 @@ _BROKER_NAMES = {
     "kotak": "kotak",
     "kotakneo": "kotak",
     "neo": "kotak",
+    "10": "flattrade",
+    "flattrade": "flattrade",
+    "flat": "flattrade",
+    "pi": "flattrade",
 }
 
 _BROKER_LABELS = {
@@ -109,10 +113,11 @@ _BROKER_LABELS = {
     "shoonya": "[bold green]Shoonya (Finvasia)[/bold green]",
     "mstock": "[bold blue]m.Stock (Mirae Asset)[/bold blue]",
     "kotak": "[bold red]Kotak Neo[/bold red]",
+    "flattrade": "[bold green]Flattrade (Pi)[/bold green]",
 }
 
 # Brokers that use TOTP auto-login (no browser redirect)
-_TOTP_BROKERS = {"angelone", "stoxkart", "shoonya", "mstock", "kotak"}
+_TOTP_BROKERS = {"angelone", "stoxkart", "shoonya", "mstock", "kotak", "flattrade"}
 
 # Broker menu display items (number, label, description)
 _BROKER_MENU = [
@@ -126,6 +131,7 @@ _BROKER_MENU = [
     ("7", "Shoonya", "Finvasia Noren API — TOTP, live data & execution"),
     ("8", "m.Stock", "Mirae Asset — free API, live data & execution"),
     ("9", "Kotak Neo", "Kotak Securities Neo API — TOTP, live data & execution"),
+    ("10", "Flattrade", "Pi Connect API — TOTP, zero brokerage backup"),
 ]
 
 
@@ -292,6 +298,30 @@ def _try_auto_restore_sessions() -> None:
                 return
     except Exception as e_suppressed:
         logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
+
+    # 4. Flattrade (Secondary Backup Broker)
+    if "flattrade" not in _brokers:
+        try:
+            from brokers.flattrade import FlattradeAPI, TOKEN_FILE as _FT_FLAT
+
+            if os.path.exists(_FT_FLAT) or os.environ.get("FLATTRADE_API_KEY"):
+                b = FlattradeAPI()
+                if b.is_authenticated():
+                    is_first = not _brokers
+                    register_broker(
+                        "flattrade", b, primary=is_first, role="both" if is_first else "execution"
+                    )
+                    if not is_testing:
+                        try:
+                            threading.Thread(
+                                target=_start_websocket, args=(b,), daemon=True
+                            ).start()
+                        except Exception as e_suppressed:
+                            logger.debug(
+                                f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}"
+                            )
+        except Exception as e_suppressed:
+            logger.debug(f"[brokers.session] Non-fatal exception suppressed: {e_suppressed}")
 
 
 def get_broker() -> BrokerAPI:
@@ -663,6 +693,30 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
             environment=os.environ.get("KOTAK_ENVIRONMENT", "prod"),
         )
 
+    elif key == "flattrade":
+        from .flattrade import FlattradeAPI
+
+        return key, FlattradeAPI(
+            user_id=get_credential(
+                "FLATTRADE_USER_ID", "Flattrade User ID / UCC", secret=False, required=False
+            ),
+            password=get_credential(
+                "FLATTRADE_PASSWORD", "Flattrade Password", secret=True, required=False
+            ),
+            totp_secret=get_credential(
+                "FLATTRADE_TOTP_SECRET",
+                "Flattrade TOTP Secret (Base32)",
+                secret=True,
+                required=False,
+            ),
+            api_key=get_credential(
+                "FLATTRADE_API_KEY", "Flattrade API Key", secret=True, required=False
+            ),
+            api_secret=get_credential(
+                "FLATTRADE_API_SECRET", "Flattrade API Secret", secret=True, required=False
+            ),
+        )
+
     else:  # fyers
         from .fyers import FyersAPI
         from config.constants import get_broker_callback_url
@@ -942,6 +996,13 @@ def _recreate_broker_from_token(key: str):
 
             if TOKEN_FILE.exists():
                 b = KotakNeoAPI()
+                if b.is_authenticated():
+                    return b
+        elif key == "flattrade":
+            from brokers.flattrade import FlattradeAPI, TOKEN_FILE
+
+            if TOKEN_FILE.exists():
+                b = FlattradeAPI()
                 if b.is_authenticated():
                     return b
     except Exception as e_suppressed:

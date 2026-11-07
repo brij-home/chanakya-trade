@@ -306,13 +306,14 @@
     - Once price has penetrated to the opposite side of VWAP, the mean-reversion setup is complete; entering there is chasing an extended move at the worst possible level (buying puts at the bottom or calls at the top).
     - Reversals must be caught early ($0.08\% \le \text{retreat} \le 0.35\%$ off the extreme). If price has already retreated $> 0.35\%$ (e.g. $> 80$ pts on Nifty), the entry is late and must be rejected to prevent immediate stop-loss whipsaw.
 
-48. **Fyers Prime Level-3 TBT Pinned Channel Partitioning**:
-    - Fyers Level-3 Tick-by-Tick (TBT) WebSocket supports up to 15 concurrent symbols partitioned strictly across 3 physical channels (max 5 symbols per channel).
-    - The TBT worker (`market/fyers_tbt_manager.py`) must enforce deterministic Slot-to-Channel Pinned Partitioning:
-      - Slots 0..4 $\implies$ Channel 1
-      - Slots 5..9 $\implies$ Channel 2
-      - Slots 10..14 $\implies$ Channel 3
-    - Incremental dynamic subscriptions must NEVER chunk by relative slice index (which overflows Channel 1); they must resolve directly from the global slot index.
+48. **Fyers Prime Level-3 TBT Pinned Channel Partitioning & 15-Slot Utilization**:
+    - Fyers Level-3 Tick-by-Tick (TBT) 50-depth WebSocket supports up to 15 concurrent symbols under Fyers Prime, partitioned strictly across 3 physical connections/workers (max 5 symbols per connection).
+    - The TBT manager (`market/fyers_tbt_manager.py`) must enforce deterministic Slot-to-Worker Pinned Partitioning:
+      - Slots 0..4 $\implies$ Worker 0 (In-Flight Guardians + Anchor Futures: NIFTY, BANKNIFTY, MIDCPNIFTY)
+      - Slots 5..9 $\implies$ Worker 1 (Core Grid, Revolving ATM Options & Primary Sector Scouts)
+      - Slots 10..14 $\implies$ Worker 2 (Secondary Sector Scouts & JIT Alert Candidates)
+    - **Prime Invariant & Zero-Throttling Contract**: Under `FYERS_PLAN=PRIME`, all 3 workers must be active during derivative market sessions (`workers_active == 3`, `active_total == 15`). NEVER set `FYERS_TBT_WORKERS=1` in `.env` or operational configurations on a Prime account.
+    - **Self-Healing Entitlement & Dynamic Recovery**: Transient broker 429 rate-limits must use bounded probation (e.g. 15m), NEVER permanently downgrading a Prime account to single-socket mode. The connection pool sentinel and `rebalance_grid_now()` must continuously probe and recover quiescent workers.
 
 ---
 

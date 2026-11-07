@@ -443,12 +443,17 @@ class SmartFunnel:
                 f"⚡ Wyckoff Spring / V-Shape Reversal: Heavy institutional absorption (+{chg_pct:.1f}%, {vol_ratio:.2f}x vol)"
             )
 
+        is_bull_align = ema20 > 0 and ema50 > 0 and ema20 >= ema50
         if 42.0 <= rsi <= 64.0:
             score += 15.0
             positive_flags.append(f"RSI {rsi:.1f} in prime base accumulation zone")
         elif rsi > 72.0:
-            score -= 20.0
-            rejection_flags.append(f"RSI overbought ({rsi:.1f} > 72)")
+            if is_bull_align and rsi <= 78.0:
+                score += 10.0
+                positive_flags.append(f"RSI {rsi:.1f} in strong momentum markup expansion zone")
+            else:
+                score -= 15.0
+                rejection_flags.append(f"RSI extreme overbought ({rsi:.1f} > 72)")
         elif rsi < 32.0:
             if not is_wyckoff_spring:
                 score -= 10.0
@@ -494,6 +499,51 @@ class SmartFunnel:
         if vol_ratio < 0.35:
             score -= 10.0
             rejection_flags.append(f"Anemic liquidity/volume ratio ({vol_ratio:.2f}x avg)")
+
+        # ── OBV & Triple-Filtered DMI Advancements (#TripleThrust & #TripleDMI) ──
+        obv_div = tech.get("obv_divergence") or "NEUTRAL"
+        obv_reg = tech.get("obv_regime") or "NEUTRAL"
+        dmi_verdict = tech.get("dmi_triple_verdict") or "NEUTRAL"
+        dmi_plus_val = float(tech.get("dmi_plus") or 0.0)
+        dmi_minus_val = float(tech.get("dmi_minus") or 0.0)
+        adx_val = float(tech.get("adx") or 0.0)
+
+        metrics["obv_divergence"] = obv_div
+        metrics["obv_regime"] = obv_reg
+        metrics["dmi_triple_verdict"] = dmi_verdict
+        metrics["dmi_plus"] = dmi_plus_val
+        metrics["dmi_minus"] = dmi_minus_val
+        metrics["adx"] = adx_val
+
+        # OBV Divergence Rules
+        if obv_div == "BULLISH_DIVERGENCE":
+            score += 15.0
+            positive_flags.append(
+                "⚡ Bullish OBV Divergence: Institutional accumulation before price breakout"
+            )
+        elif obv_div == "BEARISH_DIVERGENCE":
+            score -= 15.0
+            rejection_flags.append(
+                "⚠️ Bearish OBV Divergence: Price near highs on declining volume (Distribution Trap)"
+            )
+        elif obv_div == "BULLISH_CONVERGENCE":
+            score += 8.0
+            positive_flags.append("Bullish OBV Convergence: Price and volume expanding in sync")
+        elif obv_reg == "ACCUMULATION":
+            score += 5.0
+            positive_flags.append("OBV in steady accumulation above 20-EMA")
+
+        # Triple-Filtered DMI Rules
+        if dmi_verdict == "TRIPLE_BULLISH_CONFIRMED":
+            score += 15.0
+            positive_flags.append(
+                f"⚡ Triple DMI Bullish Confirmed (+DI {dmi_plus_val:.1f} >= 25, prior -DI pivot broken, ADX={adx_val:.1f})"
+            )
+        elif dmi_verdict == "WEAK_OR_CHOPPY" and not is_wyckoff_spring:
+            score -= 5.0
+            rejection_flags.append(
+                f"DMI chop/weak momentum (ADX {adx_val:.1f} <= 20 or crossover below threshold)"
+            )
 
         # ── Fundamental Rules (Bypassed for Crypto) ──
         if exchange.upper() != "CRYPTO":

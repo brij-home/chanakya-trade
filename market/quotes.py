@@ -96,7 +96,7 @@ def _compute_raw_vwap(clean_sym: str, exchange: str = "NSE") -> Optional[float]:
         today_str = datetime.now(IST).strftime("%Y-%m-%d")
 
         df = get_ohlcv(
-            clean_sym, exchange=exchange, interval="5minute", days=1, include_live_candle=True
+            clean_sym, exchange=exchange, interval="5minute", days=1, include_live_candle=False
         )
         if df is None or len(df) < 1:
             return None
@@ -186,24 +186,43 @@ def _enrich_quote(
     clean_sym = instrument.split(":")[-1].strip().upper()
     if (vwap_val is None or vwap_val <= 0) and not _OPTION_PATTERN.match(clean_sym):
         from market.vwap_session_cache import get_vwap_session_cache
+        from engine.alert_identity import canonical_alert_symbol
+
+        canonical_sym = canonical_alert_symbol(clean_sym)
+        cache = get_vwap_session_cache()
 
         # 1. Fast cache check (memory + disk)
-        cached_vwap = get_vwap_session_cache().get(clean_sym)
+        cached_vwap = cache.get(clean_sym) or cache.get(canonical_sym)
         if cached_vwap and cached_vwap > 0:
             vwap_val = cached_vwap
         # 2. If it's a primary benchmark index and still missing, compute on-demand
-        elif clean_sym in {
+        elif canonical_sym in {
             "NIFTY",
             "BANKNIFTY",
             "FINNIFTY",
             "MIDCPNIFTY",
             "SENSEX",
-            "NIFTY 50",
-            "NIFTY BANK",
+            "BANKEX",
         }:
             vwap_val = get_computed_vwap(
-                clean_sym, exchange="BSE" if clean_sym == "SENSEX" else "NSE"
+                canonical_sym, exchange="BSE" if canonical_sym in ("SENSEX", "BANKEX") else "NSE"
             )
+        # 3. For equities or futures with missing broker VWAP/ATP, compute from 5m bars
+        elif price > 0:
+            exch = "BSE" if instrument.startswith("BSE:") else "NSE"
+            vwap_val = _compute_raw_vwap(clean_sym, exchange=exch)
+            if vwap_val and vwap_val > 0:
+                cache.set(clean_sym, vwap_val)
+                cache.set(canonical_sym, vwap_val)
+            else:
+                # 4. Fallback proxy from today's open/high/low/ltp if available
+                q_o = float(getattr(quote, "open", 0.0) or 0.0)
+                q_h = float(getattr(quote, "high", 0.0) or 0.0)
+                q_l = float(getattr(quote, "low", 0.0) or 0.0)
+                if q_o > 0 and q_h > 0 and q_l > 0:
+                    vwap_val = round((q_o + q_h + q_l + price) / 4.0, 2)
+                elif price > 0:
+                    vwap_val = price
 
     return replace(
         quote,
@@ -218,6 +237,44 @@ def _enrich_quote(
         quality_flags=tuple(sorted(set(quote.quality_flags).union(quality_flags))),
         correlation_id=correlation_id,
     )
+
+
+_INDEX_WS_ALIAS_MAP: dict[str, str] = {
+    "NIFTY": "NSE:NIFTY50-INDEX",
+    "NIFTY 50": "NSE:NIFTY50-INDEX",
+    "NIFTY50": "NSE:NIFTY50-INDEX",
+    "NSE:NIFTY": "NSE:NIFTY50-INDEX",
+    "NSE:NIFTY 50": "NSE:NIFTY50-INDEX",
+    "NSE:NIFTY50": "NSE:NIFTY50-INDEX",
+    "NSE:NIFTY-INDEX": "NSE:NIFTY50-INDEX",
+    "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    "NIFTY BANK": "NSE:NIFTYBANK-INDEX",
+    "NSE:BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    "NSE:NIFTY BANK": "NSE:NIFTYBANK-INDEX",
+    "NSE:NIFTYBANK-INDEX": "NSE:NIFTYBANK-INDEX",
+    "FINNIFTY": "NSE:FINNIFTY-INDEX",
+    "NSE:FINNIFTY": "NSE:FINNIFTY-INDEX",
+    "NSE:NIFTY FIN SERVICE": "NSE:FINNIFTY-INDEX",
+    "NIFTY FIN SERVICE": "NSE:FINNIFTY-INDEX",
+    "NSE:FINNIFTY-INDEX": "NSE:FINNIFTY-INDEX",
+    "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+    "NSE:MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+    "NSE:NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
+    "NIFTY MID SELECT": "NSE:MIDCPNIFTY-INDEX",
+    "NSE:MIDCPNIFTY-INDEX": "NSE:MIDCPNIFTY-INDEX",
+    "SENSEX": "BSE:SENSEX-INDEX",
+    "BSE:SENSEX": "BSE:SENSEX-INDEX",
+    "BSE:SENSEX-INDEX": "BSE:SENSEX-INDEX",
+    "BANKEX": "BSE:BANKEX-INDEX",
+    "BSE:BANKEX": "BSE:BANKEX-INDEX",
+    "BSE:BANKEX-INDEX": "BSE:BANKEX-INDEX",
+    "INDIAVIX": "NSE:INDIAVIX-INDEX",
+    "NSE:INDIAVIX": "NSE:INDIAVIX-INDEX",
+    "NSE:INDIA VIX": "NSE:INDIAVIX-INDEX",
+    "INDIA VIX": "NSE:INDIAVIX-INDEX",
+    "VIX": "NSE:INDIAVIX-INDEX",
+    "NSE:INDIAVIX-INDEX": "NSE:INDIAVIX-INDEX",
+}
 
 
 def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quote]:
@@ -248,19 +305,32 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                     if not tick or getattr(tick, "ltp", 0.0) <= 0:
                         from market.instruments import resolve_corporate_alias
 
-                        clean = inst.split(":")[-1].split("-")[0].strip().upper()
-                        canon = resolve_corporate_alias(clean)
-                        if not inst.startswith(("BSE:SENSEX", "BSE:BANKEX")):
+                        clean_sym_upper = inst.split(":")[-1].strip().upper()
+                        # Check index alias map first for benchmark indices
+                        ws_idx_sym = _INDEX_WS_ALIAS_MAP.get(inst) or _INDEX_WS_ALIAS_MAP.get(
+                            clean_sym_upper
+                        )
+                        if ws_idx_sym:
                             try:
-                                alt_tick = ws_manager.get_tick(
-                                    f"NSE:{canon}-BE", max_age_seconds=max_age
-                                ) or ws_manager.get_tick(f"NSE:{canon}-EQ", max_age_seconds=max_age)
+                                tick = ws_manager.get_tick(ws_idx_sym, max_age_seconds=max_age)
                             except TypeError:
-                                alt_tick = ws_manager.get_tick(
-                                    f"NSE:{canon}-BE"
-                                ) or ws_manager.get_tick(f"NSE:{canon}-EQ")
-                            if alt_tick and getattr(alt_tick, "ltp", 0.0) > 0:
-                                tick = alt_tick
+                                tick = ws_manager.get_tick(ws_idx_sym)
+                        if not tick or getattr(tick, "ltp", 0.0) <= 0:
+                            clean = inst.split(":")[-1].split("-")[0].strip().upper()
+                            canon = resolve_corporate_alias(clean)
+                            if not inst.startswith(("BSE:SENSEX", "BSE:BANKEX")):
+                                try:
+                                    alt_tick = ws_manager.get_tick(
+                                        f"NSE:{canon}-BE", max_age_seconds=max_age
+                                    ) or ws_manager.get_tick(
+                                        f"NSE:{canon}-EQ", max_age_seconds=max_age
+                                    )
+                                except TypeError:
+                                    alt_tick = ws_manager.get_tick(
+                                        f"NSE:{canon}-BE"
+                                    ) or ws_manager.get_tick(f"NSE:{canon}-EQ")
+                                if alt_tick and getattr(alt_tick, "ltp", 0.0) > 0:
+                                    tick = alt_tick
                     if tick and tick.ltp > 0:
                         ws_vwap = (
                             float(getattr(tick, "atp", 0.0) or getattr(tick, "vwap", 0.0) or 0.0)
@@ -268,7 +338,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                         )
                         ws_bid = float(getattr(tick, "bid", 0.0) or 0.0) or None
                         ws_ask = float(getattr(tick, "ask", 0.0) or 0.0) or None
-                        result[inst] = _enrich_quote(
+                        enriched = _enrich_quote(
                             Quote(
                                 symbol=tick.symbol.split(":")[-1].split("-")[0]
                                 if ":" in tick.symbol
@@ -297,6 +367,18 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                             source="STREAM",
                             correlation_id=correlation_id,
                         )
+                        result[inst] = enriched
+                        clean_k = inst.split(":")[-1].strip().upper()
+                        if clean_k not in result:
+                            result[clean_k] = enriched
+                        if getattr(tick, "symbol", None) and tick.symbol not in result:
+                            result[tick.symbol] = enriched
+                        for a_k, tgt_s in _INDEX_WS_ALIAS_MAP.items():
+                            if tgt_s == getattr(
+                                tick, "symbol", ""
+                            ) or tgt_s == _INDEX_WS_ALIAS_MAP.get(inst):
+                                if a_k not in result:
+                                    result[a_k] = enriched
                     else:
                         missing.append(inst)
 
@@ -352,7 +434,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                             )
                             or None
                         )
-                        result[inst] = _enrich_quote(
+                        enriched = _enrich_quote(
                             Quote(
                                 symbol=clean,
                                 last_price=float(tick.ltp),
@@ -379,6 +461,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                             source="STREAM",
                             correlation_id=correlation_id,
                         )
+                        result[inst] = enriched
                     else:
                         missing.append(inst)
 
@@ -436,7 +519,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                             )
                             or None
                         )
-                        result[inst] = _enrich_quote(
+                        enriched = _enrich_quote(
                             Quote(
                                 symbol=clean,
                                 last_price=float(tick.ltp),
@@ -463,6 +546,7 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                             source="STREAM",
                             correlation_id=correlation_id,
                         )
+                        result[inst] = enriched
                     else:
                         missing.append(inst)
 
@@ -709,6 +793,13 @@ def normalize_instrument(inst: str) -> str:
     if ":" in s:
         return s
     upper = s.upper()
+    if upper in _INDEX_WS_ALIAS_MAP:
+        from market.indices import INDEX_INSTRUMENTS
+
+        clean_upper = upper.replace(" ", "")
+        return INDEX_INSTRUMENTS.get(
+            clean_upper, INDEX_INSTRUMENTS.get(upper, _INDEX_WS_ALIAS_MAP[upper])
+        )
     if upper in _MCX_SYMBOLS:
         return f"MCX:{upper}"
     if upper in _CDS_SYMBOLS:
@@ -871,15 +962,20 @@ def get_quote(
         leaders: list[str] = []
         followers: list[tuple[str, threading.Event, list[Any]]] = []
 
+        current_tid = threading.get_ident()
         with _in_flight_quote_lock:
             for inst in missing:
                 if inst in _in_flight_quote_events:
-                    evt, box = _in_flight_quote_events[inst]
+                    leader_tid, evt, box = _in_flight_quote_events[inst]
+                    if leader_tid == current_tid:
+                        # Re-entrant call from the leader thread:
+                        # Do not append to followers to prevent self-deadlock
+                        continue
                     followers.append((inst, evt, box))
                 else:
                     evt = threading.Event()
                     box = [None]
-                    _in_flight_quote_events[inst] = (evt, box)
+                    _in_flight_quote_events[inst] = (current_tid, evt, box)
                     leaders.append(inst)
 
         fetched_external: dict[str, Quote] = {}
@@ -930,7 +1026,13 @@ def get_quote(
                     get_registry().record_provider_success(provider)
                 except Exception as e_broker:
                     logger.debug(f"[Quotes] Primary broker quote fetch failed: {e_broker}")
-                    get_registry().record_provider_error(get_data_broker_key() or "broker")
+                    try:
+                        from market.calendar import is_market_open
+
+                        if is_market_open("NSE"):
+                            get_registry().record_provider_error(get_data_broker_key() or "broker")
+                    except Exception:
+                        get_registry().record_provider_error(get_data_broker_key() or "broker")
 
                 rem_leaders = [i for i in leaders if i not in fetched_external]
 
@@ -994,7 +1096,15 @@ def get_quote(
                         if yf_quotes:
                             get_registry().record_provider_success("yfinance")
                         else:
-                            get_registry().record_provider_error("yfinance", is_stale=True)
+                            try:
+                                from market.calendar import is_market_open
+
+                                if is_market_open("NSE"):
+                                    get_registry().record_provider_error("yfinance", is_stale=True)
+                            except Exception as e_suppressed:
+                                logger.debug(
+                                    f"[market.quotes] Non-fatal exception suppressed: {e_suppressed}"
+                                )
                         rem_leaders = [i for i in leaders if i not in fetched_external]
 
                 # 3d. Futures fallback
@@ -1007,7 +1117,7 @@ def get_quote(
                     for inst in leaders:
                         q_val = fetched_external.get(inst)
                         if inst in _in_flight_quote_events:
-                            evt, box = _in_flight_quote_events.pop(inst)
+                            _, evt, box = _in_flight_quote_events.pop(inst)
                             box[0] = q_val
                             evt.set()
 

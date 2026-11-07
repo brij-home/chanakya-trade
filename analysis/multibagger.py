@@ -386,6 +386,26 @@ def evaluate_short_term_horizon(
     elif sector_tailwind <= 40:
         score -= 5
 
+    # 5. Flow-Based Swingscape Edge (OBV & Triple-DMI)
+    try:
+        from analysis.obv import analyse_obv
+        from analysis.dmi_filter import evaluate_triple_dmi
+
+        _obv = analyse_obv(df, is_intraday=False)
+        _dmi = evaluate_triple_dmi(df, is_intraday=False)
+        details["obv_divergence"] = _obv.divergence
+        details["triple_dmi_verdict"] = _dmi.verdict
+
+        if _obv.divergence == "BULLISH_DIVERGENCE":
+            score += 10
+        elif _obv.divergence == "BEARISH_DIVERGENCE":
+            score -= 15
+
+        if _dmi.verdict == "TRIPLE_BULLISH_CONFIRMED":
+            score += 8
+    except Exception as e_flow_st:
+        logger.debug(f"[analysis.multibagger] Flow evaluation non-fatal: {e_flow_st}")
+
     score = max(10, min(98, score))
 
     if score >= 75:

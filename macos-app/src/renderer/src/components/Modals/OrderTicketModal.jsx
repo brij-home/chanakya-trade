@@ -395,6 +395,14 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const charges = previewOrder?.charges ?? null
   const totalCharges = charges?.total_charges ?? 0
 
+  const cleanSymbol = (symbol || '').replace(/^(NSE:|BSE:|MCX:|CDS:)/, '').trim()
+  const isDerivative = lotSize > 1 || exchange === 'NFO' || symbol.includes(' CE') || symbol.includes(' PE')
+  const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].some((idx) => cleanSymbol.startsWith(idx))
+  const isStockOption = isDerivative && !isIndex && (cleanSymbol.includes('CE') || cleanSymbol.includes('PE'))
+  const dteValue = initialData.dte != null ? Number(initialData.dte) : (initialData.days_to_expiry != null ? Number(initialData.days_to_expiry) : null)
+  const isNearExpiryStockOption = isStockOption && (dteValue != null ? dteValue <= 4 : true)
+  const currentLots = Math.max(1, Math.round((Number(qty) || 0) / Math.max(1, lotSize)))
+
   return (
     <div
       className="modal-backdrop"
@@ -663,7 +671,10 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
 
               {/* Auto-Ratchet Breakeven Bracket Toggle */}
               {Number(stopLoss) > 0 && Number(target) > 0 && (
-                <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-emerald-950/25 border border-emerald-500/30 text-[10.5px] font-mono">
+                <div
+                  className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-emerald-950/25 border border-emerald-500/30 text-[10.5px] font-mono"
+                  title="Automatically moves your stop loss to entry price (breakeven) when Target 1 (+2R) is filled, locking in a risk-free runner."
+                >
                   <label className="flex items-center gap-2 cursor-pointer text-emerald-300 font-semibold select-none">
                     <input
                       type="checkbox"
@@ -679,94 +690,130 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                 </div>
               )}
 
-              {/* Quantity & Lot Sizing Section */}
-              <div className="grid grid-cols-2 gap-3 p-2.5 rounded-xl bg-panel/70 border border-border/60 items-center">
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-muted text-[10px] uppercase font-ui font-semibold">Quantity</span>
-                    {lotSize > 1 && (
-                      <span className="text-[10px] font-mono text-amber font-bold">
-                        1 Lot = {lotSize} Qty
-                      </span>
-                    )}
-                  </div>
-                  <input
-                    type="number"
-                    min={lotSize > 1 ? lotSize : 1}
-                    step={lotSize > 1 ? lotSize : 1}
-                    value={qty}
-                    onChange={(e) => setQty(e.target.value === '' ? '' : Number(e.target.value))}
-                    className="w-full bg-panel border border-border/80 rounded-lg px-3 py-1.5 text-text font-bold font-mono text-xs"
-                    aria-label="Order quantity"
-                  />
-                </div>
-
-                <div>
-                  <span className="text-muted text-[10px] uppercase font-ui font-semibold block mb-1">
-                    {lotSize > 1 ? 'Lot Selector' : 'Product Type'}
-                  </span>
-                  {lotSize > 1 ? (
-                    <div className="flex items-center gap-1 bg-elevated border border-border/80 rounded-lg p-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const currentLots = Math.max(1, Math.round((Number(qty) || 0) / lotSize))
-                          if (currentLots > 1) setQty((currentLots - 1) * lotSize)
-                        }}
-                        className="px-2 py-1 bg-panel hover:bg-border/60 text-text font-bold text-xs rounded cursor-pointer transition-colors"
-                        title="Decrease 1 lot"
-                      >
-                        -
-                      </button>
-                      <span className="flex-1 text-center font-mono font-bold text-xs text-text">
-                        {Math.max(1, Math.round((Number(qty) || 0) / lotSize))} {Math.round((Number(qty) || 0) / lotSize) === 1 ? 'Lot' : 'Lots'}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const currentLots = Math.max(1, Math.round((Number(qty) || 0) / lotSize))
-                          setQty((currentLots + 1) * lotSize)
-                        }}
-                        className="px-2 py-1 bg-panel hover:bg-border/60 text-text font-bold text-xs rounded cursor-pointer transition-colors"
-                        title="Increase 1 lot"
-                      >
-                        +
-                      </button>
-                      <div className="flex items-center gap-1 border-l border-border/50 pl-1">
-                        {[1, 2, 5].map((mult) => (
-                          <button
-                            key={mult}
-                            type="button"
-                            onClick={() => setQty(mult * lotSize)}
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
-                              Math.round((Number(qty) || 0) / lotSize) === mult
-                                ? 'bg-amber text-black font-bold'
-                                : 'text-muted hover:text-text bg-panel'
-                            }`}
-                          >
-                            {mult}L
-                          </button>
-                        ))}
-                      </div>
+              {/* Quantity, Lot Sizing & Product Type Section */}
+              <div className="p-3 rounded-xl bg-panel/70 border border-border/60 space-y-2.5">
+                <div className="grid grid-cols-2 gap-3 items-center">
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-muted text-[10px] uppercase font-ui font-semibold">Quantity</span>
+                      {lotSize > 1 && (
+                        <span className="text-[10px] font-mono text-amber font-bold">
+                          {currentLots} {currentLots === 1 ? 'Lot' : 'Lots'} ({qty || 0} Qty)
+                        </span>
+                      )}
                     </div>
-                  ) : (
+                    <input
+                      type="number"
+                      min={lotSize > 1 ? lotSize : 1}
+                      step={lotSize > 1 ? lotSize : 1}
+                      value={qty}
+                      onChange={(e) => setQty(e.target.value === '' ? '' : Number(e.target.value))}
+                      className="w-full bg-panel border border-border/80 rounded-lg px-3 py-1.5 text-text font-bold font-mono text-xs"
+                      aria-label="Order quantity"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-muted text-[10px] uppercase font-ui font-semibold">Product Type</span>
+                      {lotSize > 1 && (
+                        <span className="text-[10px] font-mono text-muted">1 Lot = {lotSize}</span>
+                      )}
+                    </div>
                     <div className="grid grid-cols-2 gap-1 p-1 bg-elevated border border-border/80 rounded-lg">
-                      {['MIS', 'CNC'].map((prod) => (
+                      {(lotSize > 1 || isDerivative ? ['MIS', 'NRML'] : ['MIS', 'CNC']).map((prod) => (
                         <button
                           key={prod}
                           type="button"
                           onClick={() => setProduct(prod)}
                           className={`py-1 rounded text-center text-xs font-bold transition-all cursor-pointer ${
-                            product === prod ? 'bg-primary text-text' : 'text-muted hover:text-text'
+                            product === prod ? 'bg-primary text-text shadow-sm' : 'text-muted hover:text-text'
                           }`}
                         >
-                          {prod}
+                          {prod === 'MIS' ? '⚡ MIS' : prod === 'NRML' ? '📦 NRML' : '🏛️ CNC'}
                         </button>
                       ))}
                     </div>
-                  )}
+                  </div>
                 </div>
+
+                {/* Instant Lot Multipliers Presets for Derivatives */}
+                {lotSize > 1 && (
+                  <div className="flex items-center justify-between pt-1 border-t border-border/40 text-[11px] font-mono">
+                    <span className="text-muted text-[10px] uppercase">Instant Lots:</span>
+                    <div className="flex items-center gap-1.5">
+                      {[1, 2, 5, 10].map((mult) => (
+                        <button
+                          key={mult}
+                          type="button"
+                          onClick={() => setQty(mult * lotSize)}
+                          className={`px-2 py-0.5 rounded text-[11px] font-bold font-mono cursor-pointer transition-all ${
+                            currentLots === mult
+                              ? 'bg-amber text-black shadow-sm'
+                              : 'text-muted hover:text-text bg-elevated hover:bg-border/60 border border-border/60'
+                          }`}
+                          title={`Select ${mult} Lot${mult > 1 ? 's' : ''} (${mult * lotSize} Qty)`}
+                        >
+                          {mult}x
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const estMarginPerLot = (Number(price) || 1) * lotSize
+                          const maxLots = Math.min(20, Math.max(1, Math.floor(capital / Math.max(1, estMarginPerLot))))
+                          setQty(maxLots * lotSize)
+                        }}
+                        className="px-2 py-0.5 rounded text-[10px] font-bold font-mono text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 cursor-pointer transition-all"
+                        title="Calculate maximum lots based on allocated capital"
+                      >
+                        Max Margin
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
+
+              {/* Dynamic Product Disclosure Notice */}
+              {product === 'MIS' && (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10.5px] font-mono">
+                  <span className="text-sm">⚡</span>
+                  <div>
+                    <span className="font-bold">INTRADAY (MIS)</span>: Auto-square-off at 15:15 IST by broker. Position cannot be carried overnight.
+                  </div>
+                </div>
+              )}
+              {product === 'NRML' && (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/30 text-blue-300 text-[10.5px] font-mono">
+                  <span className="text-sm">📦</span>
+                  <div>
+                    <span className="font-bold">F&O CARRY-FORWARD (NRML)</span>: Full overnight SPAN + Exposure margin required across sessions.
+                  </div>
+                </div>
+              )}
+              {product === 'CNC' && (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-[10.5px] font-mono">
+                  <span className="text-sm">🏛️</span>
+                  <div>
+                    <span className="font-bold">CASH DELIVERY (CNC)</span>: 100% upfront capital required. Shares will settle to Demat account.
+                  </div>
+                </div>
+              )}
+
+              {/* SEBI Physical Delivery Warning for Stock Options */}
+              {isNearExpiryStockOption && (
+                <div className="flex items-start gap-2.5 px-3 py-2 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-200 text-[10.5px] font-mono animate-fadeIn">
+                  <span className="text-sm mt-0.5">⚠️</span>
+                  <div>
+                    <div className="font-bold uppercase tracking-wide text-rose-300">
+                      SEBI Physical Delivery Notice (Stock Options)
+                    </div>
+                    <p className="text-[10px] text-rose-200/90 leading-tight mt-0.5">
+                      In-The-Money (ITM) stock option contracts during expiry week require 100% notional cash value for delivery settlement. Ensure positions are closed prior to expiry day unless taking physical delivery.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Smart Order Router (SOR) Execution Strategy */}
               {smartRouting && (
@@ -904,7 +951,52 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                 </div>
 
                 {/* Behavioral Advisory Box if flags detected */}
-                {preflightInfo?.flags?.length > 0 && (
+                {preflightInfo?.flags?.some((f) => ['TILT_LOCKOUT', 'DAILY_LOSS_CAP', 'PYRAMID_INTO_LOSER'].includes(f)) ? (
+                  <div className="bg-rose-500/10 border-2 border-rose-500/50 rounded-xl p-3.5 space-y-3 text-left animate-in fade-in">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-rose-600 dark:text-rose-400 font-bold text-xs">
+                        <span className="text-base animate-pulse">🛑</span>
+                        <span>MIND-GUARD: ANTI-TILT CO-PILOT INTERVENTION</span>
+                      </div>
+                      <span className="bg-rose-500/20 text-rose-500 text-[10px] font-mono px-2 py-0.5 rounded-full font-bold border border-rose-500/40">
+                        3+ Loss Streak / Drawdown Active
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-rose-400 dark:text-rose-300 leading-relaxed font-ui">
+                      Statistically, urgent re-entries during consecutive loss streaks suffer a <strong className="text-rose-500 dark:text-rose-400">78% failure rate</strong> due to dopamine cortisol revenge-trading loops.
+                    </p>
+                    {preflightInfo.disclaimers?.map((d, i) => (
+                      <p key={i} className="text-rose-700 dark:text-rose-200/90 text-[11px] leading-relaxed">
+                        • {d}
+                      </p>
+                    ))}
+                    {/* Mindful Friction Actions */}
+                    <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-[10px]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onClose()
+                        }}
+                        className="px-3 py-2 rounded-lg bg-panel hover:bg-elevated border border-rose-500/40 text-rose-600 dark:text-rose-300 font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                      >
+                        <span>🧘</span>
+                        <span>Take 15-Min Reset (Step Away)</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const reduced = Math.max(lotSize, Math.floor(qty / 2 / lotSize) * lotSize)
+                          setQty(reduced)
+                          setStep(1)
+                        }}
+                        className="px-3 py-2 rounded-lg bg-panel hover:bg-elevated border border-amber/40 text-amber font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                      >
+                        <span>⚖️</span>
+                        <span>Downsize 50% ({Math.max(lotSize, Math.floor(qty / 2 / lotSize) * lotSize)} Qty)</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : preflightInfo?.flags?.length > 0 ? (
                   <div className="bg-amber/10 border border-amber/40 rounded-lg p-3 space-y-2 text-left">
                     <div className="flex items-center gap-1.5 text-amber font-bold text-[11px]">
                       <span>🧠</span>
@@ -922,7 +1014,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                       </div>
                     ))}
                   </div>
-                )}
+                ) : null}
 
                 {/* Order Breakdown */}
                 <div className="space-y-1.5 font-mono tabular-nums text-[11px] bg-panel p-3 rounded-lg border border-border/50">

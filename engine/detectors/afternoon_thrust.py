@@ -250,12 +250,12 @@ def detect_afternoon_thrust(
             float(cam.get("h4", 0.0) or 0.0)
             l4 = float(cam.get("l4", 0.0) or 0.0)
 
-            # Camarilla levels must be within reasonable proximity (10%) of spot to be valid for intraday gate
+            # Camarilla levels must be within tight collision proximity (0.25%) of spot to be valid for intraday gate
             # Bullish afternoon breakout reaching Camarilla H5 terminal exhaustion
             if (
                 direction == "BULLISH"
                 and h5 > 0
-                and abs(ltp - h5) / ltp <= 0.03
+                and abs(ltp - h5) / ltp <= 0.0025
                 and ltp >= h5 * 0.999
             ):
                 logger.debug(
@@ -268,7 +268,7 @@ def detect_afternoon_thrust(
             if (
                 direction == "BEARISH"
                 and l5 > 0
-                and abs(ltp - l5) / ltp <= 0.03
+                and abs(ltp - l5) / ltp <= 0.0025
                 and ltp <= l5 * 1.001
             ):
                 logger.debug(
@@ -278,7 +278,7 @@ def detect_afternoon_thrust(
                 return None
 
             # Bearish flush colliding with un-breached Camarilla L4 floor
-            if direction == "BEARISH" and l4 > 0 and abs(ltp - l4) / ltp <= 0.03 and ltp >= l4:
+            if direction == "BEARISH" and l4 > 0 and abs(ltp - l4) / ltp <= 0.0025 and ltp >= l4:
                 if col_c in df_today.columns:
                     last_c_val = float(df_today[col_c].iloc[-1])
                     if last_c_val >= l4:
@@ -324,6 +324,25 @@ def detect_afternoon_thrust(
                 return None
     except Exception as e_tbt:
         logger.debug(f"[AfternoonThrust] TBT check non-fatal exception: {e_tbt}")
+
+    # ── Benchmark Index Tide Gate ─────────────────────────
+    if not is_index:
+        try:
+            from engine.market_regime_gate import evaluate_index_tide_gate
+
+            tide_res = evaluate_index_tide_gate(
+                clean_sym,
+                direction=direction,
+                ltp=ltp,
+                rvol=rvol_val,
+            )
+            if tide_res.is_vetoed:
+                logger.info(
+                    f"[AfternoonThrust] Suppressed counter-trend {'thrust' if direction == 'BULLISH' else 'flush'} on {clean_sym}: {tide_res.veto_reason}"
+                )
+                return None
+        except Exception as e_tide:
+            logger.debug(f"[AfternoonThrust] Index tide check skipped: {e_tide}")
 
     # Stage determination:
     # IGNITED if spot has breached session extreme or surging with RVOL >= 1.35
@@ -398,6 +417,55 @@ def detect_afternoon_thrust(
         confidence_score += 4
     if rr_ratio >= 2.0:
         confidence_score += 3
+
+    has_flow = False
+    obv_div = None
+    dmi_verdict = None
+
+    if df_5m is not None and len(df_5m) >= 5:
+        try:
+            from analysis.obv import analyse_obv
+            from analysis.dmi_filter import evaluate_triple_dmi
+
+            obv_res = analyse_obv(df_5m, is_intraday=True)
+            if obv_res:
+                obv_div = obv_res.divergence
+                if is_bull_thrust and (
+                    obv_res.divergence in ("BULLISH_CONVERGENCE", "BULLISH_DIVERGENCE")
+                    or obv_res.obv_slope_5bar > 0
+                ):
+                    confidence_score += 5
+                    has_flow = True
+                elif is_bear_flush and (
+                    obv_res.divergence in ("BEARISH_CONVERGENCE", "BEARISH_DIVERGENCE")
+                    or obv_res.obv_slope_5bar < 0
+                ):
+                    confidence_score += 5
+                    has_flow = True
+
+            dmi_res = evaluate_triple_dmi(df_5m, is_intraday=True)
+            if dmi_res:
+                dmi_verdict = dmi_res.verdict
+                if is_bull_thrust and (
+                    dmi_res.verdict == "TRIPLE_DMI_BULLISH_CONFIRMED" or dmi_res.plus_di >= 22.0
+                ):
+                    confidence_score += 5
+                    has_flow = True
+                elif is_bear_flush and (
+                    dmi_res.verdict == "TRIPLE_DMI_BEARISH_CONFIRMED" or dmi_res.minus_di >= 22.0
+                ):
+                    confidence_score += 5
+                    has_flow = True
+        except Exception as e_flow:
+            logger.debug(f"[AfternoonThrust] Flow analysis skipped: {e_flow}")
+
+    # Vehicle selection: Afternoon theta decay protection
+    is_pm_theta = curr_t >= dtime(13, 30)
+    pref_vehicle = (
+        "NAKED_OPTION"
+        if (rvol_val >= 2.0 and stage == "IGNITED")
+        else ("SPREAD_ONLY" if is_pm_theta else "NAKED_OPTION")
+    )
     confidence_score = min(96, confidence_score)
 
     # Option resolution via Unified VIX-Aware Resolver
@@ -537,6 +605,9 @@ def detect_afternoon_thrust(
         "underlying_symbol": clean_sym,
         "underlying_spot": ltp,
         "vwap": effective_vwap,
+        "has_flow": has_flow,
+        "obv_regime": obv_div,
+        "dmi_triple_verdict": dmi_verdict,
     }
 
     if has_opt and resolved_opt:
@@ -581,6 +652,7 @@ def detect_afternoon_thrust(
         environment=env_str,
         confidence=confidence_score,
         segment=alert_seg,
+        preferred_vehicle=pref_vehicle,
         actionable_plan=act_plan,
         metrics=metrics_dict,
     )

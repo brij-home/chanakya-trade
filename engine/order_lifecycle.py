@@ -173,6 +173,9 @@ class OrderIntent:
     filled_quantity: int = 0
     average_fill_price: Optional[float] = None
     last_sync_at: Optional[str] = None
+    parent_order_id: Optional[str] = None
+    slice_index: Optional[int] = None
+    total_slices: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -241,10 +244,19 @@ def _init_orders_db():
             conn.execute("ALTER TABLE orders_ledger ADD COLUMN average_fill_price REAL")
         if "last_sync_at" not in existing_cols:
             conn.execute("ALTER TABLE orders_ledger ADD COLUMN last_sync_at TEXT")
+        if "parent_order_id" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN parent_order_id TEXT")
+        if "slice_index" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN slice_index INTEGER")
+        if "total_slices" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN total_slices INTEGER")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idemp ON orders_ledger(idempotency_key)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders_ledger(status)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orders_parent ON orders_ledger(parent_order_id)"
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS order_events (
@@ -469,6 +481,12 @@ def _intent_from_ledger_row(row: sqlite3.Row | dict[str, Any], expected_hash: st
         gtt_order_id=d.get("gtt_order_id"),
         created_at=d["created_at"],
         updated_at=d["updated_at"],
+        filled_quantity=int(d.get("filled_quantity", 0) or 0),
+        average_fill_price=float(d["average_fill_price"]) if d.get("average_fill_price") else None,
+        last_sync_at=d.get("last_sync_at"),
+        parent_order_id=d.get("parent_order_id"),
+        slice_index=d.get("slice_index"),
+        total_slices=d.get("total_slices"),
     )
 
 
@@ -1074,6 +1092,101 @@ def _row_to_intent(d: dict) -> OrderIntent:
         gtt_order_id=d.get("gtt_order_id"),
         created_at=d.get("created_at"),
         updated_at=d.get("updated_at"),
+        filled_quantity=int(d.get("filled_quantity", 0) or 0),
+        average_fill_price=float(d["average_fill_price"]) if d.get("average_fill_price") else None,
+        last_sync_at=d.get("last_sync_at"),
+        parent_order_id=d.get("parent_order_id"),
+        slice_index=d.get("slice_index"),
+        total_slices=d.get("total_slices"),
+    )
+
+
+def get_order_intent(order_id: str) -> Optional[OrderIntent]:
+    """Retrieve an order intent by its order_id from the ledger."""
+    _init_orders_db()
+    with _get_orders_db() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM orders_ledger WHERE order_id = ? OR broker_order_id = ? LIMIT 1",
+            (order_id, order_id),
+        ).fetchone()
+        if not row:
+            return None
+        return _row_to_intent(dict(row))
+
+
+def get_child_orders(parent_order_id: str) -> list[OrderIntent]:
+    """Retrieve all child tranche order intents for a given parent_order_id, sorted by slice_index."""
+    _init_orders_db()
+    with _get_orders_db() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM orders_ledger WHERE parent_order_id = ? ORDER BY slice_index ASC",
+            (parent_order_id,),
+        ).fetchall()
+        return [_row_to_intent(dict(r)) for r in rows]
+
+
+def _reconcile_parent_order_in_conn(
+    conn: sqlite3.Connection, parent_order_id: str, now_iso: str
+) -> None:
+    """Rolls up child order statuses and fills to the parent order in a single transaction."""
+    children = conn.execute(
+        "SELECT * FROM orders_ledger WHERE parent_order_id = ? ORDER BY slice_index ASC",
+        (parent_order_id,),
+    ).fetchall()
+    if not children:
+        return
+
+    statuses = [c["status"] for c in children]
+    if any(s in ("SUBMITTING", "UNKNOWN_FREEZE") for s in statuses):
+        new_parent_status = "UNKNOWN_FREEZE"
+    elif any(s in ("OPEN", "PARTIALLY_FILLED") for s in statuses):
+        new_parent_status = "OPEN"
+    elif all(s in ("FILLED", "FILLED_PAPER") for s in statuses):
+        new_parent_status = "FILLED" if "FILLED" in statuses else "FILLED_PAPER"
+    elif all(s == "REJECTED" for s in statuses):
+        new_parent_status = "REJECTED"
+    elif any(s in ("FILLED", "FILLED_PAPER") for s in statuses):
+        new_parent_status = "PARTIALLY_FILLED"
+    else:
+        new_parent_status = "OPEN"
+
+    total_qty = sum(int(c["filled_quantity"] or 0) for c in children)
+    total_cost = sum(
+        int(c["filled_quantity"] or 0) * float(c["average_fill_price"] or c["price"] or 0.0)
+        for c in children
+        if (c["filled_quantity"] or 0) > 0
+    )
+    avg_px = (total_cost / total_qty) if total_qty > 0 else None
+
+    child_broker_ids = [c["broker_order_id"] for c in children if c["broker_order_id"]]
+    prefix = (
+        "PAPER-EXEC-SLICED-"
+        if any(str(b).startswith("PAPER-") for b in child_broker_ids)
+        else "SLICED:"
+    )
+    broker_order_id_str = (
+        f"{prefix}{','.join(str(b) for b in child_broker_ids)}" if child_broker_ids else None
+    )
+
+    conn.execute(
+        """
+        UPDATE orders_ledger
+        SET status = ?, filled_quantity = ?, average_fill_price = ?,
+            broker_order_id = COALESCE(?, broker_order_id),
+            last_sync_at = ?, updated_at = ?
+        WHERE order_id = ?
+        """,
+        (
+            new_parent_status,
+            total_qty,
+            avg_px,
+            broker_order_id_str,
+            now_iso,
+            now_iso,
+            parent_order_id,
+        ),
     )
 
 
@@ -1241,7 +1354,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             lot_size,
             segment=d.get("segment"),
         )
-        if len(tranche_quantities or []) > 1:
+        if len(tranche_quantities or []) > 1 and os.environ.get("LIVE_EXECUTION_QUALIFIED") != "1":
             raise PermissionError(
                 "Live freeze-limit sliced orders are disabled until child-order IDs, "
                 "partial fills, and restart recovery are durably tracked. The order "
@@ -1357,7 +1470,60 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 all_complete = True
                 any_rejected = False
                 rej_msg = ""
-                for s_qty in slices:
+                total_filled_qty = 0
+                total_cost = 0.0
+
+                # Pre-persist all child tranches in orders_ledger before dispatching
+                with _get_orders_db() as conn:
+                    for idx, s_qty in enumerate(slices):
+                        c_order_id = f"{order_id}-C{idx + 1}"
+                        c_idemp = f"{d['idempotency_key']}-C{idx + 1}"
+                        conn.execute(
+                            """
+                            INSERT INTO orders_ledger (
+                                order_id, idempotency_key, symbol, exchange, segment, side, quantity, price,
+                                order_type, product, status, mode, charges_json, preview_hash,
+                                stop_loss, target, auto_gtt_oco, parent_order_id, slice_index, total_slices,
+                                created_at, updated_at, account_id
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(idempotency_key) DO UPDATE SET updated_at = excluded.updated_at
+                            """,
+                            (
+                                c_order_id,
+                                c_idemp,
+                                d["symbol"],
+                                _paper_exchange,
+                                d.get("segment", "EQUITY_INTRADAY"),
+                                d["side"],
+                                s_qty,
+                                d["price"],
+                                d["order_type"],
+                                d["product"],
+                                mode_info.mode.name,
+                                json.dumps(charges_dict),
+                                d.get("preview_hash"),
+                                d.get("stop_loss"),
+                                d.get("target"),
+                                1 if d.get("auto_gtt_oco", 1) else 0,
+                                order_id,
+                                idx + 1,
+                                len(slices),
+                                now_iso,
+                                now_iso,
+                                d.get("account_id") or "SIMULATED_PAPER_ACCOUNT",
+                            ),
+                        )
+                    conn.commit()
+
+                for idx, s_qty in enumerate(slices):
+                    c_order_id = f"{order_id}-C{idx + 1}"
+                    with _get_orders_db() as conn:
+                        conn.execute(
+                            "UPDATE orders_ledger SET status = 'SUBMITTING', updated_at = ? WHERE order_id = ?",
+                            (now_iso, c_order_id),
+                        )
+                        conn.commit()
+
                     req = OrderRequest(
                         symbol=d["symbol"],
                         exchange=_paper_exchange,
@@ -1367,17 +1533,79 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                         quantity=s_qty,
                         price=d["price"],
                         trigger_price=trigger_px,
+                        tag=c_order_id,
                     )
                     paper_res = paper_broker.place_order(req)
                     if paper_res.status == "COMPLETE":
                         child_ids.append(paper_res.order_id)
+                        c_broker_id = f"PAPER-EXEC-{paper_res.order_id}"
+                        c_fill_px = (
+                            float(paper_res.average_price)
+                            if (
+                                getattr(paper_res, "average_price", None)
+                                and float(paper_res.average_price) > 0
+                            )
+                            else float(d["price"])
+                        )
+                        total_filled_qty += s_qty
+                        total_cost += s_qty * c_fill_px
+                        with _get_orders_db() as conn:
+                            conn.execute(
+                                """
+                                UPDATE orders_ledger
+                                SET status = 'FILLED_PAPER', broker_order_id = ?, filled_quantity = ?,
+                                    average_fill_price = ?, updated_at = ?
+                                WHERE order_id = ?
+                                """,
+                                (c_broker_id, s_qty, c_fill_px, now_iso, c_order_id),
+                            )
+                            conn.commit()
+                        _record_order_event(
+                            c_order_id,
+                            "CHILD_ORDER_FILLED",
+                            broker_name="PaperBroker",
+                            broker_order_id=c_broker_id,
+                            payload={"quantity": s_qty, "price": c_fill_px},
+                        )
                     elif paper_res.status == "REJECTED":
                         any_rejected = True
                         rej_msg = paper_res.message or "Rejected by PaperBroker"
+                        with _get_orders_db() as conn:
+                            conn.execute(
+                                """
+                                UPDATE orders_ledger
+                                SET status = 'REJECTED', rejection_reason = ?, updated_at = ?
+                                WHERE order_id = ?
+                                """,
+                                (rej_msg, now_iso, c_order_id),
+                            )
+                            conn.commit()
+                        _record_order_event(
+                            c_order_id,
+                            "CHILD_ORDER_REJECTED",
+                            broker_name="PaperBroker",
+                            payload={"reason": rej_msg},
+                        )
                         break
                     else:
                         child_ids.append(paper_res.order_id)
                         all_complete = False
+                        c_broker_id = f"PAPER-OPEN-{paper_res.order_id}"
+                        with _get_orders_db() as conn:
+                            conn.execute(
+                                """
+                                UPDATE orders_ledger
+                                SET status = 'OPEN', broker_order_id = ?, updated_at = ?
+                                WHERE order_id = ?
+                                """,
+                                (c_broker_id, now_iso, c_order_id),
+                            )
+                            conn.commit()
+
+                d["filled_quantity"] = total_filled_qty
+                if total_filled_qty > 0:
+                    d["average_fill_price"] = total_cost / total_filled_qty
+                    d["fill_price"] = d["average_fill_price"]
 
                 if any_rejected:
                     if child_ids:
@@ -1420,12 +1648,19 @@ def execute_order_intent(order_id: str) -> OrderIntent:
 
         with _get_orders_db() as conn:
             conn.execute(
-                "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, gtt_order_id = ?, updated_at = ? WHERE order_id = ?",
+                """
+                UPDATE orders_ledger
+                SET status = ?, broker_order_id = ?, rejection_reason = ?, gtt_order_id = ?,
+                    filled_quantity = ?, average_fill_price = ?, updated_at = ?
+                WHERE order_id = ?
+                """,
                 (
                     d["status"],
                     d["broker_order_id"],
                     d["rejection_reason"],
                     d.get("gtt_order_id"),
+                    d.get("filled_quantity", 0),
+                    d.get("average_fill_price"),
                     now_iso,
                     order_id,
                 ),
@@ -1949,14 +2184,69 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                         payload={"reason": d["rejection_reason"]},
                     )
             else:
-                # Sliced institutional execution across child tranches
+                # Sliced institutional execution across child tranches with durable tracking
                 tranche_order_ids = []
                 all_complete = True
                 any_rejected = False
                 rej_msg = ""
                 total_filled_qty = 0
+                total_cost = 0.0
 
-                for s_qty in slices:
+                # Pre-persist all child tranches in orders_ledger before dispatching to broker
+                with _get_orders_db() as conn:
+                    for idx, s_qty in enumerate(slices):
+                        c_order_id = f"{order_id}-C{idx + 1}"
+                        c_idemp = f"{d['idempotency_key']}-C{idx + 1}"
+                        conn.execute(
+                            """
+                            INSERT INTO orders_ledger (
+                                order_id, idempotency_key, symbol, exchange, segment, side, quantity, price,
+                                order_type, product, status, mode, charges_json, preview_hash,
+                                stop_loss, target, auto_gtt_oco, parent_order_id, slice_index, total_slices,
+                                created_at, updated_at, account_id
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(idempotency_key) DO UPDATE SET updated_at = excluded.updated_at
+                            """,
+                            (
+                                c_order_id,
+                                c_idemp,
+                                d["symbol"],
+                                _live_exchange,
+                                d.get("segment", "EQUITY_INTRADAY"),
+                                d["side"],
+                                s_qty,
+                                d["price"],
+                                d["order_type"],
+                                d["product"],
+                                mode_info.mode.name,
+                                json.dumps(charges_dict),
+                                d.get("preview_hash"),
+                                d.get("stop_loss"),
+                                d.get("target"),
+                                1 if d.get("auto_gtt_oco", 1) else 0,
+                                order_id,
+                                idx + 1,
+                                len(slices),
+                                now_iso,
+                                now_iso,
+                                str(_account)
+                                if isinstance(_account, str)
+                                else str(d.get("account_id") or "LIVE_ACCOUNT"),
+                            ),
+                        )
+                    conn.commit()
+
+                from brokers.order_types import normalize_order_status
+
+                for idx, s_qty in enumerate(slices):
+                    c_order_id = f"{order_id}-C{idx + 1}"
+                    with _get_orders_db() as conn:
+                        conn.execute(
+                            "UPDATE orders_ledger SET status = 'SUBMITTING', updated_at = ? WHERE order_id = ?",
+                            (now_iso, c_order_id),
+                        )
+                        conn.commit()
+
                     broker_req = OrderRequest(
                         symbol=d["symbol"],
                         exchange=_live_exchange,
@@ -1966,56 +2256,193 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                         quantity=s_qty,
                         price=d["price"],
                         trigger_price=trigger_px,
+                        tag=c_order_id,
                     )
-                    b_res = live_broker.place_order(broker_req)
-                    if b_res.status in ("COMPLETE", "OPEN"):
-                        tranche_order_ids.append(b_res.order_id)
-                        total_filled_qty += getattr(
-                            b_res, "filled_quantity", s_qty if b_res.status == "COMPLETE" else 0
-                        )
-                        if b_res.status == "OPEN":
+                    try:
+                        b_res = live_broker.place_order(broker_req)
+                        norm_status = normalize_order_status(b_res.status)
+                        if norm_status in ("COMPLETE", "OPEN", "SUBMITTED"):
+                            c_status = "OPEN" if norm_status in ("OPEN", "SUBMITTED") else "FILLED"
+                            c_broker_id = str(b_res.order_id)
+                            c_filled = int(
+                                getattr(
+                                    b_res,
+                                    "filled_quantity",
+                                    s_qty if norm_status == "COMPLETE" else 0,
+                                )
+                                or 0
+                            )
+                            c_avg_px = float(
+                                getattr(b_res, "average_price", d["price"]) or d["price"]
+                            )
+                            tranche_order_ids.append(c_broker_id)
+                            total_filled_qty += c_filled
+                            total_cost += c_filled * c_avg_px
+                            if norm_status != "COMPLETE":
+                                all_complete = False
+
+                            with _get_orders_db() as conn:
+                                conn.execute(
+                                    """
+                                    UPDATE orders_ledger
+                                    SET status = ?, broker_order_id = ?, filled_quantity = ?, average_fill_price = ?, updated_at = ?
+                                    WHERE order_id = ?
+                                    """,
+                                    (
+                                        c_status,
+                                        c_broker_id,
+                                        c_filled,
+                                        c_avg_px if c_avg_px > 0 else None,
+                                        now_iso,
+                                        c_order_id,
+                                    ),
+                                )
+                                conn.commit()
+
+                            _record_order_event(
+                                c_order_id,
+                                "CHILD_ORDER_SUBMITTED",
+                                correlation_id=pretrade_correlation_id,
+                                broker_name=execution_provider,
+                                broker_order_id=c_broker_id,
+                                payload={"status": c_status, "filled_quantity": c_filled},
+                            )
+                        elif norm_status == "REJECTED":
+                            any_rejected = True
+                            rej_msg = b_res.message or "Tranche rejected by live broker"
+                            with _get_orders_db() as conn:
+                                conn.execute(
+                                    "UPDATE orders_ledger SET status = 'REJECTED', rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                                    (rej_msg, now_iso, c_order_id),
+                                )
+                                conn.commit()
+                            _record_order_event(
+                                c_order_id,
+                                "CHILD_ORDER_REJECTED",
+                                correlation_id=pretrade_correlation_id,
+                                broker_name=execution_provider,
+                                payload={"reason": rej_msg},
+                            )
+                            break
+                        else:
+                            tranche_order_ids.append(str(b_res.order_id))
                             all_complete = False
-                    elif b_res.status == "REJECTED":
-                        any_rejected = True
-                        rej_msg = b_res.message or "Tranche rejected by live broker"
-                        break
-                    else:
-                        tranche_order_ids.append(b_res.order_id)
-                        all_complete = False
+                    except Exception as tranche_exc:
+                        c_reason = (
+                            f"Live child order broker call raised {type(tranche_exc).__name__}: {tranche_exc}. "
+                            "Child slice status ambiguous; frozen for manual reconciliation."
+                        )
+                        with _get_orders_db() as conn:
+                            conn.execute(
+                                "UPDATE orders_ledger SET status = 'UNKNOWN_FREEZE', broker_order_id = NULL, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                                (c_reason, now_iso, c_order_id),
+                            )
+                            conn.commit()
+                        _record_order_event(
+                            c_order_id,
+                            "UNKNOWN_FREEZE",
+                            correlation_id=pretrade_correlation_id,
+                            payload={"reason": c_reason},
+                        )
+
+                        d["status"] = "UNKNOWN_FREEZE"
+                        d["broker_order_id"] = (
+                            f"SLICED:{','.join(str(tid) for tid in tranche_order_ids)}"
+                            if tranche_order_ids
+                            else None
+                        )
+                        d["rejection_reason"] = (
+                            f"Tranche {idx + 1} raised {type(tranche_exc).__name__}: {tranche_exc}. "
+                            "Order status ambiguous; frozen for manual reconciliation."
+                        )
+                        d["filled_quantity"] = total_filled_qty
+                        d["average_fill_price"] = (
+                            (total_cost / total_filled_qty) if total_filled_qty > 0 else None
+                        )
+                        with _get_orders_db() as conn:
+                            conn.execute(
+                                """
+                                UPDATE orders_ledger
+                                SET status = ?, broker_order_id = ?, rejection_reason = ?, filled_quantity = ?,
+                                    average_fill_price = ?, updated_at = ?
+                                WHERE order_id = ?
+                                """,
+                                (
+                                    d["status"],
+                                    d["broker_order_id"],
+                                    d["rejection_reason"],
+                                    d["filled_quantity"],
+                                    d["average_fill_price"],
+                                    now_iso,
+                                    order_id,
+                                ),
+                            )
+                            conn.commit()
+                        record_audit_event(
+                            event_type="ORDER_UNKNOWN_FREEZE",
+                            mode=mode_info.mode.name,
+                            details={
+                                "order_id": order_id,
+                                "correlation_id": pretrade_correlation_id,
+                                "exception": str(tranche_exc),
+                            },
+                        )
+                        return _row_to_intent(d)
+
+                d["filled_quantity"] = total_filled_qty
+                d["average_fill_price"] = (
+                    (total_cost / total_filled_qty) if total_filled_qty > 0 else None
+                )
 
                 if any_rejected and not tranche_order_ids:
                     d["status"] = "REJECTED"
                     d["rejection_reason"] = rej_msg
-                    with _get_orders_db() as conn:
-                        conn.execute(
-                            "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
-                            (d["status"], d["rejection_reason"], now_iso, order_id),
-                        )
-                        conn.commit()
+                elif any_rejected:
+                    d["status"] = "PARTIALLY_FILLED"
+                    d["rejection_reason"] = (
+                        f"Partial fill: {len(tranche_order_ids)} tranches submitted before rejection: {rej_msg}"
+                    )
+                    d["broker_order_id"] = (
+                        f"SLICED:{','.join(str(tid) for tid in tranche_order_ids)}"
+                    )
                 else:
                     d["status"] = "FILLED" if all_complete else "OPEN"
                     d["broker_order_id"] = (
                         f"SLICED:{','.join(str(tid) for tid in tranche_order_ids)}"
                     )
-                    with _get_orders_db() as conn:
-                        conn.execute(
-                            "UPDATE orders_ledger SET status = ?, broker_order_id = ?, updated_at = ? WHERE order_id = ?",
-                            (d["status"], d["broker_order_id"], now_iso, order_id),
-                        )
-                        conn.commit()
 
-                    _record_order_event(
-                        order_id,
-                        "BROKER_RESPONSE_SLICED",
-                        correlation_id=pretrade_correlation_id,
-                        broker_name=execution_provider,
-                        broker_order_id=d["broker_order_id"],
-                        payload={
-                            "status": d["status"],
-                            "tranche_count": len(slices),
-                            "filled_quantity": total_filled_qty,
-                        },
+                with _get_orders_db() as conn:
+                    conn.execute(
+                        """
+                        UPDATE orders_ledger
+                        SET status = ?, broker_order_id = ?, rejection_reason = ?, filled_quantity = ?,
+                            average_fill_price = ?, updated_at = ?
+                        WHERE order_id = ?
+                        """,
+                        (
+                            d["status"],
+                            d["broker_order_id"],
+                            d.get("rejection_reason"),
+                            d["filled_quantity"],
+                            d["average_fill_price"],
+                            now_iso,
+                            order_id,
+                        ),
                     )
+                    conn.commit()
+
+                _record_order_event(
+                    order_id,
+                    "BROKER_RESPONSE_SLICED",
+                    correlation_id=pretrade_correlation_id,
+                    broker_name=execution_provider,
+                    broker_order_id=d["broker_order_id"],
+                    payload={
+                        "status": d["status"],
+                        "tranche_count": len(slices),
+                        "filled_quantity": total_filled_qty,
+                    },
+                )
 
         except Exception as live_exc:
             # Ambiguous or timed-out broker call: MUST NOT fabricate order ID or set OPEN.
@@ -2052,30 +2479,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 f"Live order {order_id} frozen in UNKNOWN_FREEZE state due to broker exception: {live_exc}"
             ) from live_exc
 
-    return OrderIntent(
-        order_id=d["order_id"],
-        idempotency_key=d["idempotency_key"],
-        symbol=d["symbol"],
-        exchange=d.get("exchange", "NSE"),
-        segment=d.get("segment", "EQUITY_INTRADAY"),
-        side=d["side"],  # type: ignore
-        quantity=d["quantity"],
-        price=d["price"],
-        order_type=d["order_type"],  # type: ignore
-        product=d["product"],  # type: ignore
-        status=d["status"],  # type: ignore
-        mode=d["mode"],
-        broker_order_id=d.get("broker_order_id"),
-        charges=json.loads(d.get("charges_json") or "{}"),
-        rejection_reason=d.get("rejection_reason"),
-        preview_hash=d.get("preview_hash"),
-        stop_loss=d.get("stop_loss"),
-        target=d.get("target"),
-        auto_gtt_oco=bool(d.get("auto_gtt_oco", 1)),
-        gtt_order_id=d.get("gtt_order_id"),
-        created_at=d.get("created_at", now_iso),
-        updated_at=now_iso,
-    )
+    return _row_to_intent(d)
 
 
 def execute_order_batch(order_ids: list[str]) -> list[OrderIntent]:
@@ -3143,7 +3547,10 @@ def sync_execution_orders() -> dict[str, Any]:
             "SELECT * FROM orders_ledger WHERE broker_order_id IS NOT NULL"
         ).fetchall()
         known_ids = {str(row["broker_order_id"]) for row in known_rows}
+        parent_ids_to_sync: set[str] = set()
         for row in known_rows:
+            if row["parent_order_id"]:
+                parent_ids_to_sync.add(str(row["parent_order_id"]))
             broker_order = by_id.get(str(row["broker_order_id"]))
             if not broker_order:
                 continue
@@ -3203,6 +3610,8 @@ def sync_execution_orders() -> dict[str, Any]:
                     )
                 )
                 changed += 1
+        for pid in parent_ids_to_sync:
+            _reconcile_parent_order_in_conn(conn, pid, now_sync_iso)
         unknown_broker_orders = len(set(by_id).difference(known_ids))
         conn.commit()
     for local_order_id, new_status, filled_quantity in events_to_record:

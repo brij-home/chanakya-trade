@@ -776,3 +776,167 @@ def apply_autonomous_breakeven_lock(
         "ratcheted_orders_count": len(modified_orders),
         "modified_order_ids": [o.order_id for o in modified_orders],
     }
+
+
+def auto_ratchet_chandelier_trailing_stop(
+    symbol: str,
+    current_price: float,
+    entry_price: float,
+    initial_stop_loss: float,
+    target_1: Optional[float] = None,
+    target_2: Optional[float] = None,
+    atr_14: Optional[float] = None,
+    high_watermark: Optional[float] = None,
+    low_watermark: Optional[float] = None,
+    position_type: str = "LONG",
+    atr_multiplier: float = 2.5,
+    current_stop: Optional[float] = None,
+    cost_buffer_pct: float = 0.002,
+    is_option: Optional[bool] = None,
+    option_wick_buffer_pct: float = 0.025,
+    actor: str = "AUTONOMOUS_LIFECYCLE",
+) -> dict[str, Any]:
+    """
+    Automated Multi-Stage Trailing Stop-Loss Engine (Chandelier / ATR Ratchet & Lifecycle Runner).
+
+    Stages:
+      1. Stage 1 (T1_ACHIEVED, ~1.8R to 2.0R):
+         Ratchets stop to Breakeven (+ cost buffer for equity, -2.5% option wick cushion for options).
+      2. Stage 2 (T2_ACHIEVED, ~3.5R to 4.0R):
+         Ratchets stop to lock in Target 1 level (guarantees banking substantial profit).
+      3. Stage 3 (RUNNER_CHANDELIER):
+         For runners beyond T2, calculates dynamic Chandelier ATR trail:
+           Long:  high_watermark - (atr_multiplier * atr_14)
+           Short: low_watermark + (atr_multiplier * atr_14)
+         Monotonically ratchets the stop higher (for long) or lower (for short) as profit expands.
+
+    Ratchets resting SL orders in the OMS ledger atomically via `ratchet_stop_loss_on_milestone`.
+    """
+    is_long = position_type.upper() in ("LONG", "BUY")
+    initial_risk = max(0.01, abs(entry_price - initial_stop_loss))
+
+    # Realized / Unrealized R-multiple
+    pnl = (current_price - entry_price) if is_long else (entry_price - current_price)
+    r_mult = pnl / initial_risk
+
+    # Milestone reach tests
+    if target_1 and target_1 > 0:
+        t1_reached = (
+            (current_price >= target_1 * 0.998) if is_long else (current_price <= target_1 * 1.002)
+        )
+    else:
+        t1_reached = r_mult >= 1.8
+
+    if target_2 and target_2 > 0:
+        t2_reached = (
+            (current_price >= target_2 * 0.998) if is_long else (current_price <= target_2 * 1.002)
+        )
+    else:
+        t2_reached = r_mult >= 3.5
+
+    # Breakeven Stop Level (+ buffer for costs or option volatility wick cushion)
+    is_opt = is_option if is_option is not None else symbol.upper().endswith(("CE", "PE"))
+    if is_opt:
+        breakeven_sl = round(entry_price * (1.0 - option_wick_buffer_pct), 2)
+    elif is_long:
+        breakeven_sl = round(entry_price * (1.0 + cost_buffer_pct), 2)
+    else:
+        breakeven_sl = round(entry_price * (1.0 - cost_buffer_pct), 2)
+
+    # Target 1 Lock Level
+    if target_1 and target_1 > 0:
+        t1_lock_sl = round(target_1, 2)
+    else:
+        t1_lock_sl = (
+            round(entry_price + (1.8 * initial_risk), 2)
+            if is_long
+            else round(entry_price - (1.8 * initial_risk), 2)
+        )
+
+    # Chandelier ATR Level
+    chandelier_sl = None
+    if atr_14 and atr_14 > 0:
+        hw = max(high_watermark or entry_price, current_price)
+        lw = min(low_watermark or entry_price, current_price)
+        if is_long:
+            chandelier_sl = round(hw - (atr_multiplier * atr_14), 2)
+        else:
+            chandelier_sl = round(lw + (atr_multiplier * atr_14), 2)
+
+    # Determine stage and new stop
+    if t2_reached:
+        if chandelier_sl is not None:
+            if is_long:
+                new_sl = max(t1_lock_sl, chandelier_sl)
+                stage = "RUNNER_CHANDELIER" if chandelier_sl >= t1_lock_sl else "T2_ACHIEVED"
+            else:
+                new_sl = min(t1_lock_sl, chandelier_sl)
+                stage = "RUNNER_CHANDELIER" if chandelier_sl <= t1_lock_sl else "T2_ACHIEVED"
+        else:
+            new_sl = t1_lock_sl
+            stage = "T2_ACHIEVED"
+    elif t1_reached:
+        new_sl = breakeven_sl
+        stage = "T1_ACHIEVED"
+    else:
+        return {
+            "locked": False,
+            "symbol": symbol,
+            "current_price": current_price,
+            "current_stop": current_stop or initial_stop_loss,
+            "r_multiple": round(r_mult, 2),
+            "reason": "Neither Target 1 nor Target 2 milestone reached",
+            "ratcheted_orders_count": 0,
+            "modified_order_ids": [],
+        }
+
+    # Monotonic tightening check: Never loosen an existing stop-loss
+    if current_stop is not None and current_stop > 0:
+        if is_long and new_sl <= current_stop:
+            return {
+                "locked": False,
+                "symbol": symbol,
+                "stage": stage,
+                "new_stop": new_sl,
+                "current_stop": current_stop,
+                "r_multiple": round(r_mult, 2),
+                "reason": f"Calculated stop ₹{new_sl:,.2f} does not tighten existing stop ₹{current_stop:,.2f}",
+                "ratcheted_orders_count": 0,
+                "modified_order_ids": [],
+            }
+        elif (not is_long) and new_sl >= current_stop:
+            return {
+                "locked": False,
+                "symbol": symbol,
+                "stage": stage,
+                "new_stop": new_sl,
+                "current_stop": current_stop,
+                "r_multiple": round(r_mult, 2),
+                "reason": f"Calculated stop ₹{new_sl:,.2f} does not tighten existing stop ₹{current_stop:,.2f}",
+                "ratcheted_orders_count": 0,
+                "modified_order_ids": [],
+            }
+
+    from engine.order_lifecycle import ratchet_stop_loss_on_milestone
+
+    modified_orders = ratchet_stop_loss_on_milestone(
+        symbol=symbol,
+        new_stop_loss=new_sl,
+        milestone=stage,
+        actor=actor,
+    )
+
+    return {
+        "locked": True,
+        "symbol": symbol,
+        "stage": stage,
+        "new_stop": new_sl,
+        "previous_stop": current_stop or initial_stop_loss,
+        "r_multiple": round(r_mult, 2),
+        "chandelier_stop": chandelier_sl,
+        "t1_lock_stop": t1_lock_sl if t2_reached else None,
+        "breakeven_stop": breakeven_sl,
+        "ratcheted_orders_count": len(modified_orders),
+        "modified_order_ids": [o.order_id for o in modified_orders],
+        "summary": f"[{stage}] {symbol} stop ratcheted to ₹{new_sl:,.2f} at +{r_mult:.2f}R",
+    }

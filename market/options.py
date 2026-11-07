@@ -1576,6 +1576,19 @@ def compute_options_iv_skew(
     otm_p_iv = float(getattr(otm_p, "iv", 0.0) or 0.0)
     wing_skew = round(otm_c_iv - otm_p_iv, 2) if (otm_c_iv > 0 and otm_p_iv > 0) else 0.0
 
+    from engine.iv_surface import calculate_25delta_skew
+
+    avg_atm_iv = (
+        (atm_c_iv + atm_p_iv) / 2.0
+        if (atm_c_iv > 0 and atm_p_iv > 0)
+        else (atm_c_iv or atm_p_iv or 0.0)
+    )
+    skew_25d = calculate_25delta_skew(
+        iv_25d_put=otm_p_iv,
+        iv_25d_call=otm_c_iv,
+        atm_iv=avg_atm_iv,
+    )
+
     if atm_skew >= 1.8:
         regime = "INSTITUTIONAL_CALL_SQUEEZE"
         edge = "Bull Call Spreads underpriced: expensive OTM call leg funds cheap ATM call."
@@ -1597,8 +1610,83 @@ def compute_options_iv_skew(
         "otm_call_iv": otm_c_iv,
         "otm_put_iv": otm_p_iv,
         "wing_skew": wing_skew,
+        "skew_25d": skew_25d,
         "regime": regime,
         "spread_pricing_edge": edge,
         "is_call_skew_elevated": atm_skew >= 1.8,
         "is_put_skew_elevated": atm_skew <= -3.5,
     }
+
+
+def get_iv_surface_snapshot(underlying: str, spot: float = 0.0) -> Any:
+    """
+    Computes an institutional constant-tenor 30-day IV surface snapshot for an underlying:
+    - Interpolates 30-day constant variance across near (T1) and next (T2) expiries
+    - Calculates 25-delta Risk Reversal Skew (Put IV - Call IV) / ATM IV
+    - Fails closed to status='UNAVAILABLE' if live options data is unreachable (Safety Contract #26)
+    """
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+    from engine.iv_surface import build_iv_surface_snapshot
+
+    _ist = ZoneInfo("Asia/Kolkata")
+    clean_u = underlying.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip().upper()
+    expiries = get_expiries(clean_u)
+    if not expiries:
+        return build_iv_surface_snapshot(symbol=clean_u, near_atm_iv=None, near_dte=None)
+
+    today = datetime.now(_ist).date()
+    valid_exp = []
+    for exp_str in expiries:
+        try:
+            d = date.fromisoformat(exp_str)
+            dte = (d - today).days
+            if dte >= 0:
+                valid_exp.append((exp_str, dte))
+        except Exception:
+            continue
+
+    if not valid_exp:
+        return build_iv_surface_snapshot(symbol=clean_u, near_atm_iv=None, near_dte=None)
+
+    near_exp, near_dte = valid_exp[0]
+    next_exp, next_dte = valid_exp[1] if len(valid_exp) > 1 else (None, None)
+
+    near_chain = get_options_chain(clean_u, expiry=near_exp)
+    if not near_chain:
+        return build_iv_surface_snapshot(symbol=clean_u, near_atm_iv=None, near_dte=None)
+
+    ref_spot = spot
+    if ref_spot <= 0:
+        try:
+            from market.quotes import get_ltp
+
+            ref_spot = float(get_ltp(clean_u) or 0.0)
+        except Exception:
+            ref_spot = 0.0
+
+    near_skew_info = compute_options_iv_skew(near_chain, ref_spot, underlying=clean_u)
+    near_atm_iv = near_skew_info.get("atm_call_iv") or near_skew_info.get("atm_put_iv") or 0.0
+
+    next_atm_iv = None
+    if next_exp:
+        next_chain = get_options_chain(clean_u, expiry=next_exp)
+        if next_chain:
+            next_skew_info = compute_options_iv_skew(next_chain, ref_spot, underlying=clean_u)
+            next_atm_iv = (
+                next_skew_info.get("atm_call_iv") or next_skew_info.get("atm_put_iv") or None
+            )
+
+    return build_iv_surface_snapshot(
+        symbol=clean_u,
+        near_atm_iv=near_atm_iv if near_atm_iv > 0 else None,
+        near_dte=near_dte,
+        next_atm_iv=next_atm_iv if (next_atm_iv and next_atm_iv > 0) else None,
+        next_dte=next_dte,
+        iv_25d_put=(
+            near_skew_info.get("otm_put_iv") if near_skew_info.get("otm_put_iv", 0) > 0 else None
+        ),
+        iv_25d_call=(
+            near_skew_info.get("otm_call_iv") if near_skew_info.get("otm_call_iv", 0) > 0 else None
+        ),
+    )

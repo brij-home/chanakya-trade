@@ -413,18 +413,24 @@ def get_lot_size(symbol: str) -> int:
             res = resolve_active_contract(raw, require_fresh=True)
             if res.is_valid and res.contract:
                 return res.contract.lot_size
-            logger.warning(
-                "[engine.position_sizer] Exact contract has no valid active listed master lot: %s (%s)",
-                raw,
-                res.rejection_reason,
-            )
+
+            # If this is an exact dated derivative contract, enforce fail-closed zero
+            from market.instruments import parse_derivative_contract
+
+            if parse_derivative_contract(raw):
+                logger.warning(
+                    "[engine.position_sizer] Exact contract has no valid active listed master lot: %s (%s)",
+                    raw,
+                    res.rejection_reason,
+                )
+                return 0
         except Exception as exc:
             logger.warning(
                 "[engine.position_sizer] Current contract lot lookup degraded for %s: %s",
                 raw,
                 exc,
             )
-        return 0
+            return 0
     # 1. Check verified contract master first if available
     try:
         from market.instrument_master import get_verified_contract

@@ -1,4 +1,4 @@
-import React, { memo, useMemo } from 'react'
+import React, { memo, useMemo, useState, useCallback } from 'react'
 import { useLiveSpot } from './LiveSpotsContext'
 import { AUTO_TYPE_STYLE, formatExpiryDetails, resolveAlertLifecycle, isTestOrSimAlert } from './alertHelpers'
 
@@ -82,6 +82,28 @@ export const AlertTriageCard = memo(function AlertTriageCard({
   const stagnationWarning = alert.stagnation_warning || alert.metadata?.stagnation_warning || null
   const physicalRisk = alert.physical_delivery_risk || alert.metadata?.physical_delivery_risk || null
   const gapRisk = alert.premarket_gap_risk || alert.metadata?.premarket_gap_risk || null
+
+  const [copied, setCopied] = useState(false)
+
+  const handleCopyBlueprint = useCallback((e) => {
+    e.stopPropagation()
+    const parts = [
+      `🎯 **${alert.symbol}** (${alert.alert_type || 'ALERT'})`,
+      `Direction: ${isBull ? '🟢 LONG' : isBear ? '🔴 SHORT' : '⚪ NEUTRAL'}`,
+      entryNum ? `Entry: ${currSym}${fmtP(entryNum)}` : '',
+      (alert.entry_range || alert.optimal_entry_range) ? `OTE Range: ${alert.entry_range || alert.optimal_entry_range}` : '',
+      slNum ? `Stop Loss: ${currSym}${fmtP(slNum)}` : '',
+      t1Num ? `Target 1 (+2R): ${currSym}${fmtP(t1Num)}` : '',
+      t2Num ? `Target 2 (+4R): ${currSym}${fmtP(t2Num)}` : '',
+      t3Num ? `Runner (+6R+): ${currSym}${fmtP(t3Num)}` : '',
+      (levels?.no_chase_boundary || alert.no_chase_boundary) ? `No-Chase: ${currSym}${fmtP(levels?.no_chase_boundary || alert.no_chase_boundary)}` : '',
+      `Horizon: ${horizonInfo?.label || 'INTRADAY'} | Conviction: ${conviction}%`,
+    ].filter(Boolean).join('\n')
+
+    navigator.clipboard?.writeText(parts)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }, [alert, isBull, isBear, entryNum, slNum, t1Num, t2Num, t3Num, levels, horizonInfo, conviction, currSym])
 
   return (
     <article
@@ -345,12 +367,22 @@ export const AlertTriageCard = memo(function AlertTriageCard({
         )}
 
         {/* Liquidity Spread Warning */}
-        {(alert.metrics?.liquidity_warning || plan.execution_ticket?.liquidity_warning || alert.extra_metrics?.bid_ask_spread_pct > 2.0) && (
+        {(alert.metrics?.liquidity_warning || plan.execution_ticket?.liquidity_warning || alert.extra_metrics?.bid_ask_spread_pct > 1.5) && (
           <span
-            className="text-[10px] px-1.5 py-0.5 rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap"
-            title={alert.metrics?.liquidity_warning || 'Wide Bid-Ask Spread · Bid-ask spread exceeds 2% · Limit execution strictly enforced'}
+            className="text-[10px] px-2 py-0.5 rounded font-black bg-amber-500/25 text-amber-300 border border-amber-500/50 shadow-xs whitespace-nowrap animate-pulse"
+            title={alert.metrics?.liquidity_warning || 'Wide Bid-Ask Spread (>1.5%) · Limit execution strictly mandated'}
           >
-            ⚠️ WIDE B/A
+            ⚠️ WIDE SPREAD — LIMIT MANDATED
+          </span>
+        )}
+
+        {/* Order Book Depth Wall Trap */}
+        {(alert.metrics?.order_book_wall_trap || alert.metrics?.ask_wall_trap || alert.extra_metrics?.order_book_wall_trap) && (
+          <span
+            className="text-[10px] px-2 py-0.5 rounded font-black bg-rose-500/25 text-rose-200 border border-rose-500/50 shadow-xs whitespace-nowrap"
+            title="Heavy Ask Depth Wall Detected · Institutional sell orders clustering overhead · Reversal risk elevated"
+          >
+            🛑 ASK WALL TRAP
           </span>
         )}
 
@@ -424,6 +456,17 @@ export const AlertTriageCard = memo(function AlertTriageCard({
 
         {/* Action CTAs */}
         <div className="flex items-center gap-1.5 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={handleCopyBlueprint}
+            className={`btn btn-xs text-[10px] px-2 py-1 font-bold transition-all rounded ${
+              copied
+                ? 'bg-emerald-500 text-black font-black shadow-xs'
+                : 'text-muted hover:text-text bg-surface/60 hover:bg-elevated border border-border/50'
+            }`}
+            title="Copy Actionable Trade Blueprint as Markdown"
+          >
+            {copied ? '✓ Copied' : '📋 Copy'}
+          </button>
           <button
             onClick={() => onTrade(alert)}
             className="btn btn-xs text-[10px] px-2.5 py-1 font-bold text-slate-950 bg-emerald-500 hover:bg-emerald-400 border border-emerald-400/80 dark:text-emerald-300 dark:hover:text-emerald-100 dark:bg-emerald-500/20 dark:hover:bg-emerald-500/30 dark:border-emerald-500/40 transition-all rounded shadow-sm"

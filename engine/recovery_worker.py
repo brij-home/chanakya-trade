@@ -121,10 +121,13 @@ def run_recovery_cycle() -> dict[str, Any]:
             by_tag[str(tag)] = bo
 
     recovered = 0
+    affected_parents: set[str] = set()
     now_dt = datetime.now(timezone.utc)
     now_iso = now_dt.isoformat()
 
     for row in stuck_orders:
+        if row["parent_order_id"]:
+            affected_parents.add(str(row["parent_order_id"]))
         order_id = str(row["order_id"])
         broker_oid = str(row["broker_order_id"]) if row["broker_order_id"] else None
         curr_status = row["status"]
@@ -252,6 +255,14 @@ def run_recovery_cycle() -> dict[str, Any]:
                         broker_name=provider,
                         payload={"reason": msg},
                     )
+
+    if affected_parents:
+        from engine.order_lifecycle import _reconcile_parent_order_in_conn
+
+        with _get_orders_db() as conn:
+            for pid in affected_parents:
+                _reconcile_parent_order_in_conn(conn, pid, now_iso)
+            conn.commit()
 
     return {
         "status": "OK",

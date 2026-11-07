@@ -351,10 +351,20 @@ def test_is_valid_ws_symbol_rejects_multi_suffix():
     assert is_valid_ws_symbol("NSE:RELIANCE-EQ") is True
 
 
-def test_daily_levels_endpoints_benchmarks_and_symbol():
+def test_daily_levels_endpoints_benchmarks_and_symbol(monkeypatch):
     """Verifies that GET /api/levels/benchmarks and GET /api/levels/{symbol} return valid CPR and blueprints."""
     from fastapi.testclient import TestClient
     from web.api import app
+
+    mock_df = pd.DataFrame(
+        [
+            {"open": 24500, "high": 24700, "low": 24400, "close": 24600, "volume": 1000},
+            {"open": 24650, "high": 25000, "low": 24600, "close": 24800, "volume": 1500},
+        ],
+        index=pd.to_datetime(["2026-10-06", "2026-10-07"]),
+    )
+    monkeypatch.setattr("market.history.get_ohlcv", lambda *a, **k: mock_df)
+    monkeypatch.setattr("market.quotes.get_quote", lambda *a, **k: {})
 
     client = TestClient(app)
     resp = client.get("/api/levels/benchmarks")

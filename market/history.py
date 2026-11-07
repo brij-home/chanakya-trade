@@ -751,7 +751,7 @@ def inject_live_tick(
             df.index = df.index.tz_localize(None)
 
         inst = f"{exchange}:{symbol}"
-        quotes = get_quote([inst])
+        quotes = get_quote([inst], ws_only=True)
         q = quotes.get(inst)
         if not q or q.last_price <= 0:
             return df

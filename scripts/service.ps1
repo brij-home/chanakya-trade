@@ -36,6 +36,7 @@ $PidFile = Join-Path $LogDir "services.json"
 if (-not (Test-Path $LogDir)) {
     New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 }
+Remove-Item env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 
 function Stop-ChanakyaServices {
     Write-Host "[*] Stopping existing ChanakyaTrade background services..." -ForegroundColor Cyan
@@ -79,9 +80,12 @@ function Get-ServiceStatus {
 
     try {
         $bPort = Get-NetTCPConnection -LocalPort $ApiPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($bPort) {
+        $hTest = $null
+        try { $hTest = Invoke-RestMethod -Uri "http://${ApiHost}:${ApiPort}/health" -TimeoutSec 1 -ErrorAction SilentlyContinue } catch {}
+        if ($bPort -or ($hTest -and $hTest.status -eq "alive")) {
             $backendLive = $true
-            Write-Host " [+] Backend (FastAPI):  RUNNING on http://${ApiHost}:${ApiPort} (PID: $($bPort.OwningProcess))" -ForegroundColor Green
+            $owningPid = if ($bPort) { $bPort.OwningProcess } else { "Active" }
+            Write-Host " [+] Backend (FastAPI):  RUNNING on http://${ApiHost}:${ApiPort} (PID: $owningPid)" -ForegroundColor Green
             try {
                 $prov = Invoke-RestMethod -Uri "http://${ApiHost}:${ApiPort}/api/system/code-provenance" -TimeoutSec 2 -ErrorAction SilentlyContinue
                 if ($prov -and $prov.is_stale_in_memory) {
@@ -89,6 +93,12 @@ function Get-ServiceStatus {
                     Write-Host "     Action Needed:      Run .\scripts\service.ps1 -Action restart to reload fresh bytecode." -ForegroundColor Yellow
                 } elseif ($prov) {
                     Write-Host "     Code Provenance:    FRESH (Commit: $($prov.git_commit), Uptime: $($prov.uptime_seconds)s)" -ForegroundColor DarkGray
+                }
+                $syncSt = Invoke-RestMethod -Uri "http://${ApiHost}:${ApiPort}/api/maintenance/sync-status" -TimeoutSec 2 -ErrorAction SilentlyContinue
+                if ($syncSt -and $syncSt.last_premarket_sync_date) {
+                    Write-Host "     Pre-Market Levels:  PRIMED (Session: $($syncSt.last_premarket_sync_date))" -ForegroundColor Green
+                } elseif ($syncSt) {
+                    Write-Host "     Pre-Market Levels:  AUTO-PRIMING ON-BOOT" -ForegroundColor DarkGray
                 }
             } catch {}
         } else {
@@ -100,9 +110,12 @@ function Get-ServiceStatus {
 
     try {
         $fPort = Get-NetTCPConnection -LocalPort $VitePort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($fPort) {
+        $fTest = $null
+        try { $fTest = Invoke-WebRequest -Uri "http://localhost:$VitePort" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue } catch {}
+        if ($fPort -or ($fTest -and $fTest.StatusCode -lt 500)) {
             $frontendLive = $true
-            Write-Host " [+] Frontend (Vite/UI): RUNNING on http://localhost:$VitePort (PID: $($fPort.OwningProcess))" -ForegroundColor Green
+            $fPid = if ($fPort) { $fPort.OwningProcess } else { "Active" }
+            Write-Host " [+] Frontend (Vite/UI): RUNNING on http://localhost:$VitePort (PID: $fPid)" -ForegroundColor Green
         } else {
             Write-Host " [-] Frontend (Vite/UI): STOPPED (port $VitePort not listening)" -ForegroundColor DarkGray
         }
@@ -176,18 +189,21 @@ if (-not $NoFrontend -and -not $SkipBuildWeb -and (Test-Path "$FrontendDir\packa
     }
 }
 
-# 2. Launch FastAPI backend completely detached from parent Job Object via WMI (ShowWindow = 0: no black terminal)
+# 2. Launch FastAPI backend completely detached in background (WindowStyle = Hidden)
 $backendOut = Join-Path $LogDir "backend.log"
 $backendErr = Join-Path $LogDir "backend_err.log"
 
 Write-Host "[*] Launching hidden background FastAPI Sidecar on http://${ApiHost}:${ApiPort} ..." -ForegroundColor Cyan
+
 $startupClass = [wmiclass]"Win32_ProcessStartup"
 $startupInfo = $startupClass.CreateInstance()
-$startupInfo.ShowWindow = 0  # SW_HIDE (0): guarantees zero black console window
+$startupInfo.ShowWindow = 0  # SW_HIDE (0): zero black console window
 
 $processClass = [wmiclass]"Win32_Process"
 $reloadFlag = if ($Reload) { "--reload" } else { "" }
-$backendCmd = "cmd.exe /c `"`"$PythonExe`" -m uvicorn web.api:app --host $ApiHost --port $ApiPort $reloadFlag > `"$backendOut`" 2> `"$backendErr`"`""
+$venvDir = Join-Path $RootDir ".venv"
+$venvScripts = Join-Path $venvDir "Scripts"
+$backendCmd = "cmd.exe /c `"set VIRTUAL_ENV=$venvDir&& set PATH=$venvScripts;%PATH%&& set PYTHONUNBUFFERED=1&& set PYTHONIOENCODING=utf-8&& `"$PythonExe`" -u -m uvicorn web.api:app --host $ApiHost --port $ApiPort $reloadFlag > `"$backendOut`" 2> `"$backendErr`"`""
 $bRes = $processClass.Create($backendCmd, $RootDir, $startupInfo)
 $backendPid = $bRes.ProcessId
 
@@ -197,12 +213,21 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $backendReady = $false
 
 while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds 250
     try {
-        $conn = Get-NetTCPConnection -LocalPort $ApiPort -State Listen -ErrorAction SilentlyContinue
+        $conn = Get-NetTCPConnection -LocalPort $ApiPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($conn) {
             $backendReady = $true
             $backendPid = $conn.OwningProcess
+            break
+        }
+    } catch {}
+    try {
+        $h = Invoke-RestMethod -Uri "http://${ApiHost}:${ApiPort}/health" -TimeoutSec 1 -ErrorAction SilentlyContinue
+        if ($h -and $h.status -eq "alive") {
+            $backendReady = $true
+            $conn = Get-NetTCPConnection -LocalPort $ApiPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($conn) { $backendPid = $conn.OwningProcess }
             break
         }
     } catch {}
@@ -213,12 +238,22 @@ if (-not $backendReady) {
     exit 1
 }
 
+if (-not $backendPid -or -not (Get-Process -Id $backendPid -ErrorAction SilentlyContinue)) {
+    $conn = Get-NetTCPConnection -LocalPort $ApiPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($conn) { $backendPid = $conn.OwningProcess }
+}
+
 Write-Host " [+] FastAPI Sidecar is healthy and listening on http://${ApiHost}:${ApiPort} (PID: $backendPid)" -ForegroundColor Green
 
 # Foreground user protection: set process priority to BelowNormal so Office/Browser/Calls stay 100% fluid
 try {
-    (Get-Process -Id $backendPid).PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
-    Write-Host " [+] Process priority calibrated to BelowNormal (Foreground office & browser protected)" -ForegroundColor DarkGray
+    if ($backendPid) {
+        $pObj = Get-Process -Id $backendPid -ErrorAction SilentlyContinue
+        if ($pObj) {
+            $pObj.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+            Write-Host " [+] Process priority calibrated to BelowNormal (Foreground office & browser protected)" -ForegroundColor DarkGray
+        }
+    }
 } catch {}
 
 # 4. Launch Frontend (if requested)
@@ -228,7 +263,9 @@ if (-not $NoFrontend -and (Test-Path $FrontendDir)) {
     $frontendErr = Join-Path $LogDir "frontend_err.log"
 
     Write-Host "[*] Launching hidden background Vite Dev Server on http://localhost:$VitePort ..." -ForegroundColor Cyan
-    $frontendCmd = "cmd.exe /c `"npm.cmd run dev:renderer > `"$frontendOut`" 2> `"$frontendErr`"`""
+    Remove-Item env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+
+    $frontendCmd = "cmd.exe /c `"npm.cmd run dev:web > `"$frontendOut`" 2> `"$frontendErr`"`""
     $fRes = $processClass.Create($frontendCmd, $FrontendDir, $startupInfo)
     $frontendPid = $fRes.ProcessId
 
@@ -239,6 +276,13 @@ if (-not $NoFrontend -and (Test-Path $FrontendDir)) {
             if ($fConn) {
                 $frontendReady = $true
                 $frontendPid = $fConn.OwningProcess
+                break
+            }
+        } catch {}
+        try {
+            $fResTest = Invoke-WebRequest -Uri "http://localhost:$VitePort" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue
+            if ($fResTest -and $fResTest.StatusCode -lt 500) {
+                $frontendReady = $true
                 break
             }
         } catch {}

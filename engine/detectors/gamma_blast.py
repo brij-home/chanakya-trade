@@ -1134,6 +1134,18 @@ def detect_gamma_blast(
                     },
                     lot_size=lot_sz,
                     confidence=confidence,
+                    preferred_vehicle=(
+                        "DEEP_ITM_OR_SPREAD"
+                        if (
+                            is_high_iv_risk
+                            or (
+                                exp_date
+                                and now_dt.hour >= 13
+                                and str(exp_date)[:10] == now_dt.strftime("%Y-%m-%d")
+                            )
+                        )
+                        else "NAKED_OPTION"
+                    ),
                     created_at=now_iso,
                 )
             )
@@ -1928,6 +1940,18 @@ def detect_gamma_blast(
                     },
                     lot_size=lot_sz,
                     confidence=confidence,
+                    preferred_vehicle=(
+                        "DEEP_ITM_OR_SPREAD"
+                        if (
+                            is_high_iv_risk
+                            or (
+                                exp_date
+                                and now_dt.hour >= 13
+                                and str(exp_date)[:10] == now_dt.strftime("%Y-%m-%d")
+                            )
+                        )
+                        else "NAKED_OPTION"
+                    ),
                     created_at=now_iso,
                 )
             )

@@ -96,9 +96,11 @@ def evaluate_execution_gate(
     df: Optional[pd.DataFrame] = None,
     exchange: str = "NSE",
     notify_telegram: bool = False,
+    bias: str = "AUTO",
 ) -> ExecutionGateReport:
     """
     Evaluates strategic setup quality (Historical) vs tactical execution readiness (Real-Time Microstructure).
+    Supports symmetrical bi-directional evaluation (LONG and SHORT setups).
     Optionally dispatches instant Telegram notification if status is READY or STALK.
     """
     symbol = symbol.upper().replace(".NS", "").replace(".BO", "")
@@ -150,6 +152,23 @@ def evaluate_execution_gate(
     ms = analyze_market_structure(symbol, df=df, exchange=exchange)
     mb = scan_multibagger_opportunity(symbol, df=df)
 
+    # Determine trade bias (LONG vs SHORT)
+    if bias.upper() in ("SHORT", "BEARISH", "SELL"):
+        trade_bias = "SHORT"
+    elif bias.upper() in ("LONG", "BULLISH", "BUY"):
+        trade_bias = "LONG"
+    else:
+        # AUTO detection based on market structure and Weinstein stage
+        if (
+            ms.regime == "BEARISH"
+            or getattr(ms, "choch_type", "") == "BEARISH_CHOCH"
+            or mb.weinstein_stage == "STAGE_4_DECLINE"
+        ):
+            trade_bias = "SHORT"
+        else:
+            trade_bias = "LONG"
+
+    # 1. Tier 1: Strategic Macro & Positional Analysis (Historical Lookback)
     from analysis.universe import SECTOR_TAXONOMY
 
     sec_id, sector_name = get_stock_sector(symbol)
@@ -158,26 +177,42 @@ def evaluate_execution_gate(
 
     # Strategic Scoring (0–100)
     strat_score = 40
-    if mb.weinstein_stage == "STAGE_2_MARKUP":
-        strat_score += 25
-    if mb.trend_template_passed >= 7:
-        strat_score += 15
-    if ms.regime == "BULLISH":
-        strat_score += 10
-    if (
-        isinstance(sec_align, dict) and sec_align.get("quadrant") == "LEADING"
-    ) or sec_align == "STRONG_LEADING":
-        strat_score += 10
+    if trade_bias == "LONG":
+        if mb.weinstein_stage == "STAGE_2_MARKUP":
+            strat_score += 25
+        if mb.trend_template_passed >= 7:
+            strat_score += 15
+        if ms.regime == "BULLISH":
+            strat_score += 10
+        if (
+            isinstance(sec_align, dict) and sec_align.get("quadrant") == "LEADING"
+        ) or sec_align == "STRONG_LEADING":
+            strat_score += 10
+    else:  # SHORT
+        if mb.weinstein_stage == "STAGE_4_DECLINE":
+            strat_score += 25
+        if mb.trend_template_passed <= 3:
+            strat_score += 15
+        if ms.regime == "BEARISH":
+            strat_score += 10
+        if (
+            isinstance(sec_align, dict) and sec_align.get("quadrant") in ("LAGGING", "WEAKENING")
+        ) or sec_align in ("STRONG_LAGGING", "LAGGING"):
+            strat_score += 10
 
     # Factor E: Smart Money Stealth Accumulation & Free-Float Absorption
     try:
         from analysis.delivery_accumulation import compute_cfai
 
         cfai = compute_cfai(symbol, df=df, ltp=ltp)
-        if getattr(cfai, "float_exhaustion_detected", False):
-            strat_score += 10
-        elif getattr(cfai, "verdict", "") == "HIGH_STEALTH_ACCUMULATION":
-            strat_score += 5
+        if trade_bias == "LONG":
+            if getattr(cfai, "float_exhaustion_detected", False):
+                strat_score += 10
+            elif getattr(cfai, "verdict", "") == "HIGH_STEALTH_ACCUMULATION":
+                strat_score += 5
+        else:
+            if getattr(cfai, "verdict", "") == "HIGH_STEALTH_DISTRIBUTION":
+                strat_score += 10
     except Exception:
         cfai = None
 
@@ -186,18 +221,26 @@ def evaluate_execution_gate(
         from analysis.institutional_catalysts import get_institutional_catalysts
 
         inst = get_institutional_catalysts(symbol)
-        if getattr(inst, "institutional_footprint", "") in (
-            "SMART_MONEY_ACCELERATION",
-            "FII_EXPANSION",
-            "DII_BACKING",
-        ):
-            strat_score += 5
-        if getattr(inst, "credit_rating", None) and getattr(
-            inst.credit_rating, "is_upgrade", False
-        ):
-            strat_score += 5
-        if getattr(inst, "pledged_pct", 0.0) > 25.0:
-            strat_score -= 15
+        if trade_bias == "LONG":
+            if getattr(inst, "institutional_footprint", "") in (
+                "SMART_MONEY_ACCELERATION",
+                "FII_EXPANSION",
+                "DII_BACKING",
+            ):
+                strat_score += 5
+            if getattr(inst, "credit_rating", None) and getattr(
+                inst.credit_rating, "is_upgrade", False
+            ):
+                strat_score += 5
+            if getattr(inst, "pledged_pct", 0.0) > 25.0:
+                strat_score -= 15
+        else:
+            if getattr(inst, "pledged_pct", 0.0) > 25.0:
+                strat_score += 10  # Promoter pledge margin call risk is a short catalyst
+            if getattr(inst, "credit_rating", None) and getattr(
+                inst.credit_rating, "is_downgrade", False
+            ):
+                strat_score += 10
     except Exception:
         inst = None
 
@@ -212,26 +255,27 @@ def evaluate_execution_gate(
     catalysts: list[str] = []
 
     # Record institutional catalysts if present
-    if cfai and getattr(cfai, "float_exhaustion_detected", False):
+    if cfai and getattr(cfai, "float_exhaustion_detected", False) and trade_bias == "LONG":
         catalysts.append(f"Institutional Float Exhaustion (CFAI {cfai.cfai_pct:.1f}%)")
-    elif cfai and getattr(cfai, "verdict", "") == "HIGH_STEALTH_ACCUMULATION":
+    elif (
+        cfai
+        and getattr(cfai, "verdict", "") == "HIGH_STEALTH_ACCUMULATION"
+        and trade_bias == "LONG"
+    ):
         catalysts.append(f"Stealth Delivery Accumulation (CFAI {cfai.cfai_pct:.1f}%)")
 
-    if inst and getattr(inst, "institutional_footprint", "") in (
-        "SMART_MONEY_ACCELERATION",
-        "FII_EXPANSION",
-        "DII_BACKING",
+    if (
+        inst
+        and getattr(inst, "institutional_footprint", "")
+        in (
+            "SMART_MONEY_ACCELERATION",
+            "FII_EXPANSION",
+            "DII_BACKING",
+        )
+        and trade_bias == "LONG"
     ):
         catalysts.append(
             f"Institutional Backing ({inst.institutional_footprint.replace('_', ' ').title()})"
-        )
-    if (
-        inst
-        and getattr(inst, "credit_rating", None)
-        and getattr(inst.credit_rating, "is_upgrade", False)
-    ):
-        catalysts.append(
-            f"Credit Rating Upgrade ({inst.credit_rating.agency} {inst.credit_rating.current_rating})"
         )
     if inst and getattr(inst, "pledged_pct", 0.0) > 25.0:
         catalysts.append(f"⚠️ High Promoter Pledge ({inst.pledged_pct:.1f}%)")
@@ -247,53 +291,140 @@ def evaluate_execution_gate(
 
     # Factor B: Squeeze Explosion
     if squeeze.squeeze_fired:
-        tact_score += 20
-        catalysts.append(
-            f"🚀 Squeeze FIRED ({squeeze.momentum_direction}) — Volatility expansion active"
-        )
+        squeeze_dir = getattr(squeeze, "momentum_direction", "UP")
+        if (trade_bias == "LONG" and squeeze_dir != "DOWN") or (
+            trade_bias == "SHORT" and squeeze_dir != "UP"
+        ):
+            tact_score += 20
+            catalysts.append(f"🚀 Squeeze FIRED ({squeeze_dir}) — Volatility expansion active")
     elif squeeze.is_squeeze_on:
         tact_score += 10
         catalysts.append(f"🔴 Energy coiling in Squeeze ({squeeze.squeeze_duration_bars} bars)")
 
     # Factor C: Live Options Flow
-    if opt_flow.dominant_regime in ("LONG_BUILDUP", "SHORT_COVERING"):
-        tact_score += 20
-        catalysts.append(f"Live Options {opt_flow.dominant_regime} (PCR {opt_flow.pcr})")
-    elif opt_flow.dominant_regime in ("SHORT_BUILDUP", "LONG_UNWINDING"):
-        tact_score -= 20
-        catalysts.append(f"⚠️ Live Options Resistance: {opt_flow.dominant_regime}")
+    if trade_bias == "LONG":
+        if opt_flow.dominant_regime in ("LONG_BUILDUP", "SHORT_COVERING"):
+            tact_score += 20
+            catalysts.append(f"Live Options {opt_flow.dominant_regime} (PCR {opt_flow.pcr})")
+        elif opt_flow.dominant_regime in ("SHORT_BUILDUP", "LONG_UNWINDING"):
+            tact_score -= 20
+            catalysts.append(f"⚠️ Live Options Resistance: {opt_flow.dominant_regime}")
+    else:  # SHORT
+        if opt_flow.dominant_regime in ("SHORT_BUILDUP", "LONG_UNWINDING"):
+            tact_score += 20
+            catalysts.append(f"Live Options {opt_flow.dominant_regime} (PCR {opt_flow.pcr})")
+        elif opt_flow.dominant_regime in ("LONG_BUILDUP", "SHORT_COVERING"):
+            tact_score -= 20
+            catalysts.append(f"⚠️ Live Options Support Floor: {opt_flow.dominant_regime}")
 
     # Factor D: SMC Structural Trigger (BOS / CHoCH)
-    if ms.choch_detected:
-        tact_score += 15
-        catalysts.append(f"⚠️ Bullish Change of Character ({ms.choch_type})")
+    if trade_bias == "LONG":
+        if ms.choch_detected and ms.choch_type == "BULLISH_CHOCH":
+            tact_score += 15
+            catalysts.append("⚠️ Bullish Change of Character (BULLISH_CHOCH)")
+        elif ms.bos_detected and ms.bos_type == "BULLISH_BOS":
+            tact_score += 10
+            catalysts.append("🚀 Bullish Break of Structure (BULLISH_BOS)")
+    else:
+        if ms.choch_detected and ms.choch_type == "BEARISH_CHOCH":
+            tact_score += 15
+            catalysts.append("⚠️ Bearish Change of Character (BEARISH_CHOCH)")
+        elif ms.bos_detected and ms.bos_type == "BEARISH_BOS":
+            tact_score += 10
+            catalysts.append("📉 Bearish Break of Structure (BEARISH_BOS)")
 
-    # Factor E: SMC Discount Dealing Range & Demand Order Block Test
-    if getattr(ms, "in_discount_zone", False):
-        tact_score += 5
-        catalysts.append("SMC Discount Dealing Range (<50% Equilibrium)")
-    if getattr(ms, "active_demand_zones", None):
-        for ob in ms.active_demand_zones[:2]:
-            if ob.bottom * 0.995 <= ltp <= ob.top * 1.005:
+    # Factor E: SMC Dealing Range & Order Block Retest
+    if trade_bias == "LONG":
+        if getattr(ms, "in_discount_zone", False):
+            tact_score += 5
+            catalysts.append("SMC Discount Dealing Range (<50% Equilibrium)")
+        if getattr(ms, "active_demand_zones", None):
+            for ob in ms.active_demand_zones[:2]:
+                if ob.bottom * 0.995 <= ltp <= ob.top * 1.005:
+                    tact_score += 10
+                    catalysts.append(f"Demand Order Block Retest (OTE ₹{ob.ote_price:.2f})")
+                    break
+        if getattr(vp, "cvd_divergence", None) == "BULLISH_ABSORPTION":
+            tact_score += 10
+            catalysts.append("CVD Bullish Absorption (Smart Money absorbing supply)")
+    else:  # SHORT
+        if not getattr(ms, "in_discount_zone", True):
+            tact_score += 5
+            catalysts.append("SMC Premium Dealing Range (>50% Equilibrium)")
+        if getattr(ms, "active_supply_zones", None):
+            for ob in ms.active_supply_zones[:2]:
+                if ob.bottom * 0.995 <= ltp <= ob.top * 1.005:
+                    tact_score += 10
+                    catalysts.append(f"Supply Order Block Retest (OTE ₹{ob.ote_price:.2f})")
+                    break
+        if getattr(vp, "cvd_divergence", None) == "BEARISH_ABSORPTION":
+            tact_score += 10
+            catalysts.append("CVD Bearish Absorption (Smart Money absorbing demand)")
+
+    # Factor F: Institutional Confluence Clusters (OB + FVG + VPOC + VWAP + Fib OTE)
+    try:
+        from analysis.confluence_engine import find_confluence_clusters
+
+        clusters = find_confluence_clusters(
+            symbol=symbol,
+            ltp=ltp,
+            direction="BULLISH" if trade_bias == "LONG" else "BEARISH",
+            df=df,
+        )
+        if clusters:
+            c = clusters[0]
+            tact_score += 10
+            catalysts.append(f"Institutional Confluence: {c.description} (mid ₹{c.midpoint:.2f})")
+    except Exception as e_suppressed:
+        logger.debug(f"[execution_gate] Non-fatal confluence check: {e_suppressed}")
+
+    # Factor G: Price Action Bar Patterns (The Strat 2-1-2 / Hikkake / Outside Bar)
+    try:
+        from analysis.bar_patterns import analyze_bar_patterns
+
+        bar_pat = analyze_bar_patterns(df, symbol=symbol)
+        if bar_pat is not None:
+            if (trade_bias == "LONG" and bar_pat.bias == "BULLISH") or (
+                trade_bias == "SHORT" and bar_pat.bias == "BEARISH"
+            ):
                 tact_score += 10
-                catalysts.append(f"Demand Order Block Retest (OTE ₹{ob.ote_price:.2f})")
+                catalysts.append(f"Price Action: {bar_pat.pattern_name}")
+            elif bar_pat.is_coiled_compression:
+                tact_score += 5
+                catalysts.append(f"Energy Coiling: {bar_pat.pattern_name}")
+    except Exception as e_suppressed:
+        logger.debug(f"[execution_gate] Non-fatal bar pattern check: {e_suppressed}")
+
+    # Factor H: Classical Chart Patterns (Double Bottom/Top, H&S, High-Tight Flag)
+    try:
+        from analysis.chart_patterns import detect_chart_patterns
+
+        chart_pats = detect_chart_patterns(df, symbol=symbol)
+        for cp in chart_pats:
+            if (trade_bias == "LONG" and cp.direction == "BULLISH") or (
+                trade_bias == "SHORT" and cp.direction == "BEARISH"
+            ):
+                strat_score += 10
+                catalysts.append(
+                    f"Chart Pattern: {cp.pattern_type} (Target ₹{cp.measured_target:.2f})"
+                )
                 break
+    except Exception as e_suppressed:
+        logger.debug(f"[execution_gate] Non-fatal chart pattern check: {e_suppressed}")
 
-    # Factor F: Order Flow CVD Absorption Divergence
-    if getattr(vp, "cvd_divergence", None) == "BULLISH_ABSORPTION":
-        tact_score += 10
-        catalysts.append("CVD Bullish Absorption (Smart Money absorbing supply)")
-
+    strat_score = int(min(98, max(20, strat_score)))
     tact_score = int(min(98, max(15, tact_score)))
 
     # 3. Determine Execution Status
     if tact_score >= 78 and strat_score >= 70:
         execution_status = "READY"
-        action_summary = f"⚡ Alignment confirmed! Execute Long near ₹{ltp:.2f}."
+        action_summary = f"⚡ Alignment confirmed! Execute {trade_bias.title()} near ₹{ltp:.2f}."
     elif strat_score >= 70 and tact_score >= 50:
         execution_status = "STALK"
         action_summary = (
-            f"🎯 Strategic setup valid. Stalk entry on intraday pullback near ₹{ltp * 0.985:.2f}."
+            f"🎯 Strategic setup valid. Stalk entry near ₹{ltp * 0.985:.2f}."
+            if trade_bias == "LONG"
+            else f"🎯 Strategic setup valid. Stalk entry on pop near ₹{ltp * 1.015:.2f}."
         )
     else:
         execution_status = "STAND_DOWN"
@@ -317,20 +448,32 @@ def evaluate_execution_gate(
             )
 
     atr = atr_val if atr_val is not None else round(ltp * 0.015, 2)
-    raw_stop = round(max(ltp * 0.85, ltp - (1.5 * atr)), 2)
     from engine.position_sizer import calibrate_off_number_stop
 
-    stop_loss = calibrate_off_number_stop(direction="BULLISH", raw_stop=raw_stop, atr=atr)
-    risk_pts = max(1.0, entry_price - stop_loss)
-    target_1 = round(entry_price + (risk_pts * 2.0), 2)
-    target_2 = round(entry_price + (risk_pts * 3.5), 2)
-    rr_ratio = round((target_1 - entry_price) / risk_pts, 2)
-
-    setup_title = (
-        "💎 Stage 2 Markup"
-        if mb.weinstein_stage == "STAGE_2_MARKUP"
-        else (ms.setup_type.replace("_", " ").title())
-    )
+    if trade_bias == "LONG":
+        raw_stop = round(max(ltp * 0.85, ltp - (1.5 * atr)), 2)
+        stop_loss = calibrate_off_number_stop(direction="BULLISH", raw_stop=raw_stop, atr=atr)
+        risk_pts = max(1.0, entry_price - stop_loss)
+        target_1 = round(entry_price + (risk_pts * 2.0), 2)
+        target_2 = round(entry_price + (risk_pts * 3.5), 2)
+        rr_ratio = round((target_1 - entry_price) / risk_pts, 2)
+        setup_title = (
+            "💎 Stage 2 Markup"
+            if mb.weinstein_stage == "STAGE_2_MARKUP"
+            else (ms.setup_type.replace("_", " ").title())
+        )
+    else:
+        raw_stop = round(min(ltp * 1.15, ltp + (1.5 * atr)), 2)
+        stop_loss = calibrate_off_number_stop(direction="BEARISH", raw_stop=raw_stop, atr=atr)
+        risk_pts = max(1.0, stop_loss - entry_price)
+        target_1 = round(entry_price - (risk_pts * 2.0), 2)
+        target_2 = round(entry_price - (risk_pts * 3.5), 2)
+        rr_ratio = round((entry_price - target_1) / risk_pts, 2)
+        setup_title = (
+            "📉 Stage 4 Decline"
+            if mb.weinstein_stage == "STAGE_4_DECLINE"
+            else ("Bearish " + ms.setup_type.replace("_", " ").title())
+        )
 
     expected_timeline = (
         "3–10 Trading Days (Swing Momentum)"
@@ -354,7 +497,7 @@ def evaluate_execution_gate(
         tactical_score=tact_score,
         execution_status=execution_status,
         setup_title=setup_title,
-        trade_bias="LONG",
+        trade_bias=trade_bias,
         entry_price=entry_price,
         stop_loss=stop_loss,
         target_1=target_1,

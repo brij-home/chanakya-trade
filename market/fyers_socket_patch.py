@@ -71,6 +71,29 @@ def patch_fyers_websocket_daemon_threads() -> None:
             mod.Thread = _AutoDaemonThread
             mod.threading = proxy
 
+        # Patch FyersDataSocket to fix official SDK bug:
+        # SDK hardcodes len(index_val) == 8, but Fyers Full Mode (type 85) datafeed sends
+        # field_count > 8, which throws IndexError: list index out of range in __datafeed_resp.
+        # Defensively pad index_val, data_val, and depthvalue to 64 items so ticks never crash.
+        _orig_data_init = data_ws.FyersDataSocket.__init__
+
+        def _patched_data_init(self, *args, **kwargs):
+            _orig_data_init(self, *args, **kwargs)
+            if hasattr(self, "index_val") and len(self.index_val) < 64:
+                self.index_val = list(self.index_val) + [
+                    f"extra_{i}" for i in range(len(self.index_val), 64)
+                ]
+            if hasattr(self, "data_val") and len(self.data_val) < 64:
+                self.data_val = list(self.data_val) + [
+                    f"extra_{i}" for i in range(len(self.data_val), 64)
+                ]
+            if hasattr(self, "depthvalue") and len(self.depthvalue) < 64:
+                self.depthvalue = list(self.depthvalue) + [
+                    f"extra_{i}" for i in range(len(self.depthvalue), 64)
+                ]
+
+        data_ws.FyersDataSocket.__init__ = _patched_data_init
+
         # Patch FyersTbtSocket to fix official SDK bugs:
         # 1. SDK clobbers self.onopen = on_connect with self.onopen = on_open (where on_open defaults to None)
         # 2. SDK hardcodes self.background_flag = False which forces self.t.daemon = False

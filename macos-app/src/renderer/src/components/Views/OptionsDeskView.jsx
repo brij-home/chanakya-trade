@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import PayoffSimulatorCard from '../Cards/PayoffSimulatorCard'
+import DefinedRiskOptimizerModal from '../Cards/DefinedRiskOptimizerModal'
 import ConvictionScoreCard from '../Cards/ConvictionScoreCard'
 import { getSymbolExchange, resolveInstrument } from '../../data/universeData'
 import Tooltip, { HelpHint } from '../UI/Tooltip'
@@ -240,6 +241,7 @@ export default function OptionsDeskView({
   const [lastUpdated, setLastUpdated] = useState(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isPayoffModalOpen, setIsPayoffModalOpen] = useState(false)
+  const [isSpreadsOptimizerOpen, setIsSpreadsOptimizerOpen] = useState(false)
   const [activeBlastPopover, setActiveBlastPopover] = useState(null)
 
   // Auto-dismiss Blast popover on scroll or resize to prevent viewport detachment
@@ -473,6 +475,54 @@ export default function OptionsDeskView({
   const totalCallOI = data?.total_call_oi || '—'
   const totalPutOI = data?.total_put_oi || '—'
   const netOIChange = data?.net_oi_change || '—'
+
+  const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].includes(underlying)
+  const isStockOption = !isIndex
+
+  const dteDays = useMemo(() => {
+    if (!selectedExpiry) return null
+    try {
+      const exp = new Date(selectedExpiry).getTime()
+      const now = Date.now()
+      const diff = Math.ceil((exp - now) / (1000 * 60 * 60 * 24))
+      return diff
+    } catch {
+      return null
+    }
+  }, [selectedExpiry])
+
+  const isTodayExpiry = useMemo(() => {
+    if (dteDays === 0) return true
+    if (!selectedExpiry) return false
+    try {
+      const expDate = new Date(selectedExpiry)
+      const now = new Date()
+      const todayIST = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(now)
+      const expStr = expDate.toISOString().slice(0, 10)
+      return todayIST === expStr || selectedExpiry.includes(todayIST)
+    } catch {
+      return false
+    }
+  }, [selectedExpiry, dteDays])
+
+  const isAfternoonThetaZone = useMemo(() => {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Kolkata',
+        hour: 'numeric',
+        minute: 'numeric',
+        hour12: false,
+      }).formatToParts(new Date())
+      const h = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10)
+      const m = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10)
+      const totalMinutes = h * 60 + m
+      return totalMinutes >= 810 && totalMinutes <= 930 // 13:30 to 15:30 IST
+    } catch {
+      return false
+    }
+  }, [])
+
+  const isNearExpiryStock = isStockOption && (dteDays !== null ? dteDays <= 4 : false)
 
   // Mathematically robust ATM index calculation (guaranteed valid index)
   const atmIdx = (() => {
@@ -1006,6 +1056,36 @@ export default function OptionsDeskView({
             </button>
           </div>
         )}
+
+        {/* 0DTE Expiry Afternoon Theta Hazard Warning */}
+        {isTodayExpiry && isAfternoonThetaZone && (
+          <div className="bg-amber-500/15 border-l-4 border-amber-500 px-3 py-2 rounded-r-lg flex items-start gap-2.5 text-xs font-mono animate-fadeIn">
+            <span className="text-sm mt-0.5">⚠️</span>
+            <div className="flex-1">
+              <div className="font-bold text-amber-300 text-[11px] uppercase tracking-wide">
+                0DTE Expiry Afternoon Theta Cascade (13:30–15:30 IST)
+              </div>
+              <p className="text-[10.5px] text-amber-200/90 leading-tight mt-0.5 font-ui">
+                0DTE OTM &amp; ATM options undergo violent non-linear theta decay. Directional naked option buying carries severely negative statistical edge. Institutional best practice: switch to credit/debit spreads or scale out.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* SEBI Mandatory Physical Delivery Warning on Stock Options */}
+        {isNearExpiryStock && (
+          <div className="bg-rose-500/15 border-l-4 border-rose-500 px-3 py-2 rounded-r-lg flex items-start gap-2.5 text-xs font-mono animate-fadeIn">
+            <span className="text-sm mt-0.5">📦</span>
+            <div className="flex-1">
+              <div className="font-bold text-rose-300 text-[11px] uppercase tracking-wide">
+                SEBI Mandatory Physical Delivery Notice ({dteDays != null ? `${dteDays} DTE` : 'Expiry Week'})
+              </div>
+              <p className="text-[10.5px] text-rose-200/90 leading-tight mt-0.5 font-ui">
+                This is a Stock Option approaching monthly settlement. In-The-Money (ITM) positions at expiry mandate 100% physical delivery with full cash margin. Square off ITM legs before expiry day to prevent huge cash margin calls.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Real-Time Institutional Options Decision Matrix Card */}
@@ -1043,6 +1123,15 @@ export default function OptionsDeskView({
                 {decisionMatrix.strategyName}
               </span>
             </div>
+            <button
+              type="button"
+              onClick={() => setIsSpreadsOptimizerOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-amber/40 bg-amber/15 hover:bg-amber/25 text-amber font-mono text-[10px] font-bold transition-all cursor-pointer shadow-xs"
+              title="Launch Defined-Risk Spreads & Condors Payoff Optimizer"
+            >
+              <span>⚡</span>
+              <span>Defined-Risk Spreads</span>
+            </button>
             <button
               type="button"
               onClick={() => setShowVolModels((prev) => !prev)}
@@ -2101,6 +2190,12 @@ export default function OptionsDeskView({
                           className={`transition-colors group ${
                             isATM
                               ? 'bg-amber/20 border-y-2 border-amber font-bold shadow-xs'
+                              : isMaxPain
+                              ? 'bg-rose-500/10 border-l-4 border-l-rose-500 font-bold hover:bg-rose-500/15'
+                              : isCallWall
+                              ? 'bg-cyan-500/8 border-l-4 border-l-cyan-500 hover:bg-cyan-500/12'
+                              : isPutWall
+                              ? 'bg-amber-500/8 border-l-4 border-l-amber hover:bg-amber-500/12'
                               : 'hover:bg-elevated/70'
                           }`}
                         >
@@ -2610,6 +2705,32 @@ export default function OptionsDeskView({
           </div>
         </div>
       )}
+
+      {/* Defined-Risk Options Spreads Optimizer Modal */}
+      <DefinedRiskOptimizerModal
+        isOpen={isSpreadsOptimizerOpen}
+        onClose={() => setIsSpreadsOptimizerOpen(false)}
+        underlying={underlying}
+        spot={spot}
+        lotSize={resolveInstrument(underlying)?.lotSize || 25}
+        regime={decisionMatrix.bias || 'NEUTRAL'}
+        onStageSpread={(spreadSetup) => {
+          if (onOpenOrderTicket) {
+            onOpenOrderTicket({
+              symbol: spreadSetup.symbol,
+              action: spreadSetup.action,
+              strike: spreadSetup.strike,
+              optionType: spreadSetup.optionType,
+              qty: spreadSetup.qty,
+              strategyName: spreadSetup.strategyName,
+            })
+          }
+        }}
+        onSimulateStrategy={() => {
+          setIsSpreadsOptimizerOpen(false)
+          setIsPayoffModalOpen(true)
+        }}
+      />
 
       {/* Floating Actionable Blast Alert Popover */}
       {/* Institutional Screen-Adaptive Blast Action Popover Portal */}

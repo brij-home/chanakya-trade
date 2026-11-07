@@ -274,20 +274,20 @@ def detect_opening_drive(
 
             dl = get_daily_levels(clean_sym)
             if dl and dl.camarilla:
-                if is_bear_drive:
-                    l4 = float(dl.camarilla.get("l4", 0.0) or 0.0)
-                    if l4 > 0 and ltp >= (l4 * 0.998) and ltp <= (l4 * 1.0025):
-                        logger.info(
-                            f"[OpeningDrive] Suppressed Bearish Drive on {clean_sym}: Spot ₹{ltp:,.1f} testing Camarilla L4 Floor ₹{l4:,.1f}."
-                        )
-                        return None
-                elif is_bull_drive:
-                    h4 = float(dl.camarilla.get("h4", 0.0) or 0.0)
-                    if h4 > 0 and ltp <= (h4 * 1.002) and ltp >= (h4 * 0.9975):
-                        logger.info(
-                            f"[OpeningDrive] Suppressed Bullish Drive on {clean_sym}: Spot ₹{ltp:,.1f} testing Camarilla H4 Ceiling ₹{h4:,.1f}."
-                        )
-                        return None
+                h5 = float(dl.camarilla.get("h5", 0.0) or 0.0)
+                l5 = float(dl.camarilla.get("l5", 0.0) or 0.0)
+                if is_bear_drive and l5 > 0 and abs(ltp - l5) / ltp <= 0.03 and ltp <= (l5 * 1.001):
+                    logger.info(
+                        f"[OpeningDrive] Suppressed Bearish Drive on {clean_sym}: Spot ₹{ltp:,.1f} reached Camarilla L5 Terminal Floor ₹{l5:,.1f}."
+                    )
+                    return None
+                elif (
+                    is_bull_drive and h5 > 0 and abs(ltp - h5) / ltp <= 0.03 and ltp >= (h5 * 0.999)
+                ):
+                    logger.info(
+                        f"[OpeningDrive] Suppressed Bullish Drive on {clean_sym}: Spot ₹{ltp:,.1f} reached Camarilla H5 Terminal Ceiling ₹{h5:,.1f}."
+                    )
+                    return None
         except Exception as e_dl:
             logger.debug(f"[OpeningDrive] Daily levels check bypassed for {clean_sym}: {e_dl}")
 
@@ -324,29 +324,24 @@ def detect_opening_drive(
         os.environ.get("CHANAKYA_TESTING") == "1"
     )
 
-    # ── Benchmark NIFTY 50 Regime Gate ─────────────────────────
+    # ── Benchmark Index Tide Gate ─────────────────────────
     # In a green/bullish market, shorting equities has < 5% win rate (trap avoidance).
     # Symmetrically, buying equity breakouts in a crashing market is a bull trap.
     if not is_index and not is_test_env:
         try:
-            from market.quotes import get_quote
+            from engine.market_regime_gate import evaluate_index_tide_gate
 
-            n_probe = get_quote("NSE:NIFTY 50")
-            nq = n_probe.get("NSE:NIFTY 50") or n_probe.get("NIFTY 50")
-            if nq:
-                n_chg = getattr(nq, "change_pct", 0.0) or 0.0
-                n_ltp = float(getattr(nq, "last_price", 0.0) or 0.0)
-                n_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
-                if is_bear_drive and n_chg >= 0.15 and (n_vwap <= 0 or n_ltp >= n_vwap):
-                    logger.info(
-                        f"[OpeningDrive] Suppressed counter-trend Bearish Drive on {clean_sym}: NIFTY green +{n_chg:.2f}% holding VWAP"
-                    )
-                    return None
-                elif is_bull_drive and n_chg <= -0.15 and (n_vwap <= 0 or n_ltp <= n_vwap):
-                    logger.info(
-                        f"[OpeningDrive] Suppressed counter-trend Bullish Drive on {clean_sym}: NIFTY red {n_chg:.2f}% below VWAP"
-                    )
-                    return None
+            tide_res = evaluate_index_tide_gate(
+                clean_sym,
+                direction="BULLISH" if is_bull_drive else "BEARISH",
+                ltp=ltp,
+                rvol=rvol_val,
+            )
+            if tide_res.is_vetoed:
+                logger.info(
+                    f"[OpeningDrive] Suppressed counter-trend Drive on {clean_sym}: {tide_res.veto_reason}"
+                )
+                return None
         except Exception as e_regime:
             logger.debug(f"[OpeningDrive] Benchmark regime check suppressed: {e_regime}")
 
@@ -430,6 +425,55 @@ def detect_opening_drive(
     cpr_regime = None
     confidence_score = 92
     cpr_gate = None
+
+    # Anchored VWAP (09:15 Session Open Anchor) and Granville OBV Flow Analysis
+    has_flow = False
+    avwap_confluence = None
+    obv_div = None
+
+    if df_5m is not None and len(df_5m) >= 2:
+        try:
+            from analysis.anchored_vwap import detect_intraday_anchors
+
+            avwap_pack = detect_intraday_anchors(df_5m, ltp)
+            if avwap_pack:
+                avwap_confluence = avwap_pack.confluence
+                if is_bull_drive:
+                    if avwap_pack.dist_to_session_open_vwap_pct >= -0.05:
+                        confidence_score = min(98, confidence_score + 2)
+                        has_flow = True
+                    elif avwap_pack.dist_to_session_open_vwap_pct < -0.20:
+                        confidence_score -= 8
+                elif is_bear_drive:
+                    if avwap_pack.dist_to_session_open_vwap_pct <= 0.05:
+                        confidence_score = min(98, confidence_score + 2)
+                        has_flow = True
+                    elif avwap_pack.dist_to_session_open_vwap_pct > 0.20:
+                        confidence_score -= 8
+        except Exception as e_avwap:
+            logger.debug(f"[OpeningDrive] AVWAP calculation non-fatal: {e_avwap}")
+
+    if df_5m is not None and len(df_5m) >= 3:
+        try:
+            from analysis.obv import analyse_obv
+
+            obv_res = analyse_obv(df_5m, is_intraday=True)
+            if obv_res:
+                obv_div = obv_res.divergence
+                if is_bull_drive and (
+                    obv_res.obv_slope_5bar > 0
+                    or obv_res.divergence in ("BULLISH_CONVERGENCE", "BULLISH_DIVERGENCE")
+                ):
+                    confidence_score = min(98, confidence_score + 2)
+                    has_flow = True
+                elif is_bear_drive and (
+                    obv_res.obv_slope_5bar < 0
+                    or obv_res.divergence in ("BEARISH_CONVERGENCE", "BEARISH_DIVERGENCE")
+                ):
+                    confidence_score = min(98, confidence_score + 2)
+                    has_flow = True
+        except Exception as e_obv:
+            logger.debug(f"[OpeningDrive] OBV non-fatal: {e_obv}")
     try:
         from engine.daily_levels import get_daily_levels, evaluate_cpr_gate
 
@@ -605,6 +649,10 @@ def detect_opening_drive(
         "underlying_sl": sl_price,
         "underlying_symbol": clean_sym,
         "underlying_spot": ltp,
+        "vwap": vwap if (vwap and vwap > 0) else ltp,
+        "has_flow": has_flow,
+        "avwap_confluence": avwap_confluence,
+        "obv_regime": obv_div,
     }
 
     if rvol_val >= 1.5:
@@ -655,6 +703,7 @@ def detect_opening_drive(
         lot_size=lot_sz,
         segment=alert_seg,
         confidence=confidence_score,
+        preferred_vehicle="NAKED_OPTION",
         created_at=now_iso,
         is_live=True,
         environment="LIVE",

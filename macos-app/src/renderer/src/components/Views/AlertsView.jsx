@@ -1758,7 +1758,21 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   }, [])
 
   const [selectedFilter, setSelectedFilter] = useState('ALL')
-  const [selectedHorizon, setSelectedHorizon] = useState('ALL') // ALL | INTRADAY | SWING_SHORT | SWING_MID | POSITIONAL
+  const [selectedHorizon, setSelectedHorizon] = useState('ALL') // ALL | INTRADAY | SWING_SHORT | SWING_MID | POSITIONAL | 0DTE | DEFINED_RISK
+  const globalHorizon = useChatStore((s) => s.horizon)
+  const prevGlobalHorizonRef = useRef(globalHorizon)
+
+  useEffect(() => {
+    if (prevGlobalHorizonRef.current !== globalHorizon) {
+      prevGlobalHorizonRef.current = globalHorizon
+      if (globalHorizon === 'INTRADAY') {
+        setSelectedHorizon('INTRADAY')
+      } else if (globalHorizon === 'SWING') {
+        setSelectedHorizon('SWING_ALL')
+      }
+    }
+  }, [globalHorizon])
+
   const [selectedStage, setSelectedStage] = useState('ALL')
   const [selectedEnv, setSelectedEnv] = useState('ALL') // ALL | LIVE | TEST
   const [densityMode, setDensityMode] = useState(() => {
@@ -2938,17 +2952,26 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         const hSet = normalizeToSet(selectedHorizon)
         const hzInfo = resolveHorizonAndETA(a)
         const matchAny = Array.from(hSet).some((key) => {
+          if (key === '0DTE') {
+            const exp = String(a.expiry_date || a.expiry || a.extra_metrics?.expiry_date || '')
+            const isZeroDte = a.dte === 0 || a.days_to_expiry === 0 || String(a.alert_type || '').includes('0DTE') || a.time_horizon === '0DTE'
+            return isZeroDte || exp.includes('0DTE')
+          }
+          if (key === 'DEFINED_RISK') {
+            const at = String(a.alert_type || '').toUpperCase()
+            return at.includes('SPREAD') || at.includes('CONDOR') || at.includes('IRON') || at.includes('STRANGLE') || at.includes('HEDGE')
+          }
           if (key === 'SCALP') {
             return hzInfo.key === 'SCALP' || a.time_horizon === 'SCALP' || a.time_horizon === 'INTRADAY_SCALP_ONLY'
           }
           if (key === 'SWING_ALL' || key === 'SWING') {
-            return ['SWING', 'SWING_SHORT', 'SWING_MID'].includes(hzInfo.key) || ['SWING', 'SWING_SHORT', 'SWING_MID'].includes(a.time_horizon)
+            return ['SWING', 'SWING_SHORT', 'SWING_MID', 'LONG_TERM', 'POSITIONAL', 'MULTIBAGGER'].includes(hzInfo.key) || ['SWING', 'SWING_SHORT', 'SWING_MID', 'LONG_TERM', 'POSITIONAL', 'MULTIBAGGER'].includes(a.time_horizon)
           }
           if (key === 'MULTIBAGGER') return hzInfo.key === 'MULTIBAGGER'
           if (key === 'LONG_TERM' || key === 'POSITIONAL') return hzInfo.key === 'LONG_TERM' || hzInfo.key === 'POSITIONAL'
           if (key === 'SWING_MID') return hzInfo.key === 'SWING_MID'
           if (key === 'SWING_SHORT') return hzInfo.key === 'SWING_SHORT'
-          if (key === 'INTRADAY') return hzInfo.key === 'INTRADAY'
+          if (key === 'INTRADAY') return hzInfo.key === 'INTRADAY' || hzInfo.key === 'SCALP' || a.time_horizon === 'INTRADAY'
           if (key === 'ROLLING_24H') return hzInfo.key === 'ROLLING_24H'
           return hzInfo.key === key || (a.time_horizon || 'INTRADAY') === key
         })
@@ -3639,6 +3662,36 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 </button>
               </div>
             )}
+
+            {/* ROW 1.5: Horizon Filter Segmented Tabs */}
+            <div className="flex items-center justify-between gap-2 flex-wrap pb-1">
+              <div className="flex items-center gap-1 p-0.5 rounded-xl bg-surface/90 border border-border/70 text-xs font-mono flex-wrap">
+                <span className="text-[10px] text-muted uppercase font-ui font-semibold px-2">Trading Horizon:</span>
+                {[
+                  { id: 'ALL', label: 'All Setups', icon: '🌐' },
+                  { id: 'INTRADAY', label: 'Intraday Scalps', icon: '⚡' },
+                  { id: 'SWING_ALL', label: 'Swing Setups', icon: '📈' },
+                  { id: '0DTE', label: '0DTE Options', icon: '🎯' },
+                  { id: 'DEFINED_RISK', label: 'Spreads / Condors', icon: '🛡️' },
+                ].map((tab) => {
+                  const isActive = (selectedHorizon === tab.id) || (tab.id === 'ALL' && isAllOrEmpty(selectedHorizon))
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => setSelectedHorizon(tab.id === 'ALL' ? 'ALL' : tab.id)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                        isActive
+                          ? 'bg-elevated border border-gold/60 text-gold shadow-sm font-black'
+                          : 'border border-transparent text-muted hover:text-text hover:bg-elevated/60'
+                      }`}
+                    >
+                      <span>{tab.icon}</span>
+                      <span>{tab.label}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
 
             {/* ROW 2: Multi-Select Segment Rail & Delivery Routing */}
             <div className="flex items-center justify-between gap-2 flex-wrap">
