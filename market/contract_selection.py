@@ -495,11 +495,12 @@ def fresh_underlying_price(
             marker in provider for marker in ("MOCK", "TEST", "SYNTHETIC", "SIMULATED")
         ):
             return None
+        # Allow up to 250ms of execution jitter / sub-second clock skew between evaluation as_of and quote receipt
         if (
             not math.isfinite(price)
             or price <= 0
             or not math.isfinite(age)
-            or not 0 <= age <= max_age_seconds
+            or not -0.25 <= age <= max_age_seconds
         ):
             return None
         return price
@@ -569,7 +570,9 @@ def get_subscription_option_grid(
             or quotes.get(underlying)
             or (list(quotes.values())[0] if quotes else None)
         )
-        spot = fresh_underlying_price(quote, as_of=now, max_age_seconds=effective_max_age)
+        spot = fresh_underlying_price(
+            quote, as_of=as_of or datetime.now(IST), max_age_seconds=effective_max_age
+        )
         if spot is None:
             # Fallback to general get_quote if WebSocket cache has not populated yet
             quotes = get_quote([instrument], ws_only=False)
@@ -579,7 +582,9 @@ def get_subscription_option_grid(
                 or quotes.get(underlying)
                 or (list(quotes.values())[0] if quotes else None)
             )
-            spot = fresh_underlying_price(quote, as_of=now, max_age_seconds=effective_max_age)
+            spot = fresh_underlying_price(
+                quote, as_of=as_of or datetime.now(IST), max_age_seconds=effective_max_age
+            )
         if spot is None:
             logger.info(
                 "[ContractSelection] Option grid held for %s: no fresh live underlying quote", clean
