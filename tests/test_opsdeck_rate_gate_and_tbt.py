@@ -464,21 +464,21 @@ def test_tbt_dynamic_rebalance_on_worker_degradation():
 
     mgr.sync_subscriptions()
 
-    # Only w0 is connected: it multiplexes all 15 symbols across channels 1..3, while degraded workers get 0
-    assert len(w0.desired) == 15
-    assert w0.desired == desired_symbols[:15]
+    # Only w0 is connected: it takes top 5 symbols (strictly capped to 5 to respect physical Fyers server limit)
+    assert len(w0.desired) == 5
+    assert w0.desired == desired_symbols[:5]
     assert len(w1.desired) == 0
     assert len(w2.desired) == 0
 
-    # When w1 recovers (2 workers connected): w0 takes 10 (ch 1 & 2), w1 takes 5 (ch 1)
+    # When w1 recovers (2 workers connected): w0 takes 5 (symbols 0..4), w1 takes 5 (symbols 5..9)
     w1.connected = True
     w1.status = "CONNECTED"
     mgr.sync_subscriptions()
 
-    assert len(w0.desired) == 10
-    assert w0.desired == desired_symbols[:10]
+    assert len(w0.desired) == 5
+    assert w0.desired == desired_symbols[:5]
     assert len(w1.desired) == 5
-    assert w1.desired == desired_symbols[10:15]
+    assert w1.desired == desired_symbols[5:10]
     assert len(w2.desired) == 0
 
     # When all 3 workers recover: 5 symbols each

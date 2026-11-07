@@ -446,7 +446,10 @@ class ObservabilityRegistry:
                         availability_breached = availability_actual < slo.availability_pct and (
                             failures >= 3 or total >= 100
                         )
-                        latency_breached = bool(p95 is not None and p95 > slo.p95_latency_ms)
+                        # Require statistically significant sample size (>= 50 measurements) before declaring latency breach
+                        latency_breached = bool(
+                            total >= 50 and p95 is not None and p95 > slo.p95_latency_ms
+                        )
                         slo_breach = availability_breached or latency_breached
 
                 reports[jid] = {
@@ -528,13 +531,17 @@ class ObservabilityRegistry:
                 elif "fyers" in records:
                     primary_rec = records["fyers"]
 
-                if primary_rec and primary_rec.get("health") == "UNHEALTHY":
-                    overall_health = "UNHEALTHY"
+                if primary_rec:
+                    # Primary broker authority: primary data feed determines operational health
+                    if primary_rec.get("health") == "UNHEALTHY":
+                        overall_health = "UNHEALTHY"
+                    elif primary_rec.get("health") == "DEGRADED":
+                        overall_health = "DEGRADED"
+                    else:
+                        overall_health = "HEALTHY"
                 elif all(r.get("health") == "UNHEALTHY" for r in records.values()):
                     overall_health = "UNHEALTHY"
-                elif (primary_rec and primary_rec.get("health") == "DEGRADED") or any(
-                    r.get("health") in ("DEGRADED", "UNHEALTHY") for r in records.values()
-                ):
+                elif any(r.get("health") in ("DEGRADED", "UNHEALTHY") for r in records.values()):
                     overall_health = "DEGRADED"
                 else:
                     overall_health = "HEALTHY"

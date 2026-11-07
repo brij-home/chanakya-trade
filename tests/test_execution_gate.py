@@ -60,6 +60,47 @@ def test_evaluate_execution_gate_ready(bullish_breakout_df):
         assert mock_push.called is True
 
 
+def test_evaluate_execution_gate_short():
+    from analysis.big_move import OptionsFlowBias
+
+    dates = pd.date_range("2024-01-01", periods=100, freq="D")
+    all_closes = [1000.0 - i * 5.0 for i in range(100)]
+    bearish_df = pd.DataFrame(
+        {
+            "open": all_closes,
+            "high": [c + 5.0 for c in all_closes],
+            "low": [c - 10.0 for c in all_closes],
+            "close": all_closes,
+            "volume": [100000] * 95 + [400000] * 5,
+        },
+        index=dates,
+    )
+    mock_flow = OptionsFlowBias(
+        has_options=True,
+        pcr=0.6,
+        max_pain_strike=500.0,
+        dominant_regime="SHORT_BUILDUP",
+        call_oi_total=150000,
+        put_oi_total=70000,
+        highest_call_oi_strike=600.0,
+        highest_put_oi_strike=450.0,
+        institutional_sentiment="AGGRESSIVE_BEARISH",
+    )
+    with (
+        patch(
+            "analysis.sector_rotation.get_stock_sector_alignment",
+            return_value={"sector": "AUTO", "quadrant": "LAGGING"},
+        ),
+        patch("analysis.execution_gate.analyze_options_flow", return_value=mock_flow),
+    ):
+        rep = evaluate_execution_gate("TATAMOTORS", df=bearish_df, bias="SHORT")
+        assert isinstance(rep, ExecutionGateReport)
+        assert rep.trade_bias == "SHORT"
+        assert rep.stop_loss > rep.ltp
+        assert rep.target_1 < rep.ltp
+        assert rep.target_2 < rep.target_1
+
+
 def test_format_execution_alert_message():
     d = {
         "symbol": "JSWSTEEL",

@@ -989,6 +989,173 @@ async def post_options_gex_endpoint(req: dict[str, Any]):
     return res
 
 
+@router.post("/api/options/payoff", tags=["Options & Derivatives", "Analytics"])
+async def post_options_payoff_endpoint(req: dict[str, Any]):
+    """
+    Computes institutional multi-leg option payoff:
+    - At-Expiry P&L curve and theoretical T+0 curve (Black-Scholes with IV shift)
+    - Breakeven points, Max Profit, Max Loss, and net return
+    - Roundtrip statutory friction breakdown (STT, GST, exchange charges, brokerage)
+    - Aggregated portfolio Greeks (Delta, Gamma, Theta, Vega)
+    """
+    from analysis.options import PayoffLeg, payoff
+    from market.quotes import get_ltp
+
+    underlying = str(req.get("underlying", "NIFTY")).upper()
+    spot = float(req.get("spot", 0.0) or 0.0)
+    if spot <= 0:
+        try:
+            spot = float(await asyncio.to_thread(get_ltp, underlying) or 0.0)
+        except Exception:
+            spot = 0.0
+
+    raw_legs = req.get("legs", [])
+    if not raw_legs:
+        return {"status": "ERROR", "message": "No strategy legs provided"}
+
+    legs = []
+    for l in raw_legs:
+        legs.append(
+            PayoffLeg(
+                option_type=str(l.get("option_type", "CE")).upper(),
+                transaction=str(l.get("transaction", "BUY")).upper(),
+                strike=float(l.get("strike", spot or 100.0)),
+                premium=float(l.get("premium", 0.0)),
+                lot_size=int(l.get("lot_size", 1)),
+                lots=int(l.get("lots", 1)),
+                iv=float(l["iv"]) if "iv" in l and l["iv"] is not None else None,
+                dte=int(l["dte"]) if "dte" in l and l["dte"] is not None else None,
+            )
+        )
+
+    steps = int(req.get("steps", 50))
+    iv_shift = float(req.get("iv_shift_pct", 0.0))
+    spot_range = None
+    if "min_spot" in req and "max_spot" in req:
+        spot_range = (float(req["min_spot"]), float(req["max_spot"]))
+
+    res = await asyncio.to_thread(
+        payoff,
+        legs=legs,
+        spot_range=spot_range,
+        steps=steps,
+        iv_shift_pct=iv_shift,
+    )
+
+    return {
+        "status": "ok",
+        "underlying": underlying,
+        "spot": spot,
+        "max_profit": res.max_profit,
+        "max_loss": res.max_loss,
+        "net_max_profit": res.net_max_profit,
+        "net_max_loss": res.net_max_loss,
+        "breakevens": res.breakevens,
+        "friction_breakdown": res.friction_breakdown,
+        "net_greeks": res.net_greeks,
+        "payoff": [{"spot": p.spot, "pnl": p.pnl, "t0_pnl": p.t0_pnl} for p in res.payoff],
+    }
+
+
+@router.post("/api/options/optimize_spreads", tags=["Options & Derivatives", "Analytics"])
+async def post_options_optimize_spreads_endpoint(req: dict[str, Any]):
+    """
+    Evaluates and ranks institutional defined-risk options strategies:
+    - Bull Call Spread, Bear Put Spread, Bull Put Credit Spread, Bear Call Credit Spread, Iron Condor, Iron Butterfly
+    - Returns net cashflow, max profit, max loss, risk:reward, breakevens, Greeks, POP, and regime suitability score.
+    """
+    from analysis.options import optimize_defined_risk_strategies
+    from market.quotes import get_ltp
+    from market.symbol_master import get_lot_size
+
+    underlying = (
+        str(req.get("underlying", "NIFTY"))
+        .upper()
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("-INDEX", "")
+    )
+    spot = float(req.get("spot", 0.0) or 0.0)
+    if spot <= 0:
+        try:
+            spot = float(await asyncio.to_thread(get_ltp, underlying) or 0.0)
+        except Exception:
+            spot = 0.0
+
+    lot_size = int(req.get("lot_size", 0) or 0)
+    if lot_size <= 0:
+        try:
+            lot_size = get_lot_size(underlying) or 25
+        except Exception:
+            lot_size = 25
+
+    regime = str(req.get("regime", "NEUTRAL")).upper()
+    dte_days = int(req.get("dte_days", 5) or 5)
+    iv_atm = float(req.get("iv_atm", 15.0) or 15.0)
+    strike_step = req.get("strike_step")
+    chain = req.get("chain")
+
+    # If chain not provided in request, attempt to fetch live option chain
+    if not chain:
+        try:
+            from market.options import get_options_chain
+
+            inst_chain = await asyncio.to_thread(get_options_chain, underlying)
+            if inst_chain and hasattr(inst_chain, "contracts"):
+                chain = [
+                    {
+                        "strike_price": c.strike,
+                        "option_type": c.option_type,
+                        "last_price": c.ltp,
+                    }
+                    for c in inst_chain.contracts
+                ]
+        except Exception as e_chain:
+            logger.debug(f"[optimize_spreads] Live chain lookup fallback: {e_chain}")
+
+    res = await asyncio.to_thread(
+        optimize_defined_risk_strategies,
+        underlying=underlying,
+        spot=spot,
+        lot_size=lot_size,
+        chain=chain,
+        regime=regime,
+        dte_days=dte_days,
+        iv_atm=iv_atm,
+        strike_step=float(strike_step) if strike_step else None,
+    )
+
+    return {"status": "ok", **res}
+
+
+@router.get("/api/scanner/smt_divergences", tags=["Market Intelligence", "Smart Money Concepts"])
+@router.post("/api/scanner/smt_divergences", tags=["Market Intelligence", "Smart Money Concepts"])
+async def get_smt_divergences_endpoint():
+    """
+    Cross-Market Smart Money Technique (SMT) Divergence Scanner:
+    Monitors NIFTY vs BANKNIFTY, FINNIFTY vs BANKNIFTY, SENSEX vs BANKEX,
+    GOLD vs SILVER, and CRUDE vs NATURAL GAS for institutional accumulation,
+    distribution (Judas swings), polarization conflict, and harmonious trend flow.
+    """
+    from analysis.smt_scanner import scan_cross_market_smt_divergences
+
+    res = await asyncio.to_thread(scan_cross_market_smt_divergences)
+    return res
+
+
+@router.get("/api/options/surface/{symbol}", tags=["Options & Derivatives", "Analytics"])
+async def get_options_surface_endpoint(symbol: str):
+    """
+    Returns authentic constant-tenor 30-day IV surface snapshot, 25-delta Risk Reversal Skew,
+    and empirical IV Rank/Percentile without synthetic defaults.
+    """
+    from market.options import get_iv_surface_snapshot
+
+    clean = symbol.upper().replace("NSE:", "").replace("NFO:", "").strip()
+    snap = await asyncio.to_thread(get_iv_surface_snapshot, clean)
+    return {"status": "ok", "data": snap.to_dict()}
+
+
 # ── 2. Order Flow & Cumulative Volume Delta (CVD) Divergence ───────────────
 
 

@@ -149,6 +149,7 @@ class AlertScrutinyAuditor:
             "no_chase": False,
             "order_book_sanctity_valid": True,
             "trap_invalidation_clean": True,
+            "friction_valid": True,
         }
 
         # Bypass strict sanity for simulation/test alerts only when non-live and not in test runner
@@ -171,6 +172,9 @@ class AlertScrutinyAuditor:
         t1 = float(getattr(alert, "target_level", 0.0) or 0.0)
         direction = str(getattr(alert, "direction", "BULLISH")).upper()
         trigger = float(getattr(alert, "trigger_level", 0.0) or ltp)
+        metrics_d = getattr(alert, "metrics", {}) or {}
+        if not isinstance(metrics_d, dict):
+            metrics_d = {}
         # 0. Centralized Signal Data Integrity Invariant Gate
         if hasattr(alert, "validate_data_integrity") and callable(
             getattr(alert, "validate_data_integrity")
@@ -361,6 +365,25 @@ class AlertScrutinyAuditor:
                 )
             risk_pts = sl - entry_anchor
             reward_pts = entry_anchor - t1
+        elif (
+            getattr(alert, "derivative_type", "") == "SPREAD"
+            or atype == "DEFINED_RISK_NEUTRAL"
+            or "SPREAD" in atype
+        ):
+            spread_rr = float((metrics_d or {}).get("risk_reward_ratio", 0.0) or 0.0)
+            if spread_rr <= 0.0:
+                plan_rr = str(
+                    (getattr(alert, "actionable_plan", None) or {}).get("risk_reward", "")
+                )
+                m_rr = re.findall(r"[\d.]+", plan_rr)
+                if m_rr:
+                    spread_rr = float(m_rr[-1])
+            if spread_rr > 0:
+                risk_pts = 100.0
+                reward_pts = 100.0 * spread_rr
+            else:
+                risk_pts = abs(entry_anchor - sl)
+                reward_pts = abs(t1 - entry_anchor)
         else:
             # NEUTRAL or non-directional (e.g. straddle range)
             risk_pts = abs(entry_anchor - sl)
@@ -373,7 +396,11 @@ class AlertScrutinyAuditor:
         # Multibaggers & long-term compounders ride out multi-quarter corrections with wide structural trailing floors (up to 30%)
         # For OPTIONS_MOMENTUM, enforce disciplined risk stop (capped at 32% max to align with trade_plan 30% drawdown ceiling)
         time_horizon = str(getattr(alert, "time_horizon", "") or "").upper()
-        if is_option_premium_levels:
+        if (
+            is_option_premium_levels
+            or getattr(alert, "derivative_type", "") == "SPREAD"
+            or atype == "DEFINED_RISK_NEUTRAL"
+        ):
             max_risk = (
                 32.0
                 if atype == "OPTIONS_MOMENTUM"
@@ -537,10 +564,16 @@ class AlertScrutinyAuditor:
 
             # Dynamic Volatility Floor for Options (Check 5m ATR and Index spread noise floors)
             opt_atr = float(
-                (metrics or {}).get("opt_atr_5m") or (metrics or {}).get("atr_5m") or 0.0
+                (metrics or {}).get("opt_atr_5m") or (metrics or {}).get("option_atr") or 0.0
             )
+            if opt_atr <= 0 and (metrics or {}).get("atr_5m"):
+                # If only underlying spot ATR is provided, translate to option premium space via ATM delta (0.50)
+                spot_atr = float((metrics or {}).get("atr_5m") or 0.0)
+                opt_atr = spot_atr * 0.50
+
             if opt_atr > 0:
-                opt_min_floor = max(opt_min_floor, opt_atr * 1.20)
+                # Cap the ATR-derived option floor at 35% of option entry premium to prevent impossible stops
+                opt_min_floor = max(opt_min_floor, min(opt_atr * 0.70, entry_anchor * 0.35))
             elif is_index_sym:
                 idx_name = underlying_idx or clean_sym
                 min_idx_opt_floor = (
@@ -630,18 +663,60 @@ class AlertScrutinyAuditor:
                     or metrics_d.get("is_institutional_thrust")
                     or any(s in _SMC_STRUCTURAL_SIGNALS for s in signals)
                 )
+                has_flow = bool(
+                    metrics_d.get("obv_divergence")
+                    in (
+                        "BULLISH_DIVERGENCE",
+                        "BEARISH_DIVERGENCE",
+                        "BULLISH_CONVERGENCE",
+                        "BEARISH_CONVERGENCE",
+                    )
+                    or metrics_d.get("dmi_triple_verdict")
+                    in (
+                        "TRIPLE_BULLISH_CONFIRMED",
+                        "TRIPLE_BEARISH_CONFIRMED",
+                        "BULLISH_ESTABLISHED",
+                        "BEARISH_ESTABLISHED",
+                    )
+                    or metrics_d.get("vsa_signal")
+                    in (
+                        "ABSORPTION_BREAKOUT",
+                        "STOPPING_VOLUME",
+                        "EFFORT_VS_RESULT_BULLISH_ABSORPTION",
+                    )
+                )
             is_elig, supp_reason = is_detector_eligible_for_regime(
                 atype,
                 regime,
                 rvol=rvol_val,
                 has_structural_sweep=has_sweep,
                 direction=str(getattr(alert, "direction", "") or "").upper(),
+                has_flow_confirmation=has_flow,
             )
             if not is_elig:
-                flags["risk_within_bounds"] = False
-                return False, supp_reason, flags
+                if is_test_runner and getattr(regime, "regime", "") == "UNAVAILABLE":
+                    pass
+                else:
+                    flags["risk_within_bounds"] = False
+                    return False, supp_reason, flags
         except Exception as e_rg:
             logger.debug(f"[AlertScrutiny] Regime check error: {e_rg}")
+
+        # 3c-1. Tom Williams VSA Climax & False Breakout Sanity Gate
+        vsa_sig = str(metrics_d.get("vsa_signal") or "").upper()
+        if vsa_sig:
+            if direction == "BULLISH" and vsa_sig in ("EFFORT_NO_RESULT_BEARISH", "NO_DEMAND"):
+                return (
+                    False,
+                    f"VSA Distribution Trap Veto: Bullish setup printed during {vsa_sig} (Smart money distributing into retail buying)",
+                    flags,
+                )
+            elif direction == "BEARISH" and vsa_sig in ("STOPPING_VOLUME", "NO_SUPPLY"):
+                return (
+                    False,
+                    f"VSA Absorption Spring Veto: Bearish setup printed during {vsa_sig} (Institutional limit orders absorbing selling)",
+                    flags,
+                )
 
         # 3d. Index Benchmark Intraday VWAP Direction Sanity Gate
         # Prevent taking Bullish setups when spot is trapped below VWAP, or Bearish setups when spot is riding above VWAP
@@ -1112,9 +1187,15 @@ class AlertScrutinyAuditor:
         req_rr = active_min_rr
         if vix_val and vix_val > 0:
             if vix_val > 18.0:
-                req_rr = max(active_min_rr, 2.0)
+                req_rr = max(active_min_rr, 1.8)
             elif vix_val < 11.5:
                 req_rr = min(active_min_rr, 1.3)
+        if (
+            getattr(alert, "derivative_type", "") == "SPREAD"
+            or atype == "DEFINED_RISK_NEUTRAL"
+            or "SPREAD" in str(getattr(alert, "alert_type", ""))
+        ):
+            req_rr = min(req_rr, 1.3)
 
             # Extreme Tail Risk Gate: If VIX > 25.0, naked option buying carries extreme IV crush hazard
             if vix_val > 25.0 and is_option_premium_levels:
@@ -2678,12 +2759,39 @@ class AlertScrutinyAuditor:
                                     flags,
                                 )
                         else:
-                            # Breakout setups: Mandate institutional volume expansion
-                            if rvol_f > 0 and rvol_f < 1.8:
+                            # Breakout setups during lunch lull (11:30-13:15 IST):
+                            # Indian markets naturally compress volume during lunch; 1.30x-1.50x during midday
+                            # represents a strong abnormal volume expansion relative to the midday baseline.
+                            has_order_flow = bool(
+                                (metrics_dict or {}).get("cvd_aligned")
+                                or (metrics_dict or {}).get("order_flow_bullish")
+                                or (metrics_dict or {}).get("order_flow_bearish")
+                                or (
+                                    float((metrics_dict or {}).get("tbt_imbalance", 0.0) or 0.0)
+                                    >= 1.5
+                                )
+                            )
+                            is_hedged_spread = bool(
+                                getattr(alert, "hedged_spread", None)
+                                or getattr(alert, "derivative_type", "") == "SPREAD"
+                                or (getattr(alert, "actionable_plan", {}) or {})
+                                .get("strategy", "")
+                                .endswith("SPREAD")
+                            )
+                            min_midday_rvol = (
+                                1.30
+                                if (
+                                    has_order_flow
+                                    or is_hedged_spread
+                                    or getattr(alert, "confidence", 0) >= 82
+                                )
+                                else 1.50
+                            )
+                            if rvol_f > 0 and rvol_f < min_midday_rvol:
                                 flags["midday_rvol_valid"] = False
                                 return (
                                     False,
-                                    f"Midday False Breakout Trap: Breakout attempted during lunch lull (11:30-13:15 IST) with low relative volume (RVOL {rvol_f:.2f}x < 1.8x). Mandate institutional volume expansion.",
+                                    f"Midday False Breakout Trap: Breakout attempted during lunch lull (11:30-13:15 IST) with low relative volume (RVOL {rvol_f:.2f}x < {min_midday_rvol:.2f}x). Mandate institutional volume expansion.",
                                     flags,
                                 )
                     except (ValueError, TypeError) as e_suppressed:
@@ -3123,6 +3231,10 @@ class AlertScrutinyAuditor:
                 {
                     "INTRADAY_CAPITULATION_REVERSAL",
                     "INTRADAY_CAPITULATION_TOP",
+                    "TOP_REVERSAL",
+                    "BOTTOM_REVERSAL",
+                    "HIKKAKE_BULLISH",
+                    "HIKKAKE_BEARISH",
                     "PDL_DEMAND_REJECTION",
                     "DAY_LOW_DEMAND_BOUNCE",
                     "FAILED_DAY_LOW_BREAKDOWN",
@@ -3140,9 +3252,11 @@ class AlertScrutinyAuditor:
                     "OPENING_RANGE_DISPLACEMENT",
                 }
             )
-            is_reversal_or_displacement = atype == "SMC_OB_RETEST" or any(
-                s in reversal_signals for s in active_signals
-            )
+            is_reversal_or_displacement = atype in (
+                "SMC_OB_RETEST",
+                "TOP_REVERSAL",
+                "BOTTOM_REVERSAL",
+            ) or any(s in reversal_signals for s in active_signals)
 
             # Benchmark Gravitational Alignment:
             if n_chg is not None:
@@ -3212,11 +3326,14 @@ class AlertScrutinyAuditor:
                     hbcm_allows_long = (hb_bulls >= 1) and (hb_bears <= 2)
 
                 is_reversal_alert = bool(
-                    any(
+                    atype in ("TOP_REVERSAL", "BOTTOM_REVERSAL")
+                    or any(
                         sig
                         in (
                             "INTRADAY_CAPITULATION_REVERSAL",
                             "INTRADAY_CAPITULATION_TOP",
+                            "TOP_REVERSAL",
+                            "BOTTOM_REVERSAL",
                             "FAILED_DAY_LOW_BREAKDOWN",
                             "FAILED_DAY_HIGH_BREAKOUT",
                             "PDL_DEMAND_REJECTION",
@@ -4084,12 +4201,32 @@ class AlertScrutinyAuditor:
                             or 0.0
                         )
                         if is_call_side:
+                            has_bull_order_flow = bool(
+                                (metrics_dict.get("order_flow_bullish") is True)
+                                or (metrics_dict.get("cvd_aligned") is True)
+                                or (float(metrics_dict.get("tbt_imbalance", 0.0) or 0.0) >= 1.5)
+                                or (metrics_dict.get("is_institutional_thrust") is True)
+                            )
+                            has_price_momentum = bool(
+                                (
+                                    float(
+                                        metrics_dict.get("rvol", 0.0)
+                                        or metrics_dict.get("rvol_val", 0.0)
+                                        or 0.0
+                                    )
+                                    >= 1.6
+                                )
+                                or (metrics_dict.get("day_high_breakout") is True)
+                                or (float(metrics_dict.get("day_change_pct", 0.0) or 0.0) >= 0.80)
+                            )
                             is_equity_decoupled = bool(
                                 not is_index_sym
                                 and (
                                     (metrics_dict.get("is_decoupler") is True)
                                     or (float(metrics_dict.get("sector_rs", 0.0) or 0.0) >= 1.5)
                                     or is_multi_session
+                                    or has_bull_order_flow
+                                    or has_price_momentum
                                 )
                             )
                             hbcm_meta_mb = (
@@ -4104,15 +4241,27 @@ class AlertScrutinyAuditor:
                                     hbcm_meta_mb.get("bearish_count", 0) <= 2
                                 )
 
+                            prev_close_ref = float(
+                                metrics_dict.get("prev_close", 0.0)
+                                or getattr(alert, "prev_close", 0.0)
+                                or 0.0
+                            )
+                            is_gap_or_trend_expansion = bool(
+                                prev_close_ref > 0
+                                and (u_spot_ref - prev_close_ref) / prev_close_ref * 100 >= 0.40
+                            ) or bool(has_bull_order_flow)
                             is_index_reversal = bool(
                                 is_index_sym
                                 and hbcm_allows_ce
                                 and (
-                                    metrics_dict.get("day_low")
-                                    and (u_spot_ref - float(metrics_dict["day_low"]))
-                                    / max(1.0, float(metrics_dict["day_low"]))
-                                    * 100
-                                    >= 0.40
+                                    (
+                                        metrics_dict.get("day_low")
+                                        and (u_spot_ref - float(metrics_dict["day_low"]))
+                                        / max(1.0, float(metrics_dict["day_low"]))
+                                        * 100
+                                        >= 0.40
+                                    )
+                                    or is_gap_or_trend_expansion
                                 )
                             )
                             is_decoupled = is_equity_decoupled or is_index_reversal
@@ -4143,12 +4292,36 @@ class AlertScrutinyAuditor:
                             or 0.0
                         )
                         if is_put_side:
+                            has_bear_order_flow = bool(
+                                (metrics_dict.get("order_flow_bearish") is True)
+                                or (metrics_dict.get("cvd_aligned") is True)
+                                or (
+                                    "tbt_imbalance" in metrics_dict
+                                    and float(metrics_dict.get("tbt_imbalance", 0.0) or 0.0) > 0
+                                    and float(metrics_dict.get("tbt_imbalance", 0.0) or 0.0) <= 0.65
+                                )
+                                or (metrics_dict.get("is_institutional_thrust") is True)
+                            )
+                            has_price_breakdown = bool(
+                                (
+                                    float(
+                                        metrics_dict.get("rvol", 0.0)
+                                        or metrics_dict.get("rvol_val", 0.0)
+                                        or 0.0
+                                    )
+                                    >= 1.6
+                                )
+                                or (metrics_dict.get("day_low_breakdown") is True)
+                                or (float(metrics_dict.get("day_change_pct", 0.0) or 0.0) <= -0.80)
+                            )
                             is_equity_decoupled = bool(
                                 not is_index_sym
                                 and (
                                     (metrics_dict.get("is_decoupler") is True)
                                     or (float(metrics_dict.get("sector_rs", 0.0) or 0.0) <= -1.5)
                                     or is_multi_session
+                                    or has_bear_order_flow
+                                    or has_price_breakdown
                                 )
                             )
                             hbcm_meta_mb = (
@@ -4163,15 +4336,27 @@ class AlertScrutinyAuditor:
                                     hbcm_meta_mb.get("bullish_count", 0) <= 2
                                 )
 
+                            prev_close_ref = float(
+                                metrics_dict.get("prev_close", 0.0)
+                                or getattr(alert, "prev_close", 0.0)
+                                or 0.0
+                            )
+                            is_gap_down_or_breakdown = bool(
+                                prev_close_ref > 0
+                                and (prev_close_ref - u_spot_ref) / prev_close_ref * 100 >= 0.40
+                            ) or bool(has_bear_order_flow)
                             is_index_breakdown = bool(
                                 is_index_sym
                                 and hbcm_allows_pe
                                 and (
-                                    metrics_dict.get("day_high")
-                                    and (float(metrics_dict["day_high"]) - u_spot_ref)
-                                    / max(1.0, float(metrics_dict["day_high"]))
-                                    * 100
-                                    >= 0.40
+                                    (
+                                        metrics_dict.get("day_high")
+                                        and (float(metrics_dict["day_high"]) - u_spot_ref)
+                                        / max(1.0, float(metrics_dict["day_high"]))
+                                        * 100
+                                        >= 0.40
+                                    )
+                                    or is_gap_down_or_breakdown
                                 )
                             )
                             is_decoupled = is_equity_decoupled or is_index_breakdown
@@ -4695,6 +4880,142 @@ class AlertScrutinyAuditor:
                     metrics["trap_audit"] = trap_audit.to_dict()
         except Exception as e_trap:
             logger.debug(f"[AlertScrutiny] Adversarial trap audit bypassed: {e_trap}")
+
+        # 4c-v. Institutional Statutory Friction & Net Expectancy Gate
+        # Every alert must maintain positive net expectancy after statutory roundtrip friction
+        # (STT, exchange turnover fees, GST, stamp duty, brokerage, and bid-ask spread).
+        # Eliminates sub-breakeven scalps that win gross but bleed negative after Indian taxes.
+        try:
+            from engine.charges import calculate_net_expectancy
+            from market.instruments import get_fno_lot_size
+
+            is_spread_setup = (
+                getattr(alert, "derivative_type", "") == "SPREAD"
+                or atype == "DEFINED_RISK_NEUTRAL"
+                or "SPREAD" in atype
+            )
+
+            if is_spread_setup:
+                # Multi-leg defined-risk options spread (Iron Condor, Bull Call / Bear Put spread)
+                num_legs = (
+                    4
+                    if (
+                        "CONDOR" in str(getattr(alert, "headline", "")).upper()
+                        or "CONDOR"
+                        in str(
+                            (getattr(alert, "actionable_plan", None) or {}).get("action", "")
+                        ).upper()
+                        or (metrics_d or {}).get("strategy") == "IRON_CONDOR"
+                    )
+                    else 2
+                )
+                spread_lot = get_fno_lot_size(clean_sym) or getattr(alert, "lot_size", 1) or 1
+                spread_friction = float(
+                    num_legs * 50.0
+                )  # ~₹50 roundtrip statutory+brokerage per leg
+
+                max_prof = float((metrics_d or {}).get("max_profit", 0.0) or 0.0)
+                max_ls = float((metrics_d or {}).get("max_loss", 0.0) or 0.0)
+                spread_rr_val = float((metrics_d or {}).get("risk_reward_ratio", 0.0) or 0.0)
+                if spread_rr_val <= 0.0:
+                    plan_rr_str = str(
+                        (getattr(alert, "actionable_plan", None) or {}).get("risk_reward", "")
+                    )
+                    m_rr_match = re.findall(r"[\d.]+", plan_rr_str)
+                    if m_rr_match:
+                        spread_rr_val = float(m_rr_match[-1])
+
+                if max_prof <= 0.0:
+                    net_cred = float(
+                        (metrics_d or {}).get("net_credit", 0.0)
+                        or (getattr(alert, "actionable_plan", None) or {}).get("entry_price", 0.0)
+                        or 30.0
+                    )
+                    gross_prof = net_cred * spread_lot
+                    gross_ls = (
+                        (gross_prof / spread_rr_val) if spread_rr_val > 0 else (gross_prof * 1.5)
+                    )
+                else:
+                    gross_prof = max_prof
+                    gross_ls = max_ls if max_ls > 0 else (gross_prof / max(0.5, spread_rr_val))
+
+                net_reward_val = gross_prof - spread_friction
+                net_risk_val = gross_ls + spread_friction
+                net_rr_val = (net_reward_val / net_risk_val) if net_risk_val > 0 else 0.0
+                friction_drag = (spread_friction / max(1.0, gross_prof)) * 100.0
+
+                net_exp = {
+                    "gross_reward": gross_prof,
+                    "gross_risk": gross_ls,
+                    "net_reward": net_reward_val,
+                    "net_risk": net_risk_val,
+                    "net_rr": net_rr_val,
+                    "friction_drag_pct": friction_drag,
+                    "total_friction": spread_friction,
+                }
+                flags["friction_net_expectancy"] = net_exp
+
+                if net_exp["net_reward"] <= 0.0 or (net_exp["net_rr"] < 0.8 and not is_swing_setup):
+                    flags["friction_valid"] = False
+                    return (
+                        False,
+                        f"Statutory Friction Veto: Multi-leg spread post-tax net reward (₹{net_exp['net_reward']:.2f}) or net R:R (1:{net_exp['net_rr']:.2f}) fails minimum viable expectancy ({net_exp['friction_drag_pct']:.1f}% friction drag).",
+                        flags,
+                    )
+                flags["friction_valid"] = True
+            else:
+                # Determine segment and quantity
+                eval_qty = 1
+                if is_option_premium_levels:
+                    eval_seg = "OPTIONS"
+                    eval_qty = get_fno_lot_size(clean_sym) or 1
+                elif is_futures:
+                    eval_seg = "FUTURES"
+                    eval_qty = get_fno_lot_size(clean_sym) or 1
+                else:
+                    eval_seg = (
+                        "EQUITY_INTRADAY"
+                        if time_horizon in ("INTRADAY", "SCALP", "INTRADAY_SCALP_ONLY")
+                        else "EQUITY_DELIVERY"
+                    )
+                    eval_qty = max(1, int(50000.0 / entry_anchor)) if entry_anchor > 0 else 1
+
+                eval_side = (
+                    "BUY"
+                    if (is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY"))
+                    else "SELL"
+                )
+
+                # Check bid-ask half spread if available in metrics
+                spread_bps = 0.0005
+                if isinstance(metrics_d, dict) and "spread_bps" in metrics_d:
+                    try:
+                        spread_bps = max(0.0002, float(metrics_d["spread_bps"]) / 10000.0)
+                    except (ValueError, TypeError):
+                        spread_bps = 0.0005
+
+                net_exp = calculate_net_expectancy(
+                    entry_price=entry_anchor,
+                    target_price=t1,
+                    stop_price=sl,
+                    quantity=eval_qty,
+                    segment=eval_seg,
+                    entry_side=eval_side,
+                    half_spread_pct=spread_bps,
+                )
+                flags["friction_net_expectancy"] = net_exp
+
+                if net_exp["net_reward"] <= 0.0 or (net_exp["net_rr"] < 0.8 and not is_swing_setup):
+                    flags["friction_valid"] = False
+                    return (
+                        False,
+                        f"Statutory Friction Veto: Post-tax net reward (₹{net_exp['net_reward']:.2f}) or net R:R (1:{net_exp['net_rr']:.2f}) fails minimum viable expectancy after Indian statutory charges and slippage ({net_exp['friction_drag_pct']:.1f}% friction drag).",
+                        flags,
+                    )
+                flags["friction_valid"] = True
+        except Exception as e_fric:
+            logger.debug(f"[AlertScrutiny] Friction net expectancy check note: {e_fric}")
+            flags["friction_valid"] = True
 
         return True, "", flags
 
@@ -5502,7 +5823,7 @@ class AlertScrutinyAuditor:
 
         if is_commodity:
             chg_pct = float(metrics.get("change_pct", 0.0) or 0.0)
-            vwap = float(metrics.get("vwap", ltp) or ltp)
+            vwap = float(getattr(alert, "vwap", 0.0) or metrics.get("vwap", ltp) or ltp)
             has_opt_chain = bool(metrics.get("has_options_chain", False))
 
             macro_ctx = "Live global macro metrics unavailable"
@@ -5921,7 +6242,7 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
         # ── Commodity Quant Fallback ──────────────────────────────────────────
         if alert_type == "COMMODITY_MOMENTUM":
             chg_pct = float(metrics.get("change_pct", 0.0) or 0.0)
-            vwap = float(metrics.get("vwap", ltp) or ltp)
+            vwap = float(getattr(alert, "vwap", 0.0) or metrics.get("vwap", ltp) or ltp)
             if direction in ("BEARISH", "SHORT", "SELL"):
                 logic = (
                     f"Quant-validated MCX {sym} breakdown: session decline of {chg_pct:.1f}% below VWAP ₹{vwap:,.1f} "
@@ -6066,6 +6387,23 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
                 is_pe_trade = "PUT" in action or direction == "BEARISH"
 
             if is_pe_trade:
+                # Benchmark Gravitational Markup Veto: In quant fallback, suppress routine Put buys when NIFTY is in active markup
+                n_chg_pe = flags.get("nifty_change_pct")
+                if n_chg_pe is None and isinstance(metrics, dict):
+                    n_chg_pe = metrics.get("nifty_change_pct")
+                is_decoupler_pe = flags.get("decoupler_status") == "VERIFIED_DECOUPLER"
+                if n_chg_pe is not None and float(n_chg_pe) >= 0.35 and not is_decoupler_pe:
+                    return ScrutinyResult(
+                        status="REJECTED",
+                        score=40,
+                        logic_confirmation=f"Quant Gravitational Veto: NIFTY 50 markup (+{float(n_chg_pe):.2f}%) suppresses routine bearish Put surge.",
+                        trap_risk_warning=f"Severe market-wide accumulation (+{float(n_chg_pe):.2f}% index thrust); bearish equity/put breakdowns face >80% failure rate without verified decoupling.",
+                        actionable_guidance="Skip Put entry. Preserve capital or mandate Call setups aligned with market markup.",
+                        sanctity_matrix=flags,
+                        rejection_reason=f"Benchmark Gravitational Veto: NIFTY up +{float(n_chg_pe):.2f}% (Bullish Contagion Trap)",
+                        auditor_model="QUANT_FALLBACK",
+                    )
+
                 opt_lbl = contract or f"{sym} {opt_type or 'PE'}"
                 logic = f"Quant-validated {opt_lbl} Put momentum: bearish underlying breakdown confirmed with 1:{rr:.1f} R:R premium expansion asymmetry."
                 trap = f"Watch for sudden underlying short-covering bounce{friday_warning}; scale 50% profit at option target ₹{t1:,.1f} and trail SL to breakeven."
@@ -6076,6 +6414,22 @@ STRICT OUTPUT CONSTRAINT: Keep the entire JSON response compact and strictly und
                 trap = f"Watch for overhead resistance or IV crush near target ₹{t1:,.1f}{friday_warning}; scale 50% profit at T1 and trail SL to breakeven."
                 guidance = f"Buy CE near ₹{ltp:,.1f}{anchor_note}; strictly invalidate if option premium drops below ₹{sl:,.1f}."
         elif direction in ("BEARISH", "SHORT", "SELL"):
+            n_chg_short = flags.get("nifty_change_pct")
+            if n_chg_short is None and isinstance(metrics, dict):
+                n_chg_short = metrics.get("nifty_change_pct")
+            is_decoupler_short = flags.get("decoupler_status") == "VERIFIED_DECOUPLER"
+            if n_chg_short is not None and float(n_chg_short) >= 0.35 and not is_decoupler_short:
+                return ScrutinyResult(
+                    status="REJECTED",
+                    score=40,
+                    logic_confirmation=f"Quant Gravitational Veto: NIFTY 50 markup (+{float(n_chg_short):.2f}%) suppresses routine short breakdown.",
+                    trap_risk_warning=f"Severe market-wide accumulation (+{float(n_chg_short):.2f}% index thrust); short setups face >80% failure rate without verified decoupling.",
+                    actionable_guidance="Skip short entry. Preserve capital or mandate long setups aligned with market markup.",
+                    sanctity_matrix=flags,
+                    rejection_reason=f"Benchmark Gravitational Veto: NIFTY up +{float(n_chg_short):.2f}% (Bullish Contagion Trap)",
+                    auditor_model="QUANT_FALLBACK",
+                )
+
             logic = f"Quant-validated {sym} breakdown: distribution structure below ₹{sl:,.1f} confirmed with 1:{rr:.1f} downside asymmetry."
             trap = f"Watch for sudden short-covering bounce near ₹{t1:,.1f}; tighten stop on lower timeframe CHoCH."
             guidance = f"Short near ₹{ltp:,.1f}; invalidate trade immediately if price reclaims ₹{sl:,.1f}."

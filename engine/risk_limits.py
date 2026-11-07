@@ -497,6 +497,70 @@ class RiskLimits:
             or streak >= self.max_consecutive_losses,
         }
 
+    def get_behavioral_anti_tilt_status(
+        self, account_id: Optional[str] = None, mode: Optional[str] = None
+    ) -> dict[str, Any]:
+        """
+        Computes institutional behavioral anti-tilt metrics, psychological reset
+        directives, and mindful co-pilot friction status.
+        """
+        loss = self._daily_loss(account_id=account_id, mode=mode)
+        trades = self._trades_today(account_id=account_id, mode=mode)
+        streak = self._consecutive_losses_today(account_id=account_id, mode=mode)
+
+        total_cap = float(
+            os.environ.get("TRADING_CAPITAL", os.environ.get("TOTAL_CAPITAL", "200000.0"))
+        )
+        dd_pct = (abs(min(0.0, loss)) / total_cap * 100.0) if total_cap > 0 else 0.0
+
+        if streak >= self.max_consecutive_losses or loss <= self.max_daily_loss:
+            tilt_state = "CRITICAL_TILT_RISK"
+            coaching = (
+                f"Tilt Lockout Active: {streak} consecutive losses (limit {self.max_consecutive_losses}) "
+                f"or daily loss limit reached (-₹{abs(loss):,.0f}). "
+                f"Statistically, executing immediate re-entries now compounds losses by 2.4x. "
+                f"Mindful Directive: Step away from screens for a 15-minute nervous system reset."
+            )
+            requires_override = True
+        elif streak == 2 or (self.max_daily_loss < 0 and loss <= self.max_daily_loss * 0.5):
+            tilt_state = "ELEVATED_TILT_RISK"
+            coaching = (
+                "Elevated Fatigue Risk: 2 consecutive losses. Focus on capital defense. "
+                "Downsize next position to 0.5% capital and verify A+ confluence before pulling trigger."
+            )
+            requires_override = True
+        elif streak == 1:
+            tilt_state = "MILD_FRICTION"
+            coaching = (
+                "Normal market fluctuation. Stick strictly to playbook invalidation stop-loss."
+            )
+            requires_override = False
+        else:
+            tilt_state = "CLEAR"
+            coaching = "Disciplined state. Sizing and risk parameters fully intact."
+            requires_override = False
+
+        return {
+            "loss_streak": streak,
+            "max_consecutive_losses": self.max_consecutive_losses,
+            "daily_realized_loss": round(loss, 2),
+            "max_daily_loss": self.max_daily_loss,
+            "daily_drawdown_pct": round(dd_pct, 2),
+            "max_daily_drawdown_pct": self.max_daily_drawdown_pct,
+            "trades_today": trades,
+            "max_daily_trades": self.max_daily_trades,
+            "tilt_state": tilt_state,
+            "tilt_lockout_active": streak >= self.max_consecutive_losses,
+            "requires_conscious_override": requires_override,
+            "coaching_guidance": coaching,
+            "recommended_cooldown_minutes": 15 if streak >= 2 else 0,
+            "anti_tilt_checklist": [
+                "Have I waited at least 15 minutes since the last stop-out?",
+                "Is this a playbook A+ setup, or an urge to recover prior losses?",
+                "Am I willing to accept the exact rupee risk of this trade if stopped out?",
+            ],
+        }
+
     def reset_all(self) -> None:
         """Clear all recorded trades and reset counters (for testing and midnight resets)."""
         with self._connect() as conn:

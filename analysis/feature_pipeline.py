@@ -73,6 +73,16 @@ class FeatureSet:
     support: float = 0.0
     resistance: float = 0.0
 
+    # OBV & Triple-Filtered DMI
+    obv: float = 0.0
+    obv_ema: float = 0.0
+    obv_regime: str = "NEUTRAL"
+    obv_divergence: str = "NEUTRAL"
+    plus_di: float = 0.0
+    minus_di: float = 0.0
+    dmi_triple_verdict: str = "NEUTRAL"
+    dmi_confidence: float = 0.0
+
     @property
     def is_fresh(self) -> bool:
         """True if computed within the last 60 seconds."""
@@ -304,6 +314,13 @@ def compute_features(
     # ── ADX ───────────────────────────────────────────────────
     adx_val = _compute_adx(df)
 
+    # ── OBV & Triple-Filtered DMI ────────────────────────────
+    from analysis.obv import analyse_obv
+    from analysis.dmi_filter import evaluate_triple_dmi
+
+    obv_snap = analyse_obv(df, symbol=symbol)
+    dmi_res = evaluate_triple_dmi(df, symbol=symbol)
+
     # ── Support / Resistance (pivot points) ───────────────────
     prev = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
     h, lo, c = float(prev["high"]), float(prev["low"]), float(prev["close"])
@@ -339,6 +356,14 @@ def compute_features(
         adx=round(adx_val, 4),
         support=support,
         resistance=resistance,
+        obv=round(obv_snap.current_obv, 2),
+        obv_ema=round(obv_snap.obv_ema, 2),
+        obv_regime=obv_snap.regime,
+        obv_divergence=obv_snap.divergence,
+        plus_di=round(dmi_res.plus_di, 2),
+        minus_di=round(dmi_res.minus_di, 2),
+        dmi_triple_verdict=dmi_res.verdict,
+        dmi_confidence=round(dmi_res.confidence_score, 1),
     )
 
 

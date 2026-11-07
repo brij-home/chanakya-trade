@@ -549,7 +549,7 @@ def get_universe_depth_radar(
         with _quote_cache_lock:
             missing_warm = [c[0] for c in candidates if c[0] not in _QUOTE_CACHE]
         if missing_warm and not os.environ.get("CHANAKYA_TESTING"):
-            get_quote(missing_warm[:60], ws_only=False)
+            get_quote(missing_warm[:60], ws_only=(not allow_rest_fallback))
     except Exception as e_warm:
         logger.debug(f"[universe_depth_radar] Bulk quotes pre-warm: {e_warm}")
 

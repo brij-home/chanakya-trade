@@ -55,6 +55,7 @@ def detect_options_momentum_breakouts(
     recent_alerts: Optional[list[AutoAlert]] = None,
     batch_quotes: Optional[dict[str, Any]] = None,
     now_dt: Optional[datetime] = None,
+    chains_map: Optional[dict[str, Any]] = None,
 ) -> list[AutoAlert]:
     """
     Scans liquid indices and Tier-1 F&O leaders for directional Options Momentum Breakouts.
@@ -113,8 +114,12 @@ def detect_options_momentum_breakouts(
     nifty_change = None
     nifty_below_vwap = None
     try:
-        nq = get_quote("NSE:NIFTY 50")
-        q_obj = nq.get("NSE:NIFTY 50") or nq.get("NIFTY 50") if isinstance(nq, dict) else nq
+        nq = get_quote("NSE:NIFTY50-INDEX") or get_quote("NSE:NIFTY 50")
+        q_obj = (
+            nq.get("NSE:NIFTY50-INDEX") or nq.get("NSE:NIFTY 50") or nq.get("NIFTY 50")
+            if isinstance(nq, dict)
+            else nq
+        )
         if q_obj:
             n_ltp = float(getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0)
             n_vwap = float(getattr(q_obj, "vwap", 0.0) or 0.0)
@@ -126,10 +131,10 @@ def detect_options_momentum_breakouts(
         logger.debug(f"[OptionsBreakout] NIFTY benchmark fetch error: {e_nifty}")
 
     is_nifty_markdown = (
-        nifty_change is not None and nifty_change <= -0.35 and nifty_below_vwap is not False
+        nifty_change is not None and nifty_change <= -0.30 and nifty_below_vwap is not False
     )
     is_nifty_markup = (
-        nifty_change is not None and nifty_change >= 0.40 and nifty_below_vwap is False
+        nifty_change is not None and nifty_change >= 0.25 and nifty_below_vwap is False
     )
 
     is_test_env = (
@@ -312,8 +317,12 @@ def detect_options_momentum_breakouts(
                 )
                 return None
 
+            if chain is None and chains_map is not None:
+                chain = chains_map.get(clean_sym)
             if chain is None:
                 chain = get_options_chain(clean_sym)
+            if chains_map is not None and chain:
+                chains_map[clean_sym] = chain
 
             if not chain:
                 return None
@@ -722,14 +731,28 @@ def detect_options_momentum_breakouts(
                     logger.debug(f"[OptionsBreakout] MTF 15m fetch failed for {clean_sym}: {e_mtf}")
 
                 has_opening_breakdown = bool(
-                    (spot_open and spot <= spot_open * 0.996)
-                    and (spot_vwap and spot <= spot_vwap * 0.999)
-                    and (lower_wick_ratio <= 0.35)
+                    (
+                        (spot_open and spot <= spot_open * 0.996)
+                        or (
+                            spot_change_pct is not None
+                            and spot_change_pct <= -0.50
+                            and (not spot_open or spot <= spot_open * 1.001)
+                        )
+                    )
+                    and (spot_vwap and spot <= spot_vwap * 1.000)
+                    and (lower_wick_ratio <= 0.40)
                 )
                 has_opening_breakout = bool(
-                    (spot_open and spot >= spot_open * 1.004)
-                    and (spot_vwap and spot >= spot_vwap * 1.001)
-                    and (upper_wick_ratio <= 0.35)
+                    (
+                        (spot_open and spot >= spot_open * 1.004)
+                        or (
+                            spot_change_pct is not None
+                            and spot_change_pct >= 0.50
+                            and (not spot_open or spot >= spot_open * 0.999)
+                        )
+                    )
+                    and (spot_vwap and spot >= spot_vwap * 1.000)
+                    and (upper_wick_ratio <= 0.40)
                 )
 
                 if opt_type == "CE" and mtf_15m_trend == "BEARISH" and not has_opening_breakout:
@@ -815,12 +838,23 @@ def detect_options_momentum_breakouts(
                         or (spot_change_pct and abs(spot_change_pct) >= 2.5)
                     )
 
+                is_explosive_momentum = bool(
+                    is_extreme_catalyst
+                    or (vol_oi >= 1.8 and vol >= 800)
+                    or (vol >= 500 and (pchange or 0.0) >= 8.0)
+                    or (spot_change_pct and abs(spot_change_pct) >= 2.0)
+                )
+
                 # ── Time-of-Day Institutional Gates ──
                 if not is_test_env:
                     # 1. Opening Auction Discovery Freeze (09:15 - 09:25 IST)
                     # Squelch speculative breakout buying before morning market structure forms
                     if is_opening_freeze and not (
-                        is_bear_drive or is_bull_drive or is_extreme_catalyst
+                        is_bear_drive
+                        or is_bull_drive
+                        or is_extreme_catalyst
+                        or has_opening_breakout
+                        or has_opening_breakdown
                     ):
                         logger.debug(
                             f"[OptionsBreakout] Suppressed {clean_sym} during 09:15-09:25 IST opening auction discovery"
@@ -828,21 +862,32 @@ def detect_options_momentum_breakouts(
                         continue
 
                     # 2. Midday Volume Lull (11:15 - 13:15 IST)
-                    # Suppress options buying during midday consolidation unless high volume/OI expansion
+                    # Suppress options buying during midday consolidation unless confirmed by volume/momentum/order flow
                     if is_midday_lull and not is_extreme_catalyst:
-                        if vol_oi < 2.5 or vol < 2500:
+                        has_midday_thrust = (
+                            is_explosive_momentum
+                            or (vol_oi >= 1.35 and vol >= 600)
+                            or (spot_change_pct is not None and abs(spot_change_pct) >= 1.2)
+                        )
+                        if not has_midday_thrust and (vol_oi < 2.5 or vol < 2500):
                             logger.debug(
                                 f"[OptionsBreakout] Suppressed {clean_sym} during 11:15-13:15 IST midday lull (vol_oi {vol_oi}x < 2.5x or vol {vol} < 2500)"
                             )
                             continue
 
-                    # 3. Late Session Intraday Theta Drag (post-14:45 IST)
-                    # Ban new intraday option buying setups into market close
-                    if is_late_session_theta and not is_next_month_routed:
+                # 3. Late Session Intraday Theta Drag (post-14:45 IST)
+                # Route to defined-risk spreads (Bull Call / Bear Put Spread) rather than flat discard
+                mandate_spread_afternoon = False
+                if is_late_session_theta and not is_next_month_routed:
+                    if (
+                        not is_test_env
+                        and now_dt.time() > datetime.strptime("15:08", "%H:%M").time()
+                    ):
                         logger.debug(
-                            f"[OptionsBreakout] Suppressed {clean_sym} post-14:45 IST: terminal intraday theta collapse"
+                            f"[OptionsBreakout] Suppressed {clean_sym} post-15:08 IST: terminal session runway"
                         )
                         continue
+                    mandate_spread_afternoon = True
 
                 # Institutional Sector Support Gate ("A rising tide lifts all boats")
                 sector_tailwind_bonus = 0
@@ -919,11 +964,22 @@ def detect_options_momentum_breakouts(
                             "CONSUMER",
                         )
                     )
+                    # Decouple idiosyncratic breakouts on strong individual momentum
+                    has_stock_thrust = bool(
+                        (
+                            spot_change_pct is not None
+                            and spot_change_pct >= 1.0
+                            and (not spot_vwap or spot >= spot_vwap)
+                        )
+                        or (spot_change_pct is not None and spot_change_pct >= 2.0)
+                        or (is_decoupler and spot_change_pct and spot_change_pct > 0)
+                    )
                     if not (
                         is_defensive
                         or is_thematic
                         or sector_tailwind_bonus > 0
                         or is_extreme_catalyst
+                        or has_stock_thrust
                     ):
                         logger.debug(
                             f"[OptionsBreakout] Suppressed Call breakout on {clean_sym}: NIFTY in markdown ({nifty_change:.2f}%)"
@@ -935,10 +991,22 @@ def detect_options_momentum_breakouts(
 
                     if not sec_name:
                         sec_id, sec_name = get_stock_sector(clean_sym)
-                    is_lagging = any(d in (sec_name or "").upper() for d in ("MEDIA", "REALTY"))
-                    if not (is_lagging or sector_tailwind_bonus > 0 or is_extreme_catalyst):
+                    # Institutional Macro Decoupling Invariant:
+                    # In a broad market markup (NIFTY positive and above VWAP), buying naked Put options is statistically
+                    # catastrophic unless the underlying stock is in verified breakdown (spot <= -1.0% and below VWAP).
+                    # Option contract premium fluctuations (pchange) must NEVER be conflated with underlying stock breakdown.
+                    has_stock_breakdown = bool(
+                        (
+                            spot_change_pct is not None
+                            and spot_change_pct <= -1.0
+                            and (not spot_vwap or spot <= spot_vwap)
+                        )
+                        or (spot_change_pct is not None and spot_change_pct <= -2.0)
+                        or (is_decoupler and spot_change_pct and spot_change_pct < 0)
+                    )
+                    if not has_stock_breakdown:
                         logger.debug(
-                            f"[OptionsBreakout] Suppressed Put surge on {clean_sym}: NIFTY in markup (+{nifty_change:.2f}%)"
+                            f"[OptionsBreakout] Suppressed Put surge on {clean_sym}: NIFTY in markup (+{nifty_change:.2f}%) without verified underlying stock breakdown"
                         )
                         continue
 
@@ -1048,7 +1116,53 @@ def detect_options_momentum_breakouts(
                             f"[OptionsBreakout] SMC candle/divergence error for {clean_sym}: {e_smc}"
                         )
 
+                obv_div_status = "NEUTRAL"
+                dmi_model_verdict = "NEUTRAL"
+                vsa_sig_status = "NEUTRAL"
+                avwap_bias_status = "NEUTRAL"
+                flow_bonus = 0
                 if df_5m is not None and len(df_5m) >= 10:
+                    try:
+                        from analysis.obv import analyse_obv
+                        from analysis.dmi_filter import evaluate_triple_dmi
+                        from analysis.vsa import analyse_vsa
+                        from analysis.anchored_vwap import detect_intraday_anchors
+
+                        _obv = analyse_obv(df_5m, is_intraday=True)
+                        _dmi = evaluate_triple_dmi(df_5m, is_intraday=True)
+                        obv_div_status = _obv.divergence
+                        dmi_model_verdict = _dmi.verdict
+
+                        if opt_type == "CE":
+                            if _dmi.verdict == "TRIPLE_BULLISH_CONFIRMED":
+                                flow_bonus += 10
+                            if _obv.divergence == "BULLISH_DIVERGENCE":
+                                flow_bonus += 8
+                            elif _obv.divergence == "BEARISH_DIVERGENCE":
+                                flow_bonus -= 15
+                                mandate_spread_afternoon = True
+                        elif opt_type == "PE":
+                            if _dmi.verdict == "TRIPLE_BEARISH_CONFIRMED":
+                                flow_bonus += 10
+                            if _obv.divergence == "BEARISH_DIVERGENCE":
+                                flow_bonus += 8
+
+                        _vsa = analyse_vsa(df_5m, symbol=clean_sym, is_intraday=True)
+                        vsa_sig_status = _vsa.vsa_signal
+                        if opt_type == "CE" and _vsa.bias == "BULLISH":
+                            flow_bonus += min(8, max(3, _vsa.conviction_modifier))
+                        elif opt_type == "PE" and _vsa.bias == "BEARISH":
+                            flow_bonus += min(8, max(3, _vsa.conviction_modifier))
+
+                        _avwap = detect_intraday_anchors(df_5m, spot_price=spot)
+                        avwap_bias_status = _avwap.get("bias", "NEUTRAL")
+                        if opt_type == "CE" and avwap_bias_status == "BULLISH":
+                            flow_bonus += 5
+                        elif opt_type == "PE" and avwap_bias_status == "BEARISH":
+                            flow_bonus += 5
+                    except Exception as _e_obv_dmi:
+                        logger.debug(f"[OptionsBreakout] Flow analysis check skipped: {_e_obv_dmi}")
+
                     try:
                         from engine.signal_ensemble import ensemble_signal
 
@@ -1288,6 +1402,7 @@ def detect_options_momentum_breakouts(
                 conf_score += sector_tailwind_bonus
                 conf_score += opening_drive_bonus
                 conf_score += decoupler_bonus
+                conf_score += flow_bonus
 
                 confidence = min(96, max(50, conf_score))
 
@@ -1462,8 +1577,14 @@ def detect_options_momentum_breakouts(
                         if has_opening_breakdown
                         else ("BULLISH_BREAKOUT" if has_opening_breakout else mtf_15m_trend)
                     ),
+                    preferred_vehicle="SPREAD_ONLY" if mandate_spread_afternoon else "NAKED_OPTION",
                     vix_regime=vix_regime,
                     metrics={
+                        "obv_divergence": obv_div_status,
+                        "dmi_triple_verdict": dmi_model_verdict,
+                        "vsa_signal": vsa_sig_status,
+                        "avwap_bias": avwap_bias_status,
+                        "mandate_spread_afternoon": mandate_spread_afternoon,
                         "cpr": (cpr_gate_ce if opt_type == "CE" else cpr_gate_pe).cpr_data,
                         "cpr_type": (cpr_gate_ce if opt_type == "CE" else cpr_gate_pe).cpr_type,
                         "is_narrow_cpr": (
@@ -1484,6 +1605,7 @@ def detect_options_momentum_breakouts(
                         "strike": strike,
                         "lot_size": lot_sz,
                         "spot_vwap": spot_vwap,
+                        "vwap": spot_vwap,
                         "spot_invalidation_anchor": tp.invalidation_stop if tp else None,
                         "spot_target_1": tp.target_1 if tp else None,
                         "spot_target_2": tp.target_2 if tp else None,

@@ -9,6 +9,7 @@ import SmartSearchBox from '../Common/SmartSearchBox'
 import { parseSearchQuery, matchesSmartSearchCandidate } from '../../utils/smartSearchParser'
 import Badge from '../Common/Badge'
 import Tooltip, { HelpHint } from '../UI/Tooltip'
+import SmtDivergenceRadar from '../Cards/SmtDivergenceRadar'
 
 /**
  * Normalizes filter selection state to a Set, handling Set, Array, string, or empty/ALL states.
@@ -102,11 +103,26 @@ export default function InflectionScannerView({
   const [minScore, setMinScore] = useState(50)
   const [searchQuery, setSearchQuery] = useState('')
   const [viewMode, setViewMode] = useState('table') // 'table' | 'cards'
+  const [showSmtRadar, setShowSmtRadar] = useState(false)
   const [sortColumn, setSortColumn] = useState('inflection_score')
   const [sortDirection, setSortDirection] = useState('desc')
 
   // Multi-Horizon & Incubation Pipeline State
   const [horizonFilter, setHorizonFilter] = useState(() => new Set()) // 'ALL' | 'SHORT_TERM' | 'MID_TERM' | 'LONG_TERM'
+  const globalHorizon = useChatStore((s) => s.horizon)
+  const prevGlobalHorizonRef = useRef(globalHorizon)
+
+  useEffect(() => {
+    if (prevGlobalHorizonRef.current !== globalHorizon) {
+      prevGlobalHorizonRef.current = globalHorizon
+      if (globalHorizon === 'INTRADAY') {
+        setHorizonFilter(new Set(['SHORT_TERM']))
+      } else if (globalHorizon === 'SWING') {
+        setHorizonFilter(new Set(['MID_TERM', 'LONG_TERM']))
+      }
+    }
+  }, [globalHorizon])
+
   const [activeMainTab, setActiveMainTab] = useState('scanner') // 'scanner' | 'incubation'
   const [incubatedCandidates, setIncubatedCandidates] = useState([])
   const [isLoadingIncubation, setIsLoadingIncubation] = useState(false)
@@ -2089,6 +2105,22 @@ export default function InflectionScannerView({
             </button>
           </div>
 
+          {/* SMT Divergence Radar Toggle */}
+          <button
+            type="button"
+            onClick={() => setShowSmtRadar((prev) => !prev)}
+            className={`flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${
+              showSmtRadar
+                ? 'bg-amber/20 border-amber/50 text-amber shadow-xs font-bold'
+                : 'bg-elevated border-border text-muted hover:text-text hover:border-subtle'
+            }`}
+            title="Toggle Cross-Market SMT Divergence Inter-Index Radar"
+          >
+            <span>⚖️</span>
+            <span>SMT Radar</span>
+            <span className="text-[10px]">{showSmtRadar ? '▲' : '▼'}</span>
+          </button>
+
           {/* Sync EOD Button */}
           <button
             type="button"
@@ -2297,6 +2329,9 @@ export default function InflectionScannerView({
 
       {/* ── MAIN CANDIDATES VIEW CONTAINER ──────────────────────────────── */}
       <div className="flex-1 overflow-y-auto p-4">
+        {/* Cross-Market SMT Divergence Radar */}
+        <SmtDivergenceRadar isOpen={showSmtRadar} onClose={() => setShowSmtRadar(false)} />
+
         {activeMainTab === 'incubation' ? (
           renderIncubationBoard()
         ) : activeMainTab === 'century' ? (

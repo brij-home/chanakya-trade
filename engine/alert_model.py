@@ -126,7 +126,9 @@ class ActionableBlueprint:
     target_1: float  # +2R Scale 50% & SL to Breakeven
     target_2: float  # +4R Extension
     runner_target: Optional[float] = None  # +6R Runner
-    risk_reward: str = "1:3.0"  # Minimum 1:3.0 per Invariant 12
+    risk_reward: str = (
+        "1:2.0"  # Calibrated institutional standard (1:2.0 directional, 1:1.5 spreads)
+    )
     no_chase_boundary: Optional[float] = None
     execution_style: str = (
         "BREAKOUT_STOP"  # "BREAKOUT_STOP" | "LIMIT_ON_PULLBACK" | "DEFINED_RISK_SPREAD"
@@ -313,6 +315,7 @@ class AutoAlert:
     premarket_gap_risk: Optional[str] = None  # "GAP_OVER_SL" | "GAP_NO_CHASE"
     details: dict[str, Any] = field(default_factory=dict)
     decoupler_status: str = "CORRELATED"  # "VERIFIED_DECOUPLER" | "CORRELATED" | "INDEX_DRAGGED"
+    preferred_vehicle: str = "NAKED_OPTION"  # "NAKED_OPTION" | "SPREAD_ONLY" | "CREDIT_SPREAD"
 
     def record_audit(
         self,
@@ -374,6 +377,174 @@ class AutoAlert:
             from engine.alert_identity import canonical_alert_symbol
 
             self.symbol = canonical_alert_symbol(self.symbol)
+
+        # Pillar 1: Universal Metric Dictionary Canonicalization (Invariants 11 & 20)
+        if self.metrics is None:
+            self.metrics = {}
+        elif not isinstance(self.metrics, dict):
+            try:
+                self.metrics = dict(self.metrics)
+            except Exception:
+                self.metrics = {}
+
+        # 1. VWAP Canonicalization (vwap <-> spot_vwap <-> underlying_vwap <-> atp)
+        vwap_candidates = [
+            self.metrics.get("vwap"),
+            self.metrics.get("spot_vwap"),
+            self.metrics.get("underlying_vwap"),
+            self.metrics.get("atp"),
+        ]
+        if self.actionable_plan and isinstance(self.actionable_plan, dict):
+            vwap_candidates.append(self.actionable_plan.get("vwap"))
+            vwap_candidates.append(self.actionable_plan.get("spot_vwap"))
+
+        canon_vwap = 0.0
+        for cand in vwap_candidates:
+            if cand is not None:
+                try:
+                    f_val = float(str(cand).replace("₹", "").replace(",", "").strip())
+                    if f_val > 0:
+                        canon_vwap = f_val
+                        break
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}")
+
+        if canon_vwap > 0:
+            self.metrics["vwap"] = canon_vwap
+            self.metrics["spot_vwap"] = canon_vwap
+            self.metrics["underlying_vwap"] = canon_vwap
+
+        # 2. Spot / Underlying Price Canonicalization (spot <-> underlying_spot <-> underlying_ltp)
+        spot_candidates = [
+            self.underlying_spot,
+            self.metrics.get("spot"),
+            self.metrics.get("underlying_spot"),
+            self.metrics.get("underlying_ltp"),
+            self.metrics.get("spot_price"),
+        ]
+        if self.actionable_plan and isinstance(self.actionable_plan, dict):
+            spot_candidates.append(self.actionable_plan.get("spot"))
+            spot_candidates.append(self.actionable_plan.get("underlying_spot"))
+            spot_candidates.append(self.actionable_plan.get("spot_price"))
+
+        canon_spot = 0.0
+        for cand in spot_candidates:
+            if cand is not None:
+                try:
+                    f_val = float(str(cand).replace("₹", "").replace(",", "").strip())
+                    if f_val > 0:
+                        canon_spot = f_val
+                        break
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}")
+
+        if canon_spot > 0:
+            self.metrics["spot"] = canon_spot
+            self.metrics["underlying_spot"] = canon_spot
+            self.metrics["underlying_ltp"] = canon_spot
+            if not self.underlying_spot or self.underlying_spot <= 0:
+                self.underlying_spot = canon_spot
+
+        # 3. RVOL Canonicalization (rvol <-> rvol_10d <-> relative_volume <-> volume_ratio)
+        rvol_candidates = [
+            self.metrics.get("rvol"),
+            self.metrics.get("rvol_10d"),
+            self.metrics.get("relative_volume"),
+            self.metrics.get("volume_ratio"),
+            self.metrics.get("rvol_val"),
+        ]
+        canon_rvol = None
+        for cand in rvol_candidates:
+            if cand is not None:
+                try:
+                    f_val = float(str(cand).replace("x", "").replace("X", "").strip())
+                    if f_val > 0:
+                        canon_rvol = f_val
+                        break
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}")
+        if canon_rvol is not None:
+            self.metrics["rvol"] = canon_rvol
+            self.metrics["rvol_10d"] = canon_rvol
+            self.metrics["relative_volume"] = canon_rvol
+
+        # 4. ATR Canonicalization (Daily: atr <-> atr_14 <-> atr_14d; Lower TF: atr_5m <-> atr_15m)
+        daily_atr_candidates = [
+            self.metrics.get("atr"),
+            self.metrics.get("atr_14"),
+            self.metrics.get("atr_14d"),
+            self.metrics.get("daily_atr"),
+        ]
+        canon_daily_atr = None
+        for cand in daily_atr_candidates:
+            if cand is not None:
+                try:
+                    f_val = float(str(cand).replace("₹", "").replace(",", "").strip())
+                    if f_val > 0:
+                        canon_daily_atr = f_val
+                        break
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}")
+        if canon_daily_atr is not None:
+            self.metrics["atr"] = canon_daily_atr
+            self.metrics["atr_14"] = canon_daily_atr
+
+        ltf_atr_candidates = [
+            self.metrics.get("atr_5m"),
+            self.metrics.get("atr_15m"),
+            self.metrics.get("lower_tf_atr"),
+        ]
+        canon_ltf_atr = None
+        for cand in ltf_atr_candidates:
+            if cand is not None:
+                try:
+                    f_val = float(str(cand).replace("₹", "").replace(",", "").strip())
+                    if f_val > 0:
+                        canon_ltf_atr = f_val
+                        break
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}")
+        if canon_ltf_atr is not None:
+            self.metrics["atr_5m"] = canon_ltf_atr
+
+        # 5. Day High / Low Canonicalization (day_high <-> session_high <-> high, day_low <-> session_low <-> low)
+        high_candidates = [
+            self.metrics.get("day_high"),
+            self.metrics.get("session_high"),
+            self.metrics.get("high"),
+        ]
+        canon_high = None
+        for cand in high_candidates:
+            if cand is not None:
+                try:
+                    f_val = float(str(cand).replace("₹", "").replace(",", "").strip())
+                    if f_val > 0:
+                        canon_high = f_val
+                        break
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}")
+        if canon_high is not None:
+            self.metrics["day_high"] = canon_high
+            self.metrics["session_high"] = canon_high
+
+        low_candidates = [
+            self.metrics.get("day_low"),
+            self.metrics.get("session_low"),
+            self.metrics.get("low"),
+        ]
+        canon_low = None
+        for cand in low_candidates:
+            if cand is not None:
+                try:
+                    f_val = float(str(cand).replace("₹", "").replace(",", "").strip())
+                    if f_val > 0:
+                        canon_low = f_val
+                        break
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}")
+        if canon_low is not None:
+            self.metrics["day_low"] = canon_low
+            self.metrics["session_low"] = canon_low
 
         if (not self.strike or not self.option_type) and (self.headline or self.contract_symbol):
             text_to_search = f"{self.headline or ''} {self.contract_symbol or ''}"
@@ -2039,6 +2210,199 @@ class AutoAlert:
         return True
 
     @property
+    def vwap(self) -> float:
+        """
+        Canonical intraday Volume Weighted Average Price (VWAP) for the underlying instrument or equity.
+        Resolves through canonical metrics, actionable plan, or underlying quote cache. Guaranteed >= 0.0.
+        """
+        if self.metrics and isinstance(self.metrics, dict):
+            for k in ("vwap", "spot_vwap", "underlying_vwap", "atp"):
+                val = self.metrics.get(k)
+                if val is not None:
+                    try:
+                        f = float(str(val).replace("₹", "").replace(",", "").strip())
+                        if f > 0:
+                            return f
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}"
+                        )
+        if self.actionable_plan and isinstance(self.actionable_plan, dict):
+            for k in ("vwap", "spot_vwap"):
+                val = self.actionable_plan.get(k)
+                if val is not None:
+                    try:
+                        f = float(str(val).replace("₹", "").replace(",", "").strip())
+                        if f > 0:
+                            return f
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}"
+                        )
+        return 0.0
+
+    @property
+    def effective_spot(self) -> float:
+        """
+        Effective underlying spot price for derivative contracts, or cash LTP for equities.
+        Prevents option premium vs spot confusion. Guaranteed >= 0.0.
+        """
+        if self.underlying_spot and self.underlying_spot > 0:
+            return float(self.underlying_spot)
+        if self.metrics and isinstance(self.metrics, dict):
+            for k in ("spot", "underlying_spot", "underlying_ltp", "spot_price"):
+                val = self.metrics.get(k)
+                if val is not None:
+                    try:
+                        f = float(str(val).replace("₹", "").replace(",", "").strip())
+                        if f > 0:
+                            return f
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}"
+                        )
+        is_opt = bool(
+            self.option_type
+            or self.strike
+            or (
+                self.contract_symbol
+                and ("CE" in self.contract_symbol or "PE" in self.contract_symbol)
+            )
+        )
+        if not is_opt:
+            return float(self.ltp or self.trigger_level or 0.0)
+        return 0.0
+
+    @property
+    def effective_rvol(self) -> float:
+        """
+        Effective Relative Volume (RVOL) multiplier against baseline.
+        Returns canonical multiplier float (defaults to 1.0 if not established).
+        """
+        if self.metrics and isinstance(self.metrics, dict):
+            for k in ("rvol", "rvol_10d", "relative_volume", "volume_ratio", "rvol_val"):
+                val = self.metrics.get(k)
+                if val is not None:
+                    try:
+                        f = float(str(val).replace("x", "").replace("X", "").strip())
+                        if f > 0:
+                            return f
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}"
+                        )
+        return 1.0
+
+    @property
+    def effective_atr(self) -> float:
+        """
+        Effective Average True Range (ATR) in absolute points.
+        Returns canonical ATR float (defaults to 0.0 if not computed).
+        """
+        if self.metrics and isinstance(self.metrics, dict):
+            for k in ("atr", "atr_5m", "atr_14", "atr_14d"):
+                val = self.metrics.get(k)
+                if val is not None:
+                    try:
+                        f = float(str(val).replace("₹", "").replace(",", "").strip())
+                        if f > 0:
+                            return f
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}"
+                        )
+        return 0.0
+
+    @property
+    def effective_spot_sl(self) -> float:
+        """
+        Effective structural underlying spot stop-loss level.
+        Distinguishes spot-denominated stops from tactical option premium stops.
+        """
+        if self.structural_spot_sl and self.structural_spot_sl > 0:
+            return float(self.structural_spot_sl)
+        if self.underlying_sl and self.underlying_sl > 0:
+            return float(self.underlying_sl)
+        if self.metrics and isinstance(self.metrics, dict):
+            val = self.metrics.get("spot_invalidation_anchor") or self.metrics.get("underlying_sl")
+            if val is not None:
+                try:
+                    f = float(str(val).replace("₹", "").replace(",", "").strip())
+                    if f > 0:
+                        return f
+                except (ValueError, TypeError) as e_suppressed:
+                    logger.debug(f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}")
+        is_opt = bool(
+            self.option_type
+            or self.strike
+            or (
+                self.contract_symbol
+                and ("CE" in self.contract_symbol or "PE" in self.contract_symbol)
+            )
+        )
+        sl = float(self.stop_loss or 0.0)
+        if sl > 0:
+            if not is_opt or sl >= 1500.0:
+                return sl
+        return 0.0
+
+    @property
+    def effective_option_sl(self) -> float:
+        """
+        Effective tactical option premium stop-loss level (denominated in option contract rupees).
+        """
+        if self.tactical_sl and self.tactical_sl > 0:
+            return float(self.tactical_sl)
+        if self.option_stop_loss and self.option_stop_loss > 0:
+            return float(self.option_stop_loss)
+        is_opt = bool(
+            self.option_type
+            or self.strike
+            or (
+                self.contract_symbol
+                and ("CE" in self.contract_symbol or "PE" in self.contract_symbol)
+            )
+        )
+        sl = float(self.stop_loss or 0.0)
+        if is_opt and 0 < sl < 1500.0:
+            return sl
+        return 0.0
+
+    @property
+    def effective_day_high(self) -> float:
+        """Canonical session/day high for the instrument."""
+        if self.metrics and isinstance(self.metrics, dict):
+            for k in ("day_high", "session_high", "high"):
+                val = self.metrics.get(k)
+                if val is not None:
+                    try:
+                        f = float(str(val).replace("₹", "").replace(",", "").strip())
+                        if f > 0:
+                            return f
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}"
+                        )
+        return 0.0
+
+    @property
+    def effective_day_low(self) -> float:
+        """Canonical session/day low for the instrument."""
+        if self.metrics and isinstance(self.metrics, dict):
+            for k in ("day_low", "session_low", "low"):
+                val = self.metrics.get(k)
+                if val is not None:
+                    try:
+                        f = float(str(val).replace("₹", "").replace(",", "").strip())
+                        if f > 0:
+                            return f
+                    except (ValueError, TypeError) as e_suppressed:
+                        logger.debug(
+                            f"[engine.alert_model] Non-fatal parse suppressed: {e_suppressed}"
+                        )
+        return 0.0
+
+    @property
     def entry_price(self) -> float:
         """
         Canonical entry price coordinate.
@@ -2451,6 +2815,12 @@ class AutoAlert:
         d["scrutiny"] = (
             (self.metrics or {}).get("scrutiny") if isinstance(self.metrics, dict) else None
         )
+        d["vwap"] = self.vwap
+        d["effective_spot"] = self.effective_spot
+        d["effective_rvol"] = self.effective_rvol
+        d["effective_atr"] = self.effective_atr
+        d["effective_spot_sl"] = self.effective_spot_sl
+        d["effective_option_sl"] = self.effective_option_sl
         d["entry_price"] = self.entry_price
         d["target_1"] = self.target_1
         d["target_2"] = self.target_2

@@ -240,6 +240,18 @@ def detect_smc_orderblock_retest(
     proximity_buffer = max(round(0.35 * atr, 4), ltp * 0.004)
     now_ist = datetime.now(IST)
 
+    # Flow Analysis via Wyckoff VSA & Granville OBV
+    vsa_res = None
+    obv_res = None
+    try:
+        from analysis.vsa import analyse_vsa
+        from analysis.obv import analyse_obv
+
+        vsa_res = analyse_vsa(df, is_intraday=False)
+        obv_res = analyse_obv(df, is_intraday=False)
+    except Exception as e_flow:
+        logger.debug(f"[SMC_OB] Flow analysis skipped: {e_flow}")
+
     # ── 6. Check Demand OB (Bullish Re-test) ──────────────────────────────────
     sorted_demand = sorted(
         demand_obs,
@@ -329,7 +341,30 @@ def detect_smc_orderblock_retest(
         if vol_ratio >= 2.0:
             conviction = min(92, conviction + 4)
 
+        has_flow_bull = False
+        vsa_sig_bull = None
+        obv_div_bull = None
+        if vsa_res:
+            vsa_sig_bull = vsa_res.vsa_signal
+            if vsa_res.vsa_signal in (
+                "NO_SUPPLY",
+                "STOPPING_VOLUME",
+                "EFFORT_VS_RESULT_BULLISH_ABSORPTION",
+            ):
+                conviction = min(96, conviction + 5)
+                has_flow_bull = True
+        if obv_res:
+            obv_div_bull = obv_res.divergence
+            if (
+                obv_res.divergence in ("BULLISH_CONVERGENCE", "BULLISH_DIVERGENCE")
+                or obv_res.obv_slope_5bar > 0
+            ):
+                conviction = min(96, conviction + 4)
+                has_flow_bull = True
+
         confluence_factors = [f"Demand OB ({tier}) formed {ob.formed_date}"]
+        if vsa_sig_bull:
+            confluence_factors.append(f"VSA Footprint: {vsa_sig_bull}")
         if has_fvg:
             confluence_factors.append("FVG Confluence: Bullish imbalance overlaps OB")
         if vol_ratio >= 2.0:
@@ -399,7 +434,11 @@ def detect_smc_orderblock_retest(
                 "no_chase_boundary": round(ob.top, 2),
                 "confluence_types": confluence_factors,
                 "confluence_factors": confluence_factors,
+                "has_flow": has_flow_bull,
+                "vsa_signal": vsa_sig_bull,
+                "obv_regime": obv_div_bull,
             },
+            preferred_vehicle="NAKED_OPTION",
             actionable_plan={
                 "action": "BUY",
                 "instrument_type": "EQUITY",
@@ -516,7 +555,30 @@ def detect_smc_orderblock_retest(
         if vol_ratio >= 2.0:
             conviction = min(92, conviction + 4)
 
+        has_flow_bear = False
+        vsa_sig_bear = None
+        obv_div_bear = None
+        if vsa_res:
+            vsa_sig_bear = vsa_res.vsa_signal
+            if vsa_res.vsa_signal in (
+                "NO_DEMAND",
+                "SELLING_CLIMAX",
+                "EFFORT_VS_RESULT_BEARISH_CLIMAX",
+            ):
+                conviction = min(96, conviction + 5)
+                has_flow_bear = True
+        if obv_res:
+            obv_div_bear = obv_res.divergence
+            if (
+                obv_res.divergence in ("BEARISH_CONVERGENCE", "BEARISH_DIVERGENCE")
+                or obv_res.obv_slope_5bar < 0
+            ):
+                conviction = min(96, conviction + 4)
+                has_flow_bear = True
+
         confluence_factors = [f"Supply OB ({tier}) formed {ob.formed_date}"]
+        if vsa_sig_bear:
+            confluence_factors.append(f"VSA Footprint: {vsa_sig_bear}")
         if has_fvg:
             confluence_factors.append("FVG Confluence: Bearish imbalance overlaps OB")
         if vol_ratio >= 2.0:
@@ -586,7 +648,11 @@ def detect_smc_orderblock_retest(
                 "no_chase_boundary": round(ob.bottom, 2),
                 "confluence_types": confluence_factors,
                 "confluence_factors": confluence_factors,
+                "has_flow": has_flow_bear,
+                "vsa_signal": vsa_sig_bear,
+                "obv_regime": obv_div_bear,
             },
+            preferred_vehicle="NAKED_OPTION",
             actionable_plan={
                 "action": "SELL_SHORT",
                 "instrument_type": "EQUITY",

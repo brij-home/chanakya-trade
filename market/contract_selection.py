@@ -474,7 +474,9 @@ def get_listed_contracts(
         return []
 
 
-def fresh_underlying_price(quote: Any, *, as_of: datetime) -> float | None:
+def fresh_underlying_price(
+    quote: Any, *, as_of: datetime, max_age_seconds: float = GRID_QUOTE_MAX_AGE_SECONDS
+) -> float | None:
     """Require explicit live provenance and nonfuture receipt evidence, even in PAPER."""
     try:
         price = float(quote.last_price)
@@ -497,7 +499,7 @@ def fresh_underlying_price(quote: Any, *, as_of: datetime) -> float | None:
             not math.isfinite(price)
             or price <= 0
             or not math.isfinite(age)
-            or not 0 <= age <= GRID_QUOTE_MAX_AGE_SECONDS
+            or not 0 <= age <= max_age_seconds
         ):
             return None
         return price
@@ -555,18 +557,35 @@ def get_subscription_option_grid(
         clean, underlying if ":" in underlying else f"NSE:{clean}-EQ"
     )
     try:
-        quotes = get_quote([instrument], ws_only=True)
-        quote = quotes.get(instrument) or quotes.get(clean)
         now = as_of or datetime.now(IST)
-        spot = fresh_underlying_price(quote, as_of=now)
+        from market.calendar import is_market_open
+
+        effective_max_age = 120.0 if is_market_open("NSE", ref_dt=now) else 300.0
+
+        quotes = get_quote([instrument], ws_only=True)
+        quote = (
+            quotes.get(instrument)
+            or quotes.get(clean)
+            or quotes.get(underlying)
+            or (list(quotes.values())[0] if quotes else None)
+        )
+        spot = fresh_underlying_price(quote, as_of=now, max_age_seconds=effective_max_age)
+        if spot is None:
+            # Fallback to general get_quote if WebSocket cache has not populated yet
+            quotes = get_quote([instrument], ws_only=False)
+            quote = (
+                quotes.get(instrument)
+                or quotes.get(clean)
+                or quotes.get(underlying)
+                or (list(quotes.values())[0] if quotes else None)
+            )
+            spot = fresh_underlying_price(quote, as_of=now, max_age_seconds=effective_max_age)
         if spot is None:
             logger.info(
                 "[ContractSelection] Option grid held for %s: no fresh live underlying quote", clean
             )
             return []
         contracts = get_listed_contracts(clean, as_of=as_of)
-        if fresh_underlying_price(quote, as_of=as_of or datetime.now(IST)) is None:
-            return []
         return paired_option_grid(
             contracts, spot, strikes_per_side=strikes_per_side, max_expiries=max_expiries
         )

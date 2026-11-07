@@ -360,6 +360,7 @@ def is_detector_eligible_for_regime(
     direction: str = "BULLISH",
     sector_rs_leading: bool = False,
     sector_rs_lagging: bool = False,
+    has_flow_confirmation: bool = False,
 ) -> tuple[bool, str]:
     """
     Evaluates if a specific detector is eligible to fire under the current market regime.
@@ -444,7 +445,7 @@ def is_detector_eligible_for_regime(
                         f"Short breakdown requires RVOL >= {rvol_floor:.2f}x (got {rvol:.2f}x) or verified SMC sweep to avoid bear traps.",
                     )
 
-    # In Balanced Chop, suppress directional breakouts unless confirmed by heavy volume or SMC sweep
+    # In Balanced Chop, suppress directional breakouts unless confirmed by heavy volume, SMC sweep, or institutional flow footprints
     if regime.regime == "BALANCED_CHOP":
         if atype == "INDEX_MICRO_SCALP":
             return (
@@ -462,14 +463,14 @@ def is_detector_eligible_for_regime(
             "INDEX_PUT_SETUP",
             "GAMMA_BLAST",
         ):
-            # Verified SMC liquidity sweeps (Turtle soup, PDH/PDL rejection) are valid mean-reversions
-            if has_structural_sweep:
+            # Verified SMC liquidity sweeps or institutional flow footprints (OBV/Triple-DMI/VSA) are valid
+            if has_structural_sweep or has_flow_confirmation:
                 return True, ""
             if rvol < 2.0:
                 return (
                     False,
                     f"Suppressed by Regime Governor: BALANCED_CHOP regime (tight range / compressed VIX {regime.vix:.1f}). "
-                    f"Directional breakouts require RVOL >= 2.0x (current RVOL: {rvol:.2f}x) or verified SMC sweep to avoid false breakouts.",
+                    f"Directional breakouts require RVOL >= 2.0x (current RVOL: {rvol:.2f}x) or verified SMC sweep/flow confirmation to avoid false breakouts.",
                 )
 
     return True, ""

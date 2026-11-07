@@ -604,7 +604,32 @@ def evaluate_alert_invalidation(
                 )
             )
             init_sl_val = getattr(alert, "initial_stop_loss", None)
-            if alert.direction == "BEARISH":
+            from engine.alert_expiry import is_option_seller
+
+            is_neutral_or_seller = (alert.direction == "NEUTRAL") or is_option_seller(alert)
+
+            if is_neutral_or_seller:
+                ref_entry = (
+                    getattr(alert, "entry_price", None)
+                    or alert.trigger_level
+                    or (init_sl_val if init_sl_val else 0.0)
+                )
+                if alert.stop_loss and alert.stop_loss > 0:
+                    if ref_entry > 0 and alert.stop_loss >= ref_entry:
+                        # Upper range stop boundary breached
+                        if current_ltp > (alert.stop_loss + vol_noise_margin):
+                            return (
+                                f"Price surged to {curr_sym}{current_ltp:,.1f} "
+                                f"(breached upper boundary {curr_sym}{alert.stop_loss:,.1f}). Neutral thesis invalidated."
+                            )
+                    elif ref_entry > 0 and alert.stop_loss < ref_entry:
+                        # Lower range stop boundary breached
+                        if current_ltp < (alert.stop_loss - vol_noise_margin):
+                            return (
+                                f"Price dropped to {curr_sym}{current_ltp:,.1f} "
+                                f"(breached lower boundary {curr_sym}{alert.stop_loss:,.1f}). Neutral thesis invalidated."
+                            )
+            elif alert.direction == "BEARISH":
                 # For short positions, stop loss is moved downward below entry
                 ref_entry = (
                     getattr(alert, "entry_price", None)
@@ -2252,7 +2277,7 @@ def evaluate_alert_targets_and_trailing(
                         is_explicit_scalp = is_micro_explicit or bool(
                             fast_scalp.get("time_stop_mins")
                         )
-                        time_stop_limit = float(
+                        raw_time_stop = float(
                             fast_scalp.get("time_stop_mins")
                             if is_explicit_scalp
                             else (plan.get("time_stop_limit") or 45.0)
@@ -2262,8 +2287,29 @@ def evaluate_alert_targets_and_trailing(
                         spot = float(alert.underlying_spot or 0.0)
                         metrics_d = alert.metrics if isinstance(alert.metrics, dict) else {}
                         vwap = float(
-                            getattr(alert, "vwap", 0.0) or metrics_d.get("vwap", 0.0) or 0.0
+                            getattr(alert, "vwap", 0.0)
+                            or metrics_d.get("vwap", 0.0)
+                            or metrics_d.get("spot_vwap", 0.0)
+                            or 0.0
                         )
+
+                        # Stock Options Runway Invariant:
+                        # Non-0DTE stock options (DTE >= 3) holding structural support must not be strangled by a 20m timer.
+                        # Equity options consolidate for 30m-45m during midday lull before afternoon expansion.
+                        dte_val = metrics_d.get("dte")
+                        is_stock_option = not bool(
+                            getattr(alert, "is_index", False)
+                            or str(getattr(alert, "symbol", "")).upper()
+                            in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+                        )
+                        if (
+                            is_stock_option
+                            and (dte_val is None or dte_val >= 3)
+                            and not is_micro_explicit
+                        ):
+                            time_stop_limit = max(45.0, raw_time_stop)
+                        else:
+                            time_stop_limit = raw_time_stop
                         spot_anchor = float(
                             metrics_d.get("spot_anchor", 0.0)
                             or metrics_d.get("support_anchor", 0.0)
@@ -2834,7 +2880,11 @@ def evaluate_alert_in_flight_decay(
                 or 0.0
             )
             vwap_val = float(
-                current_vwap or getattr(alert, "vwap", 0.0) or metrics_dict.get("vwap", 0.0) or 0.0
+                current_vwap
+                or getattr(alert, "vwap", 0.0)
+                or metrics_dict.get("vwap", 0.0)
+                or metrics_dict.get("spot_vwap", 0.0)
+                or 0.0
             )
             opt_t = str(getattr(alert, "option_type", "") or "").upper()
             is_bullish_dir = (
@@ -2964,11 +3014,14 @@ def evaluate_alert_in_flight_decay(
         is_afternoon_0dte = is_0dte and (
             now_dt.hour > 13 or (now_dt.hour == 13 and now_dt.minute >= 30)
         )
-        spot_ref_val = float(getattr(alert, "underlying_spot", 0.0) or 0.0)
+        spot_ref_val = float(
+            getattr(alert, "effective_spot", 0.0) or getattr(alert, "underlying_spot", 0.0) or 0.0
+        )
         vwap_ref_val = float(
             current_vwap
             or getattr(alert, "vwap", 0.0)
             or (alert.metrics.get("vwap", 0.0) if isinstance(alert.metrics, dict) else 0.0)
+            or (alert.metrics.get("spot_vwap", 0.0) if isinstance(alert.metrics, dict) else 0.0)
             or 0.0
         )
         opt_t_upper = str(getattr(alert, "option_type", "") or "").upper()
@@ -3150,9 +3203,16 @@ def evaluate_alert_in_flight_decay(
 
     effective_vwap = current_vwap
     if not effective_vwap or effective_vwap <= 0:
-        if isinstance(alert.metrics, dict) and alert.metrics.get("vwap"):
+        alert_v = float(getattr(alert, "vwap", 0.0) or 0.0)
+        if alert_v > 0:
+            effective_vwap = alert_v
+        elif isinstance(alert.metrics, dict) and (
+            alert.metrics.get("vwap") or alert.metrics.get("spot_vwap")
+        ):
             try:
-                effective_vwap = float(alert.metrics["vwap"])
+                effective_vwap = float(
+                    alert.metrics.get("vwap") or alert.metrics.get("spot_vwap") or 0.0
+                )
             except (ValueError, TypeError) as e_suppressed:
                 logger.debug(
                     f"[engine.alert_evaluator] Non-fatal exception suppressed: {e_suppressed}"

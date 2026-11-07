@@ -197,3 +197,52 @@ def detect_structural_anchors(df: pd.DataFrame) -> list[AnchoredVWAPResult]:
         logger.debug(f"[analysis.anchored_vwap] Non-fatal exception suppressed: {e_suppressed}")
 
     return results
+
+
+def detect_intraday_anchors(df: pd.DataFrame, spot_price: Optional[float] = None) -> dict[str, Any]:
+    """
+    Computes key intraday event-anchored VWAP levels (Session Open, ORB, and Session Extremes).
+    Returns a unified dict with levels, distances, and bias.
+    """
+    if df is None or len(df) < 2:
+        return {"bias": "NEUTRAL", "summary": "Insufficient data"}
+
+    cols = {c.lower(): c for c in df.columns}
+    c_close = cols.get("close")
+    ltp = spot_price if spot_price is not None and spot_price > 0 else float(df[c_close].iloc[-1])
+
+    # 1. Session Open (bar 0)
+    res_open = compute_anchored_vwap(df, 0, "SESSION_OPEN")
+    session_vwap = res_open.current_avwap if res_open else ltp
+
+    # 2. ORB Anchor (bar 3 or around 09:30)
+    orb_idx = min(3, len(df) - 1)
+    res_orb = compute_anchored_vwap(df, orb_idx, "ORB_0930")
+    orb_vwap = res_orb.current_avwap if res_orb else session_vwap
+
+    dist_session = round(((ltp - session_vwap) / session_vwap) * 100.0, 2) if session_vwap else 0.0
+    dist_orb = round(((ltp - orb_vwap) / orb_vwap) * 100.0, 2) if orb_vwap else 0.0
+
+    above_session = ltp >= session_vwap
+    above_orb = ltp >= orb_vwap
+
+    if above_session and above_orb:
+        bias = "BULLISH"
+        summary = f"AVWAP Bullish: Spot ₹{ltp:,.1f} holding above Session VWAP (₹{session_vwap:,.1f}) and ORB VWAP (₹{orb_vwap:,.1f})"
+    elif not above_session and not above_orb:
+        bias = "BEARISH"
+        summary = f"AVWAP Bearish: Spot ₹{ltp:,.1f} pinned below Session VWAP (₹{session_vwap:,.1f}) and ORB VWAP (₹{orb_vwap:,.1f})"
+    else:
+        bias = "NEUTRAL"
+        summary = f"AVWAP Neutral: Spot ₹{ltp:,.1f} between Session VWAP and ORB VWAP"
+
+    return {
+        "session_vwap": session_vwap,
+        "orb_vwap": orb_vwap,
+        "dist_session_pct": dist_session,
+        "dist_orb_pct": dist_orb,
+        "above_session_vwap": above_session,
+        "above_orb_vwap": above_orb,
+        "bias": bias,
+        "summary": summary,
+    }

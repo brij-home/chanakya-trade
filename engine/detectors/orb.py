@@ -567,7 +567,87 @@ def detect_opening_range_breakout(
         confidence += 4
     if is_narrow_cpr:
         confidence += 8
-    confidence = min(96, confidence)
+
+    # Anchored VWAP (AVWAP: 09:15 Session Open & 09:30 ORB Complete Confluence)
+    avwap_confluence = None
+    has_flow = False
+    vsa_sig = None
+    obv_div = None
+
+    if df is not None and len(df) >= 3:
+        try:
+            from analysis.anchored_vwap import detect_intraday_anchors
+
+            avwap_pack = detect_intraday_anchors(df, ltp)
+            if avwap_pack:
+                avwap_confluence = avwap_pack.confluence
+                if is_bullish or (is_primed and direction == "BULLISH"):
+                    if avwap_pack.confluence == "BULLISH_ABOVE_BOTH":
+                        confidence += 5
+                        has_flow = True
+                    elif avwap_pack.dist_to_session_open_vwap_pct < -0.20 and not is_primed:
+                        confidence -= 8
+                elif is_bearish or (is_primed and direction == "BEARISH"):
+                    if avwap_pack.confluence == "BEARISH_BELOW_BOTH":
+                        confidence += 5
+                        has_flow = True
+                    elif avwap_pack.dist_to_session_open_vwap_pct > 0.20 and not is_primed:
+                        confidence -= 8
+        except Exception as e_avwap:
+            logger.debug(f"[ORB] AVWAP calculation non-fatal: {e_avwap}")
+
+    # Flow Analysis via Granville OBV & Tom Williams VSA
+    if df is not None and len(df) >= 5:
+        try:
+            from analysis.obv import analyse_obv
+            from analysis.vsa import analyse_vsa
+
+            obv_res = analyse_obv(df, is_intraday=True)
+            if obv_res:
+                obv_div = obv_res.divergence
+                if is_bullish or (is_primed and direction == "BULLISH"):
+                    if (
+                        obv_res.divergence in ("BULLISH_CONVERGENCE", "BULLISH_DIVERGENCE")
+                        or obv_res.obv_slope_5bar > 0
+                    ):
+                        confidence += 4
+                        has_flow = True
+                    elif obv_res.divergence == "BEARISH_DIVERGENCE":
+                        confidence -= 8
+                elif is_bearish or (is_primed and direction == "BEARISH"):
+                    if (
+                        obv_res.divergence in ("BEARISH_CONVERGENCE", "BEARISH_DIVERGENCE")
+                        or obv_res.obv_slope_5bar < 0
+                    ):
+                        confidence += 4
+                        has_flow = True
+                    elif obv_res.divergence == "BULLISH_DIVERGENCE":
+                        confidence -= 8
+
+            vsa_res = analyse_vsa(df, is_intraday=True)
+            if vsa_res:
+                vsa_sig = vsa_res.signal
+                if is_bullish or (is_primed and direction == "BULLISH"):
+                    if vsa_res.signal in (
+                        "ABSORPTION_BREAKOUT",
+                        "EFFORT_VS_RESULT_BULLISH_ABSORPTION",
+                        "STOPPING_VOLUME",
+                        "NO_SUPPLY",
+                    ):
+                        confidence += 4
+                        has_flow = True
+                elif is_bearish or (is_primed and direction == "BEARISH"):
+                    if vsa_res.signal in (
+                        "SELLING_CLIMAX",
+                        "EFFORT_VS_RESULT_BEARISH_CLIMAX",
+                        "NO_DEMAND",
+                    ):
+                        confidence += 4
+                        has_flow = True
+        except Exception as e_obv_vsa:
+            logger.debug(f"[ORB] OBV/VSA non-fatal: {e_obv_vsa}")
+
+    confidence = min(97, max(68, confidence))
 
     clean_sym = canonical_alert_symbol(symbol)
     is_idx = is_index_symbol(clean_sym)
@@ -667,7 +747,12 @@ def detect_opening_range_breakout(
                 "cpr_type": cpr_gate.cpr_type,
                 "is_narrow_cpr": cpr_gate.is_narrow,
                 "is_wide_cpr": cpr_gate.is_wide,
+                "has_flow": has_flow,
+                "avwap_confluence": avwap_confluence,
+                "obv_regime": obv_div,
+                "vsa_signal": vsa_sig,
             },
+            preferred_vehicle="NAKED_OPTION",
             actionable_plan=act_plan,
         )
 
@@ -710,7 +795,12 @@ def detect_opening_range_breakout(
             "cpr_type": cpr_gate.cpr_type,
             "is_narrow_cpr": cpr_gate.is_narrow,
             "is_wide_cpr": cpr_gate.is_wide,
+            "has_flow": has_flow,
+            "avwap_confluence": avwap_confluence,
+            "obv_regime": obv_div,
+            "vsa_signal": vsa_sig,
         },
+        preferred_vehicle="NAKED_OPTION",
         actionable_plan={
             "action": f"BUY_{alert_type}"
             if (is_bullish or (is_primed and direction == "BULLISH"))

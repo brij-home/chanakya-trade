@@ -493,6 +493,26 @@ _KNOWN_BENCHMARK_STRIKE_STEPS: dict[str, float] = {
     "JPYINR": 0.25,
 }
 
+# Standard SEBI/exchange derivative strike step intervals (filters out corporate action artifacts like 6.0/14.0)
+_STANDARD_EXCHANGE_STRIKE_STEPS: set[float] = {
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    2.5,
+    5.0,
+    10.0,
+    20.0,
+    25.0,
+    50.0,
+    100.0,
+    250.0,
+    500.0,
+    1000.0,
+}
+
 
 def _get_underlying_strikes_index(master: str) -> dict[str, set[float]]:
     """Build or return an in-memory inverted index of underlying -> set of strike prices once per master."""
@@ -549,7 +569,7 @@ def get_strike_step(symbol: str, spot: float = 0.0, expiry: Optional[str] = None
                 near = [s for s in stks if spot * 0.65 <= s <= spot * 1.35]
                 if len(near) >= 2:
                     diffs = [round(near[i + 1] - near[i], 4) for i in range(len(near) - 1)]
-                    diffs = [d for d in diffs if d > 0]
+                    diffs = [d for d in diffs if d in _STANDARD_EXCHANGE_STRIKE_STEPS]
                     if diffs:
                         from collections import Counter
 
@@ -558,7 +578,7 @@ def get_strike_step(symbol: str, spot: float = 0.0, expiry: Optional[str] = None
                         return res
 
             diffs = [round(stks[i + 1] - stks[i], 4) for i in range(len(stks) - 1)]
-            diffs = [d for d in diffs if d > 0]
+            diffs = [d for d in diffs if d in _STANDARD_EXCHANGE_STRIKE_STEPS]
             if diffs:
                 from collections import Counter
 

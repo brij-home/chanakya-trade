@@ -332,6 +332,55 @@ def detect_predator_liquidity_sweep(
         else {},
     )
 
+    # Smart Money Flow Confirmation (VSA Absorption & Granville OBV)
+    has_flow = False
+    vsa_sig = None
+    obv_div = None
+    conf_val = 86
+
+    if df is not None and len(df) >= 5:
+        try:
+            from analysis.vsa import analyse_vsa
+            from analysis.obv import analyse_obv
+
+            vsa_res = analyse_vsa(df, is_intraday=(time_horizon == "INTRADAY"))
+            if vsa_res:
+                vsa_sig = vsa_res.signal
+                if is_bullish and vsa_res.signal in (
+                    "STOPPING_VOLUME",
+                    "EFFORT_VS_RESULT_BULLISH_ABSORPTION",
+                    "ABSORPTION_BREAKOUT",
+                ):
+                    conf_val += 5
+                    has_flow = True
+                elif not is_bullish and vsa_res.signal in (
+                    "SELLING_CLIMAX",
+                    "EFFORT_VS_RESULT_BEARISH_CLIMAX",
+                    "NO_DEMAND",
+                ):
+                    conf_val += 5
+                    has_flow = True
+
+            obv_res = analyse_obv(df, is_intraday=(time_horizon == "INTRADAY"))
+            if obv_res:
+                obv_div = obv_res.divergence
+                if is_bullish and (
+                    obv_res.divergence in ("BULLISH_CONVERGENCE", "BULLISH_DIVERGENCE")
+                    or obv_res.obv_slope_5bar > 0
+                ):
+                    conf_val += 4
+                    has_flow = True
+                elif not is_bullish and (
+                    obv_res.divergence in ("BEARISH_CONVERGENCE", "BEARISH_DIVERGENCE")
+                    or obv_res.obv_slope_5bar < 0
+                ):
+                    conf_val += 4
+                    has_flow = True
+        except Exception as e_flow:
+            logger.debug(f"[liquidity_sweep] Flow analysis non-fatal: {e_flow}")
+
+    conf_val = min(96, conf_val)
+
     alert = AutoAlert(
         alert_id=alert_id,
         alert_type="PREDATOR_SWEEP",
@@ -351,7 +400,8 @@ def detect_predator_liquidity_sweep(
         strike=strike,
         option_type=option_type,
         contract_symbol=contract_symbol,
-        confidence=86,
+        confidence=conf_val,
+        preferred_vehicle="NAKED_OPTION",
         time_horizon=time_horizon,
         actionable_plan=blueprint.to_dict(),
         underlying_spot=curr_ltp,
@@ -368,6 +418,9 @@ def detect_predator_liquidity_sweep(
             "risk_pts": round(risk, 2),
             "target_1_pts": round(abs(target_1 - entry_price), 2),
             "risk_reward_ratio": rr_ratio,
+            "has_flow": has_flow,
+            "vsa_signal": vsa_sig,
+            "obv_regime": obv_div,
         },
     )
 

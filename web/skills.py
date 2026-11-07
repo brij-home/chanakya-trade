@@ -4429,6 +4429,23 @@ async def skill_century_sync_market(req: Optional[CenturySyncMarketSkillRequest]
         raise _err(str(e))
 
 
+@router.get("/scanner/smt_divergences")
+@router.post("/scanner/smt_divergences")
+async def skill_smt_divergences():
+    """
+    Cross-Market Smart Money Technique (SMT) Divergence Scanner:
+    Monitors NIFTY vs BANKNIFTY, FINNIFTY vs BANKNIFTY, SENSEX vs BANKEX,
+    GOLD vs SILVER, and CRUDE vs NATURAL GAS.
+    """
+    try:
+        from analysis.smt_scanner import scan_cross_market_smt_divergences
+
+        res = await asyncio.to_thread(scan_cross_market_smt_divergences)
+        return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
+
 @router.get("/pre_inflection_early_warning")
 @router.post("/pre_inflection_early_warning")
 async def skill_pre_inflection_early_warning(
@@ -4666,6 +4683,58 @@ async def skill_lifecycle(req: LifecycleSkillRequest):
             current_hour=curr_hour,
         )
         return _ok(report.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+class RatchetTrailSkillRequest(BaseModel):
+    symbol: str
+    current_price: float
+    entry_price: float
+    initial_stop_loss: float
+    target_1: Optional[float] = None
+    target_2: Optional[float] = None
+    atr_14: Optional[float] = None
+    high_watermark: Optional[float] = None
+    low_watermark: Optional[float] = None
+    position_type: str = "LONG"
+    atr_multiplier: float = 2.5
+    current_stop: Optional[float] = None
+    cost_buffer_pct: float = 0.002
+    is_option: Optional[bool] = None
+    option_wick_buffer_pct: float = 0.025
+    actor: str = "API_USER"
+
+
+@router.post("/lifecycle/ratchet_trail")
+async def skill_lifecycle_ratchet_trail(req: RatchetTrailSkillRequest):
+    """
+    Automated multi-stage trailing stop-loss ratchet:
+    T1 -> Breakeven, T2 -> Locks T1, Runner -> Chandelier ATR trailing stop.
+    Updates resting broker stop-loss orders atomically in the OMS ledger.
+    """
+    try:
+        from engine.trade_lifecycle import auto_ratchet_chandelier_trailing_stop
+
+        res = auto_ratchet_chandelier_trailing_stop(
+            symbol=req.symbol,
+            current_price=req.current_price,
+            entry_price=req.entry_price,
+            initial_stop_loss=req.initial_stop_loss,
+            target_1=req.target_1,
+            target_2=req.target_2,
+            atr_14=req.atr_14,
+            high_watermark=req.high_watermark,
+            low_watermark=req.low_watermark,
+            position_type=req.position_type,
+            atr_multiplier=req.atr_multiplier,
+            current_stop=req.current_stop,
+            cost_buffer_pct=req.cost_buffer_pct,
+            is_option=req.is_option,
+            option_wick_buffer_pct=req.option_wick_buffer_pct,
+            actor=req.actor,
+        )
+        return _ok(res)
     except Exception as e:
         raise _err(str(e))
 

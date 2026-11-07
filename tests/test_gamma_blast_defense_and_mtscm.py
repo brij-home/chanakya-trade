@@ -11,7 +11,7 @@ Deterministic regression tests for:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timezone, timedelta
+from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
 
@@ -44,6 +44,12 @@ class MockContract:
 class TestGammaBlastWriterDefenseAndSymmetry:
     """Tests that institutional writing walls (positive ΔOI on OTM strikes) are suppressed."""
 
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def isolate_daily_levels(self, monkeypatch):
+        monkeypatch.setattr("engine.daily_levels.get_daily_levels", lambda *args, **kwargs: None)
+
     def test_otm_index_pe_with_positive_oi_is_rejected_as_support_writing(self):
         """
         SENSEX Spot: 73,344.45
@@ -68,7 +74,10 @@ class TestGammaBlastWriterDefenseAndSymmetry:
             )
         ]
 
-        alerts = detect_gamma_blast("SENSEX", spot=spot, chain=chain, vwap=vwap, day_low=73342.0)
+        now_dt = datetime(2026, 10, 28, 10, 30, tzinfo=IST)
+        alerts = detect_gamma_blast(
+            "SENSEX", spot=spot, chain=chain, vwap=vwap, day_low=73342.0, now_dt=now_dt
+        )
         assert len(alerts) == 0, "OTM Put with positive ΔOI must be suppressed as support writing"
 
     def test_atm_index_pe_with_writer_capitulation_is_allowed(self):
@@ -95,7 +104,10 @@ class TestGammaBlastWriterDefenseAndSymmetry:
             )
         ]
 
-        alerts = detect_gamma_blast("SENSEX", spot=spot, chain=chain, vwap=vwap, day_low=73342.0)
+        now_dt = datetime(2026, 10, 28, 10, 30, tzinfo=IST)
+        alerts = detect_gamma_blast(
+            "SENSEX", spot=spot, chain=chain, vwap=vwap, day_low=73342.0, now_dt=now_dt
+        )
         assert len(alerts) >= 1
         assert alerts[0].option_type == "PE"
         assert alerts[0].strike == 73300.0
@@ -125,7 +137,10 @@ class TestGammaBlastWriterDefenseAndSymmetry:
             )
         ]
 
-        alerts = detect_gamma_blast("SENSEX", spot=spot, chain=chain, vwap=vwap, day_high=73360.0)
+        now_dt = datetime(2026, 10, 28, 10, 30, tzinfo=IST)
+        alerts = detect_gamma_blast(
+            "SENSEX", spot=spot, chain=chain, vwap=vwap, day_high=73360.0, now_dt=now_dt
+        )
         assert len(alerts) == 0, (
             "OTM Call with positive ΔOI must be suppressed as resistance writing"
         )
@@ -155,7 +170,10 @@ class TestGammaBlastWriterDefenseAndSymmetry:
             )
         ]
 
-        alerts = detect_gamma_blast("SENSEX", spot=spot, chain=chain, vwap=vwap, day_high=73360.0)
+        now_dt = datetime(2026, 10, 28, 10, 30, tzinfo=IST)
+        alerts = detect_gamma_blast(
+            "SENSEX", spot=spot, chain=chain, vwap=vwap, day_high=73360.0, now_dt=now_dt
+        )
         assert len(alerts) >= 1
         assert alerts[0].option_type == "CE"
         assert alerts[0].strike == 73400.0

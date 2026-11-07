@@ -1356,6 +1356,36 @@ export default function TerminalView({
                 <span>Options Desk ↗</span>
               </button>
             </div>
+
+            {/* Quantitative Confluences & Advanced Price Action Cluster */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border/40 text-[11px] font-mono">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] uppercase font-bold text-muted mr-1">Confluences:</span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono bg-amber-500/15 border border-amber-500/30 text-amber shadow-2xs" title="Fibonacci Optimal Trade Entry (OTE) zone: 0.618 to 0.786 retest level">
+                  📐 FIB OTE 0.618-0.786
+                </span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono bg-cyan-500/15 border border-cyan-500/30 text-cyan-400 shadow-2xs" title="Dalton Market Profile: Initial Balance established in first 60 minutes (09:15-10:15 IST)">
+                  ⏰ DALTON IB (09:15-10:15)
+                </span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono bg-purple-500/15 border border-purple-500/30 text-purple-400 shadow-2xs" title="The Strat actionable bar pattern: Inside Bar (1), Directional (2), Outside Bar (3) continuation">
+                  🔢 STRAT 2-1-2 / NR7
+                </span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 shadow-2xs" title="Smart Money Concepts (SMC): Unmitigated Order Block demand and Fair Value Gap (FVG)">
+                  🧱 SMC OB &amp; FVG
+                </span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono bg-blue-500/15 border border-blue-500/30 text-blue-400 shadow-2xs" title="Triple DMI &amp; Wilder ADX trend strength gate: ADX > 20 with +DI dominance">
+                  ⚡ DMI / ADX TREND
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => sendDraft(`quant confluence review ${selectedSymbol}`)}
+                className="px-2 py-0.5 rounded text-[10.5px] font-mono text-muted hover:text-amber bg-surface hover:bg-elevated border border-border/60 hover:border-amber/40 cursor-pointer transition-all flex items-center gap-1"
+                title="Run full quantitative multi-engine confluence audit"
+              >
+                <span>🔍 Deep Quant Audit</span>
+              </button>
+            </div>
           </div>
 
           {/* DYNAMIC INTELLIGENCE DECK: Synchronized with Left Nav selection */}

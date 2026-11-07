@@ -27,15 +27,15 @@ try {
 
 # 2. Terminate orphaned headless Python/pytest/uvicorn and Electron/Vite worker processes using WQL filter (0.18s vs 31s)
 try {
-    $wqlFilter = "Name = 'python.exe' OR Name = 'node.exe' OR Name = 'electron.exe' OR Name = 'cmd.exe'"
-    $zombieProcs = Get-CimInstance Win32_Process -Filter $wqlFilter -ErrorAction SilentlyContinue | 
+    $targetNames = @('python.exe', 'node.exe', 'electron.exe', 'cmd.exe')
+    $zombieProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -in $targetNames } | 
         Where-Object { 
             $_.ProcessId -ne $currentPid -and 
             ($_.CommandLine -notmatch "jedi|pylance|language-server|pylsp|debugpy|ms-python|antigravity-ide|service\.py|service\.ps1") -and (
                 (($_.Name -match "python|pytest|uvicorn|electron") -and
                  ($_.CommandLine -match "chanakya-trade" -or $_.CommandLine -match "pytest" -or $_.CommandLine -match "uvicorn" -or $_.CommandLine -match "validate_all" -or $_.CommandLine -match "exec\(eval")) -or
                 (($_.Name -match "node|electron") -and ($_.CommandLine -match "electron-vite|macos-app")) -or
-                (($_.Name -match "cmd\.exe") -and ($_.CommandLine -match "uvicorn" -or $_.CommandLine -match "dev:renderer" -or $_.CommandLine -match "macos-app"))
+                (($_.Name -match "cmd\.exe") -and ($_.CommandLine -match "uvicorn" -or $_.CommandLine -match "dev:renderer" -or $_.CommandLine -match "dev:web" -or $_.CommandLine -match "macos-app"))
             )
         }
 

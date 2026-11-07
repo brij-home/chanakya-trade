@@ -139,6 +139,13 @@ def _isolate_fyers_rate_gate_and_circuit_breaker():
         except Exception:
             pass
 
+        try:
+            from engine.llm_deadline import reset_deadline_slots
+
+            reset_deadline_slots()
+        except Exception:
+            pass
+
     _do_reset()
     yield
     _do_reset()
@@ -684,6 +691,18 @@ def reset_auto_alert_engine_pacing():
                 store._memory_cache.clear()
                 store._persist_dir = app_data_path("daily_levels")
                 store._persist_dir.mkdir(parents=True, exist_ok=True)
+                for f in store._persist_dir.glob("*.json"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        try:
+            from engine.llm_deadline import reset_deadline_slots
+
+            reset_deadline_slots()
         except Exception:
             pass
 

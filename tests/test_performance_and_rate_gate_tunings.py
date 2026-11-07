@@ -135,9 +135,18 @@ class TestMarketMatrixIntradayResolution:
             "Broker REST /history must not be called"
         )
         monkeypatch.setattr("brokers.session.get_data_broker", lambda: mock_broker)
+        monkeypatch.setattr(
+            "engine.historical_warehouse.historical_warehouse.has_bars", lambda *a, **k: False
+        )
+
+        # Clear cache to guarantee hermetic test isolation under parallel xdist workers
+        from market.history import clear_df_memory_cache
+
+        clear_df_memory_cache()
 
         # Query 5m intraday bars for 1 day
         res = get_ohlcv("SBIN", exchange="NSE", interval="5m", days=1)
+        clear_df_memory_cache()
         assert not res.empty
         assert len(res) == 3
         assert list(res.columns) == ["open", "high", "low", "close", "volume"]

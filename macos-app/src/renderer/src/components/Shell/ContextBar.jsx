@@ -6,7 +6,34 @@ import SmartTypeahead from '../Common/SmartTypeahead'
 import { fuzzySearchUniverse } from '../../data/universeData'
 
 /**
- * MarketClock — IST clock + market open/close countdown ring
+ * HorizonSwitcher — Global Intraday vs Swing context toggle pill
+ */
+export function HorizonSwitcher() {
+  const { horizon, toggleHorizon } = useChatStore()
+  const isIntraday = horizon === 'INTRADAY'
+
+  return (
+    <button
+      type="button"
+      onClick={toggleHorizon}
+      className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-mono font-bold transition-all cursor-pointer select-none no-drag"
+      style={{
+        background: isIntraday ? 'rgba(245, 166, 35, 0.12)' : 'rgba(74, 144, 226, 0.12)',
+        border: `1.5px solid ${isIntraday ? 'rgba(245, 166, 35, 0.45)' : 'rgba(74, 144, 226, 0.45)'}`,
+        color: isIntraday ? 'var(--color-gold)' : 'var(--color-sapphire)',
+        boxShadow: isIntraday ? '0 0 10px rgba(245, 166, 35, 0.15)' : '0 0 10px rgba(74, 144, 226, 0.15)',
+      }}
+      title={`Trading Horizon: ${horizon} — Click to switch between Intraday Scalp and Swing/Positional context`}
+      aria-label={`Trading Horizon: ${horizon}`}
+    >
+      <span className="text-xs">{isIntraday ? '⚡' : '📈'}</span>
+      <span className="tracking-wider">{horizon}</span>
+    </button>
+  )
+}
+
+/**
+ * MarketClock — IST clock + market open/close countdown ring + Dalal Street milestones
  */
 export function MarketClock() {
   const [time, setTime] = useState(() => new Date())
@@ -25,6 +52,56 @@ export function MarketClock() {
     hour12: false,
   })
 
+  // Dynamic Dalal Street Milestone Countdown
+  const getMilestoneInfo = () => {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Kolkata',
+        hour: 'numeric',
+        minute: 'numeric',
+        second: 'numeric',
+        hour12: false,
+      }).formatToParts(time)
+      const h = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10)
+      const m = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10)
+      const totalMinutes = h * 60 + m
+
+      // 09:15 to 14:45 IST: Intraday MIS trading open, countdown to 14:45 MIS cutoff
+      if (totalMinutes >= 555 && totalMinutes < 885) {
+        const diff = 885 - totalMinutes
+        const hrs = Math.floor(diff / 60)
+        const mins = diff % 60
+        return {
+          text: `⏳ ${hrs > 0 ? `${hrs}h ` : ''}${mins}m to MIS Cutoff`,
+          color: diff <= 30 ? 'var(--color-gold)' : 'var(--color-muted)',
+        }
+      }
+      // 14:45 to 15:30 IST: MIS squared off, countdown to 15:30 Cash close
+      if (totalMinutes >= 885 && totalMinutes < 930) {
+        const diff = 930 - totalMinutes
+        return {
+          text: `⚠️ MIS SQUARED · ${diff}m to Cash Close`,
+          color: 'var(--color-gold)',
+        }
+      }
+      // 15:30 to 23:30 IST: Cash closed, MCX open
+      if (totalMinutes >= 930 && totalMinutes < 1410) {
+        return {
+          text: '🌙 Cash Closed · MCX Open',
+          color: 'var(--color-subtle)',
+        }
+      }
+      return {
+        text: '○ Markets Closed',
+        color: 'var(--color-subtle)',
+      }
+    } catch {
+      return null
+    }
+  }
+
+  const milestone = getMilestoneInfo()
+
   const statusColor = {
     open: 'var(--color-emerald)',
     'pre-open': 'var(--color-gold)',
@@ -41,23 +118,33 @@ export function MarketClock() {
 
   return (
     <div
-      className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-xl no-drag"
+      className="hidden md:flex items-center gap-2 px-3 py-1 rounded-xl no-drag"
       style={{
         background: 'var(--color-elevated)',
         border: '1px solid var(--color-border)',
       }}
     >
-      <div className="flex flex-col items-end">
-        <span
-          className="text-[11px] font-bold tracking-widest font-mono"
-          style={{ color: statusColor }}
-        >
-          {statusLabel}
-        </span>
-        <span className="text-xs font-mono font-semibold" style={{ color: 'var(--color-text)' }}>
-          {istStr}
-          <span className="text-[11px] text-muted ml-1">IST</span>
-        </span>
+      <div className="flex flex-col items-end leading-tight">
+        <div className="flex items-center gap-1.5">
+          <span
+            className="text-[11px] font-bold tracking-widest font-mono"
+            style={{ color: statusColor }}
+          >
+            {statusLabel}
+          </span>
+          <span className="text-xs font-mono font-semibold" style={{ color: 'var(--color-text)' }}>
+            {istStr}
+            <span className="text-[10px] text-muted ml-1">IST</span>
+          </span>
+        </div>
+        {milestone && (
+          <span
+            className="text-[9px] font-mono tracking-tight font-medium"
+            style={{ color: milestone.color }}
+          >
+            {milestone.text}
+          </span>
+        )}
       </div>
     </div>
   )
@@ -243,6 +330,9 @@ export default function ContextBar({
           setSelectedIndex={setTypeaheadIdx}
         />
       </div>
+
+      {/* Horizon Switcher (Intraday vs Swing) */}
+      <HorizonSwitcher />
 
       {/* Relevant View Badges & Quick Action Links */}
       {activeView === 'options' && (

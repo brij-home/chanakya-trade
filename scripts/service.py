@@ -281,54 +281,32 @@ def launch_detached_process(cmd: list[str], cwd: Path, stdout_file: Path, stderr
     err_f = open(stderr_file, "a", encoding="utf-8")
 
     if IS_WINDOWS:
-        # On Windows, launch via WMI Win32_Process to break away from parent Job Objects
-        # and guarantee zero popup windows (ShowWindow = 0)
-        cmd_joined = " ".join(f'"{c}"' if " " in c else c for c in cmd)
-        cmd_wrapper = f'cmd.exe /c "{cmd_joined} > \\"{stdout_file}\\" 2> \\"{stderr_file}\\""'
-        ps_script = (
-            f'$s = ([wmiclass]"Win32_ProcessStartup").CreateInstance(); '
-            f"$s.ShowWindow = 0; "
-            f"$res = ([wmiclass]\"Win32_Process\").Create('{cmd_wrapper}', '{cwd}', $s); "
-            f"if ($res.ReturnValue -eq 0) {{ Write-Output $res.ProcessId }} else {{ exit 1 }}"
+        creationflags = subprocess.CREATE_NO_WINDOW
+        env = dict(os.environ)
+        env.pop("ELECTRON_RUN_AS_NODE", None)
+        env["PYTHONUNBUFFERED"] = "1"
+        venv_dir = ROOT_DIR / ".venv"
+        if venv_dir.is_dir():
+            env["VIRTUAL_ENV"] = str(venv_dir)
+            scripts_dir = venv_dir / ("Scripts" if IS_WINDOWS else "bin")
+            env["PATH"] = str(scripts_dir) + os.pathsep + env.get("PATH", "")
+        is_shell = (
+            cmd[0].lower().endswith(".cmd")
+            or cmd[0].lower().endswith(".bat")
+            or "npm" in cmd[0].lower()
         )
-        try:
-            out = subprocess.check_output(
-                ["powershell", "-NoProfile", "-Command", ps_script],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            )
-            pid_str = out.strip()
-            if pid_str.isdigit():
-                return int(pid_str)
-        except Exception:
-            pass
-
-        # Fallback to subprocess Popen with CREATE_BREAKAWAY_FROM_JOB
-        # 0x00000008 (DETACHED_PROCESS) | 0x08000000 (CREATE_NO_WINDOW) | 0x01000000 (CREATE_BREAKAWAY_FROM_JOB)
-        creationflags = 0x00000008 | 0x08000000 | 0x01000000
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(cwd),
-                stdout=out_f,
-                stderr=err_f,
-                stdin=subprocess.DEVNULL,
-                creationflags=creationflags,
-                close_fds=True,
-            )
-            return proc.pid
-        except Exception:
-            # If CREATE_BREAKAWAY_FROM_JOB fails due to job settings, retry without it
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(cwd),
-                stdout=out_f,
-                stderr=err_f,
-                stdin=subprocess.DEVNULL,
-                creationflags=0x00000008 | 0x08000000,
-                close_fds=True,
-            )
-            return proc.pid
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            stdout=out_f,
+            stderr=err_f,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags,
+            close_fds=True,
+            shell=is_shell,
+            env=env,
+        )
+        return proc.pid
     else:
         # POSIX (macOS / Linux) daemon detachment
         proc = subprocess.Popen(
@@ -343,11 +321,11 @@ def launch_detached_process(cmd: list[str], cwd: Path, stdout_file: Path, stderr
         return proc.pid
 
 
-def wait_for_port(port: int, host: str = "127.0.0.1", timeout: float = 30.0) -> int | None:
+def wait_for_port(port: int, host: str = "localhost", timeout: float = 30.0) -> int | None:
     """Poll until a port is actively listening and return its owning PID."""
     start = time.time()
     while time.time() - start < timeout:
-        if is_port_in_use(port, host):
+        if is_port_in_use(port, host) or probe_http_health(f"http://localhost:{port}")[0]:
             pids = get_pids_for_port(port)
             return pids[0] if pids else -1
         time.sleep(0.1)
@@ -413,6 +391,21 @@ def get_service_status(api_port: int = 8765, vite_port: int = 5173) -> bool:
                         )
                 except Exception:
                     pass
+
+            # Check pre-market level priming status
+            sync_ok, sync_json = probe_http_health(
+                f"http://127.0.0.1:{api_port}/api/maintenance/sync-status"
+            )
+            if sync_ok:
+                try:
+                    sdata = json.loads(sync_json)
+                    pm_date = sdata.get("last_premarket_sync_date")
+                    if pm_date:
+                        print(f"     Pre-Market Levels:  PRIMED (Session: {pm_date})")
+                    else:
+                        print("     Pre-Market Levels:  AUTO-PRIMING ON-BOOT")
+                except Exception:
+                    pass
         else:
             print(
                 f" [*] Backend (FastAPI):  PORT BOUND ({b_pid_str}), but HTTP probe unready ({mode_json})"
@@ -444,42 +437,12 @@ def start_services(
     api_host: str = "127.0.0.1",
     api_port: int = 8765,
     vite_port: int = 5173,
-    timeout: float = 45.0,
+    timeout: float = 90.0,
     reload: bool = False,
 ) -> int:
     """Start or restart ChanakyaTrade services dynamically based on OS."""
-    if IS_WINDOWS:
-        ps1_script = ROOT_DIR / "scripts" / "service.ps1"
-        if ps1_script.is_file():
-            cmd = [
-                "powershell",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(ps1_script),
-                "-Action",
-                action,
-                "-ApiHost",
-                api_host,
-                "-ApiPort",
-                str(api_port),
-                "-VitePort",
-                str(vite_port),
-                "-TimeoutSeconds",
-                str(int(timeout)),
-            ]
-            if no_frontend:
-                cmd.append("-NoFrontend")
-            if skip_build_web:
-                cmd.append("-SkipBuildWeb")
-            if force_build_web:
-                cmd.append("-ForceBuildWeb")
-            if reload:
-                cmd.append("-Reload")
-            res = subprocess.run(cmd)
-            return res.returncode
+    # Unified cross-platform native Python background service launcher
 
-    # POSIX (macOS and Linux) native daemon startup
     stop_services(api_port, vite_port)
 
     # 1. Sync web bundle if needed
@@ -534,10 +497,10 @@ def start_services(
         frontend_out = LOG_DIR / "frontend.log"
         frontend_err = LOG_DIR / "frontend_err.log"
 
-        frontend_cmd = [npm_exe, "run", "dev:renderer"]
+        frontend_cmd = [npm_exe, "run", "dev:web"]
         launch_detached_process(frontend_cmd, FRONTEND_DIR, frontend_out, frontend_err)
 
-        frontend_pid = wait_for_port(vite_port, "127.0.0.1", timeout=timeout)
+        frontend_pid = wait_for_port(vite_port, "localhost", timeout=timeout)
         if frontend_pid:
             print(
                 f" [+] Frontend Desktop & Vite are listening on http://localhost:{vite_port} (PID: {frontend_pid})",
@@ -584,7 +547,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="API Host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765, help="API Port (default: 8765)")
     parser.add_argument("--vite-port", type=int, default=5173, help="Vite UI Port (default: 5173)")
-    parser.add_argument("--timeout", type=float, default=45.0, help="Startup timeout in seconds")
+    parser.add_argument("--timeout", type=float, default=90.0, help="Startup timeout in seconds")
     parser.add_argument(
         "--reload",
         action="store_true",

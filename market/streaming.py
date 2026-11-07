@@ -134,7 +134,18 @@ class MarketDataStreamRegistry:
     def publish(self, event: MarketDataEvent) -> None:
         event = self._validate_event(event)
         if event.data_state == "UNAVAILABLE":
-            get_registry().record_provider_error(event.provider, is_stale=True)
+            try:
+                from market.calendar import is_market_open
+
+                exch = (
+                    event.canonical_instrument_id.split(":")[0]
+                    if ":" in event.canonical_instrument_id
+                    else "NSE"
+                )
+                if is_market_open(exch):
+                    get_registry().record_provider_error(event.provider, is_stale=True)
+            except Exception as e_suppressed:
+                logger.debug(f"[market.streaming] Non-fatal exception suppressed: {e_suppressed}")
         else:
             get_registry().record_provider_success(event.provider)
         try:

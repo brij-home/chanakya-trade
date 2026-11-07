@@ -61,6 +61,7 @@ from config.encoding import fix_windows_console
 
 fix_windows_console()
 
+
 from fastapi import FastAPI, HTTPException, Request as _Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
 
@@ -235,7 +236,7 @@ async def lifespan(app: FastAPI):
         get_csrf_secret()
 
     init_auth_db()
-    await _auto_restore_brokers()
+    broker_restore_task = asyncio.create_task(_auto_restore_brokers())
 
     # Record main event loop for threadsafe SSE publishing
     from web.sse import event_bus
@@ -300,6 +301,8 @@ async def lifespan(app: FastAPI):
         logger.warning(f"[lifespan] Failed starting RecoveryWorker: {e_rec}")
 
     yield
+    if not broker_restore_task.done():
+        broker_restore_task.cancel()
     warmer_task.cancel()
     maintenance_task.cancel()
     staleness_task.cancel()
@@ -742,12 +745,11 @@ async def _init_auth() -> None:
     init_auth_db()
 
 
-async def _auto_restore_brokers() -> None:
+def _auto_restore_brokers_sync() -> None:
     """
-    On every sidecar start, check each broker's token file.
-    If credentials are configured AND a valid token exists on disk,
-    instantiate the broker (which auto-loads the token in __init__)
-    and register it so skills can call get_broker() immediately.
+    Synchronous worker executed in a background thread via asyncio.to_thread.
+    Prevents blocking the main FastAPI/Uvicorn event loop during broker token
+    validation, headless logins, and WebSocket initializations.
     """
     import logging
     from brokers.session import register_broker
@@ -770,6 +772,12 @@ async def _auto_restore_brokers() -> None:
                 )
                 if b.is_authenticated():
                     register_broker("fyers", b, primary=True, role="both")
+                    try:
+                        from market.fyers_circuit_breaker import get_fyers_circuit_breaker
+
+                        get_fyers_circuit_breaker().record_auth_success()
+                    except Exception as e_suppressed:
+                        logger.debug(f"[web.api] Circuit breaker reset notice: {e_suppressed}")
                     try:
                         from brokers.session import _start_websocket
 
@@ -890,6 +898,30 @@ async def _auto_restore_brokers() -> None:
                     logging.info("[startup] Kotak Neo session active & registered")
         except Exception as exc:
             logging.warning("[startup] Could not restore Kotak Neo: %s", exc)
+
+    # Flattrade (Pi Connect)
+    if _has_flattrade():
+        try:
+            from brokers.flattrade import FlattradeAPI, TOKEN_FILE as _FT_FLAT
+
+            if _FT_FLAT.exists():
+                b = FlattradeAPI()
+                if b.is_authenticated():
+                    register_broker("flattrade", b)
+                    try:
+                        from brokers.session import _start_websocket
+
+                        _start_websocket(b)
+                    except Exception as e_suppressed:
+                        logger.debug(f"[web.api] Non-fatal exception suppressed: {e_suppressed}")
+                    logging.info("[startup] Flattrade session active & registered")
+        except Exception as exc:
+            logging.warning("[startup] Could not restore Flattrade: %s", exc)
+
+
+async def _auto_restore_brokers() -> None:
+    """Non-blocking async dispatcher offloading broker restore to a worker thread."""
+    await asyncio.to_thread(_auto_restore_brokers_sync)
 
 
 # ── P3-A: Correlation ID Middleware ─────────────────────────────────────────
@@ -2224,6 +2256,26 @@ def _kotak_auth() -> bool:
     return _cached_auth("kotak", _check)
 
 
+# Flattrade (Pi Connect)
+def _has_flattrade() -> bool:
+    return bool(_env("FLATTRADE_API_KEY") or _env("FLATTRADE_USER_ID"))
+
+
+def _flattrade_auth() -> bool:
+    def _check():
+        try:
+            if not _has_flattrade():
+                return False
+            from brokers.flattrade import FlattradeAPI
+
+            b = FlattradeAPI()
+            return b.is_authenticated()
+        except Exception:
+            return False
+
+    return _cached_auth("flattrade", _check)
+
+
 # ── Shared success card ───────────────────────────────────────
 
 
@@ -2282,6 +2334,7 @@ async def index():
             _has_shoonya(),
             _has_mstock(),
             _has_kotak(),
+            _has_flattrade(),
         ]
     )
 
@@ -2368,6 +2421,16 @@ async def index():
             "/kotak/login",
             _has_kotak(),
             _kotak_auth(),
+        )
+    }
+      {
+        _broker_btn(
+            "Login with Flattrade (Free)",
+            "🟢",
+            "btn-flattrade",
+            "/flattrade/login",
+            _has_flattrade(),
+            _flattrade_auth(),
         )
     }
       <div class="section-header">Premium Brokers</div>
@@ -3038,6 +3101,54 @@ async def kotak_login():
     )
 
 
+# ── Flattrade (Pi Connect API — TOTP) ────────────────────────
+
+
+@app.get("/flattrade/login", response_class=HTMLResponse)
+async def flattrade_login():
+    if not _has_flattrade():
+        body = """<div class="card">
+          <div class="info-box">
+            <strong>Flattrade Pi API</strong> — Zero Brokerage Trading API.<br><br>
+            Set these values in <code>.env</code>:<br>
+            <code>FLATTRADE_USER_ID</code>, <code>FLATTRADE_PASSWORD</code>,<br>
+            <code>FLATTRADE_TOTP_SECRET</code>, <code>FLATTRADE_API_KEY</code>, and
+            <code>FLATTRADE_API_SECRET</code>.<br><br>
+            The TOTP secret must be the Base32 seed from your Flattrade 2FA / Authenticator setup.
+          </div>
+          <a href="/" class="btn btn-back">← Back</a>
+        </div>"""
+        return HTMLResponse(_page("Flattrade Setup", body), status_code=400)
+    try:
+        from brokers.flattrade import FlattradeAPI
+        from brokers.session import register_broker
+
+        b = FlattradeAPI()
+        profile = b.complete_login()
+        funds = b.get_funds()
+        register_broker("flattrade", b)
+        _invalidate_auth_cache("flattrade")
+    except Exception as e:
+        body = f"""<div class="card"><div class="err-box">
+          ❌ Flattrade login failed: {e}<br><br>
+          Check FLATTRADE_USER_ID, FLATTRADE_PASSWORD, FLATTRADE_TOTP_SECRET,
+          FLATTRADE_API_KEY, and FLATTRADE_API_SECRET.
+        </div><a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Error", body), status_code=500)
+    return HTMLResponse(
+        _page(
+            "Connected",
+            _success_card(
+                "Flattrade",
+                "btn-flattrade",
+                profile,
+                funds,
+                "Flattrade Pi Connect API — Headless TOTP login, live market quotes, option chains, and zero brokerage execution.",
+            ),
+        )
+    )
+
+
 # ── Demo mode ─────────────────────────────────────────────────
 
 
@@ -3136,6 +3247,15 @@ async def status_page():
             _has_kotak,
             _kotak_auth,
         ),
+        (
+            "flattrade",
+            "Flattrade",
+            "badge-flattrade",
+            "/flattrade/login",
+            "#10b981",
+            _has_flattrade,
+            _flattrade_auth,
+        ),
     ]
     rows = []
     for bkey, bname, badge_cls, login_path, color, has_fn, auth_fn in _BROKERS:
@@ -3214,6 +3334,11 @@ def _compute_status() -> dict:
             "configured": _has_kotak(),
             "authenticated": _kotak_auth(),
             "role": get_broker_role("kotak"),
+        },
+        "flattrade": {
+            "configured": _has_flattrade(),
+            "authenticated": _flattrade_auth(),
+            "role": get_broker_role("flattrade"),
         },
     }
 
@@ -3760,6 +3885,7 @@ _BROKER_SESSION_FILES = {
     "stoxkart": app_data_path("stoxkart.json"),
     "shoonya": app_data_path("shoonya.json"),
     "mstock": app_data_path("mstock.json"),
+    "flattrade": app_data_path("flattrade.json"),
 }
 
 
@@ -3787,6 +3913,7 @@ async def broker_disconnect(broker_key: str, request: Request):
         "stoxkart": "stoxkart",
         "shoonya": "shoonya",
         "mstock": "mstock",
+        "flattrade": "flattrade",
     }
     session_key = _SESSION_KEY_MAP.get(broker_key, broker_key)
     unregister_broker(session_key)
@@ -3930,6 +4057,11 @@ def _compute_portfolio(source: str = "auto") -> Optional[dict]:
             from brokers.kotak import KotakNeoAPI
 
             _try("kotak", KotakNeoAPI)
+
+        if _has_flattrade():
+            from brokers.flattrade import FlattradeAPI
+
+            _try("flattrade", FlattradeAPI)
 
     if src == "paper" or (src == "auto" and not active_brokers):
         try:
@@ -4766,7 +4898,7 @@ async def stream_dashboard_snapshot(symbol: str = "NIFTY", exchange: str = ""):
 
 
 @app.get("/api/preflight", tags=["System"])
-async def get_preflight_diagnostics():
+def get_preflight_diagnostics():
     """Return system readiness, port status, and masked environment report."""
     from engine.preflight import run_preflight
 
